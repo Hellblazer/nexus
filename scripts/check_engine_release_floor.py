@@ -306,8 +306,12 @@ def check_pin_currency(newest: object) -> int:
             "check_pin_currency", {"newest": "above_floor"},
             {"newest": newest_s, "floor": floor},
         )
-    guard_value = "at_floor" if newest == REQUIRED_ENGINE_VERSION else "below_floor"
-    return _choreo.emit_choreography("check_pin_currency", {"newest": guard_value}, {"floor": floor})
+    if newest == REQUIRED_ENGINE_VERSION:
+        return _choreo.emit_choreography("check_pin_currency", {"newest": "at_floor"}, {"floor": floor})
+    newest_s = ".".join(str(p) for p in newest)
+    return _choreo.emit_choreography(
+        "check_pin_currency", {"newest": "below_floor"}, {"newest": newest_s, "floor": floor},
+    )
 
 
 def _tag_exists_in_git(tag: str, repo_root: pathlib.Path | None = None) -> object:

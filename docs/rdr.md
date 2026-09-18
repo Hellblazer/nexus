@@ -58,24 +58,30 @@ RDRs are iterative across a project, not within a single document. Write one, lo
 
 Research may reveal that one RDR needs to split into several; that's normal. Cross-reference related RDRs to maintain conceptual integrity. Stack them by dependency so implementation order is clear.
 
-The Nexus project has produced 191 RDRs across its development (through rdr-196). The corpus is searchable, so when starting a new design, prior decisions surface automatically, preventing contradictions and avoiding redundant investigation.
+The Nexus project has produced over two hundred RDRs across its development; `docs/rdr/README.md` carries the current index and count. The corpus is searchable, so when starting a new design, prior decisions surface automatically, preventing contradictions and avoiding redundant investigation.
 
 ## Statuses and types
 
+The status vocabulary is a checked table, `src/nexus/tables/rdr-lifecycle.toml`, which the `set-status` command and the gates resolve against. Six statuses:
+
 ```
-Draft --> Accepted --> Implemented
-                           |
-                       Reverted / Abandoned / Superseded
+draft --> accepted --> closed
+  |          |
+  |          +--> deferred --> (resume) draft, then re-gate
+  |
+  +--> abandoned / superseded / closed (with a stated reason)
 ```
 
 | Status | Meaning |
 |---|---|
-| **Draft** | Created, research in progress |
-| **Accepted** | Gate passed, decision formally accepted |
-| **Implemented** | Implementation complete, archived to T3 |
-| **Reverted** | Implementation rolled back |
-| **Abandoned** | Dropped before implementation |
-| **Superseded** | Replaced by a newer RDR (linked via `superseded_by`) |
+| **draft** | Created, research in progress |
+| **accepted** | Gate passed, decision formally accepted |
+| **closed** | Done. `close_reason` says how: implemented, partial, reverted, or a stated reason for a close without acceptance |
+| **deferred** | Accepted work parked; resumes to draft and re-gates |
+| **abandoned** | Dropped, with `close_reason` saying why |
+| **superseded** | Replaced by a newer RDR (linked via `superseded_by`) |
+
+An outcome such as "implemented" or "reverted" is the `close_reason` of a closed RDR, not a status.
 
 **Types**: Feature, Bug Fix, Technical Debt, Framework Workaround, Architecture.
 
@@ -412,7 +418,7 @@ Each load-bearing assumption is a checkbox with verification status:
 
 ## Post-Mortem Template
 
-Location: `docs/rdr/post-mortem/TEMPLATE.md` (copied from `conexus/resources/rdr/post-mortem/TEMPLATE.md`).
+Location: `conexus/resources/rdr/post-mortem/TEMPLATE.md` in the conexus plugin (not a copy under this repo's `docs/rdr/post-mortem/` — that directory holds only the filled-out post-mortems `rdr-close` produces from the template, never the template itself).
 
 Created automatically by `/conexus:rdr-close`. Fill it after implementation to analyze drift between what was decided and what was built.
 

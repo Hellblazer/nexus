@@ -28,6 +28,8 @@ Frontmatter `status:` field carries one of six values (Sam's ruling, RDR-201):
 - `superseded` — replaced by a named successor RDR (terminal).
 - `abandoned` — not going to happen; merges the retired `scrapped` value (terminal).
 
+`draft` → `closed` exists as one guarded edge, `close-unaccepted`: `nx rdr set-status NNN closed --reason "..."`, for work that shipped without the record ever being accepted (RDR-122 and RDR-179 were hand-edited closed in 2026-09 because no edge existed; nexus-nc08w.4). Without `--reason` it refuses `reason-not-stated`.
+
 This is a **checked table, not prose** (RDR-201): the authoritative source is the
 packaged `src/nexus/tables/rdr-lifecycle.toml` (loaded via
 `nexus.tables.load.load_packaged_table`, so it is reachable from any installed

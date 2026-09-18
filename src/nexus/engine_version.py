@@ -548,7 +548,15 @@ from __future__ import annotations
 #: [additive], so the engine deployed 12:46:32Z BEFORE this client tag, edge
 #: live from 12:47:07Z (STEP-6 gate report
 #: gate-report-20260917T124809Z-v011.json green, recall 12/12, parity pass).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 127)
+#:
+#: 7.52.0 pairs with engine-service-v0.1.128 (tagged 2026-09-17 on 95b69ef60):
+#: the announce-stamp extension to POST /v1/tuples/wait (nexus-vsipz, RDR-213
+#: engine half, changeset tuples-006-announce-columns) and
+#: PipelineRepository.clearOrphanWal's same-transaction counter zeroing
+#: (nexus-33q80, no changeset). Both wire-ledger entries lead with
+#: [additive], so the engine deploys BEFORE this client tag (nexus-1emxn
+#: choreography (a)).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 128)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

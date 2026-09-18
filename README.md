@@ -110,7 +110,7 @@ Once a day the MCP server sends one anonymous message with six values: a random 
 
 ## Learn
 
-- [Getting started](https://hellblazer.github.io/nexus/getting-started.html): eleven lessons, all done inside Claude Code.
+- [Getting started](https://hellblazer.github.io/nexus/getting-started.html): twelve lessons, all done inside Claude Code.
 - [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html): record a decision before you build, in eight lessons.
 - [Research with Nexus](https://hellblazer.github.io/nexus/research.html): what you say to Claude at each step of research work, and what you see.
 - [Research in Nexus](https://hellblazer.github.io/nexus/research-in-nexus.html): the thinking behind the method, what was borrowed from experimental science and what was left out.
@@ -118,6 +118,17 @@ Once a day the MCP server sends one anonymous message with six values: a random 
 - [Coordination](https://hellblazer.github.io/nexus/coordination.html): how sessions and agents coordinate through the tuple space, and which steps the hooks, the channel, and Claude each do.
 - [CLI reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md), [architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md), [storage tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md), and the [docs tree](https://github.com/Hellblazer/nexus/blob/main/docs/README.md).
 - [Managed service](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md), for a hosted deployment with server-side embeddings.
+
+## Push delivery into your session (Claude Code channels)
+
+By default, a message that arrives while you are away — an agent's report, a peer session's reply — waits until your next prompt, when a hook delivers it. Claude Code's channel preview can push it into a running session instead, but only when the session is launched with a channel flag, every time; nothing Nexus installs can set that flag for you.
+
+1. Launch with `claude --channels plugin:conexus@nexus-plugins` (no confirmation dialog once the plugin is on Claude Code's channel allowlist), or `claude --dangerously-load-development-channels server:nexus` (works everywhere the preview does, with a one-keystroke confirmation dialog on every launch).
+2. For the dialog-free form, put the plugin on the allowlist: on macOS, write `/Library/Application Support/ClaudeCode/managed-settings.json` (admin-written) with `{"channelsEnabled": true, "allowedChannelPlugins": [{"marketplace": "nexus-plugins", "plugin": "conexus"}]}`.
+3. Make it stick: add `alias claude='claude --channels plugin:conexus@nexus-plugins'` to your shell's startup file.
+4. Check it worked: the startup screen shows "Channels (experimental) messages from plugin:conexus@nexus-plugins inject directly in this session · restart without --channels to stop"; `nx doctor`'s `tuples.channel_delivery` row reports the waiter's own status once it has run here (alive, last wake, messages announced and pending), or an informational "no record" line for a session whose waiter has not run yet.
+
+Without the flag, mail still arrives at your next prompt through the drain hook — degraded, not broken. Channels are a Claude Code research preview, not available on Amazon Bedrock, Google Cloud Agent Platform, or Microsoft Foundry. See [Coordination](https://hellblazer.github.io/nexus/coordination.html#l5) and [Getting started](https://hellblazer.github.io/nexus/getting-started.html#push-delivery) for more.
 
 ## License
 

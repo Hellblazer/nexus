@@ -140,11 +140,18 @@ def audit_membership_cmd(
             "Specify a COLLECTION or use --all-collections.",
         )
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    from nexus.catalog.membership import refuse_if_collection_unknown  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
     cat = _cat_cmd._get_catalog()
     entries = cat.list_by_collection(collection)
     rows = [(str(e.tumbler), e.source_uri or "") for e in entries]
 
     if not rows:
+        # nexus-v1zdu: an UNKNOWN collection name (never registered) must
+        # refuse, not report "no entries" at exit 0 — the false-clean shape
+        # nexus-3ygp3's shared helper was meant to close. A collection the
+        # catalog DOES know about, genuinely holding zero entries, is a
+        # legitimate state and stays informational.
+        refuse_if_collection_unknown(cat, collection, entries)
         if as_json:
             click.echo(json.dumps({
                 "collection": collection,
@@ -1420,7 +1427,15 @@ def _verify_scoped(cat: "CatalogReader", collection: str, *, heal: bool, json_ou
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
-    entries = [e for e in cat.list_by_collection(collection) if not e.alias_of]
+    from nexus.catalog.membership import refuse_if_collection_unknown  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
+
+    all_entries = cat.list_by_collection(collection)
+    # An unknown name must refuse, not render a clean zero-document report
+    # at exit 0: a typo read as a verified-healthy collection (nexus-v1zdu
+    # sweep; the same false-clean shape audit-membership carried). Judged on
+    # the unfiltered list, so an all-alias collection is not called unknown.
+    refuse_if_collection_unknown(cat, collection, all_entries)
+    entries = [e for e in all_entries if not e.alias_of]
     total_docs = len(entries)
 
     if not entries:

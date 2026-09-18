@@ -584,6 +584,44 @@ def gc_cmd(
         )
         return
 
+    # nexus-v1zdu (audit residual #1, HIGH): catalog_documents_for_collection
+    # does NOT distinguish "collection known, zero documents" from
+    # "collection unknown" -- an unregistered/typo'd COLLECTION reads as
+    # zero documents, which reads as "nothing to protect" for the
+    # manifest-less-note (RDR-145) and RUNFENCE (nexus-g6k6b) guards above,
+    # exactly backwards for this operator-driven --yes path. Checked HERE
+    # (last line of defence before deletion, same placement as nexus-jqrtp
+    # below) rather than unconditionally early, so a --dry-run / report-only
+    # invocation (which never deletes anything) is not refused over a
+    # collection that merely lacks a `collections` registry row -- the same
+    # un-backfilled-but-real state nexus-jqrtp's own guard already tolerates
+    # via --allow-empty-manifest-set, which is why this check shares that
+    # SAME override rather than minting a second flag for the same risk
+    # category (an unverifiable/empty catalog state proceeding to delete).
+    # INDEPENDENT of the nexus-jqrtp guard's own condition otherwise: this
+    # one fires off `collection_documents`, not `referenced`, so a divergent
+    # or stale referenced-chash read that happens to be non-empty does not
+    # mask an unknown collection here.
+    if not allow_empty_manifest_set:
+        from nexus.catalog.membership import refuse_if_collection_unknown  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
+
+        refuse_if_collection_unknown(cat, collection, collection_documents)
+    elif not collection_documents:
+        # The override is the operator asserting "this collection really is
+        # fully orphaned", which is also the only state in which an unknown
+        # name is a legitimate gc target. Said out loud, because with the
+        # override nothing else stands between this name and deletion
+        # (review of 6129b9d35).
+        from nexus.catalog.membership import collection_is_known  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
+
+        if not collection_is_known(cat, collection):
+            click.echo(
+                f"WARNING: the catalog does not know a collection named "
+                f"'{collection}'. --allow-empty-manifest-set overrides that "
+                f"refusal: every chunk T3 holds under this exact name is an "
+                f"orphan candidate. Check the name against `nx collection list`."
+            )
+
     # nexus-jqrtp: the empty-alive-set guard. `cat is None` in _make_catalog()
     # was written to stop exactly this catastrophe but only ever fired for a
     # SQLite-only "catalog absent" condition; in service mode the factory

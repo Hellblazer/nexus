@@ -188,7 +188,10 @@ def mailbox_arm_instruction(session_id: str) -> str:
     launch flag and its per-launch confirmation dialog as setup (Sam's
     decision of 2026-09-17, T2 nexus_rdr/211-decision-dev-channel-dialog-
     2026-09-17): the channel is a Claude Code research preview, not yet
-    remembered between launches.
+    remembered between launches. nexus-tk2cz (2026-09-17) adds the
+    dialog-free plugin form and the alias that makes either form stick,
+    in the same one-line byte budget (see ``TestGuidanceByteBudgetIntegration``
+    in ``tests/test_hooks.py``).
     """
     return (
         f"{ARM_MARKER}: call "
@@ -198,10 +201,12 @@ def mailbox_arm_instruction(session_id: str) -> str:
         f"delivered over the channel; mailbox/{session_id} is already "
         "subscribed. "
         "The channel is a Claude Code research preview: launch with "
-        "--dangerously-load-development-channels server:nexus (a "
-        "one-keystroke confirmation dialog appears every launch, not "
-        "remembered between them); without it, mail still arrives at your "
-        "next prompt through the drain hook."
+        "--channels plugin:conexus@nexus-plugins (dialog-free once "
+        "allowlisted) or --dangerously-load-development-channels "
+        "server:nexus (a one-keystroke confirmation dialog every launch); "
+        "alias claude to the first form so it always applies; without "
+        "either, mail still arrives at your next prompt through the drain "
+        "hook."
     )
 
 

@@ -324,13 +324,22 @@ public final class TupleRepository {
 
     // ── records ──────────────────────────────────────────────────────────────
 
+    /**
+     * {@code announcedAt}/{@code announceCount} (bead nexus-vsipz, RDR-213 engine
+     * half): additive wire fields mirroring {@code nexus.tuples.announced_at}/{@code
+     * .announce_count}. Populated for every row this repository returns, not only
+     * announce-mode rows -- a row nothing has ever announced simply carries {@code
+     * announcedAt=null, announceCount=0}, the column defaults. See {@link WaitSpec
+     * .Announce} for the mechanism that stamps them.
+     */
     public record TupleRow(
             byte[] id, String subspace, String template,
             Map<String, String> keys, Map<String, String> dims, String body,
             String claimState, String claimant, String claimId,
             OffsetDateTime leaseUntil, int attempts,
             OffsetDateTime consumedAt, String consumedBy,
-            OffsetDateTime expiresAt, OffsetDateTime createdAt) {
+            OffsetDateTime expiresAt, OffsetDateTime createdAt,
+            OffsetDateTime announcedAt, int announceCount) {
     }
 
     public record ClaimedTuple(TupleRow tuple, String claimId) {
@@ -785,8 +794,24 @@ public final class TupleRepository {
         }
     }
 
+    /** Back-compat overload (every {@code rd}/{@code rdp} call site): announce
+     *  mode off, byte-for-byte today's behaviour. See the 6-arg overload below. */
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
                                       int n, ReadCursor since) {
+        return queryOnce(tenant, subspace, pattern, n, since, null);
+    }
+
+    /**
+     * {@code announce} (bead nexus-vsipz, RDR-213 engine half) is {@code null} for
+     * every {@code rd}/{@code rdp} call and for a {@link WaitSpec} that does not
+     * carry one -- exactly the 5-arg overload's prior behaviour, unchanged. When
+     * non-null, the match and the stamp both move into {@link #queryOnceAnnounce};
+     * {@code since} is ignored on that path ({@link #waitAny}'s validation pass
+     * refuses a spec that sets both, so this method never has to choose between
+     * them).
+     */
+    private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
+                                      int n, ReadCursor since, WaitSpec.Announce announce) {
         checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         // RDR-205 review (nexus-em75s.35, M4): rd/rdp must refuse an unregistered
         // subspace exactly as out() and in()/inp() (via claimOnce) do -- this was
@@ -805,6 +830,9 @@ public final class TupleRepository {
             for (var e : patternSafe.entrySet()) {
                 cond = cond.and(DSL.jsonbGetAttributeAsText(TUPLES.KEYS, e.getKey()).eq(e.getValue()));
             }
+            if (announce != null) {
+                return queryOnceAnnounce(ctx, cond, limit, announce);
+            }
             if (since != null) {
                 cond = cond.and(DSL.row(TUPLES.CREATED_AT, TUPLES.ID)
                         .gt(DSL.row(DSL.val(since.createdAt()), DSL.val(since.id()))));
@@ -822,12 +850,148 @@ public final class TupleRepository {
         });
     }
 
+    /**
+     * Announce-mode branch of {@link #queryOnce} (bead nexus-vsipz): {@code
+     * baseCond} (tenant, subspace, {@code consumed_at IS NULL}, {@code expires_at >
+     * now()}, the caller's key pattern) is narrowed to CLAIMABLE rows -- {@code
+     * claimOnce}'s own predicate, {@code claim_state IS DISTINCT FROM 'dead' AND
+     * (claim_state IS NULL OR lease_until < now())} -- further narrowed to rows DUE
+     * for a first or repeat announcement -- {@code announced_at IS NULL OR
+     * (announced_at < now() - interval_s AND announce_count < max)} -- ordered
+     * oldest first, capped at {@code limit}. The SELECT locks its candidates
+     * ({@code FOR NO KEY UPDATE SKIP LOCKED}, {@link #claimOnce}'s own lock mode,
+     * chosen for the identical reason: the UPDATE below touches no key column, and
+     * this repository's other concurrent writers -- {@code out}'s claim-log FK
+     * insert, {@code ack}/{@code nack}'s own claim mutation -- must not be forced
+     * into a stronger lock) so a second concurrent announce-mode call cannot
+     * double-stamp the same row; a locked-out row is skipped for THIS call (not
+     * blocked on), same as {@code claimOnce}'s claim loop.
+     *
+     * <p>The stamp is one {@code UPDATE ... WHERE id IN (...)} against the exact
+     * ids just selected, in the SAME transaction -- never a second SELECT to
+     * re-read what was just written. The rows returned to the caller carry the
+     * POST-stamp values ({@code announcedAt=now}, {@code announceCount=old+1}),
+     * computed here rather than re-fetched, since every id's pre-stamp {@code
+     * announceCount} is already in hand from the locking SELECT above.
+     */
+    private List<TupleRow> queryOnceAnnounce(DSLContext ctx, Condition baseCond, int limit,
+                                              WaitSpec.Announce announce) {
+        Condition claimable = TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD)
+                .and(TUPLES.CLAIM_STATE.isNull().or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())));
+        Condition due = TUPLES.ANNOUNCED_AT.isNull()
+                .or(TUPLES.ANNOUNCED_AT.lt(DSL.currentOffsetDateTime().sub(interval(announce.intervalSeconds())))
+                        .and(TUPLES.ANNOUNCE_COUNT.lt(announce.max())));
+        Condition cond = baseCond.and(claimable).and(due);
+
+        var rows = ctx.selectFrom(TUPLES)
+                .where(cond)
+                .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
+                .limit(limit)
+                .forNoKeyUpdate()
+                .skipLocked()
+                .fetch();
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+
+        List<byte[]> ids = new ArrayList<>(rows.size());
+        for (TuplesRecord r : rows) {
+            ids.add(r.getId());
+        }
+        // Truncated to microseconds (RDR-205 follow-on nexus-mvfm9's own reasoning,
+        // reused here): the value written matches Postgres TIMESTAMPTZ precision
+        // exactly, so the in-memory TupleRow this method returns and a later
+        // read-back of the same row agree on announced_at's fractional seconds.
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        ctx.update(TUPLES)
+                .set(TUPLES.ANNOUNCED_AT, now)
+                .set(TUPLES.ANNOUNCE_COUNT, TUPLES.ANNOUNCE_COUNT.add(1))
+                .where(TUPLES.ID.in(ids))
+                .execute();
+
+        List<TupleRow> out = new ArrayList<>();
+        for (TuplesRecord r : rows) {
+            out.add(toRow(r, now, r.getAnnounceCount() + 1));
+        }
+        return out;
+    }
+
     // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
 
     /** One subspace subscription within a {@link #waitAny} call: {@code n}/{@code
      *  since} carry the same meaning and defaults as {@link #rd}'s own parameters --
-     *  {@code n <= 0} clamps to 1, {@code since == null} reads from the start. */
-    public record WaitSpec(String subspace, Map<String, String> pattern, int n, ReadCursor since) {
+     *  {@code n <= 0} clamps to 1, {@code since == null} reads from the start.
+     *  {@code announce} (bead nexus-vsipz, RDR-213 engine half) is an ADDITIVE field:
+     *  {@code null} (the 4-arg constructor below) is today's unchanged behaviour for
+     *  every existing caller. {@code since} and {@code announce} together are refused
+     *  ({@link #waitAny}'s own validation pass) -- announce mode tracks position on
+     *  the ROW itself via {@code announced_at}/{@code announce_count}, never via a
+     *  client-supplied cursor, so combining the two would silently do nothing with
+     *  the cursor rather than fail loud if it were merely ignored. */
+    public record WaitSpec(String subspace, Map<String, String> pattern, int n, ReadCursor since,
+                            Announce announce) {
+
+        /** Back-compat constructor: every call site that predates announce mode
+         *  (every existing test, {@link TupleHandler}'s bare {@code since}-only
+         *  path) gets {@code announce=null} -- byte-for-byte today's semantics. */
+        public WaitSpec(String subspace, Map<String, String> pattern, int n, ReadCursor since) {
+            this(subspace, pattern, n, since, null);
+        }
+
+        /**
+         * Rate-limited engine announcement (bead nexus-vsipz, RDR-213 engine half,
+         * T2 nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
+         * 2026-09-17). When present on a {@link WaitSpec}, {@code
+         * TupleRepository.queryOnce} restricts its match to CLAIMABLE rows ({@code
+         * claimOnce}'s own predicate: unconsumed, unexpired, not dead-lettered,
+         * and either never claimed or claimed with a lapsed lease) that are DUE for
+         * a first or repeat announcement -- {@code announced_at IS NULL} (never
+         * announced) OR ({@code announced_at} older than {@code intervalSeconds}
+         * AND {@code announce_count < max}) -- and stamps {@code announced_at =
+         * now()}, {@code announce_count += 1} on every row it returns, in the SAME
+         * statement that selects them. A row a caller neither claims nor consumes
+         * is simply re-announced at the next due tick, up to {@code max} times
+         * total; past that it is never returned by announce mode again (though it
+         * remains reachable via {@code in}/{@code inp}, which never consult these
+         * columns).
+         *
+         * <p>Because the match always re-scans the FULL claimable-and-due set,
+         * ordered oldest first, with no client-supplied cursor to have advanced
+         * past anything, a row that commits its {@code out} LATE (RDR-213's
+         * lost-wake defect: a slower transaction's {@code created_at} can sort
+         * before a faster, earlier-committing sibling's) is picked up on the very
+         * next call regardless -- there is no cursor position for it to land
+         * behind.
+         */
+        public record Announce(long intervalSeconds, int max) {
+
+            /** Bounds check (review round, bead nexus-vsipz): a compact constructor
+             *  so EVERY construction path -- {@link TupleHandler#readAnnounce}, a
+             *  direct Java caller, a future one -- is covered, not just the wire
+             *  parser. Mirrors {@code claimOnce}'s own {@code lease_s <= 0} refusal
+             *  ({@code SchemaViolationException("lease_s", "must be positive")}):
+             *  a negative {@code intervalSeconds} would make {@code announced_at <
+             *  now() - interval} read as {@code now() + |interval|}, defeating rate
+             *  limiting outright rather than merely under-limiting it, and {@code
+             *  max < 1} would make the due check's {@code announce_count < max}
+             *  arm false for every row from its very first stamp (announce_count=1
+             *  is never {@code < 0} or {@code < 1} except when max is at least 1),
+             *  silently reducing "up to max announcements" to "zero, ever" for
+             *  max=0 while still passing the {@code announced_at IS NULL} arm
+             *  exactly once for a never-announced row -- one stray announcement
+             *  before going permanently silent, not the loud refusal a caller
+             *  asking for a nonsensical cap deserves. {@code max == 1} is the
+             *  smallest MEANINGFUL value (announce once, never again) and is
+             *  explicitly allowed. */
+            public Announce {
+                if (intervalSeconds < 0) {
+                    throw new SchemaViolationException("interval_s", "must not be negative");
+                }
+                if (max < 1) {
+                    throw new SchemaViolationException("max", "must be at least 1");
+                }
+            }
+        }
     }
 
     /** One subspace's matched tuples from a {@link #waitAny} call. Only subspaces
@@ -887,6 +1051,13 @@ public final class TupleRepository {
             checkFieldSize("subspace", spec.subspace(), TupleLimits.MAX_SUBSPACE_BYTES);
             resolveOrThrow(spec.subspace());
             checkPatternSizes(spec.pattern() == null ? Map.of() : spec.pattern());
+            // nexus-vsipz (RDR-213 engine half): announce mode tracks position on the
+            // ROW itself (announced_at/announce_count), never via a client-supplied
+            // cursor -- a spec naming both would have the cursor silently do nothing,
+            // so the combination is refused loud here rather than tolerated quietly.
+            if (spec.announce() != null && spec.since() != null) {
+                throw new SchemaViolationException("since", "must not be set together with announce");
+            }
             subspaces.add(spec.subspace());
         }
 
@@ -937,7 +1108,8 @@ public final class TupleRepository {
     private List<WaitResult> queryEachOnce(String tenant, List<WaitSpec> specs) {
         List<WaitResult> out = new ArrayList<>();
         for (WaitSpec spec : specs) {
-            List<TupleRow> rows = queryOnce(tenant, spec.subspace(), spec.pattern(), spec.n(), spec.since());
+            List<TupleRow> rows = queryOnce(tenant, spec.subspace(), spec.pattern(), spec.n(), spec.since(),
+                    spec.announce());
             if (!rows.isEmpty()) {
                 out.add(new WaitResult(spec.subspace(), rows));
             }
@@ -1173,7 +1345,8 @@ public final class TupleRepository {
                 TupleRow claimed = new TupleRow(row.getId(), subspace, t.name(),
                         fromJsonb(row.getKeys()), fromJsonb(row.getDims()), row.getBody(),
                         CLAIM_STATE_CLAIMED, claimant, newClaimId, leaseUntil, attempts,
-                        null, null, expiresAtForClaim, row.getCreatedAt());
+                        null, null, expiresAtForClaim, row.getCreatedAt(),
+                        row.getAnnouncedAt(), row.getAnnounceCount());
                 return Optional.of(new ClaimedTuple(claimed, newClaimId));
             }
             return Optional.empty(); // NX_TUPLE_CLAIM_PASSES exhausted: the probe result
@@ -2156,12 +2329,21 @@ public final class TupleRepository {
     }
 
     private static TupleRow toRow(TuplesRecord r) {
+        return toRow(r, r.getAnnouncedAt(), r.getAnnounceCount());
+    }
+
+    /** {@code announcedAt}/{@code announceCount} override (bead nexus-vsipz): used
+     *  by {@link #queryOnceAnnounce} to return the POST-stamp values without a
+     *  second read-back; every other caller passes {@code r}'s own persisted
+     *  columns via the no-arg overload above. */
+    private static TupleRow toRow(TuplesRecord r, OffsetDateTime announcedAt, int announceCount) {
         return new TupleRow(r.getId(), r.getSubspace(), r.getTemplate(),
                 fromJsonb(r.getKeys()), fromJsonb(r.getDims()), r.getBody(),
                 r.getClaimState(), r.getClaimant(), r.getClaimId(),
                 r.getLeaseUntil(), r.getAttempts(),
                 r.getConsumedAt(), r.getConsumedBy(),
-                r.getExpiresAt(), r.getCreatedAt());
+                r.getExpiresAt(), r.getCreatedAt(),
+                announcedAt, announceCount);
     }
 
     private static JSONB toJsonb(Map<String, String> map) {

@@ -267,7 +267,10 @@ def _extract_context(
 
     try:
         from tree_sitter_language_pack import get_parser  # lazy import  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-        parser = get_parser(language)
+        # tree-sitter-language-pack uses "csharp" not "c_sharp" (mirrors
+        # chunker.py:52 and _is_import_only_chunk below).
+        parser_name = "csharp" if language == "c_sharp" else language
+        parser = get_parser(parser_name)
     except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
         _log.warning("get_parser_failed", language=language, error=str(exc), exc_info=True)
         return ("", "")

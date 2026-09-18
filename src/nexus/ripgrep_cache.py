@@ -85,7 +85,13 @@ def search_ripgrep(
         "--no-filename",
         "--no-line-number",
         "-m", str(n_results),
-        query,
+        # The query is a PATTERN, never an option: ``-e`` binds it as one and
+        # ``--`` ends option parsing before the path. As a bare positional, a
+        # query of ``--pre=<program>`` made rg execute that program, and an
+        # ordinary code query such as ``-> None`` was rejected as an unknown
+        # flag, so the hybrid leg silently returned nothing.
+        "-e", query,
+        "--",
         str(cache_path),
     ]
 

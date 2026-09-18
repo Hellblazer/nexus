@@ -138,6 +138,8 @@ YOU (the orchestrator running this skill) drive the gate on every completion,
 regardless of what the developer's output says. Do not stop at the
 developer's return; do not let the developer self-commit.
 
+**A new check, gate, census or lint pastes its first live run into its bead before close**, with the counts it examined and skipped, so a pass over input it never examined is visible at the moment it ships.
+
 **State the acceptance bar before dispatching either reviewer** — see
 `/conexus:code-review` § Acceptance Bar. "Ship when &lt;X&gt;," never "no
 criticals."
@@ -164,7 +166,8 @@ round 3+ requires the human to ask for it by name, recorded via
 ship-blockers are CONFIRMED-CLOSED do you proceed to commit.
 
 3. **Commit**: stage the code changes (explicit paths, never `git add -A`) plus
-   the beads file, commit with the bead reference, and close the bead. The
+   the beads file, commit with the bead reference, and close the bead (for a new check, gate,
+   census or lint: only after its first live run is pasted in the bead, above). The
    developer does not self-commit; the commit is the proof both gates passed.
 
 When executing a strategic plan, the planner bakes review tasks into the plan at

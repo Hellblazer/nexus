@@ -298,9 +298,15 @@ def apply_hybrid_scoring(
         if r.collection == "rg__cache":
             r.hybrid_score = RG_FLOOR_SCORE
             continue
-        # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0
+        # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0.
+        # A single-element window normalizes to 1.0 ("trivially the maximum" —
+        # min_max_normalize's own contract, pinned in test_min_max_normalize);
+        # inverting that would double-negate it to 0.0, the WORST possible
+        # score for the only result there is to score. Treat "nothing to
+        # compare against" (0 or 1 elements) uniformly as the best match
+        # (nexus-yrc7q #8).
         calibrated = r.distance * calibration_factors.get(r.collection, 1.0)
-        v_norm = 1.0 - min_max_normalize(calibrated, distances) if distances else 1.0
+        v_norm = 1.0 if len(distances) <= 1 else 1.0 - min_max_normalize(calibrated, distances)
         if hybrid:
             # nexus-tox2m follow-on: apply vector_weight to EVERY result
             # when hybrid=True, not just code__. Before calibration this

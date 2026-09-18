@@ -74,6 +74,25 @@ def test_pdf_chunker_default_overlap_is_300_chars():
     )
 
 
+# ── nexus-yrc7q #9: no duplicate tail chunk ──────────────────────────────────
+#
+# When the current window's end reaches EOF, next_start = end - overlap_chars
+# was still computed and could be > start, so the loop ran one more time and
+# emitted a chunk consisting solely of the previous chunk's overlap tail: an
+# extra T3 row/embedding per document, a redundant fragment hit in search.
+
+def test_pdf_chunker_no_duplicate_tail_chunk():
+    """A chunk that reaches EOF must be the only one that does."""
+    text = " ".join(f"Sentence number {i} is here." for i in range(120))[:3000]
+    chunks = PDFChunker().chunk(text, {})
+    ends_at_eof = [c for c in chunks if c.metadata["chunk_end_char"] == len(text)]
+    assert len(ends_at_eof) == 1, (
+        f"expected exactly one chunk reaching EOF (len={len(text)}), got "
+        f"{len(ends_at_eof)}: "
+        f"{[(c.metadata['chunk_start_char'], c.metadata['chunk_end_char']) for c in chunks]}"
+    )
+
+
 # ── Section-type tagging (RDR-089 follow-up — close metadata gap) ────────────
 
 

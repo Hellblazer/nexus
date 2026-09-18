@@ -121,6 +121,28 @@ class ElectionBusyError(ServiceRegistryError):
 #: do age the lease out; that is the visible failure, not a silent wedge.
 HEARTBEAT_ELECTION_BUDGET_FRACTION: float = 1.0 / 3.0
 
+#: Default budget for the STOP-path election calls (``mark_shutting_down``,
+#: ``relinquish``), nexus-cd1k0 review round 3 finding 6. Both previously took
+#: ``budget=None`` -- an unconditionally BLOCKING ``LOCK_EX`` -- which made a
+#: tier's documented outer stop grace (e.g.
+#: ``storage_service_daemon._SUPERVISOR_STOP_GRACE``) false advertising: that
+#: constant's docstring claims to strictly exceed the inner worst case, but an
+#: unbounded flock wait inside ``stop()`` has no worst case to exceed. A
+#: contested election during a graceful stop is rare and momentary (the
+#: contending side is itself either heartbeating, under its OWN
+#: ``heartbeat_election_budget``-bounded wait, or another stop/relinquish
+#: racing the same scope) -- a few seconds is ample headroom without
+#: reproducing the heartbeat path's TTL-fraction reasoning, which does not
+#: apply here (there is no lease-aging clock counting down during a stop).
+#: On exhaustion this raises ``ElectionBusyError`` exactly like the heartbeat
+#: path; every stop-path caller treats that as best-effort (already true for
+#: ``mark_shutting_down`` at both call sites, and now also true for
+#: ``relinquish`` -- see storage_service_daemon.StorageServiceSupervisor.stop
+#: and aspect_worker_daemon.AspectWorkerDaemon.stop) so a busy flock degrades
+#: to "the record ages out via TTL instead of being explicitly relinquished",
+#: never to a stop that itself hangs.
+DEFAULT_STOP_ELECTION_BUDGET: float = 2.0
+
 #: LOCK_NB poll cadence for the bounded election.
 _ELECTION_POLL_INTERVAL: float = 0.05
 
@@ -294,17 +316,23 @@ class ServiceRegistry:
     ) -> Iterator[None]:
         """Hold the per-scope election flock for a read-modify-write.
 
-        ``budget=None`` (publish, relinquish, reap, shutdown marker): blocking
-        ``LOCK_EX``. The critical section (read current record, increment
-        generation, atomic write) is short, and a publisher must wait its
-        turn rather than fail, so concurrent siblings serialize into
-        strictly increasing generations.
+        ``budget=None`` (publish, reap; ``mark_shutting_down``/``relinquish``
+        callers that pass nothing, e.g. any caller outside a bounded stop
+        path): blocking ``LOCK_EX``. The critical section (read current
+        record, increment generation, atomic write) is short, and a
+        publisher must wait its turn rather than fail, so concurrent
+        siblings serialize into strictly increasing generations.
 
-        ``budget=<seconds>`` (heartbeat, nexus-59bah): ``LOCK_NB`` polled
-        against the injected monotonic clock; raises ``ElectionBusyError``
-        once the budget is spent. A heartbeat already holds a lease, so a
-        skipped stamp is cheap and a blocked tick is not: the 2026-09-06
-        skew window had a live supervisor wedged in one tick past the TTL.
+        ``budget=<seconds>`` (heartbeat, nexus-59bah; the STOP path's
+        ``mark_shutting_down``/``relinquish``, nexus-cd1k0 review round 3
+        finding 6): ``LOCK_NB`` polled against the injected monotonic clock;
+        raises ``ElectionBusyError`` once the budget is spent. A heartbeat
+        already holds a lease, so a skipped stamp is cheap and a blocked
+        tick is not: the 2026-09-06 skew window had a live supervisor
+        wedged in one tick past the TTL. The stop path reasons identically:
+        a stop that cannot finish relinquishing is still a stop, and must
+        not itself become the thing that hangs (see
+        ``DEFAULT_STOP_ELECTION_BUDGET``'s docstring).
         """
         def _open() -> int:
             self._ensure_dir()
@@ -566,10 +594,21 @@ class ServiceRegistry:
             with contextlib.suppress(OSError):
                 self._record_path(stale.scope_key).unlink()
 
-    def mark_shutting_down(self, record: LeaseRecord) -> None:
+    def mark_shutting_down(
+        self, record: LeaseRecord, *, budget: Optional[float] = None
+    ) -> None:
         """Publish a shutdown marker so discoverers stop resolving us
-        immediately, before the record is unlinked."""
-        with self._elect(record.scope_key):
+        immediately, before the record is unlinked.
+
+        ``budget=None`` (default): blocking ``LOCK_EX``, unchanged from
+        before nexus-cd1k0 review round 3 finding 6. ``budget=<seconds>``
+        (the stop path, both tiers): ``LOCK_NB`` polled against the
+        injected monotonic clock, raising ``ElectionBusyError`` once the
+        budget is spent -- see ``DEFAULT_STOP_ELECTION_BUDGET``'s docstring
+        for why every stop-path caller treats that as best-effort rather
+        than fatal.
+        """
+        with self._elect(record.scope_key, budget=budget):
             current = self._read_record(record.scope_key)
             if current is None or current.owner_token != record.owner_token:
                 return
@@ -586,10 +625,23 @@ class ServiceRegistry:
             )
             self._write_record_atomic(marker)
 
-    def relinquish(self, record: LeaseRecord) -> None:
+    def relinquish(
+        self, record: LeaseRecord, *, budget: Optional[float] = None
+    ) -> None:
         """Release ``scope_key`` on graceful shutdown, but only if we still
         own it. A delayed shutdown from a fenced predecessor must not
         unlink a successor's record (CA-4).
+
+        ``budget=None`` (default): blocking ``LOCK_EX``, unchanged from
+        before nexus-cd1k0 review round 3 finding 6. ``budget=<seconds>``
+        (the stop path, both tiers): ``LOCK_NB`` polled, raising
+        ``ElectionBusyError`` once spent -- see
+        ``DEFAULT_STOP_ELECTION_BUDGET``'s docstring. On that error nothing
+        is written and nothing is unlinked (the ``with self._elect(...)``
+        block is never entered), so a busy flock leaves the lease exactly
+        as it was: still ours on disk, but about to be torn down anyway by
+        the caller's own kill path -- it ages out via TTL instead of being
+        explicitly relinquished.
 
         nexus-ycwec GAP C: also removes the per-scope elect lock file after
         releasing the flock so clean shutdowns leave no ``<tier>_elect.*.lock``
@@ -606,7 +658,7 @@ class ServiceRegistry:
         therefore NOT the safety mechanism -- generation fencing is.
         """
         _we_owned = False
-        with self._elect(record.scope_key):
+        with self._elect(record.scope_key, budget=budget):
             current = self._read_record(record.scope_key)
             if current is None:
                 return
@@ -797,6 +849,123 @@ def exit_if_process_unowned(
     log.info(event, msg="another supervisor owns the process; exiting cleanly")
     flush_logging()
     sup.stop()
+    return True
+
+
+def fenced_exit_code(fenced: bool) -> int | None:
+    """The run-loop exit code a tier's supervisor MUST use once its
+    ``ServiceSupervisor.fenced`` flag is True, or ``None`` when not
+    fenced (keep heartbeating as usual).
+
+    Shared primitive (RDR-149 §shared primitive, nexus-cd1k0.2): fencing
+    itself already lives here (``ServiceSupervisor.heartbeat_tick`` sets
+    ``.fenced`` on ``StaleOwnerError``); what was missing was a SINGLE
+    place naming what a fenced owner's run loop does next, so two tiers
+    could not independently pick two different answers (one exiting 0,
+    one exiting non-zero, for the identical fact). The answer is always
+    0: a fenced owner already lost the race for this scope to a
+    strictly-higher-generation successor — there is no rematch to win by
+    respawning, so exiting non-zero here would only trip the OS unit's
+    restart policy (``Restart=on-failure`` / ``KeepAlive
+    SuccessfulExit=false``) into a doomed repeat.
+
+    This helper is a pure predicate; it does not call ``sup.stop()``.
+    The caller's own run-loop tail already calls ``stop()`` uniformly for
+    every exit reason, and doing so on a fenced owner is safe BY
+    CONSTRUCTION: ``ServiceRegistry.mark_shutting_down``/``relinquish``
+    both compare ``owner_token`` against the CURRENT record under the
+    election flock and no-op on a mismatch (CA-4) — a fenced
+    predecessor's own last-known record never matches the successor's,
+    so its shutdown path can never touch the successor's lease. Nothing
+    else in a tier's ``stop()`` reaches into a resource this owner does
+    not exclusively hold (Postgres, notably, is never stopped by any
+    tier's ``stop()``); only THIS owner's own child process is torn down.
+    """
+    return 0 if fenced else None
+
+
+def reclaim_lease_if_dead_owner(
+    registry: "ServiceRegistry",
+    record: "LeaseRecord",
+    *,
+    log: Any = None,
+    event: str = "service_registry_dead_owner_reclaimed",
+) -> bool:
+    """True when *record* was held by a DEAD supervisor and has just been
+    relinquished — the caller must proceed to (re)spawn rather than
+    short-circuit onto it. False when the record's owner is genuinely
+    alive, or the record carries no ``supervisor_pid`` at all (legacy /
+    non-supervised — left untouched, never reclaimed spuriously), and
+    should be honored as the live owner.
+
+    Shared primitive (RDR-149 §shared primitive, nexus-cd1k0.17): a
+    hard-crashed supervisor (OOM-kill, SIGKILL with no relinquish) leaves
+    a lease that is still TTL-FRESH — ``ServiceRegistry.discover()``'s
+    pure lease-freshness contract (this module's "liveness is lease
+    freshness, not pid" invariant) correctly returns it as live, and that
+    invariant is UNCHANGED here. This answers a narrower, DIFFERENT
+    question on top of a lease HIT (never a miss): is the fresh lease's
+    OWNER actually still running, so a self-healing spawner can decide
+    whether to honor it or reclaim and respawn. Previously implemented
+    ONCE, in the CLI client-spawn path
+    (``commands/daemon.py.ensure_storage_supervisor``) only — the
+    foreground unit path (``storage_service_daemon._start_locked``) had
+    no equivalent, so a unit-launched supervisor discovering a
+    dead-owner's fresh lease exited 0 (via ``exit_if_process_unowned``)
+    and the OS unit's restart-on-success-exit=never policy left the
+    stack down until the lease aged out on its own.
+
+    ``_pid_is_running`` (not ``_pid_is_alive``, nexus-o8dil.21): a ZOMBIE
+    supervisor — hard-killed, parent not yet reaped it (routine under a
+    non-init PID 1, e.g. a container or CI runner) — answers
+    ``os.kill(pid, 0)`` indefinitely; the alive-only probe would never
+    fire for exactly the crashed-supervisor case this exists to catch.
+
+    Relinquish is best-effort: a failure is logged (when *log* is given)
+    but never raised — the caller's own spawn attempt will publish a
+    higher generation regardless (CA-4 fencing prevents double-ownership
+    even if the stale record briefly lingers), so a relinquish failure
+    must not block the respawn it exists to enable.
+
+    RECYCLED-PID TRADE-OFF (nexus-cd1k0 review round 2, finding 3 —
+    stated explicitly, not left implicit): ``pid_running`` is a pure
+    ``kill(pid, 0)`` + zombie check, with no identity or cmdline
+    verification against the pid it is asked about. If the kernel
+    recycles ``supervisor_pid`` to an UNRELATED live process within the
+    lease's TTL window (15s for storage_service), that unrelated
+    process's mere existence reads as "the owner is alive" — the heal
+    does NOT fire, and the stack stays down until the lease naturally
+    ages out past its TTL, at which point ``discover()``'s own
+    lease-freshness reap takes over regardless. This FAILS SAFE: the
+    consequence is a bounded DELAY (at most one TTL window), never
+    double-ownership or data corruption — CA-4 generation fencing still
+    protects ownership even if this heal is late or never fires at all.
+    Recorded here per AGENTS.md's pid-liveness exception list (this
+    function is now named there alongside ``sweep_matching_processes``,
+    the primitive's other documented pid-based mechanism).
+    """
+    supervisor_pid = record.payload.get("supervisor_pid")
+    if not (isinstance(supervisor_pid, int) and supervisor_pid > 0):
+        return False
+    if pid_running(supervisor_pid):
+        return False
+    if log is not None:
+        log.warning(
+            event,
+            supervisor_pid=supervisor_pid,
+            scope=record.scope_key,
+            msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
+        )
+    try:
+        registry.relinquish(record)
+    except Exception as exc:  # noqa: BLE001 — best-effort reclaim; generation fencing still protects ownership
+        if log is not None:
+            log.warning(
+                f"{event}_relinquish_failed",
+                supervisor_pid=supervisor_pid,
+                scope=record.scope_key,
+                error=str(exc),
+            )
     return True
 
 
@@ -1132,25 +1301,110 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     is the documented multi-profile mechanism, and a bare
     ``str(config_dir) in command`` would match ``.config/nexus`` against
     ``.config/nexus-staging``'s command line, folding a healthy sibling
-    profile's supervisor into a kill set. The engine match is argv[0]-exact
-    for the same reason (never a substring match on a `tail .../nexus-service.log`
-    or similar diagnostic command).
+    profile's supervisor into a kill set. The engine match is a literal
+    prefix match on the whole *engine_path* string for the same reason
+    (never a substring match on a `tail .../nexus-service.log` or similar
+    diagnostic command) — see the space-safety note below for why this is
+    a prefix check rather than a ``.split()``-then-compare.
+
+    Flagless unit-launched supervisors — LEGACY ONLY (nexus-cd1k0.3,
+    narrowed to legacy by nexus-cd1k0.19 review round 2, finding 4): the
+    shipped launchd/systemd units USED TO exec ``nx daemon service start
+    --foreground`` with NO ``--config-dir`` token at all —
+    ``ensure_storage_supervisor`` (the client spawn path) always passed
+    the flag, but a unit's ``ExecStart``/``ProgramArguments`` never went
+    through that path, so a unit-launched supervisor was invisible to
+    this matcher entirely: with an expired lease, ``nx daemon service
+    stop`` swept only the engine, the supervisor exited non-zero on its
+    child's death, and the OS unit restarted the whole stack. That gap is
+    now closed at the SOURCE, not just papered over here: ``nx daemon
+    service install`` (``daemon/installer.py`` + ``commands/daemon.py``'s
+    ``_render_template``) now bakes an explicit, resolved-absolute
+    ``--config-dir`` into every unit it generates, and
+    ``ensure_storage_supervisor``/``upgrade_finish.py``'s own ``nx daemon
+    service start``/``stop`` invocations both resolve theirs explicitly
+    too — a supervisor spawned or unit generated from this point on is
+    NEVER flagless. The flagless-matches-default fallback below therefore
+    exists ONLY for a unit installed BEFORE this fix (legacy on-disk
+    units this code does not rewrite in place): a command with no
+    ``--config-dir`` token is treated as belonging to the DEFAULT config
+    dir — the directory a flagless process resolves to on its own
+    (``nexus.config.nexus_config_dir()``'s own fallback, mirrored here as
+    a literal so this check never depends on THIS process's own
+    ``NEXUS_CONFIG_DIR``, only on what a bare invocation would resolve
+    to) — and to NOTHING else: an explicit non-default *config_dir* (an
+    isolated test stack, a second profile) must never be matched by a
+    flagless command, or a live default-dir ``stop`` would sweep an
+    unrelated isolated stack and vice versa.
+
+    Known, DOCUMENTED limitation, ASYMMETRIC (not merely "unresolvable" —
+    nexus-cd1k0 review round 2, finding stated precisely rather than
+    understated): this matcher sees only argv (the process table's
+    ``command`` string), never a process's environment. A process that
+    sets ``NEXUS_CONFIG_DIR`` itself (rather than passing
+    ``--config-dir``) resolves to that env var's directory in the real
+    process, but is indistinguishable here from a flagless process that
+    truly means the default — both look identical from argv alone. The
+    failure direction is NOT neutral: it is biased toward matching the
+    DEFAULT dir, so a live default-dir ``stop`` could wrongly sweep an
+    unrelated env-scoped process (false-positive collateral kill), while
+    an explicit ``stop`` targeting THAT env-scoped stack by its real
+    config_dir would find nothing (false negative — it looks flagless,
+    which only ever matches the default). Two REAL vectors for this,
+    identified and closed at the source above rather than left live:
+    ``upgrade_finish.py``'s two bare CLI invocations (now pass
+    ``--config-dir`` explicitly) and the e2e sandbox scripts (which set
+    ``NEXUS_CONFIG_DIR`` via environment for real ``nx`` subprocess
+    invocations — those invocations' OWN spawned supervisors are
+    argv-explicit via ``ensure_storage_supervisor``, so they were never
+    actually flagless once spawned; the risk was specifically the CLI
+    calls that never spawned anything of their own and relied on
+    ``stop``/``start``'s own bare re-derivation). Currently DORMANT for
+    any REMAINING flagless case: the two shipped unit templates
+    (``conexus/daemon/com.nexus.service.plist``,
+    ``conexus/daemon/nexus-service.service``) never set
+    ``NEXUS_CONFIG_DIR`` via environment, only ``PATH`` — there is no
+    portable, unprivileged way to read another process's environment
+    from this module (see ``process_command``'s procfs/``ps`` split), so
+    this case is accepted as unresolvable rather than silently
+    mismatched against a guess.
+
+    Space-safety (nexus-cd1k0.3): the process table's ``command`` string
+    is already a SPACE-JOINED rendering of the real argv (``/proc/<pid>/
+    cmdline`` NUL bytes replaced with spaces, or ``ps``'s single-string
+    output) — true argv boundaries are lost before this function ever
+    sees the string, so a config_dir containing a space cannot be
+    recovered by re-splitting on whitespace: ``command.split()`` would
+    slice it apart and never match. Every comparison below is therefore
+    a literal SUBSTRING/PREFIX/SUFFIX check against the whole
+    *engine_path* / *target* string, never a re-tokenization — correct
+    for a config_dir with an EMBEDDED space, as far as this platform's
+    process-table abstraction allows; it cannot help a config_dir that
+    also embeds a value indistinguishable from a following flag or the
+    NUL-turned-space bytes.
     """
     engine_path = str(config_dir / "service" / "nexus-service")
     target = str(config_dir)
+    # The literal default a FLAGLESS process resolves to on its own
+    # (nexus.config.nexus_config_dir()'s fallback branch) — NOT that
+    # function itself, so this never depends on this process's own
+    # NEXUS_CONFIG_DIR.
+    is_default_target = config_dir == (Path.home() / ".config" / "nexus")
+    config_dir_eq = f" --config-dir={target}"
+    config_dir_sp = f" --config-dir {target}"
 
     def _match(command: str) -> bool:
-        if command.split()[:1] == [engine_path]:
+        if command == engine_path or command.startswith(engine_path + " "):
             return True
         if "daemon service start" not in command:
             return False
-        tokens = command.split()
-        for i, tok in enumerate(tokens):
-            if tok == "--config-dir" and i + 1 < len(tokens):
-                return tokens[i + 1] == target
-            if tok.startswith("--config-dir="):
-                return tok[len("--config-dir="):] == target
-        return False
+        if command.endswith(config_dir_eq) or (config_dir_eq + " ") in command:
+            return True
+        if command.endswith(config_dir_sp) or (config_dir_sp + " ") in command:
+            return True
+        if "--config-dir" in command:
+            return False  # an explicit OTHER config-dir; never match by omission
+        return is_default_target
 
     return _match
 

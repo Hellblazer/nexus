@@ -2868,7 +2868,7 @@ class TestRdrGateRoundAndFixCheck:
         sha = self._commit(rdr_env, self._BODY, "gated")
         fake = _FakeT2ResearchClient({
             "204-gate-latest": f"outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\ncommit: {sha}\n",
-            **{f"204-gate-critique-2026-09-0{i}": "x" for i in range(1, 6)},
+            **{f"204-gate-critique-2026-09-0{i}": f"round {i}" for i in range(1, 6)},
         })
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
         out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
@@ -3305,7 +3305,7 @@ class TestRdrAuditGateLoopHealth:
 
         fake = _FakeT2ResearchClient({
             "150-gate-latest": "outcome: \"PASSED\"\ncritical_count: 0\n",
-            **{f"150-gate-critique-2026-09-0{i}": "x" for i in range(1, 5)},
+            **{f"150-gate-critique-2026-09-0{i}": f"round {i}" for i in range(1, 5)},
         })
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
         out = _runner().invoke(rdr, ["preamble", "rdr-audit"]).output
@@ -3937,3 +3937,382 @@ class TestResidualBatchReviewPins:
         assert not any("off by" in v for v in idx.values()), (
             "two titles sharing every non-digit word must not resolve to either"
         )
+
+
+class TestPhaseReviewGateSubsetParses:
+    """The gate must never cross-walk a subset of the section it was handed
+    (intrastate review T2 intrastate/[26115] #1, #8, #9; plan N1). Each test
+    is a probe from nexus-redo-probes-2026-09-17/review-nexus-rdr/probe_rdr.py
+    (P5a, P5b, P5c) converted to a regression test before the fix landed."""
+
+    def test_fenced_comment_does_not_end_implementation_plan_section(self):
+        """P5b: a column-0 ``# comment`` inside a code fence is not a heading."""
+        from nexus.commands.rdr import (  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+            _prg_extract_implementation_plan_section,
+            _prg_parse_plan_phase_items,
+        )
+        text = (
+            "\n## Implementation Plan\n\n"
+            "### Phase 1: one\n\n#### Step 1: first\ntext\n\n"
+            "```bash\n# install\nmake\n```\n\n"
+            "#### Step 2: second\ntext\n\n"
+            "### Phase 2: two\n\n#### Step 3: third\ntext\n\n"
+            "## Consequences\n"
+        )
+        sec = _prg_extract_implementation_plan_section(text)
+        assert "Step 3: third" in sec
+        assert "## Consequences" not in sec
+        labels = [lbl for _, lbl, _ in _prg_parse_plan_phase_items(sec)]
+        assert labels == ["Phase 1: Step 1: first", "Phase 1: Step 2: second", "Phase 2: Step 3: third"]
+
+    def test_fenced_comment_does_not_end_approach_section(self):
+        """P5b, §Approach shape: items after a fenced ``# comment`` are kept."""
+        from nexus.commands.rdr import (  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+            _prg_extract_approach_section,
+            _prg_find_unparsed_item_starts,
+            _prg_parse_approach_items,
+        )
+        text = (
+            "\n## Approach\n\n1. **A**: first\n\n"
+            "```bash\n# build\nmake\n```\n\n"
+            "2. **B**: second\n3. **C**: third\n\n## Consequences\n"
+        )
+        sec = _prg_extract_approach_section(text)
+        assert [n for n, _, _ in _prg_parse_approach_items(sec)] == [1, 2, 3]
+        assert _prg_find_unparsed_item_starts(sec) == []
+
+    def test_decimal_phase_selects_its_own_block(self):
+        """P5a: ``--phase 1.5`` enumerates Phase 1.5, not Phase 1."""
+        from nexus.commands.rdr import _prg_parse_phase_block_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "**Phase 1: alpha**\n\n- do A\n- do B\n\n"
+            "**Phase 1.5: beta**\n\n- do C\n"
+        )
+        assert [s for _, _, s in _prg_parse_phase_block_items(text, phase="1.5")] == ["do C"]
+        assert [s for _, _, s in _prg_parse_phase_block_items(text, phase="1")] == ["do A", "do B"]
+
+    def test_only_colliding_lists_are_renumbered(self):
+        """Review of 55b38cd25: a third list with unique numbers kept its
+        keys under the old code only when nothing collided anywhere; now it
+        keeps them regardless, and the renumbered items land above every
+        number in use."""
+        from nexus.commands.rdr import _prg_parse_approach_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "#### Track A\n\n1. **A1**: a\n2. **A2**: b\n\n"
+            "#### Track B\n\n1. **B1**: c\n2. **B2**: d\n\n"
+            "#### Track C\n\n3. **C1**: e\n4. **C2**: f\n"
+        )
+        items = _prg_parse_approach_items(text)
+        assert [(n, lbl) for n, lbl, _ in items] == [
+            (5, "Track A: A1"), (6, "Track A: A2"),
+            (7, "Track B: B1"), (8, "Track B: B2"),
+            (3, "C1"), (4, "C2"),
+        ]
+
+    def test_two_lists_restarting_at_one_get_distinct_evidence_keys(self, rdr_env):
+        """P5c: two tracks numbered 1..2 each are four items needing four
+        pointers; ``Item1=..,Item2=..`` must not cover all four."""
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-050-tracks.md",
+            {"title": "Tracks", "status": "accepted"},
+            "# Tracks\n\n### Approach (two tracks)\n\n#### Track A\n\n"
+            "1. **A1**: a one\n2. **A2**: a two\n\n#### Track B\n\n"
+            "1. **B1**: b one\n2. **B2**: b two\n\n## Consequences\n",
+        )
+        res = _runner().invoke(rdr, ["preamble", "phase-review-gate", "--", "50", "--phase", "1"])
+        assert res.exit_code == 0, res.output
+        keys = re.findall(r"^\| (Item\d+) \|", res.output, re.MULTILINE)
+        assert len(keys) == 4 and len(set(keys)) == 4, res.output
+        res = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "50", "--phase", "1",
+             "--evidence", "Item1=nexus-a,Item2=nexus-b"],
+        )
+        # All four collide, so all four take fresh keys (Item3..Item6); the
+        # RDR's own Item1/Item2 name nothing and cover nothing.
+        assert "BLOCKED" in res.output, res.output
+        assert "4 of 4" in res.output, res.output
+
+
+class TestRdrResearchKeyShapes:
+    """Intrastate [26115] #6 and probe P9 (nexus-nc08w.2). The research
+    namespace's canonical title is ``%03d-research-N`` (``097-research-9``);
+    the context listing filtered on the unpadded key and so reported no
+    findings over entries the add verb had just written, and an ``RDR-97``
+    id token fell through the add path to the context print, exit 0."""
+
+    @staticmethod
+    def _fake_list(monkeypatch, rows: str):
+        import subprocess as _sp
+
+        import nexus.commands.rdr as rdr_mod
+
+        def _fake_run(cmd, *a, **k):
+            if cmd[:3] == ["nx", "memory", "list"]:
+                return _sp.CompletedProcess(cmd, 0, stdout=rows, stderr="")
+            return _sp.CompletedProcess(cmd, 1, stdout="", stderr="unavailable")
+
+        monkeypatch.setattr(rdr_mod.subprocess, "run", _fake_run)
+
+    def test_listing_finds_zero_padded_titles_for_an_rdr_below_100(self, rdr_env, monkeypatch):
+        _write_rdr(rdr_env["rdr_dir"], "rdr-097-z.md", {"title": "Z", "status": "draft"},
+                   body="## Research Findings\n\nx\n")
+        self._fake_list(monkeypatch, "[1] fakerepo_rdr/097-research-1  (rdr,research)\n"
+                                     "[2] fakerepo_rdr/197-research-1  (rdr,research)\n")
+        for verb in ("rdr-research", "rdr-show"):
+            result = _runner().invoke(rdr, ["preamble", verb, "--", "97"])
+            assert result.exit_code == 0, result.output
+            assert "097-research-1" in result.output, (verb, result.output)
+            assert "197-research-1" not in result.output, (verb, result.output)
+            assert "No research findings recorded" not in result.output, (verb, result.output)
+
+    def test_add_accepts_an_rdr_prefixed_id_token(self, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient()
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "RDR-97", "some", "finding"]
+        )
+        assert result.exit_code == 0, result.output
+        assert [t for t, _ in fake.put_calls] == ["097-research-1"], result.output
+
+
+class TestRdrCloseArgv:
+    """Intrastate [26115] #7 HIGH and #11 (nexus-my04w, probes P6 and P7).
+    The preamble joined its argv into one string and re-scanned it with
+    regexes, so a multi-word ``--force-implemented`` reason kept one word
+    and the rest fell where the first digits won the RDR lookup: the
+    skill's own example reason (``... src/foo.py:42``) closed rdr-042."""
+
+    _GAP_BODY = "## Problem Statement\n\n#### Gap 1: g\n\n## X\n"
+
+    def _two_rdrs(self, rdr_env):
+        _write_rdr(rdr_env["rdr_dir"], "rdr-042-x.md", {"title": "X", "status": "accepted"}, self._GAP_BODY)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-069-c.md", {"title": "C", "status": "accepted"}, self._GAP_BODY)
+
+    def test_multi_word_force_reason_is_kept_whole(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        reason = "critic false positive - gap addressed at src/foo.py:42"
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented",
+            "--force-implemented", reason,
+        ])
+        assert res.exit_code == 0, res.output
+        assert f"**Force Implemented (audit):** {reason}" in res.output
+        assert "rdr-069-c.md" in res.output
+
+    def test_digits_inside_the_reason_never_select_the_rdr(self, rdr_env):
+        """Flag before the id: ``:42`` in the reason must not close rdr-042."""
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--",
+            "--force-implemented", "critic false positive - gap addressed at src/foo.py:42",
+            "--reason", "reverted", "069",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "rdr-069-c.md" in res.output
+        assert "rdr-042-x.md" not in res.output
+
+    def test_one_shell_string_is_split_with_its_quotes(self, rdr_env):
+        """The skill may hand the whole line over as one argv element."""
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--",
+            "069 --reason implemented --force-implemented 'gap addressed at src/foo.py:42'",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "**Force Implemented (audit):** gap addressed at src/foo.py:42" in res.output
+        assert "rdr-069-c.md" in res.output
+
+    def test_unquoted_reason_words_run_to_the_next_flag(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--force-implemented",
+            "critic", "false", "positive", "--reason", "implemented",
+        ])
+        assert "**Force Implemented (audit):** critic false positive" in res.output, res.output
+
+    @pytest.mark.parametrize("pointer, why", [
+        ("Gap1=:12", "empty file part"),
+        ("Gap1=docs:1", "a directory"),
+    ])
+    def test_pointer_needs_a_regular_file(self, rdr_env, pointer, why):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented", "--pointers", pointer,
+        ])
+        assert "validation passed" not in res.output, (why, res.output)
+        assert "Gap1" in res.output
+
+    @pytest.mark.parametrize("pointer", ["Gap1=/etc/hosts:1", "Gap1=../../../../../../etc/hosts:1"])
+    def test_pointer_outside_the_repo_is_refused(self, rdr_env, pointer):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented", "--pointers", pointer,
+        ])
+        assert "validation passed" not in res.output, res.output
+
+    def test_an_id_swallowed_by_an_unquoted_reason_is_named(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "--force-implemented", "critic", "false", "positive", "069",
+        ])
+        assert "reason ends in `069`" in res.output, res.output
+        assert "rdr-069-c.md" not in res.output and "rdr-042-x.md" not in res.output
+
+    def test_a_flag_is_never_taken_as_another_flags_value(self, rdr_env):
+        from nexus.commands.rdr import _rdr_close_parse_args  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        parsed = _rdr_close_parse_args(("069", "--reason", "--pointers", "Gap1=src/foo.py:42"))
+        assert parsed.reason is None and parsed.pointers == "Gap1=src/foo.py:42"
+        assert parsed.missing_value == ("--reason",)
+        parsed = _rdr_close_parse_args(("069", "--pointers", "--force"))
+        assert parsed.pointers is None and parsed.force is True
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "069", "--reason"])
+        assert "--reason needs a value" in res.output, res.output
+
+    def test_pointer_to_a_real_file_still_passes(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        (rdr_env["repo_root"] / "src").mkdir()
+        (rdr_env["repo_root"] / "src" / "foo.py").write_text("x = 1\n")
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented", "--pointers", "Gap1=src/foo.py:1",
+        ])
+        assert "validation passed" in res.output, res.output
+
+
+class TestPreambleArgvSiblings:
+    """Sweep for the nexus-my04w class: every preamble joined argv to one
+    string and took the RDR id from the first digits anywhere in it."""
+
+    def test_phase_review_gate_evidence_with_a_space_does_not_pick_the_rdr(self, rdr_env):
+        """One properly quoted argv element ``Item1=a, Item2=b`` was stripped
+        by a no-spaces pattern, leaving ``Item2=b`` behind, and ``2`` won
+        the RDR lookup."""
+        body = "### Approach\n\n1. **A**: one\n2. **B**: two\n\n## Consequences\n"
+        _write_rdr(rdr_env["rdr_dir"], "rdr-002-other.md", {"title": "Other", "status": "accepted"}, body)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-112-real.md", {"title": "Real", "status": "accepted"}, body)
+        res = _runner().invoke(rdr, [
+            "preamble", "phase-review-gate", "--",
+            "--phase", "1", "--evidence", "Item1=nexus-a, Item2=nexus-b", "112",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "rdr-112-real.md" in res.output, res.output
+        assert "APPROACH CROSS-WALK PASSED" in res.output, res.output
+
+    def test_a_single_evidence_pair_with_the_id_last_does_not_pick_the_phase(self, rdr_env):
+        """nexus-u1jxt.5, a regression in the sweep above: a one-pair evidence
+        value equals its own token, so filtering "evidence tokens" out of the
+        argv also removed the flag's VALUE. ``--evidence`` then swallowed
+        ``--phase``'s neighbour and the phase number became the RDR id."""
+        body = "### Approach\n\n1. **A**: one\n\n## Consequences\n"
+        _write_rdr(rdr_env["rdr_dir"], "rdr-002-other.md", {"title": "Other", "status": "accepted"}, body)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-205-real.md", {"title": "Real", "status": "accepted"}, body)
+        res = _runner().invoke(rdr, [
+            "preamble", "phase-review-gate", "--",
+            "--evidence", "Item1=nexus-a", "--phase", "2", "205",
+        ])
+        assert "rdr-205-real.md" in res.output, res.output
+        assert "rdr-002-other.md" not in res.output, res.output
+
+    def test_phase_number_never_selects_the_rdr(self, rdr_env):
+        body = "### Approach\n\n1. **A**: one\n\n## Consequences\n"
+        _write_rdr(rdr_env["rdr_dir"], "rdr-003-other.md", {"title": "Other", "status": "accepted"}, body)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-112-real.md", {"title": "Real", "status": "accepted"}, body)
+        res = _runner().invoke(rdr, ["preamble", "phase-review-gate", "--", "--phase", "3", "112"])
+        assert "rdr-112-real.md" in res.output, res.output
+
+    def test_id_token_helper_prefers_an_id_shaped_positional(self):
+        from nexus.commands.rdr import _preamble_id_token  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        assert _preamble_id_token(("--skip-gaps", "RDR-097")) == "097"
+        assert _preamble_id_token(("status", "97")) == "97"
+        assert _preamble_id_token(("069 --reason implemented",)) == "069"
+        assert _preamble_id_token(("--phase", "3", "112"), value_flags=("--phase",)) == "112"
+        assert _preamble_id_token(("rdr-097-foo.md",)) == "097"  # no id-shaped token: digits as before
+        assert _preamble_id_token(()) is None
+
+
+
+class TestResolverSkipsCompanions:
+    """nexus-u1jxt.1: the resolver returned the alphabetically first file whose
+    number matched. A ``kind: companion`` file that sorts first (on the real
+    tree: rdr-049-consolidation-plan.md, rdr-105-shakeout.md) was taken for
+    the RDR, so ``set-status`` and every preamble acted on the wrong file."""
+
+    def test_a_companion_that_sorts_first_is_not_the_rdr(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-049-aaa-plan.md", {"title": "Plan", "kind": "companion", "status": "abandoned"}, "x\n")
+        _write_rdr(d, "rdr-049-real.md", {"title": "Real", "status": "accepted"}, "x\n")
+        assert _preamble_find_rdr_file(d, "49").name == "rdr-049-real.md"
+        assert _preamble_find_rdr_file(d, "RDR-049").name == "rdr-049-real.md"
+
+    def test_naming_the_companion_file_still_resolves_it(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        # The companion sorts AFTER the RDR, so first-match-by-name cannot
+        # return it: only the named-file branch can.
+        _write_rdr(d, "rdr-049-real.md", {"title": "Real", "status": "accepted"}, "x\n")
+        _write_rdr(d, "rdr-049-zzz-plan.md", {"title": "Plan", "kind": "companion"}, "x\n")
+        assert _preamble_find_rdr_file(d, "rdr-049-zzz-plan.md").name == "rdr-049-zzz-plan.md"
+        assert _preamble_find_rdr_file(d, "rdr-049-zzz-plan").name == "rdr-049-zzz-plan.md"
+
+    def test_an_older_companion_note_without_kind_is_not_the_rdr(self, rdr_env):
+        """rdr-079-calibration.md and rdr-152-fts-parity-contract.md carry
+        ``id: companion-note`` and no ``kind``."""
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-079-aaa-calibration.md", {"title": "Cal", "id": "companion-note", "status": "closed"}, "x\n")
+        _write_rdr(d, "rdr-079-real.md", {"title": "Real", "status": "abandoned"}, "x\n")
+        assert _preamble_find_rdr_file(d, "79").name == "rdr-079-real.md"
+
+    def test_the_file_carrying_the_rdrs_own_id_wins(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-152-aaa-untagged-note.md", {"title": "Note", "status": "closed"}, "x\n")
+        _write_rdr(d, "rdr-152-real.md", {"title": "Real", "id": "RDR-152", "status": "closed"}, "x\n")
+        assert _preamble_find_rdr_file(d, "152").name == "rdr-152-real.md"
+
+    def test_a_lone_companion_is_still_found(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-077-notes.md", {"title": "Notes", "kind": "companion"}, "x\n")
+        assert _preamble_find_rdr_file(d, "77").name == "rdr-077-notes.md"
+
+    def test_set_status_flips_the_rdr_and_not_the_companion(self, rdr_env):
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-049-aaa-plan.md", {"title": "Plan", "kind": "companion", "status": "abandoned"}, "x\n")
+        _write_rdr(d, "rdr-049-real.md", {"title": "Real", "status": "draft"}, "x\n")
+        res = _runner().invoke(rdr, ["set-status", "49", "abandoned", "--reason", "test"])
+        assert "status: abandoned" in (d / "rdr-049-real.md").read_text(), res.output
+
+    def test_set_status_refuses_a_bare_number_whose_only_match_is_a_companion(self, rdr_env):
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-077-notes.md", {"title": "Notes", "kind": "companion", "status": "draft"}, "x\n")
+        res = _runner().invoke(rdr, ["set-status", "77", "abandoned", "--reason", "test"])
+        assert res.exit_code == 1, res.output
+        assert "status: draft" in (d / "rdr-077-notes.md").read_text()
+
+    def test_on_the_real_tree_a_shared_number_never_resolves_to_a_companion(self):
+        """The fixtures above cannot see a marker nobody thought of: the first
+        version of this fix passed them and still resolved 79 and 152 to
+        companions. This walks docs/rdr itself."""
+        from nexus.commands.rdr import (  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+            _PREAMBLE_EXCLUDED, _preamble_find_rdr_file, _preamble_parse_frontmatter, _rdr_meta_is_companion,
+        )
+        tree = Path(__file__).resolve().parents[1] / "docs" / "rdr"
+        by_number: dict[int, list[Path]] = {}
+        for f in sorted(tree.glob("*.md")):
+            nums = re.findall(r"\d+", f.stem)
+            if nums and f.name.lower() not in _PREAMBLE_EXCLUDED:
+                by_number.setdefault(int(nums[0]), []).append(f)
+        shared = {n: fs for n, fs in by_number.items() if len(fs) > 1}
+        assert len(shared) >= 5, f"non-vacuity: expected several shared numbers, found {sorted(shared)}"
+        for n, files in shared.items():
+            real = [f for f in files if not _rdr_meta_is_companion(_preamble_parse_frontmatter(f)[0])]
+            if not real:
+                continue
+            got = _preamble_find_rdr_file(tree, str(n))
+            assert got in real, f"{n} resolved to {got.name}, a companion; real: {[f.name for f in real]}"
+

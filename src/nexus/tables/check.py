@@ -86,6 +86,27 @@ class ProductTooLargeError(Exception):
     """A group's guard-dimension cross-product exceeds ``PRODUCT_BOUND``."""
 
 
+def _check_bound(dims: list[str], dimensions: dict[str, Dimension]) -> None:
+    """Raise :class:`ProductTooLargeError` before any enumeration over
+    ``dims`` is attempted -- on EVERY branch that is about to enumerate,
+    not only inside :func:`full_product` ([26114] #3). Before this, the
+    bound was checked only inside ``full_product``, which ``_check_group``
+    calls from ``_check_coverage`` AFTER ``_check_overlap`` had already
+    materialized every participating row's accepted-assignment set over
+    the whole product; and the unprovable-dimension branch never called
+    ``full_product`` at all, so a pathological group with one non-enum
+    guard dimension plus a huge decidable product ran ``_check_overlap``
+    to completion with no bound check, ever -- exactly what the bound
+    exists to prevent."""
+    size = 1
+    for d in dims:
+        size *= len(dimensions[d].domain)
+    if size > PRODUCT_BOUND:
+        raise ProductTooLargeError(
+            f"scoped product over {dims} is {size} assignments, above the published bound of {PRODUCT_BOUND}"
+        )
+
+
 @dataclass(frozen=True)
 class Finding:
     """``group`` is coerced to :class:`FrozenMapping` in ``__post_init__``
@@ -192,14 +213,8 @@ def full_product(
     cell. The limit was inherited from the design this borrows from and
     went undocumented on both sides until the 2026-09-04 reanalysis.
     """
+    _check_bound(dims, dimensions)
     ranges = [dimensions[d].domain for d in dims]
-    size = 1
-    for r in ranges:
-        size *= len(r)
-    if size > PRODUCT_BOUND:
-        raise ProductTooLargeError(
-            f"scoped product over {dims} is {size} assignments, above the published bound of {PRODUCT_BOUND}"
-        )
     return set(itertools.product(*ranges)) - impossible_assignments(dims, dimensions, impossible)
 
 
@@ -394,12 +409,22 @@ def _check_group(table: Table, group: Group) -> list[Finding]:
                 )
             )
         # Coverage cannot be proved with an unprovable dimension in play, but
-        # overlap is still decidable on the dims that ARE provable.
+        # overlap is still decidable on the dims that ARE provable -- bound
+        # the DECIDABLE product before enumerating it, same as the fully
+        # decidable branch below (a group can have a huge decidable product
+        # even with one dimension excluded from it).
         decidable = [d for d in dims if d not in unprovable]
         if decidable:
-            findings.extend(_check_overlap(group, decidable, table.dimensions, table.impossible))
+            _check_bound(decidable, table.dimensions)
+            findings.extend(
+                _check_overlap(
+                    group, decidable, table.dimensions, table.impossible,
+                    unprovable_dims=tuple(sorted(unprovable)),
+                )
+            )
         return findings
 
+    _check_bound(dims, table.dimensions)
     findings.extend(_check_overlap(group, dims, table.dimensions, table.impossible))
     findings.extend(_check_coverage(group, dims, table.dimensions, table.impossible))
     return findings
@@ -423,11 +448,37 @@ def _overlap_participants(group: Group) -> list[Row]:
     return [r for r in group.rows if not (r.escape and not r.guard)]
 
 
+def _provably_disjoint_on_unprovable_dims(
+    row_a: Row, row_b: Row, unprovable_dims: tuple[str, ...]
+) -> bool:
+    """True when ``row_a`` and ``row_b`` cannot both accept the SAME full
+    assignment, via a dimension the checker itself cannot enumerate
+    ([26114] #8).
+
+    ``_check_overlap`` on the unprovable branch is handed only the
+    DECIDABLE dims, so two rows guarding the same decidable cell but
+    different, disjoint literal sets on an unprovable dimension (e.g.
+    ``free="p"`` vs ``free="q"``) were reported as overlapping -- the
+    unprovable dimension's own domain can't be enumerated, but a two-sided
+    literal-membership guard still proves no single assignment can satisfy
+    ``free = "p"`` and ``free = "q"`` at once, regardless of what else
+    ``free``'s domain contains. A row that does not guard the dimension at
+    all matches everything on it, so it can never help prove disjointness.
+    """
+    for d in unprovable_dims:
+        a_values = row_a.guard.get(d)
+        b_values = row_b.guard.get(d)
+        if a_values is not None and b_values is not None and not (set(a_values) & set(b_values)):
+            return True
+    return False
+
+
 def _check_overlap(
     group: Group,
     dims: list[str],
     dimensions: dict[str, Dimension],
     impossible: tuple[FrozenMapping, ...] = (),
+    unprovable_dims: tuple[str, ...] = (),
 ) -> list[Finding]:
     """Flag ANY non-empty intersection among participants' accepted sets.
 
@@ -449,12 +500,15 @@ def _check_overlap(
     """
     findings: list[Finding] = []
     participants = _overlap_participants(group)
+    by_id = {r.id: r for r in participants}
     ruled_out = impossible_assignments(dims, dimensions, impossible)
     accepted = {r.id: accepted_assignments(r, dims, dimensions) - ruled_out for r in participants}
     for a, b in itertools.combinations(sorted(accepted), 2):
         left, right = accepted[a], accepted[b]
         inter = left & right
         if not inter:
+            continue
+        if unprovable_dims and _provably_disjoint_on_unprovable_dims(by_id[a], by_id[b], unprovable_dims):
             continue
         findings.append(
             Finding(

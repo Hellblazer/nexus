@@ -33,9 +33,9 @@
 #
 # WHAT THE ESCAPE ROWS DO AND DO NOT SAY (reanalysis 2026-09-04, T3
 # analysis-deep-intrastate-vs-conexus-reanalysis-2026-09-04, critique
-# [24292]). Coverage of this table is FULLY proved: totality over the 36
+# [24292]). Coverage of this table is FULLY proved: totality over the 42
 # (status, event) groups, and enumeration over each group's guards. What
-# the 24 bare `escape = true` groups lack is DISCRIMINATION: each says
+# the 29 bare `escape = true` groups lack is DISCRIMINATION: each says
 # "any other status, refuse" with no per-transition reason, and the checker
 # reports each as closed-by-escape, an advisory. That is the intended
 # design for six statuses whose illegal transitions carry nothing worth
@@ -63,11 +63,13 @@ version = 1
 [dimensions.status]
 domain = ["draft", "accepted", "deferred", "closed", "superseded", "abandoned"]
 [dimensions.event]
-domain = ["accept", "close", "supersede", "abandon", "defer", "resume"]
+domain = ["accept", "close", "close-unaccepted", "supersede", "abandon", "defer", "resume"]
 [dimensions.gate]
 domain = ["passed", "blocked", "none"]
 [dimensions.successor]                    # superseded_by present in frontmatter?
 domain = ["named", "absent"]
+[dimensions.reason]                       # --reason given on the command line?
+domain = ["stated", "absent"]
 
 # --- accept: draft -> accepted, gated on RDR finalization ------------------
 
@@ -99,6 +101,34 @@ to = { status = "closed" }
 [[row]]
 id = "close-otherwise"
 match = { status = ["draft", "deferred", "closed", "superseded", "abandoned"], event = "close" }
+escape = true
+refuse = "illegal-transition"
+
+# --- close-unaccepted: draft -> closed, guarded on a stated reason ----------
+# A draft whose work shipped without the record ever being accepted
+# (RDR-122, RDR-179: the 2026-09 stale-draft sweep hand-edited them closed
+# because no edge existed, and rdr-audit reported the T2 side as drift
+# for a week). The stated reason is the audit trail the accept gate would
+# have been; `nx rdr set-status NNN closed --reason "..."` selects this
+# event from `draft` only. Added per RDR-201's own precedent: the table
+# gains an event, never a bypass flag (intrastate review [26115],
+# nexus-nc08w.4).
+
+[[row]]
+id = "close-unaccepted"
+match = { status = "draft", event = "close-unaccepted" }
+guard = { reason = "stated" }
+to = { status = "closed" }
+
+[[row]]
+id = "close-unaccepted-no-reason"
+match = { status = "draft", event = "close-unaccepted" }
+guard = { reason = "absent" }
+refuse = "reason-not-stated"
+
+[[row]]
+id = "close-unaccepted-otherwise"
+match = { status = ["accepted", "deferred", "closed", "superseded", "abandoned"], event = "close-unaccepted" }
 escape = true
 refuse = "illegal-transition"
 

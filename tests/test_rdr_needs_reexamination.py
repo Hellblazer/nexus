@@ -22,6 +22,7 @@ NOT stubbed -- the fake catalog serves real ``CatalogEntry`` /
 """
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -537,7 +538,7 @@ def test_t2_title_shapes_include_the_zero_padded_early_records():
     """RDR-014's T2 entry is titled "014" (RDR-090's "090"); the first live
     set-status flip after the T2 mirror landed missed it."""
     assert rdr_mod._t2_rdr_titles(14) == ("14", "014", "RDR-14", "RDR-014")
-    assert rdr_mod._t2_rdr_titles(201) == ("201", "201", "RDR-201", "RDR-201")
+    assert rdr_mod._t2_rdr_titles(201) == ("201", "RDR-201")  # %03d of a 3-digit number is the bare number: no duplicate shapes (nexus-nc08w.4)
 
 
 def test_set_status_finds_a_zero_padded_t2_title(tmp_path, monkeypatch):
@@ -612,3 +613,119 @@ def test_a_free_text_successor_writes_no_edge(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert cat.written == []
     assert "does not name exactly one RDR-NNN" in result.output
+
+
+# ---------------------------------------------------------------------------
+# nexus-spaaw (plan N9): everything above pins BEHAVIOR against fakes --
+# ``_FakeCatalog`` / ``_FakeT2Client`` -- so the real ``rdr_resolution`` /
+# ``current_rdr_owner`` / T2 wiring these tests EXERCISE (the module
+# docstring's "resolution itself is NOT stubbed") is only ever proven
+# against hand-built doubles, never against the genuine HTTP catalog and T2
+# clients the CLI constructs in production. This ONE test closes that gap:
+# no ``_catalog_reader_factory`` / ``_t2_client_factory`` / ``_rdr_repo_scope``
+# monkeypatch anywhere in it -- a real tmp git repo, the real
+# ``ensure_owner_for_repo`` / ``register`` / ``link_if_absent`` catalog
+# writes, and a real T2 entry, all on the suite's engine substrate
+# (tests/_engine_substrate.py; every unit test already gets one via the
+# autouse ``_pin_t2_substrate`` -> ``t2_service_env`` chain in
+# tests/conftest.py -- requesting ``t2_service_env`` directly below only
+# documents the dependency). That fixture is where the skip-with-a-reason
+# and the non-vacuity backstop already live (its own docstring: CI's
+# no-jar leg skips with a named reason, and once CI provisions the jar
+# ``NX_T2_SUBSTRATE_EXPECTED=1`` makes an absent jar fail loud again, so
+# the skip can never quietly become permanent) -- this test inherits both
+# rather than re-implementing either.
+# ---------------------------------------------------------------------------
+
+
+def test_successor_flip_marks_predecessor_through_the_real_cli_and_substrate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str,
+) -> None:
+    """A real ``nx rdr set-status`` flip, through the real CLI, against a
+    real catalog and a real T2 entry: the marker lands on the
+    PREDECESSOR's own T2 entry and ``rdr-audit`` prints it. Falsifiability
+    (nexus-spaaw acceptance): this test fails when
+    ``_mark_dependents_needs_reexamination`` is stubbed to a no-op -- the
+    red output from that stub is pasted into the bead's notes."""
+    del t2_service_env  # only requested to document the substrate dependency
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "closed")  # predecessor
+    _write_rdr(rdr_dir, 15, "accepted")  # successor -- this is the one that flips
+
+    cat = rdr_mod._catalog_reader_factory()
+    owner = cat.ensure_owner_for_repo(tmp_path)
+    predecessor = cat.register(
+        owner, "RDR-014: Thing 14",
+        content_type="rdr", file_path="docs/rdr/rdr-014-thing-14.md",
+    )
+    successor = cat.register(
+        owner, "RDR-015: Thing 15",
+        content_type="rdr", file_path="docs/rdr/rdr-015-thing-15.md",
+    )
+    cat.link_if_absent(successor, predecessor, "supersedes", "test-setup")
+
+    repo_name = tmp_path.name
+    project = f"{repo_name}_rdr"
+    with rdr_mod._t2_client_factory() as client:
+        client.put(
+            project=project, title="14",
+            content="status: superseded\ntitle: Fourteen\n", tags="rdr", ttl=None,
+        )
+
+    result = CliRunner().invoke(rdr, ["set-status", "15", "abandoned", "--root", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert f"marked {project}/14 needs-reexamination (supersedes edge)" in result.output
+
+    expected_marker = "needs-reexamination: RDR-15 accepted->abandoned (RDR-15 supersedes RDR-14)"
+    with rdr_mod._t2_client_factory() as client:
+        entry = client.get(project=project, title="14")
+    assert entry is not None, f"no T2 entry survived at {project}/14"
+    assert entry["content"].endswith(f"{expected_marker}\n")
+
+    monkeypatch.setenv("NEXUS_PROJECT_ROOTS", "/nonexistent-root-for-this-test")
+    audit = CliRunner().invoke(rdr, ["preamble", "rdr-audit", repo_name])
+    assert audit.exit_code == 0, audit.output
+    assert f"- `14`: {expected_marker}" in audit.output
+
+
+def test_supersede_writes_the_catalog_edge_through_the_real_cli_and_substrate(
+    tmp_path: Path, t2_service_env: str,
+) -> None:
+    """``nx rdr set-status <n> superseded`` writes the successor's
+    ``supersedes`` edge itself (``_ensure_supersedes_edge``). Until now no
+    real-store test reached that write: the set-status supersede test runs on
+    fakes that short-circuit before it, and the substrate test above installs
+    the edge by hand (critique of 14d65499c). Real CLI, real catalog, no
+    factory monkeypatched; the edge must exist afterwards and not before."""
+    del t2_service_env  # only requested to document the substrate dependency
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    rdr_dir = _rdr_dir(tmp_path)
+    old = _write_rdr(rdr_dir, 14, "closed")
+    old.write_text(old.read_text().replace("status: closed\n", "status: closed\nsuperseded_by: RDR-015\n"))
+    _write_rdr(rdr_dir, 15, "accepted")
+
+    cat = rdr_mod._catalog_reader_factory()
+    owner = cat.ensure_owner_for_repo(tmp_path)
+    predecessor = cat.register(
+        owner, "RDR-014: Thing 14", content_type="rdr", file_path="docs/rdr/rdr-014-thing-14.md",
+    )
+    successor = cat.register(
+        owner, "RDR-015: Thing 15", content_type="rdr", file_path="docs/rdr/rdr-015-thing-15.md",
+    )
+
+    def _edges() -> list[tuple[str, str]]:
+        return [
+            (str(link.from_tumbler), str(link.to_tumbler))
+            for link in cat.links_from(successor, link_type="supersedes")
+        ]
+
+    assert _edges() == []
+    result = CliRunner().invoke(rdr, ["set-status", "14", "superseded", "--root", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "catalog edge ensured" in result.output, result.output
+    assert _edges() == [(str(successor), str(predecessor))]
+
+    # Idempotent: a second run is a no-op on the file and adds no second edge.
+    CliRunner().invoke(rdr, ["set-status", "14", "superseded", "--root", str(tmp_path)])
+    assert _edges() == [(str(successor), str(predecessor))]

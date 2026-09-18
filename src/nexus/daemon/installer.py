@@ -126,6 +126,7 @@ def _render_for_service() -> tuple[Path, str]:
     ``nx daemon service start --foreground``.
     """
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
     install_dir = _daemon._autostart_install_dir()
     install_dir.mkdir(parents=True, exist_ok=True)
@@ -134,11 +135,18 @@ def _render_for_service() -> tuple[Path, str]:
 
     template_name = _daemon._autostart_filename_service()
     nx_bin = _daemon._resolve_nx_bin()
+    # nexus-cd1k0.19 review round 2, finding 4: bake in the RESOLVED
+    # ABSOLUTE config dir THIS install used (whatever combination of
+    # NEXUS_CONFIG_DIR / default resolved it) so the generated unit's
+    # ProgramArguments/ExecStart carry an explicit --config-dir, never a
+    # flagless one — see _render_template's own docstring for why.
+    config_dir = str(nexus_config_dir().resolve())
     rendered = _daemon._render_template(
         template_name,
         nx_bin=nx_bin,
         log_dir=str(log_dir),
         path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        config_dir=config_dir,
     )
     return install_dir / template_name, rendered
 

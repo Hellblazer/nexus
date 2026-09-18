@@ -92,11 +92,15 @@ from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
+    DEFAULT_STOP_ELECTION_BUDGET,
+    ElectionBusyError,
     ServiceRegistry,
     ServiceSupervisor,
     exit_if_process_unowned,
+    fenced_exit_code,
     pid_alive,
     pid_running,
+    reclaim_lease_if_dead_owner,
     ttl_for_tier,
 )
 
@@ -170,8 +174,70 @@ _READY_POLL_INTERVAL: float = 0.5
 #: 20+ minute migration.
 _MIGRATION_PROGRESS_LOG_INTERVAL: float = 30.0
 
-#: After SIGTERM, wait this long before escalating to SIGKILL.
+#: After SIGTERM, wait this long before escalating to SIGKILL. Applies to
+#: a supervisor stopping ITS OWN child (``_stop_service``,
+#: ``_kill_after_readiness_failure``) — see ``_SUPERVISOR_STOP_GRACE``
+#: below for the OUTER wait on the supervisor PROCESS itself, which must
+#: strictly exceed this tier's own inner total.
 _GRACEFUL_STOP_TIMEOUT: float = 5.0
+
+#: Bound on reaping a child after a SIGKILL escalation. SIGKILL is
+#: unblockable, so this is near-instant in the overwhelming case; kept
+#: bounded (rather than an unbounded ``wait()``) so a pathological
+#: uninterruptible-sleep (D-state) child cannot hang the stopper forever.
+_POST_KILL_REAP_TIMEOUT: float = 2.0
+
+#: Budget for each of the two election-flock waits on the STOP path
+#: (``mark_shutting_down`` then ``relinquish``, in ``StorageServiceSupervisor.
+#: stop``) — nexus-cd1k0 review round 3 finding 6. Before this, both calls
+#: passed no budget at all (an unconditionally BLOCKING ``LOCK_EX``), which
+#: made ``_SUPERVISOR_STOP_GRACE``'s docstring claim -- that it strictly
+#: exceeds the inner worst case -- false: an unbounded wait has no worst
+#: case for any outer grace to exceed. Reuses the shared primitive's
+#: ``DEFAULT_STOP_ELECTION_BUDGET`` rather than a tier-local number; see
+#: that constant's docstring for why a few seconds is ample and why
+#: exhaustion (``ElectionBusyError``) is caught as best-effort at both call
+#: sites below, never allowed to skip the child-teardown that follows.
+_STOP_ELECTION_BUDGET: float = DEFAULT_STOP_ELECTION_BUDGET
+
+#: nexus-cd1k0.1: the OUTER stopper (``stop_storage_service``) waits for
+#: the SUPERVISOR PROCESS itself to exit after SIGTERM. A CLEAN stop
+#: needs the supervisor to first (a) publish the shutdown marker, (b)
+#: relinquish the lease -- EACH of those bounded by ``_STOP_ELECTION_BUDGET``
+#: per nexus-cd1k0 review round 3 finding 6, above -- and then (c) stop its
+#: own engine child, up to ``_GRACEFUL_STOP_TIMEOUT`` (SIGTERM grace) plus
+#: ``_POST_KILL_REAP_TIMEOUT`` (post-SIGKILL reap) — before the supervisor
+#: process itself can exit. Reusing ``_GRACEFUL_STOP_TIMEOUT`` for BOTH the
+#: inner (engine) and outer (supervisor) wait made the two windows race: a
+#: supervisor that legitimately needed its own full inner grace to shut
+#: down cleanly could still get SIGKILLed by the OUTER caller for "taking
+#: too long", even though nothing was wrong — the outer window simply lost
+#: the race it was never given enough margin to win. This is strictly
+#: longer than that inner worst case -- 2 * ``_STOP_ELECTION_BUDGET`` (the
+#: two election waits, worst case each spending its full budget before
+#: raising ``ElectionBusyError``) plus ``_GRACEFUL_STOP_TIMEOUT`` plus
+#: ``_POST_KILL_REAP_TIMEOUT`` -- plus a small margin for the supervisor's
+#: own log-flush + exit-path overhead, so a genuinely clean stop always has
+#: room to finish.
+_SUPERVISOR_STOP_GRACE: float = (
+    2 * _STOP_ELECTION_BUDGET + _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT + 1.0
+)
+
+#: Bound on the readiness monitor's pg_probe call (nexus-cd1k0.19 review
+#: round 2, finding 5). ``_migration_pg_probe`` shells out to ``psql``
+#: with NO timeout before this — the exact phase the readiness module
+#: exists to survive (MIGRATING, 20+ minutes) is the phase where a single
+#: tick could block unboundedly on an unresponsive local psql, making
+#: ``stop_check`` invisible for that duration: nothing else in that
+#: tick's path could notice a pending stop request until this call
+#: returned. Comfortably below ``_SUPERVISOR_STOP_GRACE`` so even a
+#: fully-blocked probe (this tier's own throttle already caps how often
+#: it fires, to once per ``_MIGRATION_PG_PROBE_MIN_INTERVAL``) leaves
+#: ample room for the rest of the stop path to finish inside the outer
+#: stopper's grace window. (This tier's own throttle is
+#: ``readiness.DEFAULT_PG_PROBE_MIN_INTERVAL`` = 5.0s — how often the
+#: probe fires at all, orthogonal to how long any one call may take.)
+_PG_PROBE_TIMEOUT: float = 3.0
 
 #: HTTP timeout for /health probes.
 #:
@@ -1148,7 +1214,15 @@ class StorageServiceSupervisor:
                 "AND state = 'active' AND wait_event_type IS DISTINCT FROM 'Lock' "
                 "AND pid != pg_backend_pid();"
             )
-            proc = _run_psql(psql_bin, host, port, dbname, user, password, sql)
+            # nexus-cd1k0.19 review round 2, finding 5: bounded, unlike
+            # every other _run_psql caller — this is the readiness
+            # monitor's pg_probe, invoked from inside the per-tick
+            # readiness wait, so an unresponsive local psql must not make
+            # stop_check invisible for longer than _PG_PROBE_TIMEOUT.
+            proc = _run_psql(
+                psql_bin, host, port, dbname, user, password, sql,
+                timeout=_PG_PROBE_TIMEOUT,
+            )
             if proc.returncode != 0:
                 return readiness.PgActivity.UNAVAILABLE
             try:
@@ -1318,21 +1392,34 @@ class StorageServiceSupervisor:
         """SIGTERM + grace window + SIGKILL, matching ``_stop_service`` (not
         a bare SIGKILL) so the service can flush before it dies. Best-effort
         — a signal failure (process already gone) must never mask the
-        ``StorageServiceStartError`` this precedes."""
+        ``StorageServiceStartError`` this precedes.
+
+        nexus-cd1k0.1: *proc* is OUR OWN child (spawned by ``start()``,
+        never reaped yet), so waiting on it is a REAP (``Popen.wait``),
+        not a poll — the previous ``_pid_is_alive`` poll answers
+        ``os.kill(pid, 0)``, which stays True for a ZOMBIE (dead,
+        awaiting our own ``wait()``) for as long as we never call it,
+        burning the whole grace window on every readiness failure before
+        a pointless SIGKILL. ``wait(timeout=...)`` returns the moment the
+        child actually exits, zombie ambiguity included.
+        """
         with contextlib.suppress(Exception):
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             safe_killpg(proc.pid, signal.SIGTERM)
-            kill_deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
-            while time.monotonic() < kill_deadline and _pid_is_alive(proc.pid):
-                time.sleep(0.1)
-            if _pid_is_alive(proc.pid):
+            try:
+                proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
+            except subprocess.TimeoutExpired:
                 safe_killpg(proc.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
 
     def _wait_for_service_ready(
         self,
         proc: subprocess.Popen[bytes],
         port: int,
         timeout: float = _READY_TIMEOUT,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> None:
         """Migration-aware wait for ``/health`` 200 (nexus-8vp0i / GH #1486).
 
@@ -1397,7 +1484,30 @@ class StorageServiceSupervisor:
         )
 
         try:
-            monitor.wait_ready(poll_interval=_READY_POLL_INTERVAL, on_tick=on_tick)
+            monitor.wait_ready(
+                poll_interval=_READY_POLL_INTERVAL,
+                on_tick=on_tick,
+                stop_check=(
+                    stop_requested.is_set if stop_requested is not None else None
+                ),
+            )
+        except readiness.ReadinessStopRequestedError:
+            # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while still waiting
+            # for readiness (a real migration can leave /health unreachable
+            # for 20+ minutes). Kill the not-yet-ready process — it never
+            # published a lease (Step 4 runs only after this call returns),
+            # so there is nothing else to clean up here; the caller
+            # (_start_locked -> start() -> _supervise_until_stopped) treats
+            # this as a clean stop, not a failure, and must NOT wrap it in
+            # StorageServiceStartError.
+            _log.info(
+                "storage_service_start_interrupted_by_stop",
+                port=port,
+                pid=proc.pid,
+                msg="stop requested mid-readiness-wait; killing the not-yet-ready process",
+            )
+            self._kill_after_readiness_failure(proc)
+            raise
         except readiness.ReadinessProcessExitedError as exc:
             # nexus-8vp0i review round 2 (code-review-expert Significant 1):
             # a JVM crash mid-changeset (OOM, SIGKILL, or the LockException
@@ -1503,23 +1613,38 @@ class StorageServiceSupervisor:
         )
 
     def _stop_service(self) -> None:
-        """Send SIGTERM (escalating to SIGKILL) to the service process group.
+        """Send SIGTERM (escalating to SIGKILL) to the service process group,
+        then REAP our own child.
 
         Postgres is intentionally NOT stopped here — PG is independently
         managed and may serve other clients (see module docstring).
+
+        nexus-cd1k0.1: ``self._proc`` is OUR OWN un-reaped child (this
+        supervisor's ``start()`` spawned it and nothing has ``wait()``ed
+        on it since). The previous wait loop polled ``_pid_is_alive``
+        (``os.kill(pid, 0)``), which stays True for a ZOMBIE — dead,
+        awaiting OUR OWN reap, which only WE can perform — for as long
+        as we never call ``wait()``. That burned the FULL grace window
+        on every clean stop and then sent a pointless SIGKILL to a
+        corpse (reproduced: stop took ~5.1s, supervisor exit -9).
+        ``Popen.wait(timeout=...)`` is a real ``waitpid``: it returns the
+        moment the child actually exits, with no zombie ambiguity,
+        because reaping and detecting death are the SAME syscall here.
         """
         if self._proc is None:
             return
         from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-        pid = self._proc.pid
+        proc = self._proc
+        pid = proc.pid
         if _pid_is_alive(pid):
             safe_killpg(pid, signal.SIGTERM)
-            deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
-            while time.monotonic() < deadline and _pid_is_alive(pid):
-                time.sleep(0.1)
-            if _pid_is_alive(pid):
+            try:
+                proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
+            except subprocess.TimeoutExpired:
                 safe_killpg(pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
         self._proc = None
 
     # RDR-175: the in-process respawn mechanism (``_respawn`` + the windowed
@@ -1531,12 +1656,19 @@ class StorageServiceSupervisor:
 
     # -- Public lifecycle API -----------------------------------------------
 
-    def start(self) -> dict[str, Any]:
+    def start(
+        self, *, stop_requested: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """Acquire spawn lock, ensure PG is up, spawn service, publish lease.
 
         Returns the flat discovery payload {host, port, pid, generation, token}.
         Idempotent: a live lease short-circuits without a duplicate spawn.
         Raises :class:`StorageServiceStartError` on failure (LOUD).
+
+        ``stop_requested`` (nexus-cd1k0.19), when given, is polled during
+        the readiness wait so a SIGTERM/SIGINT arriving mid-start is not
+        invisible for the rest of a potentially 20+ minute migration wait
+        — see ``readiness.ReadinessStopRequestedError``.
         """
         import fcntl  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -1545,7 +1677,7 @@ class StorageServiceSupervisor:
         lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            return self._start_locked()
+            return self._start_locked(stop_requested=stop_requested)
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -1556,7 +1688,9 @@ class StorageServiceSupervisor:
             except OSError:
                 pass
 
-    def _start_locked(self) -> dict[str, Any]:
+    def _start_locked(
+        self, *, stop_requested: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """Inner start, called under the spawn lock."""
         # Short-circuit: a live lease already exists (parallel caller won the race).
         registry = ServiceRegistry(
@@ -1565,6 +1699,22 @@ class StorageServiceSupervisor:
             clock=self._lease_clock,
         )
         existing = registry.discover(self._scope)
+        if existing is not None and reclaim_lease_if_dead_owner(
+            registry, existing, log=_log, event="storage_service_dead_lease_reclaim",
+        ):
+            # nexus-cd1k0.17: a TTL-fresh lease held by a DEAD supervisor
+            # (hard crash — OOM-kill / SIGKILL with no relinquish) must
+            # never be honored as live. The foreground unit path lacked
+            # this check entirely (the CLI client-spawn path,
+            # commands/daemon.py.ensure_storage_supervisor, already had
+            # it) — without it, a unit-launched supervisor discovering
+            # exactly this shape short-circuited via owns_process=False
+            # and exited 0, and a successful exit never restarts under
+            # either shipped unit's policy: the stack stayed down until
+            # the 15s TTL aged the dead lease out on its own. Relinquished
+            # above; fall through to spawn fresh below, same as no lease
+            # at all.
+            existing = None
         if existing is not None:
             # nexus-hzhgl round 3 review Significant-2: this is the ONLY path
             # through _start_locked that skips _ensure_pg_running (and, with
@@ -1619,8 +1769,15 @@ class StorageServiceSupervisor:
         self._proc = proc
 
         # Step 3: wait for /health 200 — LOUD failure if it doesn't come up.
+        # nexus-cd1k0.19: readiness.ReadinessStopRequestedError (a deliberate
+        # stop mid-wait, NOT a failure) is deliberately NOT caught here —
+        # _wait_for_service_ready already killed the not-yet-ready proc for
+        # that case, and letting it propagate past _start_locked/start()
+        # lets the run loop's own call site treat it as a clean stop rather
+        # than routing it through the StorageServiceStartError LOUD-failure
+        # contract below, which is for genuine start failures only.
         try:
-            self._wait_for_service_ready(proc, port)
+            self._wait_for_service_ready(proc, port, stop_requested=stop_requested)
         except StorageServiceStartError:
             self._stop_service()
             raise
@@ -1997,6 +2154,16 @@ class StorageServiceSupervisor:
         """Graceful shutdown: mark_shutting_down -> relinquish -> killpg.
 
         Postgres is intentionally NOT stopped — PG is independently managed.
+
+        nexus-cd1k0 review round 3 finding 6: both election calls are now
+        BOUNDED (``budget=_STOP_ELECTION_BUDGET``) and best-effort. Before
+        this, ``relinquish`` in particular took no budget at all — an
+        unconditionally blocking flock wait that could hang this whole
+        method (and therefore the child-teardown below, and therefore the
+        supervisor process's own exit) for as long as some OTHER process
+        held the scope's election lock. A busy flock now degrades to "the
+        lease ages out via TTL instead of being explicitly relinquished",
+        never to a stop that itself never returns.
         """
         if self._registry is not None and self._supervisor is not None:
             rec = self._supervisor.record
@@ -2004,8 +2171,16 @@ class StorageServiceSupervisor:
                 # RDR-151 P1.3: publish shutdown marker BEFORE tearing down the
                 # process so discoverers stop resolving us immediately.
                 with contextlib.suppress(Exception):
-                    self._registry.mark_shutting_down(rec)
-                self._registry.relinquish(rec)
+                    self._registry.mark_shutting_down(rec, budget=_STOP_ELECTION_BUDGET)
+                try:
+                    self._registry.relinquish(rec, budget=_STOP_ELECTION_BUDGET)
+                except ElectionBusyError:
+                    _log.warning(
+                        "storage_service_relinquish_election_busy",
+                        scope=rec.scope_key,
+                        budget_s=_STOP_ELECTION_BUDGET,
+                        msg="election flock still held; lease left to age out via TTL",
+                    )
 
         self._stop_service()
         self._supervisor = None
@@ -2182,7 +2357,29 @@ def _supervise_until_stopped(
     instead of an in-process respawn. The lone in-place recovery is the
     ``(True, False)`` PG-only arm: PG is restarted directly while the alive JVM
     keeps running (the OS supervises the supervisor process, not PG)."""
-    sup.start()
+    try:
+        sup.start(stop_requested=stop_requested)
+    except readiness.ReadinessStopRequestedError:
+        # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while start() was still
+        # waiting for readiness. This is a CLEAN stop, not a crash: the
+        # not-yet-ready process was already killed inside
+        # _wait_for_service_ready, and no lease was ever published for
+        # this attempt (publish happens only after health succeeds), so
+        # sup.stop() below has nothing further to reclaim — it is still
+        # safe to call unconditionally (mark_shutting_down/relinquish
+        # no-op when self._registry/self._supervisor were never assigned).
+        # Exit 0: this is the SAME "deliberate stand-down, not a failure"
+        # reasoning as the fenced-exit path (fenced_exit_code) — a
+        # non-zero exit here would trip the OS unit's restart policy into
+        # respawning a supervisor that would just start over from scratch
+        # anyway, having lost nothing worth resuming.
+        _log.info(
+            "storage_service_start_stopped_cleanly",
+            msg="SIGTERM/SIGINT arrived mid-start; standing down without a lease",
+        )
+        flush_logging()
+        sup.stop()
+        return 0
 
     # GH #1369, shared across tiers (RDR-149 §shared primitive) via
     # exit_if_process_unowned: start() may have found an existing, healthy
@@ -2196,60 +2393,103 @@ def _supervise_until_stopped(
     ):
         return 0
 
+    # nexus-cd1k0.18: the loop body is wrapped in try/finally so the
+    # breadcrumb -> flush -> sup.stop() tail ALWAYS runs, exception
+    # included — an exception escaping heartbeat_once() (or anything else
+    # the loop body calls) used to propagate straight out of this function
+    # with no try/finally at all, so sup.stop() never ran and the engine
+    # child (self._proc) was left running with no supervisor whatsoever.
+    # `exit_code` is mutated in place by the loop (`break` after setting
+    # it) rather than returned from inside the try, so the finally block
+    # always logs and reports the value the loop last decided, exception
+    # or not; an exception itself is never swallowed here — the bare
+    # propagation through `finally` (no `except`) means it still reaches
+    # run_storage_supervisor's own crash backstop afterward, unchanged,
+    # only now AFTER this tier's own child has been torn down.
     exit_code = 0
-    while not stop_requested.is_set():
-        service_running, pg_ok = sup.heartbeat_once()
+    try:
+        while not stop_requested.is_set():
+            service_running, pg_ok = sup.heartbeat_once()
 
-        if not service_running:
-            # Service process exited OR the stuck-process detection threshold
-            # was breached (wedged-but-alive JVM). Under the OS-watchdog model
-            # (RDR-175) the supervisor no longer respawns in-process: it exits
-            # non-zero so the OS init unit (launchd/systemd) restarts the whole
-            # supervisor, which re-runs start() — including a fresh
-            # _ensure_pg_running(). A both-down (False, False) beat is covered
-            # by the same exit: the OS restart brings PG back up via start().
-            # 3 = service-unrecoverable.
-            _log.warning(
-                "storage_service_exited",
-                msg="service child gone or wedged; exiting non-zero for OS restart",
-                pg_ok=pg_ok,
-            )
-            exit_code = 3
-            break
-
-        if not pg_ok:
-            # PG died independently while the service is still alive — restart
-            # PG directly without bouncing the JVM (PRESERVED under the OS
-            # watchdog: the OS supervises the supervisor process, not PG).
-            # 4 = PG-unrecoverable.
-            _log.warning(
-                "storage_service_pg_died_independently",
-                msg="PG unreachable while service alive; attempting PG restart",
-            )
-            try:
-                sup._ensure_pg_running()
-                _log.info("storage_service_pg_restarted_independently")
-            except StorageServiceStartError as exc:
-                _log.error(
-                    "storage_service_pg_restart_failed",
-                    error=str(exc),
-                    msg="Could not restart PG; supervisor exiting",
+            # nexus-cd1k0.2: heartbeat_once() -> heartbeat_tick() may have
+            # just discovered a newer-generation owner (StaleOwnerError)
+            # and set sup.fenced. Checked EVERY tick, independent of
+            # service_running/pg_ok — a fenced-but-otherwise-healthy beat
+            # returns (True, True) and would otherwise fall straight
+            # through to time.sleep() forever, heartbeating a lease this
+            # owner no longer holds while its own engine keeps running
+            # beside the successor's (two engines, one Postgres).
+            # fenced_exit_code (shared primitive) is the single place
+            # naming the exit code every tier uses for this fact: always 0
+            # (a clean stand-down, not a failure — see its docstring for
+            # why a non-zero exit here would only trip the OS unit into a
+            # doomed rematch). The shared tail below (breadcrumb -> flush
+            # -> sup.stop()) then tears down THIS owner's own engine child
+            # and is safe to call unconditionally even though the lease is
+            # no longer ours (mark_shutting_down/relinquish no-op on an
+            # owner_token mismatch, CA-4).
+            fenced_exit = fenced_exit_code(sup.fenced)
+            if fenced_exit is not None:
+                _log.warning(
+                    "storage_service_lease_fenced",
+                    scope=sup._scope,
+                    msg="a newer-generation owner holds the lease; standing down",
                 )
-                exit_code = 4
+                exit_code = fenced_exit
                 break
 
-        time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+            if not service_running:
+                # Service process exited OR the stuck-process detection
+                # threshold was breached (wedged-but-alive JVM). Under the
+                # OS-watchdog model (RDR-175) the supervisor no longer
+                # respawns in-process: it exits non-zero so the OS init
+                # unit (launchd/systemd) restarts the whole supervisor,
+                # which re-runs start() — including a fresh
+                # _ensure_pg_running(). A both-down (False, False) beat is
+                # covered by the same exit: the OS restart brings PG back
+                # up via start(). 3 = service-unrecoverable.
+                _log.warning(
+                    "storage_service_exited",
+                    msg="service child gone or wedged; exiting non-zero for OS restart",
+                    pg_ok=pg_ok,
+                )
+                exit_code = 3
+                break
 
-    # Exit breadcrumb BEFORE stop(): a death without this line means the
-    # supervisor was killed, not that it chose to exit. Flush immediately —
-    # stop() can stall, and the breadcrumb is the diagnostic (nexus-61539).
-    _log.info(
-        "storage_service_supervisor_exit",
-        exit_code=exit_code,
-        stop_requested=stop_requested.is_set(),
-    )
-    flush_logging()
-    sup.stop()
+            if not pg_ok:
+                # PG died independently while the service is still alive —
+                # restart PG directly without bouncing the JVM (PRESERVED
+                # under the OS watchdog: the OS supervises the supervisor
+                # process, not PG). 4 = PG-unrecoverable.
+                _log.warning(
+                    "storage_service_pg_died_independently",
+                    msg="PG unreachable while service alive; attempting PG restart",
+                )
+                try:
+                    sup._ensure_pg_running()
+                    _log.info("storage_service_pg_restarted_independently")
+                except StorageServiceStartError as exc:
+                    _log.error(
+                        "storage_service_pg_restart_failed",
+                        error=str(exc),
+                        msg="Could not restart PG; supervisor exiting",
+                    )
+                    exit_code = 4
+                    break
+
+            time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+    finally:
+        # Exit breadcrumb BEFORE stop(): a death without this line means
+        # the supervisor was killed, not that it chose to exit. Flush
+        # immediately — stop() can stall, and the breadcrumb is the
+        # diagnostic (nexus-61539).
+        _log.info(
+            "storage_service_supervisor_exit",
+            exit_code=exit_code,
+            stop_requested=stop_requested.is_set(),
+        )
+        flush_logging()
+        sup.stop()
     return exit_code
 
 
@@ -2392,7 +2632,16 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
             # burns the whole grace window and then sends a pointless
             # SIGKILL on every double-stop. Whether we ENTER this branch
             # still keys off ``_pid_is_alive`` above, unchanged.
-            deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
+            #
+            # nexus-cd1k0.1: this OUTER wait is for the SUPERVISOR PROCESS
+            # itself, which — on a clean stop — first has to stop ITS OWN
+            # engine child (up to _GRACEFUL_STOP_TIMEOUT +
+            # _POST_KILL_REAP_TIMEOUT inside _stop_service) before it can
+            # exit. Waiting only _GRACEFUL_STOP_TIMEOUT here raced that
+            # inner window and could SIGKILL a supervisor that was midway
+            # through a perfectly clean shutdown. _SUPERVISOR_STOP_GRACE
+            # is strictly longer than that inner worst case.
+            deadline = time.monotonic() + _SUPERVISOR_STOP_GRACE
             while time.monotonic() < deadline:
                 if not _pid_is_running(supervisor_pid):
                     break
@@ -2407,9 +2656,14 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
             source = "lease"
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             safe_killpg(pid_to_signal, signal.SIGTERM)
-            # Clean up the lease record.
+            # Clean up the lease record. Bounded (nexus-cd1k0 review round 3
+            # finding 6): this is the OUTER ``stop_storage_service`` caller
+            # (e.g. the CLI's ``nx daemon service stop``) doing its own
+            # cleanup on a legacy lease with no ``supervisor_pid`` payload —
+            # an unbounded flock wait here would hang THAT caller, not just
+            # a supervisor process, so it gets the same budget.
             with contextlib.suppress(Exception):
-                registry.relinquish(record)
+                registry.relinquish(record, budget=_STOP_ELECTION_BUDGET)
             _log.info("storage_service_stopped", pid=pid_to_signal)
             signalled.append(pid_to_signal)
 

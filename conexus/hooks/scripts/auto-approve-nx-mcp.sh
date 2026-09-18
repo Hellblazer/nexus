@@ -76,7 +76,6 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__tuple_subscribe|\
   mcp__plugin_conexus_nexus__tuple_unsubscribe|\
   mcp__plugin_conexus_nexus__tuple_subscriptions|\
-  mcp__plugin_conexus_nexus__tuple_channel_probe|\
   mcp__plugin_conexus_nexus__mailbox_send|\
   mcp__plugin_conexus_sequential-thinking__sequentialthinking)
     # Event-aware output. PermissionRequest fires only when a PROMPT would be

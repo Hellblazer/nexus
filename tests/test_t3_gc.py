@@ -1097,6 +1097,54 @@ class TestGetEmbeddingsRequestOrder:
         assert result.shape[0] == 1
 
 
+def test_gc_refuses_when_collection_is_unknown_to_the_catalog(
+    runner: CliRunner, t3_db,
+) -> None:
+    """nexus-v1zdu (audit residual #1, HIGH): the manifest-less-note
+    protection (RDR-145) and RUNFENCE index-state guard both read via
+    ``catalog_documents_for_collection``, which returns ``[]`` — not a
+    failure — for a collection the catalog has never heard of. Both
+    guards then silently "find nothing to protect" and the run proceeds
+    as if the collection were genuinely and safely orphan-free.
+
+    This is INDEPENDENT of the nexus-jqrtp empty-alive-set guard: that
+    guard only fires when `referenced` (chashes_for_collection_with_
+    tombstone_protected) comes back empty. Here `referenced` is
+    deliberately seeded NON-empty (so nexus-jqrtp's guard would NOT
+    fire) while `get_collection` still reports the collection unknown —
+    proving the note/RUNFENCE read needs its OWN independent known-
+    collection check, not a free ride off the alive-set guard.
+    """
+    from unittest.mock import MagicMock
+
+    coll = "code__v1zdu-unknown-guard__stub-code-1024__v1"
+    long_ago = "2020-01-01T00:00:00Z"
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="c1", content="x",
+        chunk_text_hash="a" * 64, indexed_at=long_ago,
+    )
+
+    unknown_cat = MagicMock()
+    unknown_cat.get_collection.return_value = None
+    # Non-empty referenced set: the nexus-jqrtp empty-alive-set guard
+    # would NOT fire on its own here, so a refusal below can only come
+    # from the new known-collection check.
+    unknown_cat.chashes_for_collection_with_tombstone_protected.return_value = (
+        {"unrelated-chash"}, 0,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=unknown_cat):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code != 0, result.output
+    assert coll in result.output
+    # THE POINT: nothing was deleted.
+    assert t3_db._client.get_collection(coll).count() == 1
+
+
 def test_gc_refuses_when_manifest_references_nothing_but_chunks_exist(
     runner: CliRunner, t3_db
 ) -> None:
@@ -1382,3 +1430,29 @@ def test_gc_reports_tombstone_protected_as_unavailable_on_an_older_engine(
     assert "Protected by pending tombstones: 0" not in result.output
     assert len(audit_calls) == 1
     assert audit_calls[0]["details"]["tombstone_protected"] is None
+
+
+def test_gc_override_on_an_unknown_collection_says_so_out_loud(runner: CliRunner, t3_db) -> None:
+    """Review of 6129b9d35: --allow-empty-manifest-set overrides both
+    refusals, so with it an unknown name reaches deletion. That is the
+    override's purpose (a fully orphaned collection has no catalog row), so
+    it stays; the run names the unknown collection before it proceeds."""
+    from unittest.mock import MagicMock
+
+    coll = "code__v1zdu-unknown-override__stub-code-1024__v1"
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="c1", content="x",
+        chunk_text_hash="b" * 64, indexed_at="2020-01-01T00:00:00Z",
+    )
+    unknown_cat = MagicMock()
+    unknown_cat.get_collection.return_value = None
+    unknown_cat.list_by_collection.return_value = []
+    unknown_cat.chashes_for_collection_with_tombstone_protected.return_value = (set(), 0)
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=unknown_cat):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes", "--allow-empty-manifest-set"],
+        )
+    assert "WARNING: the catalog does not know a collection named" in result.output, result.output
+    assert coll in result.output

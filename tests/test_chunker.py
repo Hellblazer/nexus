@@ -197,6 +197,24 @@ def test_line_chunk_single_oversized_line_is_split(max_bytes, big_line):
         assert len(text.encode()) <= max_bytes
 
 
+def test_line_chunk_single_oversized_multibyte_line_is_split():
+    """nexus-thrh9: a multibyte line under the CHAR cap but over the BYTE
+    cap must split with no characters lost — not truncate with
+    errors="ignore". 5000 CJK chars is 15000 bytes (3 bytes/char), well
+    under _CHUNK_MAX_BYTES (12288) as a char count but over it as a byte
+    count; _expand_long_lines previously gated pre-splitting on the char
+    count against the byte cap, so this line passed through unsplit and
+    _line_chunk's own byte-cap fallback truncated it with errors="ignore",
+    losing 904 characters."""
+    big_line = "漢" * 5000
+    chunks = _line_chunk(big_line, chunk_lines=150, max_bytes=_CHUNK_MAX_BYTES)
+    assert len(chunks) >= 2
+    total_chars = sum(text.count("漢") for _, _, text in chunks)
+    assert total_chars == 5000
+    for _, _, text in chunks:
+        assert len(text.encode()) <= _CHUNK_MAX_BYTES
+
+
 def test_line_chunk_byte_cap_no_gaps():
     lines = ["a" * 300 for _ in range(60)]
     content = "\n".join(lines)

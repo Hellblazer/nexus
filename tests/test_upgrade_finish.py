@@ -48,8 +48,13 @@ def _assert_service_cycled(sp) -> None:
         c.args[0] for c in sp.call_args_list
         if c.args and isinstance(c.args[0], list)
     ]
-    assert ["nx", "daemon", "service", "stop"] in argvs, argvs
-    assert ["nx", "daemon", "service", "start"] in argvs, argvs
+    # nexus-cd1k0.19 review round 2, finding 4: both verbs now carry an
+    # explicit --config-dir <resolved path> too (closing a matcher
+    # false-positive surface) -- match on the stable 4-token PREFIX so
+    # this stays a pure "were stop/start invoked" check, agnostic to
+    # what trailing args ride along.
+    assert any(a[:4] == ["nx", "daemon", "service", "stop"] for a in argvs), argvs
+    assert any(a[:4] == ["nx", "daemon", "service", "start"] for a in argvs), argvs
 
 
 def _converged_provenance(tmp_path, version: str = _REQUIRED_STR) -> dict:
@@ -733,6 +738,35 @@ class TestFailLoud:
         assert "stop-sweep" in joined, (
             f"the sweep must be visible in the reported actions: {actions}"
         )
+
+    def test_restart_and_verify_passes_config_dir_explicitly_on_both_calls(
+        self, tmp_path,
+    ) -> None:
+        """nexus-cd1k0.19 review round 2, finding 4: the two bare
+        subprocess.run(["nx", "daemon", "service", "stop"/"start"]) calls
+        used to inherit environment and never pass --config-dir at all --
+        closing the false-positive surface storage_service_stack_matcher's
+        flagless-matches-default rule otherwise has against a live,
+        env-scoped invocation on the same box. Both calls must now carry
+        an explicit --config-dir with the RESOLVED absolute path."""
+        from nexus import upgrade_finish as uf
+
+        stop_ok = MagicMock(returncode=0, stdout="", stderr="")
+        start_ok = MagicMock(returncode=0, stdout="", stderr="")
+        running = MagicMock(version="v0.1.60", pid=214)
+
+        with patch.object(uf, "service_stack_pids", return_value=[]), \
+             patch.object(uf.subprocess, "run", side_effect=[stop_ok, start_ok]) as sp, \
+             patch.object(uf, "_running_engine", return_value=running):
+            actions: list[str] = []
+            uf._restart_and_verify(tmp_path, actions, "v0.1.60")
+
+        argvs = [c.args[0] for c in sp.call_args_list if c.args]
+        resolved = str(tmp_path.resolve())
+        stop_argv = next(a for a in argvs if a[:4] == ["nx", "daemon", "service", "stop"])
+        start_argv = next(a for a in argvs if a[:4] == ["nx", "daemon", "service", "start"])
+        assert stop_argv == ["nx", "daemon", "service", "stop", "--config-dir", resolved], stop_argv
+        assert start_argv == ["nx", "daemon", "service", "start", "--config-dir", resolved], start_argv
 
     def test_sweep_kills_a_stack_that_survived_stop(self, tmp_path):
         """THE FIX: `nx daemon service stop` reports success having signalled
@@ -2463,6 +2497,176 @@ class TestConvergeServiceAutostartUnit:
         assert len(actions) == 1
         assert "NEEDS HUMAN" in actions[0]
         assert "converged the storage-service autostart unit" in actions[0]
+
+    def test_install_raises_other_error_is_needs_human_and_still_restarts(self, tmp_path):
+        """nexus-cd1k0.3 follow-up, item (b): install_autostart raising
+        anything OTHER than an ActivationError caused by a missing service
+        manager is still NEEDS HUMAN -- but the pass must ALSO restart the
+        service directly (nx daemon service start, after the earlier
+        stop), rather than leaving the engine stopped with no recovery
+        attempt at all."""
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        start_result = MagicMock(returncode=0, stdout="", stderr="")
+        from nexus.daemon.installer import UninstallResult, UninstallStatus  # noqa: PLC0415 — local import, test-only convenience
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
+             patch("nexus.daemon.installer.install_autostart",
+                   side_effect=RuntimeError("bootstrap exploded")), \
+             patch("nexus.upgrade_finish.subprocess.run",
+                   side_effect=[stop_result, start_result]) as sp:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "bootstrap exploded" in actions[0]
+        assert sp.call_count == 2, "start must be invoked after stop, not skipped"
+        stop_argv = sp.call_args_list[0].args[0]
+        start_argv = sp.call_args_list[1].args[0]
+        assert stop_argv[:4] == ["nx", "daemon", "service", "stop"]
+        assert start_argv[:4] == ["nx", "daemon", "service", "start"]
+        assert "--config-dir" in start_argv
+
+    def test_uninstall_bad_status_is_needs_human_and_still_restarts(self, tmp_path):
+        """Sibling of the case above for the OTHER stop-succeeded exit path:
+        uninstall_autostart reporting a non-clean removal status must also
+        restart the service before returning NEEDS HUMAN."""
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        start_result = MagicMock(returncode=0, stdout="", stderr="")
+        from nexus.daemon.installer import UninstallResult  # noqa: PLC0415 — local import, test-only convenience
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   # A sentinel standing in for a THIRD status neither real
+                   # UninstallStatus member names -- the branch under test
+                   # is defensive against a future/unexpected status value,
+                   # not reachable via either of the two real members.
+                   return_value=UninstallResult(status="removed_with_errors", dest=dest)) as uninstall, \
+             patch("nexus.daemon.installer.install_autostart") as install, \
+             patch("nexus.upgrade_finish.subprocess.run",
+                   side_effect=[stop_result, start_result]) as sp:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        install.assert_not_called()
+        assert sp.call_count == 2, "start must be invoked after stop, not skipped"
+        assert sp.call_args_list[1].args[0][:4] == ["nx", "daemon", "service", "start"]
+
+    def test_activation_succeeds_no_direct_restart(self, tmp_path):
+        """nexus-cd1k0.3 follow-up, item (c): when a service manager IS
+        present and activation succeeds, behaviour is unchanged -- the
+        unit is activated by the OS unit manager itself and there is no
+        EXTRA direct `nx daemon service start` call (that would race the
+        freshly-bootstrapped process's own lease publish, per this
+        function's own docstring)."""
+        from nexus.daemon.installer import (  # noqa: PLC0415 — local import, test-only convenience
+            InstallResult, InstallStatus, UninstallResult, UninstallStatus,
+        )
+
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
+             patch("nexus.daemon.installer.install_autostart",
+                   return_value=InstallResult(
+                       status=InstallStatus.NEWLY_INSTALLED, dest=dest,
+                       detail="Activated via: systemctl --user enable --now nexus-service.service",
+                       activated_cmd=["systemctl", "--user", "enable", "--now", "nexus-service.service"],
+                   )), \
+             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result) as sp, \
+             patch("nexus.upgrade_finish._running_engine",
+                   return_value=_RunningEngine(up=True, version=(1, 2, 3))):
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" not in actions[0]
+        assert "converged" in actions[0]
+        sp.assert_called_once_with(
+            ["nx", "daemon", "service", "stop"],
+            capture_output=True, text=True, timeout=60,
+        )
+
+
+class TestConvergeServiceAutostartUnitNoServiceManager:
+    """nexus-cd1k0.3 follow-up: found by the 7.52.0 release battery's
+    ``--package-upgrade`` leg (log
+    /tmp/nxb-20260917-220401-49244/logs/pkgup.log) upgrading a 7.51.1
+    install in a Linux container with no ``systemctl`` on PATH. Runs the
+    REAL installer (``uninstall_autostart``/``install_autostart``, never
+    mocked) against a sandboxed autostart directory, with ``PATH``
+    stripped to exactly one directory holding a fake ``nx`` that records
+    its own argv -- ``launchctl``/``systemctl`` are genuinely unfindable
+    (a real ``FileNotFoundError``, not a simulated one), while ``nx``
+    itself genuinely is found.
+    """
+
+    def _sandbox(self, tmp_path, monkeypatch):
+        from nexus.commands import daemon as daemon_cmd  # noqa: PLC0415 — local import, test-only convenience
+
+        # This box is darwin; the activation command it will genuinely try
+        # is `launchctl bootstrap ...` -- stripped off PATH below exactly
+        # like `systemctl` would be on the Linux container that found this.
+        # Pin the platform to darwin so the seeded plist is the unit the probe
+        # reads on every CI host; on a Linux runner the unpinned probe looks
+        # for a systemd unit, finds none, and reports nothing to converge.
+        monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "units")
+        monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
+        (tmp_path / "units").mkdir()
+
+    def _fake_nx_only_path(self, tmp_path, monkeypatch):
+        """PATH containing exactly one directory: a fake `nx` that records
+        its argv and exits 0. No `launchctl`/`systemctl` anywhere on it."""
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        recorder = tmp_path / "nx-argv.log"
+        nx_script = fake_bin / "nx"
+        nx_script.write_text(
+            "#!/bin/sh\n"
+            f'echo "$@" >> "{recorder}"\n'
+            "exit 0\n"
+        )
+        nx_script.chmod(0o755)
+        monkeypatch.setenv("PATH", str(fake_bin))
+        return recorder
+
+    def test_no_service_manager_restarts_directly_and_returns_note(
+        self, tmp_path, monkeypatch,
+    ):
+        self._sandbox(tmp_path, monkeypatch)
+        recorder = self._fake_nx_only_path(tmp_path, monkeypatch)
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        dest.write_text("<!-- old content with ProcessType Background -->\n")
+
+        actions = converge_service_autostart_unit(tmp_path)
+
+        assert len(actions) == 1, actions
+        assert "NOTE" in actions[0]
+        assert "NEEDS HUMAN" not in actions[0]
+        assert "launchctl" in actions[0]
+
+        # The file was rewritten to the (REAL, unmocked) current template --
+        # not left at the stale content, and not merely written-but-untouched.
+        rewritten = dest.read_text()
+        assert "<!-- old content" not in rewritten
+        assert "/opt/conexus/bin/nx" in rewritten
+
+        # stop, then start (with an explicit --config-dir), via the REAL
+        # subprocess.run finding the fake `nx` on the stripped PATH.
+        argv_lines = [line for line in recorder.read_text().splitlines() if line.strip()]
+        assert len(argv_lines) == 2, argv_lines
+        assert argv_lines[0].split() == ["daemon", "service", "stop"]
+        start_tokens = argv_lines[1].split()
+        assert start_tokens[:3] == ["daemon", "service", "start"]
+        assert "--config-dir" in start_tokens
+        assert str(tmp_path.resolve()) in start_tokens
 
 
 class TestUnloadStaleT2Launchagent:

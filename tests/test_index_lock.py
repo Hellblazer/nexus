@@ -2,6 +2,8 @@
 """T1: index_repository per-repo file lock, on_locked flag, and head_hash update."""
 import fcntl
 import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -304,6 +306,57 @@ def test_head_hash_not_updated_on_other_error(tmp_path: Path, registry, lock_hom
     mock_set.assert_not_called()
 
 
+def test_head_hash_not_updated_when_files_transient_upsert_deferred(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """nexus-6m9zy.6 (#12): owners.head_hash is the base the NEXT
+    --since-head run diffs from. Advancing it past a commit that changed
+    a file this run deferred via _contain_transient_upsert (a transient
+    5xx/timeout) means the next --since-head git diff never offers that
+    file again -- it stays unindexed until a full index, since the
+    deferred file's own staleness cache was never populated either (it
+    was never seen as part of this run's delta)."""
+    with patch("nexus.indexer._run_index",
+               return_value={"transient_upsert_deferred_files": 1}):
+        with patch("nexus.indexer._current_head", return_value="abc"):
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
+
+    mock_set.assert_not_called()
+
+
+def test_head_hash_not_updated_when_files_permanently_failed(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """Same bug, the sibling source the bead names: a file in the
+    ChunkBatcher's failed_files (permanent chunk-flush failure, post
+    bisect-retry) must also hold the base back."""
+    with patch("nexus.indexer._run_index",
+               return_value={"chunk_flush_failed_files": 1}):
+        with patch("nexus.indexer._current_head", return_value="abc"):
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
+
+    mock_set.assert_not_called()
+
+
+def test_head_hash_updated_when_no_files_deferred_or_failed(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """Regression guard: a clean run (both counts present and zero) must
+    still advance the base -- the gate above must not become a permanent
+    freeze."""
+    with patch("nexus.indexer._run_index",
+               return_value={"chunk_flush_failed_files": 0,
+                             "transient_upsert_deferred_files": 0}):
+        with patch("nexus.indexer._current_head", return_value="deadbeef") as mock_head:
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
+
+    mock_head.assert_called_once_with(tmp_path)
+    mock_set.assert_called_once_with(tmp_path, "deadbeef")
+
+
 # ── lock released after indexing ─────────────────────────────────────────────
 
 
@@ -335,6 +388,81 @@ def test_lock_released_on_exception(tmp_path: Path, registry, lock_home: Path) -
     with open(lock_path, "w") as f:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
         fcntl.flock(f, fcntl.LOCK_UN)
+
+
+# ── skip contender must not corrupt or unlock a live holder ─────────────────
+
+
+def test_skip_contender_does_not_corrupt_or_unlock_live_holder(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """nexus-6m9zy.2 (#2): the lock prologue used to truncate the lock
+    file and write the caller's PID BEFORE taking flock. A --on-locked=skip
+    contender that loses the flock race still ran that write, leaving its
+    own (soon dead) PID in the file; the next arrival's stale-lock sweep
+    then saw ESRCH on that dead PID, unlinked the file the live holder
+    still had flocked, and took a fresh lock on a new inode -- two
+    indexers running on one repo concurrently. Reproduces the review's
+    A (long-running, wait) / B (hook-spawned, skip, loses, dies) / C
+    (next hook run, skip) shape via the real index_repository entry
+    point and a genuinely dead PID for B (subprocess spawn+wait, exactly
+    as the probe did)."""
+    from nexus.indexer import _repo_lock_path
+
+    lock_path = _repo_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    a_running = threading.Event()
+    release_a = threading.Event()
+
+    def _fake_run_index_a(*a, **k):
+        a_running.set()
+        release_a.wait(timeout=5.0)
+        return {}
+
+    def run_a():
+        with patch("nexus.indexer._run_index", side_effect=_fake_run_index_a):
+            with patch("nexus.indexer._current_head", return_value="a"):
+                index_repository(tmp_path, registry, on_locked="wait")
+
+    t = threading.Thread(target=run_a, daemon=True)
+    t.start()
+    try:
+        assert a_running.wait(timeout=5.0), "A never entered its critical section"
+
+        a_inode = lock_path.stat().st_ino
+        a_pid_on_disk = lock_path.read_text()
+
+        # B: --on-locked=skip, loses the flock race. Give B a PID that is
+        # already dead, mirroring a real hook-spawned skip contender that
+        # has already exited by the time the next hook fires.
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+
+        with patch("nexus.indexer.os.getpid", return_value=dead.pid):
+            with patch("nexus.indexer._run_index") as mock_b:
+                result_b = index_repository(tmp_path, registry, on_locked="skip")
+        assert result_b == {}
+        mock_b.assert_not_called()
+
+        # The live holder's on-disk PID and inode must be untouched by
+        # the losing contender.
+        assert lock_path.read_text() == a_pid_on_disk, "B corrupted the live holder's lock file"
+        assert lock_path.stat().st_ino == a_inode
+
+        # C: a later --on-locked=skip arrival must also see the lock as
+        # held -- not unlink A's lock file via a stale-check keyed on
+        # B's leftover dead PID and take a fresh lock on a new inode.
+        with patch("nexus.indexer._run_index") as mock_c:
+            result_c = index_repository(tmp_path, registry, on_locked="skip")
+        assert result_c == {}
+        mock_c.assert_not_called()
+        assert lock_path.stat().st_ino == a_inode, (
+            "C took a fresh lock on a new inode while A still held the original"
+        )
+    finally:
+        release_a.set()
+        t.join(timeout=5.0)
 
 
 # ── CLI --on-locked option ────────────────────────────────────────────────────

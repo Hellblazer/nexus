@@ -156,12 +156,24 @@ class Leaf:
     message key. ``message_key`` is a SEMANTIC label this module assigns to
     the branch (matching how the file:line research already names each
     dimension's outcomes) -- it is NOT parsed from the real function's
-    stdout/stderr. Two branches can legitimately print IDENTICAL text (a
-    documented defect: ``check_pin_currency`` prints "== newest published
-    tag" on both the ``at_floor`` and ``below_floor`` branches) while still
-    being distinct decision cells by the code's own branch structure; using
-    printed text as the identity key would silently MERGE them and lose
-    exactly the finding the research doc flagged."""
+    stdout/stderr. Two branches can legitimately print IDENTICAL text (e.g.
+    ``check_floor_auto_paired``'s ``ack_via_exception``/``ack_via_success``,
+    whose shared catalog entry does not distinguish which code path reached
+    it -- see ``_PAIRED_PROBE_EXPECTATIONS``) while still being distinct
+    decision cells by the code's own branch structure; using printed text
+    as the identity key would silently MERGE them.
+
+    ``check_pin_currency``'s ``at_floor``/``below_floor`` branches used to
+    be exactly this kind of case too, but by ACCIDENT rather than design (a
+    documented defect the research doc flagged, T2 nexus_rdr/201-
+    research-4): both printed "== newest published tag" regardless of
+    which branch actually held. Fixed ([26114] #5) -- ``below_floor`` now
+    reads "ahead of publication" and ``_classify_pin_currency`` tells them
+    apart from text like any other pair. Kept as a historical footnote
+    here because it is the origin of this docstring's caution: a printed-
+    text collapse can be a genuine design choice (the auto-paired case
+    above) or a bug hiding behind one, and only reading the branch that
+    produced it tells you which."""
 
     exit_code: int
     message_key: str
@@ -354,14 +366,7 @@ def _newest_value(label: str) -> Any:
 def drive_pin_currency(cell: Cell) -> tuple[int, str]:
     newest = _newest_value(cell.inputs["newest"])
     rc, out, err = _capture(floor.check_pin_currency, newest)
-    classified = _classify_pin_currency(rc, out + err)
-    if classified == "pin_currency_current":
-        # at_floor and below_floor print IDENTICAL text (the documented
-        # check_pin_currency:307 defect) -- text alone cannot disambiguate
-        # them, so trust the INPUT that produced this rc/text rather than
-        # re-deriving it from an ambiguous message.
-        return rc, cell.message_key
-    return rc, classified
+    return rc, _classify_pin_currency(rc, out + err)
 
 
 def _classify_pin_currency(rc: int, out: str) -> str:
@@ -371,16 +376,16 @@ def _classify_pin_currency(rc: int, out: str) -> str:
         return "pin_currency_zero_tags"
     if "is published but this release pins" in out:
         return "pin_currency_stale_pin"
+    if "engine pin is ahead of publication" in out:
+        return "pin_currency_current_below_floor"
     if "engine pin is current" in out:
-        # NOTE (matches T2 nexus_rdr/201-research-4 / research doc
-        # check_pin_currency:307): the print statement is IDENTICAL text
-        # for at_floor and below_floor -- this classifier cannot and does
-        # not try to tell them apart from output alone. The driver below
-        # instead trusts the INPUT that produced this rc/text and returns
-        # the cell's own message_key for either at_floor or below_floor,
-        # since both are confirmed-reachable, exit-0, textually-identical
-        # branches (a real finding, not a modeling gap).
-        return "pin_currency_current"
+        # Prior to the [26114] #5 fix, at_floor and below_floor printed
+        # IDENTICAL text (T2 nexus_rdr/201-research-4 / check_pin_currency:307
+        # -- a documented defect), so this classifier could not disambiguate
+        # them from output alone and the driver instead trusted the cell's
+        # own INPUT. below_floor's message is now distinct ("ahead of
+        # publication", matched above); only at_floor still reads "current".
+        return "pin_currency_current_at_floor"
     raise AssertionError(f"unclassified check_pin_currency output: rc={rc} out={out!r}")
 
 
@@ -1017,9 +1022,8 @@ def drive_check_floor_paired_explicit(cell: Cell) -> tuple[int, str]:
 #: check the classification against, so a real drift in the source's printed
 #: messages still fails the driver loudly). "ack_via_exception" and
 #: "ack_via_success" print IDENTICAL text (the paired-ack catalog entries do not
-#: distinguish which code path reached it) -- classified from the INPUT
-#: that produced them, not from that shared text, matching
-#: check_pin_currency's at_floor/below_floor collapse above.
+#: distinguish which code path reached it, by design) -- classified from the
+#: INPUT that produced them, not from that shared text.
 _PAIRED_PROBE_EXPECTATIONS = {
     "unreachable": (2, "paired_probe_unreachable", "is unreachable"),
     "ms_error_not_below_floor": (2, "paired_probe_unverifiable_exception", "without a genuine below-floor"),
@@ -1097,20 +1101,41 @@ def drive_check_floor_auto_paired(cell: Cell) -> tuple[int, str]:
     return rc, _classify_check_floor_auto_paired(rc, out + err, probe, battery, pin_currency)
 
 
+#: (probe, battery, pin_currency) -> (expected exit code, message key, a
+#: text marker to sanity-check the classification against -- None for a
+#: DELEGATING cell, whose printed text belongs to the sub-call it defers
+#: to (_paired_below_floor_path / check_pin_currency), not this catalog
+#: (mirrors _classify_check_floor_paired's battery=="blocks" carve-out
+#: above): a real drift in the source's own printed messages still fails
+#: the driver loudly on every cell whose text this function owns
+#: ([26114] #4 -- the OLD classifier derived message_key from these same
+#: driving inputs alone, never reading `rc`/`text`, so it could only ever
+#: fail on a wrong exit code).
+_AUTO_PAIRED_EXPECTATIONS: dict[tuple[str, str | None, str | None], tuple[int, str, str | None]] = {
+    ("unreachable", None, None): (2, "auto_probe_unreachable", "is unreachable"),
+    ("ms_error_not_below_floor", None, None): (2, "auto_probe_unverifiable_exception", "without a genuine below-floor"),
+    ("ms_error_below_floor", "blocks", None): (1, "auto_below_via_exception_battery_blocks", None),
+    ("ms_error_below_floor", "passes", None): (0, "auto_below_via_exception_ack", "PAIRED MODE: cloud reports"),
+    ("success_at_or_above_floor", None, "blocks"): (2, "auto_current_pin_blocks", None),
+    ("success_at_or_above_floor", None, "passes"): (0, "auto_current", "cloud engine is current"),
+    ("success_unparseable", None, None): (2, "auto_probe_unverifiable_success", "unparseable release_version"),
+    ("success_below_floor", "blocks", None): (1, "auto_below_via_success_battery_blocks", None),
+    ("success_below_floor", "passes", None): (0, "auto_below_via_success_ack", "PAIRED MODE: cloud reports"),
+}
+
+
 def _classify_check_floor_auto_paired(rc: int, text: str, probe: str, battery: str | None, pin_currency: str | None) -> str:
-    if probe == "unreachable":
-        return "auto_probe_unreachable"
-    if probe == "ms_error_not_below_floor":
-        return "auto_probe_unverifiable_exception"
-    if probe == "success_unparseable":
-        return "auto_probe_unverifiable_success"
-    if probe == "success_at_or_above_floor":
-        return "auto_current_pin_blocks" if pin_currency == "blocks" else "auto_current"
-    if probe == "ms_error_below_floor":
-        return "auto_below_via_exception_battery_blocks" if battery == "blocks" else "auto_below_via_exception_ack"
-    if probe == "success_below_floor":
-        return "auto_below_via_success_battery_blocks" if battery == "blocks" else "auto_below_via_success_ack"
-    raise AssertionError(f"unclassified _check_floor_auto_paired output: rc={rc} text={text!r} probe={probe}")
+    key = (probe, battery, pin_currency)
+    if key not in _AUTO_PAIRED_EXPECTATIONS:
+        raise AssertionError(f"unclassified _check_floor_auto_paired output: rc={rc} text={text!r} probe={probe} battery={battery} pin_currency={pin_currency}")
+    expected_rc, message_key, marker = _AUTO_PAIRED_EXPECTATIONS[key]
+    assert rc == expected_rc, (
+        f"probe={probe!r} battery={battery!r} pin_currency={pin_currency!r}: "
+        f"expected rc={expected_rc}, got {rc} (text={text!r})"
+    )
+    if marker is not None:
+        assert marker in text, f"probe={probe!r}: expected marker {marker!r} not found in {text!r}"
+    return message_key
 
 
 def main_dispatch_cells() -> EnumerationResult:

@@ -361,6 +361,13 @@ every other session keeps the drain hook as its floor.
    releases the message to the floor. The Monitor-driven watcher and its
    arming are deleted; the `UserPromptSubmit` drain hook stays as the floor
    (Technical Design, Delivery).
+
+   **RDR-213 note (2026-09-17).** RDR-213 amends this Approach item: the
+   waiter no longer claims mail at all, so the proof gate, the probe leg,
+   and the claim, lease, renew and release-after-five machinery described
+   above are deleted, not kept as a fallback. See
+   [RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md) for the
+   current design.
 8. **Subscriptions.** What the waiter covers is a per-session list the session
    can change while it runs: its own mailboxes by default, board topics added
    and removed by three MCP tools (`tuple_subscribe`, `tuple_unsubscribe`,
@@ -472,6 +479,13 @@ calls it is a session without the channel, and the waiter claims nothing for
 the life of that process. Without proof the floor delivers. The argv leg
 depends on preview flag syntax, which is why the probe leg exists.
 
+**RDR-213 note (2026-09-17).** RDR-213 amends this Delivery section: the
+waiter no longer claims mail at all, so the proof gate and the probe leg
+described above -- the argv check, `tuple_channel_probe`, and the claim,
+lease, renew and release-after-five machinery below -- are deleted, not kept
+as a fallback. See [RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md)
+for the current design.
+
 To claim, the waiter reads both mailboxes with a non-claiming `rd` to find
 the oldest available row, then calls `in` on that row's subspace (`in` takes
 one subspace; the oldest row there is what it returns, and a race with the
@@ -572,6 +586,13 @@ another thread; the implementation records this variance, bead
 nexus-rplay.10), and the re-issued call carries the new list, so it costs no
 slot. The mailbox skill's rule for following
 a topic is one `tuple_subscribe` call, not a watcher argument.
+
+**RDR-213 note (2026-09-17).** RDR-213 amends this Subscriptions
+subsection: mailboxes enter the wait spec on every tick the same way board
+topics already do, with `n=1` and no cursor, so the waiter announces a
+reference for the oldest available row instead of claiming it. See
+[RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md) for the current
+design.
 
 ### Scale and Limits
 

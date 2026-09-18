@@ -1695,6 +1695,9 @@ class TestVerifyCommand:
         """Ghosts are a whole-catalog census (they have no collection to
         scope into by definition) -- `--collection` scoped mode must not
         claim to carry the section."""
+        # Registered, because an unknown name now refuses (nexus-v1zdu sweep):
+        # this test is about the report's shape for a known, empty collection.
+        initialized_catalog.register_collection("knowledge__thing", embedding_model="bge-base-en-v15-768")
         runner = CliRunner()
         result = runner.invoke(
             main, ["catalog", "verify", "--collection", "knowledge__thing", "--json"],
@@ -2906,6 +2909,59 @@ class TestWhh61MigrationCarve:
         assert result.exit_code == 0, result.output
         assert "docs__default: 1 doc(s) ->" in result.output
         cat.list_by_collection.assert_called_once_with("docs__default")
+
+    def test_migrate_fallback_known_source_with_zero_docs_exits_clean(self):
+        """nexus-v1zdu: a source registered in the collections projection
+        (get_collection succeeds) but with zero live documents is a
+        legitimate, already-migrated state — 'N doc(s) to migrate' at
+        exit 0, never a refusal. Routes through the same
+        refuse_if_collection_unknown shared helper as the other three
+        guarded sites (nexus-3ygp3), which must be a no-op here since
+        `known=True` is passed explicitly (the get_collection check above
+        already confirmed it)."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        from nexus.cli import main
+
+        cat = MagicMock(spec=HttpCatalogClient)
+        cat.get_collection.return_value = {"name": "docs__default", "content_type": "docs"}
+        cat.list_by_collection.return_value = []
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
+            result = CliRunner().invoke(main, ["catalog", "migrate-fallback", "docs__default"])
+        assert result.exit_code == 0, result.output
+        assert "docs__default: 0 doc(s) to migrate." in result.output
+
+    def test_migrate_fallback_unknown_source_refuses_before_listing(self):
+        """nexus-v1zdu acceptance: a planted unknown collection name must
+        exit non-zero and name the collection — already true here via the
+        pre-existing get_collection() is-None check (before list_by_collection
+        is even reached), which this pins against regression now that the
+        zero-rows branch is also routed through the shared helper."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        from nexus.cli import main
+
+        cat = MagicMock(spec=HttpCatalogClient)
+        cat.get_collection.return_value = None
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
+            result = CliRunner().invoke(
+                main, ["catalog", "migrate-fallback", "rdr__nothing-here"],
+            )
+        assert result.exit_code != 0
+        assert "rdr__nothing-here" in result.output
+        cat.list_by_collection.assert_not_called()
 
     def test_migrate_fallback_rejects_no_double_underscore(self):
         """nexus-ft04v.23: the ``"__" not in source`` / ``source.split("__",

@@ -44,6 +44,7 @@ from typing import Any
 import structlog
 
 from nexus.daemon.service_registry import (
+    DEFAULT_STOP_ELECTION_BUDGET,
     ServiceRegistry,
     ServiceSupervisor,
     ttl_for_tier,
@@ -445,8 +446,21 @@ class AspectWorkerDaemon:
             # owner-token-guarded no-ops there, but skip them to avoid noise.
             if not supervisor.fenced and supervisor.record is not None:
                 try:
-                    self._registry.mark_shutting_down(supervisor.record)
-                    self._registry.relinquish(supervisor.record)
+                    # nexus-cd1k0 review round 3 finding 6 (sibling of the
+                    # storage-service fix): both calls previously took no
+                    # budget, an unconditionally blocking flock wait that
+                    # could hang this stop() for as long as some other
+                    # process held the scope's election lock. Already
+                    # best-effort end to end (the enclosing try/except), so
+                    # bounding the wait only tightens how quickly a busy
+                    # flock degrades to "ages out via TTL instead" —
+                    # nothing here changes.
+                    self._registry.mark_shutting_down(
+                        supervisor.record, budget=DEFAULT_STOP_ELECTION_BUDGET
+                    )
+                    self._registry.relinquish(
+                        supervisor.record, budget=DEFAULT_STOP_ELECTION_BUDGET
+                    )
                 except Exception as exc:  # noqa: BLE001 - relinquish is best-effort
                     _log.warning("aspect_worker_daemon.relinquish_failed", tenant=self._tenant, error=str(exc))
             self._supervisor = None

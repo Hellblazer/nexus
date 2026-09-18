@@ -130,6 +130,21 @@ def extractor_loop(
         # rather than trusting pages_extracted_at_start's stale value for
         # the on_page dedup skip below.
         pages_extracted_at_start = actual_pages
+    elif pages_extracted_at_start > 0:
+        # nexus-6m9zy.1 (#1): total_pages is None whenever the previous
+        # attempt did NOT complete cleanly — either a SIGKILL mid-stream
+        # (WAL rows for the pages already written stay intact) or a
+        # caught exception followed by pipeline_index_pdf's
+        # mark_failed + clear_orphan_wal (the WAL is wiped but
+        # pages_extracted survives it, per the nexus-gl99l comment above).
+        # pages_extracted alone cannot distinguish the two: verify against
+        # the actual WAL before trusting it, exactly as the fast path
+        # above does for the total_pages-set case. When the WAL still
+        # backs the counter this is a no-op (actual_pages ==
+        # pages_extracted_at_start); when clear_orphan_wal wiped it, this
+        # is what stops on_page from skipping pages the retry needs to
+        # re-extract.
+        pages_extracted_at_start = len(db.read_pages(content_hash))
 
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
@@ -502,7 +517,35 @@ def uploader_loop(
     stage's client-side embedder, local/dry-run mode only) has nothing to
     do with it, see ``pipeline_index_pdf``'s docstring.
     """
-    total_uploaded = 0
+    # nexus-6m9zy.1 (#3): seed the running total from persisted progress,
+    # not 0. On a crash-resume, chunks uploaded before the crash are
+    # already marked uploaded=true and read_uploadable_chunks never
+    # returns them again, so a running total that restarts at 0 can only
+    # ever count THIS run's uploads — chunks_uploaded then never reaches
+    # chunks_created and both resume-completion checks below poll
+    # forever.
+    #
+    # This is sound because the one call site that wipes the WAL
+    # (pipeline_index_pdf's first_exc handler, via
+    # _mark_failed_and_reset_wal -> db.clear_orphan_wal) also zeroes this
+    # counter -- nexus-33q80: the ENGINE does it in the SAME transaction
+    # as the wipe now (PipelineRepository.clearOrphanWal), not a second
+    # client call that could independently fail. Without that pairing,
+    # chunks_uploaded would survive clear_orphan_wal exactly like
+    # pages_extracted did before nexus-gl99l's fix, and this seed would
+    # trust a phantom prior-upload count no chunk in the (now-empty) WAL
+    # backs. (substantive-critic finding on the first cut of this fix, T2
+    # nexus/critique-59c07fe5b-uploader-chunks-uploaded-inflation-
+    # nexus-6m9zy [26147], ship-blocker: reproduced a persisted
+    # chunks_uploaded of 20 for a true 10-chunk document across a
+    # mark_failed+clear_orphan_wal cycle, which fails the completion
+    # fence's manifest-count check instead of merely hanging.)
+    _resume_state = db.get_pipeline_state(content_hash)
+    total_uploaded = (
+        _resume_state["chunks_uploaded"]
+        if _resume_state and _resume_state["chunks_uploaded"] is not None
+        else 0
+    )
 
     while not cancel.is_set():
         chunks = db.read_uploadable_chunks(content_hash, limit=_UPLOAD_BATCH_SIZE)
@@ -849,6 +892,37 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     return actual
 
 
+def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc: BaseException) -> None:
+    """Terminal bookkeeping for a failed pipeline run: mark the row failed
+    and wipe its WAL. Never raises: the caller re-raises *first_exc*, and
+    nothing here may mask it.
+
+    nexus-33q80: ``clear_orphan_wal`` now zeroes ``chunks_uploaded`` (and
+    ``pages_extracted``, nexus-gl99l's own counter) on the pipeline row in
+    the SAME transaction as the wipe. This used to be a SEPARATE
+    ``db.update_progress(chunks_uploaded=0)`` call right after
+    ``clear_orphan_wal`` (review of df5c4f035); if the wipe landed and
+    that second call independently failed, the counter survived a wiped
+    WAL and a retry seeded the uploader from it, eventually refusing
+    completion with ``IndexRunVerifyRefused`` (reproduced by
+    substantive-critic as a persisted ``chunks_uploaded`` of 20 for a
+    true 10-chunk document, T2 nexus/critique-59c07fe5b-uploader-chunks-
+    uploaded-inflation-nexus-6m9zy [26147]). Two client calls could never
+    be atomic; one engine call now is, so the second call and its
+    ``pipeline_chunks_uploaded_reset_failed_after_wal_wipe`` failure log
+    are gone."""
+    try:
+        db.mark_failed(content_hash, error=str(first_exc))
+        db.clear_orphan_wal(content_hash)
+    except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
+        _log.warning(
+            "pipeline_terminal_mark_failed",
+            content_hash=content_hash,
+            original_error=str(first_exc),
+            exc_info=True,
+        )
+
+
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -1085,15 +1159,37 @@ def pipeline_index_pdf(
 
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}
 
-        done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
-        for f in done:
-            exc = f.exception()
-            if exc is not None:
+        try:
+            done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
+            for f in done:
+                exc = f.exception()
+                if exc is not None:
+                    first_exc = exc
+                    cancel.set()
+                    break
+            if not_done:
+                wait(not_done, return_when=ALL_COMPLETED)
+        except BaseException as exc:  # noqa: BLE001 — nexus-6m9zy.3 (#4): see below
+            # A KeyboardInterrupt (Ctrl-C) delivered to THIS thread lands
+            # here, inside the blocking wait() call, NOT inside any stage
+            # future -- the `for f in done` loop above never runs, so
+            # cancel was never set. Left uncaught, this exception would
+            # propagate straight out of the `with` block; ThreadPoolExecutor
+            # .__exit__ still calls shutdown(wait=True) first, which blocks
+            # until all three stages run to NATURAL completion (nothing
+            # ever told them to stop), and the uploader's own
+            # resume-completion check marks the row 'completed' out from
+            # under the interrupted caller -- every later run then hits
+            # create_pipeline's 'completed' -> skip path and reports 0
+            # chunks until --force. Setting cancel here makes the stages
+            # stop promptly (each polls cancel.is_set() at least once per
+            # poll interval / per page), and falling through to the SAME
+            # first_exc handling below as any other caught stage
+            # exception marks the row 'failed' + clears the orphan WAL,
+            # so a retry resumes instead of silently skipping.
+            cancel.set()
+            if first_exc is None:
                 first_exc = exc
-                cancel.set()
-                break
-        if not_done:
-            wait(not_done, return_when=ALL_COMPLETED)
 
     if first_exc is None:
         for f in all_futures:
@@ -1123,16 +1219,7 @@ def pipeline_index_pdf(
         # stays 'running' when the engine's /fail endpoint is down) is
         # covered systemically by lcmbp's young-running-row conflict
         # semantics: the NEXT retry is loud, never a silent skip.
-        try:
-            db.mark_failed(content_hash, error=str(first_exc))
-            db.clear_orphan_wal(content_hash)
-        except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
-            _log.warning(
-                "pipeline_terminal_mark_failed",
-                content_hash=content_hash,
-                original_error=str(first_exc),
-                exc_info=True,
-            )
+        _mark_failed_and_reset_wal(db, content_hash, first_exc)
         # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
         # below cannot be masked by a fence-write failure. nexus-uxg4u:
         # never touch the catalog on a dry run (doc_id is already "" in
@@ -1208,6 +1295,28 @@ def pipeline_index_pdf(
             content_hash=content_hash,
             reason="one or more post-passes failed — data kept for retry",
         )
+        # nexus-6m9zy.5 (#10): uploader_loop already called
+        # db.mark_completed() -- BEFORE any post-pass ran -- the moment
+        # chunks_uploaded caught up to chunks_created. Leaving the row at
+        # status='completed' here means the NEXT create_pipeline() call
+        # returns "skip" (status=='completed' is the ONLY skip
+        # condition), so pipeline_index_pdf never even reaches this
+        # function again — "kept for retry" data that can never actually
+        # be retried. Move the row to 'failed' (never clear_orphan_wal:
+        # that would delete the very chunk/page data this branch exists
+        # to preserve) so the next create_pipeline() call sees
+        # 'failed' -> 'resuming'. All three stages then short-circuit
+        # near-instantly on resume (everything is already uploaded), and
+        # execution reaches the post-passes again for a genuine retry.
+        try:
+            db.mark_failed(content_hash, error="post-pass failed — kept for retry")
+        except Exception:  # noqa: BLE001 — boundary catch: best-effort, mirrors the other terminal-state writes in this function
+            _log.warning(
+                "pipeline_terminal_mark_failed",
+                content_hash=content_hash,
+                reason="post-pass retry re-arm",
+                exc_info=True,
+            )
 
     # Catalog hook: register PDF in catalog (opt-in, graceful absence)
     # 2026-08-19: this used to read ``metadata["title"]`` / ``["author"]`` —

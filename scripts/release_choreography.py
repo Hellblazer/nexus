@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import pathlib
+import re
 import sys
 from collections.abc import Callable
 
@@ -61,6 +62,25 @@ EMIT_KEYS = frozenset({"exit_code", "message_key", "stream", "advisory", "adviso
 #: message so a summary can count it.
 ADVISORY_PASSED_BY_DEFAULT = "passed-by-default"
 
+_PLACEHOLDER_RE = re.compile(r"\[([\w.]+)\]")
+
+
+def _fill_placeholders(message: str, substitutions: dict[str, str]) -> str:
+    """Fill every ``[key]`` bracket in ``message`` from ``substitutions`` in
+    ONE pass over the ORIGINAL text; an unfilled bracket (no matching key)
+    is left verbatim.
+
+    Was successive ``str.replace`` calls, one per substitution -- so a
+    substitution VALUE that itself contained a LATER placeholder's bracket
+    text got rewritten on that later pass too ([26114] #9). A single
+    regex scan over the original string can substitute each occurrence at
+    most once, so a value containing ``[tag]``-looking text can never be
+    re-substituted by a later ``tag`` replacement.
+    """
+    if not substitutions:
+        return message
+    return _PLACEHOLDER_RE.sub(lambda m: substitutions.get(m.group(1), m.group(0)), message)
+
 
 class TableDefect(RuntimeError):
     """The table, the catalog, or a call site's guard is wrong -- a defect in
@@ -73,11 +93,23 @@ class TableDefect(RuntimeError):
 
 def run_gate(main: "Callable[[], int]") -> int:
     """Entry-point wrapper for both gated scripts: a :class:`TableDefect`
-    raised anywhere under ``main`` is printed and exits 2."""
+    raised anywhere under ``main`` is printed and exits 2.
+
+    Any OTHER exception (a catalog miss -- ``release_messages.get``'s
+    ``KeyError``; a row whose ``emit`` lacks ``exit_code`` or carries a
+    non-integer one; anything else escaping the table path) is caught here
+    too and also mapped to exit 2, naming the exception's type and message
+    -- never left to escape as a bare traceback and exit 1, the code this
+    module documents as BLOCKED ([26114] #2). A crash must never be
+    misread as a legitimate refusal, whichever exception carries it.
+    """
     try:
         return main()
     except TableDefect as exc:
         print(f"TABLE DEFECT (exit 2): {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 -- deliberate catch-all, see docstring
+        print(f"TABLE DEFECT (exit 2): unhandled {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
 CHOREOGRAPHY_TABLE_PATH = (
@@ -108,10 +140,29 @@ def resolve_choreography_row(function: str, guard: dict[str, str]) -> Row:
     The ONE place that completion rule lives: the parity harness resolves
     through this function too, never through a copy of it.
 
-    A refusal (no-match / ambiguous-match / unknown-value) is a
-    :class:`TableDefect`.
+    That completion rule is enforced here, not merely assumed ([26114]
+    #1): an undeclared or misspelt ``guard`` key (one with no
+    ``{function}.{key}`` dimension at all) is refused before resolving
+    anything, and once a row IS resolved, its own guard is checked against
+    the keys ``guard`` actually supplied -- a dimension the resolved row
+    guards on that this call omitted would otherwise have silently
+    defaulted to its domain's first member and resolved to whatever row
+    that default happened to hit (the three GuardChain ledger groups'
+    domain[0] is each an exit-0 "clean" leaf). Both are refused as a
+    :class:`TableDefect` naming the key, never silently defaulted.
+
+    A refusal from the table itself (no-match / ambiguous-match /
+    unknown-value) is also a :class:`TableDefect`.
     """
     table = choreography_table()
+    undeclared = sorted(key for key in guard if f"{function}.{key}" not in table.dimensions)
+    if undeclared:
+        raise TableDefect(
+            f"{function}: guard key(s) {undeclared} name no declared dimension "
+            f"(expected {function}.<key> in docs/tables/release-choreography.toml). "
+            "An undeclared or misspelt guard key would otherwise silently "
+            "default the real dimension it meant to a wrong value -- refused."
+        )
     assignment: dict[str, str] = {"function": function}
     for key, value in guard.items():
         assignment[f"{function}.{key}"] = value
@@ -125,7 +176,17 @@ def resolve_choreography_row(function: str, guard: dict[str, str]) -> Row:
             f"{dict(resolution.detail)}. This is a table-authoring defect "
             "(RDR-201), not a runtime condition for this script to handle."
         )
-    return resolution.row
+    row = resolution.row
+    supplied = {f"{function}.{key}" for key in guard}
+    relied_on_default = sorted(k for k in row.guard if k.startswith(f"{function}.") and k not in supplied)
+    if relied_on_default:
+        raise TableDefect(
+            f"{function}: resolved row {row.id!r} guards on {relied_on_default}, "
+            f"which this call's guard {guard!r} never supplied -- it silently "
+            "defaulted to that dimension's first domain value. Supply it "
+            "explicitly, or the resolution is not the row the caller intended."
+        )
+    return row
 
 
 def emit_choreography(
@@ -146,9 +207,7 @@ def emit_choreography(
     if unknown_keys:
         raise TableDefect(f"row {row.id!r}: unknown emit key(s) {sorted(unknown_keys)}; allowed: {sorted(EMIT_KEYS)}")
     exit_code = int(outcome["exit_code"])
-    message = _release_messages.get(row.id)
-    for key, value in (substitutions or {}).items():
-        message = message.replace(f"[{key}]", value)
+    message = _fill_placeholders(_release_messages.get(row.id), substitutions or {})
     # Stream: stderr for a refusal, stdout for a pass -- unless the row says
     # otherwise. Exactly one row does (main_dispatch::main_bare_tracker_opt_out,
     # an exit-0 NOTE the pre-table code sent to stderr): the P2.6 per-stream

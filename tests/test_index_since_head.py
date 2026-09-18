@@ -98,6 +98,36 @@ def test_delta_not_a_repo_falls_back_none(tmp_path):
     assert _git_changed_since(plain, "abc123") is None
 
 
+def test_delta_non_ascii_path_is_indexed(git_repo):
+    """nexus-6m9zy.4 (#5): without -z, `git diff --name-status` C-quotes
+    any path with a non-ASCII byte (e.g. 'docs/caf\\303\\251.md'), which
+    never equals str(path.relative_to(repo)) -- the added file is
+    silently treated as outside the delta, owners.head_hash still
+    advances, and no later --since-head run ever indexes it."""
+    base = _head(git_repo)
+    (git_repo / "docs" / "café.md").write_text("x\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-q", "-m", "unicode"], check=True)
+
+    changed, deleted = _git_changed_since(git_repo, base)
+    assert "docs/café.md" in changed, f"non-ASCII path missing from delta: {changed!r}"
+
+
+def test_delta_non_ascii_path_deletion_is_tombstoned(git_repo):
+    """The deleted-path half of the same bug: a removed non-ASCII path
+    must show up in *deleted*, not silently vanish from both lists."""
+    (git_repo / "docs" / "café.md").write_text("x\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-q", "-m", "add unicode"], check=True)
+    base = _head(git_repo)
+    (git_repo / "docs" / "café.md").unlink()
+    subprocess.run(["git", "-C", str(git_repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-q", "-m", "remove unicode"], check=True)
+
+    changed, deleted = _git_changed_since(git_repo, base)
+    assert "docs/café.md" in deleted, f"non-ASCII deletion missing from delta: {deleted!r}"
+
+
 # ── _run_index delta wiring (seam-level) ────────────────────────────────────
 
 

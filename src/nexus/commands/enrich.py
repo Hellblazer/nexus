@@ -22,6 +22,8 @@ from pathlib import Path
 import click
 import structlog
 
+from nexus.catalog.membership import unknown_collection_message
+
 _log = structlog.get_logger(__name__)
 
 
@@ -1264,28 +1266,6 @@ def enrich_aspects(
         )
 
 
-def _no_catalog_rows_message(collection: str, orphan_rows: int | None = None) -> str:
-    """The refusal both aspect verbs raise when the catalog holds no rows
-    for *collection* (nexus-ngpx0, nexus-3ygp3). Three causes share this
-    symptom: a bare subject name where the catalog keys on the physical
-    four-segment name, a collection never indexed, or one whose rows were
-    all tombstoned. The remedy line covers the first, which is the one
-    measured; the other two are visible from ``nx collection list`` and
-    ``nx catalog stats``.
-    """
-    msg = (
-        f"No catalog rows in '{collection}'. Pass the physical collection "
-        "name as `nx collection list` prints it; a collection that is "
-        "genuinely empty has nothing to audit or extract."
-    )
-    if orphan_rows:
-        msg += (
-            f" {orphan_rows} aspect row(s) exist under that exact name and "
-            "match no catalog entry."
-        )
-    return msg
-
-
 def _aspect_identity(entry) -> str:
     """The ONE key a catalog entry is matched to ``document_aspects.source_path`` by.
 
@@ -1358,7 +1338,7 @@ def _select_entries(
             } if re_extract else set()
         orphan_rows = len(existing_paths)
         if not entries:
-            raise click.ClickException(_no_catalog_rows_message(collection, orphan_rows))
+            raise click.ClickException(unknown_collection_message(collection, orphan_rows=orphan_rows, row_label="aspect row"))
 
         if re_extract:
             # "Ensure every entry is at >= version": rows below the threshold,
@@ -1392,7 +1372,7 @@ def _select_entries(
                 )
 
     if raw_empty:
-        raise click.ClickException(_no_catalog_rows_message(collection, orphan_rows))
+        raise click.ClickException(unknown_collection_message(collection, orphan_rows=orphan_rows, row_label="aspect row"))
     return entries
 
 
@@ -2468,7 +2448,7 @@ def aspects_list_cmd(
             # reported full coverage while 54 of 58 rows had no aspect
             # record). Refuse, and still say what the aspect side holds,
             # since every one of those rows is an orphan of this name.
-            raise click.ClickException(_no_catalog_rows_message(collection, len(existing)))
+            raise click.ClickException(unknown_collection_message(collection, orphan_rows=len(existing), row_label="aspect row"))
         # THE SAME KEY THE GAP-FILL USES (nexus-bocft). This read
         # `e.file_path and e.file_path not in existing`, which is not a gap
         # test -- it is a gap test over the subset of entries that happen to

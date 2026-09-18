@@ -90,6 +90,34 @@ def test_hybrid_score_weighted_sum():
     assert hybrid_score(0.8, 0.5) == pytest.approx(0.71, abs=1e-6)
 
 
+# ── nexus-yrc7q #8: a lone vector result must not score 0.0 ─────────────────
+#
+# min_max_normalize(v, [v]) is pinned at 1.0 ("trivially the maximum" — see
+# test_min_max_normalize's single-element case above; that contract stays).
+# The apply_hybrid_scoring caller inverts it for distances ("smaller =
+# better, so best match -> v_norm=1.0"): v_norm = 1.0 - min_max_normalize(...).
+# For the single-result window this double-negates: the "trivially the best"
+# 1.0 becomes v_norm = 1.0 - 1.0 = 0.0, the WORST possible score, while two
+# identical results (a non-trivial window) correctly score 1.0 each.
+
+def test_hybrid_scoring_single_vector_result_is_not_worst_possible():
+    r = _r(coll="docs__corpus", dist=0.05)
+    results = apply_hybrid_scoring([r], hybrid=False)
+    assert results[0].hybrid_score == pytest.approx(1.0, abs=1e-6)
+
+
+def test_hybrid_scoring_single_result_matches_two_identical_results():
+    # Two identical-distance results already score 1.0 each (min_max_normalize
+    # over a non-trivial window with equal values -> 0.0 -> inverted -> 1.0).
+    # A single result reaching the same distance must score the same, not 0.0.
+    one = apply_hybrid_scoring([_r(coll="docs__corpus", dist=0.05)], hybrid=False)
+    two = apply_hybrid_scoring(
+        [_r(coll="docs__corpus", dist=0.05), _r(coll="docs__other", dist=0.05)],
+        hybrid=False,
+    )
+    assert one[0].hybrid_score == pytest.approx(two[0].hybrid_score, abs=1e-6)
+
+
 # ── RDR-204 Phase 3 funnel (nexus-ft04v.21): the three `.collection
 # .startswith("code__")` sites now call `collection_content_type(...) ==
 # "code"` -- pin the has_code / frecency-eligibility decision across the
@@ -795,3 +823,18 @@ class TestTopicBoost:
 
         assert r1.distance == 0.0
         assert r2.distance == 0.0
+
+
+def test_a_lone_result_scores_as_the_best_of_its_window_whatever_its_distance():
+    """Min-max normalisation is relative: the best of any window scores 1.0
+    and absolute quality is not expressed (distance thresholds, where they
+    apply, run before scoring). A lone poor hit therefore scores exactly what
+    the better of two poor hits scores. Pinned at a BAD distance so the
+    property is stated, not implied (critique of 43ca11469: every other
+    singleton test used a good distance and could not tell this rule from an
+    absolute-distance one)."""
+    lone = apply_hybrid_scoring([_r(coll="docs__corpus", dist=0.95)], hybrid=False)
+    pair = apply_hybrid_scoring(
+        [_r(coll="docs__corpus", dist=0.95), _r(coll="docs__corpus", dist=0.99)], hybrid=False,
+    )
+    assert lone[0].hybrid_score == pytest.approx(max(r.hybrid_score for r in pair)) == pytest.approx(1.0)

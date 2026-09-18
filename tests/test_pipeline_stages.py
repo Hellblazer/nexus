@@ -262,6 +262,43 @@ class TestExtractorLoop:
             ret = extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
         assert ret.metadata["table_regions"] == [{"page": 2, "html": "<table/>"}]
 
+    def test_retry_after_caught_failure_reextracts_all_pages(self, db: HttpPipelineDB) -> None:
+        """nexus-6m9zy.1 (#1), superseded by nexus-33q80: pipeline_index_pdf's
+        caught-exception handler is mark_failed + clear_orphan_wal (see
+        :func:`extractor_loop`'s nexus-gl99l comment). Before nexus-33q80,
+        clear_orphan_wal wiped the pdf_pages WAL rows but never reset the
+        pages_extracted progress counter, so a naive retry could trust a
+        stale counter to skip pages the WAL no longer held. nexus-33q80
+        makes the engine zero pages_extracted (and chunks_uploaded) in the
+        SAME transaction as the wipe, so the counter is now accurate --
+        this test's own regression protection (the retry must still
+        re-extract every page, never skip any) stays exactly as strong
+        with an accurate counter as it did with the old defensive
+        WAL-count re-verification in extractor_loop's fast path.
+        """
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with patch(_P_EXT) as ME:
+            def fail_mid(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+                for i in range(10):
+                    if i == 6:
+                        raise RuntimeError("boom mid-extraction")
+                    on_page(i, f"Page {i} text.", {"page_number": i + 1, "text_length": 12})
+                return _er(10)
+            ME.return_value.extract.side_effect = fail_mid
+            with pytest.raises(RuntimeError):
+                extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
+        # pipeline_index_pdf's own caught-exception handling, replayed directly.
+        db.mark_failed("h1", error="boom")
+        db.clear_orphan_wal("h1")
+        state = db.get_pipeline_state("h1")
+        assert state["pages_extracted"] == 0  # nexus-33q80: reset in the same transaction as the wipe
+        assert db.read_pages("h1") == []  # and the WAL is gone too
+
+        with patch(_P_EXT) as ME:
+            ME.return_value.extract.side_effect = _fx(10)
+            extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
+        indices = sorted(r["page_index"] for r in db.read_pages("h1"))
+        assert indices == list(range(10)), f"retry skipped pages the cleared WAL no longer had: {indices}"
 
 
 class TestChunkerLoop:
@@ -499,6 +536,97 @@ class TestUploaderLoop:
         assert s["chunks_uploaded"] == 3 and s["status"] == "completed"
         t3.upsert_chunks_with_embeddings.assert_called_once()
 
+    def test_resume_adds_to_persisted_chunks_uploaded(self, db) -> None:
+        """nexus-6m9zy.1 (#3): a crash-resume must ADD this run's uploads
+        to the persisted chunks_uploaded count, not overwrite it.
+        read_uploadable_chunks never returns an already-uploaded row, so
+        if the running total restarts at 0 on every resume, chunks_uploaded
+        can never reach chunks_created again and the uploader polls
+        forever. Run on a thread with a bounded join so a regression
+        hangs the assertion, not the test process."""
+        _pop_chunks(db, "h1", 6)
+        db.mark_uploaded("h1", [0, 1, 2, 3])  # run 1 uploaded 4 of 6, then crashed
+        db.update_progress("h1", chunks_uploaded=4)
+        t3 = MagicMock()
+        cancel = threading.Event()
+        th = threading.Thread(
+            target=uploader_loop, args=("h1", db, t3, "docs__test", cancel), daemon=True,
+        )
+        th.start()
+        th.join(timeout=2.0)
+        completed_in_time = not th.is_alive()
+        cancel.set()
+        th.join(timeout=1.0)
+        assert completed_in_time, "uploader never reached completion: chunks_uploaded never caught up to chunks_created"
+        t3.upsert_chunks_with_embeddings.assert_called_once()
+        assert len(t3.upsert_chunks_with_embeddings.call_args[0][1]) == 2
+        s = db.get_pipeline_state("h1")
+        assert s["chunks_uploaded"] == 6, f"expected 4 already-uploaded + 2 this run, got {s['chunks_uploaded']}"
+        assert s["status"] == "completed"
+
+    def test_second_stage_failure_after_upload_progress_does_not_inflate_chunks_uploaded(self, db) -> None:
+        """nexus-6m9zy.1 (#3) ship-blocker fix (substantive-critic T2
+        nexus/critique-59c07fe5b-uploader-chunks-uploaded-inflation-
+        nexus-6m9zy [26147]): the first cut of this fix seeded
+        total_uploaded from the persisted chunks_uploaded unconditionally.
+        clear_orphan_wal wipes every pdf_chunks row -- uploaded=true rows
+        included -- but never resets that counter (same class as
+        pages_extracted, nexus-gl99l). When upload had already made real
+        progress before a LATER pipeline stage's failure triggered
+        mark_failed + clear_orphan_wal, the stale counter got added ON
+        TOP of the resumed run's genuine re-upload count: reproduced as a
+        persisted chunks_uploaded of 20 for a true 10-chunk document.
+
+        This calls pipeline_index_pdf's own first_exc handler
+        (_mark_failed_and_reset_wal: mark_failed + clear_orphan_wal + the
+        chunks_uploaded=0 reset) directly, since driving the real
+        three-stage concurrent orchestrator to fail deterministically
+        AFTER genuine upload progress is not reproducible without a race.
+        """
+        h = "hFail"
+        db.create_pipeline(h, "/fail.pdf", "docs__test")
+        for i in range(4):
+            db.write_chunk(h, i, f"chunk {i} text", f"{h}_{i}",
+                           metadata={"page": 1}, embedding=_fake_embedding(i))
+        db.update_progress(h, chunks_created=4, chunks_embedded=4)
+        # chunking_done is a real, already-set Event: the orchestrated branch
+        # every production caller takes (pipeline_index_pdf always passes one),
+        # not the chunking_done=None resume branch (critique of df5c4f035).
+        _done = threading.Event()
+        _done.set()
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done)
+        assert db.get_pipeline_state(h)["chunks_uploaded"] == 4
+
+        # A later stage now fails: pipeline_index_pdf's own first_exc
+        # handler, called, not replayed, so deleting the production reset
+        # turns this test red (review of df5c4f035).
+        from nexus.pipeline_stages import _mark_failed_and_reset_wal  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        _mark_failed_and_reset_wal(db, h, RuntimeError("boom"))
+
+        assert db.get_pipeline_state(h)["chunks_uploaded"] == 0, "the fix must reset the stale counter"
+        assert db.read_uploadable_chunks(h) == []
+
+        # Retry: the document re-chunks and re-embeds from scratch (WAL
+        # was wiped), this time producing 10 chunks in full.
+        assert db.create_pipeline(h, "/fail.pdf", "docs__test") == "resuming"
+        for i in range(10):
+            db.write_chunk(h, i, f"chunk {i} text v2", f"{h}_{i}",
+                           metadata={"page": 1}, embedding=_fake_embedding(i))
+        db.update_progress(h, chunks_created=10, chunks_embedded=10)
+        # chunking_done is a real, already-set Event: the orchestrated branch
+        # every production caller takes (pipeline_index_pdf always passes one),
+        # not the chunking_done=None resume branch (critique of df5c4f035).
+        _done = threading.Event()
+        _done.set()
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done)
+
+        final = db.get_pipeline_state(h)
+        assert final["chunks_uploaded"] == 10, (
+            f"expected the true chunk count (10), got {final['chunks_uploaded']} "
+            f"-- the stale pre-clear counter must not be double-counted"
+        )
+        assert final["status"] == "completed"
+
     def test_uploader_injects_global_chunk_index_into_hook_payload(self, db) -> None:
         """RDR-108 Phase 3 (nexus-bdag): the streaming uploader populates
         the per-batch hook chain with a metadata blob that carries the
@@ -581,6 +709,32 @@ class TestUploaderLoop:
         )
 
 
+class TestMarkFailedAndResetWal:
+    """nexus-33q80: the engine now zeroes chunks_uploaded/pages_extracted
+    inside clear_orphan_wal's own transaction, so the client's terminal
+    handler makes exactly ONE reset-relevant call sequence -- mark_failed
+    then clear_orphan_wal -- and never a separate update_progress call to
+    undo the wipe's staleness. Two client calls could never be atomic;
+    removing the second one removes the failure window entirely, not just
+    the class of failure that leaves a log line behind."""
+
+    def test_makes_exactly_mark_failed_then_clear_orphan_wal_no_separate_reset(self) -> None:
+        from nexus.pipeline_stages import _mark_failed_and_reset_wal
+
+        mock_db = MagicMock()
+        mock_db.mock_calls.clear()
+
+        _mark_failed_and_reset_wal(mock_db, "hX", RuntimeError("boom"))
+
+        assert [c[0] for c in mock_db.mock_calls] == ["mark_failed", "clear_orphan_wal"], (
+            f"expected exactly mark_failed then clear_orphan_wal; got {mock_db.mock_calls} "
+            f"-- a separate update_progress(chunks_uploaded=0) call is the nexus-6m9zy.1 "
+            f"non-atomicity nexus-33q80 removes"
+        )
+        mock_db.update_progress.assert_not_called()
+        mock_db.mark_failed.assert_called_once_with("hX", error="boom")
+        mock_db.clear_orphan_wal.assert_called_once_with("hX")
+
 
 class TestPipelineIndexPdf:
     def test_full_pipeline(self, db, mock_t3) -> None:
@@ -595,6 +749,62 @@ class TestPipelineIndexPdf:
         assert total == 2
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
+
+    def test_post_pass_failure_can_be_retried_not_skipped(self, db) -> None:
+        """nexus-6m9zy.5 (#10, no probe -- READ finding, test written from
+        the bead description). uploader_loop already calls
+        db.mark_completed() -- BEFORE any post-pass runs -- the moment
+        chunks_uploaded catches up with chunks_created. When a post-pass
+        (metadata enrichment here) then fails, delete_pipeline_data is
+        skipped so the checkpoint data is 'kept for retry', but the row's
+        status stayed 'completed' -- the ONLY status create_pipeline()
+        treats as skip -- so the very next `nx index pdf` of that file
+        returned 0 chunks immediately, on every subsequent run, until
+        --force. Drives a real pipeline row to that exact state via a
+        failing t3.update_chunks call, then asserts a second real
+        pipeline_index_pdf call re-enters (and this time succeeds)
+        instead of skipping.
+        """
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
+            {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
+        t3 = create_autospec(T3Database, instance=True)
+        t3.get_or_create_collection.return_value = mock_col
+        t3.update_chunks.side_effect = [Exception("quota exceeded"), None]
+
+        fr = _er(1)
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+
+        # Run 1: extraction/chunking/upload all succeed (the row is
+        # marked 'completed' by uploader_loop mid-run), then the
+        # enrichment post-pass fails.
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(1, fr)
+            MC.return_value.chunk.return_value = fc
+            first_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
+                                             t3, db=db, embed_fn=_embed, corpus="test")
+        assert first_total > 0  # chunks WERE uploaded -- only the post-pass failed
+
+        state = db.get_pipeline_state("abc123")
+        assert state is not None, "pipeline data must be kept for retry, not deleted"
+        assert state["status"] != "completed", (
+            f"row wrongly left 'completed' after a failed post-pass: {state['status']!r} "
+            f"-- the next create_pipeline() call would skip instead of retrying"
+        )
+
+        # Run 2: update_chunks now succeeds. Everything else is already
+        # uploaded, so all three stages short-circuit near-instantly on
+        # resume and execution reaches the post-pass again for a genuine
+        # retry -- this must NOT be a silent 0-chunk skip.
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(1, fr)
+            MC.return_value.chunk.return_value = fc
+            second_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
+                                              t3, db=db, embed_fn=_embed, corpus="test")
+        assert second_total > 0, "the retry silently skipped instead of re-entering the pipeline"
+        assert t3.update_chunks.call_count == 2, (
+            "the retry must actually re-attempt the failed post-pass, not just re-report the old total"
+        )
 
     def test_force_re_embed_true_forwards_true(self, db, mock_t3) -> None:
         """nexus-8143o: pipeline_index_pdf's own force_re_embed kwarg
@@ -1021,6 +1231,55 @@ class TestPipelineIndexPdf:
                 f"for doc_id={tumbler!r}"
             )
 
+    def test_keyboard_interrupt_stops_stages_and_does_not_complete(self, db, mock_t3) -> None:
+        """nexus-6m9zy.3 (#4): a KeyboardInterrupt landing in the
+        orchestrator's wait() call never set cancel -- the three stage
+        loops ran to completion via ThreadPoolExecutor.__exit__'s
+        shutdown(wait=True), and the uploader's own resume-completion
+        check marked the pipeline row 'completed' out from under the
+        interrupted caller. Every later run of that file then hit
+        create_pipeline's 'completed' -> skip path and reported 0 chunks
+        until --force.
+
+        Injects the interrupt by making the orchestrator's own `wait()`
+        call raise KeyboardInterrupt directly, rather than firing a real
+        signal/`_thread.interrupt_main()` on a timer: this environment's
+        `_thread.interrupt_main()` does not preempt a thread blocked in
+        an indefinite `concurrent.futures.wait()` -- the pending
+        interrupt is only observed once that call returns on its own
+        (confirmed empirically: an `Event.wait()` with nothing ever
+        setting it is never interrupted by `_thread.interrupt_main()` on
+        a timer). Mocking `wait()` itself is deterministic and, since the
+        three stage futures are real and still running when it fires,
+        exercises exactly the code path a genuinely-preempted wait()
+        would take.
+        """
+        pages_done: list[int] = []
+
+        def slow_extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+            for i in range(8):
+                time.sleep(0.05)
+                on_page(i, f"page {i} text.", {"page_number": i + 1, "text_length": 12})
+                pages_done.append(i)
+            return _er(8)
+
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+
+        with pytest.raises(KeyboardInterrupt):
+            with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+                 patch("nexus.pipeline_stages.wait", side_effect=KeyboardInterrupt):
+                ME.return_value.extract.side_effect = slow_extract
+                MC.return_value.chunk.return_value = fc
+                pipeline_index_pdf(Path("/sigint.pdf"), "hK", "docs__test",
+                                   mock_t3, db=db, embed_fn=_embed, corpus="test")
+
+        assert len(pages_done) < 8, "extraction ran to completion despite the interrupt -- cancel was never set"
+        state = db.get_pipeline_state("hK")
+        assert state is not None
+        assert state["status"] != "completed", f"pipeline row wrongly marked completed: {state['status']!r}"
+        assert db.create_pipeline("hK", "/sigint.pdf", "docs__test") != "skip", (
+            "a later run must not silently skip the file"
+        )
 
 
 class TestPipelineIndexPdfDryRun:

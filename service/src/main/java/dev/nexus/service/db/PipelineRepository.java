@@ -358,15 +358,35 @@ public final class PipelineRepository {
     // ── cleanup ──────────────────────────────────────────────────────────────
 
     /** Delete WAL page/chunk rows, preserving the pipeline row's audit trail
-     *  (the nexus-2fyb orphan-page replay fix, mirrored). */
+     *  (the nexus-2fyb orphan-page replay fix, mirrored).
+     *
+     * <p>nexus-33q80: zeroes {@code chunks_uploaded} and {@code
+     * pages_extracted} on the pipeline row in the SAME transaction as the
+     * WAL wipe. Before this, the client made a SECOND call
+     * ({@code update_progress(chunks_uploaded=0)}) right after
+     * {@code clear_orphan_wal} to undo exactly this staleness; if the wipe
+     * landed and that second call independently failed, the counter
+     * survived a wiped WAL and a resume seeded the uploader from it,
+     * eventually refusing completion with {@code IndexRunVerifyRefused}.
+     * Two client calls can never be atomic; doing it here removes the
+     * failure window entirely (the client's own reset call, and its
+     * {@code pipeline_chunks_uploaded_reset_failed_after_wal_wipe} log
+     * event, are now dead code and removed). */
     public void clearOrphanWal(String tenant, String contentHash) {
         requireNonBlank(contentHash, "content_hash");
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         tenantScope.withTenant(tenant, ctx -> {
             ctx.deleteFrom(PDF_PAGES)
                .where(PDF_PAGES.TENANT_ID.eq(tenant).and(PDF_PAGES.CONTENT_HASH.eq(contentHash)))
                .execute();
             ctx.deleteFrom(PDF_CHUNKS)
                .where(PDF_CHUNKS.TENANT_ID.eq(tenant).and(PDF_CHUNKS.CONTENT_HASH.eq(contentHash)))
+               .execute();
+            ctx.update(PDF_PIPELINE)
+               .set(PDF_PIPELINE.CHUNKS_UPLOADED, 0)
+               .set(PDF_PIPELINE.PAGES_EXTRACTED, 0)
+               .set(PDF_PIPELINE.UPDATED_AT, now)
+               .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.CONTENT_HASH.eq(contentHash)))
                .execute();
             return null;
         });

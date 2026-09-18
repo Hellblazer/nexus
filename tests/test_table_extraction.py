@@ -122,9 +122,21 @@ def test_table_regions_contain_required_fields(tmp_path):
 # ── PDFChunker: chunk_type tagging ───────────────────────────────────────────
 
 def test_chunker_tags_table_chunks():
-    """Chunks on a table page get chunk_type='table_page'."""
+    """Chunks on a table page get chunk_type='table_page'.
+
+    page1_text is 300 chars (not 500, nexus-yrc7q #9 follow-up): with
+    chunk_chars=600 the default 20% overlap makes the continuation chunk
+    start at char 480; a 500-char page1 (boundary at 501) put that start
+    BEFORE the page-2 boundary, so no non-duplicate chunk ever legitimately
+    landed on page 2 -- this test's own table_chunks assertion was passing
+    only because the now-fixed duplicate-tail-chunk bug (#9) emitted an
+    EXTRA chunk starting at char 881 (past the page-2 boundary) purely as
+    an artifact of the bug, not because this fixture's boundaries were
+    designed to produce one. 300 chars (boundary at 301) puts the real
+    continuation chunk's start (480) inside page 2, independent of #9.
+    """
     # Page 2 is a table page; build text that fills pages 1 and 2
-    page1_text = "A" * 500
+    page1_text = "A" * 300
     page2_text = "B" * 500
     text = page1_text + "\n" + page2_text
 

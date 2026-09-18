@@ -1021,13 +1021,16 @@ def test_new_doctor_rows_absent_from_fresh_install_mvv_allowlist() -> None:
     assert "tuples.queue_depth" not in source
 
 
-# ── row 3: _check_tuple_channel_delivery (bead nexus-rplay.13) ──────────────
+# ── row 3: _check_tuple_channel_delivery (bead nexus-rplay.13, rewritten
+# under RDR-213 -- the proof gate and claim-at-delivery facts are gone;
+# `alive`/`last_wake`/`announced`/`pending`/`oldest_pending_age_s` replace
+# `proof`/`unacked`/`released`) ─────────────────────────────────────────
 
 
 def _write_status(config_dir: Path, session_id: str, **fields) -> None:
     from nexus.mcp.channel import write_channel_status
 
-    base = {"proof": "none", "alive": False, "last_wake": None, "unacked": 0, "released": 0}
+    base = {"alive": False, "last_wake": None, "announced": 0, "pending": 0, "oldest_pending_age_s": None}
     base.update(fields)
     write_channel_status(config_dir, session_id, base)
 
@@ -1048,48 +1051,75 @@ class TestCheckTupleChannelDelivery:
         assert "informational" in r.detail
         assert "no channel-waiter status recorded" in r.detail
 
-    def test_proof_none_is_informational_never_a_warn(self, monkeypatch, tmp_path: Path) -> None:
-        """Mutation-check target: flipping this branch's `ok=True` to
-        `ok=False` (or adding `warn=True`) must fail this test -- Sam's
-        decision makes the channel opt-in, so an un-proven channel is the
-        ordinary case, never a defect."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        _write_status(tmp_path, "sess-1", proof="none", alive=True)
-        r = h._check_tuple_channel_delivery()[0]
-        assert r.ok is True
-        assert r.warn is False
-        assert "capability declared" in r.detail
-        assert "not proven live" in r.detail
-        assert "drain hook" in r.detail
-
-    def test_proof_none_mentions_released_count(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        _write_status(tmp_path, "sess-1", proof="none", released=3)
-        r = h._check_tuple_channel_delivery()[0]
-        assert r.ok is True
-        assert "3 message(s)" in r.detail
-
-    def test_argv_proof_alive_fresh_wake_is_ok(self, monkeypatch, tmp_path: Path) -> None:
+    def test_alive_fresh_wake_is_ok(self, monkeypatch, tmp_path: Path) -> None:
+        """RDR-213 deleted the proof gate: there is no "declared but
+        unproven" state left -- an alive waiter with a fresh wake is
+        simply OK."""
         monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
-        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=now, unacked=1, released=0)
+        _write_status(tmp_path, "sess-1", alive=True, last_wake=now, announced=2, pending=1)
         r = h._check_tuple_channel_delivery()[0]
         assert r.ok is True
         assert r.warn is False
-        assert "proof=argv" in r.detail
-        assert "unacked=1" in r.detail
+        assert "waiter alive" in r.detail
+        assert "announced=2" in r.detail
+        assert "pending=1" in r.detail
 
-    def test_probe_proof_alive_fresh_wake_is_ok_and_names_probe(self, monkeypatch, tmp_path: Path) -> None:
+    def test_alive_nothing_announced_is_ok_the_flagless_launch_residue(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """bead nexus-gomuo.1: the only observable residue this unit test
+        can prove for "session launched without the channel flag" (RDR-213
+        Test Plan's ninth scenario). With the argv gate deleted, the
+        waiter cannot itself tell a flagless launch apart from a live one
+        that simply has no mail -- `send_channel_notification` sends
+        unconditionally once the stdio write stream is up, and a flagless
+        Claude Code drops the push silently. What IS observable here is
+        the doctor row's state for a waiter that is alive and has ticked
+        (`last_wake` fresh) but has announced nothing (`announced=0,
+        pending=0`): informational, ok=True, never a WARN, because a
+        session with no mail waiting looks identical whether or not the
+        channel is heard. The host-layer half -- that a flagless real
+        session gets no push at all and the drain hook renders at the
+        next prompt -- belongs to the MVV (nexus-gomuo.3 part 2), not a
+        unit test: asserting "nothing is pushed" here would either
+        re-introduce the gate RDR-213 deletes or pass vacuously."""
         monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
-        _write_status(tmp_path, "sess-1", proof="probe", alive=True, last_wake=now)
+        _write_status(tmp_path, "sess-1", alive=True, last_wake=now, announced=0, pending=0)
         r = h._check_tuple_channel_delivery()[0]
         assert r.ok is True
-        assert "proof=probe" in r.detail
+        assert r.warn is False
+        assert "waiter alive" in r.detail
+        assert "announced=0" in r.detail
+        assert "pending=0" in r.detail
+
+    def test_pending_oldest_age_stated_when_pending(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(
+            tmp_path, "sess-1", alive=True, last_wake=now, announced=1, pending=1,
+            oldest_pending_age_s=42.0,
+        )
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert "pending=1" in r.detail
+        assert "42s" in r.detail
+
+    def test_zero_pending_never_states_an_age(self, monkeypatch, tmp_path: Path) -> None:
+        """Mutation-check target: rendering an age when `pending` is 0
+        (or `oldest_pending_age_s` is `None`) must fail this test."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=True, last_wake=now, announced=3, pending=0)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert "pending=0" in r.detail
+        assert "oldest" not in r.detail
 
     def test_not_alive_is_warn(self, monkeypatch, tmp_path: Path) -> None:
         """Mutation-check target: dropping the `not alive` half of the
@@ -1097,7 +1127,7 @@ class TestCheckTupleChannelDelivery:
         monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
-        _write_status(tmp_path, "sess-1", proof="argv", alive=False, last_wake=now)
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now)
         r = h._check_tuple_channel_delivery()[0]
         assert r.ok is False and r.warn is True
         assert "not alive" in r.detail
@@ -1113,7 +1143,7 @@ class TestCheckTupleChannelDelivery:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
         old = (fixed_now - timedelta(seconds=h._TUPLE_CHANNEL_DELIVERY_STALE_S)).isoformat()
-        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=old)
+        _write_status(tmp_path, "sess-1", alive=True, last_wake=old)
         r = h._check_tuple_channel_delivery(now=fixed_now)[0]
         assert r.ok is True, r.detail
 
@@ -1122,23 +1152,58 @@ class TestCheckTupleChannelDelivery:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
         old = (fixed_now - timedelta(seconds=h._TUPLE_CHANNEL_DELIVERY_STALE_S + 1)).isoformat()
-        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=old)
+        _write_status(tmp_path, "sess-1", alive=True, last_wake=old)
         r = h._check_tuple_channel_delivery(now=fixed_now)[0]
         assert r.ok is False and r.warn is True
         assert "stale" in r.detail
         assert r.fix_suggestions
 
-    def test_released_count_stated_plainly_never_its_own_warn(self, monkeypatch, tmp_path: Path) -> None:
-        """RDR-211: whether `released` GREW since the last `nx doctor` run
-        is not something a stateless row can know, so a nonzero count is
-        stated plainly and never itself a reason to warn."""
+    def test_not_alive_no_stopped_reason_suggests_mcp_restart(self, monkeypatch, tmp_path: Path) -> None:
+        """A dead waiter with no known cause (a crash, or an ordinary
+        `cancel()` teardown never wrote a fresh record) gets the generic
+        `/mcp` restart suggestion -- restarting is the only lever when
+        there is no more specific cause to name."""
         monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
-        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=now, released=5)
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason=None)
         r = h._check_tuple_channel_delivery()[0]
-        assert r.ok is True
-        assert "released=5" in r.detail
+        assert r.ok is False and r.warn is True
+        assert any("/mcp" in s for s in r.fix_suggestions)
+        assert not any("current engine" in s for s in r.fix_suggestions)
+
+    def test_no_announce_support_names_the_cause_and_suggests_rebuilding_the_engine(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """bead nexus-vsipz review round: `stopped_reason="no_announce_
+        support"` means the LOCAL ENGINE predates announce mode -- the
+        detail must name that (not the generic "not alive"), and the fix
+        must point at rebuilding/reinstalling the engine, never `/mcp`
+        restart (a restart alone would hit the identical stale engine)."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "announce_count" in r.detail
+        assert any("current engine" in s for s in r.fix_suggestions)
+        assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
+
+    def test_no_wait_support_names_the_cause_and_suggests_rebuilding_the_engine(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """Same class as `no_announce_support` above, for an engine that
+        predates `/wait` itself (a bare 404)."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_wait_support")
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "/wait" in r.detail
+        assert any("current engine" in s for s in r.fix_suggestions)
+        assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
 
 
 def test_rdr211_channel_delivery_row_is_registered_in_run_health_checks() -> None:

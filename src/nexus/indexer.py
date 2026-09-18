@@ -203,8 +203,15 @@ def _git_changed_since(
     """
     try:
         proc = subprocess.run(
+            # nexus-6m9zy.4 (#5): -z switches git to NUL-delimited,
+            # UNQUOTED output. Without it, any path containing a
+            # non-ASCII byte comes back C-quoted (e.g.
+            # '"docs/caf\303\251.md"'), which never equals
+            # str(path.relative_to(repo)) anywhere this delta is
+            # consumed — the file is silently treated as outside the
+            # delta forever (owners.head_hash still advances past it).
             ["git", "-C", str(repo), "diff", "--name-status",
-             "--find-renames", "--no-color", base],
+             "--find-renames", "--no-color", "-z", base],
             capture_output=True, text=True, timeout=60,
         )
     except Exception:  # noqa: BLE001 — git unavailable/hung: full-index fallback
@@ -217,26 +224,49 @@ def _git_changed_since(
             fallback="full index",
         )
         return None
+    # With -z, each record's fields are individually NUL-terminated
+    # instead of the line being TAB-separated with a newline terminator:
+    # "<status>\0<path>\0" for A/M/T/D, "<status>\0<src>\0<dst>\0" for
+    # R/C. Splitting the whole stream on NUL and walking it token-by-
+    # token (rather than splitting on newlines first) is required
+    # because a renamed/copied record's own separator IS a NUL, not a
+    # newline.
     changed: list[str] = []
     deleted: list[str] = []
-    for line in proc.stdout.splitlines():
-        if not line.strip():
+    tokens = proc.stdout.split("\0")
+    i = 0
+    n = len(tokens)
+    while i < n:
+        status = tokens[i]
+        if not status:  # trailing NUL produces one empty token at the end
+            i += 1
             continue
-        parts = line.split("\t")
-        status = parts[0]
-        if status.startswith(("R", "C")) and len(parts) == 3:
+        if status.startswith(("R", "C")):
+            if i + 2 >= n:
+                _log.info("since_head_unparsed_status", line=status[:120])
+                return None
+            src, dst = tokens[i + 1], tokens[i + 2]
             if status.startswith("R"):
-                deleted.append(parts[1])
-            changed.append(parts[2])
-        elif status[:1] in ("A", "M", "T") and len(parts) == 2:
-            changed.append(parts[1])
-        elif status[:1] == "D" and len(parts) == 2:
-            deleted.append(parts[1])
+                deleted.append(src)
+            changed.append(dst)
+            i += 3
+        elif status[:1] in ("A", "M", "T"):
+            if i + 1 >= n:
+                _log.info("since_head_unparsed_status", line=status[:120])
+                return None
+            changed.append(tokens[i + 1])
+            i += 2
+        elif status[:1] == "D":
+            if i + 1 >= n:
+                _log.info("since_head_unparsed_status", line=status[:120])
+                return None
+            deleted.append(tokens[i + 1])
+            i += 2
         elif status[:1] == "U":
             # merge conflict in progress — indexing mid-merge is undefined
             return None
         else:
-            _log.info("since_head_unparsed_status", line=line[:120])
+            _log.info("since_head_unparsed_status", line=status[:120])
             return None
     return changed, deleted
 
@@ -2202,18 +2232,33 @@ def index_repository(
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         _sweep_stale_locks(lock_path.parent)
         _clear_stale_lock(lock_path)
-        lock_fd = open(lock_path, "w")  # noqa: SIM115  (must stay open while locked)
+        # nexus-6m9zy.2 (#2): open without O_TRUNC (and without O_APPEND —
+        # "a+" would fight the post-lock seek(0)+truncate() below on some
+        # platforms). A losing --on-locked=skip contender must be able to
+        # open the SAME inode the live holder has flocked without
+        # mutating it — the old `open(path, "w")` truncated and wrote the
+        # caller's PID unconditionally, BEFORE the flock outcome was
+        # known, so a loser left its own (soon-dead) PID in the file the
+        # winner still held; the next arrival's stale-lock sweep then saw
+        # ESRCH on that dead PID and unlinked the live holder's lock.
+        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        lock_fd = os.fdopen(raw_fd, "r+")  # noqa: SIM115  (must stay open while locked)
         try:
+            lock_file(lock_fd, blocking=(on_locked == "wait"))
+        except BlockingIOError:
+            # on_locked == "skip" and another process holds the lock.
+            # Nothing has been written to the file — close and leave the
+            # holder's content exactly as it was.
+            lock_fd.close()
+            return {}
+        # We now hold the exclusive flock: safe to stamp our own PID.
+        try:
+            lock_fd.seek(0)
+            lock_fd.truncate()
             lock_fd.write(str(os.getpid()))
             lock_fd.flush()
         except OSError:
             pass  # PID write is best-effort; lock still works without it
-        try:
-            lock_file(lock_fd, blocking=(on_locked == "wait"))
-        except BlockingIOError:
-            # on_locked == "skip" and another process holds the lock
-            lock_fd.close()
-            return {}
 
     if hooks is None:
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -2256,7 +2301,33 @@ def index_repository(
                 stats: dict[str, int] = {}
             else:
                 stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
-                _set_owner_head_hash(repo, _current_head(repo))
+                # nexus-6m9zy.6 (#12): owners.head_hash is the BASE the
+                # NEXT --since-head run diffs from. Advancing it past a
+                # commit that changed a file this run deferred (transient
+                # upsert 5xx/timeout, self-heals via staleness retry --
+                # but only if the file is still IN the delta) or
+                # permanently failed (chunk-batch flush surviving
+                # bisect-retry) means the next --since-head git diff
+                # never offers that file again, and its staleness cache
+                # is empty too (nothing marked it stale this run), so it
+                # stays unindexed until a full (non---since-head) run.
+                # Skip the advance whenever either count is nonzero --
+                # the run itself already completed and returned its
+                # stats; only the incremental bookkeeping waits for a
+                # clean run.
+                _deferred_or_failed_files = (
+                    stats.get("chunk_flush_failed_files", 0)
+                    + stats.get("transient_upsert_deferred_files", 0)
+                )
+                if _deferred_or_failed_files:
+                    _log.info(
+                        "since_head_base_not_advanced",
+                        repo=str(repo),
+                        chunk_flush_failed_files=stats.get("chunk_flush_failed_files", 0),
+                        transient_upsert_deferred_files=stats.get("transient_upsert_deferred_files", 0),
+                    )
+                else:
+                    _set_owner_head_hash(repo, _current_head(repo))
             return stats
         finally:
             if lock_fd is not None:
@@ -2517,6 +2588,38 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 #: cancels-all contract turned one file's 429 into a full-run abort).
 _TRANSIENT_UPSERT_CODES = frozenset({429, 502, 503, 504})
 
+# nexus-6m9zy.6 (#12): a file _contain_transient_upsert defers this run
+# never wrote a chunk, so it is invisible to `_files_written`/
+# `files_changed`, and to every OTHER failure-class counter in
+# `_run_index`'s returned stats dict (chunk_flush_failed_files,
+# skipped_unextractable_files, pdf_quality_gate_failed all track
+# different failure shapes). Without a dedicated count, `--since-head`'s
+# base-advance had no way to know a file was deferred this run — same
+# reset-at-top/read-at-bottom/thread-safe-increment shape as doc_indexer's
+# fence_begin_failure_count (run_file_loop drives this concurrently).
+_transient_upsert_deferred_lock = threading.Lock()
+_transient_upsert_deferred_count = 0
+
+
+def reset_transient_upsert_deferred_count() -> None:
+    """Zero the per-run transient-upsert-deferred counter. Call once at
+    the top of a run so the end-of-run count covers exactly THIS run."""
+    global _transient_upsert_deferred_count
+    with _transient_upsert_deferred_lock:
+        _transient_upsert_deferred_count = 0
+
+
+def transient_upsert_deferred_count() -> int:
+    """Snapshot of this run's transient-upsert-deferred file count so far."""
+    with _transient_upsert_deferred_lock:
+        return _transient_upsert_deferred_count
+
+
+def _record_transient_upsert_deferred(n: int = 1) -> None:
+    global _transient_upsert_deferred_count
+    with _transient_upsert_deferred_lock:
+        _transient_upsert_deferred_count += n
+
 
 def _contain_extraction_quality_gate(
     fn: "Callable[[], int]", file: "Path", failed: list[str],
@@ -2579,6 +2682,7 @@ def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
             "index_file_transient_upsert_deferred",
             file=str(file), code="upsert-timeout", error=str(exc),
         )
+        _record_transient_upsert_deferred()
         return 0
     except VectorServiceError as exc:
         if exc.code in _TRANSIENT_UPSERT_CODES:
@@ -2586,6 +2690,7 @@ def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
                 "index_file_transient_upsert_deferred",
                 file=str(file), code=exc.code, error=str(exc),
             )
+            _record_transient_upsert_deferred()
             return 0
         raise
 
@@ -4270,6 +4375,10 @@ def _run_index(
     from nexus.doc_indexer import reset_fence_begin_failure_count  # noqa: PLC0415 — deferred to avoid circular import (doc_indexer)
 
     reset_fence_begin_failure_count()
+    # nexus-6m9zy.6 (#12): same process-lifetime-global rationale — zero
+    # the transient-upsert-deferred counter so index_repository's
+    # --since-head base-advance decision covers exactly THIS run.
+    reset_transient_upsert_deferred_count()
 
     # RDR-103 Phase 3a: registry value preserves the legacy name when
     # the repo was added before the migration; fallback queries the
@@ -6276,6 +6385,18 @@ def _run_index(
         # exit after the rest of the run completes, so a total-write-path
         # failure is never reported as a clean "Done." at rc=0.
         "chunk_flush_failed_files": len(_batch_failures),
+        # nexus-6m9zy.6 (#12): count of files a per-file upsert deferred
+        # this run on a transient 5xx/timeout (_contain_transient_upsert).
+        # Zero chunks from these files landed either, same as
+        # chunk_flush_failed_files, but they self-heal via the next
+        # run's staleness retry rather than staying permanently failed --
+        # UNLESS --since-head's base has already advanced past the
+        # commit that changed them, in which case the next run's git
+        # diff never re-offers them and the staleness cache is empty for
+        # them too. index_repository reads this alongside
+        # chunk_flush_failed_files to decide whether it is safe to
+        # advance owners.head_hash after this run.
+        "transient_upsert_deferred_files": transient_upsert_deferred_count(),
         # nexus-deyd5: files skipped this run because they could not be
         # extracted (nexus.errors.UnextractableContentError, caught by
         # run_file_loop). Deliberately NOT wired into a non-zero exit on

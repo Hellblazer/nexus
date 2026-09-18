@@ -205,7 +205,7 @@
   },
   "check_pin_currency::pin_currency_current_below_floor": {
     "err": "",
-    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\n"
+    "out": "engine pin is ahead of publication: REQUIRED_ENGINE_VERSION v<FLOOR> names no published engine-service tag -- the newest published is v<FLOOR-1>. Not a failure (the paired-release choreography cuts the engine tag before bumping this pin), but the pin is NOT \"current\" against any published tag yet.\n"
   },
   "check_pin_currency::pin_currency_stale_pin": {
     "err": "ENGINE PIN CHECK FAILED: engine-service-v<FLOOR+1> is published but this release pins v<FLOOR>. Local-mode installs receive ONLY the pinned identity, so every engine fix between v<FLOOR> and v<FLOOR+1> reaches nobody.\nRemedy: bump REQUIRED_ENGINE_VERSION (src/nexus/engine_version.py) to that tag. That single edit also moves PINNED_SERVICE_TAG, which is DERIVED from it. If the tag is not deployed to the managed service yet, get conexus to deploy it FIRST -- bumping ahead of the deploy makes cloud clients refuse the managed service as below-identity (GH #1402 inverted).\n",

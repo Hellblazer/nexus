@@ -69,10 +69,15 @@ class TuplesBaselineSchemaLiquibaseTest {
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String LAST_CHANGESET_ID = "tuples-001-3";
 
+    // nexus-vsipz (RDR-213 engine half): announced_at/announce_count added by
+    // tuples-006-announce-columns.xml -- this pin runs against the fully-
+    // migrated cluster (see class javadoc), so it tracks every column ever
+    // added to nexus.tuples, not just tuples-001-baseline.xml's own three.
     private static final Set<String> TUPLES_EXPECTED_COLUMNS = Set.of(
         "id", "tenant_id", "subspace", "template", "keys", "dims", "body",
         "claim_state", "claimant", "claim_id", "lease_until", "attempts",
-        "consumed_at", "consumed_by", "expires_at", "created_at");
+        "consumed_at", "consumed_by", "expires_at", "created_at",
+        "announced_at", "announce_count");
 
     private static final Set<String> TUPLE_CLAIM_LOG_EXPECTED_COLUMNS = Set.of(
         "log_id", "tenant_id", "subspace", "template", "tuple_id",

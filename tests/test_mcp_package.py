@@ -60,10 +60,8 @@ def test_core_registered_tools():
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
         "tuple_renew", "tuple_release", "tuple_registry", "tuple_list", "tuple_stats",
         "tuple_subscribe", "tuple_unsubscribe", "tuple_subscriptions",
-        # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): the channel gate's
-        # probe fallback -- calling it is itself the signal the waiter's
-        # gate is checking for.
-        "tuple_channel_probe",
+        # RDR-213 deleted `tuple_channel_probe`: the waiter no longer
+        # gates a claim on any proof, so there is nothing left to confirm.
         # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time name
         # resolution over the RDR-208 session directory.
         "mailbox_send",
@@ -151,7 +149,7 @@ def test_no_registered_mcp_tool_is_backed_by_a_private_function():
     (as _file_path_matches did) is exactly the failure mode this catches,
     mechanically, for every current and future tool on both servers — not
     just the one instance found by hand. Non-vacuity: the tool counts are
-    asserted well above the current registry (47 core / 10 catalog) so a
+    asserted well above the current registry (52 core / 10 catalog) so a
     collection regression (e.g. an import error silently emptying the
     registry) fails loud rather than passing on an empty set.
     """

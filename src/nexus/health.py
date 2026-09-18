@@ -1525,6 +1525,16 @@ def _probe_mcp_server(
     unaffected.
     """
     try:
+        # RDR-213 MVV run 2 (T2 nexus_rdr/213-mvv-run2-2026-09-17, finding
+        # D1): this probe child inherits the REAL session's environment,
+        # session id included, so without an explicit signal it would
+        # start its OWN channel waiter under that SAME session id and its
+        # teardown would overwrite the live waiter's channel-status
+        # record with alive=false the instant this probe process exits.
+        # NX_MCP_PROBE=1 tells `nexus.mcp.core._start_channel_waiter` (the
+        # one call site the waiter starts from) to skip entirely — a
+        # signal checked once there, never a heuristic guessed from
+        # process lifetime or argv.
         proc = subprocess.Popen(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
             [binary_path],
             stdin=subprocess.PIPE,
@@ -1532,6 +1542,7 @@ def _probe_mcp_server(
             stderr=subprocess.PIPE,
             text=True,
             errors="replace",  # non-UTF8 crash output (e.g. a mangled traceback) must not raise UnicodeDecodeError out of a health check
+            env={**os.environ, "NX_MCP_PROBE": "1"},
         )
     except OSError as exc:
         return False, f"failed to spawn {binary_path}: {exc}"
@@ -3580,12 +3591,34 @@ def _run_psql(
     sql: str,
     *,
     psql_runner=None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a single-statement psql query and return the CompletedProcess.
 
     ``-t -A`` gives unaligned, tuple-only output suitable for line-by-line
     parsing. ``-v ON_ERROR_STOP=1`` makes psql exit non-zero on SQL errors.
     ``psql_runner`` is injectable for unit tests (avoids shelling out).
+
+    ``timeout`` (nexus-cd1k0.19 review round 2, finding 5) defaults to
+    ``None`` — UNBOUNDED, preserving the exact pre-existing behavior for
+    every caller in this module (the various health/doctor checks and the
+    changelog-lock release helpers in storage_service_daemon.py) — NONE
+    of them pass a timeout today, and none of them run on the
+    stop-request-sensitive readiness-wait hot path, so their blocking
+    semantics are intentionally left unchanged here.
+    ``storage_service_daemon.StorageServiceSupervisor._migration_pg_probe``
+    is the ONE caller that now passes a bounded timeout: it is the
+    readiness monitor's pg_probe, invoked from inside the per-tick
+    readiness wait during MIGRATING — the exact phase the whole readiness
+    module exists to survive (20+ minutes) — and an unresponsive local
+    psql there previously made ``stop_check`` invisible for as long as
+    this call blocked, since nothing else in that tick's path could
+    notice a pending stop request until ``_run_psql`` returned. A raised
+    ``subprocess.TimeoutExpired`` propagates to the caller exactly like
+    any other psql failure (both existing callers already wrap this in a
+    broad ``except`` and degrade to their own "unavailable" verdict, so a
+    timeout is not a NEW failure mode to handle, only a NEW way to reach
+    an already-handled one).
     """
     cmd = [
         str(psql_bin),
@@ -3611,7 +3644,9 @@ def _run_psql(
 
     env = _bundle_lib_env(cmd, None)
     env["PGPASSWORD"] = password
-    return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+    return subprocess.run(
+        cmd, capture_output=True, text=True, check=False, env=env, timeout=timeout,
+    )
 
 
 def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResult]:
@@ -5817,8 +5852,9 @@ _TUPLE_CHANNEL_DELIVERY_LABEL = "tuples.channel_delivery"
 
 
 def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[HealthResult]:
-    """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13): the
-    `claude/channel` push-delivery waiter's own status for THIS session.
+    """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13), rewritten
+    under RDR-213: the `claude/channel` push-delivery waiter's own status
+    for THIS session.
 
     `nx doctor` runs in the CLI process; the waiter runs in the session's
     `nx-mcp` process. The two never share memory, so this row reads the
@@ -5826,12 +5862,11 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     session id (`nexus.mcp.channel.write_channel_status`) via
     `nexus.mcp.channel.read_channel_status` -- no engine call, no network
     round trip, purely local files. A record's mere presence is how this
-    row infers "the capability is declared": only the waiter that ran
-    `run_stdio_with_channel`'s declaration ever writes one, so a session
-    with no record never declared the capability at all, as far as this
-    row can observe -- it makes no independent claim about the handshake,
-    which Phase 1 Step 0 found carries no channel marker either way (T2
-    `nexus_rdr/211-spike-4-channel-2026-09-17`).
+    row infers "the waiter has run here": only a waiter that completed at
+    least one wake ever writes one, so a session with no record has no
+    live waiter, as far as this row can observe -- RDR-213 deleted the
+    proof gate entirely, so there is no "declared but unproven" state left
+    to report; the waiter starts parking at lifespan start unconditionally.
 
     Not applicable (informational, ok=True, never a WARN, never
     allowlisted in the fresh-install MVV -- the nexus-7zhag doctrine) in
@@ -5841,26 +5876,27 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     a session whose MCP server predates this feature or has not
     completed its first tick yet).
 
-    Declared but never proven live (`proof == "none"`) is ALSO
-    informational, ok=True, never a WARN -- Sam's decision makes the
-    channel opt-in, so a session launched without `--channels
-    server:nexus` and never calling `tuple_channel_probe` is the ordinary
-    case, not a defect; the drain hook is the floor either way.
+    The waiter alive with a fresh `last_wake` (within
+    :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is OK, reporting wake
+    age, `announced` (the cumulative count of distinct rows ever pushed),
+    `pending` (0 or 1 per subscribed mailbox: a reference sent and not yet superseded) and
+    `oldest_pending_age_s` when `pending` is nonzero. A session launched
+    without a channel flag (`--channels plugin:conexus@nexus-plugins` or
+    `--dangerously-load-development-channels server:nexus`) reports the
+    same shape as any other idle waiter -- RDR-213 deleted the proof gate,
+    so there is no separate "declared but not proven" state to report;
+    the drain hook is the floor either way.
 
-    Proof `"argv"` or `"probe"` and the waiter alive with a fresh
-    `last_wake` (within :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is
-    OK, reporting proof, wake age, `unacked` (the live back-pressure
-    gauge, 0 or 1) and `released` (the cumulative count of claims
-    returned to the floor after exhausting resends -- mentioned plainly
-    whenever it is nonzero, in every branch, never itself a reason to
-    warn: whether it GREW since the last `nx doctor` run is not something
-    a stateless row can know).
-
-    Proof present but the waiter is not alive, or its last wake is
-    stale, is a WARN: push delivery for this session is not actually
-    happening even though the gate once proved it live, and the fix is
-    to restart the MCP server. The drain hook still delivers at the next
-    prompt either way, so this is a soft warning, never fatal.
+    The waiter not alive, or its last wake stale, is a WARN: push
+    delivery for this session is not actually happening. `stopped_reason`
+    (bead nexus-vsipz review round) names WHY when the waiter itself
+    knows: `"no_announce_support"` or `"no_wait_support"` both mean the
+    LOCAL ENGINE predates a feature this client's waiter depends on, so
+    the fix is to rebuild/reinstall the engine, not to restart the MCP
+    server (a restart would hit the identical stale engine); any other
+    not-alive or stale case has no known cause and the fix stays
+    `/mcp` restart. The drain hook still delivers at the next prompt
+    either way, so this is a soft warning, never fatal.
 
     *now* is a test-only seam (defaults to `datetime.now(UTC)`) so the
     staleness boundary can be pinned exactly rather than raced against
@@ -5878,7 +5914,7 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
             label=label, ok=True,
             detail=(
                 "informational — no active session resolvable; nothing to check "
-                "for the RDR-211 channel-delivery waiter"
+                "for the RDR-213 channel-delivery waiter"
             ),
         )]
 
@@ -5891,31 +5927,20 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
             label=label, ok=True,
             detail=(
                 "informational — no channel-waiter status recorded for this "
-                "session; the nexus MCP server has not run the RDR-211 waiter "
-                "here (a CLI-only session, a virgin box, or an MCP server that "
+                "session; the nexus MCP server has not run the waiter here "
+                "(a CLI-only session, a virgin box, or an MCP server that "
                 "predates this feature or has not completed its first wait "
                 "yet). Mail still arrives via the drain hook at the next prompt."
             ),
         )]
 
-    proof = status.get("proof", "none")
     alive = bool(status.get("alive", False))
+    stopped_reason = status.get("stopped_reason")
     last_wake = status.get("last_wake")
-    unacked = status.get("unacked", 0)
-    released = status.get("released", 0)
+    announced = status.get("announced", 0)
+    pending = status.get("pending", 0)
+    oldest_pending_age_s = status.get("oldest_pending_age_s")
 
-    if proof == "none":
-        detail = (
-            "capability declared; channel not proven live for this session "
-            "(no `--channels server:nexus` on the claude command line and no "
-            "probe reply); mail arrives at the next prompt through the drain "
-            "hook"
-        )
-        if released:
-            detail += f"; {released} message(s) previously released to the floor after exhausting resends"
-        return [HealthResult(label=label, ok=True, detail=detail)]
-
-    # proof is "argv" or "probe" past this point.
     age_s: float | None = None
     if isinstance(last_wake, str) and last_wake:
         try:
@@ -5925,25 +5950,57 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
 
     stale = age_s is not None and age_s > _TUPLE_CHANNEL_DELIVERY_STALE_S
     wake_desc = f"{age_s:.0f}s ago" if age_s is not None else "not recorded yet"
+    pending_desc = f"pending={pending}"
+    if pending and isinstance(oldest_pending_age_s, (int, float)):
+        pending_desc += f" (oldest {oldest_pending_age_s:.0f}s)"
 
     if not alive or stale:
-        reason = "the waiter is not alive" if not alive else (
-            f"the last wake was {wake_desc}, stale beyond {_TUPLE_CHANNEL_DELIVERY_STALE_S:.0f}s"
-        )
+        # bead nexus-vsipz review round: a dead waiter names WHY it stopped
+        # when it knows -- `stopped_reason` is set only by the two loud stops
+        # (`_stop_no_wait_support`/`_stop_no_announce_support`), never by an
+        # ordinary `cancel()` teardown or a crash, so a `None` here means
+        # "not alive, and no known cause" -- restarting is the only lever.
+        # Both named causes are an ENGINE that predates a feature this
+        # client's waiter now depends on; `/mcp` restart alone cannot fix
+        # that, since the new process would hit the identical stale engine.
+        # Deliberately never spells the engine build script's own filename
+        # (a hyphenated "gate", "jar" pair) as one literal token here:
+        # tests/daemon/test_rdr161_native_only_gate.py's inverse-grep for
+        # JVM-launch identifiers would flag it outside its own sanctioned
+        # module, and this is a doctor-row fix suggestion, not a launch
+        # path -- see AGENTS.md's Engine-service release section for the
+        # exact script name and invocation.
+        rebuild_fix = [
+            "rebuild the local engine's cached build (see AGENTS.md's Engine-service "
+            "release section for the exact script), or nx daemon service install a "
+            "current engine",
+        ]
+        restart_fix = ["Restart the MCP server: /mcp"]
+        if not alive and stopped_reason == "no_announce_support":
+            reason = "the waiter stopped: the local engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
+            fix_suggestions = rebuild_fix
+        elif not alive and stopped_reason == "no_wait_support":
+            reason = "the waiter stopped: the local engine predates /wait entirely (a bare 404)"
+            fix_suggestions = rebuild_fix
+        elif not alive:
+            reason = "the waiter is not alive"
+            fix_suggestions = restart_fix
+        else:
+            reason = f"the last wake was {wake_desc}, stale beyond {_TUPLE_CHANNEL_DELIVERY_STALE_S:.0f}s"
+            fix_suggestions = restart_fix
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"proof={proof}; {reason} for this session; last wake "
-                f"{wake_desc}; unacked={unacked}, released={released}"
+                f"{reason} for this session; last wake {wake_desc}; "
+                f"announced={announced}, {pending_desc}"
             ),
-            fix_suggestions=["Restart the MCP server: /mcp"],
+            fix_suggestions=fix_suggestions,
         )]
 
     return [HealthResult(
         label=label, ok=True,
         detail=(
-            f"channel live (proof={proof}); waiter alive; last wake {wake_desc}; "
-            f"unacked={unacked}, released={released}"
+            f"waiter alive; last wake {wake_desc}; announced={announced}, {pending_desc}"
         ),
     )]
 

@@ -100,6 +100,12 @@ in `src/nexus/daemon/AGENTS.md` ("no daemon child is ever silent"). **Status
 (2026-06-24): still open** — `commands/mineru.py:199-200` still spawns with both
 streams `DEVNULL`.
 
+> **Update (2026-09-17, nexus-r8643): fixed.** `spawn_server_process`
+> (`src/nexus/_mineru_spawn.py:176-180`) now routes stdout+stderr through
+> `nexus.logging_setup.open_child_log_or_devnull("mineru_server")` instead of
+> `DEVNULL`, citing this gap by name in its own comment. Historical claim
+> above left as written per the RDR body's own record-keeping rule.
+
 #### Gap 5: Single-page subprocess OOM (`-9`) fails the whole document instead of degrading (was `nexus-m26oq`)
 
 Root-caused 2026-05-30 (arXiv:2605.13379, page 31): a single page reproducibly

@@ -1491,9 +1491,20 @@ def _restart_and_verify(
     except Exception as exc:  # noqa: BLE001 — no process table: degrade to the old choreography
         _log.warning("restart_stack_snapshot_failed", error=str(exc))
         before = []
+    # nexus-cd1k0.19 review round 2, finding 4: pass --config-dir
+    # EXPLICITLY on both calls, resolved absolute, rather than letting
+    # each bare "nx daemon service stop"/"start" subprocess re-derive its
+    # own config dir from its (inherited) environment. Without this, a
+    # caller running under a non-default NEXUS_CONFIG_DIR (an e2e sandbox
+    # script) spawns a supervisor whose own argv would otherwise still be
+    # explicit via ensure_storage_supervisor's own --config-dir -- but
+    # THIS process's own stop/start invocations, and the process-table
+    # sweep they trigger, must target the SAME resolved dir this function
+    # was itself called with, not whatever a bare "nx" re-derives.
+    resolved_config_dir = str(config_dir.resolve())
     try:
         stop = subprocess.run(
-            ["nx", "daemon", "service", "stop"],
+            ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
             capture_output=True, text=True, timeout=60,
         )
         try:
@@ -1502,7 +1513,7 @@ def _restart_and_verify(
             _log.warning("restart_stack_sweep_failed", error=str(exc))
             sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
         start = subprocess.run(
-            ["nx", "daemon", "service", "start"],
+            ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir],
             capture_output=True, text=True, timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
@@ -2231,6 +2242,50 @@ def _probe_service_autostart_drift() -> tuple[Path, str, str] | None:
     return dest, existing, rendered
 
 
+def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
+    """Restart the storage service directly after
+    :func:`converge_service_autostart_unit` has already stopped it for a
+    unit reinstall (nexus-cd1k0.3 follow-up, found by the 7.52.0 release
+    battery's ``--package-upgrade`` leg on a Linux container with no
+    ``systemctl``).
+
+    By the time any caller below reaches this point, the service is
+    ALREADY down (the ``stop`` a few lines up succeeded) and the
+    reinstall attempt did not itself bring it back — either because
+    ``install_autostart`` raised (any reason) or because
+    ``uninstall_autostart`` reported a non-clean removal. Every one of
+    those exit paths must restart the service before returning, or a box
+    that hits ANY failure past the ``stop`` — not only the
+    missing-service-manager case a real activation failure surfaces most
+    often — is left with the engine down and nothing to bring it back
+    (the defect this closes: a NEEDS HUMAN line was returned with the
+    engine still stopped and no restart attempted at all).
+
+    Uses the SAME explicit ``--config-dir <resolved path>`` argv shape
+    ``_restart_and_verify`` and ``ensure_storage_supervisor`` already use
+    (nexus-cd1k0.3/.19) rather than a bare ``nx daemon service start``
+    that would re-derive its config dir from environment.
+
+    Returns ``(True, "<clause describing the restart>")`` on a clean
+    restart, ``(False, "<clause describing the failure>")`` otherwise —
+    never raises, so every caller can splice the clause into its own
+    NOTE/NEEDS HUMAN line unconditionally.
+    """
+    resolved_config_dir = str(config_dir.resolve())
+    argv = ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir]
+    try:
+        start = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except Exception as exc:  # noqa: BLE001 — best-effort restart; surfaced in the returned clause
+        return False, f"restarting the service also raised {exc}"
+    if start.returncode != 0:
+        detail = (start.stderr or start.stdout or "").strip()
+        return False, (
+            f"the direct restart also failed (`{' '.join(argv)}` exited "
+            f"{start.returncode}: {detail})"
+        )
+    return True, f"restarted the service directly (`{' '.join(argv)}`)"
+
+
 def converge_service_autostart_unit(
     config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
 ) -> list[str]:
@@ -2339,14 +2394,55 @@ def converge_service_autostart_unit(
             installer.UninstallStatus.REMOVED,
             installer.UninstallStatus.NOT_INSTALLED,
         ):
+            _restarted, restart_clause = _restart_service_after_unit_reinstall(config_dir)
             return [
                 f"NEEDS HUMAN: {note}, but removing the stale unit reported "
-                f"{uninstall_result.status} -- {manual_fallback}"
+                f"{uninstall_result.status} -- {restart_clause} -- {manual_fallback}"
             ]
-        install_result = installer.install_autostart(tier="service")
+        try:
+            install_result = installer.install_autostart(tier="service")
+        except installer.ActivationError as exc:
+            # nexus-cd1k0.3 follow-up: install_autostart WRITES the unit
+            # file before it ever attempts activation, so a
+            # FileNotFoundError cause here means the file already carries
+            # the current template -- only the OS-level activation
+            # (launchctl/systemctl) could not run because the service
+            # manager itself is absent (a container, some Linux setups).
+            # That is not a human-needed failure: restart the service
+            # directly and report a NOTE, same as a clean convergence,
+            # rather than stranding the engine down over a box shape the
+            # installer itself already distinguishes as non-fatal under
+            # force=True. Any OTHER ActivationError (a service manager
+            # THAT EXISTS but exited non-zero -- permissions, a broken
+            # user session, etc.) re-raises to the blanket handler below,
+            # which is still a genuine NEEDS HUMAN: activation failing
+            # with the manager PRESENT means something is actually wrong,
+            # not merely absent.
+            if isinstance(exc.__cause__, FileNotFoundError):
+                restarted, restart_clause = _restart_service_after_unit_reinstall(config_dir)
+                if restarted:
+                    return [
+                        f"NOTE: {note}. Reinstalled the unit at {uninstall_result.dest} "
+                        f"with the current template, but activation could not run "
+                        f"({exc}) -- {restart_clause}. Once a service manager "
+                        "(launchctl/systemctl) is available on this box, run `nx "
+                        "daemon service install --autostart --force` to also "
+                        "register it for autostart."
+                    ]
+                return [
+                    f"NEEDS HUMAN: {note}. Reinstalled the unit at "
+                    f"{uninstall_result.dest} with the current template, but "
+                    f"activation could not run ({exc}), and {restart_clause} -- "
+                    f"{manual_fallback}"
+                ]
+            raise
     except Exception as exc:  # noqa: BLE001 — never let convergence crash the finish pass
         _log.warning("service_autostart_convergence_failed", error=str(exc))
-        return [f"NEEDS HUMAN: {note}, and converging it raised {exc} -- {manual_fallback}"]
+        _restarted, restart_clause = _restart_service_after_unit_reinstall(config_dir)
+        return [
+            f"NEEDS HUMAN: {note}, and converging it raised {exc} -- "
+            f"{restart_clause} -- {manual_fallback}"
+        ]
 
     # The freshly-activated unit does not publish its lease instantly; bound
     # the wait the same way _restart_and_verify does rather than declaring

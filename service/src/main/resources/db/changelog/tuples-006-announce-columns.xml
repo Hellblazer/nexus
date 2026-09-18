@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-vsipz (RDR-213 engine half, Sam's decision 2026-09-18: "land
+    the cursor now, engine fix on the next cut" — T2 nexus_rdr/213-decision-
+    announcements-rate-limited-not-ack-gated-2026-09-17; analysis
+    nexus_rdr/213-waiter-deep-analysis-2026-09-17 (2/2) section D).
+
+    THE DEFECT this column pair fixes: the client-side cursor
+    (nexus-gomuo.1, cherry-picked onto this same tree) advances past every
+    row it announces by (created_at, id). out() stamps created_at with
+    Postgres now(), the TRANSACTION START time (TupleRepository.java
+    writeOut, ~line 549). Transaction A starts at t1, transaction B starts
+    at t2 > t1 and commits FIRST; a reader's cursor advances to B's
+    (created_at, id); A commits afterward with created_at t1, strictly
+    BEHIND the already-issued cursor, and is never returned to that reader.
+    Measured 2026-09-17 (tests/test_mcp_channel.py::
+    test_stop_rule_two_hundred_rows_two_concurrent_writers_no_row_ever_lost_to_the_cursor):
+    2 failures in 9 runs under heavy concurrent box load.
+
+    THE FIX: move the position that gates re-delivery from the CLIENT (a
+    cursor over created_at/id, which a late commit can appear behind) to
+    the ROW itself (announced_at/announce_count, stamped in the same
+    statement that selects the row for announcement). A query that always
+    re-scans the full claimable-and-due set, oldest first, cannot skip a
+    row that commits late — there is no cursor position for it to land
+    behind. TupleRepository.queryOnce's new announce-mode branch (bead
+    nexus-vsipz Java half) is the consumer; docs/wire-contract-pending.md
+    carries the wire-ledger entry.
+
+    Two nullable/defaulted columns, no backfill:
+      - announced_at TIMESTAMPTZ NULL: NULL means "never announced" for
+        every existing row (there is nothing to migrate — no prior column
+        held this fact, so NULL is not a stand-in for a lost value, it is
+        the true previous state of every row that predates this bead).
+      - announce_count INTEGER NOT NULL DEFAULT 0: 0 for every existing row,
+        for the identical reason — no row has ever been announced under
+        this mechanism, so 0 is not a computed backfill, it is the correct
+        starting count.
+    Both are ADD COLUMN only (no UPDATE, no ALTER ... TYPE ... USING) —
+    scripts/data_effect_lint.py's own scope excludes ADD COLUMN from the
+    DATA EFFECT disclosure requirement, and this changeset's comment says
+    so explicitly per that module's convention, matching catalog-022-owner-
+    soft-delete.xml's ADD COLUMN shape (also additive, also no DATA EFFECT
+    line). DDL, not DML — nexus.tuples carries FORCE ROW LEVEL SECURITY
+    (tuples-001-1), but ALTER TABLE ADD COLUMN is unaffected by RLS (RLS
+    gates row DATA access, not schema changes), so no toggle is needed here
+    (contrast tuples-004-1's UPDATE, which does need one).
+
+    Placed after tuples-005-subspace-and-claim-log-indexes.xml (current
+    tail of the tuples-00N family) and before the grants-nexus-svc.xml
+    runAlways block, matching the established late-append convention
+    (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: announced_at / announce_count on nexus.tuples ──────── -->
+    <changeSet id="tuples-006-1" author="nexus-vsipz">
+        <comment>Adds nexus.tuples.announced_at TIMESTAMPTZ NULL and announce_count INTEGER NOT NULL DEFAULT 0 -- additive columns only (ADD COLUMN, no data mutation of any existing row's value), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. NULL/0 are the true prior state of every existing row (this mechanism has never run before), not a computed backfill. Consumed by TupleRepository's new announce-mode wait/rd query branch (bead nexus-vsipz): a mailbox WaitSpec carrying an announce field returns only claimable rows due for a first-or-repeat announcement and stamps both columns, in the same statement, on every row it returns.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples
+    ADD COLUMN announced_at TIMESTAMPTZ NULL,
+    ADD COLUMN announce_count INTEGER NOT NULL DEFAULT 0;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.tuples DROP COLUMN IF EXISTS announced_at;
+                ALTER TABLE nexus.tuples DROP COLUMN IF EXISTS announce_count;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

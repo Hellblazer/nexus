@@ -408,6 +408,14 @@ def _body_to_tuple_row(body: dict[str, Any]) -> TupleRow:
         consumed_by=body.get("consumed_by"),
         expires_at=body.get("expires_at"),
         created_at=body.get("created_at"),
+        announced_at=body.get("announced_at"),
+        # nexus-vsipz (RDR-213 engine half): NO default here, deliberately --
+        # `.get("announce_count")` (not `.get("announce_count", 0)`) so an
+        # engine that never renders the key at all (one predating this bead)
+        # comes through as `None`, distinguishable from a real engine's
+        # genuine 0 (a row nothing has ever announced). See `TupleRow
+        # .announce_count`'s own docstring for why that distinction matters.
+        announce_count=body.get("announce_count"),
     )
 
 
@@ -845,6 +853,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             since_body = _since_payload(spec.since)
             if since_body is not None:
                 entry["since"] = since_body
+            if spec.announce is not None:
+                entry["announce"] = {"interval_s": spec.announce.interval_s, "max": spec.announce.max}
             payload_specs.append(entry)
         payload: dict[str, Any] = {"subspaces": payload_specs}
         if timeout_s:

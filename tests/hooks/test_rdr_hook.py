@@ -356,6 +356,66 @@ def test_slow_t3_answer_falls_back_to_the_listing_within_the_hook_budget(
     assert time.monotonic() - started < 1.5
 
 
+def test_slow_t3_worker_cannot_hold_the_process_past_the_deadline(
+    rdr_hook_module, monkeypatch,
+) -> None:
+    """nexus-r8643 (intrastate review [26115] #3): the sibling test above
+    pins that a slow T3 answer falls back to the listing WITHIN budget, but
+    not that the process can actually exit once it does. The pre-fix code
+    handed the T3 call to a ``ThreadPoolExecutor`` and called
+    ``pool.shutdown(wait=False)`` on timeout -- that neither cancels nor
+    interrupts the already-running worker, and ``ThreadPoolExecutor``
+    threads are NON-daemon (``concurrent.futures`` installs an ``atexit``
+    handler that joins every active worker before interpreter exit), so a
+    genuinely hung T3 client left a thread the SessionStart hook process
+    could not exit past -- it would outlive ``_T3_DEADLINE_S`` and get
+    killed by the harness's 10s cap instead of falling back cleanly.
+
+    This pins the property that closes the gap: whatever thread a timed-out
+    call leaves running is a DAEMON thread (``threading.Thread(daemon=True)``
+    has no such atexit handler), so a real process hosting this hook can
+    exit immediately after the fallback runs, with the stalled T3 call
+    still in flight in the background."""
+    import threading
+    import time
+
+    mod = rdr_hook_module
+    monkeypatch.setattr(mod, "_T3_DEADLINE_S", 0.2)
+
+    release = threading.Event()
+
+    class _HangingT3:
+        def collection_exists(self, name):
+            # Never returns within the hook's own budget -- release() lets
+            # it finish at teardown so it does not leak across tests.
+            release.wait(timeout=5)
+            return True
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _HangingT3())
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Done())
+
+    before = {t.ident for t in threading.enumerate()}
+    started = time.monotonic()
+    try:
+        assert mod._collection_exists("rdr__1-1__voyage-context-3__v1") is False
+        assert time.monotonic() - started < 1.0
+
+        leftover = [
+            t for t in threading.enumerate()
+            if t.ident not in before and t.is_alive()
+        ]
+        assert leftover, "expected the still-running T3 worker thread to be observable"
+        assert all(t.daemon for t in leftover), (
+            "a NON-daemon thread survived the T3 timeout -- it would block "
+            f"process exit past the hook's deadline: {leftover}"
+        )
+    finally:
+        release.set()
+
+
 def test_resolution_failure_reaches_stderr_without_structlog(rdr_hook_module, monkeypatch, capsys):
     """nexus-4ti7e: the failure line must not depend on structlog, which the
     interpreter that ran this hook on 2026-09-08 did not have either."""
@@ -493,3 +553,40 @@ def test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout(tmp_path) -> No
         assert ln.strip().startswith(("(resolution failed:", "Run:", "RDR-")), (
             f"unexpected stdout line, possible leak: {ln!r}"
         )
+
+
+def test_status_loader_keeps_rdr_prefixed_titles_and_counts_each_rdr_once(rdr_hook_module, monkeypatch) -> None:
+    """Intrastate [26115] #4 (nexus-nc08w.1): ``if "-" in title: continue``
+    dropped every ``RDR-NNN``-titled status record, undercounting and
+    mis-flagging an accepted RDR as draft for the rdr-fix line. Keeping
+    them naively double-counts an RDR recorded under both shapes, so the
+    loader keys on the bare number and counts each RDR once."""
+    mod = rdr_hook_module
+    rows = [
+        {"title": "RDR-105", "content": "status: accepted\n"},
+        {"title": "097", "content": "status: draft\n"},
+        {"title": "97", "content": "status: draft\n"},
+        {"title": "RDR-105-gate-latest", "content": "commit: abc1234\n"},
+        {"title": "204-research-1", "content": "status: draft\n"},
+    ]
+    monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+    statuses = mod._load_all_t2_statuses("nexus")
+    assert statuses == {"105": "accepted", "97": "draft"}
+    assert mod._rdr_status_counts("nexus", statuses) == {"accepted": 1, "draft": 1}
+
+
+@pytest.mark.parametrize("order", ["bare-first", "prefixed-first"])
+def test_status_loader_leaves_out_an_rdr_whose_title_shapes_disagree(rdr_hook_module, monkeypatch, order) -> None:
+    """Two shapes with two statuses are the census's `ambiguous` case; the
+    loader picks neither, in either row order (critique of nexus-nc08w.1:
+    a bare-wins rule was a silent choice between ledgers, nexus-e19sa)."""
+    mod = rdr_hook_module
+    rows = [
+        {"title": "42", "content": "status: accepted\n"},
+        {"title": "RDR-42", "content": "status: draft\n"},
+        {"title": "7", "content": "status: closed\n"},
+    ]
+    if order == "prefixed-first":
+        rows[0], rows[1] = rows[1], rows[0]
+    monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+    assert mod._load_all_t2_statuses("nexus") == {"7": "closed"}

@@ -502,7 +502,10 @@ Every step below is **required**. Missing any one of them has caused problems in
    git push origin vX.Y.Z
    ```
    The `release.yml` workflow:
-   - Runs tests on Python 3.12 and 3.13
+   - Verifies the tagged commit already carries a green required check
+     (evidence read from GitHub's check-run record — it does NOT re-run the
+     test suite; the release PR's own CI already tested this tree, and CI
+     Cost Discipline bans testing the same tree twice)
    - Verifies the tag matches `pyproject.toml` version
    - Extracts release notes from the matching `## [X.Y.Z]` section in `CHANGELOG.md`
    - Builds wheel + sdist

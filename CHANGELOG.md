@@ -6,6 +6,159 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.52.0] - 2026-09-18
+
+Paired engine: engine-service-v0.1.128 (`REQUIRED_ENGINE_VERSION` (0, 1, 128);
+was engine-service-v0.1.127), tagged 2026-09-17 on 95b69ef60 (GitHub release
+draft pending asset promotion at release-prep time), to deploy before this
+client tag on the additive branch of the paired-release choreography. That
+tag carries two changes: the engine half of nexus-vsipz below (changeset
+`tuples-006-announce-columns`, two added columns, no data effect) and
+nexus-33q80 (`clearOrphanWal` transaction scoping, no changeset). Every wire
+change is additive, so an older client on the new engine is unaffected, and
+the client detects an older engine and stops loud.
+
+### Fixed
+- **Security: a search query is passed to ripgrep as a pattern, never as an
+  option (commit 2c2b1b045, RDR-214 research).** `nx search --hybrid` and
+  the MCP `search` tool put the query into `rg`'s argv as a bare positional,
+  so a query of `--pre=<program>` made `rg` run that program, and a query
+  could originate in text an agent read. Ordinary code queries starting with
+  a dash (`-> None`, `--verbose`) were rejected as unknown flags and the
+  hybrid leg silently returned nothing. The query is now bound with `-e`
+  and option parsing ends with `--` before the path.
+- **A byte-identical file at a second path is indexed, not skipped (bead
+  nexus-o19i0).** The incremental-skip lookup matched on `content_hash`
+  collection-wide, so a second copy of the same bytes was registered with no
+  manifest: present in the catalog, absent from every search. `index_markdown`
+  and `index_pdf` never skip a Document the call itself minted.
+- **A retried PDF pipeline run no longer trips the completion fence on a
+  stale counter (beads nexus-6m9zy.1, nexus-33q80).** After a caught
+  mid-extraction failure the WAL was wiped but `pages_extracted` and
+  `chunks_uploaded` survived, so a resume silently dropped pages below the
+  stale count or refused completion with `IndexRunVerifyRefused`. The
+  engine's `clear_wal` now zeroes both counters in the same transaction as
+  the wipe, and a resume adds to the persisted upload count instead of
+  restarting it at zero.
+- **Interrupting or failing a PDF pipeline run leaves it retryable (beads
+  nexus-6m9zy.3, nexus-6m9zy.5).** Ctrl-C during the orchestrator's wait
+  never set cancel, so the stages ran to completion and marked the row
+  `completed`; a post-pass failure preserved the checkpoint but left the row
+  `completed` too. Either way the next `nx index pdf` returned 0 chunks until
+  `--force`. Both now leave the row `failed`, and the next run resumes.
+- **`--since-head` no longer loses files (beads nexus-6m9zy.4,
+  nexus-6m9zy.6).** The git diff omitted `-z`, so a non-ASCII path was
+  C-quoted and never matched the delta; the owner's head hash advanced
+  unconditionally, so a file deferred on a transient upsert timeout or
+  permanently failed dropped out of every later delta. Paths are read
+  NUL-delimited, and the base advances only when nothing was deferred or
+  failed (`transient_upsert_deferred_files` is reported in the run stats).
+- **A skipped index contender can no longer corrupt a live holder's lock
+  (bead nexus-6m9zy.2).** The lock prologue wrote its PID before `flock`,
+  so a `--on-locked=skip` post-commit hook left a dead PID in a file the
+  running indexer still held, and the next arrival swept it and started a
+  second indexer on the same repo. The PID is stamped only after the flock
+  succeeds.
+- **An unknown collection name is refused instead of reported clean (bead
+  nexus-v1zdu).** `nx catalog audit-membership`, `nx catalog verify
+  --collection` and the `nx t3 gc` orphan guard treated a typo the same as
+  an empty collection and exited 0; `nx t3 gc --no-dry-run --yes` could
+  delete real content with the manifest-less-note and RUNFENCE protections
+  finding nothing to protect. A shared helper distinguishes unknown from
+  registered-but-empty; `--allow-empty-manifest-set` remains the explicit
+  override for a fully orphaned collection.
+- **A lone search result scores as the best match, not the worst (bead
+  nexus-yrc7q).** Min-max normalisation of a single-element window was
+  double-negated to a hybrid score of 0.0. Same bead: the PDF chunker no
+  longer emits a duplicate tail chunk at end of file (one extra T3 row per
+  document and a redundant fragment hit), and C# chunks get their class
+  and method context (the `c_sharp` to `csharp` tree-sitter alias was
+  missing at one call site, so every C# chunk logged a warning and carried
+  none).
+- **Multibyte lines are pre-split on byte length, not character count
+  (bead nexus-thrh9).** A CJK line under the character cap but over the
+  byte cap passed through unsplit and was truncated by the byte-cap
+  fallback (904 characters lost on a 5,000-character line).
+- **Storage-service lifecycle (epic nexus-cd1k0: beads .1, .2, .3, .17, .18,
+  .19).** `nx daemon service stop` ends clean: the supervisor reaps its
+  engine child with a real `wait` instead of polling a zombie, so a stop no
+  longer burns the grace window, gets SIGKILLed, and comes back under the
+  unit's restart policy. A fenced supervisor (a successor took the lease)
+  stops its own engine and exits 0 instead of running a second engine
+  against the same Postgres forever. The stack matcher sees a unit-launched
+  supervisor (no `--config-dir` on its argv) and config directories with
+  spaces, so `stop` and `nx upgrade` find the whole stack. A lease whose
+  owner died hard is healed on the unit's foreground start path, not only
+  on the CLI spawn path, instead of the stack staying down until the TTL
+  aged it out. An exception escaping the heartbeat loop tears the engine
+  child down before it re-raises. A SIGTERM during a slow start (a long
+  migration) is noticed within one readiness tick, kills the not-yet-ready
+  engine and exits 0, instead of leaving an orphan for a restarted
+  supervisor to double. Stop-path lease elections are bounded, and the
+  migration readiness probe times out at 3 s.
+- **`nx doctor`'s MCP entry-point probe no longer starts a channel waiter
+  or overwrites the live session's channel status (bead nexus-gomuo.1).**
+  The probe's short-lived `nx-mcp` child inherited the session id, started
+  its own waiter, and wrote `alive=false` for the real session on exit.
+- **`nx rdr` verbs (beads nexus-my04w, nexus-u1jxt.1, nexus-u1jxt.5,
+  nexus-nc08w.1 to .6, nexus-5r0ho, nexus-8tpw3).** Every preamble takes
+  its RDR id from a positional token, so digits inside a `--reason` or an
+  evidence value never select another RDR (`rdr-close` had picked rdr-042
+  from a path in the reason). An RDR number resolves to the RDR, never a
+  companion note that sorts first (49, 79, 105 and 152 were affected).
+  `set-status` mirrors a flip to T2 on the re-run after a first run with T2
+  unreachable, writes the stated reason as `close_reason`, and its README
+  rewrite targets the Status column by header instead of destroying a
+  title whose first word is a status. `rdr-research` and `rdr-show` list
+  findings for RDRs below 100 (the listing key was unpadded). Frontmatter
+  splits on fence lines only. `phase-review-gate` enumerates the whole
+  section (a `# comment` inside a fenced block had ended it early; on the
+  repo's RDRs rdr-081, rdr-108 and rdr-111 gained items), keeps a
+  fractional `--phase`, and renumbers only colliding items. Gate critiques
+  have one title shape per round, so two rounds on one day never overwrite
+  each other; the drift census keys T2 status records on the bare RDR
+  number.
+- **Release tooling (beads nexus-0stwc, nexus-r798p, nexus-mbeke).** The
+  release-choreography resolver refuses an undeclared or omitted guard key
+  instead of resolving to a row that never read the ledger; a non-table
+  exception exits 2, never the BLOCKED code; malformed rows load as
+  `TableLoadError`; placeholder substitution is single-pass.
+
+### Changed
+- **RDR-213: the channel waiter pushes a reference and never claims mail
+  (epic nexus-gomuo, bead nexus-vsipz; amends RDR-211).** The proof gate,
+  the `tuple_channel_probe` MCP tool (52 tools on the `nexus` server, was
+  53), the launch-flag table and the waiter's lease machinery are deleted.
+  The waiter parks on the engine's `wait` and never spins. With the plugin
+  loaded, the drain hook delivers the body at the channel wake, before the
+  model's turn, already claimed and acked, so the session claims nothing;
+  without the plugin the session claims with `tuple_in`, and an empty
+  `tuple_in` means the row was already delivered or taken. Each new message
+  is announced once and re-announced at most every 150 s, at most five
+  times; the engine stamps `announced_at` and `announce_count` on the row
+  in the same statement that returns it (`POST /v1/tuples/wait` takes an
+  optional per-spec `announce: {interval_s, max}`), so no client cursor can
+  skip a slower writer's row. On an engine older than v0.1.128 the waiter
+  stops with a logged reason. The `tuples.channel_delivery` doctor row
+  counts pending per mailbox; the SessionStart line and the doctor row name
+  both launch-flag forms and the alias (bead nexus-tk2cz).
+- **Every CLI-spawned storage supervisor and every newly installed launchd
+  plist or systemd unit carries an explicit `--config-dir <path>` (bead
+  nexus-cd1k0.3).** `nx upgrade`'s stop and start calls pass it too. A
+  flagless supervisor is matched only to the default config directory, and
+  only for a unit installed before this release.
+- **`nx rdr set-status NNN closed --reason "..."` closes a never-accepted
+  draft** (the lifecycle table's `close-unaccepted` edge, beads
+  nexus-nc08w.2 to .6); `nx rdr research add` takes `--classification` and
+  `--method` from closed sets, and `rdr-audit` reports close overrides,
+  terminated records by reason, and post-mortem coverage (bead nexus-5r0ho).
+- Turn-on instructions for push delivery are on the site, the README and
+  `tuple-space.md` (bead nexus-tk2cz); the coordination page addresses the
+  reader directly. `docs/contributing.md` says the release workflow verifies
+  the tagged commit's existing green check rather than re-testing; the
+  unreferenced `Formula/nx.rb` is deleted (bead nexus-r8643). RDR-213 is
+  accepted; RDR-214 (standing-code correctness review) is drafted.
+
 ## [7.51.1] - 2026-09-17
 
 Paired engine: engine-service-v0.1.127 (unchanged from 7.51.0;

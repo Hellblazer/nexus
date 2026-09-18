@@ -293,15 +293,15 @@ class TestStorageServiceSupervisorUnit:
 
         original_msd = sup._registry.mark_shutting_down
 
-        def track_msd(rec: Any) -> None:
+        def track_msd(rec: Any, **kwargs: Any) -> None:
             call_order.append("mark_shutting_down")
-            original_msd(rec)
+            original_msd(rec, **kwargs)
 
         original_relinquish = sup._registry.relinquish
 
-        def track_relinquish(rec: Any) -> None:
+        def track_relinquish(rec: Any, **kwargs: Any) -> None:
             call_order.append("relinquish")
-            original_relinquish(rec)
+            original_relinquish(rec, **kwargs)
 
         def track_killpg() -> None:
             call_order.append("stop_service")
@@ -352,6 +352,72 @@ class TestStorageServiceSupervisorUnit:
 
         # After stop: lease is relinquished (None)
         assert registry.discover(scope) is None
+
+    def test_stop_returns_promptly_when_the_election_flock_is_held(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """nexus-cd1k0 review round 3 finding 6: before this fix,
+        mark_shutting_down()/relinquish() on the stop path took NO
+        budget -- an unconditionally blocking LOCK_EX -- so a contested
+        election flock could hang stop() (and therefore the supervisor
+        process's own exit) indefinitely, making _SUPERVISOR_STOP_GRACE's
+        docstring claim ("strictly exceeds the inner worst case") false.
+
+        Hold the REAL election flock from a second fd in this same
+        process -- flock() locks are per open-file-description, so a
+        second open() of the same path takes a genuinely separate lock
+        that contends with the first, even within one process (mirrors
+        tests/daemon/test_service_registry_election_bound.py's
+        ``held_flock`` fixture). stop() must still return, bounded by
+        the two election budgets, not hang on the contested flock.
+        """
+        import fcntl
+
+        from nexus.daemon.storage_service_daemon import (
+            _STOP_ELECTION_BUDGET,
+            _SUPERVISOR_STOP_GRACE,
+        )
+
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=42610)
+        sup._proc = fake_proc
+        sup._service_port = 18088
+        sup._publish(18088)
+
+        scope = str(os.getuid())
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        assert registry.discover(scope) is not None, "sanity: lease published"
+
+        election_path = sup._registry._election_path(scope)
+        election_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(election_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with patch.object(sup, "_stop_service"):
+                t0 = time.monotonic()
+                sup.stop()  # must return, not hang on the held flock
+                elapsed = time.monotonic() - t0
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert elapsed < _SUPERVISOR_STOP_GRACE, (
+            f"stop() took {elapsed:.2f}s with the election flock held, "
+            f"past its own documented outer grace ({_SUPERVISOR_STOP_GRACE}s)"
+        )
+        # Bounded specifically by the two election budgets (mark_shutting_down
+        # then relinquish), not merely "eventually" inside the outer grace.
+        assert elapsed < 2 * _STOP_ELECTION_BUDGET + 1.0, (
+            f"stop() took {elapsed:.2f}s, not bounded by 2x "
+            f"_STOP_ELECTION_BUDGET ({_STOP_ELECTION_BUDGET}s each)"
+        )
+        # Neither election call could take the flock we hold, so neither ran
+        # its critical section: the lease is untouched (still fresh, never
+        # relinquished) until the foreign holder above releases it.
+        assert registry.discover(scope) is not None, (
+            "relinquish must not have run its critical section while the "
+            "flock was held -- the lease should still be there"
+        )
 
     def test_endpoint_carries_host_port_and_token(
         self, config_dir: Path, clock: _FakeClock
@@ -1923,6 +1989,72 @@ class TestEnsurePgRunningCalledOnFreshStart:
         ensure_pg.assert_called_once()
 
 
+class TestDeadOwnerLeaseHealedOnForegroundStart:
+    """nexus-cd1k0.17: ``_start_locked`` (the FOREGROUND unit path — what a
+    launchd/systemd-launched supervisor actually runs) lacked the
+    dead-owner heal ``commands/daemon.ensure_storage_supervisor`` (the CLI
+    client-spawn path) already had. A TTL-fresh lease whose
+    ``supervisor_pid`` points at a genuinely dead process (a hard crash —
+    OOM-kill, SIGKILL with no relinquish) must be reclaimed and fallen
+    through to a fresh spawn, not honored as live: honoring it makes
+    ``start()`` return without ever assigning ``self._proc``, so
+    ``owns_process`` is False, ``exit_if_process_unowned`` exits the run
+    loop with 0, and neither shipped unit's restart policy retries a
+    successful exit — the stack stays down until the 15s TTL ages the
+    dead lease out on its own.
+
+    Real dead pid throughout (spawn + reap), not a patched probe: the
+    zombie-vs-dead distinction is exactly what the shared primitive's
+    ``pid_running`` (not ``pid_alive``) gets right, per nexus-o8dil.21.
+    """
+
+    def test_dead_owner_lease_is_reclaimed_and_start_falls_through(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
+
+        scope = str(os.getuid())
+
+        # A genuinely dead pid: spawn + reap.
+        dead = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv
+        dead.wait()
+        dead_pid = dead.pid
+
+        # Publish a fresh, supervised lease whose payload names the dead pid
+        # as supervisor_pid (mirrors a hard-crashed supervisor's last-known
+        # lease — nothing ever relinquished it).
+        stale_registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        stale_sup = ServiceSupervisor(
+            stale_registry, scope, version="1.0.0",
+            endpoint_provider=lambda: {"host": "127.0.0.1", "port": 1, "pid": dead_pid, "token": "t"},
+            payload={"supervisor_pid": dead_pid},
+        )
+        stale_sup.publish_once()
+        stale_bytes = (config_dir / f"storage_service_addr.{scope}").read_bytes()
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = _FakeProc(pid=51400)
+        with patch.object(sup, "_ensure_pg_running") as ensure_pg, \
+             patch.object(sup, "_spawn_service", return_value=(proc, 19801)), \
+             patch.object(sup, "_wait_for_service_ready"):
+            sup.start()
+
+        ensure_pg.assert_called_once(), (
+            "a dead-owner lease must fall through to a fresh spawn, not "
+            "short-circuit past _ensure_pg_running"
+        )
+        # A genuinely NEW lease was published (this supervisor's own), not
+        # the stale dead-owner record left untouched.
+        fresh_bytes = (config_dir / f"storage_service_addr.{scope}").read_bytes()
+        assert fresh_bytes != stale_bytes, (
+            "the stale dead-owner lease must have been relinquished and "
+            "replaced by a fresh publish, not left in place"
+        )
+        fresh_record = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock).discover(scope)
+        assert fresh_record is not None
+        assert fresh_record.owner_token == sup._supervisor.owner_token
+
+
 class TestNativeStartHasNoSchemaSkewGate:
     """RDR-161: the JVM-only schema-skew gate (nexus-pebfx.4) is expunged with
     the legacy launch path. A native start goes PG -> spawn with no skew probe;
@@ -1965,6 +2097,7 @@ class _ScriptedSupervisor:
         *,
         ensure_pg_raises: Exception | None = None,
         owns_process: bool = True,
+        fence_after_beats: int | None = None,
     ) -> None:
         self._beats = list(beats)
         self._stop = stop_requested
@@ -1972,8 +2105,15 @@ class _ScriptedSupervisor:
         self.owns_process = owns_process
         self.calls: list[str] = []
         self.heartbeat_calls = 0
+        # nexus-cd1k0.2: matches the real StorageServiceSupervisor.fenced
+        # property the run loop now checks every tick via fenced_exit_code.
+        # Defaults False so every pre-existing scripted test (none of which
+        # touch fencing) is unaffected.
+        self.fenced = False
+        self._fence_after_beats = fence_after_beats
+        self._scope = "test-scope"  # read by the loop's fenced-exit log line
 
-    def start(self) -> None:
+    def start(self, *, stop_requested=None) -> None:
         self.calls.append("start")
 
     def heartbeat_once(self) -> tuple[bool, bool]:
@@ -1983,7 +2123,12 @@ class _ScriptedSupervisor:
             self._stop.set()
             return True, True
         beat = self._beats.pop(0)
-        if not self._beats:
+        if self._fence_after_beats is not None and self.heartbeat_calls >= self._fence_after_beats:
+            # Mirrors heartbeat_tick() discovering StaleOwnerError on THIS
+            # tick and setting .fenced synchronously, before the run loop's
+            # next check.
+            self.fenced = True
+        elif not self._beats:
             self._stop.set()  # last scripted beat — loop exits after handling
         return beat
 
@@ -2093,6 +2238,38 @@ class TestMinimalSuperviseLoop:
             "a supervisor with nothing to own must never call heartbeat_once()"
         )
         assert sup.calls == ["start", "stop"]
+
+    def test_fenced_owner_exits_0_within_one_tick_even_when_healthy(
+        self,
+    ) -> None:
+        """nexus-cd1k0.2: a fenced-but-otherwise-healthy (True, True) beat
+        must not fall through to time.sleep() forever. Before this fix the
+        loop only ever checked service_running/pg_ok — fencing was logged
+        (heartbeat_once's own internal warning) and then completely
+        ignored by the loop, so a fenced owner heartbeated a lease it no
+        longer held while its own engine kept running beside the
+        successor's."""
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor(
+                # Three healthy beats scripted; fencing on tick 1 must stop
+                # the loop before ticks 2/3 are ever reached.
+                [(True, True), (True, True), (True, True)], stop,
+                fence_after_beats=1,
+            )
+        )
+        assert code == 0, (
+            "a fenced stand-down must be a CLEAN exit (0), not a failure — "
+            "a non-zero exit would trip the OS unit into a doomed rematch "
+            "against the owner that already won the race"
+        )
+        assert sup.heartbeat_calls == 1, (
+            "the loop must stop on the SAME tick fencing was discovered, "
+            f"not keep heartbeating; got {sup.heartbeat_calls} calls"
+        )
+        assert sup.calls == ["start", "stop"], (
+            "stop() must still run through the shared loop tail so the "
+            f"fenced owner's own engine is torn down; got {sup.calls}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2230,13 +2407,12 @@ class TestEnsureStorageSupervisor:
         ``supervisor_pid`` points at a dead process. The discover path must
         detect the dead pid, relinquish the stale lease, and re-spawn — rather
         than returning a dead endpoint for up to the lease TTL window."""
-        import nexus.daemon.storage_service_daemon as ssd_mod
         from nexus.commands import daemon as daemon_mod
         from nexus.daemon.service_registry import ServiceRegistry
 
         # A fresh, supervised lease (payload carries supervisor_pid). Patch
         # the guard's probe False so it treats that supervisor as dead.
-        # The probe is ``_pid_is_running``, not ``_pid_is_alive``, since
+        # The probe is ``pid_running``, not ``pid_alive``, since
         # nexus-o8dil.21 — see the zombie sibling test below for why.
         self._publish_fresh_lease(config_dir, port=18093)
         scope = str(os.getuid())
@@ -2246,7 +2422,12 @@ class TestEnsureStorageSupervisor:
             self._publish_fresh_lease(config_dir, port=18094)
             return MagicMock()
 
-        with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
+        # nexus-cd1k0.17: the dead-owner check moved into the shared primitive
+        # (service_registry.reclaim_lease_if_dead_owner), which calls
+        # service_registry.pid_running directly -- patching the storage-tier
+        # re-export (ssd_mod._pid_is_running) no longer intercepts it.
+        from nexus.daemon import service_registry as sr_mod
+        with patch.object(sr_mod, "pid_running", return_value=False), \
              patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
              patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
@@ -2395,6 +2576,45 @@ class TestEnsureStorageSupervisor:
 
         assert rec is not None and rec.endpoint.get("port") == 18098
         assert se.has_ever_resolved_lease() is True
+
+    def test_spawn_argv_carries_config_dir_even_when_it_came_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-cd1k0.19 review round 2, finding 4: whatever combination of
+        NEXUS_CONFIG_DIR / default resolved this call's config_dir, the
+        spawned supervisor's argv must carry an EXPLICIT, RESOLVED-ABSOLUTE
+        --config-dir -- never rely on the spawned process re-deriving its
+        own config dir from an inherited environment. storage_service_stack_
+        matcher's flagless-matches-default rule exists only for units
+        installed BEFORE this fix; a freshly spawned supervisor must never
+        be flagless."""
+        from nexus.commands import daemon as daemon_mod
+        from nexus import config as _config
+
+        env_scoped_dir = tmp_path / "env-scoped-nexus-config"
+        env_scoped_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(env_scoped_dir))
+        resolved_config_dir = _config.nexus_config_dir()  # reads the env var just set
+        assert resolved_config_dir == env_scoped_dir
+
+        captured: dict[str, list[str]] = {}
+
+        def _fake_popen(argv, **_kw):
+            captured["argv"] = argv
+            return MagicMock()
+
+        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+             patch.object(daemon_mod, "_popen", side_effect=_fake_popen), \
+             patch.object(daemon_mod.time, "monotonic", side_effect=[0.0, 100.0]):
+            with pytest.raises(StorageServiceStartError):
+                # No lease is ever published (the fake Popen does nothing
+                # real) -- this call is only here to observe the spawn argv,
+                # not to succeed.
+                daemon_mod.ensure_storage_supervisor(resolved_config_dir)
+
+        assert "--config-dir" in captured["argv"], captured["argv"]
+        idx = captured["argv"].index("--config-dir")
+        assert captured["argv"][idx + 1] == str(env_scoped_dir.resolve()), captured["argv"]
 
 
 # ---------------------------------------------------------------------------
@@ -3008,6 +3228,176 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
         )
 
 
+class TestStopServiceReapsOwnChild:
+    """nexus-cd1k0.1: ``_stop_service`` waits on ``_pid_is_alive`` for the
+    supervisor's OWN un-reaped child. A zombie answers ``os.kill(pid, 0)``
+    forever, so the previous implementation burned the whole grace window
+    before a pointless SIGKILL (reproduced against the probe of record:
+    ~5.1s, exit -9). ``Popen.wait(timeout=...)`` is a real ``waitpid`` —
+    it reaps and detects death in the SAME syscall, so a child that dies
+    promptly on SIGTERM is noticed almost immediately.
+
+    Real child process throughout (no mocks of liveness): the whole
+    defect is that a poll-based probe cannot tell a zombie from a genuine
+    survivor, so a faked probe would assert nothing.
+    """
+
+    def test_child_that_exits_promptly_is_stopped_well_under_grace(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        sup._proc = proc
+
+        t0 = time.monotonic()
+        sup._stop_service()
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 2.0, (
+            "a child that dies promptly on SIGTERM must not burn the "
+            f"whole grace window; took {elapsed:.2f}s"
+        )
+        assert sup._proc is None
+        assert process_state(proc.pid) is None, (
+            "the child must be fully REAPED after _stop_service, not left "
+            "as an unreaped zombie"
+        )
+
+    def test_child_that_ignores_sigterm_is_killed_and_reaped_within_bound(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """The SIGKILL escalation path still works, and still reaps —
+        this is not a regression test for the escalation itself, only
+        confirmation the reap-based rewrite didn't drop it."""
+        from nexus.daemon.storage_service_daemon import (
+            _GRACEFUL_STOP_TIMEOUT,
+            _POST_KILL_REAP_TIMEOUT,
+        )
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603
+            [
+                sys.executable, "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "time.sleep(60)\n",
+            ],
+            start_new_session=True,
+        )
+        sup._proc = proc
+
+        t0 = time.monotonic()
+        sup._stop_service()
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT + 2.0, (
+            f"escalation + reap took {elapsed:.2f}s, past the bounded total"
+        )
+        assert sup._proc is None
+        assert process_state(proc.pid) is None
+
+
+class TestKillAfterReadinessFailureReapsOwnChild:
+    """nexus-cd1k0.1 sibling: ``_kill_after_readiness_failure`` held the
+    SAME zombie-blind ``_pid_is_alive`` poll on a Popen it (indirectly,
+    via the caller) owns and holds directly."""
+
+    def test_child_that_exits_promptly_is_killed_well_under_grace(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+
+        t0 = time.monotonic()
+        sup._kill_after_readiness_failure(proc)
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 2.0, (
+            "a child that dies promptly on SIGTERM must not burn the "
+            f"whole grace window; took {elapsed:.2f}s"
+        )
+        assert process_state(proc.pid) is None, (
+            "the child must be fully REAPED, not left as an unreaped zombie"
+        )
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=1)
+
+
+class TestFencedSupervisorStopsAndStandsDown:
+    """nexus-cd1k0.2: on ``StaleOwnerError`` the supervisor's RUN LOOP must
+    stop — not merely log and keep returning (True, True) forever while
+    its own engine runs on beside the successor's (two engines, one
+    Postgres). Real engine child; a REAL successor lease published at a
+    strictly higher generation, exactly as ``ensure_storage_supervisor``
+    would produce on a lease-miss respawn."""
+
+    def test_fenced_supervisor_reaps_engine_exits_0_and_leaves_successor_untouched(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        engine = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        sup._proc = engine
+        sup._service_port = 18200
+        sup._publish(18200)  # generation 1, owner A
+
+        # A genuine successor republishes at a strictly higher generation
+        # (e.g. spawned by ensure_storage_supervisor after A's lease aged
+        # out past its TTL while A was still alive).
+        scope = str(os.getuid())
+        successor_registry = ServiceRegistry(
+            dir=config_dir, tier="storage_service", clock=clock,
+        )
+        successor = ServiceSupervisor(
+            successor_registry, scope, version="1.0.0",
+            endpoint_provider=lambda: {"pid": 999999, "host": "127.0.0.1", "port": 0},
+        )
+        successor.publish_once()
+        lease_path = config_dir / f"storage_service_addr.{scope}"
+        successor_bytes_before = lease_path.read_bytes()
+
+        stop_requested = threading.Event()
+        with patch.object(sup, "start"), \
+             patch.object(sup, "_probe_service_health", return_value=HealthProbe.OK), \
+             patch.object(sup, "_pg_reachable", return_value=True):
+            exit_code = ssd._supervise_until_stopped(sup, stop_requested, lambda: None)
+
+        assert exit_code == 0, (
+            "a fenced stand-down must be a CLEAN exit, not a failure — a "
+            "non-zero exit would trip the OS unit's restart policy into "
+            "respawning a supervisor whose only move is to lose the same "
+            "race again"
+        )
+        assert sup._supervisor is None, "stop() must have run through the loop's tail"
+
+        try:
+            engine_rc = engine.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            engine.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                engine.wait(timeout=5)
+            pytest.fail("fenced supervisor did not stop its own engine child")
+        assert engine_rc is not None
+
+        assert lease_path.read_bytes() == successor_bytes_before, (
+            "a fenced predecessor's stand-down must not touch the "
+            "successor's lease record (CA-4: mark_shutting_down/relinquish "
+            "no-op on an owner_token mismatch)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # nexus-8vp0i / GH #1486: migration-aware readiness wiring
 # ---------------------------------------------------------------------------
@@ -3108,6 +3498,54 @@ class TestStaleChangelogLockCleanup:
         }
         sup = _make_supervisor(config_dir, clock, creds=creds)
         assert sup._migration_pg_probe() is readiness.PgActivity.UNAVAILABLE
+
+    def test_pg_probe_unwinds_promptly_when_psql_hangs(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """nexus-cd1k0.19 review round 2, finding 5: _run_psql had NO
+        timeout, so an unresponsive local psql during MIGRATING could
+        block the readiness monitor's per-tick pg_probe unboundedly,
+        making stop_check invisible for that whole duration. Real
+        subprocess that sleeps well past _PG_PROBE_TIMEOUT (3s) -- the
+        probe must still return (UNAVAILABLE, via TimeoutExpired ->
+        the existing broad except) well under the OLD unbounded
+        behavior, and comfortably under _SUPERVISOR_STOP_GRACE."""
+        import stat
+
+        import nexus.daemon.readiness as readiness
+        from nexus.daemon.storage_service_daemon import _PG_PROBE_TIMEOUT, _SUPERVISOR_STOP_GRACE
+
+        fake_psql = config_dir / "fake-psql-that-hangs.sh"
+        fake_psql.write_text(
+            "#!/bin/sh\nsleep 60\necho 't'\n"
+        )
+        fake_psql.chmod(fake_psql.stat().st_mode | stat.S_IEXEC)
+
+        creds = {
+            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": "15432",
+            "PG_DATA": str(config_dir / "pgdata"),
+            "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+        }
+        sup = _make_supervisor(config_dir, clock, creds=creds)
+
+        fake_bins = SimpleNamespace(psql=fake_psql)
+        t0 = time.monotonic()
+        with patch("nexus.db.pg_provision.discover_pg_binaries", return_value=fake_bins):
+            result = sup._migration_pg_probe()
+        elapsed = time.monotonic() - t0
+
+        assert result is readiness.PgActivity.UNAVAILABLE
+        assert elapsed < _SUPERVISOR_STOP_GRACE, (
+            f"an unresponsive psql must not block the pg_probe past the "
+            f"outer stop grace; took {elapsed:.2f}s"
+        )
+        # Bounded specifically by _PG_PROBE_TIMEOUT, not merely "eventually".
+        assert elapsed < _PG_PROBE_TIMEOUT + 2.0, (
+            f"pg_probe took {elapsed:.2f}s, not bounded by _PG_PROBE_TIMEOUT "
+            f"({_PG_PROBE_TIMEOUT}s)"
+        )
 
     def test_skips_when_a_live_engine_is_found(
         self, config_dir: Path, clock: _FakeClock
@@ -3340,6 +3778,114 @@ class TestWaitForServiceReadyMigrationAware:
             sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
 
         cleanup.assert_not_called()
+
+
+class TestWaitForServiceReadyRespondsToStopRequested:
+    """nexus-cd1k0.19: a SIGTERM/SIGINT arriving while the supervisor is
+    still waiting for readiness (a real migration can leave /health
+    unreachable for 20+ minutes) was previously invisible until the wait
+    finished or timed out on its own — nothing inside start()/
+    _wait_for_service_ready()/readiness.wait_ready() ever read
+    stop_requested; only the run loop's OWN while-condition did, AFTER
+    start() had already returned. Real child process throughout (never
+    becomes ready): the whole point is proving the wait unwinds PROMPTLY,
+    not merely that a mocked probe eventually notices."""
+
+    def test_stop_requested_mid_wait_kills_the_proc_and_raises_stop_requested(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        import threading
+
+        from nexus.daemon import readiness
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            start_new_session=True,
+        )
+        stop_requested = threading.Event()
+
+        def stop_soon() -> None:
+            time.sleep(0.2)
+            stop_requested.set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
+
+        t0 = time.monotonic()
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNREADY), \
+             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE):
+            with pytest.raises(readiness.ReadinessStopRequestedError):
+                sup._wait_for_service_ready(proc, 19999, timeout=600.0, stop_requested=stop_requested)
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 5.0, (
+            f"a stop request must unwind the readiness wait promptly, not "
+            f"wait out the 600s timeout; took {elapsed:.2f}s"
+        )
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("the not-yet-ready process must be killed on a stop request")
+        assert rc is not None
+
+    def test_no_stop_requested_is_unaffected(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """stop_requested=None (the default) must behave exactly as
+        before — the happy-path healthy-boot case is unaffected."""
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51050)
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.OK):
+            sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)  # must not raise
+
+    def test_full_supervise_loop_stops_cleanly_mid_slow_start(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """End-to-end through _supervise_until_stopped: exit code 0, not a
+        crash, and the run loop's own try/finally tail (nexus-cd1k0.18)
+        still runs sup.stop() exactly once."""
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+        from nexus.daemon import readiness
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            start_new_session=True,
+        )
+        stop_requested = threading.Event()
+
+        def fake_start_locked(self, *, stop_requested=None):  # noqa: ANN001
+            self._proc = proc
+            self._wait_for_service_ready(proc, 19999, timeout=600.0, stop_requested=stop_requested)
+            raise AssertionError("readiness never succeeds in this test")
+
+        def stop_soon() -> None:
+            time.sleep(0.2)
+            stop_requested.set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
+
+        t0 = time.monotonic()
+        with patch.object(type(sup), "_start_locked", fake_start_locked), \
+             patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNREADY), \
+             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE):
+            exit_code = ssd._supervise_until_stopped(sup, stop_requested, lambda: None)
+        elapsed = time.monotonic() - t0
+
+        assert exit_code == 0, (
+            "a stop mid-start is a CLEAN stand-down, not a crash — a "
+            "non-zero exit would trip the OS unit's restart policy"
+        )
+        assert elapsed < 5.0
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("the not-yet-ready engine must be killed and reaped")
+        assert rc is not None
 
 
 class TestStartLockedReleasesStaleLockBeforeSpawn:

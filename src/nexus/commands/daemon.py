@@ -105,41 +105,65 @@ def _read_template(name: str) -> str:
 
 
 _PLIST_NX_BIN_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)<string>__NX_BIN__</string>\s*$")
+_PLIST_CONFIG_DIR_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)<string>__CONFIG_DIR_ARGV__</string>\s*$")
 
 
-def _substitute_plist_argv(body: str, nx_bin: list[str]) -> str:
-    """Expand ``<string>__NX_BIN__</string>`` into one entry per argv
-    token. The plist's ProgramArguments array gives launchd one
-    ``<string>`` per element; a multi-token fallback
-    (``[python, "-m", "nexus.cli"]``) must render as multiple siblings,
-    not a single space-joined string, or posix_spawn fails with ENOENT.
-    """
+def _substitute_plist_multi_token(body: str, pattern: re.Pattern[str], tokens: list[str]) -> str:
+    """Expand a single ``<string>PLACEHOLDER</string>`` line into one
+    ``<string>`` element per token in *tokens*. The plist's argv arrays
+    (ProgramArguments) give launchd one ``<string>`` per element; ANY
+    multi-token substitution (the nx-bin fallback ``[python, "-m",
+    "nexus.cli"]``, or ``--config-dir <path>`` as two tokens) must render
+    as multiple siblings, never a single joined string, or posix_spawn
+    fails with ENOENT / mis-parses the argument boundary."""
     out_lines: list[str] = []
     for line in body.splitlines(keepends=True):
-        match = _PLIST_NX_BIN_LINE_RE.match(line.rstrip("\n"))
+        match = pattern.match(line.rstrip("\n"))
         if match is None:
             out_lines.append(line)
             continue
         indent = match.group("indent")
         trailing_nl = "\n" if line.endswith("\n") else ""
-        for token in nx_bin:
+        for token in tokens:
             out_lines.append(f"{indent}<string>{_xml_escape(token)}</string>{trailing_nl}")
     return "".join(out_lines)
 
 
-def _render_template(name: str, *, nx_bin: list[str], log_dir: str, path_env: str) -> str:
+def _render_template(
+    name: str, *, nx_bin: list[str], log_dir: str, path_env: str, config_dir: str,
+) -> str:
     """Substitute placeholders in a shipped autostart template.
 
     The plist substitutes ``<string>__NX_BIN__</string>`` into one
     ``<string>`` per argv token; the systemd unit's
     ``ExecStart=__NX_BIN__ ...`` line uses ``shlex.join`` so multi-token
     argvs survive systemd's whitespace-split parser.
+
+    ``config_dir`` (nexus-cd1k0.19 review round 2, finding 4) is the
+    RESOLVED ABSOLUTE config dir this install used, baked into the
+    generated unit's argv as an explicit ``--config-dir <path>`` — on the
+    plist side as TWO separate ``<string>`` elements (never a single
+    joined string, so a directory containing a space survives launchd's
+    argv array intact, mirroring ``storage_service_stack_matcher``'s own
+    space-safety discipline on the matching side); on the systemd side
+    via ``shlex.quote`` so the same holds through ``ExecStart``'s
+    whitespace-split parser. This closes the false-positive surface the
+    matcher's flagless-matches-default rule otherwise has against a live,
+    env-scoped supervisor spawned some OTHER way on this same box (see
+    that function's docstring) — a unit generated from this point on is
+    argv-explicit, never flagless.
     """
     body = _read_template(name)
     if name.endswith(".plist"):
-        body = _substitute_plist_argv(body, nx_bin)
+        body = _substitute_plist_multi_token(body, _PLIST_NX_BIN_LINE_RE, nx_bin)
+        body = _substitute_plist_multi_token(
+            body, _PLIST_CONFIG_DIR_LINE_RE, ["--config-dir", config_dir],
+        )
     else:
         body = body.replace("__NX_BIN__", shlex.join(nx_bin))
+        body = body.replace(
+            "__CONFIG_DIR_ARGV__", shlex.join(["--config-dir", config_dir]),
+        )
     return (
         body
         .replace("__LOG_DIR__", log_dir)
@@ -594,7 +618,10 @@ def ensure_storage_supervisor(config_dir: Path):
 
     Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
     """
-    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        ServiceRegistry,
+        reclaim_lease_if_dead_owner,
+    )
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     StorageServiceStartError = _ssd.StorageServiceStartError
@@ -603,48 +630,23 @@ def ensure_storage_supervisor(config_dir: Path):
     scope = str(os.getuid())
     existing = _service_endpoint.discover_storage_service_lease(registry, scope)
     if existing is not None:
-        # RDR-175 heal-on-next-use hardening: a fresh (TTL-live) lease whose
-        # ``supervisor_pid`` points at a DEAD process is a hard-crashed
-        # supervisor (OOM-kill / SIGKILL with no relinquish). Without the OS
-        # watchdog (no-autostart mode) nothing restarts it, and the lease would
-        # otherwise be returned as a live endpoint for up to the TTL window.
-        # Relinquish it and fall through to re-spawn. Reuses the exact guard from
-        # ``stop_storage_service`` — an ABSENT ``supervisor_pid`` (legacy /
-        # non-supervised lease) is left to the existing TTL-freshness
-        # short-circuit, never re-spawned spuriously. (RDR-149-gate-safe: this is
-        # in the storage-specific caller, not service_registry.discover.)
-        supervisor_pid = existing.payload.get("supervisor_pid")
-        # ``_pid_is_running``, not ``_pid_is_alive`` (nexus-o8dil.21): a
-        # ZOMBIE supervisor — hard-killed, and its parent has not reaped it
-        # (routine when PID 1 is a shell script rather than a real init, as
-        # in containers and CI runners) — answers ``os.kill(pid, 0)``
-        # indefinitely. Under the alive-only probe this heal never fired for
-        # exactly the crashed-supervisor case it exists to catch: the fresh
-        # lease stayed, ``start`` short-circuited onto it, and the box kept
-        # serving a dead supervisor's endpoint until the TTL expired.
-        if (
-            isinstance(supervisor_pid, int)
-            and supervisor_pid > 0
-            and not _ssd._pid_is_running(supervisor_pid)
+        # RDR-175 heal-on-next-use hardening, generalized into the shared
+        # primitive at nexus-cd1k0.17 (was a copy of this exact check
+        # duplicated in _start_locked; now the ONE place both callers
+        # share): a fresh (TTL-live) lease whose ``supervisor_pid`` points
+        # at a DEAD process is a hard-crashed supervisor (OOM-kill /
+        # SIGKILL with no relinquish). Without the OS watchdog
+        # (no-autostart mode) nothing restarts it, and the lease would
+        # otherwise be returned as a live endpoint for up to the TTL
+        # window. reclaim_lease_if_dead_owner relinquishes it and returns
+        # True so this falls through to re-spawn. An ABSENT
+        # ``supervisor_pid`` (legacy / non-supervised lease) is left to
+        # the existing TTL-freshness short-circuit below, never
+        # re-spawned spuriously. (RDR-149-gate-safe: this IS the shared
+        # primitive now, not a storage-specific copy.)
+        if not reclaim_lease_if_dead_owner(
+            registry, existing, log=_log, event="storage_service_dead_lease_reclaim",
         ):
-            _log.warning(
-                "storage_service_dead_lease_reclaim",
-                supervisor_pid=supervisor_pid,
-                msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
-            )
-            try:
-                registry.relinquish(existing)
-            except Exception as exc:  # noqa: BLE001 — best-effort reclaim; generation fencing still protects ownership
-                # Don't fail the spawn: the new supervisor's publish bumps the
-                # generation (fencing prevents double-ownership) and the 60s
-                # discover-wait resolves once it lands. But log it — a silent
-                # reclaim failure leaves no evidence for an operator.
-                _log.warning(
-                    "storage_service_dead_lease_relinquish_failed",
-                    supervisor_pid=supervisor_pid,
-                    error=str(exc),
-                )
-        else:
             # nexus-4e96a: THE load-bearing short-circuit (this is the branch
             # that returns without ever spawning a subprocess, let alone
             # reaching _start_locked's own copy of this check). Raises loud
@@ -660,9 +662,16 @@ def ensure_storage_supervisor(config_dir: Path):
             # docstring in db/service_endpoint.py).
             return existing
 
+    # nexus-cd1k0.19 review round 2, finding 4: always RESOLVE to an
+    # absolute path before it goes into argv, however config_dir itself
+    # was derived (an explicit --config-dir flag, NEXUS_CONFIG_DIR, or the
+    # bare default) -- a relative path in argv would not match the same
+    # string another caller's own (independently resolved) matcher target
+    # compares against, defeating the token-exact discipline
+    # storage_service_stack_matcher relies on.
     argv = [
         *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
-        "--config-dir", str(config_dir),
+        "--config-dir", str(Path(config_dir).resolve()),
     ]
     # nexus-ovbr7: route the child's streams to a crash-channel file so a failure
     # BEFORE run_storage_supervisor's configure_logging runs (import error, bad

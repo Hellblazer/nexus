@@ -6,6 +6,19 @@
   placeholder is substituted at install time with the resolved absolute path
   to the ``nx`` executable.
 
+  ``--config-dir __CONFIG_DIR_ARGV__`` (nexus-cd1k0.19 review round 2,
+  finding 4): install time bakes in the RESOLVED ABSOLUTE config dir this
+  install used (flag, env, or default -- however it was resolved), as two
+  literal argv tokens (never a single joined string, so a directory
+  containing a space survives launchd's argv array intact). This makes a
+  unit installed from THIS point on argv-explicit, closing the false-
+  positive surface `storage_service_stack_matcher`'s flagless-matches-
+  default rule otherwise has against a live, env-scoped `nx daemon
+  service start`/`stop` invocation on this same box (upgrade_finish.py's
+  bare CLI calls; e2e sandbox scripts). See that function's docstring for
+  the two vectors this closes and why the flagless rule now applies only
+  to units installed BEFORE this fix.
+
   ``nx daemon service start --foreground`` runs the storage supervisor
   (run_storage_supervisor) in the foreground — it owns the native engine-
   service binary + the local Postgres cluster and blocks until SIGTERM, so
@@ -45,6 +58,7 @@
         <string>service</string>
         <string>start</string>
         <string>--foreground</string>
+        <string>__CONFIG_DIR_ARGV__</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

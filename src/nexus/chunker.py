@@ -130,12 +130,25 @@ def _expand_long_lines(content: str, max_bytes: int = _LONG_LINE_THRESHOLD) -> s
     has_long = any(len(ln.encode()) > max_bytes for ln in lines)
     if not has_long:
         return content
-    # Conservative char estimate: UTF-8 chars are ≤4 bytes, but code is mostly ASCII.
-    max_chars = max_bytes  # 1:1 for ASCII; will overshoot for multi-byte but that's safe
     expanded: list[str] = []
     for ln in lines:
         if len(ln.encode()) > max_bytes:
-            expanded.extend(_split_long_line(ln, max_chars))
+            # _split_long_line's tiers operate on CHAR offsets (they search
+            # for syntactic/whitespace breaks), so max_bytes is passed as a
+            # char threshold too — correct for ASCII/minified code (1
+            # byte/char), but a multibyte line can sit under that char
+            # count while still exceeding the byte cap (nexus-thrh9: 5,000
+            # CJK chars is under a 12,288 char threshold but 15,000 bytes,
+            # so no split happened and the byte-cap fallback downstream
+            # truncated with errors="ignore", losing characters). Re-check
+            # each segment in bytes and fall back to a byte-safe split
+            # (nexus-2s91y's split_text_to_byte_cap, the same precedent
+            # md_chunker/pdf_chunker use) for anything still oversized.
+            for seg in _split_long_line(ln, max_bytes):
+                if len(seg.encode()) > max_bytes:
+                    expanded.extend(split_text_to_byte_cap(seg, max_bytes))
+                else:
+                    expanded.append(seg)
         else:
             expanded.append(ln)
     return "\n".join(expanded)
