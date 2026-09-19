@@ -228,7 +228,7 @@ class TestSessionStartCmdSourcePassthrough:
 
         runner = CliRunner()
         with (
-            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", return_value=777),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[888]),
         ):
@@ -262,7 +262,7 @@ class TestSessionStartCmdGuidanceImperative:
 
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
         runner = CliRunner()
-        with _patch("nexus.hooks.write_claude_session_id"):
+        with _patch("nexus.session.write_claude_session_id"):
             result = runner.invoke(
                 hook_group, ["session-start"],
                 input='{"session_id": "s-h33x8-4-cli"}',
@@ -307,7 +307,7 @@ class TestSessionStartCmdGuidanceImperative:
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
 
         runner = CliRunner()
-        with _patch("nexus.hooks.write_claude_session_id"):
+        with _patch("nexus.session.write_claude_session_id"):
             result = runner.invoke(
                 hook_group, ["session-start"],
                 input='{"session_id": "s-h33x8-4-interim"}',

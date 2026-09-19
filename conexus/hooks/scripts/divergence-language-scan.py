@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Locked Rev 4 8-pattern divergence-language scan for
-divergence-language-guard.sh (RDR-065 Gap 2).
+the divergence-language guard (RDR-065 Gap 2; the caller is now
+``nexus.hooks.divergence_language_guard``, which imports this file BY
+PATH rather than copying it -- two copies of a locked pattern bank is
+how a Rev 4 becomes a Rev 4 and a Rev 4-prime).
 
 Prints one "  line N: <text>" row per hit; empty output means clean.
 Lives in a sibling file rather than a heredoc because bash 5.3 pipes

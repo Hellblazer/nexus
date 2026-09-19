@@ -3,15 +3,21 @@
 """RDR-205 Phase 2 Step 3 (bead nexus-em75s.11): the async projection body
 for the two ``ledger/<session_id>`` tuple writes.
 
-Invoked ONLY from inside ``subagent-start-tuple-async.sh`` /
-``subagent-stop-tuple-async.sh`` — never directly from ``hooks.json`` (so
-it is not subject to the Python-hook ``_run_python_hook.sh`` routing rule,
-which governs only commands ``hooks.json`` invokes itself; see
-``subagent-stop-scan.py`` for the identical precedent of a bash hook
-shelling to a stdlib sibling ``.py``). Those two wrapper scripts are the
-``async: true`` entries beside ``subagent-start.sh``/``subagent-start-
-stamp.sh`` and ``subagent-stop.sh`` in ``hooks.json`` — this module does
-the actual work after the wrapper has already detached and returned.
+Invoked ONLY as a subprocess of ``nexus.hooks.tuple_projection``'s
+``run_start`` / ``run_stop`` — never directly from ``hooks.json``. Those
+two are registered as the ``hook_subagent_start_tuple`` and
+``hook_subagent_stop_tuple`` MCP tools, siblings of the subagent-start
+and subagent-stop entries rather than children of them, so a failure in
+the main hook still leaves the projection to run.
+
+RDR-215 bead nexus-q02nx.20 ported the detachment and .21 deleted the
+bash: the wrappers this module used to be invoked from,
+``subagent-start-tuple-async.sh`` and ``subagent-stop-tuple-async.sh``,
+disowned a background subshell, where the port uses a daemon thread.
+``tuple_projection``'s own docstring records what that costs. This module
+is unchanged by either: it stays plugin content, stdlib-only, and a
+subprocess, because importing it would invert the epic's dependency
+direction.
 
 NO HOOK MINTS ANYTHING (RDR-205 "Identity and addressing"). This module
 reads the client library's own cross-process caches --

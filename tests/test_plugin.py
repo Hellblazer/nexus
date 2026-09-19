@@ -37,7 +37,7 @@ def test_session_start_writes_session_file(runner: CliRunner, fake_home: Path) -
         captured["session_id"] = session_id
         original_write(session_id)
 
-    with patch("nexus.hooks.write_claude_session_id", side_effect=_capture):
+    with patch("nexus.session.write_claude_session_id", side_effect=_capture):
         result = runner.invoke(main, ["hook", "session-start"])
 
     assert result.exit_code == 0, result.output
@@ -69,7 +69,7 @@ def test_hook_and_cli_use_same_getsid_anchor(
     def _capture(session_id: str) -> None:
         written["session_id"] = session_id
 
-    with patch("nexus.hooks.write_claude_session_id", side_effect=_capture):
+    with patch("nexus.session.write_claude_session_id", side_effect=_capture):
         session_start()
 
     assert "session_id" in written
