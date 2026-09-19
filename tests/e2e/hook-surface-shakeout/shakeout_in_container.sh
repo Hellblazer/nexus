@@ -51,7 +51,24 @@ nx init --service --yes > "$RUN/init.log" 2>&1 \
 ok "nx init completed"
 
 SID_OF=""
-turn_stamp() { local f="$RUN/turn-end.$SID_OF"; [ -f "$f" ] && stat -c %Y "$f" 2>/dev/null || echo 0; }
+# The sentinel is found by GLOB, not by session id. turn_end.py names its file
+# after the session in its own stdin payload, so asking for a specific id
+# means resolving that id FIRST -- and the first cut of this script resolved
+# it from the wrong directory (`~/.config/nexus/status`; the record actually
+# lives under the transcript workspace, as rdr208-mvv's STATUS_D shows). The
+# id came back empty, every check then looked for a file literally named
+# "turn-end.", and five turns timed out at 240 s each while the session was
+# doing the work perfectly well. Only one session runs here, so the newest
+# sentinel of any name is unambiguous and needs nothing resolved.
+turn_stamp() {
+    local newest=0 f t
+    for f in "$RUN"/turn-end.*; do
+        [ -e "$f" ] || continue
+        t="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+        [ "$t" -gt "$newest" ] && newest="$t"
+    done
+    echo "$newest"
+}
 turn_ended_since() { [ "$(turn_stamp)" -gt "$1" ]; }
 
 prompt() {  # TEXT LABEL: paste, Enter, wait for the Stop-hook turn sentinel
@@ -94,14 +111,27 @@ if grep -qF "bypass permissions on" <<<"$(pane S)"; then
 fi
 ok "session launched"
 
-# The session id, from the status record the SessionStart hook writes.
-for _ in $(seq 1 30); do
-    SID_OF="$(ls -1 "$HOME_DIR/.config/nexus/status" 2>/dev/null | grep -v '\.tmp$' | head -1)"
-    [ -n "$SID_OF" ] && break
-    sleep 1
-done
-if [ -n "$SID_OF" ]; then ok "SessionStart produced a status record ($SID_OF)"
-else bad "no status record: the SessionStart battery did not run"; fi
+# Whether the SessionStart battery ran is answered by the CENSUS at the end,
+# against the pane, not by hunting for one hook's private artefact here. The
+# first cut asserted on a status record at a guessed path, got an empty
+# result, and reported "the SessionStart battery did not run" -- a confident
+# false negative about the product caused entirely by the harness looking in
+# the wrong place. An assertion that can only be read one way when it fails
+# is worse than no assertion, and the census already covers this claim with a
+# denominator it derives from the shipped manifest.
+#
+# The session id is taken from the sentinel turn_end.py writes, once a turn
+# has actually ended, because that file is named by the id the HOOK saw --
+# no second source to disagree with.
+sid_from_sentinel() {
+    local f
+    for f in "$RUN"/turn-end.*; do
+        [ -e "$f" ] || continue
+        basename "$f" | sed 's/^turn-end\.//'
+        return 0
+    done
+    return 1
+}
 
 # --- the turns, each aimed at one event -----------------------------------
 say "warmup: load the deferred nexus tools"
@@ -136,7 +166,12 @@ python3 "$HOME_DIR/hook_census.py" "$PLUGIN/hooks/hooks.json" \
 CENSUS=$?
 
 say "RDR-184 ledger (the subagent family's own record)"
-if nx-hook expectations_census "$SID_OF" > "$RUN/census.txt" 2>&1; then
+SID_OF="$(sid_from_sentinel || true)"
+if [ -z "$SID_OF" ]; then
+    printf '  note  no turn-end sentinel, so no session id: the ledger check\n'
+    printf '        below is UNRUN, not clean.\n'
+fi
+if [ -n "$SID_OF" ] && nx-hook expectations_census "$SID_OF" > "$RUN/census.txt" 2>&1; then
     ok "expectations_census ran"
 else
     printf '  note  expectations_census exit %s\n' "$?"
