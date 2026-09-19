@@ -423,7 +423,16 @@ def _commit(work, name: str) -> str:
 
 @pytest.fixture()
 def primary(repo_on, tmp_path):
+    """A primary checkout that is SHARED, i.e. has a linked worktree.
+
+    Rule 5 only applies where a linked worktree exists (Sam, 2026-09-18) --
+    that is the observable signature of a checkout several sessions commit
+    into, and without it the rule fired in every throwaway repo on the
+    machine. Rule 3's tests are unaffected by the extra worktree; they ask
+    about HEAD ownership, not about worktrees.
+    """
     work = repo_on("develop")
+    _git("worktree", "add", "-q", "--detach", str(tmp_path / "linked-wt"), "HEAD", cwd=work)
     store = tmp_path / "session_commits"
     return work, store, {"NX_SESSION_COMMITS_DIR": str(store)}
 
@@ -448,8 +457,11 @@ def test_amend_in_primary_on_own_recorded_commit_is_allowed(primary):
     recorded = _run_recorder({**_bash("git commit -q -m mine", cwd=str(work)), "session_id": "sess-A"}, env)
     assert recorded.returncode == 0 and recorded.stdout == ""
     assert (store / "sess-A").read_text().split() == [sha]
-    d = _decision(_run_with_env(_amend_payload(work), env))
-    assert d["permissionDecision"] == "allow"
+    # Rule 5 also applies to an amend -- it re-commits the whole index, so a
+    # peer's staged file rides it exactly as it rides a fresh bare commit.
+    # Rule 3's "your own tip" permission is necessary, not sufficient.
+    d = _decision(_run_with_env(_amend_payload(work, cmd="git commit --amend --no-edit -- mine"), env))
+    assert d["permissionDecision"] == "allow", d
 
 
 def test_amend_after_a_peer_commit_on_top_is_denied(primary):
@@ -460,8 +472,9 @@ def test_amend_after_a_peer_commit_on_top_is_denied(primary):
     _run_recorder({**_bash("git commit -q -m peer", cwd=str(work)), "session_id": "sess-B"}, env)
     d = _decision(_run_with_env(_amend_payload(work, "sess-A"), env))
     assert d["permissionDecision"] == "deny"
-    d = _decision(_run_with_env(_amend_payload(work, "sess-B"), env))
-    assert d["permissionDecision"] == "allow"
+    d = _decision(_run_with_env(
+        _amend_payload(work, "sess-B", cmd="git commit --amend --no-edit -- peer"), env))
+    assert d["permissionDecision"] == "allow", d
 
 
 def test_amend_without_a_session_id_is_denied(primary):
@@ -491,10 +504,18 @@ def test_amend_via_dash_C_targets_the_named_repo(primary, tmp_path):
     assert d["permissionDecision"] == "deny"
 
 
-def test_plain_commit_in_primary_is_untouched(primary):
+def test_plain_commit_in_primary_is_now_rule_5s(primary):
+    """This test used to assert ALLOW, and RULE 5 deliberately reverses it.
+
+    Rule 3 (amend on a foreign tip) still does not fire here -- there is no
+    ``--amend`` -- but a bare commit in the shared primary is exactly the
+    nexus-bbriq defect, so it is denied now, by a different rule and with a
+    different message.
+    """
     work, _store, env = primary
     d = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
-    assert d["permissionDecision"] == "allow"
+    assert d["permissionDecision"] == "deny", d
+    assert "whole index" in d["permissionDecisionReason"]
 
 
 def test_amend_hidden_in_a_compound_command_is_caught(primary):
@@ -594,3 +615,340 @@ def test_bare_push_to_develop_escape_allows(repo_on):
     _with_script(work)
     d = _decision(_run(_bash("git push origin develop  # routing-allow: release back-merge", cwd=str(work))))
     assert d["permissionDecision"] == "allow"
+
+
+# ── Rule 5: an unscoped `git commit` in the shared primary (nexus-bbriq) ────
+#
+# THE INCIDENT (2026-09-17). A peer had staged a 740-line
+# docs/rdr/rdr-212-*.md draft in the shared index. An accept commit ran
+# `git add <two paths>` then a BARE `git commit`, which commits the whole
+# index, so the peer's unreviewed draft rode 0249b0c98 to origin/develop.
+# The nexus-9wxu6 push script vouches commits, not index contents.
+
+
+def _commit_payload(work, cmd: str) -> dict:
+    return {**_bash(cmd, cwd=str(work)), "session_id": "sess-A"}
+
+
+@pytest.mark.parametrize("cmd", [
+    "git commit -m x",
+    'git commit -m "a message"',
+    "git commit",
+    "git commit --no-verify -m x",
+    "git commit -F -",
+    "git status --short && git commit -m x",
+])
+def test_unscoped_commit_in_primary_is_denied(cmd, primary):
+    work, _store, env = primary
+    d = _decision(_run_with_env(_commit_payload(work, cmd), env))
+    assert d["permissionDecision"] == "deny", f"{cmd}: {d}"
+    assert "whole index" in d["permissionDecisionReason"], cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "git commit -a -m x",
+    "git commit -am x",
+    "git commit --all -m x",
+    "git commit -av -m x",
+])
+def test_stage_all_commit_in_primary_is_denied(cmd, primary):
+    """`-a` cannot take a pathspec at all, so it gets its own message."""
+    work, _store, env = primary
+    d = _decision(_run_with_env(_commit_payload(work, cmd), env))
+    assert d["permissionDecision"] == "deny", f"{cmd}: {d}"
+    assert "stages every tracked modification" in d["permissionDecisionReason"], cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "git commit -m x -- f.txt",
+    "git commit -m x -- f.txt other.txt",
+    'git commit -m "msg with -- inside" -- f.txt',
+    "git commit --allow-empty -m x",
+])
+def test_scoped_or_empty_commit_in_primary_is_allowed(cmd, primary):
+    work, _store, env = primary
+    d = _decision(_run_with_env(_commit_payload(work, cmd), env))
+    assert d["permissionDecision"] == "allow", f"{cmd}: {d}"
+
+
+def test_unscoped_commit_in_a_linked_worktree_is_allowed(primary, tmp_path):
+    """The rule is about the SHARED index, which a linked worktree does not have."""
+    work, _store, env = primary
+    wt = tmp_path / "wt-rule5"
+    _git("worktree", "add", "-q", "--detach", str(wt), "HEAD", cwd=work)
+    d = _decision(_run_with_env(_commit_payload(wt, "git commit -m x"), env))
+    assert d["permissionDecision"] == "allow", d
+
+
+def test_unscoped_commit_during_a_merge_is_allowed(primary):
+    """git itself refuses a partial commit mid-merge, so demanding one would
+    block conflict resolution and the mandatory post-release back-merge."""
+    work, _store, env = primary
+    _git("checkout", "-q", "-b", "side", cwd=work)
+    (work / "f.txt").write_text("side")
+    _git("add", "f.txt", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "side", cwd=work)
+    _git("checkout", "-q", "develop", cwd=work)
+    (work / "f.txt").write_text("develop")
+    _git("add", "f.txt", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "dev", cwd=work)
+    subprocess.run(["git", "merge", "side"], cwd=work, capture_output=True)
+    assert (work / ".git" / "MERGE_HEAD").exists(), "fixture did not produce a conflicted merge"
+    d = _decision(_run_with_env(_commit_payload(work, "git commit --no-edit"), env))
+    assert d["permissionDecision"] == "allow", d
+
+
+def test_unscoped_commit_via_dash_C_targets_the_named_repo(primary, tmp_path):
+    """`git -C <primary> commit` from elsewhere is still a primary commit."""
+    work, _store, env = primary
+    outside = tmp_path / "outside-rule5"
+    outside.mkdir()
+    d = _decision(_run_with_env(
+        {**_bash(f"git -C {work} commit -m x", cwd=str(outside)), "session_id": "sess-A"}, env))
+    assert d["permissionDecision"] == "deny", d
+
+
+def test_unscoped_commit_escape_allows(primary):
+    work, _store, env = primary
+    cmd = "git commit -m x  # routing-allow: rebuilding an index git mangled"
+    d = _decision(_run_with_env(_commit_payload(work, cmd), env))
+    assert d["permissionDecision"] == "allow", d
+
+
+def test_rule_5_message_carries_both_pathspec_traps(primary):
+    """The message is where the two lessons a pathspec does NOT teach live."""
+    work, _store, env = primary
+    d = _decision(_run_with_env(_commit_payload(work, "git commit -m x"), env))
+    reason = d["permissionDecisionReason"]
+    assert "WORKING TREE version" in reason
+    assert "STRANDS THE DELETE" in reason
+    assert "0249b0c98" in reason
+
+
+def test_a_bare_amend_on_your_own_tip_is_still_denied_by_rule_5(primary):
+    """Rule 3 and Rule 5 are independent gates and an amend must clear BOTH.
+
+    Rule 3 asks "is HEAD yours to rewrite". Rule 5 asks "are you naming what
+    you are committing". An amend re-commits the whole index, so a peer's
+    staged file rides an amend exactly as it rides a fresh bare commit --
+    passing Rule 3 says nothing about that. Leaving amend exempt would have
+    left the nexus-bbriq defect reachable through the one commit form the
+    hook already had an opinion about.
+    """
+    work, store, env = primary
+    sha = _commit(work, "mine")
+    _run_recorder({**_bash("git commit -q -m mine", cwd=str(work)), "session_id": "sess-A"}, env)
+    assert (store / "sess-A").read_text().split() == [sha]
+    d = _decision(_run_with_env(_amend_payload(work), env))
+    assert d["permissionDecision"] == "deny", d
+    assert "whole index" in d["permissionDecisionReason"]
+
+
+def test_a_cd_moves_which_repo_is_judged_and_a_solo_repo_is_exempt(primary, tmp_path):
+    """A PreToolUse hook is handed the SESSION's cwd, not the directory the
+    command runs in, so `cd elsewhere && git commit` was judged against the
+    session's checkout. Found 2026-09-18 by the rule refusing its own author.
+
+    Two properties in one test, because each is the other's control. The
+    `cd` is HONOURED, so the verdict comes from the scratch repo rather than
+    the session's checkout; and a solo repo with no linked worktree is
+    EXEMPT, because rule 5 is about a checkout several sessions share and
+    `_is_primary_checkout` alone would cover every repo on the machine
+    (Sam, 2026-09-18).
+
+    Asserted together so neither can pass for the wrong reason: if the cd
+    were ignored, the first case would inherit the shared checkout's deny;
+    if the rule had simply stopped working, the second case would not still
+    deny.
+    """
+    work, _store, env = primary
+    scratch = tmp_path / "scratch-repo"
+    scratch.mkdir()
+    _git("init", "-q", "--initial-branch=main", cwd=scratch)
+    cmd = f"cd {scratch} && git commit -m x"
+    d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "allow", d
+
+    # Non-vacuity: the SAME command, judged against the shared checkout, is
+    # denied. So the allow above comes from the cd being honoured, not from
+    # the rule having quietly stopped working.
+    d2 = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
+    assert d2["permissionDecision"] == "deny", d2
+
+
+def test_a_cd_AFTER_the_commit_does_not_excuse_it(primary, tmp_path):
+    """Only a `cd` BEFORE the commit moves where it runs. Otherwise
+    `git commit -m x && cd /tmp` would be a one-token bypass."""
+    work, _store, env = primary
+    scratch = tmp_path / "scratch-after"
+    scratch.mkdir()
+    _git("init", "-q", "--initial-branch=main", cwd=scratch)
+    cmd = f"git commit -m x && cd {scratch}"
+    d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "deny", d
+
+
+def test_a_commit_mentioned_inside_a_heredoc_is_not_a_commit(primary):
+    """REGRESSION, the second false positive in five minutes (2026-09-18).
+
+    shlex has no idea the lines between `<<'PY'` and `PY` are a Python
+    program, so a script that merely MENTIONS a git command reads as one.
+    Rule 5 is far more exposed than rules 1-4 because `git commit` is
+    ordinary prose in test and doc text.
+    """
+    work, _store, env = primary
+    cmd = (
+        "python3 - <<'PY'\n"
+        "from pathlib import Path\n"
+        "Path('t.py').write_text('git commit -m x')\n"
+        "PY"
+    )
+    d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "allow", d
+
+
+def test_a_real_commit_AFTER_a_heredoc_is_still_caught(primary):
+    """Stripping heredoc bodies must not blind the rule to the shell around
+    them -- otherwise a heredoc anywhere in the command is the bypass."""
+    work, _store, env = primary
+    cmd = (
+        "cat > note.txt <<'EOF'\n"
+        "some text mentioning git commit -m nothing\n"
+        "EOF\n"
+        "git commit -m x"
+    )
+    d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "deny", d
+
+
+def test_a_primary_checkout_with_no_linked_worktree_is_exempt(repo_on, tmp_path):
+    """Rule 5 is scoped to SHARED checkouts, and a linked worktree is the
+    signal chosen for that (Sam, 2026-09-18).
+
+    Deliberately not using the `primary` fixture, which now adds a worktree:
+    this is the same repo shape WITHOUT one, so the pair brackets the
+    boundary exactly.
+    """
+    work = repo_on("develop")
+    env = {"NX_SESSION_COMMITS_DIR": str(tmp_path / "sc")}
+    d = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "allow", d
+
+    _git("worktree", "add", "-q", "--detach", str(tmp_path / "wt-now"), "HEAD", cwd=work)
+    d2 = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
+    assert d2["permissionDecision"] == "deny", (
+        "adding a linked worktree must bring the same repo under the rule"
+    )
+
+
+def test_a_multi_line_commit_message_with_a_pathspec_is_allowed(primary):
+    """REGRESSION, reported by nexus-01 2026-09-18 and blocking every session.
+
+    This repo writes long multi-line commit messages by convention. An
+    earlier fix rewrote newlines to `;` in the RAW command before splitting,
+    so the message's own newlines became segment boundaries: the verb landed
+    in one piece and the `-- <paths>` in another, and a correctly scoped
+    commit was refused. The only ways through were `-F <file>` or burning the
+    audited escape on a false positive.
+    """
+    work, _store, env = primary
+    msg = "feat(x): a subject line\n\nA body paragraph; with a semicolon.\nAnd | a pipe.\n"
+    cmd = f'git commit -m "{msg}" -- f.txt'
+    d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "allow", d
+
+
+def test_a_commit_inside_a_command_substitution_is_caught(primary):
+    """`x=$(git commit -m x)` never reached a segment boundary, so it was
+    silently allowed -- the bead's own defect wearing a subshell."""
+    work, _store, env = primary
+    for cmd in (
+        'x=$(git commit -m sneaky)',
+        'echo "$(git commit -m sneaky)"',
+        '( git commit -m sneaky )',
+    ):
+        d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
+        assert d["permissionDecision"] == "deny", f"{cmd}: {d}"
+
+
+def test_a_directory_pathspec_is_not_a_scoped_commit(primary):
+    """REGRESSION. Measured 2026-09-18: with `docs/rdr/mine.md` and a peer's
+    `docs/rdr/rdr-212-peer.md` both staged, `git commit -m x -- docs/rdr/`
+    committed BOTH. A directory pathspec is `-a` scoped to a subtree, and
+    `-a` is refused here by name."""
+    work, _store, env = primary
+    (work / "docs").mkdir(exist_ok=True)
+    for cmd in (
+        "git commit -m x -- .",
+        "git commit -m x -- docs/",
+        "git commit -m x -- docs",
+        "git commit -m x -- 'src/*.py'",
+        "git commit -m x -- f.txt docs/",
+    ):
+        d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
+        assert d["permissionDecision"] == "deny", f"{cmd}: {d}"
+
+
+def test_a_stale_merge_head_does_not_disable_the_rule(primary):
+    """REGRESSION. The exemption keyed on MERGE_HEAD's mere existence, and
+    that file persists with no TTL until the operation is committed or
+    aborted. An ordinary `git merge --no-commit` -- inspect before
+    committing -- would disable the rule for every session sharing the
+    checkout, indefinitely. It now requires an unmerged index entry, which
+    is the only reason a partial commit is impossible."""
+    work, _store, env = primary
+    _git("checkout", "-q", "-b", "side2", cwd=work)
+    (work / "g.txt").write_text("side")
+    _git("add", "g.txt", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "side", cwd=work)
+    _git("checkout", "-q", "develop", cwd=work)
+    # A clean --no-commit merge: MERGE_HEAD exists, nothing is unmerged.
+    subprocess.run(["git", "merge", "--no-commit", "--no-ff", "side2"],
+                   cwd=work, capture_output=True)
+    assert (work / ".git" / "MERGE_HEAD").exists(), "fixture must leave MERGE_HEAD present"
+    unmerged = subprocess.run(
+        ["git", "diff", "--cached", "--diff-filter=U", "--name-only"],
+        cwd=work, capture_output=True, text=True,
+    ).stdout.strip()
+    assert unmerged == "", "fixture must have NO unmerged entries (a clean --no-commit merge)"
+    d = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "deny", d
+
+
+def test_a_scoped_amend_really_scopes_on_a_multi_file_commit(primary):
+    """Non-vacuity for the amend cases above, which each amend the only file
+    their commit touched — so they cannot distinguish "the pathspec scoped
+    the amend" from "there was nothing to scope".
+
+    Two files in the commit, a foreign third staged, amend naming ONE: the
+    unnamed file's blob must be unchanged from the pre-amend tip and the
+    foreign file must stay out. This asserts git's behaviour, which is what
+    rule 5's whole justification for covering amend rests on.
+    """
+    work, store, env = primary
+    (work / "one.txt").write_text("one")
+    (work / "two.txt").write_text("two")
+    _git("add", "one.txt", "two.txt", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "pair", cwd=work)
+    def _out(*args: str) -> str:
+        # This module's own `_git` returns None (it is a fire-and-forget
+        # helper); the stdout-returning one lives in the push-script tests.
+        return subprocess.run(
+            ["git", *args], cwd=work, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    before_two = _out("rev-parse", "HEAD:two.txt")
+
+    (work / "one.txt").write_text("one-changed")
+    (work / "peer.txt").write_text("a peer's staged file")
+    _git("add", "one.txt", "peer.txt", cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--amend", "--no-edit", "--", "one.txt", cwd=work)
+
+    assert _out("rev-parse", "HEAD:two.txt") == before_two, (
+        "a scoped amend must not disturb a file it did not name"
+    )
+    assert _out("show", "HEAD:one.txt") == "one-changed"
+    tracked = _out("ls-tree", "--name-only", "HEAD").split()
+    assert "peer.txt" not in tracked, "the foreign staged file rode the scoped amend"
+    assert "peer.txt" in _out("diff", "--cached", "--name-only").split()

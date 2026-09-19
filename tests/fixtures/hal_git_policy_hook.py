@@ -133,6 +133,19 @@ is denied. Denied means the tip is not provably yours; restore-by-SHA is
 the only recovery once the rewrite has happened, so the rule fails closed.
 
 --------------------------------------------------------------------------
+RULE 5: deny a ``git commit`` that does not name its paths (no ``--
+<paths>``, or a pathspec naming a directory/glob rather than specific
+files), and deny ``git commit -a``, in a primary checkout that HAS LINKED
+WORKTREES -- the observable signature of a checkout several sessions share.
+
+A bare ``git commit`` commits the whole INDEX, so a file a peer session
+left staged rides your commit. That is nexus-bbriq: commit 0249b0c98
+carried a peer's unpushed 740-line RDR-212 draft to origin/develop, and
+nothing caught it because the nexus-9wxu6 push script vouches commits,
+not index contents. Exempt: linked worktrees, ``--allow-empty``, and any
+merge/cherry-pick/revert/rebase in progress, where git itself refuses a
+partial commit.
+
 RULE 4: deny a bare ``git push`` whose effective target is ``develop`` in a
 repo that ships ``scripts/git-push-develop.sh`` -- nexus-9wxu6.
 
@@ -744,6 +757,488 @@ def _bare_push_message(branch: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+
+#: ``git commit`` short-flag groups that stage every tracked modification.
+#: ``-a`` in any group (``-a``, ``-am``, ``-av``) sweeps the working tree into
+#: the commit, which in a shared checkout is the widest possible version of
+#: the RULE 5 defect.
+_COMMIT_STAGE_ALL_LONG = {"--all"}
+
+
+def _commit_tokens_clean(tokens: list[str]) -> list[str]:
+    return [t.rstrip(")") for t in _strip_shell_redirections(tokens)]
+
+
+def _commit_stages_everything(tokens: list[str]) -> bool:
+    """True iff this ``git commit`` carries ``-a``/``--all`` (in any short
+    group). Such a commit cannot take a pathspec at all -- git rejects the
+    combination -- so there is no scoped form to redirect the author to."""
+    for tok in _commit_tokens_clean(tokens):
+        if tok == "--":
+            break
+        if tok in _COMMIT_STAGE_ALL_LONG:
+            return True
+        if len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "a" in tok[1:]:
+            return True
+    return False
+
+
+#: Glob metacharacters. A pathspec carrying one of these names an unknown
+#: set, which is the thing this rule exists to refuse.
+_GLOB_CHARS = set("*?[")
+
+
+def _is_specific_path(token: str, cwd: str) -> bool:
+    """True iff *token* names ONE file rather than a set of them."""
+    if not token or token in {".", "..", "./"}:
+        return False
+    if token.endswith("/"):
+        return False
+    if _GLOB_CHARS & set(token):
+        return False
+    candidate = token if os.path.isabs(token) else os.path.join(cwd, token)
+    return not os.path.isdir(candidate)
+
+
+def _commit_has_pathspec(tokens: list[str], cwd: str) -> bool:
+    """True iff the segment names at least one pathspec after ``--`` and
+    EVERY name is a specific file.
+
+    A bare directory, ``.``, or a glob is not a scoped commit. Measured
+    2026-09-18 in a throwaway repo, reproducing the founding incident's
+    exact shape: with ``docs/rdr/mine.md`` and a peer's
+    ``docs/rdr/rdr-212-peer.md`` both staged, ``git commit -m x --
+    docs/rdr/`` committed BOTH. ``-- .`` committed everything, including a
+    file at the repo root. Git takes the working-tree content of every
+    path matching the pathspec, so a directory name is functionally
+    ``-a`` scoped to a subtree -- and this rule hunts down ``-a`` by name
+    a few lines above while letting its equivalent through.
+
+    Rejecting a directory costs the caller nothing they should not be
+    paying: naming the files is the entire point, and if the list is long
+    enough to be annoying that is itself the signal the commit is too
+    broad to eyeball.
+    """
+    toks = _commit_tokens_clean(tokens)
+    if "--" not in toks:
+        return False
+    named = [t for t in toks[toks.index("--") + 1:] if t]
+    if not named:
+        return False
+    return all(_is_specific_path(t, cwd) for t in named)
+
+
+def _in_progress_operation(cwd: str) -> str | None:
+    """The in-flight merge/cherry-pick/revert/rebase, or None.
+
+    A partial commit is IMPOSSIBLE during these -- git itself refuses with
+    "fatal: cannot do a partial commit during a merge" -- so demanding a
+    pathspec would block conflict resolution and the mandatory post-release
+    back-merge. RULE 5 stands down rather than ship a guard whose only
+    escape is the override.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    git_dir = os.path.join(cwd, r.stdout.strip())
+    found: str | None = None
+    for name, label in (
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+    ):
+        if os.path.exists(os.path.join(git_dir, name)):
+            found = label
+            break
+    if found is None:
+        return None
+    # The state file's EXISTENCE is not enough. It persists with no TTL until
+    # the operation is committed or aborted, so an ordinary `git merge
+    # --no-commit` -- a sanctioned "inspect before committing" step -- would
+    # leave MERGE_HEAD lying around and disable this rule for every session
+    # sharing the checkout, indefinitely. That reopens the exact defect the
+    # rule exists to close, with no adversarial intent required.
+    #
+    # So require the operation to be LIVE: an unmerged index entry. That is
+    # what makes a partial commit impossible, which is the only reason the
+    # exemption exists. A merge whose conflicts are all resolved and staged
+    # can take a pathspec again -- and by then naming paths is exactly what
+    # the caller should be doing.
+    try:
+        u = subprocess.run(
+            ["git", "diff", "--cached", "--diff-filter=U", "--name-only"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return found
+    if u.returncode != 0:
+        return found
+    return found if u.stdout.strip() else None
+
+
+#: Heredoc introducers: ``<<WORD``, ``<<-WORD``, ``<<'WORD'``, ``<<"WORD"``.
+#: ``<<<`` (a here-STRING) is deliberately excluded -- it has no body to skip.
+_HEREDOC_RE = re.compile(r"<<-?\s*([\"']?[A-Za-z_][A-Za-z0-9_]*[\"']?)(?!<)")
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """*command* with every heredoc BODY removed, delimiters and all.
+
+    A PreToolUse hook sees one blob of shell text, and ``shlex`` has no idea
+    that the lines between ``<<'PY'`` and ``PY`` are a Python program rather
+    than more shell. So a script that merely MENTIONS a git command -- a test
+    fixture, a docs snippet, a patch script writing a deny message -- gets
+    tokenised as if it were running one.
+
+    That is not hypothetical and it is not rare: writing THIS rule's own
+    tests, twice in five minutes, a ``python3 - <<'PY'`` heredoc whose body
+    contained the string ``git commit -m x`` was refused as an unscoped
+    commit in the primary. RULE 5 is far more exposed to this than rules 1-4
+    because ``git commit`` is ordinary prose in test and doc text, where
+    ``git add -A`` and ``git push origin main`` are not.
+
+    Handles ``<<WORD``, ``<<-WORD``, ``<<'WORD'`` and ``<<"WORD"``. A body
+    whose terminator never arrives is dropped to end-of-input, which is the
+    conservative direction: text that was never going to execute as a command
+    cannot then be read as one.
+    """
+    out: list[str] = []
+    lines = command.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        markers = _HEREDOC_RE.findall(line)
+        i += 1
+        for raw_marker in markers:
+            marker = raw_marker.strip("\"'")
+            while i < len(lines) and lines[i].strip() != marker:
+                i += 1
+            i += 1  # skip the terminator itself
+    return "\n".join(out)
+
+
+#: Shell operators that end a command, as raw text outside quotes.
+_TOPLEVEL_OPS = ("&&", "||", ";;", ";", "|", "\n")
+
+#: Openers that begin a NESTED command whose body is still a command:
+#: command substitution, a subshell, a process substitution.
+_NESTED_OPENERS = ("$(", "<(", ">(", "`", "(")
+
+
+def _split_shell_toplevel(command: str) -> list[str]:
+    """Split *command* into command-sized pieces, respecting QUOTES.
+
+    Rule 5 cannot reuse ``_SEGMENT_SPLIT_RE``: that regex runs against raw
+    text, so it cannot tell an operator from the same characters inside a
+    quoted argument. Two measured consequences, both on 2026-09-18:
+
+    * A multi-line ``git commit -m "...."`` had its MESSAGE's newlines
+      treated as separators, so the ``-- <paths>`` landed in a different
+      piece than the verb and a correctly-scoped commit was refused. This
+      repo writes long multi-line commit messages by convention, so the
+      rule refused the sanctioned form (found by nexus-01).
+    * ``x=$(git commit -m sneaky)`` produced NO segment at all -- ``git``
+      was never the first token of a piece -- and was silently allowed,
+      which is the bead's own defect wearing a subshell.
+
+    So this walks the string once, tracking single quotes, double quotes
+    and backslash escapes, and cuts only on operators found OUTSIDE them.
+    A nested-command opener also cuts, so the command inside a
+    substitution is examined on its own rather than disappearing into an
+    argument. Closing ``)`` and backticks are dropped as separators too;
+    the pieces they bound are what matters, not the punctuation.
+    """
+    pieces: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(command)
+    in_single = False
+    in_double = False
+    restore_double: list[str] = []
+    while i < n:
+        ch = command[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+            buf.append(ch)
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                buf.append(ch)
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            # Command substitution is LIVE inside double quotes -- `echo
+            # "$(git commit -m x)"` runs the commit. Only single quotes make
+            # it literal. Treating a double-quoted region as inert text let
+            # exactly that spelling through (measured 2026-09-18).
+            nested_dq = next(
+                (o for o in ("$(", "`") if command.startswith(o, i)), None
+            )
+            if nested_dq is not None:
+                pieces.append("".join(buf))
+                buf = []
+                in_double = False
+                restore_double.append(")" if nested_dq == "$(" else "`")
+                i += len(nested_dq)
+                continue
+            if ch == '"':
+                in_double = False
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if ch == "'":
+            in_single = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            buf.append(ch)
+            i += 1
+            continue
+        nested = next((o for o in _NESTED_OPENERS if command.startswith(o, i)), None)
+        if nested is not None:
+            pieces.append("".join(buf))
+            buf = []
+            i += len(nested)
+            continue
+        if ch in ")`":
+            pieces.append("".join(buf))
+            buf = []
+            # If this closer ends a substitution that began inside double
+            # quotes, the rest of that quoted string resumes.
+            if restore_double and restore_double[-1] == ch:
+                restore_double.pop()
+                in_double = True
+            i += 1
+            continue
+        op = next((o for o in _TOPLEVEL_OPS if command.startswith(o, i)), None)
+        if op is not None:
+            pieces.append("".join(buf))
+            buf = []
+            i += len(op)
+            continue
+        buf.append(ch)
+        i += 1
+    pieces.append("".join(buf))
+    return [p for p in (piece.strip() for piece in pieces) if p]
+
+
+def _commit_segments_quote_aware(command: str) -> list[tuple[list[str], str | None]]:
+    """``git commit`` segments found with quote-aware splitting.
+
+    Mirrors ``_git_verb_segments``'s contract (tokens from the verb onward,
+    plus any ``-C`` directory) but sources its pieces from
+    :func:`_split_shell_toplevel`. Kept separate rather than changing
+    ``_git_verb_segments`` itself, because rules 1-4 and their ~90 tests
+    are built on that function's current behaviour and this rule's bugs
+    are not theirs to inherit.
+    """
+    out: list[tuple[list[str], str | None]] = []
+    for piece in _split_shell_toplevel(command):
+        try:
+            candidates = [shlex.split(piece, posix=True)]
+        except ValueError:
+            candidates = _degraded_token_variants(piece)
+        for tokens in candidates:
+            k = 0
+            while k < len(tokens) and _ENV_ASSIGN_RE.match(tokens[k]):
+                k += 1
+            tokens = tokens[k:]
+            if len(tokens) < 2 or tokens[0] != "git":
+                continue
+            c_dir: str | None = None
+            j = 1
+            while j < len(tokens) and tokens[j].startswith("-"):
+                if tokens[j] in {"-C", "-c"}:
+                    if tokens[j] == "-C" and j + 1 < len(tokens):
+                        c_dir = tokens[j + 1]
+                    j += 2
+                else:
+                    j += 1
+            if j < len(tokens) and tokens[j] == "commit":
+                out.append((tokens[j:], c_dir))
+                break
+    return out
+
+
+def _has_linked_worktrees(cwd: str) -> bool:
+    """True iff this repo has at least one LINKED worktree besides the primary.
+
+    Rule 5 is about a checkout several sessions share. ``_is_primary_checkout``
+    answers a narrower question -- "primary rather than linked worktree" --
+    which is true of every ordinary single-checkout repo on the machine, so
+    the rule fired in throwaway repos that no one else can possibly be
+    committing into. Measured within five minutes of the rule going live: a
+    ``git commit`` in a ``mktemp -d`` repo was refused.
+
+    A linked worktree is the observable signature of the setup this rule
+    exists for. It is a heuristic, not a proof -- a shared checkout with no
+    worktrees goes uncovered here -- and that gap is deliberate: the
+    push-time scope audit still covers it, which is why both halves were
+    built (Sam, 2026-09-18).
+    """
+    try:
+        r = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    return sum(1 for line in r.stdout.splitlines() if line.startswith("worktree ")) > 1
+
+
+def _cd_target_before_commit(command: str, payload_cwd: str) -> str | None:
+    """The directory a leading ``cd`` moves to before the first ``git commit``.
+
+    A PreToolUse hook is handed the SESSION's cwd, not the directory the
+    command will actually run in, so ``cd /tmp/scratch && git commit -m x``
+    is judged against the session's checkout. Measured 2026-09-18, by this
+    rule refusing a commit in a throwaway ``mktemp -d`` repo purely because
+    the session happened to be sitting in the shared primary -- a false
+    positive, and the kind that gets a guard switched off.
+
+    Only a ``cd`` that appears BEFORE the first ``git commit`` counts:
+    ``git commit && cd elsewhere`` must still be judged where the commit
+    runs. A relative target resolves against the session cwd.
+    """
+    lowered = command.find("git ")
+    head = command if lowered < 0 else command[:command.find("commit", lowered)]
+    target: str | None = None
+    for segment in re.split(_SEGMENT_SPLIT_RE, head):
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            continue
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+        tokens = tokens[i:]
+        if len(tokens) >= 2 and tokens[0] == "cd":
+            candidate = tokens[1]
+            if candidate not in {"-", "--"}:
+                target = candidate
+    if target is None:
+        return None
+    return target if os.path.isabs(target) else os.path.join(payload_cwd, target)
+
+
+def _unscoped_commit_in_primary(command: str, payload: dict[str, Any]) -> str | None:
+    """``"stage-all"`` or ``"bare"`` when *command* commits the whole index in
+    the primary checkout, else None.
+
+    RULE 5. See the module docstring.
+    """
+    # Heredoc bodies out first, then NEWLINES become ordinary separators.
+    # _SEGMENT_SPLIT_RE knows && || ; | then do -- not "\n" -- so in a
+    # multi-line command everything after the first line landed in one
+    # segment whose first token was not `git`, and the rule saw nothing.
+    # Measured while writing this rule's own tests: a `cat > f <<'EOF' ...
+    # EOF` followed by a real `git commit -m x` on the next line was
+    # ALLOWED. Any script with a setup line above its commit was a bypass.
+    command = _strip_heredoc_bodies(command)
+    segments = _commit_segments_quote_aware(command)
+    if not segments:
+        return None
+    payload_cwd = str(payload.get("cwd") or "") or os.getcwd()
+    cd_target = _cd_target_before_commit(command, payload_cwd)
+    if cd_target is not None and os.path.isdir(cd_target):
+        payload_cwd = cd_target
+    for tokens, c_dir in segments:
+        cwd = _effective_cwd(payload_cwd, c_dir)
+        if not _is_primary_checkout(cwd):
+            continue
+        if not _has_linked_worktrees(cwd):
+            # Not a shared checkout by any observable signal -- see
+            # _has_linked_worktrees for why that is the signal chosen and
+            # what it deliberately leaves to the push-time audit.
+            continue
+        if _commit_stages_everything(tokens):
+            return "stage-all"
+        if _commit_has_pathspec(tokens, cwd):
+            continue
+        if "--" in _commit_tokens_clean(tokens):
+            return "broad-pathspec"
+        toks = _commit_tokens_clean(tokens)
+        if "--allow-empty" in toks or "--allow-empty-message" in toks:
+            continue
+        if _in_progress_operation(cwd) is not None:
+            continue
+        return "bare"
+    return None
+
+
+def _unscoped_commit_message(kind: str) -> str:
+    if kind == "broad-pathspec":
+        lead = (
+            "That pathspec names a SET of files, not specific ones. A bare "
+            "directory, `.`, or a glob makes `git commit` take the working-"
+            "tree content of everything matching it -- which is `-a` scoped "
+            "to a subtree, and `-a` is refused here by name. Name the files."
+            "\n\nMeasured 2026-09-18 in a throwaway repo, reproducing this "
+            "incident exactly: with `docs/rdr/mine.md` and a peer's "
+            "`docs/rdr/rdr-212-peer.md` both staged, `git commit -m x -- "
+            "docs/rdr/` committed BOTH."
+        )
+    elif kind == "stage-all":
+        lead = (
+            "`git commit -a` stages every tracked modification in the working "
+            "tree, including files a peer session is midway through editing. "
+            "It cannot take a pathspec -- git rejects the combination -- so "
+            "stage what you mean with `git add <path>` and commit with an "
+            "explicit `-- <paths>`."
+        )
+    else:
+        lead = (
+            "A bare `git commit` in the SHARED PRIMARY checkout commits the "
+            "whole index, not just what you staged. Name your paths: "
+            "`git commit -m \"...\" -- path/a.py path/b.py`."
+        )
+    return (
+        f"{lead}\n"
+        "\n"
+        "Why (nexus-bbriq): on 2026-09-17 a peer had staged a 740-line "
+        "docs/rdr/rdr-212-*.md draft in this same index. An accept commit ran "
+        "`git add <two paths>` then a bare `git commit`, so the peer's "
+        "unreviewed draft rode commit 0249b0c98 to origin/develop. The "
+        "nexus-9wxu6 push script vouches COMMITS, not index contents, so "
+        "nothing downstream caught it.\n"
+        "\n"
+        "TWO THINGS A PATHSPEC DOES NOT BUY YOU, both measured here:\n"
+        "  1. `git commit -- <path>` commits the WORKING TREE version of that "
+        "path. On a file two sessions are BOTH editing it will quietly carry "
+        "the other session's uncommitted text under your message (nexus-01, "
+        "2026-09-18). A pathspec protects the paths you did not name; it "
+        "guarantees nothing about one you did.\n"
+        "  2. Naming only the new path of a rename STRANDS THE DELETE, and "
+        "the commit ships both copies. `git mv` stages two index entries and "
+        "you must name BOTH (2026-09-18, b439089a1 before its amend).\n"
+        "\n"
+        "Check what you are about to ship with `git status --short`, then "
+        "name every path. In a linked worktree this rule does not apply; a "
+        "merge, cherry-pick, revert or rebase in progress is exempt, because "
+        "git itself refuses a partial commit there.\n"
+        "\n"
+        "Escape (audited, logged): append `# routing-allow: <reason>`."
+    )
+
 def body(payload: dict[str, Any]) -> None:
     command = _get_bash_command(payload)
     if not command:
@@ -768,7 +1263,17 @@ def body(payload: dict[str, Any]) -> None:
             cwd = str(payload.get("cwd") or "") or os.getcwd()
             bare_push = _bare_push_to_integration(command, cwd)
 
+    unscoped_commit: str | None = None
     if not wildcard_add and not push_to_main and amend_head is None and bare_push is None:
+        unscoped_commit = _unscoped_commit_in_primary(command, payload)
+
+    if (
+        not wildcard_add
+        and not push_to_main
+        and amend_head is None
+        and bare_push is None
+        and unscoped_commit is None
+    ):
         _allow()
 
     if _should_skip_for_reason(command):
@@ -777,6 +1282,14 @@ def body(payload: dict[str, Any]) -> None:
 
     _log_event("deny", command_fragment=command)
     # Each check keeps its OWN message.
+    if unscoped_commit is not None:
+        _deny(
+            _unscoped_commit_message(unscoped_commit),
+            summary=(
+                "unscoped git commit in the shared primary blocked: commit with "
+                "an explicit `-- <paths>` (nexus-bbriq)."
+            ),
+        )
     if bare_push is not None:
         _deny(
             _bare_push_message(bare_push),
