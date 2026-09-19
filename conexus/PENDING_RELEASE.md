@@ -32,6 +32,24 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.54.0)
 
+- `conexus/skills/git-worktrees/SKILL.md`:
+  bead: nexus-q02nx.17 — the skill covered worktrees for FEATURE WORK and for
+  `isolation: "worktree"` subagent dispatches, and said nothing about the
+  session itself, so sessions defaulted into the shared checkout by omission
+  rather than by decision. Its description named only those two cases, so it
+  could not be selected for "more than one session on one checkout" either —
+  the skill existed, covered adjacent ground, and was unfindable for the case
+  that mattered. Adds that case, the move procedure (verify in the new
+  worktree BEFORE reverting the source; cherry-pick committed work because a
+  commit is recoverable where an applied-but-unverified diff is not), and the
+  Serena difference between a session STARTED in a worktree and one RELOCATED
+  into it. Project-specific mechanics are deliberately NOT duplicated here —
+  they live in this repo's AGENTS.md next to the commands they concern,
+  because a second copy of a project rule drifts from the first until the
+  stale one wins.
+  INERT until the next cut: a session loading the pinned plugin gets the old
+  description and will not find this for the multi-session case.
+
 - `conexus/commands/continuation.md`, `conexus/skills/orchestration/SKILL.md`:
   bead: nexus-q02nx.14 — both told the reader to reach the RDR-184 ledger by
   `source tests/e2e/lib/expectations.sh`. That file is deleted; the ledger is
