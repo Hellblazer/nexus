@@ -32,6 +32,11 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.53.0)
 
+- `conexus/skills/research-synthesis/SKILL.md` (nexus-3uxbc): its Model
+  Selection section said the default is haiku with sonnet escalation, while
+  `conexus/agents/deep-research-synthesizer.md` pins `model: sonnet`. Same
+  defect shape as the four below, a different model pair, missed by the
+  first sweep because that sweep looked only at agents pinning opus.
 - `conexus/skills/strategic-planning/SKILL.md` (nexus-3uxbc): its Model Selection
   section said the default is sonnet with opus escalation, while
   `conexus/agents/strategic-planner.md` pins `model: opus`. An agent's own

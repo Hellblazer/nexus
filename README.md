@@ -18,7 +18,7 @@ The package on PyPI is `conexus`. The command it installs is `nx`. The full inst
 | git | Nexus reads git information when it indexes a repository. | `git --version` |
 | Node.js with npm | Required for the Claude Code plugin. Without it the plugin installs but its tools never appear, with no error message. | `node --version` |
 | About 600 MB, a few minutes | The first run downloads the service program, a database, and the search model. | |
-| Apple Silicon Mac, or Linux on x86-64 or arm64 | The bundled PostgreSQL ships for these three. An Intel Mac has no bundle and falls back to a PostgreSQL you install yourself. Windows is not supported yet. | `uname -sm` |
+| Apple Silicon Mac, or Linux on x86-64 or arm64 | Nexus ships its own PostgreSQL and never uses one you installed. The bundle exists for these three only, so an Intel Mac or Windows cannot run a local install: setup stops with an error rather than falling back. | `uname -sm` |
 | No GPU | Search runs a bundled CPU model. Nothing here needs CUDA or Metal. | |
 
 ## Install

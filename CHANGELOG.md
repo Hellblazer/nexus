@@ -19,7 +19,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Existing installs keep the old stanza until `nx hooks update`; `nx doctor`
   reports the drift.
 
-### Fixed
 
 - **A `/clear` or `/resume` handoff now moves the channel waiter with the
   session** (nexus-kdxyv). The MCP server's T1 handoff swapped the session
