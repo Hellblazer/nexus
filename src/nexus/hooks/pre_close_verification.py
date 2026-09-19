@@ -132,6 +132,28 @@ def _bd_verbs(cmd: str) -> dict:
     }
 
 
+#: The flags whose VALUE is prose or a path, never a close target.
+#: Hoisted to module scope at nexus-q02nx.24 so the regex below can be
+#: DERIVED from it. These were two hand-kept literals inside ``_bead_ids``
+#: and the port expanded only one: ``--reason-file`` and ``-r`` reached
+#: the shlex path and not the malformed-quoting fallback, so an unbalanced
+#: quote anywhere in a close command let a bead-id-shaped token inside a
+#: reason-file path or a short-flag reason be harvested as a close target.
+#: Two constants holding one fact, edited one at a time.
+_VALUE_FLAGS = frozenset(
+    {'--reason', '--reason-file', '-r', '--description', '--notes', '-m'}
+)
+
+#: Longest-first so ``--reason`` cannot claim ``--reason-file``'s prefix and
+#: leave ``-file`` behind. Python's alternation backtracks and would recover
+#: anyway; ordering it makes that independent of the engine's behaviour.
+_FLAG_VALUE_RE = re.compile(
+    '('
+    + '|'.join(re.escape(f) for f in sorted(_VALUE_FLAGS, key=len, reverse=True))
+    + r')(=|\s+)(\x22[^\x22]*\x22?|\x27[^\x27]*\x27?|\S+)'
+)
+
+
 def _bead_ids(cmd: str) -> list[str]:
     """Every literal bead id this command names as a close target.
 
@@ -153,8 +175,7 @@ def _bead_ids(cmd: str) -> list[str]:
     mistake in this one can only decline to scan a path. Every historical
     defect in this file failed open, so a fix must not add a new way.
     """
-    VALUE_FLAGS = {'--reason', '--reason-file', '-r',
-                   '--description', '--notes', '-m'}
+    VALUE_FLAGS = _VALUE_FLAGS
     BEAD_RE = re.compile(r'\bnexus-[a-z0-9]+\b', re.IGNORECASE)
     OPERATORS = {';', '&&', '||', '|', 'then', 'do'}
     seen, ids = set(), []
@@ -194,9 +215,7 @@ def _bead_ids(cmd: str) -> list[str]:
     # Malformed quoting means the flag value could not be isolated by shlex;
     # blank it textually (a value opened by an unbalanced quote runs to the
     # end of the segment) so the raw scan never reads --reason prose as targets.
-    FLAG_VALUE_RE = re.compile(
-        r'(--reason|--description|--notes|-m)(=|\s+)(\x22[^\x22]*\x22?|\x27[^\x27]*\x27?|\S+)'
-    )
+    FLAG_VALUE_RE = _FLAG_VALUE_RE
 
     for tokens, raw in tokenized:
         if tokens is None:
@@ -723,15 +742,32 @@ def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
     incomplete = _ids_with_status(status, "incomplete")
 
     if override and (missing or uncertain or deadline or incomplete):
-        _log_override_escape(ids, command)
+        # THE TWO ID SETS ARE STAMPED DIFFERENTLY, and the three things
+        # below key on NOT-COVERED rather than on every id in the command.
+        # The bash did this (COVERED_SPACE -> "passed", NOT_COVERED_SPACE
+        # -> "overridden") and the first port collapsed both onto `ids`,
+        # so a bead that genuinely had a verified marker lost its true
+        # state to an "overridden" it never earned and the escape log
+        # claimed the bypass covered a bead that needed no covering --
+        # a false record in the audit trail this gate exists to keep
+        # honest. Restored at nexus-q02nx.24 from the deleted script.
+        not_covered = missing + uncertain + deadline + incomplete
+        _log_override_escape(not_covered, command)
         # The override still STAMPS, with its own state. Surfaced by the
         # differential: leaving the bypass unstamped would make an
         # overridden close indistinguishable from one that was never
         # gated, which is the record this gate exists to produce.
-        _stamp_ids(ids, "overridden", "NX_REVIEW_GATE_OVERRIDE=1 at close")
+        if covered:
+            _stamp_ids(covered, "passed", "review-completed marker verified at close")
+        _stamp_ids(
+            not_covered,
+            "overridden",
+            "NX_REVIEW_GATE_OVERRIDE=1; no confirmed review-completed coverage "
+            f"in T1 scratch for: {' '.join(not_covered)}",
+        )
         return _allow(
             "NX_REVIEW_GATE_OVERRIDE=1 \u2014 review gate bypassed for: "
-            f"{' '.join(ids)}. Logged as a routing escape."
+            f"{' '.join(not_covered)}. Logged as a routing escape."
         )
 
     if missing or deadline or incomplete:

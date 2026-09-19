@@ -188,3 +188,159 @@ class TestTheEnvelopes:
                 "permissionDecision"
             ] == "allow"
             assert result.exit_code == 0
+
+
+class TestTheOverridePathKeepsTheBashDifferential:
+    """An override stamps the two id sets DIFFERENTLY (RDR-215 nexus-q02nx.24).
+
+    The bash split them and the first port did not::
+
+        _stamp_ids "$COVERED_SPACE"     "passed"      "...verified at close"
+        _stamp_ids "$NOT_COVERED_SPACE" "overridden"  "...no confirmed ... for: ..."
+        _log_override_escape "$NOT_COVERED_SPACE"
+        allow "...no confirmed review-completed coverage ... for $NOT_COVERED_SPACE ..."
+
+    Three things key on NOT_COVERED, not on every id in the command. A
+    bead that DID have a verified marker, closed in the same command as
+    one that did not, must keep its true ``passed`` state; overwriting it
+    with ``overridden`` writes a false record into the audit trail this
+    gate exists to keep honest, and makes the escape log claim the bypass
+    covered a bead that never needed it.
+
+    No test in this file or the harness file closed more than one id
+    under override, which is why the collapse survived the port.
+    """
+
+    @staticmethod
+    def _drive(monkeypatch, status: dict):
+        calls: list[tuple] = []
+        escapes: list[list[str]] = []
+        monkeypatch.setattr(gate, "_coverage", lambda ids: {"status": status})
+        monkeypatch.setattr(
+            gate, "_stamp_ids", lambda ids, state, reason: calls.append((list(ids), state, reason))
+        )
+        monkeypatch.setattr(
+            gate, "_log_override_escape", lambda ids, command: escapes.append(list(ids))
+        )
+        monkeypatch.setattr(
+            "nexus.hooks.stop_verification._read_config", lambda: {"on_close": True}
+        )
+        command = f"{CLOSE} " + " ".join(status)
+        result = gate._run_gate(
+            {}, command, {"has_create": False, "inline_override": True}
+        )
+        return result, calls, escapes
+
+    def test_a_covered_id_is_stamped_passed_not_overridden(self, monkeypatch) -> None:
+        _, calls, _ = self._drive(
+            monkeypatch, {"nexus-cover1": "covered", "nexus-missn1": "missing"}
+        )
+        by_state = {state: ids for ids, state, _ in calls}
+        assert "passed" in by_state, (
+            f"no id was stamped `passed`; the override stamped only {sorted(by_state)}. "
+            f"The bash stamped COVERED_SPACE passed on this very branch."
+        )
+        assert by_state["passed"] == ["nexus-cover1"]
+        assert by_state["overridden"] == ["nexus-missn1"], (
+            "a covered bead must not acquire an `overridden` record it did not earn"
+        )
+
+    def test_the_escape_log_names_only_the_ids_that_needed_the_bypass(
+        self, monkeypatch
+    ) -> None:
+        _, _, escapes = self._drive(
+            monkeypatch, {"nexus-cover1": "covered", "nexus-missn1": "missing"}
+        )
+        assert escapes == [["nexus-missn1"]], (
+            f"the escape log recorded {escapes}; naming a covered id there claims "
+            f"the override covered a bead that needed no covering."
+        )
+
+    def test_the_allow_text_names_only_the_uncovered_ids(self, monkeypatch) -> None:
+        result, _, _ = self._drive(
+            monkeypatch, {"nexus-cover1": "covered", "nexus-missn1": "missing"}
+        )
+        context = result.stdout or ""
+        assert "nexus-missn1" in context
+        assert "nexus-cover1" not in context, (
+            "the allow text named a covered id as bypassed"
+        )
+
+    def test_all_four_uncovered_states_are_stamped_overridden(self, monkeypatch) -> None:
+        _, calls, _ = self._drive(
+            monkeypatch,
+            {
+                "nexus-cover1": "covered",
+                "nexus-missn1": "missing",
+                "nexus-uncrt1": "uncertain",
+                "nexus-dedln1": "deadline",
+                "nexus-incmp1": "incomplete",
+            },
+        )
+        by_state = {state: ids for ids, state, _ in calls}
+        assert by_state["passed"] == ["nexus-cover1"]
+        assert sorted(by_state["overridden"]) == [
+            "nexus-dedln1",
+            "nexus-incmp1",
+            "nexus-missn1",
+            "nexus-uncrt1",
+        ], "the override must absorb all four non-covered states uniformly"
+
+
+class TestTheTwoFlagTablesCannotDrift:
+    """The fallback path knows the same flags as the shlex path (nexus-q02nx.24).
+
+    ``_bead_ids`` carries two tables: ``VALUE_FLAGS``, used once shlex has
+    tokenized cleanly, and ``FLAG_VALUE_RE``, used on the malformed-quoting
+    fallback where shlex could not isolate the value. The port expanded the
+    first to add ``--reason-file`` and ``-r`` and left the second at its
+    original four flags, so an unbalanced quote anywhere in the command
+    sent a bead-id-shaped token inside a ``--reason-file`` path or a ``-r``
+    value straight into the harvest as a required-coverage close target.
+
+    That is the over-harvesting class this function's own history was
+    built to close (nexus-cr4lp F3, nexus-fv65m), reopened on one path
+    only. Nothing drove the fallback path at all, in either direction.
+    """
+
+    def test_a_reason_file_path_is_not_harvested_under_malformed_quoting(self) -> None:
+        ids = gate._bead_ids(
+            f'{CLOSE} nexus-q02nx.17 --reason-file nexus-93.txt "unterminated'
+        )
+        assert "nexus-93" not in ids, (
+            f"harvested {ids}; a --reason-file PATH is not a close target, and "
+            f"treating it as one demands review coverage for a bead nobody closed."
+        )
+
+    def test_a_short_reason_flag_value_is_not_harvested_under_malformed_quoting(
+        self,
+    ) -> None:
+        ids = gate._bead_ids(f'{CLOSE} nexus-q02nx.17 -r "unterminated supersedes nexus-zzzzz')
+        assert "nexus-zzzzz" not in ids, f"harvested {ids}; -r prose is not a target"
+
+    def test_the_real_target_still_survives_both(self) -> None:
+        """The fix must not blind the harvester; finding nothing ALLOWS."""
+        for command in (
+            f'{CLOSE} nexus-q02nx.17 --reason-file nexus-93.txt "unterminated',
+            f'{CLOSE} nexus-q02nx.17 -r "unterminated supersedes nexus-zzzzz',
+        ):
+            assert "nexus-q02nx" in gate._bead_ids(command), command
+
+    @pytest.mark.parametrize("flag", sorted(gate._VALUE_FLAGS))
+    def test_every_value_flag_is_blanked_on_the_fallback_path(self, flag: str) -> None:
+        """The structural pin: neither table may grow without the other.
+
+        Parametrized over the module's own ``_VALUE_FLAGS`` rather than a
+        list retyped here, so a seventh flag added tomorrow is covered
+        the moment it is added. A hand-kept copy in the test would be a
+        third constant holding the same fact -- the defect this fixes.
+        """
+        ids = gate._bead_ids(f'{CLOSE} nexus-q02nx.17 {flag} nexus-zzzzz "unterminated')
+        assert "nexus-zzzzz" not in ids, (
+            f"{flag} is in _VALUE_FLAGS but its value was still harvested on the "
+            f"malformed-quoting fallback path; got {ids}"
+        )
+        assert "nexus-q02nx" in ids, (
+            f"blanking {flag} also blinded the harvester to the real target; "
+            f"finding nothing routes to INDETERMINATE, which ALLOWS"
+        )

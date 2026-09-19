@@ -237,6 +237,30 @@ class TestWhatItSubprocesses:
         proj._project("start", "{}")  # must not raise
         assert emitted == [expected]
 
+    def test_a_SUCCESSFUL_projection_says_so(self, monkeypatch, tmp_path):
+        """Both outcomes are logged, not just the bad one (nexus-q02nx.24).
+
+        The module's own docstring says this "adds only a line saying the
+        attempt happened at all, because a thread that dies quietly is
+        harder to notice than a process that was never spawned" -- and
+        the success path emitted nothing, so from the hook log a clean
+        projection and a thread that never started read identically.
+        That is precisely the distinction the line exists to draw, and
+        the failure-only parametrization above could not notice its
+        absence.
+        """
+        script = tmp_path / "tuple_ledger_project.py"
+        script.write_text("import sys; sys.exit(0)\n")
+        monkeypatch.setattr(proj, "_projector", lambda: script)
+        emitted: list[str] = []
+        monkeypatch.setattr(proj, "_emit", lambda _lvl, ev, **_kw: emitted.append(ev))
+
+        proj._project("start", "{}")
+        assert emitted == ["tuple_projection_ok"], (
+            f"a clean projection emitted {emitted}; with nothing on the success "
+            f"path the log cannot distinguish it from a thread that never ran"
+        )
+
 
 class TestTheBackgroundedWriteActuallyLands:
     """The end-to-end proof, ported from

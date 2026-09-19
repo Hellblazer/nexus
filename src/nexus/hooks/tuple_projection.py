@@ -106,6 +106,13 @@ def _project(verb: str, payload_json: str) -> None:
             returncode=proc.returncode,
             stderr=(proc.stderr or "").strip()[:300],
         )
+        return
+    # BOTH outcomes are logged. The success line is what makes the
+    # failure lines mean something: with nothing here, a projection that
+    # ran cleanly and a thread that never started are the same absence in
+    # the hook log, which is the distinction the docstring above says
+    # this logging exists to draw (nexus-q02nx.24).
+    _emit("info", "tuple_projection_ok", verb=verb)
 
 
 def _spawn(verb: str, payload: dict | None) -> HookResult:
