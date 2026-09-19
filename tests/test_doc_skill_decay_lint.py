@@ -424,7 +424,17 @@ _DISALLOWED_TOKEN_CHARS: tuple[str, ...] = ("$", "~", "{", "}", "<", ">", " ", "
 
 #: Confirmed: `git check-ignore service/target` matches `.gitignore:54`.
 #: Build output; its presence/absence on disk says nothing about doc rot.
-_BUILD_OUTPUT_PREFIXES: tuple[str, ...] = ("service/target/",)
+#:
+#: BOTH FORMS, and the bare one is why: this shipped with the trailing-slash
+#: form alone, which misses a doc citing the directory itself as
+#: `service/target` (AGENTS.md:222 does). That reference exists on any box
+#: that has built the engine and is absent on a fresh CI checkout, so the
+#: check was green locally and red in CI for every author who had ever run
+#: `scripts/build-gate-jar.sh` — a gate whose verdict depended on untracked
+#: build output rather than on the tree. Allowlisting the citation would have
+#: recorded it as an exception; it is not one, it is the same build output
+#: this tuple already exempts.
+_BUILD_OUTPUT_PREFIXES: tuple[str, ...] = ("service/target/", "service/target")
 
 
 def _looks_like_repo_path_token(tok: str) -> bool:
