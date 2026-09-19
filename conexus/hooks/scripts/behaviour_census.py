@@ -37,6 +37,17 @@ same corpus -- a 5.4x swing from bugs, not behaviour, which is exactly the
 failure mode a raw count cannot produce: there is no ratio to be wrong
 about.
 
+DISPATCH IS A RAW COUNT TOO, NOT ONLY THE RATIO THAT WAS DELETED. "N
+dispatched, M performed by this session directly" is exactly as honest as
+the thought/decision counts above -- it says nothing about whether M should
+have been smaller, only what happened. Only the percentage built from it
+("delegation 25.0%") implied a verdict, so only the percentage is gone. An
+Agent/Task dispatch is also counted in the decision set below and so also
+appears in the distance distribution: the dispatch line answers "how much
+was handed off", the distance line answers "how much was deliberated
+before it happened", and one call legitimately answers both questions at
+once.
+
 NO SCHEMA, NO STORE. Deliberately computes from the transcript rather than
 reading a stored row: storing would mean new ``capability_census`` columns,
 hence a Liquibase changeset, an engine tag, a PITR-fork walk rehearsal and
@@ -51,6 +62,11 @@ import json
 import os
 import sys
 from pathlib import Path
+
+#: Tool calls this session performed itself rather than dispatching. A raw
+#: count paired against `dispatch` below (Agent/Task calls) -- "N
+#: dispatched, M by hand" -- with no ratio between them.
+HANDS_ON = {"Read", "Edit", "Write", "Grep", "Glob", "Bash", "NotebookEdit"}
 
 #: What counts as a decision: a tool call that changes state outside the
 #: transcript itself. Reviewable in ONE place, not scattered predicates.
@@ -109,12 +125,16 @@ REFUSAL = (
 
 
 class Counts:
-    __slots__ = ("think", "decisions", "tool_calls", "distances", "ungrounded")
+    __slots__ = ("think", "decisions", "tool_calls", "distances", "ungrounded", "dispatch", "hands_on")
 
     def __init__(self) -> None:
         self.think = 0
         self.decisions = 0
         self.tool_calls = 0
+        #: Agent/Task calls -- handed off, not performed by this session.
+        self.dispatch = 0
+        #: Calls in HANDS_ON -- performed by this session directly.
+        self.hands_on = 0
         #: One entry per decision that had at least one preceding thought
         #: anywhere earlier in the transcript: the tool-call distance
         #: (this call counts as 1) from the NEAREST such thought.
@@ -181,6 +201,10 @@ def census(path: Path) -> Counts:
                 # a decision.
                 if since_thought is not None:
                     since_thought += 1
+                if base in ("Agent", "Task"):
+                    c.dispatch += 1
+                elif base in HANDS_ON:
+                    c.hands_on += 1
                 command = (block.get("input") or {}).get("command") or ""
                 is_decision = base in DECISION_TOOL_NAMES or (
                     base == "Bash" and any(k in command for k in DECISION_BASH_SUBSTRINGS)
@@ -226,6 +250,7 @@ def _report(c: Counts) -> None:
     print("## Session behaviour census (previous session)\n")
     print(REFUSAL + "\n")
     print(f"- {c.think} thought(s), {c.decisions} state-mutating action(s)")
+    print(f"- {c.dispatch} dispatched (Agent/Task calls), {c.hands_on} performed by this session directly (the HANDS_ON set)")
     if c.distances:
         med = _percentile(c.distances, 50.0)
         p25 = _percentile(c.distances, 25.0)

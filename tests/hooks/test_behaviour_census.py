@@ -78,10 +78,10 @@ def test_a_prior_transcript_with_no_tool_calls_says_skipped_not_zero(tmp_path: P
 def test_it_reports_raw_counts_and_distances_from_a_real_transcript(tmp_path: Path) -> None:
     lines = [
         _thought(),
-        _tool_use("Edit"),                       # decision, distance 1 from the thought
-        _tool_use("Agent"),                      # decision, distance 2
+        _tool_use("Edit"),                       # decision + hands-on, distance 1 from the thought
+        _tool_use("Agent"),                      # decision + dispatch, distance 2
         _tool_use("Bash", "ls -la"),              # hands-on, NOT a decision
-        _tool_use("Bash", "git commit -m x"),     # decision, distance 4 (ls -la counts too)
+        _tool_use("Bash", "git commit -m x"),     # decision + hands-on, distance 4 (ls -la counts too)
     ]
     (tmp_path / "prior.jsonl").write_text("\n".join(lines) + "\n")
     cur = tmp_path / "current.jsonl"
@@ -90,11 +90,34 @@ def test_it_reports_raw_counts_and_distances_from_a_real_transcript(tmp_path: Pa
     assert r.returncode == 0, r.stderr
     # 1 thought, 3 decisions (Edit, Agent, git commit) -- "ls -la" is not one.
     assert "1 thought(s), 3 state-mutating action(s)" in r.stdout
+    # dispatch: the one Agent call. hands-on: Edit + both Bash calls = 3.
+    # Different denominators from "decisions" above, not double counting:
+    # this line answers "how much was handed off", not "how much mutated
+    # state".
+    assert "1 dispatched (Agent/Task calls), 3 performed by this session directly" in r.stdout
     # distances [1, 2, 4]: median 2, p25 1.5, p75 3. Every decision here
     # followed the one thought, so 0 are ungrounded.
     assert "median 2, p25 1.5, p75 3" in r.stdout
     assert "3 of 3 action(s) had one" in r.stdout
     assert "had no prior thought" not in r.stdout
+
+
+def test_a_dispatch_is_counted_as_both_a_dispatch_and_a_decision(tmp_path: Path) -> None:
+    """An Agent/Task call answers two different questions at once: how much
+    was handed off (the dispatch line), and how much was deliberated before
+    it happened (the distance distribution, since a dispatch is also a
+    decision). Appearing in both is correct, not double counting -- the two
+    lines have different denominators."""
+    lines = [_thought(), _tool_use("Agent"), _tool_use("Task")]
+    (tmp_path / "prior.jsonl").write_text("\n".join(lines) + "\n")
+    cur = tmp_path / "current.jsonl"
+    cur.write_text("")
+    r = _run(cur)
+    assert r.returncode == 0, r.stderr
+    assert "1 thought(s), 2 state-mutating action(s)" in r.stdout
+    assert "2 dispatched (Agent/Task calls), 0 performed by this session directly" in r.stdout
+    assert "median 1.5, p25 1.25, p75 1.75" in r.stdout
+    assert "2 of 2 action(s) had one" in r.stdout
 
 
 def test_a_decision_far_past_the_old_six_call_window_is_reported_at_its_true_distance(
@@ -113,6 +136,7 @@ def test_a_decision_far_past_the_old_six_call_window_is_reported_at_its_true_dis
     r = _run(cur)
     assert r.returncode == 0, r.stderr
     assert "1 thought(s), 1 state-mutating action(s)" in r.stdout
+    assert "0 dispatched (Agent/Task calls), 201 performed by this session directly" in r.stdout
     assert "median 201, p25 201, p75 201" in r.stdout
     assert "1 of 1 action(s) had one" in r.stdout
 
@@ -127,6 +151,7 @@ def test_a_decision_with_no_preceding_thought_at_all_is_reported_as_ungrounded(
     r = _run(cur)
     assert r.returncode == 0, r.stderr
     assert "0 thought(s), 1 state-mutating action(s)" in r.stdout
+    assert "0 dispatched (Agent/Task calls), 1 performed by this session directly" in r.stdout
     assert "1 action(s) had no prior thought" in r.stdout
     # nothing to compute a distance distribution over
     assert "median" not in r.stdout
@@ -216,6 +241,9 @@ def test_subagent_calls_are_excluded(tmp_path: Path) -> None:
     r = _run(cur)
     assert r.returncode == 0, r.stderr
     assert "0 thought(s), 1 state-mutating action(s)" in r.stdout, "sidechain entries must not be counted"
+    assert "0 dispatched (Agent/Task calls), 1 performed by this session directly" in r.stdout, (
+        "sidechain entries must not count toward hands-on either"
+    )
 
 
 def test_the_current_session_is_never_its_own_previous(tmp_path: Path) -> None:
