@@ -84,6 +84,25 @@ uv build --wheel --out-dir "$STAGE/wheel" "$ROOT" > "$STAGE/build.log" 2>&1 \
 
 cp "$ROOT/conexus/.claude-plugin/plugin.json" "$STAGE/plugin/.claude-plugin/"
 cp -R "$ROOT/conexus/hooks/scripts" "$STAGE/plugin/hooks/scripts"
+# THE PLUGIN'S OWN MCP REGISTRATION, and it is load-bearing for the tool tier.
+# hooks.json addresses `"server": "plugin:conexus:nexus"`; that name is what
+# Claude Code namespaces the plugin's own `.mcp.json` key `nexus` to when it
+# loads the plugin. The first cut of this harness did not stage this file and
+# instead forced a separate server with `--mcp-config --strict-mcp-config`
+# keyed `nexus`, so every one of the twelve tool-tier entries addressed a
+# server that did not exist under that name. Measured: "Stop hook error: MCP
+# server 'plugin:conexus:nexus' not connected", and the session carried on
+# regardless -- which is the fail-open this shakeout exists to find, reproduced
+# by the harness instead of by the product.
+# The sequential-thinking entry is dropped: it shells out to npx, which this
+# image has no node for, and nothing under test needs it.
+python3 - "$ROOT/conexus/.mcp.json" "$STAGE/plugin/.mcp.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("sequential-thinking", None)
+json.dump(d, open(sys.argv[2], "w"), indent=2)
+print(f"[stage] plugin .mcp.json: {', '.join(sorted(d))}")
+PY
 
 # hooks.json UNTRIMMED except for the two entries that would mutate the thing
 # under test. `upgrade-auto` installs a generation and flips <tools>/current,

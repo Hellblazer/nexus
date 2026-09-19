@@ -97,10 +97,16 @@ prompt() {  # TEXT LABEL: paste, Enter, wait for the Stop-hook turn sentinel
 }
 
 say "launch: real Claude Code, plugin from ${SHAKEOUT_SHA:-?}, ALL hooks live"
-mcp="$RUN/mcp.json"
-printf '{"mcpServers":{"nexus":{"type":"stdio","command":"%s/nxenv/bin/nx-mcp","args":[],"env":{"NX_MCP_LOG":"%s/nx-mcp.log"}}}}\n' \
-    "$HOME_DIR" "$RUN" > "$mcp"
-CMD="export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --dangerously-skip-permissions --plugin-dir $PLUGIN --mcp-config $mcp --strict-mcp-config"
+# NO --mcp-config, and that is the point. The twelve tool-tier hooks address
+# `plugin:conexus:nexus`, which is how Claude Code namespaces the PLUGIN's own
+# .mcp.json key `nexus`. Passing our own --mcp-config (with
+# --strict-mcp-config, which suppresses every other source) registered a
+# server called plain `nexus` and left the tool tier addressing a name that
+# did not exist -- measured as "Stop hook error: MCP server
+# 'plugin:conexus:nexus' not connected", with the session continuing anyway.
+# rdr208-mvv can use --mcp-config because the two hooks it tests are
+# command-tier and never name a server. This one cannot.
+CMD="export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --dangerously-skip-permissions --plugin-dir $PLUGIN"
 T kill-server 2>/dev/null
 T new-session -d -s S -x 240 -y 50 || { echo "tmux failed"; exit 1; }
 T pipe-pane -t S -o "cat >> $RUN/pane.log"
@@ -189,7 +195,7 @@ ok "/exit issued"
 # --- the census -----------------------------------------------------------
 say "census: every declared handler against what fired"
 python3 "$HOME_DIR/hook_census.py" "$PLUGIN/hooks/hooks.json" \
-    "$RUN/pane.log" "$RUN/nx-mcp.log"
+    "$RUN/pane.log"
 CENSUS=$?
 
 say "RDR-184 ledger (the subagent family's own record)"
