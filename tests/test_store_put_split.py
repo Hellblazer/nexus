@@ -87,10 +87,16 @@ def test_a_note_inside_the_window_is_one_piece(small_window) -> None:
 
 
 def test_a_windowless_collection_splits_for_granularity(monkeypatch) -> None:
-    """nexus-b2tld. A model with no window (voyage-context-3 reads 32,000,
-    above the 12,288-byte chunk cap) used to store a note WHOLE however long
-    it was, so one vector represented every topic and search found the note
-    but not the part of it. It now splits on a character cap instead."""
+    """nexus-b2tld. A model whose token limit sits above the 12,288-byte chunk
+    cap imposes no window at all, so a note used to be stored WHOLE however
+    long it was: one vector had to represent every topic, and search found the
+    note but not the part of it. It now splits on a character cap instead.
+
+    The model that behaves this way is named in note_pieces' own docstring and
+    deliberately not repeated here. This test forces window_for_model to None
+    and asserts nothing about cloud mode, so naming it would only make the
+    test an RDR-109 mode-declaration offender (tests/conftest.py
+    _MODE_LINT_EXCLUDE) for a string no code here reads."""
     monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
     assert len(NOTE) > store_hook.NOTE_SPLIT_CHARS, "fixture must cross the cap"
     pieces = store_hook.note_pieces(NOTE, t3_collection_name(SUBJECT))
