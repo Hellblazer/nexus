@@ -125,7 +125,7 @@ one hop, not a transitive closure. Verified at authoring time that one
 hop is sufficient for the WHOLE current tree — none of the repo-local libs
 sourced anywhere in this corpus (``scripts/validate/lib.sh``,
 ``tests/e2e/lib.sh``, ``tests/e2e/lib/lock.sh``,
-``tests/e2e/lib/expectations.sh``) itself sources a further file, so there
+``conexus/hooks/scripts/expectations.sh``) itself sources a further file, so there
 is no live 2-hop chain today. If a future lib begins sourcing another lib,
 that second hop is invisible to this precondition filter until this scope
 is revisited — a disclosed limitation, not a silent gap.

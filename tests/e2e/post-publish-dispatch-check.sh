@@ -14,7 +14,7 @@
 # session itself dispatches one trivial agent FIRST, then this script runs
 # against that session's id):
 #   (a) the TSV expectations ledger has >=1 START row and >=1 REPORTED row
-#       (tests/e2e/lib/expectations.sh -- the always-on half of RDR-184).
+#       (nx-hook expectations_* -- the always-on half of RDR-184).
 #   (b) the tuple-space subspace ledger/<sid> (read-only, via the
 #       INSTALLED `nx tuple stats` / `nx tuple rd`, cloud or local) holds
 #       >=1 kind=start and >=1 kind=report tuple whose agent_id matches a
@@ -26,7 +26,7 @@
 #       project.py's _log_skip) carries no line newer than the newest TSV
 #       START row. A SKIP after our dispatch's START is the projector
 #       failing on OUR OWN traffic, not stale history from an earlier run.
-#   (d) `expectations_census` (tests/e2e/lib/expectations.sh) ends its
+#   (d) `nx-hook expectations_census` ends its
 #       space-backed report on SPACE_PRESENT for this session -- never
 #       SPACE_FALLBACK (the space could not be consulted at all) or
 #       SPACE_BLINDSPOT (consulted, saw nothing under ledger/ at all).

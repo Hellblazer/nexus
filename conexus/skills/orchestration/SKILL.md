@@ -29,7 +29,7 @@ There is no orchestrator agent. The caller (main conversation or skill) dispatch
 The declaration surface is a SHELL LIB, not an nx verb (nexus-3ra9h: `nx expectations` / `nx orchestration` / `nx guard` do not exist; declarations improvised into `nx scratch` are invisible to the audit). In a nexus checkout:
 
 ```bash
-source tests/e2e/lib/expectations.sh   # plugin copy: conexus/hooks/scripts/expectations.sh
+# nx-hook is on PATH wherever the conexus wheel is installed; no source step
 ```
 
 1. The EXPECT row is MECHANIZED. Do NOT hand-write one (nexus-qc4p1). A PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`, before the dispatch lands. Hand-writing an extra row now DOUBLE-COUNTS: the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual row inflates the count and shows up as a spurious `EXPECTED_NO_START`. Call `expectations_expect` by hand only for a dispatch the hook cannot see (it fires on the Agent/Task tool only), and key it on the SUBAGENT TYPE, never on an invented name. The Agent tool has no `name` parameter, so a name-keyed row cannot pair with anything the SubagentStart hook records (nexus-nu7fo: 25 dispatches, zero recognised).

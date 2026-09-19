@@ -42,11 +42,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "conexus" / "hooks" / "scripts" / "agent-dispatch-expect.sh"
 STAMP = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-start-stamp.sh"
-LIB = REPO_ROOT / "tests" / "e2e" / "lib" / "expectations.sh"
-PLUGIN_LIB = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
+#: The bash side of every differential in this file. It points at the
+#: PLUGIN copy, not the deleted reference copy (RDR-215 bead
+#: nexus-q02nx.14): ~45 call sites across this file and its sibling
+#: source it, and the plugin copy is what the four wired hooks.json
+#: entries actually run until bead .21 re-points them. So the
+#: differential moved to the copy still in production rather than
+#: dying with the one that was only a reference.
+LIB = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
 
 SESSION = "sess-dispatch"
 
@@ -430,6 +438,36 @@ class TestSameTypeDispatchedTwice:
         assert "UNDECLARED\ta4dae47be426023ec\tgeneral-purpose" in undeclared.stdout
         assert "SUMMARY\tchecked=2 recognized=2 unrecognized=0 undeclared=1" in undeclared.stdout
 
+    def test_partial_mechanization_leaves_a_deficit_python_port(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same scenario as test_partial_mechanization_leaves_a_deficit
+        above, called directly against the Python port instead of through
+        ``_lib_call`` (which sources ``conexus/hooks/scripts/expectations.sh``).
+        Mutation-gate target for mutations_qc4p1.sh M7 (RDR-215 bead
+        nexus-q02nx.14): once that lib is deleted, the bash-sourcing test
+        above cannot go red against a mutation applied to
+        ``src/nexus/hooks/expectations.py`` — it never runs that code."""
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        from nexus.hooks.expectations import expectations_census, expectations_undeclared
+
+        f = _expfile(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                "2026-08-29T00:00:00Z\tEXPECT\tgeneral-purpose\tbackground\ttoolu_A\n"
+                "2026-08-29T00:00:05Z\tSTART\ta94a5d5448a23e359\tgeneral-purpose\n"
+                "2026-08-29T00:00:06Z\tSTART\ta4dae47be426023ec\tgeneral-purpose\n"
+            )
+        census = expectations_census(SESSION)
+        assert "undeclared=1" in "\n".join(census.lines), census.lines
+        undeclared = expectations_undeclared(SESSION)
+        assert "UNDECLARED\ta4dae47be426023ec\tgeneral-purpose" in undeclared.lines
+        assert (
+            "SUMMARY\tchecked=2 recognized=2 unrecognized=0 undeclared=1"
+            in undeclared.lines
+        )
+
     def test_two_same_second_rows_are_not_collapsed(self, tmp_path: Path) -> None:
         """The census drops EXACT-duplicate lines (nexus-3h0u6). Two
         same-type dispatches inside one second would be byte-identical
@@ -776,11 +814,12 @@ class TestPluginWiring:
         matcher = matched[0]["matcher"]
         assert "Agent" in matcher, f"matcher must fire on the Agent tool, got {matcher!r}"
 
-    def test_shellib_parity_with_reference(self) -> None:
-        assert PLUGIN_LIB.read_bytes() == LIB.read_bytes(), (
-            "conexus/hooks/scripts/expectations.sh has drifted from "
-            "tests/e2e/lib/expectations.sh — edit the reference, then copy it over"
-        )
+    # test_shellib_parity_with_reference REMOVED (RDR-215 bead nexus-q02nx.14):
+    # tests/e2e/lib/expectations.sh, the reference this compared the plugin
+    # copy against, is deleted -- a byte-parity test with one side gone
+    # either errors on a missing file or passes vacuously, and vacuous is
+    # worse. The plugin copy's own deletion is bead nexus-q02nx.21's,
+    # landing in the same change that re-points hooks.json.
 
     def test_script_is_bash_clean(self) -> None:
         proc = subprocess.run(

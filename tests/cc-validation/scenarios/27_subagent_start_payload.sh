@@ -192,7 +192,7 @@ if [[ -z "$B_SID" ]]; then
 else
     census_out="$(
         XDG_STATE_HOME="$LEDGER_STATE" bash -c \
-            "source '$REPO_ROOT/tests/e2e/lib/expectations.sh'; expectations_census '$B_SID'" \
+            "nx-hook expectations_census '$B_SID'" \
             2>/dev/null || true
     )"
     if grep -q 'BLINDSPOT	checked=1 recognized=1 unrecognized=0' <<<"$census_out"; then

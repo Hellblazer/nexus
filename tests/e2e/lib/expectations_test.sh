@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# tests/e2e/lib/expectations_test.sh — unit-level shell tests for
-# expectations.sh (RDR-184 P1.1, nexus-ccs9v.7). Self-provisioning: private
+# tests/e2e/lib/expectations_test.sh — unit-level shell tests for the
+# RDR-184 ledger shellib (P1.1, nexus-ccs9v.7). Self-provisioning: private
 # XDG_STATE_HOME in a throwaway tmpdir, no ambient state, no dependency on
 # any other harness. Run directly: `bash tests/e2e/lib/expectations_test.sh`.
+#
+# ITS SUBJECT MOVED, AND THAT IS DELIBERATE (RDR-215 bead nexus-q02nx.14).
+# The sibling copy this used to source is deleted; the ledger is now
+# `nexus.hooks.expectations`, covered in Python by
+# tests/hooks/test_expectations_module.py. These 75 assertions are NOT
+# redundant with that: they cover the PLUGIN copy, which is still what the
+# four wired hooks.json entries run in production, and which nothing else
+# exercises. Bead nexus-q02nx.21 deletes that copy in the same change that
+# re-points those entries, and this file goes with it.
 set -u -o pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,8 +20,10 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/expectations_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 export XDG_STATE_HOME="$WORKDIR/state"
 
-# shellcheck source=./expectations.sh disable=SC1091
-source "$HERE/expectations.sh"
+REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
+PLUGIN_LIB="$REPO_ROOT/conexus/hooks/scripts/expectations.sh"
+# shellcheck source=../../../conexus/hooks/scripts/expectations.sh disable=SC1091
+source "$PLUGIN_LIB"
 
 PASS=0
 FAIL=0
@@ -117,7 +128,7 @@ RACE_SID="race-session"
 racef="$(expectations_file "$RACE_SID")"
 rm -f "$racef"
 for i in $(seq 1 40); do
-    ( source "$HERE/expectations.sh"; expectations_expect "$RACE_SID" "racer-$i" "background" ) &
+    ( source "$PLUGIN_LIB"; expectations_expect "$RACE_SID" "racer-$i" "background" ) &
 done
 wait
 rows="$(wc -l <"$racef" | tr -d ' ')"

@@ -16,9 +16,28 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 
 HOOK=conexus/hooks/scripts/agent-dispatch-expect.sh
 HOOKS_JSON=conexus/hooks/hooks.json
-LIB=tests/e2e/lib/expectations.sh
 PLUGIN_LIB=conexus/hooks/scripts/expectations.sh
+PY_LIB=src/nexus/hooks/expectations.py
+PENDING_RELEASE=conexus/PENDING_RELEASE.md
 T=tests/hooks/test_agent_dispatch_expect.py
+
+# ⛔ REAL GUARD, not just the warning above: refuse outright on a dirty tree
+# instead of trusting the comment to be read. Every mutation below is
+# reverted with `git checkout --`, which restores the COMMITTED version of
+# whatever it touches — so if any of these paths already carries
+# uncommitted work, running this harness discards it silently. That
+# happened once already (see the header). Checking only the paths this
+# harness actually mutates (not the whole tree) lets it run in a checkout
+# that has unrelated uncommitted work elsewhere.
+MUTATED_PATHS=("$HOOK" "$HOOKS_JSON" "$PLUGIN_LIB" "$PY_LIB" "$PENDING_RELEASE")
+DIRTY="$(git status --porcelain -- "${MUTATED_PATHS[@]}")"
+if [[ -n "$DIRTY" ]]; then
+    echo "REFUSING TO RUN: uncommitted changes in a file this harness mutates and"
+    echo "reverts with 'git checkout --'. Running now would silently DELETE that"
+    echo "work. Commit or stash it first, then re-run."
+    echo "$DIRTY"
+    exit 1
+fi
 
 restore() { git checkout -- "$@" 2>/dev/null; }
 
@@ -122,40 +141,63 @@ restore "$HOOK"
 
 echo
 echo "== M5: restore the unrecognised free pass (the pre-houpu defect) =="
-# Was "recogniser back to morphology-only". That mutation edited two awk
-# lines containing `named[id]`, which nexus-houpu DELETED — the replaces
-# silently matched nothing and the mutation stopped mutating. A mutation
-# that applies no diff proves the suite is green about nothing, so this one
-# ASSERTS it landed (see the vacuous-gate doctrine in AGENTS.md).
+# Was "recogniser back to morphology-only", then (RDR-215 bead nexus-q02nx.9)
+# the same defect re-expressed in the two bash copies' awk. Bead
+# nexus-q02nx.14 deletes tests/e2e/lib/expectations.sh, the reference those
+# needles targeted, so this now mutates the PORT
+# (src/nexus/hooks/expectations.py) instead. The real expressions, read
+# from that file rather than guessed: expectations_undeclared and
+# expectations_census each compute `recognized` from `agent_type in
+# expect_types` (undeclared) / `expect_names` (census) immediately before
+# consulting credit — the free pass is skipping straight to the next
+# agent when that membership check fails, instead of falling through to
+# name the deficit.
 #
-# The equivalent defect under type keying is the free pass itself: skip any
-# START whose type has no EXPECT row instead of naming it. That is exactly
-# what hid a half-working dispatch hook before houpu.
+# The bash-sourcing pins this used to key on
+# (TestNamedBackgroundDispatchAt2_1_251's
+# test_named_background_dispatch_undeclared_without_expect_row /
+# test_census_names_a_start_whose_type_was_never_declared) exercise
+# tests/e2e/lib/expectations.sh via _run_undeclared/_run_census and so
+# cannot see a mutation applied only to the Python port — TestFreePass-
+# RemovedInPythonPort's two tests call expectations_undeclared /
+# expectations_census directly and are what this mutation must turn red.
 python3 - <<'PY'
 import pathlib, sys
+TARGET = "src/nexus/hooks/expectations.py"
 PAIRS = [
     # expectations_undeclared: skip a START whose type was never declared
-    ("                if (t in e) recognized++",
-     "                if (t in e) recognized++; else continue"),
+    ("        if agent_type in expect_types:\n"
+     "            recognized += 1\n"
+     "        if credit.get(agent_type, 0) > 0:",
+     "        if agent_type in expect_types:\n"
+     "            recognized += 1\n"
+     "        else:\n"
+     "            continue\n"
+     "        if credit.get(agent_type, 0) > 0:"),
     # expectations_census: same free pass in the per-agent view
-    ("                    if (ty in expect) recognized++",
-     "                    if (ty in expect) recognized++; else continue"),
+    ("            if agent_type in expect_names:\n"
+     "                recognized += 1\n"
+     "            if credit.get(agent_type, 0) > 0:",
+     "            if agent_type in expect_names:\n"
+     "                recognized += 1\n"
+     "            else:\n"
+     "                continue\n"
+     "            if credit.get(agent_type, 0) > 0:"),
 ]
-for f in ("tests/e2e/lib/expectations.sh", "conexus/hooks/scripts/expectations.sh"):
-    p = pathlib.Path(f)
-    s = p.read_text()
-    for needle, repl in PAIRS:
-        if needle not in s:
-            sys.exit(f"M5 mutation did not apply: needle absent from {f}:\n"
-                     f"  {needle!r}\n"
-                     "the mutation would have been vacuous; fix the needle.")
-        s = s.replace(needle, repl, 1)
-    p.write_text(s)
+p = pathlib.Path(TARGET)
+s = p.read_text()
+for needle, repl in PAIRS:
+    if needle not in s:
+        sys.exit(f"M5 mutation did not apply: needle absent from {TARGET}:\n"
+                 f"  {needle!r}\n"
+                 "the mutation would have been vacuous; fix the needle.")
+    s = s.replace(needle, repl, 1)
+p.write_text(s)
 PY
 run "M5 unrecognised free pass" expect-red \
-    "tests/hooks/test_subagent_stop_hook.py::TestNamedBackgroundDispatchAt2_1_251::test_named_background_dispatch_undeclared_without_expect_row" \
-    "tests/hooks/test_subagent_stop_hook.py::TestNamedBackgroundDispatchAt2_1_251::test_census_names_a_start_whose_type_was_never_declared"
-restore "$LIB" "$PLUGIN_LIB"
+    "tests/hooks/test_subagent_stop_hook.py::TestFreePassRemovedInPythonPort::test_undeclared_names_a_start_with_no_expect_row" \
+    "tests/hooks/test_subagent_stop_hook.py::TestFreePassRemovedInPythonPort::test_census_names_a_start_with_no_expect_row"
+restore "$PY_LIB"
 
 echo
 echo "== M6: drop the tool_use_id 5th field =="
@@ -172,25 +214,61 @@ restore "$HOOK"
 
 echo
 echo "== M7: N-of-type credit back to set membership =="
+# Same bead-nexus-q02nx.14 retarget as M5: the awk needles that used to hit
+# both bash copies no longer have a subject once tests/e2e/lib/expectations.sh
+# is deleted, so this mutates src/nexus/hooks/expectations.py's N-of-type
+# credit check directly. The real expressions, read from that file: both
+# expectations_undeclared and expectations_census gate the
+# declared/undeclared verdict on `credit.get(agent_type, 0) > 0` (decrementing
+# on each hit) — set membership drops the decrement, so a second START of an
+# already-declared type is wrongly waved through instead of counted as a
+# deficit.
 python3 - <<'PY'
-import pathlib
-for f in ("tests/e2e/lib/expectations.sh", "conexus/hooks/scripts/expectations.sh"):
-    p = pathlib.Path(f)
-    s = p.read_text()
-    s = s.replace("if (credit[t] > 0) { credit[t]--; continue }   # N-of-type",
-                  "if (t in e) { continue }")
-    s = s.replace('if (credit[ty] > 0) { credit[ty]--; d = "declared" }',
-                  'if (ty in expect) { d = "declared" }')
-    p.write_text(s)
+import pathlib, sys
+TARGET = "src/nexus/hooks/expectations.py"
+PAIRS = [
+    # expectations_undeclared: N-of-type credit collapsed to set membership
+    ('        if credit.get(agent_type, 0) > 0:\n'
+     '            credit[agent_type] -= 1\n'
+     '            continue\n'
+     '        lines.append(f"UNDECLARED\\t{agent_id}\\t{agent_type}")',
+     '        if agent_type in expect_types:\n'
+     '            continue\n'
+     '        lines.append(f"UNDECLARED\\t{agent_id}\\t{agent_type}")'),
+    # expectations_census: same collapse in the per-agent view
+    ('            if credit.get(agent_type, 0) > 0:\n'
+     '                credit[agent_type] -= 1\n'
+     '                declared = "declared"\n'
+     '            else:',
+     '            if agent_type in expect_names:\n'
+     '                declared = "declared"\n'
+     '            else:'),
+]
+p = pathlib.Path(TARGET)
+s = p.read_text()
+for needle, repl in PAIRS:
+    if needle not in s:
+        sys.exit(f"M7 mutation did not apply: needle absent from {TARGET}:\n"
+                 f"  {needle!r}\n"
+                 "the mutation would have been vacuous; fix the needle.")
+    s = s.replace(needle, repl, 1)
+p.write_text(s)
 PY
-run "M7 set membership" expect-red "$T::TestSameTypeDispatchedTwice::test_partial_mechanization_leaves_a_deficit"
-restore "$LIB" "$PLUGIN_LIB"
+run "M7 set membership" expect-red \
+    "$T::TestSameTypeDispatchedTwice::test_partial_mechanization_leaves_a_deficit_python_port"
+restore "$PY_LIB"
 
 echo
-echo "== M8: plugin lib copy drifts from the reference =="
-printf '\n# drift\n' >> "$PLUGIN_LIB"
-run "M8 parity drift" expect-red "$T::TestPluginWiring::test_shellib_parity_with_reference"
-restore "$PLUGIN_LIB"
+echo "== M8: REMOVED (RDR-215 bead nexus-q02nx.14) =="
+# M8 asserted the two bash copies stayed byte-identical. Its subject —
+# tests/e2e/lib/expectations.sh, the reference side of that comparison — no
+# longer exists once bead .14 lands, and the parity tests it targeted
+# (test_agent_dispatch_expect.py::TestPluginWiring::test_shellib_parity_with_reference,
+# test_subagent_stop_hook.py::TestPluginWiring::test_shellib_parity_with_reference)
+# were deleted rather than adapted: a byte-parity test with one side gone
+# either errors on a missing file or passes vacuously, and vacuous is worse
+# than absent. Nothing replaces this mutation; there is nothing left to
+# falsify.
 
 echo
 echo "== M9: ledger entry removed =="
@@ -220,14 +298,14 @@ echo
 echo "== M10: reader-side dispatch_id dedup removed (review finding 1) =="
 python3 - <<'PY'
 import pathlib
-for f in ("tests/e2e/lib/expectations.sh", "conexus/hooks/scripts/expectations.sh"):
+for f in ("conexus/hooks/scripts/expectations.sh",):
     p = pathlib.Path(f)
     s = p.read_text().replace(
         '$2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }', "")
     p.write_text(s)
 PY
 run "M10 no dedup by dispatch id" expect-red "$T::TestIdempotence::test_duplicate_rows_do_not_inflate_the_credit_pool"
-restore "$LIB" "$PLUGIN_LIB"
+restore "$PLUGIN_LIB"
 
 echo
 echo "== M11: stale-lockdir reaping removed (review finding 3) =="

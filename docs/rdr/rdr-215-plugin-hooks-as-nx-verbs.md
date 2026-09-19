@@ -899,3 +899,16 @@ registration module on the existing server, and one package.
   and `os.environ` is process-global; the no-spawn claim is therefore
   asserted separately and in-process, in
   `tests/hooks/test_subagent_stop_module.py`.
+- 2026-09-19: Sequencing correction found starting bead
+  `nexus-q02nx.14`. Deleting `conexus/hooks/scripts/expectations.sh` moves
+  from `.14` (Phase 2) to `.21` (Phase 3), to land in the same change that
+  re-declares the `hooks.json` entries. All four live entries still run
+  bash scripts that source it, so the deletion would have preceded the
+  re-declaration and removed the library from the production
+  implementation; three of the four source it as `|| exit 0` with no
+  diagnostic, so the whole RDR-184 guard would have gone quiet in every
+  session with nothing to see. `.14` already forbade this in its own words
+  -- "nothing is deleted while a consumer still sources it" -- but its
+  three enumerated consumer classes are test scripts, Python tests and
+  prose, and the production bash hooks are a fourth the enumeration
+  missed. `.14` keeps the `tests/e2e/lib/` copy and the byte-identity test.

@@ -21,8 +21,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop.sh"
-PLUGIN_EXPECTATIONS = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
-REFERENCE_EXPECTATIONS = REPO_ROOT / "tests" / "e2e" / "lib" / "expectations.sh"
+#: The bash side of every differential in this file. It points at the
+#: PLUGIN copy, not the deleted reference copy (RDR-215 bead
+#: nexus-q02nx.14): ~45 call sites across this file and its sibling
+#: source it, and the plugin copy is what the four wired hooks.json
+#: entries actually run until bead .21 re-points them. So the
+#: differential moved to the copy still in production rather than
+#: dying with the one that was only a reference.
+REFERENCE_EXPECTATIONS = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
 
 SESSION = "sess-testorch"
 NAME = "worker-a"
@@ -1316,6 +1322,60 @@ class TestObserveMode:
         assert "\tWOULDBLOCK\t" not in content
 
 
+class TestFreePassRemovedInPythonPort:
+    """Mutation-gate target for mutations_qc4p1.sh M5, repointed at the
+    Python port (RDR-215 bead nexus-q02nx.14): a START whose type carries
+    NO EXPECT row anywhere in the ledger must be named UNDECLARED, never
+    silently skipped -- the pre-houpu free pass. Same scenario as
+    TestNamedBackgroundDispatchAt2_1_251's
+    test_named_background_dispatch_undeclared_without_expect_row /
+    test_census_names_a_start_whose_type_was_never_declared below, which
+    source ``conexus/hooks/scripts/expectations.sh`` via ``_run_undeclared`` /
+    ``_run_census`` and so cannot go red against a mutation applied only to
+    ``src/nexus/hooks/expectations.py`` once that lib is deleted."""
+
+    OPAQUE_ID = "aeb1c1b56623244ae"
+    SUBAGENT_TYPE = "general-purpose"
+
+    def test_undeclared_names_a_start_with_no_expect_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        from nexus.hooks.expectations import expectations_undeclared
+
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+            )
+        report = expectations_undeclared(SESSION)
+        assert report.code == 2, report.lines
+        assert f"UNDECLARED\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}" in report.lines
+        assert not any(line.startswith("BLINDSPOT") for line in report.lines), (
+            "a START the audit walked and named is not a blind spot"
+        )
+
+    def test_census_names_a_start_with_no_expect_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        from nexus.hooks.expectations import expectations_census
+
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+            )
+        report = expectations_census(SESSION)
+        assert report.code == 0, report.lines
+        assert (
+            f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tNO_TERMINAL\tundeclared"
+            in report.lines
+        )
+
+
 def _run_undeclared(tmp_path: Path, session_id: str = SESSION) -> subprocess.CompletedProcess[str]:
     """Source the reference lib directly and invoke expectations_undeclared,
     propagating its own exit code as the subprocess's returncode (not the
@@ -1987,16 +2047,13 @@ class TestCensusVerifyAbsent:
 
 
 class TestPluginWiring:
-    def test_shellib_parity_with_reference(self) -> None:
-        """The plugin ships a COPY of the reference shellib (plugin surface
-        rides a release; tests/e2e/lib is the reference implementation +
-        test bed). Byte-identity is the drift tripwire — same pattern as the
-        version-lockstep manifests."""
-        assert PLUGIN_EXPECTATIONS.exists(), "plugin copy of expectations.sh missing"
-        assert PLUGIN_EXPECTATIONS.read_bytes() == REFERENCE_EXPECTATIONS.read_bytes(), (
-            "conexus/hooks/scripts/expectations.sh has drifted from "
-            "tests/e2e/lib/expectations.sh — edit the reference, then copy it over"
-        )
+    # test_shellib_parity_with_reference REMOVED (RDR-215 bead
+    # nexus-q02nx.14): tests/e2e/lib/expectations.sh, the reference this
+    # compared the plugin copy against, is deleted -- a byte-parity test
+    # with one side gone either errors on a missing file or passes
+    # vacuously, and vacuous is worse. The plugin copy's own deletion is
+    # bead nexus-q02nx.21's, landing in the same change that re-points
+    # hooks.json.
 
     def test_registered_in_hooks_json(self) -> None:
         hooks = json.loads((REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text())

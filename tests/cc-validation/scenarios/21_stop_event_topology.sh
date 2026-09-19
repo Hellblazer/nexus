@@ -209,9 +209,7 @@ else
     # Orchestrator write path: EXPECT row BEFORE the dispatch prompt.
     (
         export XDG_STATE_HOME="$ORCH_STATE"
-        # shellcheck source=../../e2e/lib/expectations.sh disable=SC1091
-        source "$REPO_ROOT/tests/e2e/lib/expectations.sh"
-        expectations_expect "$SID" "probe21d" "background"
+        nx-hook expectations_expect "$SID" "probe21d" "background"
     )
     EXPFILE="$ORCH_STATE/nexus/orchestration/$SID.expectations"
     if [[ -f "$EXPFILE" ]] && grep -q "EXPECT" "$EXPFILE"; then
@@ -358,9 +356,7 @@ else
     pass "21e setup: spawner session_id captured ($SID_E)"
     (
         export XDG_STATE_HOME="$ORCH_STATE"
-        # shellcheck source=../../e2e/lib/expectations.sh disable=SC1091
-        source "$REPO_ROOT/tests/e2e/lib/expectations.sh"
-        expectations_expect "$SID_E" "general-purpose" "background"
+        nx-hook expectations_expect "$SID_E" "general-purpose" "background"
     )
     EXPFILE_E="$ORCH_STATE/nexus/orchestration/$SID_E.expectations"
 

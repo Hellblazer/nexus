@@ -1042,7 +1042,7 @@ def test_sanitize_verbatim_when_already_ledger_valid() -> None:
     """AGENTS.md's hot-rule convention: verbatim, colon included, never invented.
 
     This is VERIFICATION 4 from the bead, checked against the CURRENT
-    ledger charset (colon-inclusive, tests/e2e/lib/expectations.sh) rather
+    ledger charset (colon-inclusive, nexus.hooks.expectations) rather
     than the OLDER colon-excluding charset the bead's BUILD text quotes —
     see LEDGER_NAME_CHARSET_RE's docstring for why sanitizing the colon
     away would be wrong today.

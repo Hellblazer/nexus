@@ -109,6 +109,15 @@ import sys
 #: beads in the epic land.
 VERB_TABLE: dict[str, str] = {
     "session-start": "nexus.hooks.session_start_verb",
+    # The RDR-184 ledger's operator verbs (bead nexus-q02nx.14). All four
+    # resolve to ONE module, which re-reads sys.argv[1] to tell them apart
+    # -- they take arguments rather than a hook payload, so they are the
+    # only entries here that are not fired by an event. Command tier only:
+    # the answer IS the exit code, and an MCP tool has none.
+    "expectations_census": "nexus.hooks.ledger_verbs",
+    "expectations_undeclared": "nexus.hooks.ledger_verbs",
+    "expectations_reconcile": "nexus.hooks.ledger_verbs",
+    "expectations_expect": "nexus.hooks.ledger_verbs",
 }
 
 #: Verbs whose exit code nx-hook must propagate from ``run()`` instead of
@@ -119,7 +128,14 @@ VERB_TABLE: dict[str, str] = {
 #: could not run" from any real verdict.
 _LEDGER_CRASH_EXIT = 70
 
-LEDGER_VERBS: frozenset[str] = frozenset()
+LEDGER_VERBS: frozenset[str] = frozenset(
+    {
+        "expectations_census",
+        "expectations_undeclared",
+        "expectations_reconcile",
+        "expectations_expect",
+    }
+)
 
 #: Test-only dispatch override, read solely by
 #: ``tests/hooks/test_nx_hook_entry.py``. A JSON object string mapping verb
@@ -277,7 +293,20 @@ def main() -> None:
         def _dispatch():
             if failed_import is not None:
                 raise failed_import
-            return module.run(read_payload(sys.stdin))
+            # A LEDGER VERB IS NOT FIRED BY AN EVENT, so it must not read
+            # stdin. Every other verb is a hook and its payload arrives
+            # there; these four are invoked with arguments by an operator
+            # or an audit script, which does not redirect stdin at all.
+            # read_payload guards a TTY, but a script's inherited pipe is
+            # not a TTY and has no writer, so read() blocks until an EOF
+            # that never comes -- measured: `nx-hook
+            # expectations_undeclared <sid>` from a shell hung until
+            # killed, and every class-1 consumer bead nexus-q02nx.14
+            # repoints would have hung the same way. They take no payload
+            # (reconcile takes its own as an argument), so None is not a
+            # degraded input here, it is the correct one.
+            payload = None if _is_ledger_verb(verb) else read_payload(sys.stdin)
+            return module.run(payload)
 
         result = never_fail(_dispatch, verb)
     finally:

@@ -598,7 +598,7 @@ def census_corpus(
 # below.
 #
 # SCOPE FENCE (binding, not a suggestion): this module SUPPLIES the
-# recognizer. It does not modify ``tests/e2e/lib/expectations.sh``, does
+# recognizer. It does not modify the RDR-184 ledger, does
 # not change the ledger's verdict logic, and does not decide nu7fo's
 # resolution — that bead (closed 2026-08-07, superseded by the
 # dispatch-expect hook + the AGENTS.md verbatim-subagent-type convention)
@@ -606,7 +606,7 @@ def census_corpus(
 # ---------------------------------------------------------------------------
 
 #: The ledger's own name charset, mirrored READ-ONLY from
-#: ``expectations_expect`` in ``tests/e2e/lib/expectations.sh`` (its "Name
+#: ``expectations_expect`` in ``nexus.hooks.expectations`` (its "Name
 #: charset" comment, current at time of writing). A plugin-namespaced
 #: ``subagent_type`` like ``conexus:substantive-critic`` ALREADY satisfies
 #: this — that is the point of AGENTS.md's hot-rule convention, "keyed on
@@ -856,7 +856,7 @@ class SessionDispatchCensus:
         """N-of-type per SANITIZED subagent_type.
 
         This is what the ledger's N-of-type credit matching
-        (``tests/e2e/lib/expectations.sh``) actually consumes — NOT the
+        (``nexus.hooks.expectations``) actually consumes — NOT the
         ordinal, see :class:`DispatchRecord`'s docstring for why an
         ordinal cannot be a pairing key in this harness.
         """
@@ -1241,7 +1241,7 @@ def to_json(result: CorpusCensus) -> str:
 _DISPATCH_VERDICT_REFUSAL = (
     "Recognized dispatches only. This does NOT verify EXPECT rows were "
     "written, does NOT compute undeclared/BLINDSPOT, and does not modify "
-    "or replace tests/e2e/lib/expectations.sh (nexus-h33x8.2 scope fence "
+    "or replace the RDR-184 ledger (nexus-h33x8.2 scope fence "
     "— that ledger's own resolution is nexus-nu7fo's call). 'subagent_type' "
     "below is the SANITIZED, ledger-consumable form; a '*' marks a row "
     "where sanitization changed the raw transcript value."

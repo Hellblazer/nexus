@@ -856,11 +856,27 @@ def _bash_census(session: str, state_home: str) -> tuple[list[str], int]:
         capture_output=True, text=True,
         env={**os.environ, "XDG_STATE_HOME": state_home},
     )
-    # The space-backed SPACE_*/VERIFY_* lines are appended by helpers that
-    # talk to the tuple engine and never affect the exit code; they are out
-    # of this bead's scope, so the comparison is bounded to the ledger lines.
-    keep = ("AGENT\t", "EXPECTED_NO_START\t", "ROWS\t", "CLASSIFIED\t", "BLINDSPOT\t")
-    return [ln for ln in proc.stdout.splitlines() if ln.startswith(keep)], proc.returncode
+    return _ledger_lines_only(proc.stdout.splitlines()), proc.returncode
+
+
+#: The census's ledger lines, excluding the space-backed SPACE_*/VERIFY_*
+#: tail. Applied to BOTH SIDES of the comparison below, which is the fix for
+#: a real asymmetry: this filter used to be applied to bash's output alone
+#: while the port's ``.lines`` went in whole. That was invisible only
+#: because the bead .9 port had not yet reproduced those lines. Bead
+#: nexus-q02nx.14 completed them, twelve tests here went red, and the red
+#: was correct -- the comparison had been narrower on one side all along.
+#: The full-output differential now lives in
+#: ``tests/hooks/test_ledger_verbs.py::TestTheSpaceAndVerifyLines``, so
+#: bounding this file to the ledger lines is a division of labour rather
+#: than a gap.
+_LEDGER_LINE_PREFIXES = (
+    "AGENT\t", "EXPECTED_NO_START\t", "ROWS\t", "CLASSIFIED\t", "BLINDSPOT\t",
+)
+
+
+def _ledger_lines_only(lines: list[str]) -> list[str]:
+    return [ln for ln in lines if ln.startswith(_LEDGER_LINE_PREFIXES)]
 
 
 class TestCensus:
@@ -969,7 +985,9 @@ class TestCensusAgreesWithBash:
         _seed("sc", rows)
         mine = exp.expectations_census("sc")
         theirs_lines, theirs_rc = _bash_census("sc", os.environ["XDG_STATE_HOME"])
-        assert mine.lines == theirs_lines, f"{label}: census lines drifted from bash"
+        assert _ledger_lines_only(mine.lines) == theirs_lines, (
+            f"{label}: census ledger lines drifted from bash"
+        )
         assert mine.code == theirs_rc, f"{label}: census exit code drifted from bash"
 
 
@@ -1108,12 +1126,33 @@ class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:
 
     def test_a_populated_reader_always_ends_with_a_summary_or_blindspot(self, state):
         """So a consumer CAN rely on the last line when lines is non-empty,
-        which is the guarantee the empty shape deliberately does not make."""
+        which is the guarantee the empty shape deliberately does not make.
+
+        CENSUS IS EXCLUDED, and the exclusion is a correction rather than a
+        carve-out. Real bash has ALWAYS appended the space-backed
+        SPACE_*/VERIFY_* tail after its summary, so "ends with SUMMARY or
+        BLINDSPOT" was never true of the census; it only looked true while
+        the bead .9 port had not reproduced those lines. Asserting it here
+        was asserting a property of the incomplete port, not of the ledger.
+        The other two readers genuinely do end that way.
+        """
         _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
-        for result in (exp.expectations_undeclared("s"), exp.expectations_census("s"),
+        for result in (exp.expectations_undeclared("s"),
                        exp.expectations_reconcile("s", _payload())):
             assert result.lines, "a populated ledger always produces lines"
             assert result.lines[-1].startswith(("SUMMARY\t", "BLINDSPOT\t"))
+
+        census = exp.expectations_census("s")
+        assert census.lines, "a populated ledger always produces lines"
+        summary = [
+            i for i, ln in enumerate(census.lines)
+            if ln.startswith(("ROWS\t", "CLASSIFIED\t", "BLINDSPOT\t"))
+        ]
+        assert summary, f"census produced no summary line at all: {census.lines}"
+        assert all(
+            ln.startswith(("SPACE_", "VERIFY_"))
+            for ln in census.lines[max(summary) + 1:]
+        ), f"only the space-backed tail may follow the summary: {census.lines}"
 
 
 # ── the bead .14 obligation, made mechanical ─────────────────────────────

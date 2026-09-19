@@ -182,17 +182,28 @@ class _SchemaViolation(_Skip):
 
 
 def _default_state_dir() -> Path:
-    """Mirrors ``expectations.sh``'s ``_expectations_dir``:
+    """Mirrors ``nexus.hooks.expectations._state_dir``:
     ``${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration`` -- the
-    log file lives beside the session's ``.expectations`` ledger there."""
+    log file lives beside the session's ``.expectations`` ledger there.
+
+    STILL MIRRORED, NOT IMPORTED, and that is forced rather than chosen
+    (RDR-215 bead nexus-q02nx.14). This file is invoked by a bare
+    ``python3`` from a detached bash wrapper and is stdlib-only BY
+    CONTRACT -- see the module docstring -- so ``nexus`` is not on its
+    path to import from. Bead nexus-q02nx.20 moves this work into the
+    server as a daemon thread; the import belongs there, and the mirror
+    should go in the same change."""
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(base) / "nexus" / "orchestration"
 
 
 def _valid_session_id(session_id: str) -> bool:
-    """Mirrors ``expectations_file``'s path-safe charset guard: a
-    traversal-bearing or otherwise unsafe session_id must never be used to
-    build a filesystem path."""
+    """Mirrors ``nexus.hooks.expectations.expectations_file``'s path-safe
+    charset guard: a traversal-bearing or otherwise unsafe session_id must
+    never be used to build a filesystem path. Mirrored for the same
+    stdlib-only reason as ``_default_state_dir`` above; two
+    implementations of one rule, and the pair should collapse at bead
+    nexus-q02nx.20."""
     if not session_id or len(session_id) > 128:
         return False
     if not (session_id[0].isalnum()):

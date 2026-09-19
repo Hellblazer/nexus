@@ -43,9 +43,12 @@ every later reader.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 
 from nexus._hook_runtime._io import _emit
@@ -863,6 +866,258 @@ def _acquire_owes_lock(lockdir: str) -> bool:
     return False
 
 
+#: Bounded-call timeout for every ``nx tuple ...`` the census shells out to,
+#: env-overridable exactly as bash's ``NX_EXPECT_CENSUS_NX_TIMEOUT_S``.
+#: Bash needed a hand-rolled watchdog (``_expectations_run_bounded``)
+#: because it has no built-in subprocess deadline; ``subprocess.run(timeout=)``
+#: is the direct Python equivalent, so no watchdog/marker-file dance is
+#: ported -- the OBSERVABLE contract (a bounded call, a named SPACE_FALLBACK
+#: reason on expiry) is what is reproduced, not bash's mechanism for getting
+#: there.
+_NX_CENSUS_TIMEOUT_DEFAULT = "45"
+
+#: The connected-space retention window bash keys ``SPACE_NEVER_RAN`` vs.
+#: ``SPACE_OUTSIDE_WINDOW`` on: 90 days, matching
+#: ``_EXPECTATIONS_LEDGER_RETENTION_S=$((90 * 24 * 3600))``.
+_LEDGER_RETENTION_S = 90 * 24 * 3600
+
+
+def _nx_census_timeout_s() -> tuple[str, float]:
+    """The (raw string, numeric seconds) bounded-call timeout.
+
+    Mirrors bash's ``${NX_EXPECT_CENSUS_NX_TIMEOUT_S:-45}``: unset or empty
+    falls back to the default. NOT reproduced: a non-numeric override.
+    Bash would pass the bogus string straight to `sleep` in its watchdog and
+    degrade in its own (undefined) way; this falls back to the numeric
+    default instead of raising, because there is no watchdog here for a
+    bogus value to break. Nobody sets this to a non-numeric value in
+    practice -- it is a raw seconds count -- so this is a considered
+    non-reproduction, not an overlooked one.
+    """
+    raw = os.environ.get("NX_EXPECT_CENSUS_NX_TIMEOUT_S") or _NX_CENSUS_TIMEOUT_DEFAULT
+    try:
+        return raw, float(raw)
+    except ValueError:
+        return raw, float(_NX_CENSUS_TIMEOUT_DEFAULT)
+
+
+def _scrub_reason(text: str) -> str:
+    """``tr '\\n\\t' '  ' | tr -s ' '``: fold newlines/tabs to spaces, then
+    squeeze runs of spaces to one -- so a multi-line CLI error never breaks
+    the census's one-reason-per-line output. ``"no output"`` mirrors bash's
+    ``${combined:-no output}``, triggered on an empty (not merely falsy)
+    string, same as the shell's unset-or-null test."""
+    text = text if text else "no output"
+    return re.sub(r" +", " ", text.replace("\n", " ").replace("\t", " "))
+
+
+def _run_nx_bounded(args: list[str], timeout_s: float) -> tuple[str, int]:
+    """Run an ``nx`` subcommand with stdout+stderr merged, bounded by
+    *timeout_s*. Returns ``(combined_output, returncode)``; a killed-by-
+    deadline expiry returns rc ``124``, the same sentinel bash's
+    ``_expectations_run_bounded`` uses, so both fallback branches below key
+    on the identical value.
+    """
+    try:
+        proc = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_s,
+        )
+        return proc.stdout or "", proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        return (exc.output or ""), 124
+    except OSError as exc:  # pragma: no cover — nx vanished between the PATH
+        # check and the spawn; not reachable through a real fixture.
+        return str(exc), 127
+
+
+def _tsv_newest_first_field(file: str) -> str:
+    """The ledger's last row's first (timestamp) field, or "".
+
+    ``tail -n 1 "$file" | cut -f1``: an append-only file's chronologically
+    last row is its last line by construction, same ordering guarantee
+    every other reader in this module relies on.
+    """
+    try:
+        text = Path(file).read_text()
+    except OSError:
+        return ""
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    return lines[-1].split("\t", 1)[0]
+
+
+def _file_age_s(file: str) -> int | None:
+    """Seconds since *file*'s mtime, or None on any stat failure."""
+    try:
+        mtime = os.stat(file).st_mtime
+    except OSError:
+        return None
+    return int(time.time() - mtime)
+
+
+def _parse_iso(ts: str) -> datetime.datetime | None:
+    """``datetime.fromisoformat`` with a ``Z``-suffix normalised to
+    ``+00:00`` first -- ``fromisoformat`` predates ``Z`` support on the
+    Python versions this reproduces the bash's embedded ``python3 -c``
+    block against."""
+    if not ts:
+        return None
+    s = ts.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _census_space(session_id: str, file: str) -> list[str]:
+    """Port of bash's ``_expectations_census_space``. See that function's
+    header comment (``tests/e2e/lib/expectations.sh``) for the full
+    contract: fail-open on every axis with a NAMED reason, and the
+    vacuity rule that an empty subspace list is a BLINDSPOT rather than a
+    silent clean read. NEVER raises; NEVER changes
+    :func:`expectations_census`'s own exit code -- this is report, not
+    verdict, same as the TSV half above.
+    """
+    target = f"ledger/{session_id}"
+
+    if shutil.which("nx") is None:
+        return ["SPACE_FALLBACK\treason=PATH has no nx"]
+
+    timeout_raw, timeout_s = _nx_census_timeout_s()
+    combined, rc = _run_nx_bounded(
+        ["nx", "tuple", "list", "--prefix", "ledger/", "--json"], timeout_s
+    )
+    if rc == 124:
+        return [f"SPACE_FALLBACK\treason=nx tuple list exceeded {timeout_raw}s"]
+    if rc != 0:
+        return [
+            "SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed "
+            f"(rc={rc}): {_scrub_reason(combined)}"
+        ]
+
+    try:
+        rows = json.loads(combined)
+    except Exception:  # noqa: BLE001 — any parse failure is a named fallback
+        return ["SPACE_FALLBACK\treason=unparseable JSON from nx tuple list"]
+    if not isinstance(rows, list):
+        return ["SPACE_FALLBACK\treason=nx tuple list --json did not return an array"]
+    if not rows:
+        return [
+            "SPACE_BLINDSPOT\treason=subspace_list returned zero subspaces under "
+            "ledger/ - the space walk examined nothing"
+        ]
+
+    found = next(
+        (r for r in rows if isinstance(r, dict) and r.get("subspace") == target),
+        None,
+    )
+    tsv_newest = _tsv_newest_first_field(file)
+    age = _file_age_s(file)
+
+    if found is not None:
+        total = found.get("total", 0)
+        newest = found.get("newest_created_at") or ""
+        a, b = _parse_iso(newest), _parse_iso(tsv_newest)
+        drift = f"{(b - a).total_seconds():.0f}" if a is not None and b is not None else "unknown"
+        space_disp = newest if newest else "-"
+        tsv_disp = tsv_newest if tsv_newest else "-"
+        return [
+            f"SPACE_PRESENT\tsubspace={target} total={total}",
+            f"SPACE_AGE\tspace_newest={space_disp} tsv_newest={tsv_disp} drift_seconds={drift}",
+        ]
+
+    age_disp = age if age is not None else "unknown"
+    if age is not None and age < _LEDGER_RETENTION_S:
+        return [f"SPACE_NEVER_RAN\tsubspace={target} age_seconds={age_disp}"]
+    return [f"SPACE_OUTSIDE_WINDOW\tsubspace={target} age_seconds={age_disp}"]
+
+
+def _declares_verify(templates_json: str) -> str:
+    """``"yes"``/``"no"``/``"error"`` -- does the connected engine's
+    ``ledger/<session_id>`` template declare the ``verify`` dimension.
+    The literal string ``"ledger/<session_id>"`` is deliberate: a template
+    LISTING names its parameterised templates with the placeholder itself,
+    not a real session id."""
+    try:
+        data = json.loads(templates_json)
+    except Exception:  # noqa: BLE001 — any parse failure is the caller's to report
+        return "error"
+    templates = data.get("templates") if isinstance(data, dict) else None
+    if not isinstance(templates, list):
+        return "error"
+    for t in templates:
+        if isinstance(t, dict) and t.get("name") == "ledger/<session_id>":
+            dims = t.get("dimensions")
+            return "yes" if isinstance(dims, dict) and "verify" in dims else "no"
+    return "no"
+
+
+def _census_verify_absent(session_id: str) -> list[str]:
+    """Port of bash's ``_expectations_census_verify_absent``. See that
+    function's header comment for the full contract, including the
+    below-floor-engine gate on the ``verify`` dimension. NEVER raises;
+    NEVER changes :func:`expectations_census`'s own exit code.
+
+    INHERITED ASYMMETRY, not introduced here: unlike :func:`_census_space`,
+    bash's counterpart has no special-cased 124/timeout branch for either
+    of its two bounded calls -- a deadline expiry falls straight into the
+    generic ``rc != 0`` ``VERIFY_FALLBACK`` path below, exactly as it does
+    in the shell.
+    """
+    target = f"ledger/{session_id}"
+
+    if shutil.which("nx") is None:
+        return ["VERIFY_FALLBACK\treason=PATH has no nx"]
+
+    _, timeout_s = _nx_census_timeout_s()
+    templates_json, rc = _run_nx_bounded(["nx", "tuple", "templates", "--json"], timeout_s)
+    if rc != 0:
+        return [
+            "VERIFY_FALLBACK\treason=nx tuple templates --json failed "
+            f"(rc={rc}): {_scrub_reason(templates_json)}"
+        ]
+
+    declares_verify = _declares_verify(templates_json)
+    if declares_verify == "error":
+        return ["VERIFY_FALLBACK\treason=unparseable JSON from nx tuple templates"]
+    if declares_verify != "yes":
+        return [
+            "VERIFY_UNVERIFIABLE\treason=connected engine ledger template does "
+            "not declare verify yet (below engine-service-v0.1.118)"
+        ]
+
+    rows_json, rc = _run_nx_bounded(
+        ["nx", "tuple", "rd", target, "--pattern", "kind=report", "-n", "300", "--json"],
+        timeout_s,
+    )
+    if rc != 0:
+        return [
+            f"VERIFY_FALLBACK\treason=nx tuple rd {target} --pattern kind=report "
+            f"failed (rc={rc}): {_scrub_reason(rows_json)}"
+        ]
+
+    try:
+        rows = json.loads(rows_json)
+    except Exception:  # noqa: BLE001 — any parse failure is a named fallback
+        return ["VERIFY_FALLBACK\treason=unparseable JSON from nx tuple rd"]
+    if not isinstance(rows, list):
+        return ["VERIFY_FALLBACK\treason=nx tuple rd --json did not return an array"]
+
+    n = sum(
+        1
+        for r in rows
+        if isinstance(r, dict) and (r.get("dims") or {}).get("verify") != "present"
+    )
+    return [f"VERIFY_ABSENT_COUNT\tn={n}"]
+
+
 def expectations_census(session_id: str) -> LedgerReport:
     """The scripted retro census (nexus-hybv1) -- never hand-count.
 
@@ -883,6 +1138,16 @@ def expectations_census(session_id: str) -> LedgerReport:
     was stopped, told why, and came back with its report. That is
     ``BLOCKED_RESOLVED``, and it is counted separately by whether the
     report arrived immediately or later.
+
+    Two more lines are appended after everything above, RDR-205 Phase 4.1
+    (nexus-em75s.19): one ``SPACE_*`` line (see :func:`_census_space`) and
+    one ``VERIFY_*`` line (see :func:`_census_verify_absent`), cross-
+    checking the ledger's TSV view against the connected engine's tuple
+    space. Neither can change ``code`` -- they are report, not verdict,
+    same as everything above -- and neither is printed at all unless the
+    ledger file itself was readable (an absent/unsafe session_id returns
+    before either runs, matching bash's placement after its own
+    ``[[ -r "$file" ]] || return 0`` guard).
     """
     if not session_id:
         return LedgerReport()
@@ -1013,6 +1278,16 @@ def expectations_census(session_id: str) -> LedgerReport:
     )
 
     code = 1 if (checked == 0 and verb_rows.get("EXPECT", 0) > 0) else 0
+
+    # SPACE_*/VERIFY_* lines, RDR-205 Phase 4.1 (nexus-em75s.19): printed
+    # AFTER every TSV-side line above, and NEVER folded into `code` -- same
+    # "report, not verdict" rule the TSV half already established. Only
+    # reached here because `rows is not None` already proved the file
+    # exists and is readable, matching bash's placement (after the awk
+    # call, guarded by the same early `[[ -r "$file" ]] || return 0`).
+    lines.extend(_census_space(session_id, expectations_file(session_id)))
+    lines.extend(_census_verify_absent(session_id))
+
     return LedgerReport(lines=lines, code=code)
 
 

@@ -200,7 +200,7 @@ def dispatches_cmd(
     carries no ``name`` parameter. Reports RECOGNIZED dispatches only —
     it does not verify EXPECT rows were written, does not compute
     undeclared/BLINDSPOT, and does not modify or replace
-    ``tests/e2e/lib/expectations.sh``.
+    ``nexus.hooks.expectations`` (``nx-hook expectations_expect``).
 
     Exits non-zero when the run measured *nothing* — same UNMEASURABLE-
     vs-zero contract as ``nx census capability``.

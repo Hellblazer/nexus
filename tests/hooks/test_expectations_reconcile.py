@@ -23,8 +23,12 @@ import pytest
 from nexus.hooks import expectations
 
 REPO = Path(__file__).resolve().parents[2]
-LIB = REPO / "tests" / "e2e" / "lib" / "expectations.sh"
 PLUGIN_LIB = REPO / "conexus" / "hooks" / "scripts" / "expectations.sh"
+#: The differential drives the PLUGIN copy now that the reference copy
+#: is deleted (RDR-215 bead nexus-q02nx.14). It moved rather than died
+#: on purpose: this copy is what the wired hooks.json entries actually
+#: run until bead .21 re-points them, so it is the copy worth being
+#: equal to. The "bash" param goes when it does.
 STOP_HOOK = REPO / "conexus" / "hooks" / "scripts" / "stop_verification_hook.sh"
 
 SESSION = "sess-reconcile"
@@ -36,7 +40,7 @@ def _bash(script: str, state: Path, env: dict[str, str] | None = None) -> subpro
     if env:
         full_env.update(env)
     return subprocess.run(
-        ["bash", "-c", f"source {LIB}\n{textwrap.dedent(script)}"],
+        ["bash", "-c", f"source {PLUGIN_LIB}\n{textwrap.dedent(script)}"],
         capture_output=True, text=True, env=full_env,
     )
 
@@ -448,18 +452,13 @@ class TestStopHookWiring:
         assert any("stop_verification_hook.sh" in c for c in commands)
 
 
-class TestBothLibraryCopiesStayIdentical:
-    """NOT a differential: these assert facts about files on disk and never
-    consult the implementation under test. They still collect twice under
-    the autouse `impl` fixture, which is harmless but carries no signal —
-    noted so nobody reads the doubled ids as doubled coverage."""
+# The reference copy `tests/e2e/lib/expectations.sh` is DELETED (RDR-215
+# bead nexus-q02nx.14); the ledger is `nexus.hooks.expectations`. The
+# byte-identity class that lived here went with it — a parity assert with
+# one side missing either errors or passes vacuously, and vacuous is
+# worse. The PLUGIN copy `conexus/hooks/scripts/expectations.sh` still
+# exists and is still what the wired hooks.json entries run; bead
+# nexus-q02nx.21 deletes it in the same change that re-points those
+# entries, which is also where this file's `impl` fixture loses its
+# "bash" param.
 
-    """CLAUDE.md: edit tests/e2e/lib/expectations.sh, copy it over, never
-    the reverse. Byte-identity is the drift tripwire."""
-
-    def test_plugin_copy_is_byte_identical(self):
-        assert LIB.read_bytes() == PLUGIN_LIB.read_bytes()
-
-    def test_both_copies_define_the_reconcile_function(self):
-        for path in (LIB, PLUGIN_LIB):
-            assert "expectations_reconcile()" in path.read_text(), path
