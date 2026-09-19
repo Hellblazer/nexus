@@ -130,6 +130,8 @@ chmod +x "$STAGE/mcp_tee.sh"
 # leaves every tool-tier entry and every other verb in place -- which is the
 # surface this shakeout exists to exercise. Anything else removed here would
 # be the trim that made rdr208-mvv unable to answer this question.
+# The UNSHIMMED manifest travels too: it is the census denominator.
+cp "$ROOT/conexus/hooks/hooks.json" "$STAGE/hooks.json.original"
 mkdir -p "$STAGE/shims"
 python3 - "$ROOT/conexus/hooks/hooks.json" "$STAGE/plugin/hooks/hooks.json" "$STAGE/shims" <<'PY'
 import json, os, stat, sys
