@@ -331,6 +331,18 @@ _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
         "step's tool identifier before dispatch, guarded by the same "
         '`startswith("mcp__")` check as the other three sites.'
     ),
+    (
+        "src/nexus/mcp/hooks.py",
+        ('*parents, leaf = flat_name.split("__")',),
+    ): (
+        "not a collection name at all: RDR-215's tool-tier hook_<name> "
+        'registration flattens a dotted payload field path (e.g. '
+        '"tool_input.command") to a valid tool-parameter/JSON-Schema '
+        "identifier by joining segments with `__` (`flatten_field_name`); "
+        "`nest_payload` is the exact inverse, splitting that identifier "
+        "back into the nested dict a ported hook's `run()` reads. No "
+        "collection ever passes through this path."
+    ),
 }
 
 #: 2026-09-09 census of collection-name parse sites, per file, AFTER the

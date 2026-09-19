@@ -45,6 +45,11 @@ from nexus.migration.banner import degrade_loud_when_migrating
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
+# RDR-215 Approach items 1 and 4: the tool-tier registration mechanism for
+# ported Claude Code hooks. HOOK_TOOLS is empty until the first port
+# (bead nexus-q02nx.4) -- this call registers nothing on the live server
+# today. See nexus/mcp/hooks.py's module docstring for the full contract.
+from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
@@ -1901,6 +1906,11 @@ else:  # pragma: no cover — future SDK restructure
     structlog.get_logger(__name__).debug("fastmcp_settings_symbol_unavailable")
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
+
+# RDR-215: register any ported hook_<name> tool-tier tools. HOOK_TOOLS is
+# empty until bead nexus-q02nx.4 lands its first port, so this call
+# currently registers zero tools -- see nexus/mcp/hooks.py.
+_register_hook_tools(mcp)
 
 _DEFAULT_PAGE_SIZE = 10
 
