@@ -83,18 +83,13 @@ if command -v git &>/dev/null; then
     fi
 fi
 
-# Check 2: Catalog sync (auto-commit + push if remote configured)
-if command -v nx &>/dev/null; then
-    CATALOG_PATH="${NEXUS_CATALOG_PATH:-$HOME/.config/nexus/catalog}"
-    if [[ -d "$CATALOG_PATH/.git" && -f "$CATALOG_PATH/documents.jsonl" ]]; then
-        # Check for uncommitted JSONL changes
-        # grep -c exits 1 on zero matches; || echo "0" catches both that and pipe failures
-        CATALOG_DIRTY=$(git -C "$CATALOG_PATH" status --porcelain 2>/dev/null | grep -c "\.jsonl" || echo "0")
-        if [[ "$CATALOG_DIRTY" -gt 0 ]]; then
-            nx catalog sync -m "auto-sync at session close" >/dev/null 2>&1 || true
-        fi
-    fi
-fi
+# Check 2 (catalog sync) deleted at nexus-06aei: dead at three independent
+# levels. The guard tested for "$CATALOG_PATH/.git" and documents.jsonl, the
+# git/JSONL catalog substrate RDR-158 P4 removed, so it could never be true;
+# `nx catalog sync` has raised ClickException unconditionally since conexus
+# 7.0.0, so the call could never succeed; and the call discarded its result
+# with `|| true`, so no caller could ever have observed the outcome.
+# Found by tests/test_retired_command_callers_lint.py on its first run.
 
 # Check 3: Open beads
 if command -v bd &>/dev/null; then

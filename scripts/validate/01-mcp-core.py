@@ -97,12 +97,19 @@ def run_suite() -> None:
 
 
 def _seed_catalog_and_plans() -> None:
-    """Run `nx catalog setup` so the sandbox has the 14 seeded plans."""
+    """Run `nx plan reseed` so the sandbox has the seeded plan library."""
     step("Seed catalog + plans")
     import subprocess
-    with case("nx catalog setup (14 plans seeded)"):
+    # nexus-06aei: was `nx catalog setup`, retired since conexus 7.0.0 and
+    # raising unconditionally, so this step asserted returncode == 0 on a
+    # command that can only refuse and the suite could not pass. `nx plan
+    # reseed` calls seed_plan_templates() -- the same function catalog
+    # setup used for the plan half, and the one `nx init` calls -- so the
+    # step does what its name always claimed. Found by
+    # tests/test_retired_command_callers_lint.py.
+    with case("nx plan reseed (plan library seeded)"):
         r = subprocess.run(
-            ["uv", "run", "nx", "catalog", "setup"],
+            ["uv", "run", "nx", "plan", "reseed"],
             capture_output=True, text=True, timeout=60,
         )
         assert r.returncode == 0, r.stderr

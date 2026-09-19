@@ -68,3 +68,18 @@ mechanize, it matters enough to ship.
   deliberately unchanged: it is still true (the flag exists and still blends
   frecency), just narrower than when written.
   bead: nexus-06aei
+
+- `conexus/hooks/scripts/stop_verification_hook.sh`: deleted the Check-2
+  catalog-sync block, which was dead at three independent levels. Its guard
+  tested for `$CATALOG_PATH/.git` and `documents.jsonl`, the git/JSONL
+  catalog substrate RDR-158 P4 removed, so it could never be true; the
+  `nx catalog sync` it guarded has raised unconditionally since conexus
+  7.0.0, so the call could never have succeeded; and the call discarded its
+  result with `|| true`, so no caller could ever have observed the outcome.
+  Behaviour change is nil by construction — the block could not run, could
+  not succeed, and could not be observed — but it is plugin surface, so it
+  is declared. A hook-surface deletion, no tool or command change. Found by
+  `tests/test_retired_command_callers_lint.py` on its first run; the
+  surviving mentions of the command in that file are inside the replacement
+  comment, which the lint does not flag because naming is not invoking.
+  bead: nexus-06aei
