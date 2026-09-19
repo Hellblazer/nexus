@@ -77,6 +77,7 @@ from pydantic import Field as _PydanticField
 from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.hooks.agent_dispatch_expect import run as _run_agent_dispatch_expect
 from nexus.hooks.auto_approve import run as _run_auto_approve
+from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
 
 __all__ = [
     "HOOK_TOOLS",
@@ -193,6 +194,28 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         summary=(
             "auto-approves an explicit allowlist of conexus MCP tools "
             "(plus any hook_ tool) on PreToolUse and PermissionRequest"
+        ),
+    ),
+    HookToolSpec(
+        name="subagent_start_stamp",
+        run=_run_subagent_start_stamp,
+        fields=("session_id", "agent_id", "agent_type"),
+        field_docs={
+            "session_id": "The session whose RDR-184 ledger this START row joins.",
+            "agent_id": (
+                "The framework-assigned id for this subagent. It keys the "
+                "stamp-at-most-once check, and it is what a later CONSUMED or "
+                "REPORTED row matches against."
+            ),
+            "agent_type": (
+                "The subagent type, verbatim and colon-qualified. This is the "
+                "key an EXPECT row's credit is claimed under, so an invented "
+                "or normalised name reads later as an undeclared dispatch."
+            ),
+        },
+        summary=(
+            "records one RDR-184 START row when a subagent begins, so an "
+            "agent that started without a matching EXPECT can be caught"
         ),
     ),
 )
