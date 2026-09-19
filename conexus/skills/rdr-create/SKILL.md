@@ -63,7 +63,18 @@ If `$RDR_DIR/REGISTER.md` does not exist, copy it from `$CLAUDE_PLUGIN_ROOT/reso
 
 ### Step 2: Assign ID
 
-Scan `$RDR_DIR/` for files matching `[0-9][0-9][0-9]-*.md`. Find the highest number. Next ID = max + 1, zero-padded to 3 digits. If no files exist, start at `001`.
+Run `nx rdr preamble rdr-create`. Take the `Next ID:` it prints; it also prints
+`ID style detected:` for the repo's filename convention.
+
+Never hand-scan with a fixed glob. `[0-9][0-9][0-9]-*.md` requires a filename to
+begin with three digits and matches none of nexus's 217 `rdr-NNN-*.md` files, so
+it falls through to `001` and collides with RDR-001.
+
+Preamble unavailable: extract from the real filenames, and start at `001` only if
+that returns nothing.
+```bash
+ls "$RDR_DIR" | sed -nE 's/.*([0-9]{3}).*\.md/\1/p' | sort -n | tail -1
+```
 
 Derive project prefix from repo name:
 ```bash
