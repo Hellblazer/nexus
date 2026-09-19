@@ -52,7 +52,11 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _hook_boundary  # noqa: E402 — bundled sibling, resolved by the path insert above
-from worktree_guard import cwd_from_payload, is_linked_worktree  # noqa: E402
+
+try:  # noqa: E402 — see _in_worktree; an unimportable guard costs the section, not the envelope
+    from worktree_guard import cwd_from_payload, is_linked_worktree
+except Exception:  # noqa: BLE001 — including SyntaxError, which is not an ImportError
+    cwd_from_payload = is_linked_worktree = None
 
 _HERE = pathlib.Path(__file__).resolve().parent
 
@@ -84,7 +88,25 @@ def _in_worktree(payload: str) -> bool:
     the common case rather than losing the injection. Preserved deliberately:
     without this, a raising detector would reach the outer boundary and the
     subagent would get no sections at all.
+
+    The IMPORT is guarded for the same reason and it is a separate case: the
+    bash ran the detector in its own subprocess, so nothing it could do —
+    not a syntax error, not a missing file — reached the ``cat`` calls that
+    followed. Importing it at module scope put it ahead of the boundary, and
+    a broken sibling took the whole envelope rather than one section.
+    Measured: the bash exited 0 with both universal sections; the first
+    version of this port exited 1 with empty stdout.
+
+    ``auto_approve_sn_mcp.py`` imports the same module and deliberately does
+    NOT do this. Its dependency is the guard itself — degrading there would
+    approve a Serena write from a worktree, which is the incident
+    ``worktree_guard.py`` exists to prevent, so failing is correct. Here the
+    dependency is one advisory section and the enforcement lives there, so
+    degrading costs a warning rather than removing a guard.
     """
+    if is_linked_worktree is None or cwd_from_payload is None:
+        print("[sn-subagent-start] worktree_guard unavailable; assuming not a worktree", file=sys.stderr)  # noqa: T201 — stderr is this hook's only diagnostic surface
+        return False
     try:
         return is_linked_worktree(cwd_from_payload(payload))
     except Exception as exc:  # noqa: BLE001 — matches the bash's 2>/dev/null degrade-to-false

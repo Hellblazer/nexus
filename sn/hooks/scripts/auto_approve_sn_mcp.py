@@ -37,6 +37,16 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _hook_boundary  # noqa: E402 — bundled sibling, resolved by the path insert above
+
+# Imported at module scope, ahead of the boundary, ON PURPOSE. subagent_start.py
+# guards the identical import and degrades to "not a worktree"; here that would
+# be wrong. This module's dependency IS the guard: with worktree_guard gone, the
+# allowlist below would happily approve mcp__plugin_sn_serena__replace_in_files
+# from a linked worktree, which is the incident (nexus-ftpk3, three of them)
+# worktree_guard.py exists to prevent. Refusing to start means every sn tool
+# prompts for manual approval, which is noisy and safe; degrading means the
+# guard is silently off, which is quiet and not. Do not "make this consistent"
+# with its sibling — the asymmetry is the decision.
 from worktree_guard import cwd_from_payload, deny_reason, is_linked_worktree, is_serena_write_tool  # noqa: E402
 
 CONTEXT7_TOOLS = frozenset({

@@ -635,3 +635,51 @@ class TestSnHookErrorBoundary:
         src = script.read_text()
         tail = src.split('if __name__ == "__main__":')[-1]
         assert "_hook_boundary.guard(" in tail or "guard(" in tail, tail
+
+
+class TestBrokenWorktreeGuardSibling:
+    """A broken ``worktree_guard.py`` degrades in one script and refuses in the other.
+
+    The old `mcp-inject.sh` ran detection in its own subprocess under
+    ``2>/dev/null``, so nothing it could do reached the ``cat`` calls after
+    it. Importing it at module scope put it ahead of the boundary; measured
+    on the first version of this port, a sibling that raises at import took
+    the WHOLE envelope (rc=1, empty stdout) where the bash had exited 0 with
+    both universal sections. Found by code review, by execution.
+    """
+
+    BROKEN = "this is not valid python(\n"
+
+    def _install(self, tmp_path: Path, script: Path) -> Path:
+        """*script* plus its real siblings, but with a worktree_guard that cannot import."""
+        src = script.parent
+        for name in (script.name, "_hook_boundary.py", "serena-section.md",
+                     "context7-section.md", "worktree-section.md", "serena-tools.txt"):
+            if (src / name).exists():
+                (tmp_path / name).write_text((src / name).read_text())
+        (tmp_path / "worktree_guard.py").write_text(self.BROKEN)
+        return tmp_path / script.name
+
+    def test_subagent_start_still_delivers_the_universal_sections(self, tmp_path: Path) -> None:
+        target = self._install(tmp_path, SUBAGENT_START)
+        result = subprocess.run(
+            [sys.executable, str(target)], input=json.dumps({"cwd": str(tmp_path)}),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        body = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## Serena MCP" in body and "## Context7 MCP" in body
+        assert "worktree_guard unavailable" in result.stderr
+
+    def test_auto_approve_refuses_rather_than_unguarding(self, tmp_path: Path) -> None:
+        """The opposite call, deliberately. Degrading here would approve a
+        Serena WRITE from a worktree — the incident the guard exists for —
+        so an unimportable guard must stop the allowlist, not bypass it."""
+        target = self._install(tmp_path, AUTO_APPROVE)
+        result = subprocess.run(
+            [sys.executable, str(target)],
+            input=json.dumps({"hook_event_name": "PreToolUse",
+                              "tool_name": "mcp__plugin_sn_serena__replace_in_files"}),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.stdout.strip() == "", "an unguarded allowlist must not emit an allow"
