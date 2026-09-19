@@ -1,21 +1,20 @@
-"""Tests for the divergence-language-guard hook script's session_id export (nexus-7o1zh)."""
+"""Tests for the divergence-language-guard hook's session_id export
+(nexus-7o1zh), ``nexus.hooks.divergence_language_guard``.
+
+RDR-215 bead nexus-q02nx.19 ported this hook from
+``conexus/hooks/scripts/divergence-language-guard.sh``; bead .21
+re-declared its ``hooks.json`` entry to the
+``hook_divergence_language_guard`` mcp_tool, so the bash script no longer
+runs in production and this file drives the Python module only
+(nexus-q02nx.21).
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
 import sys
-
-import pytest
 from pathlib import Path
-
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "divergence-language-guard.sh"
-)
 
 
 def _make_payload(session_id: str | None, file_path: str) -> str:
@@ -27,26 +26,6 @@ def _make_payload(session_id: str | None, file_path: str) -> str:
     if session_id is not None:
         body["session_id"] = session_id
     return json.dumps(body)
-
-
-#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
-_IMPL = "bash"
-
-
-@pytest.fixture(params=["bash", "python"], autouse=True)
-def impl(request):
-    """Run every assertion against BOTH implementations.
-
-    RDR-215 bead nexus-q02nx.19 ports this hook to ``divergence_language_guard``. The
-    script stays wired until bead .21 re-declares its ``hooks.json``
-    entry, so both are driven and each assertion becomes a differential
-    against the thing still running in production. Drop the "bash" param
-    when the script goes.
-    """
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "bash"
 
 
 #: A child process, not an in-process call: these tests vary PATH and the
@@ -80,13 +59,8 @@ def _run_hook(
         "PATH": os.environ.get("PATH", ""),
         **(env_overrides or {}),
     }
-    argv = (
-        [sys.executable, "-c", _PY_DRIVER]
-        if _IMPL == "python"
-        else ["bash", str(SCRIPT)]
-    )
     return subprocess.run(
-        argv,
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,

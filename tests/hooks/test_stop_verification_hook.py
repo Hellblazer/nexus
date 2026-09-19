@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the Stop verification hook script.
+"""Tests for the Stop verification hook, ``nexus.hooks.stop_verification``.
 
 The Stop hook is advisory-only — it warns about uncommitted changes and open
 beads but never blocks. Hard enforcement is the PreToolUse close gate's job.
+
+RDR-215 bead nexus-q02nx.13 ported this hook from
+``conexus/hooks/scripts/stop_verification_hook.sh``; bead .21 re-declared its
+``hooks.json`` entry to the ``hook_stop_verification`` mcp_tool, so the bash
+script no longer runs in production and this file drives the Python module
+only (nexus-q02nx.21).
 """
 from __future__ import annotations
 
@@ -14,8 +20,6 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "stop_verification_hook.sh"
-
 _MINIMAL_PATH = "/usr/bin:/bin"
 
 
@@ -25,25 +29,6 @@ def _make_payload(stop_hook_active: bool = False) -> str:
         "hook_event_name": "Stop",
         "stop_hook_active": stop_hook_active,
     })
-
-
-#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
-_IMPL = "bash"
-
-
-@pytest.fixture(params=["bash", "python"], autouse=True)
-def impl(request):
-    """Run every assertion against BOTH implementations.
-
-    RDR-215 bead nexus-q02nx.13 ports this hook to
-    ``nexus.hooks.stop_verification``. The script stays wired until bead
-    .21 re-declares its ``hooks.json`` entry, so both are driven and each
-    assertion becomes a differential. Drop the "bash" param when it goes.
-    """
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "bash"
 
 
 #: A child process, not an in-process call: these tests vary ``cwd`` and the
@@ -83,13 +68,8 @@ def _run_hook(
     }
     if not stdin:
         stdin = _make_payload()
-    argv = (
-        [sys.executable, "-c", _PY_DRIVER]
-        if _IMPL == "python"
-        else ["bash", str(SCRIPT)]
-    )
     return subprocess.run(
-        argv,
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,
@@ -138,10 +118,6 @@ def dirty_git_repo(tmp_path):
 
 class TestStopVerificationHook:
     """Stop verification hook — advisory only, never blocks."""
-
-    def test_script_exists_and_is_executable(self) -> None:
-        assert SCRIPT.exists()
-        assert os.access(SCRIPT, os.X_OK)
 
     def test_exits_zero_always(self) -> None:
         assert _run_hook().returncode == 0
