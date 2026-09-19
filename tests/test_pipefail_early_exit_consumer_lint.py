@@ -124,9 +124,12 @@ already existed. DISCLOSED BOUND, not silently assumed: this is exactly
 one hop, not a transitive closure. Verified at authoring time that one
 hop is sufficient for the WHOLE current tree — none of the repo-local libs
 sourced anywhere in this corpus (``scripts/validate/lib.sh``,
-``tests/e2e/lib.sh``, ``tests/e2e/lib/lock.sh``,
-``conexus/hooks/scripts/expectations.sh``) itself sources a further file, so there
-is no live 2-hop chain today. If a future lib begins sourcing another lib,
+``tests/e2e/lib.sh``, ``tests/e2e/lib/lock.sh``) itself sources a further
+file, so there is no live 2-hop chain today.
+(``conexus/hooks/scripts/expectations.sh`` was a fourth entry in this list
+until RDR-215 bead nexus-q02nx.21 ported it to ``nexus.hooks.expectations``
+and deleted it; it sourced nothing either, so the one-hop conclusion is
+unchanged.) If a future lib begins sourcing another lib,
 that second hop is invisible to this precondition filter until this scope
 is revisited — a disclosed limitation, not a silent gap.
 
@@ -541,6 +544,26 @@ def _sets_pipefail(text: str, *, file_path: Path | None = None) -> bool:
             if _PIPEFAIL_SET_RE.search(sline):
                 return True
     return False
+
+
+#: Minimum tracked ``*.sh`` files this sweep must enumerate before its
+#: "no violations" verdict means anything.
+#:
+#: Measured 2026-09-19: 156 tracked ``*.sh`` in the tree, falling to 144
+#: when RDR-215 bead nexus-q02nx.21 deleted the twelve ported plugin hook
+#: scripts. Set to 120, comfortably under the real count so ordinary
+#: deletions do not churn it, and far enough above zero to catch the
+#: failure it exists for.
+#:
+#: This was ``>= 10`` against a 156-file corpus, which is not a floor so
+#: much as a check that the list is non-empty: the sweep could have lost
+#: 93% of its input and still called itself healthy. A DROP HERE READS AS
+#: THE SWEEP GOING BLIND BEFORE IT READS AS A DELETION — a broken
+#: ``git ls-files`` pathspec, a relocated repo root, a corpus renamed out
+#: from under the glob. If a deliberate deletion genuinely takes the tree
+#: below this number, lower it in the same commit and say which deletion
+#: did it; that is a conscious edit, which is the point.
+_TRACKED_SHELL_SCRIPT_FLOOR = 120
 
 
 def _tracked_shell_scripts() -> list[Path]:
@@ -1324,7 +1347,10 @@ def test_pipefail_or_true_sites_are_live_or_true_guarded_hits() -> None:
 
 def test_no_pipefail_script_pipes_into_an_early_exit_consumer() -> None:
     scripts = _tracked_shell_scripts()
-    assert len(scripts) >= 10, f"suspicious sweep: only {len(scripts)} scripts enumerated"
+    assert len(scripts) >= _TRACKED_SHELL_SCRIPT_FLOOR, (
+        f"suspicious sweep: only {len(scripts)} scripts enumerated "
+        f"(floor {_TRACKED_SHELL_SCRIPT_FLOOR}) -- see that constant's note"
+    )
 
     # Resolved once, outside the per-script loop -- an anchor that fails
     # to resolve (STALE/AMBIGUOUS) excludes nothing here (fail-safe
@@ -1408,7 +1434,10 @@ def test_no_if_condition_neutralizes_its_own_pipe_with_or_true() -> None:
     pipefail, so this bug is independent of the pipefail precondition
     that gates the rest of this file's sweep."""
     scripts = _tracked_shell_scripts()
-    assert len(scripts) >= 10, f"suspicious sweep: only {len(scripts)} scripts enumerated"
+    assert len(scripts) >= _TRACKED_SHELL_SCRIPT_FLOOR, (
+        f"suspicious sweep: only {len(scripts)} scripts enumerated "
+        f"(floor {_TRACKED_SHELL_SCRIPT_FLOOR}) -- see that constant's note"
+    )
 
     violations: list[str] = []
     for script in scripts:

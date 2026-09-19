@@ -44,7 +44,8 @@ def _continuation_into_comment(lines: list[str]) -> list[int]:
     A continuation is live when the PREVIOUS line ends in an odd number of
     backslashes and is not itself a comment line (a backslash at the end of a
     comment is inert prose — bash comments end at the newline, so nothing
-    continues; see expectations.sh:366 for the benign shape).
+    continues). ``test_detector_ignores_backslash_inside_comment_prose``
+    below carries the benign shape verbatim as its fixture.
     """
     hits: list[int] = []
     for i in range(1, len(lines)):
@@ -55,6 +56,19 @@ def _continuation_into_comment(lines: list[str]) -> list[int]:
                 and lines[i].lstrip().startswith("#"):
             hits.append(i + 1)
     return hits
+
+
+#: Minimum tracked ``*.sh`` files this sweep must enumerate before its
+#: "zero violations" verdict means anything. Measured 2026-09-19: 156 in
+#: the tree, 144 after RDR-215 bead nexus-q02nx.21 deleted the twelve
+#: ported plugin hook scripts. 120 leaves room for ordinary deletions.
+#:
+#: Was ``>= 10`` against 156 files — an is-it-empty check rather than a
+#: floor. A DROP HERE READS AS THE SWEEP GOING BLIND BEFORE IT READS AS A
+#: DELETION: a broken pathspec or a relocated root, not a tree that went
+#: shell-free. A deliberate deletion that lands under this lowers it in
+#: the same commit, naming the deletion.
+_TRACKED_SHELL_SCRIPT_FLOOR = 120
 
 
 def _tracked_shell_scripts() -> list[Path]:
@@ -78,8 +92,16 @@ def test_detector_catches_the_376115c1_shape() -> None:
 
 
 def test_detector_ignores_backslash_inside_comment_prose() -> None:
-    """The expectations.sh benign shape: a backslash ending a COMMENT line is
-    prose, not a continuation, and must not be flagged."""
+    """A backslash ending a COMMENT line is prose, not a continuation, and
+    must not be flagged.
+
+    The fixture is real text, lifted from the comment block of what was
+    ``conexus/hooks/scripts/expectations.sh:366`` before RDR-215 bead
+    nexus-q02nx.21 ported that library to ``nexus.hooks.expectations`` and
+    deleted it. Kept verbatim rather than re-derived from a surviving
+    script: it is the shape that would produce a false positive, and where
+    it was found does not change whether the detector must tolerate it.
+    """
     benign = (
         "#   CLASSIFIED reported=N blocked_resolved=N \\\n"
         "#       wouldblock=N no_terminal=N\n"
@@ -100,9 +122,12 @@ def test_detector_ignores_escaped_backslash_at_eol() -> None:
 def test_no_tracked_shell_script_continues_into_a_comment() -> None:
     scripts = _tracked_shell_scripts()
     # Non-vacuity: the sweep must actually be sweeping something. The repo
-    # carries dozens of shell scripts; an empty list means the enumeration
-    # broke, not that the tree went shell-free.
-    assert len(scripts) >= 10, f"suspicious sweep: only {len(scripts)} scripts enumerated"
+    # carries well over a hundred shell scripts; a short list means the
+    # enumeration broke, not that the tree went shell-free.
+    assert len(scripts) >= _TRACKED_SHELL_SCRIPT_FLOOR, (
+        f"suspicious sweep: only {len(scripts)} scripts enumerated "
+        f"(floor {_TRACKED_SHELL_SCRIPT_FLOOR}) -- see that constant's note"
+    )
 
     violations: list[str] = []
     for script in scripts:
