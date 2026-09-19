@@ -162,7 +162,7 @@ mechanize, it matters enough to ship.
   INERT until the next cut: sessions on the pinned tag keep running the
   bash layer, which is still on disk and still correct.
 
-- `conexus/hooks/hooks.json` (the last four shell-form entries), `conexus/hooks/scripts/_run_python_hook.sh` (deleted), `conexus/hooks/scripts/routing/README.md`:
+- `conexus/hooks/hooks.json` (the last four shell-form entries), `conexus/hooks/scripts/_run_python_hook.sh` (deleted), `conexus/hooks/scripts/routing/README.md`, `conexus/hooks/scripts/version_lockstep_action.py`:
   bead: nexus-q02nx.22 — RDR-215 Approach items 6 and 7, the tail of the
   re-declaration. `nx upgrade --auto 2>/dev/null || echo ... >&2` becomes
   `nx-hook upgrade-auto`, `nx self gc >/dev/null 2>&1 || true` becomes
@@ -180,7 +180,15 @@ mechanize, it matters enough to ship.
   RDR-208 MVV container) are repointed in the same change. The routing
   README is prose only: it named the deleted launcher as half of "the
   framework", which is `_interpreter.py` now.
-  ALL THREE PATHS ARE ON THE BULLET LINE ABOVE, and that is not
+  `version_lockstep_action.py` is docstring only — it said its interpreter
+  came from the deleted launcher; it now says it is inherited from the
+  spawning hook's `sys.executable`. Declared anyway, because the ledger is
+  about what differs from the pinned tag, not about what matters.
+  `conexus/hooks/scripts/version_lockstep_hook.py` is NOT listed again here:
+  it is already declared under .21's entry above, and a path is declared
+  once. Its .22 change is the dispatch argv (`sys.executable` in place of
+  the launcher), named there rather than duplicated.
+  EVERY PATH IS ON THE BULLET LINE ABOVE, and that is not
   incidental formatting. `_declared_paths` reads backtick spans from lines
   matching `^\s*-\s+`, so a path wrapped onto a continuation line is
   invisible to it. This entry was written that way first and the ledger
@@ -268,6 +276,13 @@ mechanize, it matters enough to ship.
 - `conexus/hooks/scripts/version_lockstep_hook.py`:
   bead: nexus-q02nx.21 — the preamble, ahead of its own 3.12 guard.
   Measured rc=1 under `/usr/bin/python3` 3.9.6 before it, rc=0 after.
+  ALSO bead nexus-q02nx.22: the detached action is spawned with this
+  process's own `sys.executable` instead of `bash <launcher> <action>`,
+  because .22 deletes that launcher. Safe without a second interpreter
+  probe precisely because of .21's preamble above — `reexec_if_needed()`
+  and the 3.12 guard both run at module scope, so no dispatch is reached
+  under an unvetted interpreter on any path, including the one where
+  resolution fails and returns having changed nothing.
   INERT until the next cut: a hook whose job is repairing a wheel that is
   behind the plugin could not run on the interpreter most likely to be
   present when things are already broken.
