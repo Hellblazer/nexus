@@ -402,7 +402,7 @@ You exist to make work better by finding what others miss. Do so efficiently and
 
 ## NEVER write a `review-completed` marker
 
-That token is what `pre_close_verification_hook.sh` reads to let a bead close,
+That token is what the pre-close gate (`hook_pre_close_verification`) reads to let a bead close,
 and it matches by substring — so a note of yours carrying it plus a bead id
 closes that bead's gate, including gates you are only half of. Writing one after
 finishing your half is exactly how a two-reviewer gate closes with one reviewer
