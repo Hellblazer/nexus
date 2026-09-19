@@ -33,25 +33,9 @@
       "parameters": {
         "properties": {
           "hook_event_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
             "default": null
           },
           "tool_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
             "default": null
           }
         },
