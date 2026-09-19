@@ -28,8 +28,18 @@ CLOSE = "bd " + "close"
 
 
 class TestTheDenyTextIsACarriedContract:
-    """The remedy block is quoted in 19 files and duplicated verbatim in
-    none of them, so a paraphrase breaks what those files rest on.
+    """The remedy block is duplicated NOWHERE, and that is why it needs
+    pinning.
+
+    Measured rather than repeated: before this port exactly one file on
+    disk carried the string ``Close blocked: no review-completed`` --
+    the script. The gate CONCEPT is referenced in about ten documents,
+    which is a different claim and the one the bead actually makes.
+
+    Scarcity is the hazard, not ubiquity. A text living in twenty places
+    cannot be quietly reworded; one living in a single place can, and
+    then the documents describing the gate drift from what it says with
+    nothing to disagree with them.
 
     Asserted against the SCRIPT'S OWN BYTES, never against a copy living
     here: a test holding its own copy of a contract drifts with the code

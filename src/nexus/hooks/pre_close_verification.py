@@ -18,12 +18,26 @@ nexus-fv65m the tokenize-then-split ordering. Each exists because a
 simpler version silently mis-tokenized a real command, and every one of
 those defects failed OPEN.
 
-**THE DENY TEXT IS A CONTRACT.** The remedy block is quoted in 19 files --
+**THE DENY TEXT IS A CONTRACT, AND THE REASON IS THE OPPOSITE OF
+UBIQUITY.** The gate CONCEPT is referenced in roughly ten documents --
 the phase-review-gate skill, ``.beads/PRIME.md``, several RDR
-post-mortems -- and duplicated verbatim nowhere, so a paraphrase breaks
-the documentation-as-contract property those files rest on. It is carried
-byte for byte and the test module asserts it against the SCRIPT's bytes
-rather than against a copy living in the test.
+post-mortems -- but the remedy block itself is DUPLICATED NOWHERE.
+Measured: before this port exactly one file on disk contained the string
+``Close blocked: no review-completed``, namely the script.
+
+That absence is what makes a paraphrase dangerous. If the text existed in
+twenty places a reworded copy would disagree with nineteen of them and
+someone would notice; because it exists once, a paraphrase is
+undetectable and the documents referring to the gate quietly start
+describing something the code no longer says. So it is carried byte for
+byte and the test module asserts it against the SCRIPT's bytes rather
+than against a copy living in the test -- there being no third copy to
+appeal to.
+
+(An earlier draft of this docstring said "the remedy block is quoted in
+19 files", which inverted the argument for its own existence. The bead
+says the CONCEPT is in 19 files and the strings are nowhere duplicated;
+two sentences collapsed into one wrong one.)
 
 **Fail-open stays fail-open.** A missing marker denies; an unreachable T1,
 an absent ``nx``, a blown time budget all ALLOW with verification stamped
