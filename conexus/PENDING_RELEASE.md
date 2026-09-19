@@ -143,3 +143,34 @@ mechanize, it matters enough to ship.
   that does not also ship the wheel.
   INERT until the next cut: sessions on the pinned tag keep running the
   bash layer, which is still on disk and still correct.
+
+- `conexus/hooks/scripts/behaviour_census.py`:
+  bead: nexus-4lnn1 — a new SessionStart hook reporting the PREVIOUS
+  session's delegation and deliberation rates against baselines computed
+  from the user's own trailing sessions. Both rates are invisible while a
+  session runs, which is why prose has never moved them: measured 4.3%
+  delegation and 16.8% positional thinking coverage across 25 transcripts.
+  Stdlib-only, no nexus imports, and verified to run under
+  `/usr/bin/python3` 3.9.6 — the oldest interpreter likely to win PATH —
+  which is why it is declared in the plugin-resident `python3` exec form
+  and does NOT need `_run_python_hook.sh`. Authored by nexus-93; merged
+  here and carried into bead nexus-q02nx.21's re-declaration so the entry
+  did not have to be rewritten twice.
+  INERT until the next cut: the census does not run, so no session sees
+  its own prior rates.
+
+- `conexus/skills/rdr-create/SKILL.md`:
+  bead: nexus-4lnn1 — Step 2 told sessions to find the highest existing
+  RDR id by hand-scanning for `[0-9][0-9][0-9]-*.md`. That glob requires a
+  filename to BEGIN with three digits and matches none of this repo's 217
+  `rdr-NNN-*.md` files, so a session following it literally found no
+  maximum, fell through to the step's own "start at 001" clause, and would
+  have collided with RDR-001. Now points at the executable preamble, which
+  was already correct and prints the style it detected. Authored by
+  nexus-93.
+  INERT until the next cut: a session on the pinned tag still reads the
+  glob. Worth noting the failure mode is silent — a scan matching nothing
+  and a stale checkout both answer confidently with a wrong maximum, and
+  unlike the stale checkout this one has no fetch that would save it,
+  which is how it survived 217 RDRs unhit.
+
