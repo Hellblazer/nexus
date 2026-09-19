@@ -679,6 +679,8 @@ nexus-3z1a0
 nexus-3z1a0.1
 nexus-3z6ax
 nexus-3z8a7
+nexus-3z8vb
+nexus-3z8vb.1
 nexus-3znzn
 nexus-3zu8g
 nexus-3zu8g.1
@@ -1745,6 +1747,8 @@ nexus-9h7nz
 nexus-9hfcu
 nexus-9hoyj
 nexus-9hoyj.1
+nexus-9ifls
+nexus-9ifls.1
 nexus-9iw41
 nexus-9iygb
 nexus-9j8yw
@@ -2098,6 +2102,7 @@ nexus-bawvu
 nexus-bawvu.1
 nexus-bb5c8
 nexus-bbriq
+nexus-bbriq.1
 nexus-bbt
 nexus-bbt.1
 nexus-bc0x7
@@ -2173,6 +2178,7 @@ nexus-bq06h.1
 nexus-bqda
 nexus-bqlf
 nexus-br31l
+nexus-br31l.1
 nexus-br90a
 nexus-brw1s
 nexus-brw1s.1
