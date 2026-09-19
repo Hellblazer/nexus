@@ -8,6 +8,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The git hook stanza now passes `--since-head`** (nexus-0l5so). That flag
+  was built as "the per-commit fast path the removed git hooks needed"
+  (b38435724), and `docs/cli-reference.md` has described it that way ever
+  since, but the stanza `nx hooks install` writes never carried it, so every
+  commit paid the full-repo tax the flag exists to remove. It falls back
+  loudly to a full index whenever the delta is unusable (no stored base, an
+  unreachable one after a rewrite, a parse surprise), which is what makes it
+  correct on `post-merge` and `post-rewrite` as well as `post-commit`.
+  Existing installs keep the old stanza until `nx hooks update`; `nx doctor`
+  reports the drift.
+
+### Fixed
+
 - **A `/clear` or `/resume` handoff now moves the channel waiter with the
   session** (nexus-kdxyv). The MCP server's T1 handoff swapped the session
   id but left the channel waiter and subscription set built for the old
