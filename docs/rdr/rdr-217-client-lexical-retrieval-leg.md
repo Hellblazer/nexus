@@ -285,6 +285,25 @@ retrieves measurably better than an incrementally grown one, and an autovacuum
 reclaiming dead tuples moved one query's overlap from 0.818 to 0.333 with no
 ranking code changing (nexus-4lnn1).
 
+A second timing constraint arrived after this record was drafted, and it bears
+on the note corpus only. Note chunk geometry is changing on write:
+nexus-b2tld, on `origin/feature/nexus-b2tld-split-notes` and not in develop as
+of this amendment, splits a note stored through `store_put` at 1,689 characters
+whenever its model imposes no window at all. That is every Voyage collection —
+`window_for_model` returns no window when the model's token limit exceeds the
+12,288-byte chunk cap, and voyage-context-3 reads 32,000 — so those notes were
+never split before. The change is **write-only**: the 257 existing notes over
+2,000 characters are not re-embedded, which is Sam's decision and a bulk write
+over his live store.
+
+The consequence for this phase is a measurement-window constraint, not a
+blocker. A baseline taken today still describes the store as it stands, but
+every note written after that branch lands is one or more pieces where it would
+previously have been exactly one. So if this phase's query set draws on notes
+at all, take the before-measurement and the after-measurement **within one
+window**, or scope the measurement to the file-indexed corpora, which this
+change does not touch.
+
 **Phase 2 — the client method.** Add a `hybrid_search` method to
 `HttpVectorClient` calling `POST /v1/vectors/hybrid-search`, with the same
 result shape as the existing search methods.
