@@ -1,9 +1,19 @@
-"""Tests for the SubagentStart hook script's session_id export (nexus-7o1zh)."""
+"""Tests for the SubagentStart hook script's session_id export (nexus-7o1zh).
+
+RDR-215 bead nexus-q02nx.18 ports this hook to ``nexus.hooks.subagent_start``.
+A straight retarget would delete the only coverage of the bash script while
+it is STILL the live production path (bead .21 re-declares the hooks.json
+entry, not this one), so every assertion here is driven against BOTH
+implementations via the ``impl`` fixture below (pattern carried from
+``tests/hooks/test_subagent_stop_hook.py``'s own ``impl``/``_PY_DRIVER``).
+Drop the "bash" param when the script goes.
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 SCRIPT = (
@@ -21,6 +31,44 @@ STDIN_PAYLOAD = json.dumps({
     "prompt": "look into something",
 })
 
+#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
+_IMPL = "bash"
+
+
+import pytest  # noqa: E402 — grouped with the fixture it supports, not at top
+
+
+@pytest.fixture(params=["bash", "python"], autouse=True)
+def impl(request):
+    """Run every hook assertion in this file against BOTH implementations."""
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "bash"
+
+
+#: Drives the ported module in a CHILD PROCESS, exactly as
+#: test_subagent_stop_hook.py's own driver does — a real process with a real
+#: environment, since several tests here vary env (and cwd) per call and
+#: ``os.environ``/the process cwd are process-global.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import subagent_start
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: subagent_start.run(payload), "subagent_start")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
 
 def _run_hook(
     *,
@@ -33,8 +81,13 @@ def _run_hook(
         "PATH": os.environ.get("PATH", ""),
         **(env_overrides or {}),
     }
+    argv = (
+        [sys.executable, "-c", _PY_DRIVER]
+        if _IMPL == "python"
+        else ["bash", str(SCRIPT)]
+    )
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        argv,
         input=stdin,
         capture_output=True,
         text=True,

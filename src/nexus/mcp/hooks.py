@@ -77,6 +77,9 @@ from pydantic import Field as _PydanticField
 from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.hooks.agent_dispatch_expect import run as _run_agent_dispatch_expect
 from nexus.hooks.auto_approve import run as _run_auto_approve
+from nexus.hooks.subagent_start import run as _run_subagent_start
+from nexus.hooks.post_compact import run as _run_post_compact
+from nexus.hooks.divergence_language_guard import run as _run_divergence_language_guard
 from nexus.hooks.pre_close_verification import run as _run_pre_close_verification
 from nexus.hooks.stop_verification import run as _run_stop_verification
 from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
@@ -298,6 +301,55 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
             "the close gate: refuses a bd close whose beads have no "
             "review-completed marker, and warns on a bd create that omits "
             "commitment metadata while an RDR close is active"
+        ),
+    ),
+    HookToolSpec(
+        name="subagent_start",
+        run=_run_subagent_start,
+        fields=('session_id', 'agent_id', 'agent_type', 'task'),
+        field_docs={
+            "session_id": (
+                "Forced onto every subprocess this hook spawns. It runs detached, so without it the T2 scan and scratch read resolve a sibling session's machine-wide pointer."
+            ),
+            "agent_id": "The framework-assigned id for the starting subagent.",
+            "agent_type": (
+                "Routes which context sections are assembled. Matched against the locked classification regexes, carried verbatim from the script — a dropped alternative silently removes guidance from a real dispatch."
+            ),
+            "task": (
+                "The dispatch's task text. Pattern-matched to decide whether catalog, phase-gate, operator or code-navigation context is worth its bytes."
+            ),
+        },
+        summary=(
+            "assembles the context a starting subagent needs — linked RDRs, T2 memory, T1 scratch and the tool guidance its agent type calls for — under a measured byte budget"
+        ),
+    ),
+    HookToolSpec(
+        name="post_compact",
+        run=_run_post_compact,
+        fields=('session_id',),
+        field_docs={
+            "session_id": (
+                "Forced onto the bd and nx subprocesses. The machine-wide session pointer is clobbered by any second top-level session, so an unforced read returns a sibling's scratch."
+            ),
+        },
+        summary=(
+            "re-injects active work after a compaction — in-progress beads and session scratch, the part SessionStart(compact) does not cover"
+        ),
+    ),
+    HookToolSpec(
+        name="divergence_language_guard",
+        run=_run_divergence_language_guard,
+        fields=('session_id', 'tool_name', 'tool_input'),
+        structured_fields=frozenset({"tool_input"}),
+        field_docs={
+            "session_id": "Forced onto the T1 write this hook makes when it fires.",
+            "tool_name": "Only Write and Edit are watched.",
+            "tool_input": (
+                "Its file_path decides everything: only a file under docs/rdr/post-mortem/ is scanned, because the pattern bank is tuned for that genre."
+            ),
+        },
+        summary=(
+            "flags divergence language in a post-mortem just written — advisory only, since acknowledged deferral and silent scope reduction look alike and only a reader can tell them apart"
         ),
     ),
 )

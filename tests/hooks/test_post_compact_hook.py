@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+
+import pytest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "post_compact_hook.sh"
@@ -19,6 +22,47 @@ STDIN_PAYLOAD = json.dumps({
 })
 
 
+#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
+_IMPL = "bash"
+
+
+@pytest.fixture(params=["bash", "python"], autouse=True)
+def impl(request):
+    """Run every assertion against BOTH implementations.
+
+    RDR-215 bead nexus-q02nx.19 ports this hook to ``post_compact``. The
+    script stays wired until bead .21 re-declares its ``hooks.json``
+    entry, so both are driven and each assertion becomes a differential
+    against the thing still running in production. Drop the "bash" param
+    when the script goes.
+    """
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "bash"
+
+
+#: A child process, not an in-process call: these tests vary PATH and the
+#: environment per case, and ``os.environ`` is process-global.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import post_compact as _hook
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: _hook.run(payload), "post_compact")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+
 def _run_hook(
     *,
     env_overrides: dict[str, str] | None = None,
@@ -29,8 +73,13 @@ def _run_hook(
         "PATH": os.environ.get("PATH", ""),
         **(env_overrides or {}),
     }
+    argv = (
+        [sys.executable, "-c", _PY_DRIVER]
+        if _IMPL == "python"
+        else ["bash", str(SCRIPT)]
+    )
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        argv,
         input=stdin,
         capture_output=True,
         text=True,
