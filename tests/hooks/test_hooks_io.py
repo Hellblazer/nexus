@@ -13,11 +13,16 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from unittest import mock
 
 import pytest
 from structlog.testing import capture_logs
+
+import nexus.logging_setup as logging_setup
 
 from nexus.hooks import _io
 
@@ -182,9 +187,6 @@ def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
     together they pin that the diagnostic went somewhere, and that somewhere is
     not the decision channel.
     """
-    import subprocess
-    import sys
-    import textwrap
 
     program = textwrap.dedent(
         """
@@ -207,8 +209,6 @@ def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
 def test_never_fail_logs_the_swallowed_exception_through_structlog_when_configured():
     """With a sink configured, the diagnostic takes the normal structured path
     rather than the stderr fallback, so the tool tier keeps its log file."""
-    import nexus.logging_setup as logging_setup
-
     def boom() -> _io.HookResult:
         raise RuntimeError("hook logic exploded")
 
@@ -272,9 +272,6 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
     is exactly the condition `capsys` cannot reproduce inside a configured
     pytest run.
     """
-    import subprocess
-    import sys
-    import textwrap
 
     program = textwrap.dedent(
         """
@@ -296,9 +293,6 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
 
 def test_a_malformed_payload_writes_nothing_to_stdout_when_logging_is_unconfigured():
     """Same channel, the other two log sites: read_payload's debug lines."""
-    import subprocess
-    import sys
-    import textwrap
 
     program = textwrap.dedent(
         """
