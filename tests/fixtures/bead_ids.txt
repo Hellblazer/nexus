@@ -2059,6 +2059,7 @@ nexus-b1v9z
 nexus-b23q
 nexus-b2i
 nexus-b2i.1
+nexus-b2tld
 nexus-b2vrl
 nexus-b32rx
 nexus-b34f
