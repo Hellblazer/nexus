@@ -539,11 +539,16 @@ use), and the never-fail boundary. `_config.py` resolves
 
 **Contracts.** The contract map (T2 `215-hook-contract-map`) lists each
 script's stdin fields, stdout shapes and exit codes; the port reproduces
-each byte for byte and the retargeted test asserts them. Two are quoted
+each byte for byte and the retargeted test asserts them. ONE is quoted
 outside the tests: the ledger verbs' codes (0 clean, 1 BLINDSPOT, 2
 undeclared, 3 no ledger for `undeclared`; 0, 2, 4 for `reconcile`) in
-AGENTS.md and the orchestration skill, and the close gate's deny text in
-19 files. `census` returns 1 on the same blind-spot shape, quoted in the
+AGENTS.md and the orchestration skill. The close gate's deny text is the
+opposite case and an earlier draft of this section had it backwards:
+before the port exactly ONE file on disk carried the literal remedy block
+-- the script itself. Scarcity is the hazard, not ubiquity. A text living
+in twenty places cannot be quietly reworded; one living in a single place
+can, and then the ten-odd documents describing the gate drift from what
+it says with nothing to disagree with them. That is why it is pinned. `census` returns 1 on the same blind-spot shape, quoted in the
 orchestration skill and asserted by value in
 `tests/e2e/lib/expectations_test.sh` and
 `tests/hooks/test_subagent_stop_hook.py`. `expect` and `start` return 2
@@ -725,8 +730,17 @@ Assumptions).
    (`pre_close_verification_hook.sh`, `stop_verification_hook.sh`,
    `subagent-start-stamp.sh`, `divergence-language-guard.sh`,
    `post_compact_hook.sh`, the two async wrappers).
-5. The eight Python hooks: `mailbox_drain.py`, `stop_failure_hook.py`
-   and the two routing hooks re-declared as tools; `preflight.py`,
+5. The eight Python hooks: `stop_failure_hook.py` re-declared as a tool.
+   `mailbox_drain.py` and the two routing hooks were named here as tools
+   too and did NOT move -- all three reach `_endpoint_resolve.py`
+   (directly, or via `routing/_lib.py`), which cannot leave
+   `conexus/hooks/scripts/` while `t2_prefix_scan.py` and
+   `tuple_ledger_project.py` import it and neither is ported by this
+   epic. Making them wheel-resident would mean a second copy of a
+   449-line resolver beside `nexus.db.service_endpoint`, which Approach
+   item 9 forbids as a rewrite. They stay exec-form `python3`; full
+   reasoning in T2 `nexus_rdr/215-tier-resolution-bead-21`. Then
+   `preflight.py`,
    `session_start_hook.py` and `rdr_hook.py` re-declared on `nx-hook`;
    `version_lockstep_hook.py` re-declared as exec-form `python3` with its
    dispatch lines rewritten (Approach item 3). The four shell-form `nx`
@@ -860,7 +874,7 @@ registration module on the existing server, and one package.
 - 2026-09-18: Design amended to two tiers (research-9): `mcp_tool` hooks on `nx-mcp` for every event after session start, `nx-hook` command hooks for `SessionStart`, the lockstep hook on stdlib `python3`.
 - 2026-09-18: Gate round 3 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `dd95743fa`; critique `nexus_rdr/215-gate-critique-2026-09-18-r3`.
 - 2026-09-18: Accept dispositions of the round-3 residuals: the four carried from round 2 closed by `dd95743fa` (fix check `nexus_rdr/215-fix-check-dd95743fa`); the four from round 3 fixed in `faa779251`.
-- 2026-09-18: `phase_review_close_requires_gate` carved out of the tool tier to the command tier; the tool tier is 15 of 24 conexus entries, not 16. Raised during bead `nexus-q02nx.1` review; critique `nexus_rdr/critique-impl-nexus-q02nx.1-hooks-package`.
+- 2026-09-18: `phase_review_close_requires_gate` carved out of the tool tier to the command tier; the tool tier is 15 of 24 conexus entries, not 16. SUPERSEDED 2026-09-19, see the bead `nexus-q02nx.25` entry below: the measured tool tier is 13. Raised during bead `nexus-q02nx.1` review; critique `nexus_rdr/critique-impl-nexus-q02nx.1-hooks-package`.
 - 2026-09-19: Phase 1 measurements landed (bead `nexus-q02nx.6`): the
   MCP connection race is refuted — turn 1 waits for connection
   resolution — and the risk relocates to a server that never connects,
@@ -924,3 +938,30 @@ registration module on the existing server, and one package.
   enumeration missed. `.14` DELETES the `tests/e2e/lib/` copy and keeps
   the PLUGIN copy; an earlier version of this entry stated that
   backwards.
+- 2026-09-19: Two claims in this document were measured false during the
+  Phase 3 review and corrected in place (bead `nexus-q02nx.25`;
+  critique `nexus_rdr/215-bead25-critique-findings-2026-09-19`). (a) The
+  TOOL TIER IS 13, not the 15 the 2026-09-18 entry above records:
+  `mailbox_drain.py` and `routing/subagent_git_write_requires_orchestrator.py`
+  were both named for the tool tier and both stayed command tier, for the
+  `_endpoint_resolve.py` reason now written into phase item 5. Counted
+  from the shipped manifest: 13 `mcp_tool` and 12 `command` entries, 25
+  total (24 of them this epic's; `behaviour_census.py` arrived from
+  nexus-4lnn1). The resolution had existed in T2 since 2026-09-19 and
+  never reached this document. (b) The Contracts section said the close
+  gate's deny text was quoted in 19 files. It was quoted in ONE -- the
+  script -- measured by `git grep` at `213f4515d`, and the scarcity is
+  the argument for pinning it, so the claim was not merely wrong but
+  backwards. Both were found by implementation and fixed elsewhere
+  first; the standing lesson for this epic's close is to sweep the
+  document for "verified false, fixed in code or T2, RDR text unchanged".
+- 2026-09-19: Phase 3 code review (bead `nexus-q02nx.24`) returned one
+  Critical and two Significant, all three fixed with tests that failed
+  first. The close gate's override path had collapsed the bash's two id
+  sets into one, stamping covered beads `overridden` and naming them in
+  the escape log and allow text; `_bead_ids` carried two flag tables and
+  the port expanded only the shlex one, so `--reason-file` and `-r`
+  values leaked into the harvest on the malformed-quoting fallback (both
+  tables are now derived from one constant); and the bead `.20` daemon
+  thread logged only failure, so a clean projection and a thread that
+  never started were the same absence in the hook log.
