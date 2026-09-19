@@ -318,8 +318,10 @@ would lose results the vector path returns today. The surface must be additive
 (a union of both legs) or an explicit mode.
 
 **Settled (Sam, 2026-09-19), in his words: "2. your rec is fine. 3. yes.
-this goes in the mcp" — answering a two-question ask that proposed `--lexical`
-as the name and asked whether the MCP `search` tool should carry the leg.**
+this goes in the mcp" — answering a three-question ask whose questions 2 and
+3 proposed `--lexical` as the name and asked whether the MCP `search` tool
+should carry the leg. Question 1 was the additive-versus-explicit-mode shape,
+which waits on Phase 1 and is the open item below.**
 
 1. **The name is `--lexical`.** `--hybrid` stays as it is and keeps its
    current meaning, the git-frecency blend for code corpora (`search_cmd.py`
@@ -331,7 +333,9 @@ as the name and asked whether the MCP `search` tool should carry the leg.**
    users: RDR-008 names `codebase-deep-analyzer` as one
    (`docs/rdr/rdr-008-nx-workflow-integration.md:157`),
    `conexus/skills/architecture/SKILL.md` recommends it in three places, and
-   five docs files carry live usage examples. A rename therefore costs a real
+   four further docs files carry runnable usage examples
+   (`docs/cli-reference.md`, `docs/getting-started.md`,
+   `docs/querying-guide.md`, `docs/repo-indexing.md`). A rename therefore costs a real
    deprecation cycle across agent-facing guidance. An earlier draft of this
    line asserted the opposite, that the flag had no reported users; that was
    an unverified universal and it was false. The decision is unchanged and
@@ -396,14 +400,26 @@ ground_truth_lexical_match == True
 With the flag False the comparator never fails, whatever the diff shows,
 because a fused zero is then the correct answer.
 
-**The vector call is a control, not the signal.** Under the ground-truth flag
-a fused zero is already a failure on its own, so the second call does not
-supply the verdict. It establishes that the collection is reachable and the
-query retrieves at all, so a fused zero is attributable to the gate or the
-query plan rather than to an empty collection, a wrong collection name, or an
-engine returning nothing for every call alike. This refines rather than
-contradicts RF-3, whose two-call finding was reasoned without a ground-truth
-fixture in view.
+**All three terms are jointly necessary. None of them decides alone, and an
+earlier version of this paragraph claimed otherwise.** It said the fused zero
+was "already a failure on its own, so the second call does not supply the
+verdict", which contradicts the formula directly above: with
+`vector_rows == 0` the comparator does NOT fire, so the vector count is a
+necessary conjunct and not a commentary on one.
+
+What the vector count does is **exclusionary**, which is a different job from
+the other two rather than a lesser one. It rules out the degenerate case where
+nothing retrieves at all — a wrong collection name, an empty collection, or an
+engine returning nothing for every call alike — and in that case a fused zero
+carries no information about the gate, so the detector must stay silent. It
+answers "did anything retrieve?", not "did the gate work?". The second
+question is only meaningful once the first is answered yes.
+
+Read that way the formula **preserves** RF-3 rather than refining past it.
+RF-3 established that two calls are necessary because one response cannot
+distinguish a true zero from a mis-planned one; it never claimed the diff
+between them was sufficient. The ground-truth flag supplies the sufficiency
+RF-3 left open, and both calls stay necessary exactly as RF-3 found.
 
 This is what makes the genuine-zero case and the planted-bug case
 distinguishable at the fixture level rather than only in narrative. **The two
@@ -498,10 +514,14 @@ because the table describes one call and the detector makes two. If either
 call errors, times out or returns a non-200, the detector propagates and
 fails loud. It does not treat an unanswered call as a pass, and it does not
 substitute a zero-row reading for a call that never returned. The reasoning is
-the project's fail-loud doctrine (nexus-moht0) and the specific circumstance:
-a degraded engine is exactly when a second round trip is likeliest to fail, so
-a detector that swallowed that failure would go quiet precisely when it is
-needed. Retrying is deliberately not specified: a retry that masks a flapping
+the specific circumstance: a degraded engine is exactly when a second round
+trip is likeliest to fail, so a detector that swallowed that failure would go
+quiet precisely when it is needed. (This is adjacent to nexus-moht0 rather
+than an instance of it. That doctrine is about a sweep which found nothing to
+check being a failure rather than a pass; this is about an infrastructure
+error not being read as a result. They share a spirit, and citing the bead for
+both stretches it, so it is named once here and claimed only where it
+applies.) Retrying is deliberately not specified: a retry that masks a flapping
 engine reintroduces the silence this detector exists to break.
 
 **An extension point deliberately not taken.** Which branch served a call,
@@ -653,9 +673,11 @@ found nothing to check, which this project already treats as a failure rather
 than a pass (nexus-moht0).
 
 **Diagnosis path, and its limit.** Call `/search` and `/hybrid-search` with
-the same query and collections and diff the row counts. A fused result of zero
-where the vector leg alone returns rows is the signal **only when the corpus
-is known to contain a lexical match for that query**. Without that ground
+the same query and collections and diff the row counts. A fused zero together
+with a non-empty vector result is actionable **only when the corpus is known
+to contain a lexical match for that query**; the two row counts are jointly
+necessary here for the same reason they are in the comparator, and neither is
+"the signal" by itself. Without that ground
 truth the same reading is the ordinary result for a query with no lexical
 overlap, so this is a diagnostic an operator runs against a query they have
 chosen for the purpose, not a check that can be pointed at arbitrary traffic.
@@ -664,7 +686,9 @@ There is no server-side shortcut for this today.
 Two limits on the diff itself. A write landing between the two calls can
 present a genuine visibility difference as the BUG-0148 signature, so a
 positive reading is confirmed by repeating it rather than acted on from one
-observation. And if either call errors, times out or returns non-200, the
+observation. This limit belongs to the LIVE operator diagnostic only: Phase
+4's CI detector runs against a fixture with no concurrent writer, so the race
+cannot arise there and the detector does not retry on its account. And if either call errors, times out or returns non-200, the
 diff is not computed at all: see the detector's error behaviour in the
 Technical Design.
 
@@ -802,21 +826,29 @@ a caller.
 - **Scenario**: no pgvector backend. **Verify**: 503, not a silent vector
   fallback.
 - **Scenario**: a query whose gate genuinely matches no text, against a corpus
-  containing NO chunk with its literal tokens. **Verify**: an empty list, and
-  the detector does NOT fire, since no lexical match exists to have been
-  missed. The fixture's defining property is the absence of a lexical match,
-  and the test asserts that absence directly rather than assuming it.
+  containing NO chunk with its literal tokens but which DOES hold
+  semantically near ones. **Verify**: `hybrid_rows == 0` AND `vector_rows > 0`
+  AND the detector does NOT fire, since no lexical match exists to have been
+  missed. All three are asserted. The `vector_rows > 0` assertion is what
+  makes this fixture exercise discrimination rather than emptiness, and the
+  test asserts the absence of a lexical match directly rather than assuming
+  it.
 - **Scenario**: the BUG-0148 condition planted, against a corpus that DOES
-  contain a chunk carrying the query's literal tokens, so the fused call
-  returns zero where a lexical match provably exists. **Verify**: the detector
-  FAILS. This is the non-vacuity proof: a detector that has never been
-  observed failing is a sweep that found nothing to check.
+  contain a chunk carrying the query's literal tokens. **Verify**:
+  `hybrid_rows == 0` AND `vector_rows > 0` AND the detector FAILS. This is the
+  non-vacuity proof: a detector that has never been observed failing is a
+  sweep that found nothing to check.
 - **Scenario**: the two scenarios above are compared as fixtures, not as
-  narratives. **Verify**: they differ in whether the corpus contains a literal
-  match, and that difference is asserted in the test setup. Two scenarios that
-  assert opposite detector outcomes from an identical observable signature
-  would prove nothing, and an earlier draft of this plan had exactly that
-  defect.
+  narratives. **Verify**: their asserted observables are IDENTICAL
+  (`hybrid_rows == 0`, `vector_rows > 0`) and they differ in exactly one
+  thing, whether the corpus contains a literal match, which is asserted in
+  the test setup. That single difference is the whole discrimination. Two
+  scenarios asserting opposite detector outcomes from an identical observable
+  signature with no declared ground truth would prove nothing, and an earlier
+  draft of this plan had exactly that defect. A later draft then stated the
+  ground truth but dropped the `vector_rows > 0` assertion, which would have
+  let the genuine-zero fixture be built with nothing retrievable at all; both
+  regressions are closed here.
 - **Scenario**: one of the detector's two calls errors, times out or returns
   non-200. **Verify**: the detector propagates and fails loud. It never treats
   a failed call as a pass, and never silently substitutes a zero-row reading
@@ -848,7 +880,9 @@ Alternative 2 being rejected, and it is not a target for this work.
 ### Contradiction Check
 
 No contradictions found between research findings, design principles and the
-proposed solution as it now stands. Six were found and corrected on the way
+proposed solution as it now stands, and that clause has been earned twice
+rather than asserted: the previous time this section made it, a fix check
+found a contradiction it had missed. Seven were found and corrected on the way
 here, and they are listed rather than summarised because the count is the
 honest measure of how much this document changed under review.
 
@@ -879,6 +913,17 @@ Three were corrected by the fix check on that round's diff:
 6. The settled half of the surface decision had been pulled into Phase 2
    while its behaviour still depended on Phase 1, and only the MCP half at
    that. All surface work now sits in Phase 3, both halves together.
+
+One was corrected by a second fix check, on the full post-gate diff:
+
+7. The paragraph introducing the comparator called the vector call "a
+   control, not the signal" and said a fused zero was "already a failure on
+   its own" — contradicting the formula directly above it, in which
+   `vector_rows > 0` is a necessary conjunct. An implementer following the
+   prose would have dropped that guard and built a detector that fires during
+   a total outage, the exact false positive the paragraph claimed to prevent.
+   The same round restored the `vector_rows > 0` assertion to Test Plan
+   scenarios 6 and 7, which the previous correction had dropped.
 
 ### Assumption Verification
 
