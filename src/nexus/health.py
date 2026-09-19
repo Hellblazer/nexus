@@ -2252,8 +2252,10 @@ def _check_garbage() -> list[HealthResult]:
     """The garbage sweep (:mod:`nexus.garbage`, Sam 2026-09-05).
 
     Local litter (stale mint locks, rotated logs past 14 days, operator
-    dispatch dumps past 7) is reaped here on every run, the same way the
-    T1 lease and handoff-marker reapers above behave. Catalog litter
+    dispatch dumps past 7, and orphaned ripgrep line caches at any age
+    since nexus-06aei deleted the code that read them) is reaped here on
+    every run, the same way the T1 lease and handoff-marker reapers above
+    behave. Catalog litter
     (orphaned links, tombstones past the one-day window) is COUNTED here
     and reclaimed only by ``nx doctor --fix``, since each reclaim is an
     engine write. A non-zero catalog count is a warning that names the
