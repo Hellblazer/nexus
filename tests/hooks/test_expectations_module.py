@@ -566,3 +566,180 @@ class TestPortAgreesWithTheLiveBashLibrary:
         theirs_lines, theirs_rc = _bash_undeclared("no-such-session", os.environ["XDG_STATE_HOME"])
         assert mine.code == theirs_rc == 3
         assert mine.lines == theirs_lines == []
+
+
+# ── owes_report: the consult rule, and both disclosed causes ─────────────
+
+class TestOwesReport:
+    def test_a_background_expect_makes_the_first_stop_owe(self, state):
+        _seed("s", [("EXPECT", "t", "background")])
+        assert exp.expectations_owes_report("s", "a1", "t").owes is True
+
+    def test_the_stop_writes_a_consumed_row(self, state):
+        _seed("s", [("EXPECT", "t", "background")])
+        exp.expectations_owes_report("s", "a1", "t")
+        assert any(r[1] == "CONSUMED" and r[2] == "a1"
+                   for r in _rows(Path(exp.expectations_file("s"))))
+
+    def test_a_second_agent_of_the_same_type_does_not_owe(self, state):
+        """One unit of credit, one debit. The second stop of that type is
+        not covered, and must not be blocked."""
+        _seed("s", [("EXPECT", "t", "background")])
+        exp.expectations_owes_report("s", "a1", "t")
+        assert exp.expectations_owes_report("s", "a2", "t").owes is False
+
+    def test_two_credits_cover_two_agents(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("EXPECT", "t", "background")])
+        assert exp.expectations_owes_report("s", "a1", "t").owes is True
+        assert exp.expectations_owes_report("s", "a2", "t").owes is True
+
+    def test_re_entry_by_the_same_agent_still_owes_and_spends_once(self, state):
+        """A crash between the claim and the stop re-enters here: the self
+        branch. Still owes; must not consume a second unit."""
+        _seed("s", [("EXPECT", "t", "background"), ("EXPECT", "t", "background")])
+        exp.expectations_owes_report("s", "a1", "t")
+        again = exp.expectations_owes_report("s", "a1", "t")
+        assert again.owes is True
+        consumed = [r for r in _rows(Path(exp.expectations_file("s"))) if r[1] == "CONSUMED"]
+        assert len(consumed) == 1, "the re-entry must not write a second debit"
+
+    def test_a_mixed_pool_never_owes(self, state):
+        """A type with ANY non-background EXPECT row is not a pure
+        background pool, and guessing at one is how an ordinary sync
+        dispatch gets blocked."""
+        _seed("s", [("EXPECT", "t", "background"), ("EXPECT", "t", "sync")])
+        assert exp.expectations_owes_report("s", "a1", "t").owes is False
+
+    def test_credit_is_type_keyed(self, state):
+        _seed("s", [("EXPECT", "t1", "background")])
+        assert exp.expectations_owes_report("s", "a1", "t2").owes is False
+
+    @pytest.mark.parametrize(
+        "args",
+        [("", "a", "t"), ("s", "", "t"), ("s", "a", ""), ("s", "a", "bad type"),
+         ("s", "tab\tid", "t")],
+    )
+    def test_degraded_input_fails_open(self, state, args):
+        """Fails OPEN on every degraded input. A missing ledger, a bad
+        charset or an empty id must never block a stop."""
+        assert exp.expectations_owes_report(*args).owes is False
+
+    def test_a_missing_ledger_fails_open(self, state):
+        assert exp.expectations_owes_report("never-seen", "a1", "t").owes is False
+
+    def test_a_colon_qualified_type_encodes_its_sidecar_names(self, state):
+        """':' is legal in a subagent type and would otherwise land in
+        sidecar FILE names — the round-2 fix."""
+        _seed("s", [("EXPECT", "conexus:critic", "background")])
+        assert exp.expectations_owes_report("s", "a1", "conexus:critic").owes is True
+        base = Path(exp.expectations_file("s"))
+        assert Path(f"{base}.credit.conexus__critic.1").is_symlink()
+
+
+class TestOwesReportDisclosedCauses:
+    """Both values are asserted BY VALUE in test_subagent_stop_hook.py and
+    are appended to the block reason an operator reads."""
+
+    def test_lock_exhaustion_blocks_with_its_cause(self, state, monkeypatch):
+        """Over-blocking is explicable; a silent miss is the failure this
+        subsystem exists to prevent. So an exhausted budget consults no
+        credit and takes a fixed default of owes."""
+        _seed("s", [("EXPECT", "t", "background")])
+        monkeypatch.setenv("NX_EXPECT_LOCK_TRIES", "1")
+        os.mkdir(f"{exp.expectations_file('s')}.owes.t.lock")  # held by "someone"
+        verdict = exp.expectations_owes_report("s", "a1", "t")
+        assert verdict.owes is True
+        assert verdict.cause == "lock-exhausted"
+
+    def test_a_credit_slot_orphan_blocks_with_its_cause(self, state):
+        """Every slot claimed while the ROWS still say unspent credit is
+        provably inconsistent: a claimant was killed between its slot claim
+        and its CONSUMED row. SubagentStop has a 10s timeout, so that kill
+        is routine and load-correlated, not rare."""
+        _seed("s", [("EXPECT", "t", "background")])
+        base = exp.expectations_file("s")
+        os.symlink("ghost-agent", f"{base}.credit.t.1")  # claimed, no row
+        verdict = exp.expectations_owes_report("s", "a1", "t")
+        assert verdict.owes is True
+        assert verdict.cause == "credit-slot-orphan"
+
+    def test_a_clean_verdict_carries_no_cause(self, state):
+        _seed("s", [("EXPECT", "t", "background")])
+        assert exp.expectations_owes_report("s", "a1", "t").cause == ""
+
+
+class TestOwesReportSurvivesTheLockBeingDisabled:
+    def test_the_ceiling_holds_with_no_mutual_exclusion(self, state, monkeypatch):
+        """Round 3's whole point: correctness moved to the atomic slot, so
+        the accounting must be exact even with the lock switched off."""
+        monkeypatch.setenv("NX_EXPECT_LOCK_DISABLE", "1")
+        _seed("s", [("EXPECT", "t", "background"), ("EXPECT", "t", "background")])
+        owed = [exp.expectations_owes_report("s", f"a{i}", "t").owes for i in range(6)]
+        assert owed.count(True) == 2, "two units of credit, two debits, no more"
+        consumed = [r for r in _rows(Path(exp.expectations_file("s"))) if r[1] == "CONSUMED"]
+        assert len(consumed) == 2
+
+
+class TestOwesReportAgreesWithBash:
+    """owes_report MUTATES (a CONSUMED row and a slot), so the differential
+    runs each implementation on its own fresh session and compares the
+    verdict, the disclosed cause and the resulting ledger rows."""
+
+    def _bash_owes(self, session: str, agent_id: str, agent_type: str, state_home: str):
+        proc = subprocess.run(
+            ["bash", "-c",
+             f'. "{_BASH_LIB}"; expectations_owes_report "{session}" "{agent_id}" '
+             f'"{agent_type}"; rc=$?; echo "RC=$rc CAUSE=$EXPECTATIONS_OWES_CAUSE"'],
+            capture_output=True, text=True,
+            env={**os.environ, "XDG_STATE_HOME": state_home},
+        )
+        tail = [ln for ln in proc.stdout.splitlines() if ln.startswith("RC=")][-1]
+        rc = int(tail.split()[0].split("=")[1])
+        cause = tail.split("CAUSE=", 1)[1]
+        return (rc == 0), cause
+
+    @pytest.mark.parametrize(
+        "rows,label",
+        [
+            ([("EXPECT", "t", "background")], "owes"),
+            ([("EXPECT", "t", "sync")], "sync-only-never-owes"),
+            ([("EXPECT", "t", "background"), ("EXPECT", "t", "sync")], "mixed-never-owes"),
+            ([("EXPECT", "other", "background")], "type-keyed"),
+            ([], "empty-ledger"),
+            ([("EXPECT", "t", "background"), ("CONSUMED", "someone-else", "t")], "spent"),
+            ([("EXPECT", "t", "background"), ("CONSUMED", "a1", "t")], "self-re-entry"),
+        ],
+    )
+    def test_verdict_and_cause_match_bash(self, state, rows, label):
+        _seed("mine", rows)
+        _seed("theirs", rows)
+        mine = exp.expectations_owes_report("mine", "a1", "t")
+        theirs_owes, theirs_cause = self._bash_owes(
+            "theirs", "a1", "t", os.environ["XDG_STATE_HOME"]
+        )
+        assert mine.owes == theirs_owes, f"{label}: verdict drifted from bash"
+        assert mine.cause == theirs_cause, f"{label}: cause drifted from bash"
+
+    def test_the_consumed_row_shape_matches_bash(self, state):
+        _seed("mine", [("EXPECT", "t", "background")])
+        _seed("theirs", [("EXPECT", "t", "background")])
+        exp.expectations_owes_report("mine", "a1", "t")
+        self._bash_owes("theirs", "a1", "t", os.environ["XDG_STATE_HOME"])
+        mine_rows = [r[1:] for r in _rows(Path(exp.expectations_file("mine")))]
+        theirs_rows = [r[1:] for r in _rows(Path(exp.expectations_file("theirs")))]
+        assert mine_rows == theirs_rows, "the appended CONSUMED row must match byte for byte"
+
+    def test_the_slot_name_and_owner_match_bash(self, state):
+        """The sidecar names are part of the contract while both
+        implementations are live: bead .14 has not repointed consumers, so
+        a session can be written by one and read by the other."""
+        _seed("mine", [("EXPECT", "conexus:critic", "background")])
+        _seed("theirs", [("EXPECT", "conexus:critic", "background")])
+        exp.expectations_owes_report("mine", "a1", "conexus:critic")
+        self._bash_owes("theirs", "a1", "conexus:critic", os.environ["XDG_STATE_HOME"])
+        mine_slots = sorted(p.name.split(".expectations", 1)[1]
+                            for p in exp._state_dir().glob("mine.expectations.credit.*"))
+        theirs_slots = sorted(p.name.split(".expectations", 1)[1]
+                              for p in exp._state_dir().glob("theirs.expectations.credit.*"))
+        assert mine_slots == theirs_slots == [".credit.conexus__critic.1"]
+        assert os.readlink(str(exp._state_dir() / f"mine.expectations{mine_slots[0]}")) == "a1"

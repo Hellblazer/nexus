@@ -57,6 +57,7 @@ __all__ = [
     "expectations_file",
     "expectations_last_terminal",
     "expectations_mark_blocked",
+    "expectations_owes_report",
     "expectations_start",
     "expectations_sweep",
     "expectations_undeclared",
@@ -511,3 +512,175 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     if undeclared > 0:
         return LedgerReport(lines=lines, code=2)
     return LedgerReport(lines=lines, code=0)
+
+
+@dataclass(frozen=True)
+class OwesVerdict:
+    """Whether a stopping agent owes a completion report, and why.
+
+    ``cause`` mirrors the bash ``EXPECTATIONS_OWES_CAUSE`` global, whose
+    two values (``lock-exhausted``, ``credit-slot-orphan``) are asserted BY
+    VALUE in ``tests/hooks/test_subagent_stop_hook.py`` and appended to the
+    block reason the operator reads. It is "" whenever the verdict came
+    from the ledger rather than from a degraded path.
+    """
+
+    owes: bool
+    cause: str = ""
+
+
+def _owes_lock_tries() -> int:
+    raw = os.environ.get("NX_EXPECT_LOCK_TRIES", "10")
+    tries = int(raw) if raw.isdigit() else 10
+    return min(tries, 600)
+
+
+def _type_enc(agent_type: str) -> str:
+    """The round-2 colon encoding. ``:`` is legal in a subagent type and
+    would otherwise appear in sidecar FILE NAMES."""
+    return agent_type.replace(":", "__")
+
+
+def _read_type_credit(rows: list[list[str]], agent_type: str, agent_id: str) -> tuple[str, int, int, list[str]]:
+    """The consult rule's single ledger pass. Returns (verdict, credit, spent, owners).
+
+    ``mixed`` wins over everything: a type that has ANY non-background
+    EXPECT row is not a pure background pool, and guessing at a mixed pool
+    is how an ordinary sync dispatch gets blocked.
+    """
+    seen_dispatch: set[str] = set()
+    credit = 0
+    mixed = False
+    self_consumed = False
+    owners: list[str] = []
+
+    for row in rows:
+        verb = row[1] if len(row) > 1 else ""
+        if verb == "EXPECT" and len(row) > 2:
+            dispatch_id = row[4] if len(row) > 4 else ""
+            if dispatch_id and dispatch_id in seen_dispatch:
+                continue
+            if dispatch_id:
+                seen_dispatch.add(dispatch_id)
+            if row[2] == agent_type:
+                if len(row) > 3 and row[3] == "background":
+                    credit += 1
+                else:
+                    mixed = True
+        elif verb == "CONSUMED" and len(row) > 3 and row[3] == agent_type:
+            if row[2] == agent_id:
+                self_consumed = True
+            else:
+                owners.append(row[2])
+
+    if mixed:
+        return "no", credit, len(owners), owners
+    if self_consumed:
+        return "self", credit, len(owners), owners
+    if credit > len(owners):
+        return "new", credit, len(owners), owners
+    return "no", credit, len(owners), owners
+
+
+def expectations_owes_report(
+    session_id: str, agent_id: str, agent_type: str
+) -> OwesVerdict:
+    """The consult rule: does this stopping agent owe a completion report?
+
+    TYPE-KEYED, because the type is the only key both sides of the ledger
+    can know. Fails OPEN on every degraded input -- no session, bad
+    charset, missing or unreadable ledger -- because a missing ledger must
+    never block a stop.
+
+    The lock is EFFICIENCY ONLY. Round 3 moved correctness to the atomic
+    slot claim precisely because a name-based lock is stealable, so nothing
+    below depends on holding it; it merely stops same-type racers doing
+    redundant passes and racing onto the same slot name. Its one behavioural
+    role is the exhaustion path, which blocks with a disclosed cause rather
+    than consulting credit -- over-blocking is explicable, and a silent miss
+    is the failure this subsystem exists to prevent.
+    """
+    if not session_id or not agent_id or not agent_type:
+        return OwesVerdict(False)
+    if not _NAME_RE.match(agent_type):
+        return OwesVerdict(False)
+    if "\t" in agent_id or "\n" in agent_id:
+        return OwesVerdict(False)
+
+    rows = _readable_rows(session_id)
+    if rows is None:
+        return OwesVerdict(False)
+    file = expectations_file(session_id)
+    enc = _type_enc(agent_type)
+    lockdir = f"{file}.owes.{enc}.lock"
+
+    held = _acquire_owes_lock(lockdir)
+    if not held:
+        return OwesVerdict(True, "lock-exhausted")
+
+    try:
+        verdict, credit, spent, owners = _read_type_credit(rows, agent_type, agent_id)
+        if verdict == "self":
+            # A CONSUMED row already names this agent: it is re-entering
+            # after a crash between its claim and its stop. Still owes, and
+            # must not consume a second unit.
+            return OwesVerdict(True)
+        if verdict != "new":
+            return OwesVerdict(False)
+
+        if _claim_credit(file, enc, agent_id, credit, spent, owners):
+            _append(file, f"{_ts()}\tCONSUMED\t{agent_id}\t{agent_type}")
+            return OwesVerdict(True)
+
+        # Every slot is taken. Re-read: if the ROWS still say this type has
+        # unspent credit, that state is provably inconsistent and the only
+        # explanation is a claimant killed between its slot claim and its
+        # CONSUMED row -- SubagentStop has a 10s hook timeout, so that kill
+        # is a routine, load-correlated event rather than a rarity.
+        # Deliberately NOT reclaiming the orphaned slot: that is the
+        # check-then-act shape whose unfixability this module documents, in
+        # a new costume.
+        for attempt in (1, 2):
+            fresh = _readable_rows(session_id) or []
+            _, fresh_credit, fresh_spent, _ = _read_type_credit(fresh, agent_type, "")
+            if fresh_credit <= fresh_spent:
+                return OwesVerdict(False)
+            if attempt == 2:
+                break
+            time.sleep(0.1)
+        return OwesVerdict(True, "credit-slot-orphan")
+    finally:
+        try:
+            os.rmdir(lockdir)
+        except OSError:
+            pass
+
+
+def _acquire_owes_lock(lockdir: str) -> bool:
+    """Best-effort mutual exclusion. True iff acquired (or disabled).
+
+    Correctness must not depend on this -- the permanent test disables it
+    and requires the ceiling to hold anyway.
+    """
+    if os.environ.get("NX_EXPECT_LOCK_DISABLE") == "1":
+        return True
+    # The stale reap is KNOWN-UNSAFE and kept deliberately: it can delete a
+    # lock it does not own (test / find / remove are three steps and the
+    # lock can change hands between them). Since round 3 that steal is
+    # merely wasteful rather than incorrect, and removing it without a
+    # replacement self-heal would trade a harmless inefficiency for a
+    # session-long wedge when one holder is SIGKILLed.
+    try:
+        if os.path.isdir(lockdir) and (time.time() - os.stat(lockdir).st_mtime) > 60:
+            os.rmdir(lockdir)
+    except OSError:
+        pass
+    for _ in range(_owes_lock_tries()):
+        try:
+            os.mkdir(lockdir)
+            return True
+        except FileExistsError:
+            time.sleep(0.1)
+        except OSError:
+            return True  # fail open: an unusable lock must not block a stop
+    return False
