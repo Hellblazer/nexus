@@ -77,12 +77,24 @@ class TestSnPluginStructure:
             for entry in hooks
             for h in entry["hooks"]
             for arg in h.get("args", [])
-            if arg.startswith("${CLAUDE_PLUGIN_ROOT}/")
         ]
         assert len(named) == 4, f"expected 4 exec-form script paths, got {named}"
         for arg in named:
-            script = SN_DIR / arg[len("${CLAUDE_PLUGIN_ROOT}/"):]
-            assert script.is_file(), f"hooks.json names {arg}, which does not exist"
+            # Both spellings, and NOT as a filter — as a strip. Filtering on
+            # one spelling first was the gap: every deleted bash wrapper used
+            # the unbraced `$CLAUDE_PLUGIN_ROOT`, so a future entry pasted
+            # from an old example would drop out of `named` while the count
+            # still read 4 against the braced entries already here, and its
+            # script would go unchecked. That is tally instance 1's shape
+            # (an extractor that knew one spelling) mirrored rather than
+            # removed. Anything unrecognised fails loudly below.
+            for prefix in ("${CLAUDE_PLUGIN_ROOT}/", "$CLAUDE_PLUGIN_ROOT/"):
+                if arg.startswith(prefix):
+                    rel = arg[len(prefix):]
+                    break
+            else:
+                pytest.fail(f"hooks.json arg {arg!r} names no recognised plugin-root spelling")
+            assert (SN_DIR / rel).is_file(), f"hooks.json names {arg}, which does not exist"
 
     def test_no_hook_entry_spawns_bash(self) -> None:
         """RDR-215: the sn bash wrapper layer is gone. A re-introduced
@@ -598,6 +610,13 @@ class TestSnHookErrorBoundary:
     ``auto-approve-sn-mcp.sh`` ended in an unconditional ``exit 0`` that hid
     a Python crash completely — the wrapper is gone, so the boundary has to
     be in the Python or a crash becomes the event's problem.
+
+    Read the two halves below as a pair. ``test_the_boundary_swallows_and_logs``
+    proves the MECHANISM catches anything;
+    ``test_each_script_routes_its_entry_point_through_the_boundary`` proves
+    every script's ``__main__`` is WIRED to it. Together those entail that
+    any exception ``main()`` raises is caught, for every script, which is
+    the actual claim — and each is falsifiable on its own.
     """
 
     SCRIPTS = (
@@ -606,13 +625,52 @@ class TestSnHookErrorBoundary:
         SESSION_START,
     )
 
+    #: The two scripts whose ``main()`` reads stdin. ``session_start.py`` does
+    #: not read it at all, so a stdin fixture is inert there — its own
+    #: boundary entry is proven by test_missing_section_file_is_survivable.
+    STDIN_READERS = (SN_DIR / "hooks" / "scripts" / "auto_approve_sn_mcp.py", SUBAGENT_START)
+
     @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
-    def test_garbage_stdin_never_fails_the_event(self, script: Path) -> None:
+    def test_malformed_json_stdin_is_handled_without_reaching_the_boundary(self, script: Path) -> None:
+        """Payload robustness, NOT a boundary test — and the distinction was
+        a finding, not a nicety. This case was written as proof that "every
+        sn hook script survives its own crash"; measured, it never enters
+        the boundary for any of the three. ``decide()`` and
+        ``cwd_from_payload()`` already catch ``json.loads`` failures,
+        ``_in_worktree`` catches its own, and ``session_start.py`` does not
+        read stdin. The property is still worth pinning; the claim was
+        wrong. That makes it the fourth instance of this epic's own tally
+        class authored inside a fix round.
+        """
         result = subprocess.run(
             [sys.executable, str(script)], input="}{not json at all",
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 0, result.stderr
+        assert "crashed, event continues" not in result.stderr, (
+            "this case now reaches the boundary, so it is no longer the "
+            "payload-robustness proof it claims to be — split it"
+        )
+
+    @pytest.mark.parametrize("script", STDIN_READERS, ids=lambda p: p.name)
+    def test_an_undecodable_payload_reaches_the_boundary_and_is_survived(self, script: Path) -> None:
+        """A per-script boundary entry that depends on no defect.
+
+        Invalid UTF-8 on stdin raises ``UnicodeDecodeError`` inside
+        ``sys.stdin.read()``, before any of the script's own guards, so this
+        genuinely exercises ``guard``'s except branch for each script rather
+        than passing on code that never crashed. Measured on both: rc=0,
+        empty stdout, one logged crash.
+        """
+        result = subprocess.run(
+            [sys.executable, str(script)], input=b"\xff\xfe",
+            capture_output=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == b"", "a crashed hook must emit nothing, not half an envelope"
+        assert b"crashed, event continues" in result.stderr, (
+            "the boundary was not entered, so this proves nothing about it"
+        )
 
     def test_the_boundary_swallows_and_logs(self, capsys: pytest.CaptureFixture) -> None:
         """Non-vacuity for the boundary itself. Without this, a boundary
@@ -683,3 +741,28 @@ class TestBrokenWorktreeGuardSibling:
             capture_output=True, text=True, timeout=10,
         )
         assert result.stdout.strip() == "", "an unguarded allowlist must not emit an allow"
+
+
+class TestNonStringToolName:
+    """``{"tool_name": 123}`` is valid JSON a hook payload can carry.
+
+    Found by adversarial review of this bead. Before the isinstance guard it
+    raised ``AttributeError`` in ``is_serena_write_tool``. The outcome was
+    never unsafe — the crash reached the boundary, nothing was approved —
+    but a non-string is simply not a write tool, and the traceback was
+    noise standing in for an answer.
+    """
+
+    @pytest.mark.parametrize("bad", [123, None, ["x"], {"a": 1}, 1.5, True])
+    def test_is_serena_write_tool_answers_rather_than_raising(self, bad: object) -> None:
+        assert is_serena_write_tool(bad) is False  # type: ignore[arg-type]
+
+    def test_the_hook_decides_without_entering_the_boundary(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(AUTO_APPROVE), str(SNAPSHOT)],
+            input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": 123}),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "", "a non-string tool name must not be approved"
+        assert "crashed, event continues" not in result.stderr, result.stderr
