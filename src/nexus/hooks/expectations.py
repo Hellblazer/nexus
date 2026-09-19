@@ -47,6 +47,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,6 +72,26 @@ __all__ = [
 #: refreshes on WRITE, so a session idle past the floor with a background
 #: dispatch still pending can lose its ledger.
 _REAP_DAYS = 7
+
+#: TEST-ONLY FAULT-INJECTION SEAM, ``None`` in production.
+#:
+#: Called immediately before each slot-create attempt in
+#: :func:`_claim_credit`. A race test sets it to a callback that runs a
+#: SECOND claimant to completion, which CONSTRUCTS the losing interleaving
+#: instead of hoping to observe it.
+#:
+#: This exists because the two obvious instruments both fail. A parallel
+#: load test only SAMPLES interleavings: measured here, 16 concurrent
+#: processes did not hit the window, so replacing the atomic create with a
+#: check-then-act left its winners assertion green. An AST assertion never
+#: EXECUTES the claim: it pins the shape of the code, so it refuses a
+#: legitimate refactor and passes a rewrite that keeps the shape and loses
+#: the property.
+#:
+#: One line that is ``None`` in production buys a race test that is
+#: deterministic rather than flaky, and this project has already paid for
+#: the alternative three times over (see the round 1/2/3 history above).
+_CLAIM_INTERLEAVE: "Callable[[], None] | None" = None
 
 #: Verb vocabulary of the append-only TSV. Reproduced exactly; a reader in
 #: the bash library, the e2e twin, or a test fixture may carry any of them.
@@ -249,6 +270,8 @@ def _claim_credit(
     # the common case to a single syscall.
     for index in range(spent + 1, credit + 1):
         slot = f"{base}.{index}"
+        if _CLAIM_INTERLEAVE is not None:  # test-only seam; None in production
+            _CLAIM_INTERLEAVE()
         try:
             os.symlink(agent_id, slot)
             return True

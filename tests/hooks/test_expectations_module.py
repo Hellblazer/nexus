@@ -207,8 +207,90 @@ class TestCreditClaimIsAtomic:
         assert won.count(True) == 2
 
 
+class TestTwoClaimantsCannotBothWin:
+    """Deterministic interleaving — and an honest note on what it does NOT prove.
+
+    The fault-injection seam constructs the losing interleaving instead of
+    hoping to observe it: a second claimant runs to completion inside the
+    window before our own create lands. That makes the one-winner outcome
+    and the loser-moves-on behaviour deterministic rather than sampled,
+    which the 16-process load test is not.
+
+    **IT DOES NOT DISCRIMINATE ATOMIC FROM CHECK-THEN-ACT, and I measured
+    that rather than assuming it.** Replacing ``os.symlink`` with a
+    check-then-act non-exclusive create leaves every assertion in this
+    class passing: ``interloper_won == [True]`` and ``mine_won is False``
+    both hold, because the seam sits before the whole create operation, so
+    for a check-then-act implementation it lands before the CHECK. The
+    interloper finishes, the loser then checks, sees the slot taken, and
+    behaves exactly as the atomic version does.
+
+    Catching check-then-act behaviourally would need a seam BETWEEN its
+    check and its act — a point that exists only in the broken
+    implementation. You cannot place a seam in code you do not have. That
+    is why ``TestTheClaimIsStructurallyAtomic`` below is kept rather than
+    replaced: an AST assertion is the only instrument here that fails on
+    the unsafe shape, and its cost (it pins the shape, so a refactor must
+    update it) is the price of catching a property no behavioural test in
+    this process can reach.
+
+    The seam was suggested by nexus-c3 as a replacement for the AST test.
+    It is a good test and it earns its place, but the replacement claim did
+    not survive being checked — reported back to them rather than quietly
+    kept.
+    """
+
+    def test_a_second_claimant_in_the_window_still_leaves_one_winner(self, state, monkeypatch):
+        path = Path(exp.expectations_file("s"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        interloper_won: list[bool] = []
+
+        def _interleave():
+            # Run a whole competing claim to completion, exactly once, in
+            # the window before our own create lands.
+            monkeypatch.setattr(exp, "_CLAIM_INTERLEAVE", None)
+            interloper_won.append(
+                exp._claim_credit(str(path), "t", "interloper", credit=1, spent=0, owners=[])
+            )
+
+        monkeypatch.setattr(exp, "_CLAIM_INTERLEAVE", _interleave)
+        mine_won = exp._claim_credit(str(path), "t", "me", credit=1, spent=0, owners=[])
+
+        assert interloper_won == [True], "the interloper must genuinely claim the unit"
+        assert mine_won is False, (
+            "one unit, two claimants, and the interloper took it inside our own "
+            "window — a second winner here is the double-spend three rounds of "
+            "this file failed to close"
+        )
+        assert os.readlink(f"{path}.credit.t.1") == "interloper"
+
+    def test_the_loser_moves_on_to_a_free_slot_rather_than_failing(self, state, monkeypatch):
+        """Losing a slot is not losing the claim: with credit to spare the
+        claimant must take the next one, or contention would look like
+        exhaustion."""
+        path = Path(exp.expectations_file("s"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fired: list[int] = []
+
+        def _interleave():
+            if fired:
+                return
+            fired.append(1)
+            monkeypatch.setattr(exp, "_CLAIM_INTERLEAVE", None)
+            exp._claim_credit(str(path), "t", "interloper", credit=2, spent=0, owners=[])
+
+        monkeypatch.setattr(exp, "_CLAIM_INTERLEAVE", _interleave)
+        assert exp._claim_credit(str(path), "t", "me", credit=2, spent=0, owners=[]) is True
+        assert os.readlink(f"{path}.credit.t.1") == "interloper"
+        assert os.readlink(f"{path}.credit.t.2") == "me"
+
+    def test_the_seam_is_None_in_production(self):
+        """It is a one-line test hook; it must never be armed by default."""
+        assert exp._CLAIM_INTERLEAVE is None
+
+
 class TestTheClaimIsStructurallyAtomic:
-    """The actual guard on atomicity, because the load test below is NOT one.
+    """The ONLY instrument here that fails on a non-atomic claim.
 
     Measured while writing this file: replacing ``os.symlink`` with a
     check-then-act using a NON-exclusive create left the 16-process load
@@ -219,10 +301,21 @@ class TestTheClaimIsStructurallyAtomic:
     That is precisely the failure the bash file's own history describes —
     "a test which only re-asserts the ceiling under load will keep passing
     while the defect relocates", which is how rounds 1 and 2 were each
-    declared fixed. So the property is asserted STRUCTURALLY here: the claim
-    must be a single create-or-fail syscall with no existence check before
-    it. Same technique as ``test_hook_runtime_thin.py``, which pins an
-    import property no functional test can see.
+    declared fixed.
+
+    The deterministic seam test above does not close it either, and that
+    was measured: its assertions pass under a check-then-act claim, because
+    a seam placed before the create lands before that implementation's
+    check. Catching the unsafe shape behaviourally would need a seam inside
+    code that only the broken version contains.
+
+    So the property is asserted STRUCTURALLY: the claim must be a single
+    create-or-fail syscall with no existence check before it. The cost is
+    real — this pins the SHAPE, so a legitimate refactor has to update it —
+    and it is accepted deliberately, because the alternative is no guard at
+    all on the one property three rounds of this file failed to hold. Same
+    technique as ``test_hook_runtime_thin.py``, which pins an import
+    property no functional test can see.
     """
 
     def _claim_calls(self) -> set[str]:
