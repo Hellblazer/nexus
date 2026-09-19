@@ -21,6 +21,17 @@ PASS=0; FAIL=0
 mkdir -p "$RUN"
 export MVV_RUN="$RUN"
 
+collect() {  # everything that might carry evidence, out to the mounted dir
+    [ -d /artifacts ] || return 0
+    cp -R "$RUN" /artifacts/run 2>/dev/null
+    cp -R "$HOME_DIR/.claude" /artifacts/dot-claude 2>/dev/null
+    cp -R "$HOME_DIR/.config/nexus" /artifacts/config-nexus 2>/dev/null
+    cp "$HOME_DIR/.claude.json" /artifacts/ 2>/dev/null
+    chmod -R a+rX /artifacts 2>/dev/null
+    true
+}
+trap collect EXIT
+
 ok()  { PASS=$((PASS+1)); printf '  PASS  %s\n' "$*"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$*"; }
 say() { printf '\n== %s\n' "$*"; }
@@ -136,6 +147,22 @@ sid_from_sentinel() {
 # --- the turns, each aimed at one event -----------------------------------
 say "warmup: load the deferred nexus tools"
 prompt "List the names of your mcp__plugin_conexus_nexus__ tools. Reply with just the count." "warmup"
+
+# PROBE MODE: one turn, then dump everything and stop. Exists because the
+# question "where is a hook invocation actually observable" cost a full
+# six-turn billed run to ask badly. One turn is enough to answer it.
+if [ -n "${SHAKEOUT_PROBE:-}" ]; then
+    say "probe: one turn done, collecting every candidate evidence surface"
+    collect
+    echo "  files with any content under the run dir:"
+    find "$RUN" "$HOME_DIR/.claude" "$HOME_DIR/.config/nexus" -type f -size +0 2>/dev/null \
+        | head -40 | while read -r f; do printf '    %-64s %s\n' "$f" "$(wc -c < "$f")"; done
+    echo "  any hook_ or nx-hook mention, by file:"
+    grep -rlE 'hook_[a-z_]+|nx-hook' "$RUN" "$HOME_DIR/.claude" "$HOME_DIR/.config/nexus" 2>/dev/null \
+        | head -20 | sed 's/^/    /'
+    echo "PROBE COMPLETE"
+    exit 0
+fi
 
 say "PreToolUse (Bash): the close gate and the two routing rules"
 prompt "Run this exact bash command and show me its output: echo shakeout-bash-ok" "Bash turn"

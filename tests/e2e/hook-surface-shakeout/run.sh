@@ -139,12 +139,26 @@ echo "[build] $IMAGE"
 docker build -q -t "$IMAGE" "$STAGE" > "$STAGE/docker-build.log" 2>&1 \
     || { tail -40 "$STAGE/docker-build.log" >&2; exit 1; }
 
+# Artifacts ALWAYS come out, whatever the verdict. The first two runs each
+# ended with --rm and took their logs with them, so working out why the census
+# saw nothing would have needed another billed session to reproduce what had
+# already been written to disk once.
+ART="${NX_SHAKEOUT_ARTIFACTS:-${TMPDIR:-/tmp}/hook-shakeout-$SHA.artifacts}"
+rm -rf "$ART"; mkdir -p "$ART"; chmod 777 "$ART"
+
 echo "[run] real Claude Code sessions, plugin from $SHA"
+echo "[run] artifacts -> $ART"
 set +e
 docker run --rm \
     -v "$STAGE/.claude-credentials.json:/creds/.credentials.json:ro" \
+    -v "$ART:/artifacts" \
     -e SHAKEOUT_SHA="$SHA" \
+    -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}" \
     "$IMAGE"
 rc=$?
 set -e
+echo "[run] artifacts:"
+find "$ART" -type f 2>/dev/null | head -40 | while read -r f; do
+    printf '  %-60s %s bytes\n' "${f#$ART/}" "$(wc -c < "$f")"
+done
 exit $rc
