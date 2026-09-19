@@ -178,6 +178,13 @@ _EVERYDAY_SURFACE_MODULES = (
     "commands/doctor.py",
     "health.py",
     "hooks",
+    # nexus-br31l moved the command tier's dispatch plumbing OUT of `hooks`
+    # into this sibling package, and the census did not follow it -- so
+    # entry.py's user-facing text ("nx-hook: unknown verb ...") and the
+    # envelope renderers went unscanned. The commit immediately before that
+    # relocation had just made this census package-aware for exactly this
+    # class of miss; the relocation reopened it one package over.
+    "_hook_runtime",
 )
 
 

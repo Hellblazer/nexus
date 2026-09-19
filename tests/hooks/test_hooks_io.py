@@ -308,3 +308,49 @@ def test_a_malformed_payload_writes_nothing_to_stdout_when_logging_is_unconfigur
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", f"hook logging leaked onto the decision channel: {proc.stdout!r}"
+
+
+class TestWrappedCancellationPassesThrough:
+    """A cancellation must propagate even when it arrives inside a group.
+
+    52919bb20 made a bare ``asyncio.CancelledError`` pass through
+    ``never_fail``, because swallowing one breaks the caller's own timeout
+    rather than the hook's. ``asyncio.TaskGroup`` (3.11+) raises a
+    ``BaseExceptionGroup`` instead, and ``isinstance(group, CancelledError)``
+    is False however many cancellations the group carries — so the bare check
+    alone swallowed exactly the signal it existed to let through. The tool
+    tier calls ``run()`` from async handlers and Phase 2 ports two async
+    projectors, so a group is a real shape here.
+    """
+
+    def test_a_group_carrying_a_cancellation_is_re_raised(self):
+        group = BaseExceptionGroup("tg", [asyncio.CancelledError()])
+
+        def _body():
+            raise group
+
+        with pytest.raises(BaseExceptionGroup):
+            _io.never_fail(_body, "probe")
+
+    def test_a_group_carrying_no_cancellation_is_still_swallowed(self):
+        """The widening must not turn every group into an escape hatch: a
+        group of ordinary errors is still a crash the hook swallows."""
+        group = BaseExceptionGroup("tg", [ValueError("boom"), KeyError("k")])
+
+        def _body():
+            raise group
+
+        assert _io.never_fail(_body, "probe") == _io.HookResult()
+
+    def test_a_nested_group_carrying_a_cancellation_is_re_raised(self):
+        """TaskGroups nest, so the check has to look through the tree rather
+        than only at the top level — which is what subgroup() does and a
+        plain any(isinstance(...)) over .exceptions would not."""
+        inner = BaseExceptionGroup("inner", [asyncio.CancelledError()])
+        outer = BaseExceptionGroup("outer", [inner])
+
+        def _body():
+            raise outer
+
+        with pytest.raises(BaseExceptionGroup):
+            _io.never_fail(_body, "probe")

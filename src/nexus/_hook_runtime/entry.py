@@ -234,12 +234,47 @@ def main() -> None:
 
     sys.stdout = sys.stderr
     try:
-        module = importlib.import_module(module_path)
+        # THE VERB MODULE IS IMPORTED FIRST, AND THE FAILURE IS CARRIED.
+        # Order is load-bearing in both directions here, which is why this is
+        # not simply wrapped in never_fail:
+        #
+        #  - the verb's module must import BEFORE nexus._hook_runtime._io, so
+        #    a verb inspecting its own import environment sees neither _io nor
+        #    nexus.logging_setup (RDR-215 Approach item 2; held by
+        #    test_the_verb_module_loads_before_the_shared_io_and_logging_machinery).
+        #    Importing never_fail first to guard the import would invert that.
+        #  - but the import must not ESCAPE. It used to sit unguarded one line
+        #    above never_fail, so a verb module with an import-time error --
+        #    a syntax error, a missing transitive dependency -- propagated a
+        #    raw traceback and exited 1, contradicting this module's own
+        #    "every hook verb exits 0" contract (bead nexus-q02nx.8 critique,
+        #    reproduced: EXIT=1 with a traceback). That is the property the
+        #    bash layer's deliberately absent `set -e` guaranteed.
+        #
+        # So the import is caught here and RE-RAISED inside the boundary,
+        # which keeps one error path rather than two: never_fail logs it the
+        # same way it logs a crash inside run(). `except Exception` and not
+        # BaseException deliberately mirrors never_fail's own posture, so a
+        # KeyboardInterrupt during import still propagates.
+        #
+        # Phase 2 meets this first: the ledger verbs are new modules that
+        # shell out to bd and git, so an import-time failure in one of them
+        # is a likely early defect rather than a hypothetical.
+        module = None
+        failed_import: Exception | None = None
+        try:
+            module = importlib.import_module(module_path)
+        except Exception as exc:  # noqa: BLE001 — re-raised inside never_fail below
+            failed_import = exc
 
         from nexus._hook_runtime._io import never_fail, read_payload  # noqa: PLC0415 — deferred: only a real dispatch pays this
 
-        payload = read_payload(sys.stdin)
-        result = never_fail(lambda: module.run(payload), verb)
+        def _dispatch():
+            if failed_import is not None:
+                raise failed_import
+            return module.run(read_payload(sys.stdin))
+
+        result = never_fail(_dispatch, verb)
     finally:
         sys.stdout = real_stdout
         if saved_stdout_fd is not None and guarded_fd is not None:

@@ -277,3 +277,61 @@ def test_this_module_does_not_touch_the_click_hook_group() -> None:
     assert not any(
         m == "nexus.commands.hook" or m.startswith("nexus.commands.hook.") for m in imported
     ), imported
+
+
+# -- a verb whose MODULE fails to import (bead nexus-q02nx.8 critique) ------
+
+_UNIMPORTABLE_VERB = textwrap.dedent(
+    """
+    import this_module_does_not_exist_rdr215  # noqa: F401
+
+    def run(payload):
+        return None
+    """
+)
+
+
+def test_a_verb_whose_module_cannot_import_still_exits_zero(tmp_path: Path) -> None:
+    """A raising verb and an UNIMPORTABLE verb are different code paths.
+
+    `importlib.import_module` used to sit outside the never-fail boundary,
+    one line above it, so a verb module with an import-time error — a
+    syntax error, a missing transitive dependency — propagated a raw
+    traceback and exited 1. Reproduced before the fix: EXIT=1 with a
+    traceback on stderr, directly contradicting entry.py's own documented
+    "every hook verb exits 0" contract, which is the property the bash
+    layer's deliberately absent `set -e` guaranteed.
+
+    test_a_raising_verb_exits_zero... covers a verb that imports fine and
+    then raises; this covers one that never imports at all. Phase 2's
+    ledger verbs are new modules that shell out to bd and git, so this is
+    the likelier of the two failures there.
+    """
+    fixtures = _write_fixture_verb(tmp_path, "unimportable_verb", _UNIMPORTABLE_VERB)
+    env = _env(
+        tmp_path,
+        PYTHONPATH=str(fixtures),
+        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"nope": "unimportable_verb"}),
+    )
+    proc = _run(["nope"], env, stdin="{}")
+    assert proc.returncode == 0, (
+        f"an unimportable verb module must not break the exit-0 contract: {proc.stderr}"
+    )
+    assert proc.stdout == "", "the decision channel must stay clean"
+
+
+def test_an_unimportable_verb_is_still_diagnosable_on_stderr(tmp_path: Path) -> None:
+    """Swallowed is not invisible — the same standard the raising-verb case
+    is held to. Without this, an import-time failure would be a hook that
+    silently does nothing forever."""
+    fixtures = _write_fixture_verb(tmp_path, "unimportable_verb", _UNIMPORTABLE_VERB)
+    env = _env(
+        tmp_path,
+        PYTHONPATH=str(fixtures),
+        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"nope": "unimportable_verb"}),
+    )
+    proc = _run(["nope"], env, stdin="{}")
+    assert proc.returncode == 0, proc.stderr
+    assert "this_module_does_not_exist_rdr215" in proc.stderr, (
+        "the log must name the module that could not be imported"
+    )

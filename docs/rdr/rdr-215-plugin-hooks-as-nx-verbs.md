@@ -324,7 +324,8 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   '<name>' not connected`. `nx-mcp`'s own stdio `initialize` round-trip
   is 0.61-0.73 s warm, about 40x under that ceiling; the cold-boot case
   is not yet measured.
-- **Verified on all three host shapes** (bead `nexus-q02nx.6`,
+- **Verified on two host shapes, and on a third by inference** (bead
+  `nexus-q02nx.6`,
   2026-09-19): Claude Code spawns a command hook directly, with no
   intervening login shell, and hands it its own PATH unmodified.
   Terminal-launched macOS: `nx-hook` resolves from `~/.local/bin`.
@@ -379,8 +380,15 @@ no shell, no PATH, no interpreter to find, and the hook runs in the
 process that already imports `nexus`. The `SessionStart` group, which
 fires before the servers exist, and the version-lockstep hook, which must
 work on a wheel older than the plugin, are command hooks in exec form.
-All logic lives in `src/nexus/hooks/`; both tiers call the same
-functions.
+The hook logic lives in `src/nexus/hooks/`; the shared dispatch
+plumbing it is called through — `_io.py`, `_config.py` and the command
+tier's `entry.py` — lives in `src/nexus/_hook_runtime/`, a package whose
+`__init__` is a docstring and nothing else. The split is not cosmetic:
+Python runs a package's `__init__` before any module inside it, and
+`nexus/hooks/__init__.py` imports `nexus.session` and structlog, so a
+stdlib-only verb reached through `nexus.hooks` paid 0.06 s before doing
+anything (bead `nexus-br31l`; see § Technical Design). Both tiers still
+call the same functions.
 
 ### Approach
 
@@ -628,9 +636,17 @@ that client or shell out to `nx` for every call.
   measures the first `PreToolUse` after launch on macOS and WSL2; if it
   can race the connection, that event's entry gets a command-tier twin
   until the server is up.
-- **`nx-hook` not on the `SessionStart` PATH.** Mitigation: measured in
-  Phase 1 on an app-launched macOS Claude Code and in WSL2; the verb
-  prints one line naming the fix when it cannot find its generation.
+- **`nx-hook` not on the `SessionStart` PATH.** Measured in Phase 1 on
+  all three host shapes, and the PATH itself is fine (see § Critical
+  Assumptions). The mitigation as written here is REFUTED and no
+  replacement has been built: a command hook that cannot be found does
+  not fail loud, so "the verb prints one line naming the fix" is
+  structurally impossible — the verb never runs. Claude Code logs
+  `Executable not found in $PATH` to the debug log only and the session
+  proceeds silently. OPEN: the fail-loud line has to live somewhere that
+  runs regardless — `nx doctor`, the installer, or a declaration that
+  does not depend on PATH resolution. Bead `nexus-3z8vb` closed the
+  related case where the shim exists but its target does not.
 - **A port changes a refusal text or exit code another file quotes.**
   Mitigation: the retargeted test asserts the exact bytes; a grep for the
   quoted strings runs before each script is deleted.
@@ -660,8 +676,20 @@ No implementation starts before this RDR is accepted.
 Two first ports: `auto-approve-nx-mcp.sh` as `hook_auto_approve` on
 `nx-mcp` declared as an `mcp_tool` hook, and `nx hook session-start` as
 `nx-hook session-start` in exec form. Both pass their retargeted tests,
-and both fire in a real Claude Code session on macOS and inside a WSL2
-distro, with the timing of the first `PreToolUse` after launch recorded.
+and both fired in a real Claude Code session on macOS, with the timing of
+the first `PreToolUse` after launch recorded.
+
+**What that does and does not mean.** Neither port is wired into the live
+`conexus/hooks/hooks.json`, and nothing in Phase 1 touches that file — the
+re-declaration is Approach item 6, deliberately Phase 3 (beads
+`nexus-q02nx.21`/`.22`). So what fired live was the real port reached
+through a purpose-built `hooks.json` in an isolated HOME, which proves the
+DISPATCH MECHANISM and the tier's contracts; it is not the same as a
+hooks.json-triggered event in a normal session reaching the ported module,
+which stays open until Phase 3. On WSL2 the mechanism was proven with a
+probe server and a stand-in executable rather than with nexus's own
+package, which does not install on that distro (see § Critical
+Assumptions).
 
 ### Phase 1: Shape
 

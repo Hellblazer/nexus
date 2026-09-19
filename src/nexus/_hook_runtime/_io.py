@@ -285,5 +285,14 @@ def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
 
         if isinstance(exc, asyncio.CancelledError):
             raise
+        # A cancellation can arrive WRAPPED. asyncio.TaskGroup (3.11+) raises a
+        # BaseExceptionGroup, and isinstance(group, CancelledError) is False
+        # however many CancelledErrors it carries -- so the check above alone
+        # would swallow exactly the cancellation it exists to let through. The
+        # tool tier calls run() from async handlers, and Phase 2's two async
+        # tuple projectors are a plausible source of a group, so this is the
+        # sibling of 52919bb20's fix rather than a hypothetical.
+        if isinstance(exc, BaseExceptionGroup) and exc.subgroup(asyncio.CancelledError):
+            raise
         _emit("warning", "hook_boundary_swallowed_exception", hook=hook, error=str(exc))
         return HookResult()
