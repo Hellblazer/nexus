@@ -1101,14 +1101,21 @@ def search_cross_corpus(
     # Topic boost (RDR-070, nexus-aym) — applied AFTER grouping so
     # distance-based group ordering is not contaminated by the boost.
     #
-    # ORDERING DEPENDENCY, do not reorder without reading this. Three sites
-    # above rebuild SearchResult objects rather than mutating them
-    # (_flag_contradictions, _apply_clustering, _apply_topic_grouping) and
-    # none of them copies `topic_boost` forward. That is safe ONLY because
-    # they all run before this call, while the field is still at its 0.0
-    # default. Move this earlier and the credit is silently dropped — no
-    # exception, no wrong type, just unboosted ranking, because a defaulted
-    # field fails quieter than a missing one (nexus-la5pr review).
+    # Three sites above rebuild SearchResult objects rather than mutating
+    # them (_flag_contradictions, _apply_clustering, _apply_topic_grouping).
+    # All three now copy `topic_boost` forward, so this call's position is a
+    # preference rather than a load-bearing dependency.
+    #
+    # It did not used to be. Until the nexus-la5pr review round, none of the
+    # three forwarded the field and the whole arrangement was safe ONLY
+    # because they all ran before this call while the field sat at its 0.0
+    # default -- a comment saying "do not reorder" was the entire guard.
+    # That is the same failure shape this bead just removed from `distance`:
+    # a defaulted field fails quieter than a missing one, so moving this
+    # call earlier would have silently dropped the credit with no exception
+    # and no wrong type, just unboosted ranking. Forwarding the field costs
+    # three lines and converts the hazard into an ordinary data flow, which
+    # is worth more than a comment nobody reads at the moment they reorder.
     if _topic_assignments and all_results:
         try:
             from nexus.scoring import apply_topic_boost  # noqa: PLC0415 — branch-local; only when topic assignments present
@@ -1473,7 +1480,7 @@ def _flag_contradictions(
             out.append(SearchResult(
                 id=r.id, content=r.content or "", distance=r.distance,
                 collection=r.collection, metadata=meta,
-                hybrid_score=r.hybrid_score,
+                hybrid_score=r.hybrid_score, topic_boost=r.topic_boost,
             ))
         else:
             out.append(r)
@@ -1572,7 +1579,7 @@ def _apply_clustering(
     result_dicts = [
         {"id": r.id, "content": r.content, "distance": r.distance,
          "collection": r.collection, "metadata": dict(r.metadata),
-         "hybrid_score": r.hybrid_score}
+         "hybrid_score": r.hybrid_score, "topic_boost": r.topic_boost}
         for r in results
     ]
 
@@ -1592,6 +1599,7 @@ def _apply_clustering(
                 collection=rd["collection"],
                 metadata=meta,
                 hybrid_score=rd.get("hybrid_score", 0.0),
+                topic_boost=rd.get("topic_boost", 0.0),
             ))
     return out
 
@@ -1630,7 +1638,7 @@ def _apply_topic_grouping(
             out.append(SearchResult(
                 id=r.id, content=r.content or "", distance=r.distance,
                 collection=r.collection, metadata=meta,
-                hybrid_score=r.hybrid_score,
+                hybrid_score=r.hybrid_score, topic_boost=r.topic_boost,
             ))
 
     # Unassigned at the end, sorted by distance

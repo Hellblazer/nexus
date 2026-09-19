@@ -698,6 +698,122 @@ class TestLinkBoost:
 # ── Topic boost (RDR-070, nexus-aym) ─────────────────────────────────────
 
 
+class TestTopicBoostRankingEquivalence:
+    """The ranking-equivalence property 7b1b49075 claimed but never committed.
+
+    That commit's message cites "400 randomised trials scoring each set both
+    ways ... agree on ordering and on every hybrid_score" as its primary
+    evidence that moving the topic credit out of ``distance`` left ranking
+    untouched. The trials were run ad hoc during development and never
+    landed, so the repo carried a claim nothing in it could check
+    (nexus-la5pr review, code-review-expert). This is that check.
+
+    It needs no replica of the deleted code. The old pipeline mutated
+    ``distance`` in place to ``max(0.0, raw - boost)`` and then scored it;
+    the new one leaves ``distance`` alone and subtracts inside
+    ``_effective_distance``. Since ``_effective_distance`` with a zero
+    ``topic_boost`` reduces to ``max(0.0, d) * calibration`` -- the old
+    arithmetic exactly, for the non-negative distances a real embedder
+    returns -- the equivalence is just:
+
+        score(raw, boost)  ==  score(max(0, raw - boost), 0)
+
+    Both sides run through the CURRENT function, so the test cannot rot into
+    pinning a stale implementation, and it keeps meaning something if the
+    scoring formula is later rewritten. DELETE IT when ranking is
+    DELIBERATELY changed, not before -- a red here means ranking moved, and
+    the question is only whether that was intended.
+
+    The one known divergence, a negative raw distance with no boost, is
+    excluded from the domain here and pinned separately by
+    ``test_a_negative_raw_distance_is_floored_rather_than_winning``.
+    """
+
+    def _pair(self, trial: list[tuple[str, float, float]], hybrid: bool):
+        """Score one trial both ways; return (new_result, prebaked_result)."""
+        new = [
+            SearchResult(id=i, content="c", distance=d, collection=c,
+                         metadata={"frecency_score": 0.0}, topic_boost=b)
+            for i, (c, d, b) in enumerate((t[0], t[1], t[2]) for t in trial)
+        ]
+        old = [
+            SearchResult(id=i, content="c", distance=max(0.0, d - b),
+                         collection=c, metadata={"frecency_score": 0.0})
+            for i, (c, d, b) in enumerate((t[0], t[1], t[2]) for t in trial)
+        ]
+        return (apply_hybrid_scoring(new, hybrid),
+                apply_hybrid_scoring(old, hybrid))
+
+    @pytest.mark.parametrize("hybrid", [False, True], ids=["plain", "hybrid"])
+    def test_400_seeded_trials_agree_on_order_and_every_score(
+        self, hybrid: bool, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import random
+
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
+        rng = random.Random(20260919)  # seeded: a red is reproducible
+        collections = ["code__repo", "knowledge__notes", "docs__manual"]
+
+        for _ in range(400):
+            trial = [
+                (rng.choice(collections),
+                 round(rng.uniform(0.0, 1.5), 6),      # raw distance, never negative
+                 round(rng.uniform(0.0, 0.30), 6))     # topic credit, the real range
+                for _ in range(rng.randint(1, 8))
+            ]
+            got, want = self._pair(trial, hybrid)
+            assert [r.id for r in got] == [r.id for r in want], trial
+            for a, b in zip(got, want, strict=True):
+                assert a.hybrid_score == pytest.approx(b.hybrid_score, abs=1e-12), trial
+
+    def test_the_trials_actually_discriminate(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-vacuity: the trials above must be able to FAIL.
+
+        A randomised equivalence test that passes because both sides are
+        trivially identical proves nothing, and that failure is invisible --
+        it looks exactly like a pass. So drop the credit the way a regression
+        in ``_effective_distance`` would and require most trials to diverge.
+        The commit message's own falsification reported 338 of 400; this
+        asserts only a large majority, because the exact count depends on the
+        seed and pinning it would make a reseed look like a regression.
+        """
+        import random
+
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
+        rng = random.Random(20260919)
+        collections = ["code__repo", "knowledge__notes", "docs__manual"]
+
+        # A credit that is never applied: exactly what ignoring topic_boost
+        # inside _effective_distance would produce.
+        diverged = 0
+        for _ in range(400):
+            trial = [
+                (rng.choice(collections),
+                 round(rng.uniform(0.0, 1.5), 6),
+                 round(rng.uniform(0.0, 0.30), 6))
+                for _ in range(rng.randint(2, 8))
+            ]
+            broken = [
+                SearchResult(id=i, content="c", distance=d, collection=c,
+                             metadata={"frecency_score": 0.0})  # credit dropped
+                for i, (c, d, b) in enumerate((t[0], t[1], t[2]) for t in trial)
+            ]
+            _, want = self._pair(trial, hybrid=False)
+            got = apply_hybrid_scoring(broken, hybrid=False)
+            if [r.id for r in got] != [r.id for r in want] or any(
+                a.hybrid_score != pytest.approx(b.hybrid_score, abs=1e-12)
+                for a, b in zip(got, want, strict=True)
+            ):
+                diverged += 1
+
+        assert diverged > 300, (
+            f"only {diverged}/400 trials diverged when the topic credit was "
+            "dropped — the equivalence test above is not discriminating"
+        )
+
+
 class TestTopicBoost:
     """apply_topic_boost() scoring tests.
 
@@ -739,6 +855,56 @@ class TestTopicBoost:
         assert r3.topic_boost == 0.0
         # And no result's distance moved.
         assert (r1.distance, r2.distance, r3.distance) == (0.5, 0.4, 0.3)
+
+    def test_the_three_rebuild_sites_forward_topic_boost(self) -> None:
+        """A reorder must not silently drop the credit (nexus-la5pr review).
+
+        ``_flag_contradictions``, ``_apply_clustering`` and
+        ``_apply_topic_grouping`` construct fresh ``SearchResult`` objects
+        rather than mutating in place. Until this test they copied
+        ``hybrid_score`` forward and not ``topic_boost``, which was safe only
+        because all three run before ``apply_topic_boost`` while the field is
+        still 0.0 -- the entire guard was a comment saying "do not reorder".
+
+        A defaulted field fails quieter than a missing one: move the boost
+        earlier and every result silently ranks unboosted, with no exception
+        and no wrong type. So this pins the FORWARDING, by setting a non-zero
+        ``topic_boost`` first and requiring it to survive each rebuild, which
+        is the property a reorder needs and the comment could not provide.
+        """
+        from nexus.search_engine import (
+            _apply_topic_grouping,
+            _flag_contradictions,
+        )
+
+        # _flag_contradictions rebuilds only the rows it FLAGS, so build the
+        # condition it flags on: same collection, different source_agent,
+        # near-identical embeddings (cosine distance < 0.3).
+        import numpy as np
+
+        r = self._make_result(doc_id="doc-a", distance=0.5)
+        r.metadata = {"source_agent": "agent-alpha"}
+        r.topic_boost = 0.11
+        other = self._make_result(doc_id="doc-b", distance=0.5)
+        other.metadata = {"source_agent": "agent-beta"}
+        embs = np.array([[1.0, 0.0, 0.0], [0.99, 0.01, 0.0]], dtype=float)
+
+        out = _flag_contradictions([r, other], embs)
+        assert out[0].metadata.get("_contradiction_flag") is True, (
+            "the row was not rebuilt, so this asserts nothing"
+        )
+        assert out[0].topic_boost == 0.11
+
+        # _apply_topic_grouping rebuilds every ASSIGNED row.
+        r2 = self._make_result(doc_id="doc-b", distance=0.4)
+        r2.topic_boost = 0.07
+        taxonomy = MagicMock()
+        taxonomy.get_labels_for_ids.return_value = {1: "t1"}
+        grouped = _apply_topic_grouping([r2], {"doc-b": 1}, taxonomy)
+        assert grouped[0].metadata.get("_topic_label"), (
+            "the row was not rebuilt, so this asserts nothing"
+        )
+        assert grouped[0].topic_boost == 0.07
 
     def test_linked_topic_boost(self) -> None:
         """Results in linked topics get distance reduction."""
