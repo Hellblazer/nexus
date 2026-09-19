@@ -42,6 +42,7 @@ import time
 from pathlib import Path
 
 from nexus._hook_runtime._io import HookResult
+from nexus.hooks._plugin import plugin_script
 
 __all__ = ["run"]
 
@@ -76,14 +77,16 @@ def _nx_env(session_id: str) -> dict:
 
 
 def _scan_script() -> Path:
-    """The sibling scan, resolved as the script resolves it.
+    """The sibling scan, wherever the plugin actually is.
 
-    Off this module's own location via the repo root, which is the
-    equivalent anchor: the bash used ``dirname ${BASH_SOURCE[0]}``, and
-    a missing file must yield no hits rather than an error.
+    The bash used ``dirname ${BASH_SOURCE[0]}`` and was always right,
+    because it WAS the sibling. This module is not: installed, it sits in
+    site-packages, where a checkout-relative anchor resolves to the
+    interpreter's lib directory and the scan is simply never found. The
+    caller treats a missing script as no hits, so that failure is silent
+    -- which is how it shipped. See ``_plugin.py``.
     """
-    repo = Path(__file__).resolve().parents[3]
-    return repo / "conexus" / "hooks" / "scripts" / "divergence-language-scan.py"
+    return plugin_script("divergence-language-scan.py")
 
 
 def _hits(file_path: str) -> str:

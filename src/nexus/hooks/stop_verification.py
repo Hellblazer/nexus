@@ -48,6 +48,7 @@ from pathlib import Path
 
 from nexus._hook_runtime._config import stop_guard_mode
 from nexus._hook_runtime._io import HookResult, _emit
+from nexus.hooks._plugin import plugin_root
 from nexus.hooks import expectations as _exp
 
 __all__ = ["run"]
@@ -82,10 +83,8 @@ def _approve(reason: str = "") -> HookResult:
 
 
 def _plugin_root() -> Path:
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if root:
-        return Path(root)
-    return Path(__file__).resolve().parents[3] / "conexus"
+    """See ``_plugin.plugin_root``; kept as a local name for its callers."""
+    return plugin_root()
 
 
 def _read_config() -> dict:

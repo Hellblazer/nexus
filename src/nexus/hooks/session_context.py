@@ -90,6 +90,7 @@ import sys
 from pathlib import Path
 
 from nexus._hook_runtime._io import HookResult
+from nexus.hooks._plugin import plugin_root
 
 __all__ = ["run"]
 
@@ -217,10 +218,7 @@ def _plugin_root() -> Path:
     (bead nexus-q02nx.13/.17), the established precedent for a ported hook
     that still needs a not-yet-ported plugin-only sibling script.
     """
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if root:
-        return Path(root)
-    return Path(__file__).resolve().parents[3] / "conexus"
+    return plugin_root()
 
 
 def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script never reads stdin; payload is unused, matching it

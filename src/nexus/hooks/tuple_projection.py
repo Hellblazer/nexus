@@ -46,6 +46,7 @@ import threading
 from pathlib import Path
 
 from nexus._hook_runtime._io import HookResult, _emit
+from nexus.hooks._plugin import checkout_plugin_root
 
 __all__ = ["run_start", "run_stop"]
 
@@ -66,9 +67,8 @@ def _projector() -> Path | None:
     root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
     if root:
         candidates.append(Path(root) / "hooks" / "scripts" / "tuple_ledger_project.py")
-    repo = Path(__file__).resolve().parents[3]
     candidates.append(
-        repo / "conexus" / "hooks" / "scripts" / "tuple_ledger_project.py"
+        checkout_plugin_root() / "hooks" / "scripts" / "tuple_ledger_project.py"
     )
     return next((c for c in candidates if c.is_file()), None)
 
