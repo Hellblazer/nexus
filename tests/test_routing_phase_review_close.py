@@ -539,7 +539,7 @@ def test_registry_lists_rule_with_fail_closed():
 # ---------------------------------------------------------------------------
 
 
-def _declared_paths(hooks: dict, event: str) -> list[str]:
+def _declared_paths(hooks: dict, event: str, matcher: str | None = None) -> list[str]:
     """Every script path the *event*'s entries name, from either form.
 
     RDR-215 nexus-q02nx.21 moved the script out of the ``command`` string
@@ -554,6 +554,8 @@ def _declared_paths(hooks: dict, event: str) -> list[str]:
     """
     out = []
     for entry in hooks["hooks"].get(event, []):
+        if matcher is not None and entry.get("matcher") != matcher:
+            continue
         for h in entry.get("hooks", []):
             if not isinstance(h, dict):
                 continue
@@ -565,11 +567,17 @@ def _declared_paths(hooks: dict, event: str) -> list[str]:
 def test_hooks_json_registers_routing_hook():
     hooks_json = PROJECT_ROOT / "conexus" / "hooks" / "hooks.json"
     data = json.loads(hooks_json.read_text())
-    declared = _declared_paths(data, "PreToolUse")
+    # The matcher is half the contract and dropping it was a real
+    # regression in this bead's first pass: a reviewer falsified it by
+    # moving the entry to an Agent|Task matcher, where the gate never sees
+    # a `bd close` Bash command and the path assertion stays green. For
+    # the routing framework's only fail_closed rule.
+    declared = _declared_paths(data, "PreToolUse", matcher="Bash")
     assert any(
         p.endswith("hooks/scripts/routing/phase_review_close_requires_gate.py")
         for p in declared
     ), (
-        "phase_review_close_requires_gate.py must be registered at its real "
-        f"path, hooks/scripts/routing/. Declared: {declared}"
+        "phase_review_close_requires_gate.py must be registered under the "
+        "Bash matcher at its real path, hooks/scripts/routing/. Declared "
+        f"under Bash: {declared}"
     )
