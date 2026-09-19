@@ -1000,3 +1000,6 @@ function family this RDR explicitly does not touch.
 
 ## Revision History
 
+- 2026-09-19: Gate round 1 — BLOCKED (1 Critical, 2 Significant, 1 ship-blocker(s)); commit `8f71c96f8`; critique `nexus_rdr/217-gate-critique-2026-09-19-r1`.
+- 2026-09-19: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `7d27a4a55`; critique `nexus_rdr/217-gate-critique-2026-09-19-r2`.
+
