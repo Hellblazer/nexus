@@ -61,9 +61,10 @@ module path of the object that implements it. Every entry's module defines
 one function, ``run(payload: dict | None) -> HookResult``
 (:class:`nexus.hooks._io.HookResult`) -- the exact function the tool tier's
 ``hook_<name>`` tools call too (RDR-215 Approach item 4: "one implementation,
-two entries"). :data:`VERB_TABLE` is empty in this bead (nexus-q02nx.2):
-this module is the dispatch mechanism, not a verb port. The first real verb,
-``session-start``, is nexus-q02nx.5; the ledger verbs
+two entries"). The first real verb, ``session-start`` (nexus-q02nx.5), is
+registered below; it never reaches the tool tier at all, since
+``SessionStart`` fires before any MCP server is guaranteed connected
+(Approach item 1). The ledger verbs
 (``expect``/``start``/``census``/``undeclared``/``reconcile``) are Phase 2.
 Resolution happens once, per invocation, via ``importlib`` -- there is no
 eager import of every registered verb's module merely because one of them
@@ -91,10 +92,12 @@ import sys
 #: Hook verb name -> dotted module path. Each module defines
 #: ``run(payload: dict | None) -> HookResult``. Resolved and imported
 #: lazily, per verb, at dispatch time -- never eagerly -- so nx-hook's own
-#: cost never scales with how many verbs are registered. Empty until
-#: nexus-q02nx.5 ports the first real verb (``session-start``); populated
-#: incrementally as later beads in the epic land.
-VERB_TABLE: dict[str, str] = {}
+#: cost never scales with how many verbs are registered. ``session-start``
+#: (nexus-q02nx.5) is the first real port; populated incrementally as later
+#: beads in the epic land.
+VERB_TABLE: dict[str, str] = {
+    "session-start": "nexus.hooks.session_start_verb",
+}
 
 #: Verbs whose exit code nx-hook must propagate from ``run()`` instead of
 #: forcing 0 -- the ledger's callers branch on it (RDR-215 Contracts).

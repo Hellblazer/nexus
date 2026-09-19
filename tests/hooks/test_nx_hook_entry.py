@@ -2,15 +2,17 @@
 """Tests for ``nexus.hooks.entry`` -- the ``nx-hook`` command-tier dispatch
 mechanism (RDR-215 Phase 1, bead nexus-q02nx.2).
 
-No real verb is registered yet (``VERB_TABLE`` is empty; the first port is
-nexus-q02nx.5), so these tests exercise the dispatch mechanism itself
-against the REAL entry point, using the module's own test-only override env
-vars (``_NX_HOOK_TEST_VERB_OVERRIDE`` / ``_NX_HOOK_TEST_LEDGER_VERBS``,
+These tests exercise the dispatch mechanism itself against the REAL entry
+point, using the module's own test-only override env vars
+(``_NX_HOOK_TEST_VERB_OVERRIDE`` / ``_NX_HOOK_TEST_LEDGER_VERBS``,
 documented on the module) to register throwaway fixture verbs for the
-duration of one subprocess call. Every scenario spawns
-``python -m nexus.hooks.entry <verb>`` -- exactly the callable the
-``nx-hook`` console script's generated stub also calls (``nexus.hooks.entry:main``),
-so this needs no prior ``scripts/reinstall-tool.sh`` run to be meaningful.
+duration of one subprocess call, rather than the one real verb
+:data:`VERB_TABLE` carries (``session-start``, nexus-q02nx.5 -- its own
+coverage lives in ``tests/hooks/test_session_start_verb.py``). Every
+scenario spawns ``python -m nexus.hooks.entry <verb>`` -- exactly the
+callable the ``nx-hook`` console script's generated stub also calls
+(``nexus.hooks.entry:main``), so this needs no prior
+``scripts/reinstall-tool.sh`` run to be meaningful.
 """
 from __future__ import annotations
 
