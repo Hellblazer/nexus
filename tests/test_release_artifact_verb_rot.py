@@ -40,9 +40,26 @@ Surfaces swept (evidence-scoped, not speculative — see module-level
     and ``scripts/validate/`` stay out of charter (personal/ops sandbox
     tooling, not a release-only artifact; a real `nx storage migrate` rot
     found there in scope-widening reconnaissance is tracked as its own bead,
-    not silently swept in here). ``conexus/hooks/scripts/*.sh`` are the
-    SHIPPED plugin hook scripts every plugin user's Claude Code session
-    actually executes.
+    not silently swept in here). ``conexus/hooks/scripts/*.sh`` WAS the
+    shipped plugin hook scripts every plugin user's Claude Code session
+    executes — until RDR-215 bead nexus-q02nx.21 ported twelve of the
+    thirteen into the wheel and deleted them. That glob still resolves, but
+    to ONE file (``_run_python_hook.sh``) carrying ZERO nx invocations, so
+    it is an inert surface today, kept wired for whatever shell hook lands
+    next rather than because it currently proves anything. The shipped-hook
+    nx-invocation signal it used to carry now lives entirely in
+    ``conexus/hooks/hooks.json``, whose anchor was raised from 1 to 3 to
+    match (see ``_ANCHOR_MIN_COUNTS``).
+
+    The ported hooks themselves are NOT swept: they are Python in
+    ``src/nexus/hooks/``, and this module reads .sh, skill markdown,
+    workflow YAML, hooks.json and the plugin README. That is a real
+    coverage reduction, disclosed rather than papered over — a dead ``nx``
+    verb named inside a ported hook's Python is invisible here. It is also
+    much less exposed than the bash was: a verb named in Python is a string
+    in a module the unit suite imports, not an un-run line in a shell
+    script nobody executes between releases, which is the whole premise of
+    this module (nexus-1e2eh, "release-only procedures rot silently").
   * ``conexus/hooks/hooks.json`` — every ``command`` string value, however
     deeply nested (parsed via ``json.loads``, not text-matched). This is the
     strongest instance of the class this bead generalises: a SHIPPED
@@ -215,14 +232,18 @@ _FILE_VERB_ALLOWLIST: dict[tuple[str, str], str] = {
     ("tests/e2e/upgrade-shakeout.sh", "guided-upgrade to"): (
         "planted RED fixture text for _check_no_demoted_verb's self-test"
     ),
-    # nexus-fgekf: extractor noise — the close gate's capability-gap warning
-    # says "the nx binary is absent, or 'nx scratch list' failed" and the
-    # extractor reads the prose after "nx" as a verb. Any wording that
-    # mentions the binary by name followed by prose parses the same way, so
-    # this is class-3 (mis-parsed ordinary prose), not rot.
-    ("conexus/hooks/scripts/pre_close_verification_hook.sh", "binary is"): (
-        "prose in the T1-unreachable warning naming the nx binary itself"
-    ),
+    # REMOVED at RDR-215 bead nexus-q02nx.21: the nexus-fgekf entry keyed on
+    # ("conexus/hooks/scripts/pre_close_verification_hook.sh", "binary is").
+    # It exempted extractor noise — the close gate's capability-gap warning
+    # says "the nx binary is absent, or 'nx scratch list' failed", and the
+    # extractor read the prose after "nx" as a verb. That script is deleted;
+    # the gate is `nexus.hooks.pre_close_verification`, which this sweep does
+    # not scan (its surfaces are .sh / skill md / workflow yml / hooks.json /
+    # the plugin README — never Python in the wheel). The warning text still
+    # exists there, so the exemption did not become unnecessary, it became
+    # unreachable — and `test_allowlist_entries_are_not_stale` asserts every
+    # key resolves to a real file, so leaving it would fail on the path, not
+    # on the verb.
 }
 
 
@@ -407,8 +428,22 @@ _ANCHOR_MIN_COUNTS: dict[str, int] = {
     # to retarget the anchor to. Removed rather than lowered to 0: an anchor
     # asserting ">= 0 invocations" proves nothing about the extractor, which
     # is the one thing an anchor is for. The remaining 11 anchors still do.
-    "conexus/hooks/hooks.json": 1,
-    "conexus/hooks/scripts/subagent-start.sh": 3,
+    # Raised 1 -> 3 at RDR-215 bead nexus-q02nx.21 (measured: 4 invocations
+    # — `nx upgrade`, `nx self install`, `nx self gc`, `nx hook session-start`).
+    # hooks.json is now the ONLY carrier of the shipped-plugin nx-invocation
+    # signal this module watches, so a token floor of 1 is no longer enough:
+    # see the `conexus/hooks/scripts/*.sh` note below for what it replaced.
+    "conexus/hooks/hooks.json": 3,
+    # REMOVED at RDR-215 bead nexus-q02nx.21: the
+    # "conexus/hooks/scripts/subagent-start.sh": 3 anchor. That script (and
+    # eleven siblings) were ported into the wheel and deleted, and the whole
+    # `conexus/hooks/scripts/*.sh` glob now resolves to ONE surviving file,
+    # `_run_python_hook.sh`, which contains ZERO nx invocations (measured).
+    # So there is nowhere in that surface to retarget the anchor to.
+    #
+    # Removed rather than lowered to 0, on this dict's own reinstall-tool.sh
+    # precedent above: an anchor asserting ">= 0 invocations" proves nothing
+    # about the extractor, which is the one thing an anchor is for.
     "conexus/README.md": 5,
 }
 

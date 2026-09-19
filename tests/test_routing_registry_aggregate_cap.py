@@ -24,8 +24,9 @@ CORRECTION (2026-08-23). The registry count alone does not measure the
 budget. ``src/nexus/commands/hook.py`` says it outright -- "registry.yaml
 is documentation, hooks.json is the registration surface" -- and the two
 disagree: ``conexus/hooks/hooks.json`` fires THREE hooks on the
-``PreToolUse: Bash`` matcher (``pre_close_verification_hook.sh`` plus the
-two routing hooks) while the registry lists two rules. A hook registered
+``PreToolUse: Bash`` matcher (the ``hook_pre_close_verification`` MCP
+tool -- ``pre_close_verification_hook.sh`` until RDR-215 bead
+nexus-q02nx.21 -- plus the two routing hooks) while the registry lists two rules. A hook registered
 in hooks.json with no registry entry costs latency on every Bash call and
 was invisible to this cap, so a fifth could land while the lint reported
 2/4. The budget is cumulative wall-clock per Bash call, so the count that

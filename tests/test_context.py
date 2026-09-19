@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 from pathlib import Path
 from typing import Any
 
@@ -275,11 +276,39 @@ class TestGenerateContextL1:
 
 
 class TestSubagentHookInjection:
-    """Verify the SubagentStart hook expands the L1 context cache."""
+    """Verify the SubagentStart hook expands the L1 context cache.
 
-    HOOK_PATH = Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "subagent-start.sh"
+    Re-pointed at the wheel (RDR-215 bead nexus-q02nx.21). These tests drove
+    ``conexus/hooks/scripts/subagent-start.sh`` through ``/bin/bash`` until
+    that script was deleted; the behaviour they assert is now
+    ``nexus.hooks.subagent_start``, wired as the ``hook_subagent_start`` MCP
+    tool. There is no command-line surface to exec any more, so the harness
+    calls the two functions the bash's Knowledge Map block became --
+    ``_repo_root`` (the ``git rev-parse --git-common-dir`` resolution) and
+    ``_knowledge_map_section`` (the cache lookup keyed on it) -- in the same
+    order, with the same cwd and ``$HOME``, rather than a subprocess.
 
-    def test_hook_emits_knowledge_map(self, tmp_path: Path) -> None:
+    The COMPOSITION is the point, which is why this stayed here in
+    ``test_context.py`` rather than collapsing into a unit test of the
+    lookup alone: the filename ``nx context refresh`` writes must be the
+    filename the SubagentStart hook reads, and only running the resolution
+    and the lookup together proves that.
+    """
+
+    @staticmethod
+    def _knowledge_map(repo_dir: Path, home: Path, monkeypatch) -> str:
+        """The hook's Knowledge Map section for a subagent started in *repo_dir*.
+
+        Mirrors ``run()``'s own order: resolve the main repo root from the
+        process cwd, then look the cache up under it.
+        """
+        from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root
+
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(repo_dir)
+        return _knowledge_map_section(_repo_root(dict(os.environ)))
+
+    def test_hook_emits_knowledge_map(self, tmp_path: Path, monkeypatch) -> None:
         """SubagentStart hook outputs the cached knowledge map content.
 
         nexus-cnzei.2 (S6): the hook resolves the project root via
@@ -289,7 +318,7 @@ class TestSubagentHookInjection:
         own directory and would never match the main repo's cache filename).
         The fixture repo must therefore be a REAL git repository -- a bare
         directory with no `.git` makes `--git-common-dir` fail (no output,
-        `REPO_ROOT_KM` stays empty), and the hook silently skips the whole
+        `_repo_root` returns ""), and the hook silently skips the whole
         Knowledge Map section, which is exactly the failure this test
         exists to catch.
         """
@@ -318,36 +347,30 @@ class TestSubagentHookInjection:
         cache_file = context_dir / f"{repo_root.name}-{repo_hash}.txt"
         cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n")
 
-        result = subprocess.run(
-            ["/bin/bash", str(self.HOOK_PATH)],  # /bin/bash 3.2 — homebrew bash 5.3 deadlocks on the NXTOOLS heredoc
-            capture_output=True, text=True, timeout=10,
-            cwd=str(repo_dir),
-            env={**__import__("os").environ, "HOME": str(tmp_path)},
+        section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
+
+        assert "## Knowledge Map" in section, (
+            f"Hook did not emit Knowledge Map. section={section[:500]!r}"
         )
+        assert "Test Topic (42)" in section
 
-        assert "## Knowledge Map" in result.stdout, (
-            f"Hook did not emit Knowledge Map. stdout={result.stdout[:500]}"
-        )
-        assert "Test Topic (42)" in result.stdout
+    def test_hook_silent_when_no_cache(self, tmp_path: Path, monkeypatch) -> None:
+        """Hook doesn't error when no cache file exists.
 
-    def test_hook_silent_when_no_cache(self, tmp_path: Path) -> None:
-        """Hook doesn't error when no cache file exists."""
-        import subprocess
-
+        The bash asserted this as ``returncode == 0`` with empty stdout. The
+        port has no exit code of its own -- ``run()`` is called in-process by
+        the MCP tool -- so the equivalent assertion is that the section
+        builder returns empty rather than raising: a missing cache is "no
+        map", never an error (``_knowledge_map_section``'s own contract).
+        """
         repo_dir = tmp_path / "norepo"
         repo_dir.mkdir()
 
-        result = subprocess.run(
-            ["/bin/bash", str(self.HOOK_PATH)],  # /bin/bash 3.2 — homebrew bash 5.3 deadlocks on the NXTOOLS heredoc
-            capture_output=True, text=True, timeout=10,
-            cwd=str(repo_dir),
-            env={**__import__("os").environ, "HOME": str(tmp_path)},
-        )
+        section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
 
-        assert result.returncode == 0
-        assert "Knowledge Map" not in result.stdout
+        assert section == "", f"expected no Knowledge Map section, got {section[:500]!r}"
 
-    def test_hook_does_not_fall_back_to_global(self, tmp_path: Path) -> None:
+    def test_hook_does_not_fall_back_to_global(self, tmp_path: Path, monkeypatch) -> None:
         """Hook must NOT use the legacy global context_l1.txt (audit S6).
 
         The global fallback was deleted on purpose (nexus-cnzei.2, audit
@@ -376,20 +399,15 @@ class TestSubagentHookInjection:
             capture_output=True, text=True,
         )
 
-        result = subprocess.run(
-            ["/bin/bash", str(self.HOOK_PATH)],  # /bin/bash 3.2 — homebrew bash 5.3 deadlocks on the NXTOOLS heredoc
-            capture_output=True, text=True, timeout=10,
-            cwd=str(repo_dir),
-            env={**__import__("os").environ, "HOME": str(tmp_path)},
-        )
+        section = self._knowledge_map(repo_dir, tmp_path, monkeypatch)
 
-        assert "Global Topic (99)" not in result.stdout, (
+        assert "Global Topic (99)" not in section, (
             "the hook must never fall back to the legacy global "
-            f"context_l1.txt. stdout={result.stdout[:500]}"
+            f"context_l1.txt. section={section[:500]!r}"
         )
-        assert "## Knowledge Map" not in result.stdout, (
+        assert "## Knowledge Map" not in section, (
             "no per-repo cache exists, so no Knowledge Map section should "
-            f"be emitted at all. stdout={result.stdout[:500]}"
+            f"be emitted at all. section={section[:500]!r}"
         )
 
 

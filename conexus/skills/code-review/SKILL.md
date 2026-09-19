@@ -180,7 +180,7 @@ The code-review-expert agent uses hypothesis-driven review:
 
 **A REVIEWER NEVER WRITES THE `review-completed` MARKER.** This section used to
 instruct exactly that, and it was wrong: the marker is what
-`pre_close_verification_hook.sh` reads to let a bead close, so a reviewer that
+the pre-close gate (`hook_pre_close_verification`) reads to let a bead close, so a reviewer that
 writes one closes the gate it is only half of. On 2026-08-26 a dispatched
 reviewer finished the first of a two-reviewer gate and left a handoff note
 beginning `review-completed bead=nexus-utpuw.23 (RG-C reviewer 1/2: ...)` — it

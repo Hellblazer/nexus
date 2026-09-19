@@ -196,7 +196,10 @@ class TestSnHookOutput:
 
         Plain stdout was the prior shape; the JSON envelope is the
         documented schema and prevents silent drop on parser tightening.
-        Mirrors conexus/hooks/scripts/subagent-start.sh (commit 68854ca).
+        Mirrors the conexus SubagentStart hook, which emitted this envelope
+        as conexus/hooks/scripts/subagent-start.sh at commit 68854ca and
+        emits it from nexus.hooks.subagent_start since RDR-215 bead
+        nexus-q02nx.21 ported and deleted that script.
         """
         envelope = json.loads(hook_envelope)
         assert "hookSpecificOutput" in envelope

@@ -21,8 +21,9 @@ Two citation shapes are checked:
    row.
 
 Non-vacuity: zero citations found across the scanned tree is a FAILURE —
-scanning nothing is not finding nothing wrong (the expectations.sh rc=3
-doctrine).
+scanning nothing is not finding nothing wrong (the
+``nx-hook expectations_undeclared`` rc=3 doctrine -- no ledger file means
+nothing checkable, which is not evidence of cleanliness).
 """
 from __future__ import annotations
 

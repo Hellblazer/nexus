@@ -1,7 +1,16 @@
 # RDR-080 P2a — Canonical registry of retrieval-shaped agents.
 #
-# This is the SINGLE SOURCE OF TRUTH. Both `conexus/hooks/scripts/subagent-start.sh`
-# and `tests/test_plan_first_skills.py` read from it. To add a new
+# NOTHING READS THIS FILE. It was written as the single source of truth for
+# `conexus/hooks/scripts/subagent-start.sh` and `tests/test_plan_first_skills.py`;
+# the test is gone, and RDR-215 bead nexus-q02nx.21 deleted the script. Its
+# port, `nexus.hooks.subagent_start`, classifies an agent from the dispatch's
+# own `agent_type` and task text (`_classify`), never from a registry file.
+# `tests/test_plugin_release_drift_ledger.py` records the same finding
+# independently ("retrieval-agents.txt — no live reference in the tree").
+#
+# Left in place rather than deleted because that is a disposition for
+# whoever owns the plugin surface, not a side effect of a hook port. Do not
+# edit it expecting an effect: adding a name here changes nothing. To add a new
 # retrieval-shaped agent to the plan-match-first injection, add the
 # canonical agent name below (dashes, no file extension). A matching
 # grep pattern is derived automatically.

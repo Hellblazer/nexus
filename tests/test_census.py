@@ -1129,8 +1129,10 @@ def _non_agent_block_with_subagent_type(
 ) -> dict:
     """A tool_use block that LOOKS like a dispatch but is not named Agent —
     the drift signature Rider 2 asks the census to flag rather than silently
-    drop. Mirrors ``conexus/hooks/scripts/agent-dispatch-expect.sh``'s own
-    precedent: it special-cases ``"Task"`` as "the pre-rename spelling of
+    drop. Mirrors ``nexus.hooks.agent_dispatch_expect``'s own
+    precedent (the ``hook_agent_dispatch_expect`` MCP tool; it was
+    ``conexus/hooks/scripts/agent-dispatch-expect.sh`` until RDR-215 bead
+    nexus-q02nx.21 ported and deleted it): it special-cases ``"Task"`` as "the pre-rename spelling of
     the same tool" alongside ``"Agent"``, proof this exact rename shape has
     happened in this harness before.
     """
@@ -1225,8 +1227,8 @@ def test_iter_dispatches_assigns_type_ordinal_per_sanitized_type() -> None:
 def test_iter_dispatches_records_but_flags_missing_subagent_type() -> None:
     """A dispatch with no input.subagent_type is still enumerated — dropping
     the row would break VERIFICATION 2's raw-count equality — and keyed as
-    ``general-purpose``, matching what agent-dispatch-expect.sh's own EXPECT
-    row computes for the SAME omitted field (nexus-a795d:
+    ``general-purpose``, matching what ``nexus.hooks.agent_dispatch_expect``'s
+    own EXPECT row computes for the SAME omitted field (nexus-a795d:
     ``str(ti.get("subagent_type") or "general-purpose")``). Review finding
     S1 (fix round 2, 2026-08-08): the census must match the hook's key or
     "pass subagent_type straight to expectations_expect" is false for every
