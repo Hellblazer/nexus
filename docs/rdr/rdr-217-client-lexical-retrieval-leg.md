@@ -2,10 +2,11 @@
 title: "A Lexical Leg for the nexus Client: Reach the Engine's FTS Hybrid Route"
 id: RDR-217
 type: Feature
-status: draft
+status: accepted
+accepted_date: 2026-09-19
 priority: medium
 author: Sam
-reviewed-by: unreviewed
+reviewed-by: self
 created: 2026-09-19
 related_issues: [nexus-06aei]
 related_rdrs: [RDR-026, RDR-155, RDR-156, RDR-180, RDR-188]
