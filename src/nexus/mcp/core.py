@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-52 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+53 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -46,9 +46,9 @@ from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
 # RDR-215 Approach items 1 and 4: the tool-tier registration mechanism for
-# ported Claude Code hooks. HOOK_TOOLS is empty until the first port
-# (bead nexus-q02nx.4) -- this call registers nothing on the live server
-# today. See nexus/mcp/hooks.py's module docstring for the full contract.
+# ported Claude Code hooks. HOOK_TOOLS carries one entry per port, starting
+# with hook_auto_approve (bead nexus-q02nx.4). See nexus/mcp/hooks.py's
+# module docstring for the full contract.
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
@@ -1907,9 +1907,8 @@ else:  # pragma: no cover — future SDK restructure
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
-# RDR-215: register any ported hook_<name> tool-tier tools. HOOK_TOOLS is
-# empty until bead nexus-q02nx.4 lands its first port, so this call
-# currently registers zero tools -- see nexus/mcp/hooks.py.
+# RDR-215: register any ported hook_<name> tool-tier tools -- see
+# nexus/mcp/hooks.py for the registration table (HOOK_TOOLS).
 _register_hook_tools(mcp)
 
 _DEFAULT_PAGE_SIZE = 10

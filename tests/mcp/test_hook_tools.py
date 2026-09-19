@@ -260,14 +260,18 @@ class TestPhaseReviewCloseNeverOnThisTier:
         assert "phase_review_close_requires_gate" not in {spec.name for spec in HOOK_TOOLS}
 
 
-# ── no accidental tools on the live server ────────────────────────────────
+# ── the live server registers exactly the ported hooks, no more ──────────
 
-def test_the_live_nx_mcp_server_gains_no_hook_tools_yet():
-    """HOOK_TOOLS is empty in this bead, so nexus.mcp.core's unconditional
-    registration call must add zero tools to the live server -- the
-    tool-count/description-lint pins this bead's AUDIT RESIDUAL flags stay
-    green with no doc update required."""
+def test_the_live_nx_mcp_server_registers_exactly_the_ported_hook_tools():
+    """HOOK_TOOLS carries one entry per ported hook module (bead
+    nexus-q02nx.4 is the first: hook_auto_approve). nexus.mcp.core's
+    unconditional registration call must add exactly those hook_<name>
+    tools to the live server, no more and no fewer -- the tool-count/
+    description-lint docs (docs/mcp-servers.md, this module's own module
+    docstring) must track that count, which is why this test asserts the
+    exact set rather than merely "not empty"."""
     from nexus.mcp.core import mcp as core_mcp
+    from nexus.mcp.hooks import HOOK_TOOLS
 
-    names = [t.name for t in core_mcp._tool_manager.list_tools()]
-    assert not any(name.startswith("hook_") for name in names)
+    hook_names = {t.name for t in core_mcp._tool_manager.list_tools() if t.name.startswith("hook_")}
+    assert hook_names == {f"hook_{spec.name}" for spec in HOOK_TOOLS}

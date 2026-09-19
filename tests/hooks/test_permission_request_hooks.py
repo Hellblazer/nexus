@@ -5,9 +5,26 @@ Both hooks must:
 1. Output valid JSON with hookSpecificOutput.decision.behavior = "allow" for matching tools
 2. Output nothing (empty stdout) for non-matching tools
 3. Agree on the output format
+
+**RDR-215 bead nexus-q02nx.4 retargeted the nx half of this file.** The nx
+plugin's decision logic no longer lives only in
+``conexus/hooks/scripts/auto-approve-nx-mcp.sh``: it is ported to
+``nexus.hooks.auto_approve.run()``, registered as the ``hook_auto_approve``
+tool on the live ``nx-mcp`` server (``nexus.mcp.hooks.HOOK_TOOLS``). Every nx
+assertion below now drives that tool through the real server's in-process
+dispatch (:func:`_run_nx_hook`) rather than spawning the bash script --
+"the registered tool through the server's in-process dispatch" the RDR's
+Tests section calls for. The bash script itself is UNCHANGED and still on
+disk: ``conexus/hooks/hooks.json`` still wires it, its own hard-coded exact
+byte-for-byte behaviour is fixed by :class:`TestNxPortMatchesBashByteForByte`
+below, and its deletion is a later bead (nexus-q02nx.22). The sn plugin is
+not ported yet (bead nexus-q02nx.23): every sn assertion still spawns
+``auto-approve-sn-mcp.sh`` exactly as before.
 """
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
 import subprocess
 from pathlib import Path
@@ -30,6 +47,22 @@ def _run_hook(script: Path, tool_name: str) -> str:
     )
     assert result.returncode == 0, f"Hook failed: {result.stderr}"
     return result.stdout.strip()
+
+
+def _run_nx_hook(tool_name: str, hook_event_name: str | None = None) -> str:
+    """Call the ported ``hook_auto_approve`` tool on the REAL, live
+    ``nx-mcp`` server (``nexus.mcp.core.mcp``) through its own in-process
+    ``call_tool`` dispatch -- the same path a ``tools/call`` request over
+    stdio takes, minus the transport. ``hook_event_name`` omitted matches
+    the bash script's own default (absent stdin field -> ``PermissionRequest``,
+    see ``nexus.hooks.auto_approve.run``'s docstring).
+    """
+    core_mcp = importlib.import_module("nexus.mcp.core").mcp
+    kwargs: dict[str, str] = {"tool_name": tool_name}
+    if hook_event_name is not None:
+        kwargs["hook_event_name"] = hook_event_name
+    result = asyncio.run(core_mcp.call_tool("hook_auto_approve", kwargs))
+    return result.content[0].text if result.content else ""
 
 
 def _parse_decision(output: str) -> str | None:
@@ -63,8 +96,6 @@ def _registered_conexus_tools() -> list[str]:
     ``_MANUAL_APPROVAL_REQUIRED`` — those are asserted NOT auto-approved
     instead (see ``TestDestructiveToolsRequireManualApproval``).
     """
-    import importlib
-
     names: list[str] = []
     for module, server in (
         ("nexus.mcp.core", "nexus"),
@@ -83,13 +114,18 @@ def _registered_conexus_tools() -> list[str]:
 @pytest.mark.parametrize("tool_name", _registered_conexus_tools())
 def test_every_registered_conexus_tool_is_auto_approved(tool_name: str) -> None:
     """Drift guard: every tool the conexus MCP servers register MUST be
-    auto-approved by auto-approve-nx-mcp.sh. A registered tool missing from the
-    hook's explicit allow-list would make Claude Code prompt for permission.
+    auto-approved by the ported hook_auto_approve tool. A registered tool
+    missing from the allowlist would make Claude Code prompt for permission.
+
+    Includes hook_auto_approve itself once it registers -- see
+    nexus.hooks.auto_approve's module docstring for why the port adds a
+    generic hook_-prefix carve-out the frozen bash script never had.
     """
-    output = _run_hook(NX_SCRIPT, tool_name)
+    output = _run_nx_hook(tool_name)
     assert _parse_decision(output) == "allow", (
         f"{tool_name} is registered by an MCP server but NOT auto-approved by "
-        f"{NX_SCRIPT.name} -- add it to the case list (it will prompt otherwise)."
+        "nexus.hooks.auto_approve -- add it to _ALLOWED_TOOLS (it will prompt "
+        "otherwise)."
     )
 
 
@@ -97,27 +133,34 @@ class TestNxPermissionHook:
     """conexus plugin auto-approves mcp__plugin_conexus_* tools."""
 
     def test_approves_nexus_catalog_tool(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus-catalog__search")
+        output = _run_nx_hook("mcp__plugin_conexus_nexus-catalog__search")
         assert _parse_decision(output) == "allow"
 
     def test_approves_nexus_search_tool(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus__search")
+        output = _run_nx_hook("mcp__plugin_conexus_nexus__search")
         assert _parse_decision(output) == "allow"
 
     def test_approves_sequential_thinking(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_sequential-thinking__sequentialthinking")
+        output = _run_nx_hook("mcp__plugin_conexus_sequential-thinking__sequentialthinking")
+        assert _parse_decision(output) == "allow"
+
+    def test_approves_hook_tools(self) -> None:
+        """RDR-215 Cross-Cutting: the auto-approve matcher covers hook_
+        tools themselves, since MCP cannot hide them from the model's
+        tool list."""
+        output = _run_nx_hook("mcp__plugin_conexus_nexus__hook_auto_approve")
         assert _parse_decision(output) == "allow"
 
     def test_ignores_sn_tools(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_sn_serena__find_file")
+        output = _run_nx_hook("mcp__plugin_sn_serena__find_file")
         assert output == ""
 
     def test_ignores_unrelated_tools(self) -> None:
-        output = _run_hook(NX_SCRIPT, "Bash")
+        output = _run_nx_hook("Bash")
         assert output == ""
 
     def test_output_is_valid_json(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus__scratch")
+        output = _run_nx_hook("mcp__plugin_conexus_nexus__scratch")
         data = json.loads(output)
         assert "hookSpecificOutput" in data
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
@@ -138,10 +181,10 @@ class TestDestructiveToolsRequireManualApproval:
     def test_registered_tool_is_not_auto_approved_on_permissionrequest(
         self, tool_name: str
     ) -> None:
-        output = _run_hook(NX_SCRIPT, tool_name)
+        output = _run_nx_hook(tool_name)
         assert output == "", (
-            f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but auto-approve-nx-mcp.sh "
-            f"still approves it on PermissionRequest — the case-statement removal "
+            f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but nexus.hooks.auto_approve "
+            f"still approves it on PermissionRequest — the allowlist exclusion "
             f"regressed."
         )
 
@@ -149,10 +192,10 @@ class TestDestructiveToolsRequireManualApproval:
     def test_registered_tool_is_not_auto_approved_on_pretooluse(
         self, tool_name: str
     ) -> None:
-        output = _run_pretooluse(NX_SCRIPT, tool_name)
+        output = _run_nx_hook(tool_name, hook_event_name="PreToolUse")
         assert output == "", (
-            f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but auto-approve-nx-mcp.sh "
-            f"still approves it on PreToolUse — the case-statement removal "
+            f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but nexus.hooks.auto_approve "
+            f"still approves it on PreToolUse — the allowlist exclusion "
             f"regressed."
         )
 
@@ -160,8 +203,6 @@ class TestDestructiveToolsRequireManualApproval:
         """A name in _MANUAL_APPROVAL_REQUIRED that no longer exists on any
         server would silently stop exempting anything real — catch a rename
         or deletion here rather than the drift guard quietly widening."""
-        import importlib
-
         all_registered: set[str] = set()
         for module, server in (
             ("nexus.mcp.core", "nexus"),
@@ -224,7 +265,7 @@ class TestHookAgreement:
 
     def test_same_decision_structure(self) -> None:
         """nx and sn hooks use the same JSON envelope for allow decisions."""
-        nx_out = json.loads(_run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus__search"))
+        nx_out = json.loads(_run_nx_hook("mcp__plugin_conexus_nexus__search"))
         sn_out = json.loads(_run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"))
 
         # Same top-level keys
@@ -236,12 +277,12 @@ class TestHookAgreement:
 
     def test_no_cross_approval(self) -> None:
         """nx hook doesn't approve sn tools, sn hook doesn't approve nx tools."""
-        assert _run_hook(NX_SCRIPT, "mcp__plugin_sn_serena__find_file") == ""
+        assert _run_nx_hook("mcp__plugin_sn_serena__find_file") == ""
         assert _run_hook(SN_SCRIPT, "mcp__plugin_conexus_nexus__search") == ""
 
     def test_neither_approves_unknown(self) -> None:
         """Neither hook approves tools from unknown plugins."""
-        assert _run_hook(NX_SCRIPT, "mcp__other_plugin__tool") == ""
+        assert _run_nx_hook("mcp__other_plugin__tool") == ""
         assert _run_hook(SN_SCRIPT, "mcp__other_plugin__tool") == ""
 
 
@@ -280,35 +321,47 @@ class TestPreToolUseApproval:
     NX_HOOKS = NX_SCRIPT.parent.parent / "hooks.json"
     SN_HOOKS = SN_SCRIPT.parent.parent / "hooks.json"
 
+    #: Sentinel routing an (nx | sn) parametrized case at the ported tool
+    #: rather than a script path -- nx has no script left to spawn here.
+    NX = "nx"
+
     @pytest.mark.parametrize(
-        ("script", "tool_name"),
+        ("target", "tool_name"),
         [
-            (NX_SCRIPT, "mcp__plugin_conexus_sequential-thinking__sequentialthinking"),
-            (NX_SCRIPT, "mcp__plugin_conexus_nexus__search"),
+            (NX, "mcp__plugin_conexus_sequential-thinking__sequentialthinking"),
+            (NX, "mcp__plugin_conexus_nexus__search"),
             (SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"),
             (SN_SCRIPT, "mcp__plugin_sn_context7__query-docs"),
         ],
     )
     def test_pretooluse_payload_yields_permission_decision_allow(
-        self, script: Path, tool_name: str
+        self, target: str | Path, tool_name: str
     ) -> None:
-        data = json.loads(_run_pretooluse(script, tool_name))
+        raw = (
+            _run_nx_hook(tool_name, hook_event_name="PreToolUse")
+            if target == self.NX
+            else _run_pretooluse(target, tool_name)
+        )
+        data = json.loads(raw)
         out = data["hookSpecificOutput"]
         assert out["hookEventName"] == "PreToolUse"
         assert out["permissionDecision"] == "allow"
         assert "decision" not in out  # the PermissionRequest shape must not leak
 
-    @pytest.mark.parametrize("script", [NX_SCRIPT, SN_SCRIPT])
-    def test_pretooluse_payload_for_unlisted_tool_is_silent(self, script: Path) -> None:
-        assert _run_pretooluse(script, "mcp__other_plugin__tool") == ""
+    @pytest.mark.parametrize("target", [NX, SN_SCRIPT])
+    def test_pretooluse_payload_for_unlisted_tool_is_silent(self, target: str | Path) -> None:
+        output = (
+            _run_nx_hook("mcp__other_plugin__tool", hook_event_name="PreToolUse")
+            if target == self.NX
+            else _run_pretooluse(target, "mcp__other_plugin__tool")
+        )
+        assert output == ""
 
     def test_permissionrequest_shape_unchanged_without_event_name(self) -> None:
         """A payload with no hook_event_name keeps the PermissionRequest shape."""
-        for script, tool in (
-            (NX_SCRIPT, "mcp__plugin_conexus_nexus__search"),
-            (SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"),
-        ):
-            data = json.loads(_run_hook(script, tool))
+        nx_data = json.loads(_run_nx_hook("mcp__plugin_conexus_nexus__search"))
+        sn_data = json.loads(_run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"))
+        for data in (nx_data, sn_data):
             assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
             assert data["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
 
@@ -332,3 +385,47 @@ class TestPreToolUseApproval:
             pre, perm = commands("PreToolUse"), commands("PermissionRequest")
             assert pre == perm, f"{hooks_json}: PreToolUse {pre} vs PermissionRequest {perm}"
             assert any(script_name in c for c in pre)
+
+
+# ── nx port vs nx bash: byte-for-byte parity ──────────────────────────────
+
+
+class TestNxPortMatchesBashByteForByte:
+    """RDR-215 bead nexus-q02nx.4's own verification bullet: "asserting
+    byte-identical output to the bash script's for every fixture."
+
+    ``conexus/hooks/scripts/auto-approve-nx-mcp.sh`` is unedited by this
+    bead and stays wired in ``hooks.json`` until nexus-q02nx.21/.22. Every
+    tool name below is drawn from the bash script's OWN case list (never a
+    hook_-prefixed name -- the bash script predates every hook_ tool and
+    cannot match one; that is the one deliberate divergence the port adds,
+    documented in nexus.hooks.auto_approve's module docstring and NOT
+    covered by this parity class).
+    """
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "mcp__plugin_conexus_nexus__search",
+            "mcp__plugin_conexus_nexus__scratch",
+            "mcp__plugin_conexus_nexus-catalog__search",
+            "mcp__plugin_conexus_sequential-thinking__sequentialthinking",
+            "mcp__plugin_conexus_nexus__daemon_uninstall",  # deliberately excluded from both
+            "mcp__plugin_sn_serena__find_file",  # matches neither
+            "mcp__other_plugin__tool",  # matches neither
+        ],
+    )
+    def test_permissionrequest_output_matches_bash(self, tool_name: str) -> None:
+        assert _run_nx_hook(tool_name) == _run_hook(NX_SCRIPT, tool_name)
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "mcp__plugin_conexus_nexus__search",
+            "mcp__plugin_conexus_sequential-thinking__sequentialthinking",
+            "mcp__plugin_conexus_nexus__daemon_uninstall",
+            "mcp__other_plugin__tool",
+        ],
+    )
+    def test_pretooluse_output_matches_bash(self, tool_name: str) -> None:
+        assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == _run_pretooluse(NX_SCRIPT, tool_name)

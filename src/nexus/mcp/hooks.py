@@ -4,12 +4,16 @@
 
 Every conexus ``hooks.json`` entry other than ``SessionStart`` and
 ``phase_review_close_requires_gate`` becomes an ``mcp_tool`` call against a
-``hook_<name>`` tool registered here. This module is the registration
-*mechanism* only (bead nexus-q02nx.3) -- no hook module is ported yet, so
-:data:`HOOK_TOOLS` is empty and registers nothing on the live server. Bead
-nexus-q02nx.4 (and every port after it) plugs in with one line: a new
-:class:`HookToolSpec` appended to :data:`HOOK_TOOLS`, naming the ported
-module's ``run(payload) -> HookResult`` (``src/nexus/hooks/_io.py``).
+``hook_<name>`` tool registered here. This module was the registration
+*mechanism* only (bead nexus-q02nx.3); bead nexus-q02nx.4 lands the first
+real port, ``hook_auto_approve`` (``nexus.hooks.auto_approve``), still
+registered here with the ``hooks.json`` re-declaration deferred to beads
+nexus-q02nx.21/.22 -- the tool answers live on ``nx-mcp`` today, but the
+bash script it ports (``conexus/hooks/scripts/auto-approve-nx-mcp.sh``) is
+still what ``hooks.json`` actually wires. Every port after this one plugs
+in with one line: a new :class:`HookToolSpec` appended to :data:`HOOK_TOOLS`,
+naming the ported module's ``run(payload) -> HookResult``
+(``src/nexus/hooks/_io.py``).
 
 **Never registers ``phase_review_close_requires_gate`` here.** That hook is
 the routing framework's one ``fail_closed: true`` rule
@@ -59,13 +63,15 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field as _PydanticField
 
 from nexus.hooks._io import HookResult, never_fail
+from nexus.hooks.auto_approve import run as _run_auto_approve
 
 __all__ = [
     "HOOK_TOOLS",
@@ -91,24 +97,57 @@ class HookToolSpec:
     (see :func:`_description`) -- MCP has no way to hide a tool from the
     model's tool list, so the description is part of the mitigation the RDR
     names, not incidental documentation.
+
+    ``field_docs`` maps a dotted field name from ``fields`` to its own
+    JSON-Schema ``description`` (see :func:`_make_tool_function`). Every
+    parameter on a live-registered tool needs one --
+    ``tests/test_mcp_tool_description_lint.py::
+    test_every_parameter_has_a_schema_description`` walks the actual
+    registry, not a fixture, so a field left undocumented here fails that
+    lint the moment a spec with fields registers on the real server. A
+    field named in ``fields`` but absent from ``field_docs`` still gets a
+    generated fallback (see :func:`_field_description`), so this mapping is
+    an override for a better description, never a requirement to populate
+    every key.
     """
 
     name: str
     run: Callable[[dict[str, Any] | None], HookResult]
     fields: tuple[str, ...] = ()
+    field_docs: Mapping[str, str] = field(default_factory=dict)
     summary: str = ""
 
 
-# One entry per ported hook module (RDR-215 Approach item 4). EMPTY today --
-# bead nexus-q02nx.3 is the registration mechanism only; the first real port
-# is bead nexus-q02nx.4. Adding a hook after that is one line: append a
-# HookToolSpec here.
+# One entry per ported hook module (RDR-215 Approach item 4). The first real
+# port is bead nexus-q02nx.4 (auto-approve-nx-mcp.sh -> hook_auto_approve).
+# Adding a hook after that is one line: append a HookToolSpec here.
 #
 # `phase_review_close_requires_gate` NEVER belongs in this tuple -- see the
 # module docstring and `_NEVER_TOOL_TIER` below, which refuses it even if a
 # future edit adds it by habit or via an automated "every hook module"
 # sweep. Do not build such a sweep without carrying that exclusion with it.
-HOOK_TOOLS: tuple[HookToolSpec, ...] = ()
+HOOK_TOOLS: tuple[HookToolSpec, ...] = (
+    HookToolSpec(
+        name="auto_approve",
+        run=_run_auto_approve,
+        fields=("tool_name", "hook_event_name"),
+        field_docs={
+            "tool_name": (
+                "The full mcp__plugin_conexus_<server>__<tool> name Claude "
+                "Code is about to invoke."
+            ),
+            "hook_event_name": (
+                "Which event fired this hook: PreToolUse or "
+                "PermissionRequest. Defaults to PermissionRequest when "
+                "absent, matching the bash script's own default."
+            ),
+        },
+        summary=(
+            "auto-approves an explicit allowlist of conexus MCP tools "
+            "(plus any hook_ tool) on PreToolUse and PermissionRequest"
+        ),
+    ),
+)
 
 
 #: Names that must never reach this tier. See the module docstring's
@@ -165,6 +204,22 @@ def _description(spec: HookToolSpec) -> str:
     )
 
 
+def _field_description(spec: HookToolSpec, payload_field: str) -> str:
+    """The JSON-Schema ``description`` for one of *spec*'s payload fields.
+
+    Prefers ``spec.field_docs[payload_field]``; falls back to a generic,
+    still-non-empty description naming the field and the hook, so
+    ``tests/test_mcp_tool_description_lint.py::
+    test_every_parameter_has_a_schema_description`` (which walks the live
+    registry, not a fixture) never finds a blank schema property just
+    because a spec did not bother to document one.
+    """
+    override = spec.field_docs.get(payload_field)
+    if override:
+        return override
+    return f"Hook payload field {payload_field!r} for the {spec.name} hook."
+
+
 def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
     """Build the ``hook_<name>`` tool function FastMCP registers.
 
@@ -174,8 +229,9 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
     explicit override before falling back to introspecting ``__code__``, so
     the pydantic arg-model FastMCP builds from ``inspect.signature(fn)`` sees
     exactly the flattened field names in ``spec.fields``, each an optional
-    string parameter, while the function body still receives them as
-    ordinary keyword arguments.
+    string parameter carrying its own ``Field(description=...)`` (see
+    :func:`_field_description`), while the function body still receives them
+    as ordinary keyword arguments.
     """
     tool_name = f"hook_{spec.name}"
 
@@ -190,7 +246,10 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
             flatten_field_name(payload_field),
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             default=None,
-            annotation=str | None,
+            annotation=Annotated[
+                str | None,
+                _PydanticField(description=_field_description(spec, payload_field)),
+            ],
         )
         for payload_field in spec.fields
     ]
