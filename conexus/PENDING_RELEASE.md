@@ -45,3 +45,4 @@ mechanize, it matters enough to ship.
   recommends `nx search --hybrid` for discovery in three places and is
   deliberately unchanged: it is still true (the flag exists and still blends
   frecency), just narrower than when written.
+  bead: nexus-06aei
