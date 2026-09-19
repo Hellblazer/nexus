@@ -10,7 +10,6 @@ same path a real ``tools/call``/``tools/list`` request takes.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
@@ -163,17 +162,27 @@ class TestRegisterHookTools:
         assert result.content[0].text == ""
 
     def test_a_raised_exception_is_logged(self, monkeypatch):
-        """Patches ``nexus.hooks._io``'s own ``_log`` rather than
+        """Patches ``nexus.hooks._io``'s own emitter rather than
         ``structlog.testing.capture_logs()`` -- this repo's
         ``configure_logging`` installs a level-filtering wrapper_class that
         ``capture_logs()`` does not override (see
         ``tests/test_upgrade_finish.py::test_restart_helper_emits_a_
         structured_log_line`` for the full explanation), so patching the
-        logger object directly is the reliable pattern here."""
+        emitter directly is the reliable pattern here.
+
+        The target is ``_emit``, not a module-level ``_log``: ``_io`` no
+        longer holds an ambient structlog logger, because an unconfigured one
+        writes to stdout, which is the hook's decision channel. ``_emit``
+        chooses the sink at call time and imports structlog only if it has one.
+        """
         import nexus.hooks._io as io_mod
 
-        mock_log = MagicMock()
-        monkeypatch.setattr(io_mod, "_log", mock_log)
+        emitted = []
+        monkeypatch.setattr(
+            io_mod,
+            "_emit",
+            lambda level, event, **fields: emitted.append((level, event, fields)),
+        )
 
         def _boom(payload):
             raise RuntimeError("boom")
@@ -184,9 +193,9 @@ class TestRegisterHookTools:
 
         _run(mcp.call_tool("hook_probe", {}))
 
-        mock_log.warning.assert_called_once_with(
-            "hook_boundary_swallowed_exception", hook="hook_probe", error="boom",
-        )
+        assert emitted == [
+            ("warning", "hook_boundary_swallowed_exception", {"hook": "hook_probe", "error": "boom"})
+        ]
 
     def test_multiple_hooks_reach_only_their_own_run(self):
         calls: dict[str, int] = {"a": 0, "b": 0}
