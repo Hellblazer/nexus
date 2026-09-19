@@ -148,6 +148,71 @@
       },
       "qualname": "_make_tool_function.<locals>._tool"
     },
+    "hook_subagent_stop": {
+      "is_async": false,
+      "module": "nexus.mcp.hooks",
+      "parameters": {
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "agent_transcript_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "agent_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "stop_hook_active": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "_make_tool_function.<locals>._tool"
+    },
     "mailbox_send": {
       "is_async": false,
       "module": "nexus.mcp.core",

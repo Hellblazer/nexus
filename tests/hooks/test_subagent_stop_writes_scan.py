@@ -24,17 +24,57 @@ from pathlib import Path
 
 import pytest
 
+from nexus.hooks import subagent_stop_scans as scans
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCAN = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop-writes-scan.py"
 HOOK = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop.sh"
 
 
-def run_scan(path: Path) -> str:
+#: Which implementation :func:`run_scan` drives, set per-test by `impl`.
+_IMPL = "bash"
+
+
+@pytest.fixture(params=["script", "python"], autouse=True)
+def impl(request):
+    """Run every assertion against BOTH implementations.
+
+    RDR-215 bead nexus-q02nx.12 ports this scan to
+    ``nexus.hooks.subagent_stop_scans``. The script is still invoked by the
+    live bash hook until bead .21 re-declares the hooks.json entry, so a
+    straight retarget would delete the only coverage of the thing still
+    running in production. Drop the "script" param when it goes.
+
+    NOTE the verdict contract differs by ONE case, deliberately: the script
+    prints SCANERROR for a missing or unreadable transcript, and the bash
+    caller collapsed that to CLEAN before using it. The port's
+    ``writes_verdict`` does that collapse itself, so the tests below that
+    exercise a missing file assert through ``run_scan_raw``, which keeps
+    both sides on the script's own contract.
+    """
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "script"
+
+
+def run_scan_raw(path: Path) -> str:
+    """The SCRIPT's contract: CLEAN / UNLANDED <n> <tools> / SCANERROR."""
+    if _IMPL == "python":
+        try:
+            count, tools = scans.writes_scan(str(path))
+        except Exception:  # noqa: BLE001 — mirrors the script's own bare except
+            return "SCANERROR"
+        return f"UNLANDED {count} {','.join(tools)}" if count else "CLEAN"
     r = subprocess.run(
         [sys.executable, str(SCAN), str(path)],
         capture_output=True, text=True, timeout=60,
     )
     return r.stdout.strip()
+
+
+def run_scan(path: Path) -> str:
+    return run_scan_raw(path)
 
 
 def _tool_use(tid: str, name: str, tool_input: dict | None = None) -> dict:

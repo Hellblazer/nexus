@@ -78,6 +78,7 @@ from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.hooks.agent_dispatch_expect import run as _run_agent_dispatch_expect
 from nexus.hooks.auto_approve import run as _run_auto_approve
 from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
+from nexus.hooks.subagent_stop import run as _run_subagent_stop
 
 __all__ = [
     "HOOK_TOOLS",
@@ -216,6 +217,42 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         summary=(
             "records one RDR-184 START row when a subagent begins, so an "
             "agent that started without a matching EXPECT can be caught"
+        ),
+    ),
+    HookToolSpec(
+        name="subagent_stop",
+        run=_run_subagent_stop,
+        fields=(
+            "session_id",
+            "agent_id",
+            "agent_type",
+            "agent_transcript_path",
+            "stop_hook_active",
+        ),
+        field_docs={
+            "session_id": "The session whose RDR-184 ledger decides whether this agent owes a report.",
+            "agent_id": (
+                "The stopping subagent. Keys the once-guard: an agent with a "
+                "BLOCKED row is never blocked twice."
+            ),
+            "agent_type": (
+                "The subagent type, verbatim. Credit is keyed on type, because "
+                "the type is the only key both sides of the ledger can know."
+            ),
+            "agent_transcript_path": (
+                "The agent's own transcript. Scanned for a SendMessage or "
+                "SubagentHandback report, and for storage writes that came "
+                "back as errors. Missing or unreadable fails open."
+            ),
+            "stop_hook_active": (
+                "True on the re-stop that follows a block. Never blocks again; "
+                "records whether the report has since arrived."
+            ),
+        },
+        summary=(
+            "blocks a named background teammate's stop exactly once when its "
+            "transcript shows no completion report, or when it reported but "
+            "its storage writes failed"
         ),
     ),
 )

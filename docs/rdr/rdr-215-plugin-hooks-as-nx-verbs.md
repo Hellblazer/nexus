@@ -877,3 +877,25 @@ registration module on the existing server, and one package.
   branching on the 0/1/2/3/4 vocabularies can tell "the audit could not
   run" from a real verdict. Found and measured during bead
   `nexus-q02nx.9`; non-ledger verbs unchanged.
+- 2026-09-19: Bead `nexus-q02nx.12` found the first port had dropped both
+  of `expectations_owes_report`'s operator-facing stderr diagnostics --
+  the lock-exhaustion line and the credit-slot-orphan line. The cause
+  still rode the ledger's 4th field, so an auditor could recover it, but
+  the person watching an agent get blocked had nothing telling a
+  precautionary block from a verified one. Restored through `_emit`,
+  which never touches stdout. Caught by the retargeted SubagentStop
+  suite, whose five pinned substrings are the only reason it was
+  visible; a port checked against the decision table alone would have
+  passed. This is the measured answer to the Phase 2 question of whether
+  "move, do not rewrite" needs the old tests carried across before the
+  script goes: it does.
+- 2026-09-19: The two SubagentStop scans become `subagent_stop_scans`
+  functions rather than sibling scripts. The `nexus-2gcqk` heredoc-pipe
+  constraint that forced them out of the script does not apply to an
+  import, and removing their two `python3` spawns is the concrete form
+  the timing mitigation takes for this hook. `test_subagent_stop_hook.py`
+  still drives the port through a CHILD process, because three of its
+  test families set per-call environment and run six racers concurrently
+  and `os.environ` is process-global; the no-spawn claim is therefore
+  asserted separately and in-process, in
+  `tests/hooks/test_subagent_stop_module.py`.

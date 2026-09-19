@@ -47,6 +47,8 @@ import json
 import os
 import re
 import time
+
+from nexus._hook_runtime._io import _emit
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +56,7 @@ from pathlib import Path
 __all__ = [
     "ExpectationsUsageError",
     "expectations_already_blocked",
+    "expectations_append_row",
     "expectations_archive",
     "expectations_census",
     "expectations_expect",
@@ -92,6 +95,36 @@ _REAP_DAYS = 7
 #: deterministic rather than flaky, and this project has already paid for
 #: the alternative three times over (see the round 1/2/3 history above).
 _CLAIM_INTERLEAVE: "Callable[[], None] | None" = None
+
+
+def _test_delay(name: str) -> None:
+    """A TEST-ONLY contention seam, driven by an environment variable.
+
+    Three of these exist (``NX_EXPECT_LOCK_HOLD_DELAY_S``,
+    ``NX_EXPECT_CLAIM_DELAY_S``, ``NX_EXPECT_APPEND_DELAY_S``) and they are
+    NOT optional colour: the concurrency falsifiers in
+    ``tests/hooks/test_subagent_stop_hook.py`` use them to WIDEN a specific
+    window deterministically, so the exhaustion and orphan races reproduce
+    on demand instead of on a box that happens to be loaded. Bead
+    nexus-q02nx.9 ported the lock without them, and the result was not a
+    red -- it was a concurrency test passing VACUOUSLY, because with no
+    forced hold no racer ever exhausted its budget and "no over-block" was
+    trivially true. Caught only by that test's own non-vacuity assert.
+
+    The in-process :data:`_CLAIM_INTERLEAVE` seam does not replace these:
+    it fires inside one interpreter, and these have to widen a window
+    across separate PROCESSES.
+
+    A missing or non-numeric value is a no-op, matching the bash regex
+    guard. Nothing outside a test harness sets any of them.
+    """
+    raw = os.environ.get(name, "")
+    try:
+        delay = float(raw)
+    except ValueError:
+        return
+    if delay >= 0:
+        time.sleep(delay)
 
 #: Verb vocabulary of the append-only TSV. Reproduced exactly; a reader in
 #: the bash library, the e2e twin, or a test fixture may carry any of them.
@@ -165,6 +198,32 @@ def _append(file: str | Path, row: str) -> None:
         os.write(fd, (row + "\n").encode())
     finally:
         os.close(fd)
+
+
+def expectations_append_row(
+    session_id: str, verb: str, agent_id: str, detail: str = ""
+) -> None:
+    """Append one ``<ts>\t<verb>\t<agent_id>[\t<detail>]`` row.
+
+    The bash called ``_expectations_append`` directly from
+    ``subagent-stop.sh`` for the three verbs that have no named writer of
+    their own -- ``REPORTED``, ``WOULDBLOCK`` and ``UNLANDEDWRITE``. Those
+    are ledger rows like any other, so the port gives them a public door
+    rather than having a second module reach through the underscore. The
+    underscore then means what it says.
+
+    The optional fourth field is inert to every exact-field reader, which
+    is what lets ``REPORTED`` carry its resolution strength and
+    ``UNLANDEDWRITE`` its ``<n> <tools>`` without any reader change.
+
+    Raises :class:`ExpectationsUsageError` on a path-unsafe *session_id*,
+    the same as :func:`expectations_file`. Callers in hook code swallow it:
+    a ledger row is never worth failing a hook over.
+    """
+    row = f"{_ts()}\t{verb}\t{agent_id}"
+    if detail:
+        row = f"{row}\t{detail}"
+    _append(expectations_file(session_id), row)
 
 
 def expectations_file(session_id: str) -> str:
@@ -666,7 +725,30 @@ def expectations_owes_report(
 
     held = _acquire_owes_lock(lockdir)
     if not held:
+        # OPERATOR-FACING, and load-bearing (bead nexus-q02nx.12 found it
+        # missing from the first port): the ledger's 4th field records the
+        # cause for an auditor, but the person watching an agent get blocked
+        # has only this line to tell a precautionary block from a verified
+        # one. Carried verbatim from the bash, which is why it is a message
+        # field rather than prose assembled here --
+        # `tests/hooks/test_subagent_stop_hook.py` pins five of its
+        # substrings by value.
+        _emit(
+            "warning",
+            "expectations_owes_lock_exhausted",
+            message=(
+                f"expectations: owes-report lock budget exhausted "
+                f"({_owes_lock_tries()} tries) for type '{agent_type}'; no "
+                f"credit consulted, fixed default = owes (BLOCK, "
+                f"cause=lock-exhausted; fail-open direction per "
+                f"nexus-bk974/nexus-4b8sz/nexus-7z7rj/nexus-plycy)"
+            ),
+        )
         return OwesVerdict(True, "lock-exhausted")
+
+    # nexus-7z7rj test seam: widen the critical section so a test can force
+    # the other racers to exhaust their try budget.
+    _test_delay("NX_EXPECT_LOCK_HOLD_DELAY_S")
 
     try:
         # READ AFTER THE LOCK, NEVER BEFORE. Round 3's chosen fix is
@@ -692,7 +774,20 @@ def expectations_owes_report(
         if verdict != "new":
             return OwesVerdict(False)
 
+        # nexus-ols6a test seam: widen READ -> CLAIM, so a test can force
+        # every racer to decide from the SAME credit state. Without it,
+        # switching the lock off removes exclusion but NOT simultaneity, and
+        # the falsifier's detection still rides thread interleaving --
+        # measured in bash as a 1-in-12 FALSE PASS against a deliberately
+        # broken claim.
+        _test_delay("NX_EXPECT_CLAIM_DELAY_S")
+
         if _claim_credit(file, enc, agent_id, credit, spent, owners):
+            # nexus-ols6a test seam: widen CLAIM -> APPEND, the window in
+            # which a killed claimant leaves an orphaned slot with no
+            # CONSUMED row -- the exact state the orphan branch below is
+            # written to detect.
+            _test_delay("NX_EXPECT_APPEND_DELAY_S")
             _append(file, f"{_ts()}\tCONSUMED\t{agent_id}\t{agent_type}")
             return OwesVerdict(True)
 
@@ -712,6 +807,24 @@ def expectations_owes_report(
             if attempt == 2:
                 break
             time.sleep(0.1)
+        # Provably inconsistent: no slot left, yet the ledger says this type
+        # still has unspent credit. FAIL LOUD in the guard's usual safe
+        # direction (block, disclosed) rather than silently waving the stop
+        # through -- the silent version is what let ONE killed hook cost TWO
+        # unguarded stops instead of one.
+        _emit(
+            "warning",
+            "expectations_credit_slot_orphan",
+            message=(
+                f"expectations: credit-slot orphan for type '{agent_type}' — "
+                f"every credit slot is claimed but the ledger records only "
+                f"{fresh_spent} of {fresh_credit} spent, so a claimant was "
+                f"killed between its slot claim and its CONSUMED row "
+                f"(SubagentStop has a 10s hook timeout). Blocking this stop "
+                f"rather than silently passing it (cause=credit-slot-orphan; "
+                f"nexus-ols6a)"
+            ),
+        )
         return OwesVerdict(True, "credit-slot-orphan")
     finally:
         try:

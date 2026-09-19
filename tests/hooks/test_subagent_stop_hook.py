@@ -120,6 +120,62 @@ _HOOK_TIMEOUT = 30
 _HOOK_TIMEOUT_MANY_SPAWNS = 300
 
 
+#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
+_IMPL = "bash"
+
+
+@pytest.fixture(params=["bash", "python"], autouse=True)
+def impl(request):
+    """Run every hook assertion in this file against BOTH implementations.
+
+    RDR-215 bead nexus-q02nx.12 ports this hook to
+    ``nexus.hooks.subagent_stop``. A straight retarget would delete the only
+    coverage of the bash script while it is STILL the live production path
+    (bead .21 re-declares the hooks.json entry, not this one), so both are
+    driven and each assertion becomes a differential. Drop the "bash" param
+    when the script goes.
+    """
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "bash"
+
+
+#: Drives the ported module in a CHILD PROCESS rather than in-process, and
+#: that is a deliberate choice with a cost. In-process would match the tool
+#: tier exactly, but three families of test here set ``NX_EXPECT_LOCK_TRIES``
+#: per call and run six racers concurrently through a thread pool --
+#: ``os.environ`` is process-global and ``contextlib.redirect_stderr``
+#: rebinds a process-global ``sys.stderr``, so six in-process racers would
+#: overwrite each other's environment and misattribute each other's
+#: diagnostics. The concurrency in those tests is the point of them
+#: (nexus-plycy, nexus-ols6a), so the harness yields instead: each call gets
+#: a real process with a real environment and a real stderr, and what is
+#: under test -- ``subagent_stop.run`` and the decision table it implements
+#: -- is identical either way.
+#:
+#: The no-spawn claim the tier change actually makes is therefore NOT
+#: evidenced by this file. It is asserted in-process, against a large
+#: transcript, in ``tests/hooks/test_subagent_stop_module.py``.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import subagent_stop
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: subagent_stop.run(payload), "subagent_stop")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+
 def _run_hook(
     stdin: str,
     tmp_path: Path,
@@ -137,8 +193,13 @@ def _run_hook(
         env["NX_ORCH_STOP_GUARD"] = mode
     if extra_env:
         env.update(extra_env)
+    argv = (
+        [sys.executable, "-c", _PY_DRIVER]
+        if _IMPL == "python"
+        else ["bash", str(SCRIPT)]
+    )
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        argv,
         input=stdin,
         capture_output=True,
         text=True,

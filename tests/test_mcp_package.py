@@ -65,10 +65,18 @@ def test_core_registered_tools():
         # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time name
         # resolution over the RDR-208 session directory.
         "mailbox_send",
-        # RDR-215 bead nexus-q02nx.4: the first tool-tier hook port
-        # (auto-approve-nx-mcp.sh -> hook_auto_approve), registered via
-        # nexus.mcp.hooks.HOOK_TOOLS.
-        "hook_auto_approve",
+        # RDR-215 Phase 2: the tool-tier hook ports, registered via
+        # nexus.mcp.hooks.HOOK_TOOLS. A new one lands in SEVEN hand-kept
+        # places -- HOOK_TOOLS, auto_approve's _ALLOWED_HOOK_TOOLS, the
+        # wire snapshot, this set, and THREE separate counts
+        # (docs/mcp-servers.md's table row, its section heading, and
+        # core.py's own module docstring). The last four are exactly the
+        # ones a hooks-only test run cannot see: measured on 7c7eebbd4,
+        # which was green locally and red on both CI shards.
+        "hook_auto_approve",              # bead .4
+        "hook_agent_dispatch_expect",     # bead .10
+        "hook_subagent_start_stamp",      # bead .11
+        "hook_subagent_stop",             # bead .12
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
