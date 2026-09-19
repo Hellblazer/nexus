@@ -12,6 +12,7 @@ the generation python that is the only interpreter guaranteed to import
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -245,4 +246,72 @@ class TestMeasuredAgainstAnOldInterpreter:
             f"phase_review_close_requires_gate that is not a deny -- Claude Code "
             f"reads a non-zero exit with no envelope as a non-blocking error, so "
             f"the close gate fails OPEN.\n{proc.stderr[-2000:]}"
+        )
+
+class TestTheThingsPreviouslyAsserted:
+    """Two premises this module stated in prose and nothing enforced.
+
+    Both are the project's own "an assumption stated in prose that
+    nothing enforces" class, and both are checkable without an old
+    interpreter -- ``ast.parse(feature_version=...)`` needs only the
+    grammar, so these run everywhere and floor the measured leg above,
+    which skips on a box with no sub-3.12 python.
+    """
+
+    @pytest.mark.parametrize(
+        "rel", [*PREAMBLE_SCRIPTS, "_interpreter.py", "behaviour_census.py"]
+    )
+    def test_it_parses_under_python_3_9(self, rel: str) -> None:
+        """A 3.12-only construct anywhere in the file defeats the preamble.
+
+        The re-exec runs at import time, which is after the whole module
+        has been PARSED. A walrus in a comprehension or a `match` block
+        is a SyntaxError on 3.9 before the preamble gets a turn, so the
+        file never reaches the interpreter that could have served it.
+        """
+        src = (SCRIPTS / rel).read_text()
+        try:
+            ast.parse(src, filename=str(rel), feature_version=(3, 9))
+        except SyntaxError as exc:  # pragma: no cover - the failure IS the message
+            pytest.fail(
+                f"{rel} does not parse as Python 3.9 ({exc.msg} at line "
+                f"{exc.lineno}). The interpreter preamble cannot help: the "
+                f"file is parsed in full before any of it runs."
+            )
+
+    def test_behaviour_census_is_genuinely_stdlib_only(self) -> None:
+        """Its exemption from the preamble list rests on this.
+
+        ``test_the_list_covers_every_bare_python3_entry`` exempts
+        behaviour_census.py as "genuinely stdlib-3.9-safe". That was an
+        allowlist entry with no check that its premise still holds; a
+        `nexus` import would make it need the generation python like the
+        other four, silently.
+        """
+        tree = ast.parse((SCRIPTS / "behaviour_census.py").read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                imported.add(node.module.split(".")[0])
+        assert "nexus" not in imported, (
+            "behaviour_census.py imports nexus, so it needs an interpreter "
+            "that can import nexus -- the generation python. Either give it "
+            "the preamble and add it to PREAMBLE_SCRIPTS, or drop the import."
+        )
+
+    def test_it_runs_under_an_interpreter_below_3_12(self) -> None:
+        """The exemption's other half, measured where a box allows it."""
+        old = _old_python()
+        if old is None:
+            pytest.skip("no interpreter below 3.12 on this box")
+        proc = subprocess.run(
+            [old, str(SCRIPTS / "behaviour_census.py")],
+            input="{}", capture_output=True, text=True, timeout=120, env=_env(),
+        )
+        assert proc.returncode == 0, (
+            f"behaviour_census.py exited {proc.returncode} under {old}; it is "
+            f"declared as a bare python3 entry with no preamble on the "
+            f"strength of running there.\n{proc.stderr[-2000:]}"
         )

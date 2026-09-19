@@ -122,6 +122,23 @@ mechanize, it matters enough to ship.
   `mailbox_drain.py`, `subagent_git_write_requires_orchestrator.py`,
   `phase_review_close_requires_gate.py`, `behaviour_census.py`). The four
   entries naming `nx` are bead nexus-q02nx.22's and are untouched.
+  THE WHEEL FLOOR, and why this entry is NOT cuttable on its own: every
+  one of those fifteen handlers is wheel-resident. The twelve `hook_*`
+  tools come from `nexus.mcp.hooks`; `nx-hook` is a console script
+  declared in `pyproject.toml`. A plugin-only cut (RDR-197) ships
+  `conexus/**` WITHOUT a client release, so this hooks.json landing on a
+  box running the currently pinned conexus would name fifteen handlers
+  that box does not have — and Claude Code treats an unavailable tool as
+  a non-blocking error, so they would not fail, they would silently do
+  nothing. Among them the bd-close gate and the RDR-184 EXPECT writer.
+  This is ENFORCED, not merely intended: `cut_plugin_release.py`'s
+  `atomic_split_check` refuses a cut whose ledger entry straddles into
+  the wheel surface, with no flag and no warn mode, and this bead touches
+  19 paths under `src/` (verified by the attribution rule the check
+  itself reads). It is written down here because a guard nobody can see
+  is one people route around — a reviewer reading this file concluded the
+  exposure was open, and the only thing wrong with that reading was that
+  nothing in the file said otherwise.
   WHY FIVE STAY IN THE PLUGIN, since it is not the RDR's original shape:
   `_endpoint_resolve.py` cannot leave `conexus/hooks/scripts/` —
   `t2_prefix_scan.py` and `tuple_ledger_project.py` import it and neither
