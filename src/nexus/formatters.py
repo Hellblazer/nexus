@@ -343,7 +343,8 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
 
 
 def format_json(results: list[SearchResult]) -> str:
-    """Format results as a JSON array with id, content, distance, collection, and metadata.
+    """Format results as a JSON array with id, content, distance,
+    hybrid_score, keyword_only, collection, and metadata.
 
     Metadata fields are spread into the top-level object first, then the canonical
     fields (id, content, distance, collection) are written last so they always win
@@ -351,11 +352,21 @@ def format_json(results: list[SearchResult]) -> str:
     """
     items: list[dict[str, Any]] = []
     for r in results:
+        # A ripgrep hit has no embedding and therefore no vector distance.
+        # It was reported as 0.0 -- a PERFECT match, the best value in the
+        # range -- so a keyword hit outranked every real vector hit for any
+        # consumer that read the number (nexus-la5pr). null says what is
+        # true: this row was not scored by distance. `keyword_only` is the
+        # positive form of the same fact, so a consumer can branch on it
+        # without special-casing a collection name.
+        keyword_only = r.collection == "rg__cache"
         item: dict[str, Any] = {
             **r.metadata,
             "id": r.id,
             "content": r.content,
-            "distance": r.distance,
+            "distance": None if keyword_only else r.distance,
+            "hybrid_score": r.hybrid_score,
+            "keyword_only": keyword_only,
             "collection": r.collection,
         }
         items.append(item)

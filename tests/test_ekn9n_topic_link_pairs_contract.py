@@ -90,7 +90,7 @@ def test_topic_boost_survives_a_real_link_read(db: T2Database) -> None:
     """store -> apply_topic_boost, the seam ``search_engine`` actually runs.
 
     Non-vacuity: the two results are in DIFFERENT topics, so the same-topic
-    boost cannot fire and the measured delta is the linked-topic boost alone.
+    boost cannot fire and the measured credit is the linked-topic boost alone.
     Feeding the pre-fix list shape here raises ``ValueError`` rather than
     under-boosting, so this fails loudly on a regression instead of silently
     asserting zero.
@@ -104,6 +104,10 @@ def test_topic_boost_survives_a_real_link_read(db: T2Database) -> None:
     links = db.taxonomy.get_topic_link_pairs([a, b])
     apply_topic_boost(results, {"doc-a": a, "doc-b": b}, topic_links=links)
 
-    assert [r.distance for r in results] == pytest.approx(
-        [0.5 - _TOPIC_LINKED_BOOST] * 2,
+    assert [r.topic_boost for r in results] == pytest.approx(
+        [_TOPIC_LINKED_BOOST] * 2,
     ), "linked-topic boost did not reach the results"
+    # The credit is carried, not subtracted: distance stays what the vector
+    # store reported (nexus-la5pr). This half is what makes the assertion
+    # above a statement about the boost rather than about distance arithmetic.
+    assert [r.distance for r in results] == [0.5, 0.5]

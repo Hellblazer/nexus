@@ -2258,13 +2258,13 @@ def _structured_no_results(diagnostics: list, *, base: str = "No results.") -> d
     consolidate" on a topic whose two nearest entries had been dropped at 0.629
     and 0.645, and which a plain prose ``search`` returned.
 
-    Additive only. The six original keys keep their exact shape and meaning, so
+    Additive only. The seven populated-branch keys keep their exact shape and meaning, so
     existing consumers are unaffected; the new keys are present on zero-hit
     payloads for callers that want to discriminate.
     """
     worst = diagnostics[0].worst_offender() if diagnostics else None
     out: dict = {
-        "ids": [], "tumblers": [], "distances": [],
+        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
         "collections": [], "chunk_collections": [], "chunk_text_hash": [],
         "no_results_reason": _no_results_message(diagnostics, base=base),
         # A caller must not have to parse prose to branch on this.
@@ -2324,9 +2324,12 @@ def _search_render(
     each cluster's own internal ordering), full stop — the hybrid/bib boost
     is still computed but its reordering is fully discarded to keep same-
     cluster results contiguous for the text renderer, so in this mode the
-    boost has NO effect on what the caller sees, in either text or
-    ``structured=True`` output (``hybrid_score`` is not surfaced there
-    either). Use ``cluster_by=""`` when boosted ranking matters.
+    boost's REORDERING has no effect on what the caller sees, in either
+    text or ``structured=True`` output. The scores themselves ARE visible as
+    of nexus-la5pr — ``hybrid_scores`` in the structured dict, ``s=`` in the
+    text render — so in this mode a caller can see a page whose order does
+    not follow them, which is the point of this paragraph. Use
+    ``cluster_by=""`` when boosted ranking matters.
 
     File diversity (nexus-0bmhd, 2026-09-01): a text render (``structured=
     False``) caps display to at most 2 chunks per file
@@ -2505,6 +2508,16 @@ def _search_render(
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
+                # The page is ORDERED by hybrid_score, so withholding it left
+                # the consumer reading one number and being served another
+                # (nexus-la5pr). The two answer different questions and both
+                # are needed: distance is absolute and comparable across
+                # queries, hybrid_score is min-max normalised WITHIN this
+                # result window, so the best of two poor hits scores 1.0 and
+                # so does a lone poor one. A caller wanting a relevance floor
+                # has to read distance; a caller wanting to know why this row
+                # is above that one has to read hybrid_score.
+                "hybrid_scores": [float(r.hybrid_score) for r in page],
                 "collections": list({r.collection for r in page}),
                 "chunk_collections": [r.collection for r in page],
                 "chunk_text_hash": [
@@ -2535,7 +2548,12 @@ def _search_render(
                 r.metadata.get("_display_path")
                 or r.metadata.get("source_path", "")
             )
-            dist = f"{r.distance:.4f}"
+            # Both numbers, because the order comes from the second one.
+            # `d=` is the raw vector distance (absolute, lower is better);
+            # `s=` is the hybrid score this page was sorted by (relative to
+            # this window, higher is better). Printing only `d=` while
+            # sorting by `s=` is what nexus-la5pr was filed about.
+            dist = f"d={r.distance:.4f} s={r.hybrid_score:.3f}"
             label = title or source or r.id
             # RDR-169 Phase B fix round 1 (reference-only chunks, content=None):
             # coerced to "" at the SearchResult boundary (search_engine.py), but
@@ -2656,8 +2674,9 @@ def search(
     )] = "",
     structured: Annotated[bool, Field(
         description=(
-            "Return the {ids, tumblers, distances, collections} dict instead of the "
-            "human-readable string; the plan runner uses this so $stepN.ids resolves."
+            "Return the {ids, tumblers, distances, hybrid_scores, collections, "
+            "chunk_collections, chunk_text_hash} dict instead of the human-readable "
+            "string; the plan runner uses this so $stepN.ids resolves."
         ),
     )] = False,
     threshold: Annotated[float | None, Field(
@@ -2676,10 +2695,14 @@ def search(
     an extracted aspect field, or graph neighbours, respectively.
 
     Returns a ranked, human-readable list of chunks by default, or, when
-    `structured=True`, `{ids, tumblers, distances, collections,
+    `structured=True`, `{ids, tumblers, distances, hybrid_scores, collections,
     chunk_collections, chunk_text_hash, truncated, truncated_chars, text}`:
-    `truncated`/`truncated_chars` say whether the text rendering cut the
-    page and by how much, and `text` is that rendering.
+    `distances` is the raw vector distance (absolute, lower is better),
+    `hybrid_scores` is what the page was SORTED by (min-max normalised within
+    this result window, higher is better, so the best of two poor hits scores
+    1.0 and so does a lone poor one -- read `distances` for a relevance
+    floor). `truncated`/`truncated_chars` say whether the text rendering cut
+    the page and by how much, and `text` is that rendering.
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
@@ -2707,8 +2730,8 @@ def search(
         threshold=threshold,
     )
     empty_shape = {
-        "ids": [], "tumblers": [], "distances": [], "collections": [],
-        "chunk_collections": [], "chunk_text_hash": [],
+        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
+        "collections": [], "chunk_collections": [], "chunk_text_hash": [],
     }
     structured_content = {
         **(data if isinstance(data, dict) else empty_shape),
@@ -4034,7 +4057,16 @@ def query(
                 if structured:
                     empty_result: dict = {
                         "ids": [], "tumblers": [], "distances": [],
+                        "hybrid_scores": [],
                         "collections": [], "chunk_collections": [],
+                        # also_in/also_in_ids were missing here while the
+                        # populated dict below carries them: a zero-hit call
+                        # returned a NARROWER shape than a populated one, so a
+                        # consumer reading them unconditionally got a KeyError
+                        # only when a query happened to match nothing. Same
+                        # class as the hybrid_scores line above, found while
+                        # adding it (nexus-la5pr).
+                        "also_in": [], "also_in_ids": [],
                         "chunk_text_hash": [],
                     }
                     if seed_scope is not None:
@@ -4056,6 +4088,15 @@ def query(
                     "ids": tumblers_svc,
                     "tumblers": tumblers_svc,
                     "distances": _reported_distances(rows),
+                    # Present and EMPTY, deliberately. This path reads rows
+                    # straight from the service and never runs
+                    # apply_hybrid_scoring, so there is no hybrid score to
+                    # report -- these rows are ordered by distance alone.
+                    # Emitting [] rather than omitting the key keeps one
+                    # shape across both query paths, so a consumer can read
+                    # it unconditionally; emitting zeros would be inventing
+                    # a score that was never computed.
+                    "hybrid_scores": [],
                     # sorted distinct across rows
                     "collections": sorted({r.get("collection", "") for r in rows}),
                     # per-row aligned (RDR-086 / review #7)
@@ -4208,7 +4249,11 @@ def query(
             if structured:
                 empty_result: dict = {
                     "ids": [], "tumblers": [], "distances": [],
+                    "hybrid_scores": [],
                     "collections": [], "chunk_collections": [],
+                    # See the sibling empty shape above: also_in/also_in_ids
+                    # were absent here too (nexus-la5pr).
+                    "also_in": [], "also_in_ids": [],
                     "chunk_text_hash": [],
                 }
                 if graph_batch_info is not None:
@@ -4234,6 +4279,13 @@ def query(
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
+                # This page came out of apply_ranking_boosts, which sorts
+                # descending by hybrid_score -- so a structured caller was
+                # being handed an order it could not explain from the one
+                # number it got (nexus-la5pr). This is the machine path
+                # nx_answer's plan runner consumes, which is exactly the
+                # audience that cannot squint at a text render instead.
+                "hybrid_scores": [float(r.hybrid_score) for r in page],
                 # H1 (nexus-rzqto): sorted for deterministic ordering across
                 # local and service modes.
                 "collections": sorted({r.collection for r in page}),
@@ -4393,7 +4445,12 @@ def query(
         lines.append(_READER_INSTRUCTION_LINE())
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
-            dist = f"{d['distance']:.4f}"
+            # `sorted_docs` is ordered by hybrid_score (see the sort above),
+            # and both numbers were already sitting in this dict -- one
+            # printed, one discarded. `d=` is the raw vector distance
+            # (absolute, lower is better); `s=` is what the order came from
+            # (relative to this result window, higher is better). nexus-la5pr.
+            dist = f"d={d['distance']:.4f} s={d['hybrid_score']:.3f}"
             title = d["title"][:70]
             header_parts = [f"[{dist}] {title}"]
             # Bibliographic metadata

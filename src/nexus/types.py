@@ -46,3 +46,19 @@ class SearchResult:
     collection: str
     metadata: dict[str, Any] = field(default_factory=dict)
     hybrid_score: float = 0.0
+
+    #: Relevance credit from RDR-070's topic boost, in DISTANCE units, to be
+    #: subtracted when an effective distance is computed. Never subtracted
+    #: from :attr:`distance` itself.
+    #:
+    #: ``apply_topic_boost`` used to write straight into ``distance``,
+    #: because ``hybrid_score`` is computed later and would overwrite
+    #: anything put there. The cost was that ``distance`` — the one absolute,
+    #: comparable number a consumer can judge a hit by — silently carried up
+    #: to 0.15 of relevance engineering on the search path, while every
+    #: surface reported it as the raw vector distance (nexus-la5pr). Holding
+    #: the credit here keeps the ranking identical and the reported number
+    #: honest: ``apply_hybrid_scoring`` computes ``max(0.0, distance -
+    #: topic_boost) * calibration`` locally, exactly as before, and writes
+    #: back nothing.
+    topic_boost: float = 0.0

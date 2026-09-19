@@ -1100,6 +1100,15 @@ def search_cross_corpus(
 
     # Topic boost (RDR-070, nexus-aym) — applied AFTER grouping so
     # distance-based group ordering is not contaminated by the boost.
+    #
+    # ORDERING DEPENDENCY, do not reorder without reading this. Three sites
+    # above rebuild SearchResult objects rather than mutating them
+    # (_flag_contradictions, _apply_clustering, _apply_topic_grouping) and
+    # none of them copies `topic_boost` forward. That is safe ONLY because
+    # they all run before this call, while the field is still at its 0.0
+    # default. Move this earlier and the credit is silently dropped — no
+    # exception, no wrong type, just unboosted ranking, because a defaulted
+    # field fails quieter than a missing one (nexus-la5pr review).
     if _topic_assignments and all_results:
         try:
             from nexus.scoring import apply_topic_boost  # noqa: PLC0415 — branch-local; only when topic assignments present

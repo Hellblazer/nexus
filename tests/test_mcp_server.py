@@ -1863,7 +1863,7 @@ def test_search_structured_true_wire_call_unchanged():
         result = search(query="x", corpus="code__test", structured=True)
     assert isinstance(result, dict)
     assert set(result.keys()) == {
-        "ids", "tumblers", "distances", "collections",
+        "ids", "tumblers", "distances", "hybrid_scores", "collections",
         "chunk_collections", "chunk_text_hash",
     }
     assert "truncated" not in result
@@ -2526,7 +2526,10 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
     assert "indexed 20" in out and "d ago)" in out, out
     # structured output is untouched by the annotation
     structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True)
-    assert set(structured) == {"ids", "tumblers", "distances", "collections", "chunk_collections", "chunk_text_hash"}
+    assert set(structured) == {
+        "ids", "tumblers", "distances", "hybrid_scores", "collections",
+        "chunk_collections", "chunk_text_hash",
+    }
 
 
 # ── RDR-204 Phase 3 funnel (nexus-ft04v.21): _resolve_corpus_target ─────────

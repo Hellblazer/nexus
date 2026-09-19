@@ -701,9 +701,15 @@ class TestLinkBoost:
 class TestTopicBoost:
     """apply_topic_boost() scoring tests.
 
-    Topic boost reduces ``distance`` (lower = better) rather than
-    modifying ``hybrid_score``, because ``hybrid_score`` is populated
-    later by the reranker and would be overwritten.
+    The boost accumulates on ``topic_boost``, in distance units (lower =
+    better), and ``distance`` is left alone. It used to be subtracted
+    straight from ``distance`` -- correctly, because ``hybrid_score`` is
+    computed later and would overwrite anything written there -- which left
+    the one absolute number a consumer can judge a hit by silently carrying
+    up to 0.15 of relevance engineering (nexus-la5pr).
+    ``apply_hybrid_scoring`` subtracts the credit into its own local
+    effective distance, so ranking is unchanged and the reported distance is
+    the measured one.
     """
 
     def _make_result(
@@ -727,11 +733,12 @@ class TestTopicBoost:
 
         apply_topic_boost([r1, r2, r3], assignments)
 
-        # doc-a and doc-b should have lower distance (boosted)
-        assert r1.distance < 0.5
-        assert r2.distance < 0.4
-        # doc-c is alone in its topic — no same-topic partner in results
-        assert r3.distance == 0.3
+        # doc-a and doc-b earn credit; doc-c is alone in its topic.
+        assert r1.topic_boost > 0.0
+        assert r2.topic_boost > 0.0
+        assert r3.topic_boost == 0.0
+        # And no result's distance moved.
+        assert (r1.distance, r2.distance, r3.distance) == (0.5, 0.4, 0.3)
 
     def test_linked_topic_boost(self) -> None:
         """Results in linked topics get distance reduction."""
@@ -745,8 +752,9 @@ class TestTopicBoost:
 
         apply_topic_boost([r1, r2], assignments, topic_links=topic_links)
 
-        assert r1.distance < 0.5
-        assert r2.distance < 0.4
+        assert r1.topic_boost > 0.0
+        assert r2.topic_boost > 0.0
+        assert (r1.distance, r2.distance) == (0.5, 0.4)
 
     def test_no_assignments_unchanged(self) -> None:
         """No topic assignments → distances unchanged."""
@@ -755,6 +763,7 @@ class TestTopicBoost:
         r1 = self._make_result(doc_id="doc-a", distance=0.5)
 
         apply_topic_boost([r1], {})
+        assert r1.topic_boost == 0.0
         assert r1.distance == 0.5
 
     def test_single_result_no_boost(self) -> None:
@@ -765,6 +774,7 @@ class TestTopicBoost:
         assignments = {"doc-a": 1}
 
         apply_topic_boost([r1], assignments)
+        assert r1.topic_boost == 0.0
         assert r1.distance == 0.5
 
     def test_boost_values(self) -> None:
@@ -781,8 +791,9 @@ class TestTopicBoost:
         assignments = {"doc-a": 1, "doc-b": 1}
         apply_topic_boost([r1, r2], assignments)
 
-        assert r1.distance == pytest.approx(0.5 - _TOPIC_SAME_BOOST, abs=0.001)
-        assert r2.distance == pytest.approx(0.5 - _TOPIC_SAME_BOOST, abs=0.001)
+        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
+        assert r2.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
+        assert (r1.distance, r2.distance) == (0.5, 0.5)
 
     def test_combined_same_and_linked_boost(self) -> None:
         """Results get both same-topic and linked-topic distance reduction."""
@@ -803,17 +814,24 @@ class TestTopicBoost:
         apply_topic_boost([r1, r2, r3], assignments, topic_links=topic_links)
 
         # r1 gets same-topic (with r2) + linked-topic (with r3)
-        assert r1.distance == pytest.approx(
-            0.5 - _TOPIC_SAME_BOOST - _TOPIC_LINKED_BOOST, abs=0.001,
+        assert r1.topic_boost == pytest.approx(
+            _TOPIC_SAME_BOOST + _TOPIC_LINKED_BOOST, abs=0.001,
         )
         # r3 gets linked-topic (with r1 and r2)
-        assert r3.distance == pytest.approx(
-            0.5 - _TOPIC_LINKED_BOOST, abs=0.001,
-        )
+        assert r3.topic_boost == pytest.approx(_TOPIC_LINKED_BOOST, abs=0.001)
+        assert (r1.distance, r2.distance, r3.distance) == (0.5, 0.5, 0.5)
 
-    def test_distance_floor_at_zero(self) -> None:
-        """Distance never goes below 0.0."""
-        from nexus.scoring import apply_topic_boost
+    def test_the_floor_at_zero_moved_to_the_effective_distance(self) -> None:
+        """The clamp still exists; it just is not applied to ``distance``.
+
+        A credit larger than the distance used to bottom ``distance`` out at
+        0.0 and stay there, which is precisely the case where the reported
+        number was furthest from the measured one: a hit 0.05 away and a hit
+        0.00 away are very different, and the second was a fiction. The clamp
+        now lives in ``_effective_distance``, where it belongs, and
+        ``distance`` keeps what the vector store returned.
+        """
+        from nexus.scoring import _TOPIC_SAME_BOOST, _effective_distance, apply_topic_boost
 
         r1 = self._make_result(doc_id="doc-a", distance=0.05)
         r2 = self._make_result(doc_id="doc-b", distance=0.05)
@@ -821,8 +839,12 @@ class TestTopicBoost:
         assignments = {"doc-a": 1, "doc-b": 1}
         apply_topic_boost([r1, r2], assignments)
 
-        assert r1.distance == 0.0
-        assert r2.distance == 0.0
+        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
+        assert r1.topic_boost > 0.05, "fixture must over-credit, or the clamp is untested"
+        assert r1.distance == 0.05
+        assert r2.distance == 0.05
+        assert _effective_distance(r1, {}) == 0.0
+        assert _effective_distance(r2, {}) == 0.0
 
 
 def test_a_lone_result_scores_as_the_best_of_its_window_whatever_its_distance():
@@ -838,3 +860,39 @@ def test_a_lone_result_scores_as_the_best_of_its_window_whatever_its_distance():
         [_r(coll="docs__corpus", dist=0.95), _r(coll="docs__corpus", dist=0.99)], hybrid=False,
     )
     assert lone[0].hybrid_score == pytest.approx(max(r.hybrid_score for r in pair)) == pytest.approx(1.0)
+
+
+def test_a_negative_raw_distance_is_floored_rather_than_winning():
+    """A distance below zero is measurement error, not a better-than-perfect match.
+
+    Cosine distance computed as ``1 - similarity`` can dip a hair below zero
+    in float32. Before nexus-la5pr the clamp lived in ``apply_topic_boost``
+    and therefore ran ONLY on results that earned a topic credit, so an
+    unboosted negative distance reached the scorer intact and ranked strictly
+    ahead of a genuine exact match. This pins the new behaviour: the floor
+    applies to every result, so noise ties with perfect rather than beating it.
+
+    This is the one input class where the refactor is NOT equivalent to the
+    old form, which is why it is pinned rather than left to the equivalence
+    argument.
+    """
+    from nexus.scoring import _effective_distance, apply_hybrid_scoring
+
+    noise = SearchResult(id="noise", content="x", distance=-0.001,
+                         collection="knowledge__k__m__v1")
+    perfect = SearchResult(id="perfect", content="x", distance=0.0,
+                           collection="knowledge__k__m__v1")
+    far = SearchResult(id="far", content="x", distance=0.5,
+                       collection="knowledge__k__m__v1")
+
+    assert _effective_distance(noise, {}) == 0.0, "a negative distance must floor"
+    assert _effective_distance(perfect, {}) == 0.0
+
+    out = apply_hybrid_scoring([noise, perfect, far], hybrid=False)
+    by_id = {r.id: r.hybrid_score for r in out}
+    assert by_id["noise"] == by_id["perfect"], (
+        "float noise must not outrank a genuine perfect match"
+    )
+    assert by_id["far"] < by_id["perfect"]
+    # And the reported distance still says what was measured.
+    assert noise.distance == -0.001

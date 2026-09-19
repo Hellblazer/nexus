@@ -168,6 +168,38 @@ def hybrid_score(
     return vector_weight * vector_norm + frecency_weight * frecency_norm
 
 
+def _effective_distance(
+    r: SearchResult, calibration_factors: dict[str, float],
+) -> float:
+    """The distance this result is RANKED by, which is not the one reported.
+
+    Reproduces what ``apply_topic_boost`` used to do in place, in the same
+    order: clamp the topic credit off the raw distance at zero, then apply
+    the per-collection calibration factor. Keeping it in one function used by
+    both the window and the per-result score is what makes "the ranking did
+    not change" checkable rather than asserted — the two used to be separate
+    copies of the same expression.
+
+    ONE DELIBERATE DIVERGENCE, because the equivalence is not total and
+    saying it is would be false. The old code clamped only results
+    ``apply_topic_boost`` actually touched; an untouched result's distance
+    reached calibration unclamped. This clamps EVERY result. The two differ
+    only for a NEGATIVE raw distance with no credit — float noise near a
+    perfect cosine match, since ``1 - similarity`` can dip a hair below zero
+    in float32. Measured: with distances ``{-0.001, 0.0, 0.5}`` and no
+    boosts, the old form ranked the noise strictly ahead of the genuine
+    zero-distance match; this ties them.
+
+    Tying is the better answer and is why the divergence is kept rather than
+    papered over. A distance below zero is not a better match than a perfect
+    one, it is measurement error, and letting it win was an accident of
+    where the clamp happened to sit. The alternative — clamping only when
+    ``topic_boost`` is non-zero — would preserve the old behaviour exactly by
+    preserving a bug.
+    """
+    return max(0.0, r.distance - r.topic_boost) * calibration_factors.get(r.collection, 1.0)
+
+
 def apply_hybrid_scoring(
     results: list[SearchResult],
     hybrid: bool,
@@ -285,7 +317,7 @@ def apply_hybrid_scoring(
     # no-op gate).
     calibration_factors = _resolve_calibration_factors(results)
     distances = [
-        r.distance * calibration_factors.get(r.collection, 1.0)
+        _effective_distance(r, calibration_factors)
         for r in results if r.collection != "rg__cache"
     ]
     frecencies = [
@@ -305,7 +337,7 @@ def apply_hybrid_scoring(
         # score for the only result there is to score. Treat "nothing to
         # compare against" (0 or 1 elements) uniformly as the best match
         # (nexus-yrc7q #8).
-        calibrated = r.distance * calibration_factors.get(r.collection, 1.0)
+        calibrated = _effective_distance(r, calibration_factors)
         v_norm = 1.0 if len(distances) <= 1 else 1.0 - min_max_normalize(calibrated, distances)
         if hybrid:
             # nexus-tox2m follow-on: apply vector_weight to EVERY result
@@ -489,9 +521,18 @@ def apply_topic_boost(
 ) -> list[SearchResult]:
     """Boost results that share or are linked by topic.
 
-    Reduces ``distance`` (lower = better) rather than modifying
-    ``hybrid_score``, because ``hybrid_score`` is populated later
-    by the reranker and would be overwritten.
+    Accumulates credit on :attr:`~nexus.types.SearchResult.topic_boost`, in
+    distance units (lower = better), and does NOT touch ``distance``.
+
+    It used to subtract straight from ``distance``, for a good reason —
+    ``hybrid_score`` is computed later by the reranker and would overwrite
+    anything written there. The cost was hidden: ``distance`` is the one
+    absolute number a consumer can judge a hit by, and on the search path it
+    silently carried up to 0.15 of relevance engineering while every surface
+    reported it as the raw vector distance (nexus-la5pr). ``apply_hybrid_scoring``
+    now subtracts this credit when it computes its own local effective
+    distance, so the ranking is unchanged to the last bit and the reported
+    number is the one that was measured.
 
     For each result with a topic assignment:
     - If another result in the set shares the SAME topic: -_TOPIC_SAME_BOOST distance
@@ -527,7 +568,7 @@ def apply_topic_boost(
         # Same-topic boost: at least one other result in the same topic
         same_topic_peers = topic_to_indices.get(tid, [])
         if len(same_topic_peers) > 1:
-            r.distance = max(0.0, r.distance - _TOPIC_SAME_BOOST)
+            r.topic_boost += _TOPIC_SAME_BOOST
 
         # Linked-topic boost: at least one result in a linked topic
         has_linked = False
@@ -538,7 +579,7 @@ def apply_topic_boost(
                 has_linked = True
                 break
         if has_linked:
-            r.distance = max(0.0, r.distance - _TOPIC_LINKED_BOOST)
+            r.topic_boost += _TOPIC_LINKED_BOOST
 
     return results
 

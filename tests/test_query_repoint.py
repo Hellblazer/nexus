@@ -254,9 +254,16 @@ class TestQueryRepointMetadataScoped:
         assert result["chunk_text_hash"] == [chash_a, chash_b]
 
     def test_structured_exact_key_set(self, monkeypatch):
-        """Structured output must have EXACTLY: ids, tumblers, distances, collections,
-        chunk_collections, chunk_text_hash, also_in, also_in_ids — matching the
-        plain path (both joined the envelopes together, GH #1524, nexus-20uv3)."""
+        """Structured output must have EXACTLY: ids, tumblers, distances,
+        hybrid_scores, collections, chunk_collections, chunk_text_hash,
+        also_in, also_in_ids — matching the plain path (both joined the
+        envelopes together, GH #1524, nexus-20uv3).
+
+        hybrid_scores is [] on this path and that is deliberate: the
+        catalog/service route never runs apply_hybrid_scoring, so there is no
+        score to report and inventing zeros would be worse than an empty list
+        (nexus-la5pr).
+        """
         rows = _make_meta_rows(("1.2.3", "a" * 32))
         t3 = _FakeServiceT3(meta_rows=rows)
         cat = _FakeCatalog(entries=[_FakeCatalogEntry("1.2.3", "T",
@@ -266,7 +273,7 @@ class TestQueryRepointMetadataScoped:
         result = core.query("q", author="X", structured=True)
 
         assert set(result.keys()) == {
-            "ids", "tumblers", "distances", "collections",
+            "ids", "tumblers", "distances", "hybrid_scores", "collections",
             "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
         }
 
@@ -364,7 +371,14 @@ class TestQueryRepointMetadataScoped:
         assert "author=" in result
 
     def test_empty_result_structured_returns_empty_dict(self, monkeypatch):
-        """Empty result in structured mode returns the 6-key empty dict."""
+        """Empty result in structured mode returns the SAME keys as a populated one.
+
+        This used to assert a 6-key empty dict while the populated path
+        returned 8, so a consumer reading also_in unconditionally got a
+        KeyError only when a query happened to match nothing — the narrowest
+        possible reproduction window. The asymmetry was encoded here rather
+        than noticed; widened with hybrid_scores (nexus-la5pr).
+        """
         t3 = _FakeServiceT3(meta_rows=[])
         cat = _FakeCatalog()
         _wire(monkeypatch, t3, ["c1"], cat, service=True)
@@ -372,8 +386,9 @@ class TestQueryRepointMetadataScoped:
         result = core.query("q", author="Nobody", structured=True)
 
         assert result == {
-            "ids": [], "tumblers": [], "distances": [],
+            "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
             "collections": [], "chunk_collections": [],
+            "also_in": [], "also_in_ids": [],
             "chunk_text_hash": [],
         }
 
@@ -642,18 +657,21 @@ class TestQueryNoCatalogParamsCollectionsSorted:
             },
         )
 
-        class _FakeResult:
-            def __init__(self, coll, dist):
-                self.id = "chunk1"
-                self.collection = coll
-                self.distance = dist
-                self.metadata = {}
-                self.content = "text"
+        # A real SearchResult, not a hand-rolled stand-in. The stand-in
+        # carried exactly the five attributes the code happened to read at
+        # the time, so it broke the moment scoring read a sixth
+        # (topic_boost, nexus-la5pr) -- and it broke as a swallowed
+        # AttributeError that surfaced as query() returning TEXT instead of
+        # the structured dict, which reads as an unrelated failure.
+        from nexus.types import SearchResult
 
-        results = [
-            _FakeResult("z_col", 0.1),
-            _FakeResult("a_col", 0.2),
-        ]
+        def _res(coll: str, dist: float) -> SearchResult:
+            return SearchResult(
+                id="chunk1", content="text", distance=dist,
+                collection=coll, metadata={},
+            )
+
+        results = [_res("z_col", 0.1), _res("a_col", 0.2)]
 
         _wire(monkeypatch, object(), ["z_col", "a_col"], None, service=False)
         monkeypatch.setattr(se, "search_cross_corpus",
