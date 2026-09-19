@@ -317,7 +317,9 @@ no text signal never appears on it, so switching `nx search` over wholesale
 would lose results the vector path returns today. The surface must be additive
 (a union of both legs) or an explicit mode.
 
-**Settled (Sam, 2026-09-19).**
+**Settled (Sam, 2026-09-19), in his words: "2. your rec is fine. 3. yes.
+this goes in the mcp" — answering a two-question ask that proposed `--lexical`
+as the name and asked whether the MCP `search` tool should carry the leg.**
 
 1. **The name is `--lexical`.** `--hybrid` stays as it is and keeps its
    current meaning, the git-frecency blend for code corpora (`search_cmd.py`
@@ -325,17 +327,25 @@ would lose results the vector path returns today. The surface must be additive
    (0.7\*vector + 0.3\*frecency)"). That flag is a separate, surviving
    feature and reusing its name for a second meaning would be worse than
    either alternative. Renaming `--hybrid` to `--frecency` is the cleaner end
-   state but costs a deprecation cycle for a flag with no reported users, so
-   it is not part of this work.
+   state, and it stays out of this work because the flag HAS documented
+   users: RDR-008 names `codebase-deep-analyzer` as one
+   (`docs/rdr/rdr-008-nx-workflow-integration.md:157`),
+   `conexus/skills/architecture/SKILL.md` recommends it in three places, and
+   five docs files carry live usage examples. A rename therefore costs a real
+   deprecation cycle across agent-facing guidance. An earlier draft of this
+   line asserted the opposite, that the flag had no reported users; that was
+   an unverified universal and it was false. The decision is unchanged and
+   better supported by the correction than it was by the error.
 2. **The MCP `search` tool gets the leg too.** It is not CLI-only. Its
    parameters today are `query`, `corpus`, `limit`, `offset`, `where`,
    `cluster_by`, `topic`, `structured` and `threshold`; this adds a tenth.
-   That has a known cost in this repo: registering one MCP tool parameter
-   touches several hand-kept enumerations plus the committed wire snapshot
-   `tests/fixtures/mcp_wire_snapshot.json`, which reds develop on the pin
-   rather than on the change if it is not regenerated in the same commit.
-   Phase 2's implementation carries that cost explicitly rather than
-   discovering it.
+   The cost is one specific thing: the committed wire snapshot
+   `tests/fixtures/mcp_wire_snapshot.json` pins each tool's parameters, so it
+   must be regenerated in the SAME commit or develop reds on the pin rather
+   than on the change, which reads as an unrelated failure. It is NOT the
+   larger cost of registering a new tool: `HOOK_TOOLS`, the hook allowlists
+   and the tool-count assertions are keyed on tool names, not on an existing
+   tool's parameter list, so a parameter addition does not touch them.
 
 **Open, and waiting on Phase 1.** Whether the leg is additive (union both
 legs) or an explicit off-by-default mode. That turns on whether the lexical
@@ -369,10 +379,39 @@ lexical match for the query at all.
 and only over such a fixture.** It runs against a corpus containing a chunk
 whose text carries the query's literal tokens. On that fixture the fused leg
 returning zero has exactly one explanation, since a lexical match provably
-exists, and the assertion is sound. This is what makes the genuine-zero case
-and the planted-bug case distinguishable at the fixture level rather than only
-in narrative, which is the distinction the Test Plan's scenarios 6 and 7 turn
-on.
+exists, and the assertion is sound.
+
+**The comparator takes three inputs, not two, and an earlier version of this
+phase left that unstated.** It reads the fused row count, the vector row
+count, and the fixture's ground-truth flag: whether the corpus contains a
+chunk carrying the query's literal tokens. It fails when, and only when, all
+three hold:
+
+```
+ground_truth_lexical_match == True
+  AND hybrid_rows == 0
+  AND vector_rows  > 0
+```
+
+With the flag False the comparator never fails, whatever the diff shows,
+because a fused zero is then the correct answer.
+
+**The vector call is a control, not the signal.** Under the ground-truth flag
+a fused zero is already a failure on its own, so the second call does not
+supply the verdict. It establishes that the collection is reachable and the
+query retrieves at all, so a fused zero is attributable to the gate or the
+query plan rather than to an empty collection, a wrong collection name, or an
+engine returning nothing for every call alike. This refines rather than
+contradicts RF-3, whose two-call finding was reasoned without a ground-truth
+fixture in view.
+
+This is what makes the genuine-zero case and the planted-bug case
+distinguishable at the fixture level rather than only in narrative. **The two
+Test Plan fixtures differ in the flag alone: both carry `hybrid_rows == 0` and
+`vector_rows > 0`.** A genuine-zero fixture built with `vector_rows == 0`
+would retrieve nothing at all and would exercise no discrimination, which is
+the vacuous-gate shape this RDR cites nexus-moht0 against, reproduced inside
+the test written to prevent it.
 
 **What this delivers, stated precisely, because the distinction matters for
 what it is credited with.** Phase 4 proves the client-side comparison logic is
@@ -688,23 +727,42 @@ Per the Technical Design signature. Body construction mirrors `search()`.
 
 Assert the body carries exactly the seven wire fields and no more.
 
-#### Step 3: the MCP `search` parameter
+Phase 2 stops there, and deliberately. The client method and its wire test
+are semantics-independent: they are the same code whichever way the surface
+question is answered. Everything user-visible waits for Phase 1, including
+the parts of the surface Sam has already settled, because what is settled is
+the NAME and the REACH, not the BEHAVIOUR. Building a flag before knowing
+whether it unions two legs or selects one would be building the wrong thing
+with the right name.
 
-Phase 3 settled that the leg reaches the MCP surface and not only the CLI, so
-the tool gains a tenth parameter. This step is listed separately because in
-this repo it is not one edit: registering an MCP tool parameter touches
-several hand-kept enumerations, and the committed wire snapshot
-`tests/fixtures/mcp_wire_snapshot.json` must be regenerated in the SAME
-commit. A wire-visible change that leaves the snapshot behind reds develop on
-the pin rather than on the change, which reads as an unrelated failure.
+### Phase 3: the surface, both halves of it
 
-The parameter's name and default follow the flag: `--lexical` on the CLI, so
-`lexical` on the tool, defaulting off until Phase 1 says otherwise.
+Two surfaces, one decision, and neither is built before Phase 1 reports.
 
-### Phase 3: the surface decision
+#### Step 1: the CLI flag `--lexical`
 
-Sam's. Narrowed by research to additive or explicit mode, never a silent
-default. Not executed until Phase 1 reports.
+Name settled by Sam; behaviour depends on Phase 1's answer to additive union
+versus explicit mode. `--hybrid` is untouched and keeps its frecency meaning.
+
+#### Step 2: the MCP `search` parameter `lexical`
+
+Settled by Sam as in scope, so the leg is not CLI-only. The tool gains a
+tenth parameter, matching the flag in name, default and behaviour.
+
+The one mechanical cost to carry into this step: the committed wire snapshot
+`tests/fixtures/mcp_wire_snapshot.json` pins each tool's parameter list, so
+it is regenerated in the SAME commit that adds the parameter. Otherwise
+develop reds on the pin rather than on the change, which reads as an
+unrelated failure. Registering a new TOOL would additionally touch
+`HOOK_TOOLS`, the hook allowlists and the tool-count assertions; adding a
+parameter to an existing tool does not, since those are keyed on tool names.
+
+#### Step 3: the agent-facing guidance
+
+`conexus/skills/architecture/SKILL.md` recommends `--hybrid` in three places
+and RDR-008 names `codebase-deep-analyzer` as a user. Whatever Phase 1
+decides, that guidance is reviewed against the new flag in the same change,
+so the two flags' meanings do not drift apart in agent-facing prose.
 
 ### Phase 4: the recurrence detector
 
@@ -790,11 +848,37 @@ Alternative 2 being rejected, and it is not a target for this work.
 ### Contradiction Check
 
 No contradictions found between research findings, design principles and the
-proposed solution. Two places where an earlier draft contradicted the research
-were corrected before this gate: Phase 4 assumed a single response could carry
-the zero-row signal, which RF-3 refuted, and the draft carried a
-scope-tripling worry about the route being harness-shaped, which RF-5 refuted.
-Both corrections are in the text above.
+proposed solution as it now stands. Six were found and corrected on the way
+here, and they are listed rather than summarised because the count is the
+honest measure of how much this document changed under review.
+
+Two were corrected before the first gate:
+
+1. Phase 4 assumed a single response could carry the zero-row signal, which
+   RF-3 refuted.
+2. The draft carried a scope-tripling worry about the route being
+   harness-shaped, which RF-5 refuted.
+
+One was corrected after gate round 1 (critique
+`nexus_rdr/217-gate-critique-2026-09-19-r1`):
+
+3. Phase 4 stated an unconditional firing condition, and the Risks table
+   credited a CI test with mitigating a production recurrence. The detector
+   is now defined only over a ground-truth fixture and the risk is marked
+   PARTIAL.
+
+Three were corrected by the fix check on that round's diff:
+
+4. The corrected Phase 4 still left the comparator's inputs unstated, so an
+   implementer could have built the genuine-zero fixture with no retrievable
+   rows at all and proved nothing. The comparator's three inputs and both
+   fixtures' shared shape are now explicit.
+5. A claim that `--hybrid` had no reported users was an unverified universal
+   and was false; RDR-008 and three recommendations in
+   `conexus/skills/architecture/SKILL.md` contradict it.
+6. The settled half of the surface decision had been pulled into Phase 2
+   while its behaviour still depended on Phase 1, and only the MCP half at
+   that. All surface work now sits in Phase 3, both halves together.
 
 ### Assumption Verification
 
