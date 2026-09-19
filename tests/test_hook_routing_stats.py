@@ -279,14 +279,53 @@ def test_selftest_pairs_excluded_with_count(tmp_path):
 def test_registered_rules_parses_hooks_json(tmp_path):
     from nexus.routing_stats import registered_rules
     hooks = tmp_path / "hooks.json"
+    # Three declaration forms, all of which the shipped manifest has used:
+    # a bare path in `command`; a path with an interpreter ahead of it in
+    # one `command` string (the rsplit-robustness property); and EXEC FORM,
+    # where the path is in `args` and `command` is just the interpreter.
+    # The third is what the real manifest uses today.
     hooks.write_text(json.dumps({
         "hooks": {"PreToolUse": [{"hooks": [
             {"type": "command", "command": "$ROOT/hooks/scripts/routing/rule_a.py"},
-            {"type": "command", "command": "$ROOT/hooks/scripts/_run_python_hook.sh $ROOT/hooks/scripts/routing/rule_b.py"},
+            {"type": "command", "command": "python3 $ROOT/hooks/scripts/routing/rule_b.py"},
+            {"type": "command", "command": "python3",
+             "args": ["$ROOT/hooks/scripts/routing/rule_c.py"]},
             {"type": "command", "command": "$ROOT/hooks/scripts/other/not_routing.py"},
+            {"type": "command", "command": "python3",
+             "args": ["$ROOT/hooks/scripts/other/not_routing_either.py"]},
         ]}]}
     }))
-    assert registered_rules(hooks) == {"rule_a", "rule_b"}
+    assert registered_rules(hooks) == {"rule_a", "rule_b", "rule_c"}
+
+
+def test_registered_rules_sees_the_REAL_shipped_manifest(tmp_path):  # noqa: ARG001
+    """The fixture above can pass while the shipped manifest reports nothing.
+
+    It did. Bead nexus-q02nx.21 (9b1081514) re-declared both routing rules
+    from a single ``command`` string naming ``_run_python_hook.sh`` plus the
+    script, to exec form with the script in ``args`` — and
+    ``registered_rules`` only ever read ``command``. Measured on that tree:
+    ``registered_rules(conexus/hooks/hooks.json)`` returned the EMPTY SET,
+    so ``nx hook routing-stats`` marked every rule "(unregistered)". Nothing
+    failed, because every test of this function built its own fixture in the
+    form the function already understood.
+
+    This test has the real file as its subject, which is the only way the
+    question "does it work on what we ship" gets asked at all.
+    """
+    from nexus.routing_stats import registered_rules
+
+    manifest = pathlib.Path(__file__).resolve().parents[1] / "conexus" / "hooks" / "hooks.json"
+    assert manifest.is_file(), f"shipped manifest moved: {manifest}"
+    rules = registered_rules(manifest)
+    assert rules, (
+        "registered_rules() found NO routing rules in the shipped conexus "
+        "manifest. Either every rule was removed, or the parser stopped "
+        "recognising how they are declared — check the second reading first."
+    )
+    # Named, not just counted: a count floor would survive a rename.
+    assert "subagent_git_write_requires_orchestrator" in rules
+    assert "phase_review_close_requires_gate" in rules
 
 
 def test_registered_rules_none_when_absent(tmp_path):
