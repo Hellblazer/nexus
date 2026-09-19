@@ -118,6 +118,23 @@ class TestPreflightDegraded:
         )
 
 
+def _invocations(sessionstart: list[dict]) -> list[str]:
+    """Each SessionStart hook as one string, whatever form it is declared in.
+
+    RDR-215 nexus-q02nx.21 moved the preflight from a command line naming
+    ``preflight.py`` to the exec form ``{"command": "nx-hook", "args":
+    ["preflight"]}``. The ORDER contract these tests pin is unchanged and
+    still matters; only the spelling moved, so they match on the rendered
+    invocation rather than on ``command`` alone.
+    """
+    out = []
+    for h in sessionstart:
+        parts = [h.get("command", "")]
+        parts.extend(a for a in h.get("args", []) if isinstance(a, str))
+        out.append(" ".join(p for p in parts if p))
+    return out
+
+
 class TestHookConfigWiresPreflightEarly:
     """Preflight must run AFTER the ``nx upgrade --auto`` self-
     upgrade (test_phase5_integration.TestHooksJson asserts that
@@ -138,14 +155,14 @@ class TestHookConfigWiresPreflightEarly:
         # Position 0 is `nx upgrade --auto` (existing contract per
         # tests/test_phase5_integration.py::TestHooksJson::
         # test_upgrade_auto_is_first_session_start_hook).
-        assert "nx upgrade --auto" in sessionstart[0]["command"]
+        cmds = _invocations(sessionstart)
+        assert "nx upgrade --auto" in cmds[0]
         # Position 1 must be the preflight so the FAILED marker
         # lands above the capability dump and the using-nx-skills
         # routing.
-        assert "preflight.py" in sessionstart[1]["command"], (
+        assert "nx-hook preflight" == cmds[1], (
             f"preflight must be the SECOND SessionStart hook (right "
-            f"after `nx upgrade --auto`). Got hook[1]: "
-            f"{sessionstart[1]['command']!r}"
+            f"after `nx upgrade --auto`). Got hook[1]: {cmds[1]!r}"
         )
 
     def test_hook_config_preflight_runs_before_guidance_emission(self) -> None:
@@ -160,9 +177,9 @@ class TestHookConfigWiresPreflightEarly:
         )
         data = json.loads(cfg.read_text())
         sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
-        cmds = [h["command"] for h in sessionstart]
+        cmds = _invocations(sessionstart)
         preflight_idx = next(
-            (i for i, c in enumerate(cmds) if "preflight.py" in c), -1,
+            (i for i, c in enumerate(cmds) if "nx-hook preflight" in c), -1,
         )
         guidance_idx = next(
             (i for i, c in enumerate(cmds) if "nx hook session-start" in c), -1,

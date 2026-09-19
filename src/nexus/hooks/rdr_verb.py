@@ -328,15 +328,14 @@ def _fetch_rdr_rows(repo_name: str) -> list[dict]:
     inside a 10s SessionStart budget)."""
     if repo_name in _T2_ROWS_CACHE:
         return _T2_ROWS_CACHE[repo_name]
-    rows: list[dict] = []
-    try:
-        from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred: only a real T2 lookup pays for this
-        from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred: same reason
+    # The handle is opened on the db/ side of the RDR-120 storage boundary:
+    # this module is in the wheel now, where the lint can see it, and
+    # T2Database construction outside src/nexus/db/ is a violation there.
+    # rdr_rows() also owns the never-raise contract this used to spell
+    # inline.
+    from nexus.db.t2_reads import rdr_rows  # noqa: PLC0415 — deferred: only a real T2 lookup pays for this
 
-        with T2Database(default_db_path()) as db:
-            rows = list(db.get_all(project=f"{repo_name}_rdr"))
-    except Exception:  # noqa: BLE001 — the hook must never fail; an unreachable T2 degrades to an empty status map
-        rows = []
+    rows = rdr_rows(f"{repo_name}_rdr")
     _T2_ROWS_CACHE[repo_name] = rows
     return rows
 
