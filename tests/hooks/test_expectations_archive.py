@@ -14,18 +14,77 @@ from pathlib import Path
 
 import pytest
 
+from nexus.hooks import expectations
+
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "tests" / "e2e" / "lib" / "expectations.sh"
 PLUGIN_LIB = REPO / "conexus" / "hooks" / "scripts" / "expectations.sh"
 SUBAGENT_STOP = REPO / "conexus" / "hooks" / "scripts" / "subagent-stop.sh"
 
 
+#: Which implementation `_bash` drives, set per-test by `impl` below.
+_IMPL = "bash"
+
+
+@pytest.fixture(params=["bash", "python"], autouse=True)
+def impl(request):
+    """Run every assertion here against BOTH implementations.
+
+    RDR-215 bead nexus-q02nx.9 ports this library to
+    ``nexus.hooks.expectations``. A straight retarget would delete the only
+    coverage of the bash library while it is STILL the live production path
+    (bead .14 repoints consumers, not this one), so both are driven instead
+    and each assertion becomes a differential. Drop the "bash" param in .14.
+    """
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "bash"
+
+
+class _Result:
+    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = ""
+
+
 def _bash(script: str, state: Path) -> subprocess.CompletedProcess:
+    """Drive one ledger verb, through bash or the module.
+
+    The script strings this file passes are bare verb names
+    (``expectations_archive``, ``expectations_sweep``), so the python side
+    dispatches on the name rather than parsing shell.
+    """
+    if _IMPL == "python":
+        verb = textwrap.dedent(script).strip()
+        prior = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(state)
+        try:
+            if verb == "expectations_archive":
+                expectations.expectations_archive()
+            elif verb == "expectations_sweep":
+                expectations.expectations_sweep()
+            else:  # a shell-only construction this file still needs bash for
+                raise _UnsupportedInPython(verb)
+        except _UnsupportedInPython:
+            pass
+        else:
+            return _Result()
+        finally:
+            if prior is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = prior
     env = dict(os.environ, XDG_STATE_HOME=str(state), HOME=str(state / "home"))
     return subprocess.run(
         ["bash", "-c", f"source {LIB}\n{textwrap.dedent(script)}"],
         capture_output=True, text=True, env=env,
     )
+
+
+class _UnsupportedInPython(Exception):
+    """This script is a shell construction, not a single ported verb."""
 
 
 @pytest.fixture

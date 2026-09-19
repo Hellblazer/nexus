@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus.hooks import expectations
+
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "tests" / "e2e" / "lib" / "expectations.sh"
 PLUGIN_LIB = REPO / "conexus" / "hooks" / "scripts" / "expectations.sh"
@@ -55,8 +57,56 @@ def _write_ledger(state: Path, rows: list[str], session_id: str = SESSION) -> No
     _ledger(state, session_id).write_text("".join(r + "\n" for r in rows))
 
 
+#: Which implementation `_reconcile` drives. Set per-test by the autouse
+#: `impl` fixture below.
+_IMPL = "bash"
+
+
+@pytest.fixture(params=["bash", "python"], autouse=True)
+def impl(request, monkeypatch):
+    """Run every assertion in this file against BOTH implementations.
+
+    RDR-215 bead nexus-q02nx.9 ports this library to
+    ``nexus.hooks.expectations``. The bead asks for these tests to be
+    retargeted at the module — but the bash library is STILL THE LIVE
+    PRODUCTION PATH until bead .14 repoints its consumers, so a straight
+    retarget would delete the only coverage of running code to cover its
+    replacement. Parametrising instead keeps bash covered, adds the module,
+    and makes every assertion here a differential: any behavioural drift
+    between the two fails on the implementation that drifted, in the test
+    that names the behaviour.
+
+    Drop the "bash" param in bead .14, when the library is deleted.
+    """
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "bash"
+
+
+class _Result:
+    """The CompletedProcess surface these tests already assert against."""
+
+    def __init__(self, stdout: str, returncode: int) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = ""
+
+
 def _reconcile(state: Path, payload: dict, session_id: str = SESSION) -> subprocess.CompletedProcess:
     payload_json = json.dumps(payload)
+    if _IMPL == "python":
+        prior = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(state)
+        try:
+            report = expectations.expectations_reconcile(session_id, payload_json)
+        finally:
+            if prior is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = prior
+        out = "".join(line + "\n" for line in report.lines)
+        return _Result(out, report.code)
     return _bash(
         f"expectations_reconcile {session_id!r} {payload_json!r}",
         state,
