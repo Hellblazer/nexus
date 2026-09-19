@@ -196,6 +196,38 @@
       },
       "qualname": "_make_tool_function.<locals>._tool"
     },
+    "hook_stop_failure": {
+      "is_async": false,
+      "module": "nexus.mcp.hooks",
+      "parameters": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "error_details": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "_make_tool_function.<locals>._tool"
+    },
     "hook_stop_verification": {
       "is_async": false,
       "module": "nexus.mcp.hooks",

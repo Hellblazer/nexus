@@ -82,6 +82,7 @@ from nexus.hooks.post_compact import run as _run_post_compact
 from nexus.hooks.divergence_language_guard import run as _run_divergence_language_guard
 from nexus.hooks.tuple_projection import run_start as _run_subagent_start_tuple
 from nexus.hooks.tuple_projection import run_stop as _run_subagent_stop_tuple
+from nexus.hooks.stop_failure import run as _run_stop_failure
 from nexus.hooks.pre_close_verification import run as _run_pre_close_verification
 from nexus.hooks.stop_verification import run as _run_stop_verification
 from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
@@ -396,6 +397,26 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         summary=(
             "projects the RDR-205 ledger REPORT tuple for a subagent that "
             "just stopped — a sibling of hook_subagent_stop, never a child"
+        ),
+    ),
+    HookToolSpec(
+        name="stop_failure",
+        run=_run_stop_failure,
+        fields=("error", "error_details"),
+        field_docs={
+            "error": (
+                "The failure class. Anything outside the seven known types "
+                "is normalised to \"unknown\" rather than passed through."
+            ),
+            "error_details": (
+                "Free text, truncated at 200 characters. May be null, which "
+                "is why the port coerces before slicing."
+            ),
+        },
+        summary=(
+            "observes a StopFailure event and does nothing else — transient "
+            "API failures are infra events, so it files no issue and "
+            "remembers nothing (nexus-0dj7e); debug trace only"
         ),
     ),
 )

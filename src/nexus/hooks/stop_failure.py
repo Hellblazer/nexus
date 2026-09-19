@@ -65,7 +65,11 @@ def _debug(msg: str) -> None:
     said at server start for the life of the process.
     """
     if os.environ.get("NX_HOOK_DEBUG", "0") == "1":
-        print(f"[stop-failure-hook] {msg}", file=sys.stderr)
+        # noqa rather than structlog: this is the debug trace of a hook
+        # whose whole contract is to cost nothing, and reaching for a
+        # logger here would re-import the 60 ms chain the package just
+        # shed. stderr, never stdout — see the class below it in the tests.
+        print(f"[stop-failure-hook] {msg}", file=sys.stderr)  # noqa: T201
 
 
 def run(payload: dict | None) -> HookResult:

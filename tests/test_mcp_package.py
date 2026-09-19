@@ -84,6 +84,7 @@ def test_core_registered_tools():
         "hook_divergence_language_guard", # bead .19
         "hook_subagent_start_tuple",      # bead .20
         "hook_subagent_stop_tuple",       # bead .20
+        "hook_stop_failure",              # bead .21
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

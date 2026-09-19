@@ -109,6 +109,23 @@ import sys
 #: beads in the epic land.
 VERB_TABLE: dict[str, str] = {
     "session-start": "nexus.hooks.session_start_verb",
+    # The three SessionStart scripts that were plugin Python, ported into
+    # the wheel at bead nexus-q02nx.21. Their closures permitted it: two
+    # are stdlib-only and rdr_hook's sole non-stdlib import was
+    # _hook_logging, whose one public function has a same-name equivalent
+    # in _io. The other three Python hooks (mailbox_drain and the two
+    # routing guards) stay plugin-resident in python3 exec form, because
+    # each reaches _endpoint_resolve.py, which cannot leave the plugin --
+    # t2_prefix_scan.py and tuple_ledger_project.py still import it and
+    # neither is ported by this epic. Full reasoning and the measured
+    # closure: T2 nexus_rdr/215-tier-resolution-bead-21.
+    #
+    # "session-context", not "session-start": these are two DIFFERENT
+    # SessionStart hooks and the good name was already taken above by the
+    # port of the `nx hook session-start` Click verb.
+    "preflight": "nexus.hooks.preflight_verb",
+    "session-context": "nexus.hooks.session_context",
+    "rdr": "nexus.hooks.rdr_verb",
     # The RDR-184 ledger's operator verbs (bead nexus-q02nx.14). All four
     # resolve to ONE module, which re-reads sys.argv[1] to tell them apart
     # -- they take arguments rather than a hook payload, so they are the
