@@ -399,3 +399,46 @@ class TestScopeAudit:
         assert proc.returncode == 7, proc.stdout + proc.stderr
         for name in ("alpha.txt", "beta.txt", "gamma.txt"):
             assert name in proc.stdout, f"{name} missing from the listing:\n{proc.stdout}"
+
+
+    def test_a_newline_separated_allowlist_is_not_truncated(self, repos) -> None:
+        """REGRESSION. `read` stops at the first newline, so a multi-line
+        allowlist was read as its FIRST ENTRY ONLY and every other outbound
+        file was reported as foreign -- the caller's own files, in the
+        caller's own commit. Fails closed, so nothing unsafe shipped, but it
+        accuses you of smuggling when the real fault is a newline (nexus-01,
+        2026-09-19).
+        """
+        origin, work = repos
+        (work / "one.txt").write_text("one")
+        (work / "two.txt").write_text("two")
+        _git("add", "one.txt", "two.txt", cwd=work)
+        _git("commit", "-q", "-m", "pair", cwd=work)
+        sha = _git("rev-parse", "HEAD", cwd=work)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("NX_PUSH_ALLOWED_PATHS", "NX_PUSH_SKIP_SCOPE_AUDIT")}
+        env["NX_PUSH_ALLOWED_PATHS"] = "one.txt\ntwo.txt"
+        proc = subprocess.run(
+            [str(SCRIPT), sha], cwd=work, env=env,
+            capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
+        assert _remote_tip(origin) == sha
+
+    def test_a_newline_separated_wildcard_is_still_refused(self, repos) -> None:
+        """Folding newlines must not let a wildcard in through the back door:
+        the wildcard check runs on the same folded value."""
+        origin, work = repos
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("NX_PUSH_ALLOWED_PATHS", "NX_PUSH_SKIP_SCOPE_AUDIT")}
+        env["NX_PUSH_ALLOWED_PATHS"] = "src/\n*"
+        proc = subprocess.run(
+            [str(SCRIPT), sha], cwd=work, env=env,
+            capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "matches every file" in proc.stdout
+        assert _remote_tip(origin) == before

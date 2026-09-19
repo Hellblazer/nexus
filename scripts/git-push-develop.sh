@@ -179,8 +179,12 @@ _wildcard_allowlist() {
   # file list and never match the case below. That is the same defect this
   # script already fixed once for NX_PUSH_ALLOWED_PATHS, reintroduced in the
   # check written to catch its abuse (measured 2026-09-18).
+  # Same newline fold as the audit call site below: `read` stops at the
+  # first newline, so a multi-line allowlist whose wildcard sits on a later
+  # line would slip past this check entirely. Both readers must see the same
+  # value or the check guards a different string from the one that is used.
   local -a specs=()
-  read -r -a specs <<< "$1"
+  read -r -a specs <<< "$(printf '%s' "$1" | tr '\n' ' ')"
   local spec
   for spec in "${specs[@]+"${specs[@]}"}"; do
     case "$spec" in
@@ -252,6 +256,15 @@ elif [[ -z "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
 # pattern the AUDIT must receive verbatim, and letting this shell expand it
 # against the cwd first would silently narrow the allowlist to whatever
 # happens to exist here.
+#
+# Newlines are folded to spaces first because `read` stops at the FIRST one.
+# A caller pasting a multi-line list got an allowlist of its first entry and
+# a FOREIGN FILE(S) DETECTED verdict naming the other five -- their own
+# files, in their own commit. It fails closed, so nothing unsafe shipped,
+# but "you are smuggling files" is a bad way to say "your variable had a
+# newline in it", and it cost a peer session a cycle (nexus-01, 2026-09-19).
+# Folding is not a widening: a newline is a separator here either way, and
+# treating it as one can only ever ADD entries the caller wrote down.
 elif _wildcard_allowlist "${NX_PUSH_ALLOWED_PATHS}"; then
   echo "PUSH_REFUSED_SCOPE NX_PUSH_ALLOWED_PATHS is '${NX_PUSH_ALLOWED_PATHS}', which matches every file."
   echo "An allowlist that audits nothing satisfies the letter of this gate and produces a clean"
@@ -260,7 +273,7 @@ elif _wildcard_allowlist "${NX_PUSH_ALLOWED_PATHS}"; then
   echo
   echo "    NX_PUSH_SKIP_SCOPE_AUDIT='<reason>' $0 $*"
   exit 7
-elif read -r -a _allowed_paths <<< "${NX_PUSH_ALLOWED_PATHS}" &&
+elif read -r -a _allowed_paths <<< "$(printf '%s' "${NX_PUSH_ALLOWED_PATHS}" | tr '\n' ' ')" &&
      ! _audit_out="$(bash "$audit" "refs/remotes/$remote/$branch..$tip" "${_allowed_paths[@]}" 2>&1)"; then
   # The audit's per-commit listing is captured, not streamed: this script's
   # stdout is a machine-readable contract (PUSH_OK n=<n> tip=<sha>) that
