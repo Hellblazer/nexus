@@ -86,9 +86,58 @@ def test_a_note_inside_the_window_is_one_piece(small_window) -> None:
     assert store_hook.note_pieces("A short note.", t3_collection_name(SUBJECT)) == ["A short note."]
 
 
-def test_a_collection_with_no_window_never_splits(monkeypatch) -> None:
+def test_a_windowless_collection_splits_for_granularity(monkeypatch) -> None:
+    """nexus-b2tld. A model whose token limit sits above the 12,288-byte chunk
+    cap imposes no window at all, so a note used to be stored WHOLE however
+    long it was: one vector had to represent every topic, and search found the
+    note but not the part of it. It now splits on a character cap instead.
+
+    The model that behaves this way is named in note_pieces' own docstring and
+    deliberately not repeated here. This test forces window_for_model to None
+    and asserts nothing about cloud mode, so naming it would only make the
+    test an RDR-109 mode-declaration offender (tests/conftest.py
+    _MODE_LINT_EXCLUDE) for a string no code here reads."""
     monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
-    assert store_hook.note_pieces(NOTE, t3_collection_name(SUBJECT)) == [NOTE]
+    assert len(NOTE) > store_hook.NOTE_SPLIT_CHARS, "fixture must cross the cap"
+    pieces = store_hook.note_pieces(NOTE, t3_collection_name(SUBJECT))
+    assert len(pieces) > 1
+    assert all(len(p) <= store_hook.NOTE_SPLIT_CHARS for p in pieces)
+
+
+def test_a_windowless_note_under_the_cap_is_still_one_piece(monkeypatch) -> None:
+    monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
+    short = "A short note."
+    assert store_hook.note_pieces(short, t3_collection_name(SUBJECT)) == [short]
+
+
+def test_windowless_pieces_rejoin_to_exactly_the_original(monkeypatch) -> None:
+    """The invariant that constrains the whole design: note_manifest_metadata
+    derives each span by accumulating len(piece) with no gaps and store_get
+    reassembles by position, so a splitter that added or dropped a character
+    would misreport every span after the first. This is why the markdown
+    chunker cannot be used here: it prepends headings and overlaps."""
+    monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
+    pieces = store_hook.note_pieces(NOTE, t3_collection_name(SUBJECT))
+    assert "".join(pieces) == NOTE
+
+
+def test_windowless_manifest_spans_are_contiguous_and_cover_the_note(monkeypatch) -> None:
+    monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
+    pieces = store_hook.note_pieces(NOTE, t3_collection_name(SUBJECT))
+    _first, metas = store_hook.note_manifest_metadata(pieces)
+    assert [m["chunk_index"] for m in metas] == list(range(len(pieces)))
+    assert metas[0]["chunk_start_char"] == 0
+    assert metas[-1]["chunk_end_char"] == len(NOTE)
+    for earlier, later in zip(metas, metas[1:]):
+        assert earlier["chunk_end_char"] == later["chunk_start_char"], "no gap, no overlap"
+
+
+def test_a_real_token_window_still_wins_over_the_char_cap(small_window) -> None:
+    """A bge collection keeps splitting by its own token window; the character
+    cap is only for models that impose no window at all."""
+    pieces = store_hook.note_pieces(NOTE, t3_collection_name(SUBJECT))
+    assert all(small_window.fits(p) for p in pieces)
+    assert "".join(pieces) == NOTE
 
 
 def test_one_piece_keeps_the_single_chunk_manifest_exactly() -> None:
