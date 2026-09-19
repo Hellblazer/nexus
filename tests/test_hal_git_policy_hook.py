@@ -57,6 +57,44 @@ def _git(*args: str, cwd) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+# Ambient git config reaches a test repo, and a merge is the operation most
+# exposed to it. `merge.ff=only` in a runner's global config turns
+# `git merge <divergent>` into rc=128 with NO MERGE_HEAD and the message
+# "Diverging branches can't be fast-forwarded" -- reproduced locally, and
+# indistinguishable at the assertion from "the fixture is wrong". The
+# identity is passed for the same reason every other call here passes it: a
+# merge that resolves cleanly goes on to commit.
+_MERGE_CONFIG = ("-c", "merge.ff=true", "-c", "user.email=t@t", "-c", "user.name=t")
+
+
+def _merge(work, *args: str) -> subprocess.CompletedProcess:
+    """Merge with ambient config neutralised, returning the result.
+
+    Never raises on a conflict (rc=1 is the point of these fixtures), but a
+    merge that could not START is a fixture failure, and this reports WHY --
+    the previous version discarded stdout/stderr, so CI could only ever say
+    `assert False` about an environment the reader cannot see.
+    """
+    return subprocess.run(
+        ["git", *_MERGE_CONFIG, "merge", *args],
+        cwd=work, capture_output=True, text=True,
+    )
+
+
+def _assert_merge_head(work, res: subprocess.CompletedProcess, what: str) -> None:
+    if (work / ".git" / "MERGE_HEAD").exists():
+        return
+    version = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout.strip()
+    raise AssertionError(
+        f"{what}\n"
+        f"  git merge exited {res.returncode}\n"
+        f"  stdout: {res.stdout.strip() or '<empty>'}\n"
+        f"  stderr: {res.stderr.strip() or '<empty>'}\n"
+        f"  {version}\n"
+        "  (ambient git config reaching the test repo is the usual cause)"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolate_log(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(tmp_path / "log.jsonl"))
@@ -692,8 +730,8 @@ def test_unscoped_commit_during_a_merge_is_allowed(primary):
     (work / "f.txt").write_text("develop")
     _git("add", "f.txt", cwd=work)
     _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "dev", cwd=work)
-    subprocess.run(["git", "merge", "side"], cwd=work, capture_output=True)
-    assert (work / ".git" / "MERGE_HEAD").exists(), "fixture did not produce a conflicted merge"
+    res = _merge(work, "side")
+    _assert_merge_head(work, res, "fixture did not produce a conflicted merge")
     d = _decision(_run_with_env(_commit_payload(work, "git commit --no-edit"), env))
     assert d["permissionDecision"] == "allow", d
 
@@ -903,9 +941,8 @@ def test_a_stale_merge_head_does_not_disable_the_rule(primary):
     _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "side", cwd=work)
     _git("checkout", "-q", "develop", cwd=work)
     # A clean --no-commit merge: MERGE_HEAD exists, nothing is unmerged.
-    subprocess.run(["git", "merge", "--no-commit", "--no-ff", "side2"],
-                   cwd=work, capture_output=True)
-    assert (work / ".git" / "MERGE_HEAD").exists(), "fixture must leave MERGE_HEAD present"
+    res = _merge(work, "--no-commit", "--no-ff", "side2")
+    _assert_merge_head(work, res, "fixture must leave MERGE_HEAD present")
     unmerged = subprocess.run(
         ["git", "diff", "--cached", "--diff-filter=U", "--name-only"],
         cwd=work, capture_output=True, text=True,
