@@ -106,3 +106,40 @@ mechanize, it matters enough to ship.
   surviving mentions of the command in that file are inside the replacement
   comment, which the lint does not flag because naming is not invoking.
   bead: nexus-06aei
+
+- `conexus/hooks/hooks.json` (21 of its 25 entries), and the plugin
+  scripts twelve of them used to run:
+  bead: nexus-q02nx.21 — RDR-215 re-declares the hook layer across two
+  tiers. Twelve entries become `mcp_tool` calls on `plugin:conexus:nexus`
+  (`hook_auto_approve`, `hook_subagent_start`, `hook_subagent_start_stamp`,
+  `hook_subagent_start_tuple`, `hook_subagent_stop`,
+  `hook_subagent_stop_tuple`, `hook_stop_verification`,
+  `hook_pre_close_verification`, `hook_agent_dispatch_expect`,
+  `hook_post_compact`, `hook_divergence_language_guard`,
+  `hook_stop_failure`); three SessionStart entries become exec-form
+  `nx-hook` verbs (`preflight`, `session-context`, `rdr`); five stay
+  plugin-resident on bare `python3` (`version_lockstep_hook.py`,
+  `mailbox_drain.py`, `subagent_git_write_requires_orchestrator.py`,
+  `phase_review_close_requires_gate.py`, `behaviour_census.py`). The four
+  entries naming `nx` are bead nexus-q02nx.22's and are untouched.
+  WHY FIVE STAY IN THE PLUGIN, since it is not the RDR's original shape:
+  `_endpoint_resolve.py` cannot leave `conexus/hooks/scripts/` —
+  `t2_prefix_scan.py` and `tuple_ledger_project.py` import it and neither
+  is ported by this epic — so the three hooks that reach it cannot become
+  wheel-resident without a second copy of a 449-line resolver beside
+  `nexus.db.service_endpoint`. The lockstep repairs a wheel that is
+  behind the plugin so it can depend on neither tier, and
+  `behaviour_census.py` is plugin-domain (it parses Claude Code
+  transcripts). Full reasoning: T2
+  `nexus_rdr/215-tier-resolution-bead-21`.
+  WHEEL FLOOR, and it is the hard one in this ledger: a plugin naming
+  `nx-hook` or any `hook_*` tool needs a conexus generation at or past
+  the wheel that ships them. An older installed generation has no
+  `nx-hook` shim and no `hook_*` tools on `nx-mcp`, so the entries do not
+  merely go stale, they DO NOT FIRE — the command form is not found and
+  the tool form logs `[WARN] Hooks: mcp_tool hook skipped` and proceeds.
+  That is a fail-open on twelve hooks at once, including the close gate
+  and the orchestrator guard. This entry must not be cleared by a release
+  that does not also ship the wheel.
+  INERT until the next cut: sessions on the pinned tag keep running the
+  bash layer, which is still on disk and still correct.
