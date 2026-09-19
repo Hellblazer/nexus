@@ -288,6 +288,23 @@ def _read_plugin_hooks_json() -> dict:
     return json.loads((repo_root / "conexus" / "hooks" / "hooks.json").read_text())
 
 
+def _rendered(hook: dict) -> str:
+    """One hook entry as the line it stands for: ``command`` plus its ``args``.
+
+    ``command`` alone stopped being the invocation when RDR-215 moved
+    hooks.json to exec form -- the SessionEnd entry this module checks now
+    carries ``"args": []`` (bead nexus-q02nx.22), and a sibling entry could
+    carry a real one. The positive assertion below would survive a
+    ``command``-only read; the NEGATIVE one ("session-end-detach must not
+    appear") would not: move that name into ``args`` and a ``command``-only
+    search finds nothing and passes, which is the failure this module exists
+    to prevent, reported as success.
+    """
+    parts = [str(hook.get("command", ""))]
+    parts.extend(str(a) for a in hook.get("args", []) or [])
+    return " ".join(p for p in parts if p)
+
+
 def test_hooks_json_session_end_uses_launcher_not_flush_directly() -> None:
     """The hooks.json SessionEnd entry MUST dispatch through
     nx-session-end-launcher, never directly to ``nx hook session-end-flush``.
@@ -303,7 +320,7 @@ def test_hooks_json_session_end_uses_launcher_not_flush_directly() -> None:
     assert session_end, "SessionEnd block must not be empty"
 
     commands = [
-        h["command"]
+        _rendered(h)
         for entry in session_end
         for h in entry.get("hooks", [])
     ]
@@ -455,7 +472,7 @@ def test_hooks_json_session_end_drops_detach_fallback() -> None:
     """
     cfg = _read_plugin_hooks_json()
     commands = [
-        h["command"]
+        _rendered(h)
         for entry in cfg["hooks"]["SessionEnd"]
         for h in entry.get("hooks", [])
     ]

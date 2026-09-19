@@ -47,9 +47,16 @@ class TestHooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        # The first hook must start with `nx upgrade --auto`.  The 4.2.1
-        # fallback appends a helpful error message for older CLIs.
-        assert startup_hooks[0]["command"].startswith("nx upgrade --auto")
+        # The first hook must be the self-upgrade. RDR-215 bead
+        # nexus-q02nx.22 moved it from the shell string
+        # `nx upgrade --auto 2>/dev/null || echo <skew guidance> >&2` to
+        # exec form, which puts the verb in `args` and leaves `command`
+        # as the bare console-script name -- so a `.startswith()` on the
+        # old spelling stopped describing anything. Assert the DECLARATION
+        # instead of a rendering of it: there is exactly one shape now and
+        # naming it is more precise than a prefix match ever was.
+        assert startup_hooks[0]["command"] == "nx-hook"
+        assert startup_hooks[0]["args"] == ["upgrade-auto"]
         assert startup_hooks[0]["timeout"] == 30
 
 

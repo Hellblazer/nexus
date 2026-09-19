@@ -77,7 +77,11 @@ class TestSC8HooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        assert startup_hooks[0]["command"].startswith("nx upgrade --auto")
+        # Exec form since RDR-215 bead nexus-q02nx.22 -- see the twin of
+        # this assertion in tests/test_phase5_integration.py for why the
+        # old `.startswith("nx upgrade --auto")` had to go.
+        assert startup_hooks[0]["command"] == "nx-hook"
+        assert startup_hooks[0]["args"] == ["upgrade-auto"]
         assert startup_hooks[0]["timeout"] == 30
 
     def test_pretooluse_bash_timeout_is_short(self) -> None:
