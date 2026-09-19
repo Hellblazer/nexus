@@ -145,10 +145,21 @@ class HookResult:
     ``agent-dispatch-expect.sh`` never write to real stdout at all).
     ``exit_code`` is 0 for every hook verb; the ledger verbs propagate their own
     codes, which callers branch on.
+
+    ``crashed`` marks a result produced by :func:`never_fail`'s swallow rather
+    than by the verb returning. It exists because a ledger verb's exit code IS
+    its contract, so "the verb crashed" and "the verb legitimately returned 0"
+    must not be the same answer. Measured before the fix (bead nexus-q02nx.9):
+    a ledger verb that raised exited 0, indistinguishable from a clean
+    ``reconcile``, which bead ``.13`` would read as "nothing stranded" -- a
+    silent miss in the subsystem built to catch silent misses. Non-ledger verbs
+    ignore it and still exit 0, because for them a crash IS a hook choosing to
+    say nothing, which is what failing open means.
     """
 
     stdout: str | None = None
     exit_code: int = 0
+    crashed: bool = False
 
 
 def read_payload(stream: IO[str]) -> dict | None:
@@ -295,4 +306,4 @@ def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
         if isinstance(exc, BaseExceptionGroup) and exc.subgroup(asyncio.CancelledError):
             raise
         _emit("warning", "hook_boundary_swallowed_exception", hook=hook, error=str(exc))
-        return HookResult()
+        return HookResult(crashed=True)

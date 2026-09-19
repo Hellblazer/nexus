@@ -114,6 +114,11 @@ VERB_TABLE: dict[str, str] = {
 #: Verbs whose exit code nx-hook must propagate from ``run()`` instead of
 #: forcing 0 -- the ledger's callers branch on it (RDR-215 Contracts).
 #: Populated alongside VERB_TABLE as those verbs are ported (Phase 2).
+#: sysexits EX_SOFTWARE. A ledger verb that CRASHED exits this instead of a
+#: vocabulary value, so a caller branching on 0/1/2/3/4 can tell "the audit
+#: could not run" from any real verdict.
+_LEDGER_CRASH_EXIT = 70
+
 LEDGER_VERBS: frozenset[str] = frozenset()
 
 #: Test-only dispatch override, read solely by
@@ -286,7 +291,24 @@ def main() -> None:
         real_stdout.write(result.stdout + "\n")
         real_stdout.flush()
 
-    sys.exit(result.exit_code if _is_ledger_verb(verb) else 0)
+    # A LEDGER VERB'S EXIT CODE IS ITS CONTRACT, so a crash must not wear a
+    # vocabulary value. undeclared uses 0/1/2/3, reconcile 0/2/4, census 0/1,
+    # and every one of those means something a caller branches on; a crashed
+    # verb exiting 0 reads as "clean", which is the silent miss this whole
+    # subsystem exists to prevent (measured, bead nexus-q02nx.9). It exits
+    # EX_SOFTWARE instead -- reserved, colliding with no ledger vocabulary.
+    #
+    # Reserved rather than folded into undeclared's 3 ("no ledger file,
+    # nothing checkable"): "I could not tell you" is not "there was nothing
+    # to tell", and folding them loses the distinction exactly when someone
+    # is diagnosing a flapping audit. Sam's ruling, 2026-09-19; RDR-215
+    # Contracts amended to name this third case.
+    #
+    # Non-ledger verbs are unchanged and still forced to 0: for them a crash
+    # IS the hook choosing to say nothing, which is failing open.
+    if _is_ledger_verb(verb):
+        sys.exit(_LEDGER_CRASH_EXIT if result.crashed else result.exit_code)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

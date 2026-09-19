@@ -197,7 +197,16 @@ class TestCreditClaimIsAtomic:
         lock. If this ever needs the lock to pass, the port has regressed
         into the shape whose unfixability the bash file documents at length.
         """
-        monkeypatch.setenv("NX_EXPECT_LOCK_DISABLED", "1")
+        # NOTE: _claim_credit reads NO lock variable at all — it is
+        # lock-free by construction, which is round 3's entire point. So
+        # this assertion holds whatever the environment says, and an
+        # earlier version of it set a MISSPELLED variable
+        # (NX_EXPECT_LOCK_DISABLED, with a trailing D) without that
+        # changing anything, which is how the typo survived. The real
+        # lock-disabled property is carried by
+        # TestOwesReportSurvivesTheLockBeingDisabled, which drives the
+        # function that actually consults the lock.
+        monkeypatch.setenv("NX_EXPECT_LOCK_DISABLE", "1")
         path = Path(exp.expectations_file("s"))
         path.parent.mkdir(parents=True, exist_ok=True)
         won = [

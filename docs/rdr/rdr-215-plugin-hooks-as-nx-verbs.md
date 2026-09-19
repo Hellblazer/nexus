@@ -512,7 +512,21 @@ from stdin (TTY-aware, empty or malformed reads as `None`), calls the
 same `run()`, writes the decision JSON to stdout, and exits 0 for every
 hook verb. Every ledger verb propagates the code `run()` returns instead,
 so a caller that branches on it keeps working; Contracts, below, carries
-the codes. `nx hook` keeps its Click verbs for a human at a terminal; no
+the codes.
+
+**A THIRD CASE: a ledger verb that CRASHED exits a reserved 70**
+(sysexits `EX_SOFTWARE`; Sam's ruling 2026-09-19, bead
+`nexus-q02nx.9`). A ledger verb's exit code IS its contract, so a crash
+must not wear a vocabulary value. Measured before the fix: a ledger verb
+that raised exited 0, indistinguishable from a clean `reconcile`, which
+bead `.13` reads as "nothing stranded" — a silent miss in the subsystem
+built to catch silent misses. `never_fail` now marks the swallow
+(`HookResult.crashed`) and the entry point maps it. Reserved rather than
+folded into `undeclared`'s 3 ("no ledger file, nothing checkable"),
+because "I could not tell you" is not "there was nothing to tell", and
+folding them loses the distinction exactly when someone is diagnosing a
+flapping audit. Non-ledger verbs are unchanged and still exit 0: for
+them a crash IS the hook choosing to say nothing, which is failing open. `nx hook` keeps its Click verbs for a human at a terminal; no
 `hooks.json` entry names it.
 
 **Package.** `src/nexus/hooks/` (the existing `nexus.hooks` module that
@@ -858,3 +872,8 @@ registration module on the existing server, and one package.
   children that run user tooling, so the command tier is reachable
   there. Record: T2 `nexus_rdr/215-phase1-measurements`.
 - 2026-09-18: The command-tier entry point moves from `nexus.hooks.entry` to `nexus._hook_runtime.entry`, taking `_io` and `_config` with it, and the eager logging bridge in `main()` is replaced by a per-verb call plus a structural stdout guard. Measured: a stdlib-only dispatch falls from 0.06 s to 0.02 s, below the bash close gate re-measured on the same box at 0.03 s (bead .2 recorded 0.04 s in its own harness). Bead `nexus-br31l`.
+- 2026-09-19: Contracts amended with a third exit case (Sam's ruling): a
+  ledger verb that crashed exits a reserved 70 rather than 0, so a caller
+  branching on the 0/1/2/3/4 vocabularies can tell "the audit could not
+  run" from a real verdict. Found and measured during bead
+  `nexus-q02nx.9`; non-ledger verbs unchanged.

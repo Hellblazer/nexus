@@ -169,13 +169,24 @@ def test_never_fail_returns_the_wrapped_result_untouched():
 def test_never_fail_swallows_an_exception_into_a_silent_zero_result():
     """The bash layer sets no ``set -e`` by design; Python needs this explicitly.
 
-    A crashing hook must look exactly like a hook that decided to say nothing.
+    A crashing hook must look exactly like a hook that decided to say
+    nothing — ON THE WIRE. stdout is None and the exit code is 0, which is
+    the whole fail-open contract and is unchanged.
+
+    It is no longer indistinguishable IN THE VALUE: ``crashed`` marks the
+    swallow so that the one caller for whom an exit code is a contract —
+    a ledger verb, whose 0/1/2/3/4 a script branches on — can tell a crash
+    from a clean verdict. Nothing else reads the flag, and non-ledger verbs
+    still exit 0 (bead nexus-q02nx.9, Sam's ruling 2026-09-19).
     """
 
     def boom() -> _io.HookResult:
         raise RuntimeError("hook logic exploded")
 
-    assert _io.never_fail(boom, "demo") == _io.HookResult(stdout=None, exit_code=0)
+    result = _io.never_fail(boom, "demo")
+    assert result.stdout is None, "the decision channel stays silent"
+    assert result.exit_code == 0, "fail-open is unchanged"
+    assert result.crashed is True, "but the swallow is now marked"
 
 
 def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
@@ -281,7 +292,7 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
             raise RuntimeError("crash inside hook logic")
 
         result = _io.never_fail(boom, "stdout_guard")
-        assert result == _io.HookResult(), result
+        assert result == _io.HookResult(crashed=True), result
         """
     )
     proc = subprocess.run(
@@ -340,7 +351,7 @@ class TestWrappedCancellationPassesThrough:
         def _body():
             raise group
 
-        assert _io.never_fail(_body, "probe") == _io.HookResult()
+        assert _io.never_fail(_body, "probe") == _io.HookResult(crashed=True)
 
     def test_a_nested_group_carrying_a_cancellation_is_re_raised(self):
         """TaskGroups nest, so the check has to look through the tree rather

@@ -93,6 +93,29 @@ class _Result:
         self.stderr = ""
 
 
+def _reconcile_script(state: Path, session_id: str, payload: str) -> subprocess.CompletedProcess:
+    """Drive reconcile with a RAW payload string, through whichever
+    implementation `impl` selected.
+
+    Two tests here used to call `_bash` directly, so they ran bash under
+    BOTH parametrize ids — the `[python]` id claimed coverage it did not
+    have. Found by the bead .9 critique.
+    """
+    if _IMPL == "python":
+        prior = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(state)
+        try:
+            report = expectations.expectations_reconcile(session_id, payload)
+        finally:
+            if prior is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = prior
+        return _Result("".join(line + "\n" for line in report.lines), report.code)
+    quoted = payload.replace("'", "'\\''")
+    return _bash(f"expectations_reconcile {session_id!r} '{quoted}'", state)
+
+
 def _reconcile(state: Path, payload: dict, session_id: str = SESSION) -> subprocess.CompletedProcess:
     payload_json = json.dumps(payload)
     if _IMPL == "python":
@@ -137,12 +160,12 @@ class TestFieldsAbsentIsANoOp:
 
     def test_unparseable_payload_never_crashes(self, state):
         _write_ledger(state, ["a\tSTART\ta1\tconexus:developer"])
-        proc = _bash(f"expectations_reconcile {SESSION!r} 'not json at all'", state)
+        proc = _reconcile_script(state, SESSION, "not json at all")
         assert proc.returncode == 0
         assert proc.stdout == ""
 
     def test_missing_session_id_or_payload_is_a_noop(self, state):
-        proc = _bash("expectations_reconcile", state)
+        proc = _reconcile_script(state, "", "")
         assert proc.returncode == 0
         assert proc.stdout == ""
 
@@ -426,6 +449,11 @@ class TestStopHookWiring:
 
 
 class TestBothLibraryCopiesStayIdentical:
+    """NOT a differential: these assert facts about files on disk and never
+    consult the implementation under test. They still collect twice under
+    the autouse `impl` fixture, which is harmless but carries no signal —
+    noted so nobody reads the doubled ids as doubled coverage."""
+
     """CLAUDE.md: edit tests/e2e/lib/expectations.sh, copy it over, never
     the reverse. Byte-identity is the drift tripwire."""
 

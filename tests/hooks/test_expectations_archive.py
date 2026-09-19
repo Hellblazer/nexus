@@ -57,25 +57,38 @@ def _bash(script: str, state: Path) -> subprocess.CompletedProcess:
     dispatches on the name rather than parsing shell.
     """
     if _IMPL == "python":
-        verb = textwrap.dedent(script).strip()
+        # Dispatch VERB BY VERB. An earlier version matched the whole script
+        # against one verb name, so a composite two-verb script (the
+        # archive-before-sweep ordering tests) matched nothing, raised,
+        # was caught by a bare except, and fell through to the bash call
+        # below — under BOTH params. Those tests ran bash twice under
+        # different labels while reporting python coverage, which is the
+        # vacuous-gate shape this file's own obligation guard exists to
+        # prevent and could not see. Found by the bead .9 critique.
+        verbs = [line.strip() for line in textwrap.dedent(script).splitlines() if line.strip()]
+        supported = {
+            "expectations_archive": expectations.expectations_archive,
+            "expectations_sweep": expectations.expectations_sweep,
+        }
+        unsupported = [v for v in verbs if v not in supported]
+        if unsupported:
+            # LOUD, not a silent bash fallback: a test id that says
+            # "python" must never quietly run bash instead.
+            raise _UnsupportedInPython(
+                f"{unsupported!r} is not a ported verb. Mark this test "
+                "bash-only rather than letting it claim python coverage."
+            )
         prior = os.environ.get("XDG_STATE_HOME")
         os.environ["XDG_STATE_HOME"] = str(state)
         try:
-            if verb == "expectations_archive":
-                expectations.expectations_archive()
-            elif verb == "expectations_sweep":
-                expectations.expectations_sweep()
-            else:  # a shell-only construction this file still needs bash for
-                raise _UnsupportedInPython(verb)
-        except _UnsupportedInPython:
-            pass
-        else:
-            return _Result()
+            for verb in verbs:
+                supported[verb]()
         finally:
             if prior is None:
                 os.environ.pop("XDG_STATE_HOME", None)
             else:
                 os.environ["XDG_STATE_HOME"] = prior
+        return _Result()
     env = dict(os.environ, XDG_STATE_HOME=str(state), HOME=str(state / "home"))
     return subprocess.run(
         ["bash", "-c", f"source {LIB}\n{textwrap.dedent(script)}"],
@@ -191,6 +204,11 @@ class TestArchiveWinsTheRaceWithSweep:
 
 
 class TestBothLibraryCopiesStayIdentical:
+    """NOT a differential: these assert facts about files on disk and never
+    consult the implementation under test. They still collect twice under
+    the autouse `impl` fixture, which is harmless but carries no signal —
+    noted so nobody reads the doubled ids as doubled coverage."""
+
     """CLAUDE.md: edit tests/e2e/lib/expectations.sh, copy it over, never the reverse."""
 
     def test_plugin_copy_is_byte_identical(self):

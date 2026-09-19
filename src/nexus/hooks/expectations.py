@@ -284,8 +284,12 @@ def _claim_credit(
                     return True
             except OSError:  # pragma: no cover — vanished between calls
                 continue
-        except OSError:  # pragma: no cover — fail open, never block a stop
-            return False
+        except OSError:  # pragma: no cover — any other failure: try the next slot
+            # The reconciliation loop above swallows every OSError and
+            # continues, and bash's `ln -s ... 2>/dev/null` does the same
+            # for the claim. Returning here instead made one transient
+            # failure mid-search look like exhaustion.
+            continue
     return False
 
 
@@ -319,7 +323,20 @@ def _readable_rows(session_id: str) -> list[list[str]] | None:
         text = Path(file).read_text()
     except OSError:
         return None
-    return [line.split("\t") for line in text.splitlines() if line]
+    # SPLIT ON \n ONLY, deliberately, to match `awk -F'\t'` with the
+    # default RS="\n": awk leaves a literal \r attached to the last field
+    # of a \r\n-terminated row, so a CRLF ledger's START type no longer
+    # string-equals its EXPECT type and bash reports UNDECLARED on a
+    # well-formed file. `splitlines()` strips \r cleanly and disagreed.
+    #
+    # This REPRODUCES A BASH DEFECT on purpose. The port's bar for Phase 2
+    # is that the two agree exactly, because a live session can be written
+    # by one and read by the other, and a port that silently "fixes" a
+    # reader changes what a shared ledger means mid-flight. The writer here
+    # only ever emits \n, so a CRLF ledger needs a hand edit or a Windows
+    # tool to occur at all. Bead nexus-q02nx.14 deletes the bash library
+    # and is where this should be corrected rather than matched.
+    return [line.split("\t") for line in text.split("\n") if line]
 
 
 def expectations_mark_blocked(session_id: str, agent_id: str, cause: str = "") -> None:
@@ -479,11 +496,19 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
 
     for row in rows:
         verb = row[1] if len(row) > 1 else ""
-        if verb == "START" and len(row) > 3:
+        if verb == "START" and len(row) > 2:
+            # A row with FEWER fields is still audited, because awk reads a
+            # missing $4 as "" rather than skipping the row. Requiring 4
+            # fields made a truncated START — a crash mid-write, or a
+            # pre-slots-era ledger — report CLEAN, which inverts the
+            # fail-closed contract of the one function whose entire job is
+            # to surface that anomaly. Measured against bash: a 3-field
+            # START gives rc=2 with `UNDECLARED\t<id>\t` there and gave
+            # rc=0 here.
             agent_id = row[2]
             if agent_id not in stype:
                 order.append(agent_id)
-                stype[agent_id] = row[3]
+                stype[agent_id] = row[3] if len(row) > 3 else ""
         elif verb == "EXPECT" and len(row) > 2:
             # Dedupe by dispatch_id. The writing hook takes a BOUNDED lock,
             # so a double registration that outlasts the budget can append
@@ -633,8 +658,7 @@ def expectations_owes_report(
     if "\t" in agent_id or "\n" in agent_id:
         return OwesVerdict(False)
 
-    rows = _readable_rows(session_id)
-    if rows is None:
+    if _readable_rows(session_id) is None:
         return OwesVerdict(False)
     file = expectations_file(session_id)
     enc = _type_enc(agent_type)
@@ -645,6 +669,20 @@ def expectations_owes_report(
         return OwesVerdict(True, "lock-exhausted")
 
     try:
+        # READ AFTER THE LOCK, NEVER BEFORE. Round 3's chosen fix is
+        # "decision-only-under-lock": the ledger is read once the lock is
+        # held, precisely so a decision is never made from data captured
+        # before the wait. Reading first and deciding on those rows
+        # reopens the window the lock exists to close — a same-type
+        # dispatch whose EXPECT row lands DURING our lock-wait would be
+        # invisible, and the verdict would be "does not owe" against a
+        # ledger that plainly shows unspent credit. The ceiling invariant
+        # still holds in that state, so no concurrency test keyed on it
+        # would notice; what is lost is DETECTION, in the one direction
+        # this subsystem exists to protect.
+        rows = _readable_rows(session_id)
+        if rows is None:  # vanished during the wait — fail open
+            return OwesVerdict(False)
         verdict, credit, spent, owners = _read_type_credit(rows, agent_type, agent_id)
         if verdict == "self":
             # A CONSUMED row already names this agent: it is re-entering
@@ -743,6 +781,7 @@ def expectations_census(session_id: str) -> LedgerReport:
     seen_dispatch: set[str] = set()
     verb_rows: dict[str, int] = {}
     expect_names: set[str] = set()
+    expect_order: list[str] = []
     expect_rows: dict[str, int] = {}
     credit: dict[str, int] = {}
     start_count: dict[str, int] = {}
@@ -771,6 +810,8 @@ def expectations_census(session_id: str) -> LedgerReport:
         verb_rows[verb] = verb_rows.get(verb, 0) + 1
 
         if verb == "EXPECT":
+            if who not in expect_names:
+                expect_order.append(who)
             expect_names.add(who)
             expect_rows[who] = expect_rows.get(who, 0) + 1
             credit[who] = credit.get(who, 0) + 1
@@ -824,7 +865,14 @@ def expectations_census(session_id: str) -> LedgerReport:
         cls[terminal] = cls.get(terminal, 0) + 1
 
     expected_no_start = 0
-    for name in sorted(expect_names):
+    # FIRST-APPEARANCE order, not alphabetical. bash iterates an awk
+    # associative array here, whose order is implementation-defined —
+    # observed emitting file order, which alphabetical sorting reversed for
+    # a two-name ledger. Neither "unspecified" nor "alphabetical" is
+    # reproducible or meaningful, so this pins the one order a reader would
+    # expect from an append-only log, and the differential compares these
+    # lines as a SET because bash's own order is not a contract.
+    for name in expect_order:
         if start_count.get(name, 0) < expect_rows.get(name, 0):
             lines.append(f"EXPECTED_NO_START\t{name}")
             expected_no_start += 1
@@ -932,6 +980,7 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
         return LedgerReport()  # ABSENT: no ground truth, nothing to reconcile
 
     harness_ids = {i for i in identities if i}
+    harness_order = list(dict.fromkeys(i for i in identities if i))
     unidentified = sum(1 for i in identities if not i)
 
     order: list[str] = []
@@ -957,7 +1006,7 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
             stranded += 1
 
     undeclared_tasks = 0
-    for ident in sorted(harness_ids):
+    for ident in harness_order:  # first appearance; see census's note
         if ident not in stype:
             lines.append(f"UNDECLARED_TASK\t{ident}")
             undeclared_tasks += 1

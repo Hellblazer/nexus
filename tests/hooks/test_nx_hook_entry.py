@@ -22,6 +22,8 @@ import os
 import subprocess
 import sys
 import textwrap
+
+from nexus._hook_runtime.entry import _LEDGER_CRASH_EXIT
 from pathlib import Path
 
 from nexus._hook_runtime import entry
@@ -335,3 +337,71 @@ def test_an_unimportable_verb_is_still_diagnosable_on_stderr(tmp_path: Path) -> 
     assert "this_module_does_not_exist_rdr215" in proc.stderr, (
         "the log must name the module that could not be imported"
     )
+
+
+# -- a crashed LEDGER verb is distinguishable from a clean one (Sam, 2026-09-19) --
+
+_CLEAN_LEDGER_VERB = textwrap.dedent(
+    """
+    from nexus._hook_runtime._io import HookResult
+
+    def run(payload):
+        return HookResult(exit_code=0)
+    """
+)
+
+
+def test_a_crashed_ledger_verb_exits_the_reserved_code(tmp_path: Path) -> None:
+    """A ledger verb's exit code IS its contract, so a crash must not wear a
+    vocabulary value.
+
+    undeclared uses 0/1/2/3, reconcile 0/2/4, census 0/1, and a caller
+    branches on every one. Before this, a crashed verb exited 0 —
+    indistinguishable from a clean reconcile, which bead .13 reads as
+    "nothing stranded". That is a silent miss in the subsystem built to
+    catch silent misses. 70 is sysexits EX_SOFTWARE and collides with no
+    ledger vocabulary.
+    """
+    fixtures = _write_fixture_verb(tmp_path, "boom_verb", _BOOM_VERB)
+    env = _env(
+        tmp_path,
+        PYTHONPATH=str(fixtures),
+        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"reconcile": "boom_verb"}),
+        _NX_HOOK_TEST_LEDGER_VERBS="reconcile",
+    )
+    proc = _run(["reconcile"], env, stdin="{}")
+    assert proc.returncode == 70, (
+        f"a crashed ledger verb must not exit a vocabulary value: {proc.returncode}"
+    )
+
+
+def test_a_clean_ledger_verb_still_exits_its_own_code(tmp_path: Path) -> None:
+    """The reserved code must not swallow the contract it protects."""
+    fixtures = _write_fixture_verb(tmp_path, "clean_verb", _CLEAN_LEDGER_VERB)
+    env = _env(
+        tmp_path,
+        PYTHONPATH=str(fixtures),
+        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"reconcile": "clean_verb"}),
+        _NX_HOOK_TEST_LEDGER_VERBS="reconcile",
+    )
+    assert _run(["reconcile"], env, stdin="{}").returncode == 0
+
+
+def test_a_crashed_NON_ledger_verb_still_exits_zero(tmp_path: Path) -> None:
+    """Unchanged, and deliberately: for a non-ledger hook a crash IS the
+    hook choosing to say nothing, which is what failing open means. The
+    reserved code applies only where an exit code is a contract."""
+    fixtures = _write_fixture_verb(tmp_path, "boom_verb", _BOOM_VERB)
+    env = _env(
+        tmp_path,
+        PYTHONPATH=str(fixtures),
+        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"plain": "boom_verb"}),
+    )
+    assert _run(["plain"], env, stdin="{}").returncode == 0
+
+
+def test_the_reserved_code_is_outside_every_ledger_vocabulary(tmp_path: Path) -> None:
+    """A reserved code that collided with a real verdict would be worse than
+    none: it would silently become that verdict."""
+    vocabularies = {0, 1, 2, 3, 4}  # undeclared 0/1/2/3, reconcile 0/2/4, census 0/1
+    assert _LEDGER_CRASH_EXIT not in vocabularies
