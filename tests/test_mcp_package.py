@@ -77,6 +77,7 @@ def test_core_registered_tools():
         "hook_agent_dispatch_expect",     # bead .10
         "hook_subagent_start_stamp",      # bead .11
         "hook_subagent_stop",             # bead .12
+        "hook_stop_verification",         # bead .13
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

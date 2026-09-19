@@ -105,6 +105,27 @@
       },
       "qualname": "_make_tool_function.<locals>._tool"
     },
+    "hook_stop_verification": {
+      "is_async": false,
+      "module": "nexus.mcp.hooks",
+      "parameters": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "_make_tool_function.<locals>._tool"
+    },
     "hook_subagent_start_stamp": {
       "is_async": false,
       "module": "nexus.mcp.hooks",

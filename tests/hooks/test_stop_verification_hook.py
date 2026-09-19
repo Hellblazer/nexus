@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,49 @@ def _make_payload(stop_hook_active: bool = False) -> str:
     })
 
 
+#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
+_IMPL = "bash"
+
+
+@pytest.fixture(params=["bash", "python"], autouse=True)
+def impl(request):
+    """Run every assertion against BOTH implementations.
+
+    RDR-215 bead nexus-q02nx.13 ports this hook to
+    ``nexus.hooks.stop_verification``. The script stays wired until bead
+    .21 re-declares its ``hooks.json`` entry, so both are driven and each
+    assertion becomes a differential. Drop the "bash" param when it goes.
+    """
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "bash"
+
+
+#: A child process, not an in-process call: these tests vary ``cwd`` and the
+#: environment per case, and the hook reads both at call time. Driving it in
+#: process would mean ``os.chdir`` and ``os.environ`` mutation, which are
+#: process-global -- the same hazard that made the ledger's contention seams
+#: environment variables rather than an in-process seam.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import stop_verification
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: stop_verification.run(payload), "stop_verification")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+
 def _run_hook(
     stdin: str = "",
     *,
@@ -39,12 +83,17 @@ def _run_hook(
     }
     if not stdin:
         stdin = _make_payload()
+    argv = (
+        [sys.executable, "-c", _PY_DRIVER]
+        if _IMPL == "python"
+        else ["bash", str(SCRIPT)]
+    )
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        argv,
         input=stdin,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
         env=env,
         cwd=cwd,
     )

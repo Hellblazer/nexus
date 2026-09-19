@@ -77,6 +77,7 @@ from pydantic import Field as _PydanticField
 from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.hooks.agent_dispatch_expect import run as _run_agent_dispatch_expect
 from nexus.hooks.auto_approve import run as _run_auto_approve
+from nexus.hooks.stop_verification import run as _run_stop_verification
 from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
 from nexus.hooks.subagent_stop import run as _run_subagent_stop
 
@@ -253,6 +254,23 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
             "blocks a named background teammate's stop exactly once when its "
             "transcript shows no completion report, or when it reported but "
             "its storage writes failed"
+        ),
+    ),
+    HookToolSpec(
+        name="stop_verification",
+        run=_run_stop_verification,
+        fields=("session_id",),
+        field_docs={
+            "session_id": (
+                "The session whose RDR-184 ledger is reconciled against the "
+                "harness's own task list. Its only other use is naming the "
+                "session in the warning."
+            ),
+        },
+        summary=(
+            "warns at session close about uncommitted changes, beads still "
+            "in progress, and background agents the ledger lists as "
+            "outstanding — advisory only, it can never block a stop"
         ),
     ),
 )
