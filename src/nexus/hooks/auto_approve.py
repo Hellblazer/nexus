@@ -136,6 +136,7 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
 _ALLOWED_HOOK_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__plugin_conexus_nexus__hook_auto_approve",
+        "mcp__plugin_conexus_nexus__hook_agent_dispatch_expect",
     }
 )
 

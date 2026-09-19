@@ -75,6 +75,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import Field as _PydanticField
 
 from nexus._hook_runtime._io import HookResult, never_fail
+from nexus.hooks.agent_dispatch_expect import run as _run_agent_dispatch_expect
 from nexus.hooks.auto_approve import run as _run_auto_approve
 
 __all__ = [
@@ -145,6 +146,35 @@ class HookToolSpec:
 # future edit adds it by habit or via an automated "every hook module"
 # sweep. Do not build such a sweep without carrying that exclusion with it.
 HOOK_TOOLS: tuple[HookToolSpec, ...] = (
+    HookToolSpec(
+        name="agent_dispatch_expect",
+        run=_run_agent_dispatch_expect,
+        fields=("session_id", "tool_name", "tool_use_id", "tool_input"),
+        structured_fields=frozenset({"tool_input"}),
+        field_docs={
+            "session_id": "The session whose RDR-184 ledger this dispatch is recorded in.",
+            "tool_name": (
+                "The dispatching tool. Only Agent and Task write a row; "
+                "anything else is skipped with a named diagnostic."
+            ),
+            "tool_use_id": (
+                "The dispatch's own id, written as the row's dispatch_id and "
+                "used to refuse a duplicate EXPECT — a duplicate inflates the "
+                "credit pool and masks an undeclared start."
+            ),
+            "tool_input": (
+                "The dispatch arguments. subagent_type keys the row (verbatim, "
+                "colon included; absent means general-purpose, which is what "
+                "the harness actually starts) and run_in_background chooses "
+                "background or sync."
+            ),
+        },
+        summary=(
+            "records one RDR-184 EXPECT row per agent dispatch, before the "
+            "dispatch, so a background agent that stops without reporting can "
+            "be caught"
+        ),
+    ),
     HookToolSpec(
         name="auto_approve",
         run=_run_auto_approve,
