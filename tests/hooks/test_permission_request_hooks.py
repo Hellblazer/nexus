@@ -7,17 +7,18 @@ Both hooks must:
 3. Agree on the output format
 
 **RDR-215 bead nexus-q02nx.4 retargeted the nx half of this file.** The nx
-plugin's decision logic no longer lives only in
+plugin's decision logic no longer lives in
 ``conexus/hooks/scripts/auto-approve-nx-mcp.sh``: it is ported to
 ``nexus.hooks.auto_approve.run()``, registered as the ``hook_auto_approve``
 tool on the live ``nx-mcp`` server (``nexus.mcp.hooks.HOOK_TOOLS``). Every nx
-assertion below now drives that tool through the real server's in-process
-dispatch (:func:`_run_nx_hook`) rather than spawning the bash script --
-"the registered tool through the server's in-process dispatch" the RDR's
-Tests section calls for. The bash script itself is UNCHANGED and still on
-disk: ``conexus/hooks/hooks.json`` still wires it, its own hard-coded exact
-byte-for-byte behaviour is fixed by :class:`TestNxPortMatchesBashByteForByte`
-below, and its deletion is a later bead (nexus-q02nx.22). The sn plugin is
+assertion below drives that tool through the real server's in-process
+dispatch (:func:`_run_nx_hook`) rather than spawning a script -- "the
+registered tool through the server's in-process dispatch" the RDR's Tests
+section calls for. Bead nexus-q02nx.21 re-declared both the PreToolUse and
+PermissionRequest ``hooks.json`` entries to that mcp_tool and deleted the
+bash script; the byte-for-byte parity class that used to compare the port
+against it (``TestNxPortMatchesBashByteForByte``) is gone with it, its
+scenarios already covered directly elsewhere in this file. The sn plugin is
 not ported yet (bead nexus-q02nx.23): every sn assertion still spawns
 ``auto-approve-sn-mcp.sh`` exactly as before.
 """
@@ -318,6 +319,8 @@ class TestPreToolUseApproval:
     One script per plugin serves both events, so the allowlist has one home.
     """
 
+    # NX_SCRIPT is deleted (RDR-215 bead nexus-q02nx.21); used here only as
+    # a path anchor for hooks.json's directory, never read.
     NX_HOOKS = NX_SCRIPT.parent.parent / "hooks.json"
     SN_HOOKS = SN_SCRIPT.parent.parent / "hooks.json"
 
@@ -369,63 +372,40 @@ class TestPreToolUseApproval:
         assert "mcp__plugin_conexus_.*" in _pretooluse_matchers(self.NX_HOOKS)
         assert "mcp__plugin_sn_.*" in _pretooluse_matchers(self.SN_HOOKS)
 
-    def test_pretooluse_entry_runs_the_same_script_as_permissionrequest(self) -> None:
-        for hooks_json, script_name in (
-            (self.NX_HOOKS, "auto-approve-nx-mcp.sh"),
-            (self.SN_HOOKS, "auto-approve-sn-mcp.sh"),
-        ):
+    def test_pretooluse_entry_runs_the_same_handler_as_permissionrequest(self) -> None:
+        """Each plugin's PreToolUse and PermissionRequest entries must
+        invoke the identical handler — a bash ``command`` for sn (bead
+        nexus-q02nx.23, not yet ported), the ``hook_auto_approve``
+        mcp_tool for nx (RDR-215 bead nexus-q02nx.21 re-declared it away
+        from the bash ``command`` shape this test used to compare)."""
+
+        def handlers(hooks_json: Path, event: str) -> set[str]:
             data = json.loads(hooks_json.read_text())["hooks"]
-            def commands(event: str) -> set[str]:
-                return {
-                    h["command"]
-                    for entry in data.get(event, [])
-                    if entry["matcher"].startswith("mcp__plugin_")
-                    for h in entry["hooks"]
-                }
-            pre, perm = commands("PreToolUse"), commands("PermissionRequest")
-            assert pre == perm, f"{hooks_json}: PreToolUse {pre} vs PermissionRequest {perm}"
-            assert any(script_name in c for c in pre)
+            out: set[str] = set()
+            for entry in data.get(event, []):
+                if not entry["matcher"].startswith("mcp__plugin_"):
+                    continue
+                for h in entry["hooks"]:
+                    out.add(h["tool"] if h.get("type") == "mcp_tool" else h["command"])
+            return out
+
+        nx_pre, nx_perm = handlers(self.NX_HOOKS, "PreToolUse"), handlers(self.NX_HOOKS, "PermissionRequest")
+        assert nx_pre == nx_perm == {"hook_auto_approve"}, (
+            f"{self.NX_HOOKS}: PreToolUse {nx_pre} vs PermissionRequest {nx_perm}"
+        )
+
+        sn_pre, sn_perm = handlers(self.SN_HOOKS, "PreToolUse"), handlers(self.SN_HOOKS, "PermissionRequest")
+        assert sn_pre == sn_perm, f"{self.SN_HOOKS}: PreToolUse {sn_pre} vs PermissionRequest {sn_perm}"
+        assert any("auto-approve-sn-mcp.sh" in c for c in sn_pre)
 
 
-# ── nx port vs nx bash: byte-for-byte parity ──────────────────────────────
-
-
-class TestNxPortMatchesBashByteForByte:
-    """RDR-215 bead nexus-q02nx.4's own verification bullet: "asserting
-    byte-identical output to the bash script's for every fixture."
-
-    ``conexus/hooks/scripts/auto-approve-nx-mcp.sh`` is unedited by this
-    bead and stays wired in ``hooks.json`` until nexus-q02nx.21/.22. Every
-    tool name below is drawn from the bash script's OWN case list (never a
-    hook_-prefixed name -- the bash script predates every hook_ tool and
-    cannot match one; that is the one deliberate divergence the port adds,
-    documented in nexus.hooks.auto_approve's module docstring and NOT
-    covered by this parity class).
-    """
-
-    @pytest.mark.parametrize(
-        "tool_name",
-        [
-            "mcp__plugin_conexus_nexus__search",
-            "mcp__plugin_conexus_nexus__scratch",
-            "mcp__plugin_conexus_nexus-catalog__search",
-            "mcp__plugin_conexus_sequential-thinking__sequentialthinking",
-            "mcp__plugin_conexus_nexus__daemon_uninstall",  # deliberately excluded from both
-            "mcp__plugin_sn_serena__find_file",  # matches neither
-            "mcp__other_plugin__tool",  # matches neither
-        ],
-    )
-    def test_permissionrequest_output_matches_bash(self, tool_name: str) -> None:
-        assert _run_nx_hook(tool_name) == _run_hook(NX_SCRIPT, tool_name)
-
-    @pytest.mark.parametrize(
-        "tool_name",
-        [
-            "mcp__plugin_conexus_nexus__search",
-            "mcp__plugin_conexus_sequential-thinking__sequentialthinking",
-            "mcp__plugin_conexus_nexus__daemon_uninstall",
-            "mcp__other_plugin__tool",
-        ],
-    )
-    def test_pretooluse_output_matches_bash(self, tool_name: str) -> None:
-        assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == _run_pretooluse(NX_SCRIPT, tool_name)
+# TestNxPortMatchesBashByteForByte REMOVED (RDR-215 bead nexus-q02nx.21):
+# it drove conexus/hooks/scripts/auto-approve-nx-mcp.sh, deleted in this
+# same change now that hooks.json re-declares both the PreToolUse and
+# PermissionRequest nx entries to the hook_auto_approve mcp_tool. Every
+# tool name it parametrized over is covered directly elsewhere in this
+# file: test_approves_nexus_catalog_tool / test_approves_hook_tools /
+# test_ignores_sn_tools / test_ignores_unrelated_tools for the allow/deny
+# shapes, TestDestructiveToolsRequireManualApproval for
+# mcp__plugin_conexus_nexus__daemon_uninstall's exclusion, and
+# TestPreToolUseApproval for the PreToolUse variant.
