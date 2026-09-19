@@ -112,10 +112,15 @@ the real tree (mirrors ``tests/test_skip_bound_lint.py``'s
     variable (``$``), a home-relative prefix (``~``), a brace/angle
     placeholder, a glob character, or a known template marker (``NNN``,
     ``X.Y.Z``, ``vX.Y.Z``) are out of scope for the same reason: none of
-    them names a literal path this check could resolve. ``service/target/``
-    is additionally excluded -- it is git-ignored build output (confirmed:
-    ``git check-ignore service/target`` matches ``.gitignore:54``), so its
-    presence or absence says nothing about DOCUMENTATION rot.
+    them names a literal path this check could resolve. Anything GIT IGNORES
+    is excluded, asked of ``git check-ignore`` rather than hardcoded: this
+    check's name says "repo path", and build output such as ``service/target``
+    (``.gitignore:54``) is not in the repo, so its absence from a fresh
+    checkout is not documentation rot. A referenced path can be missing for
+    four reasons -- build output, otherwise gitignored, living in another
+    repo, or a genuinely rotten reference -- and only the last is a finding.
+    Git separates the first two mechanically; the other two need a human, via
+    ``PATH_EXISTS_ALLOWLIST``.
 
 (c) ``scan_globs`` -- inline single-backtick tokens shaped like a glob
     (contains ``*``, or the specific ``[0-9]`` digit-class shape the
@@ -155,6 +160,7 @@ This module does not re-implement or shadow:
 
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 from collections.abc import Sequence
@@ -422,19 +428,63 @@ def _unallowlisted_absorption_violations(
 _TOKEN_RE = re.compile(r"`([^`\n]+)`")
 _DISALLOWED_TOKEN_CHARS: tuple[str, ...] = ("$", "~", "{", "}", "<", ">", " ", "*")
 
-#: Confirmed: `git check-ignore service/target` matches `.gitignore:54`.
-#: Build output; its presence/absence on disk says nothing about doc rot.
-#:
-#: BOTH FORMS, and the bare one is why: this shipped with the trailing-slash
-#: form alone, which misses a doc citing the directory itself as
-#: `service/target` (AGENTS.md:222 does). That reference exists on any box
-#: that has built the engine and is absent on a fresh CI checkout, so the
-#: check was green locally and red in CI for every author who had ever run
-#: `scripts/build-gate-jar.sh` — a gate whose verdict depended on untracked
-#: build output rather than on the tree. Allowlisting the citation would have
-#: recorded it as an exception; it is not one, it is the same build output
-#: this tuple already exempts.
-_BUILD_OUTPUT_PREFIXES: tuple[str, ...] = ("service/target/", "service/target")
+@functools.lru_cache(maxsize=1)
+def _gitignored(paths: tuple[str, ...]) -> frozenset[str]:
+    """The subset of *paths* git ignores, asked of git rather than guessed.
+
+    This check's name says "referenced repo path". Build output is not in the
+    repo, so its absence from a fresh checkout is not documentation rot --
+    `service/target` is gitignored (.gitignore:54) and exists on any box that
+    has run build-gate-jar.sh.
+
+    That distinction shipped WRONG the first time and is why this asks git.
+    The original exclusion was a hardcoded prefix tuple `("service/target/",)`,
+    with a trailing slash, so the bare token `service/target` in AGENTS.md did
+    not match it. It passed every local run because the authoring box HAD the
+    directory on disk, so the existence test succeeded and the exclusion was
+    never reached; CI's fresh checkout has no build output and it failed there
+    immediately. The check's premise was silently satisfied by ambient state
+    in the only environment it had ever run in -- the exact shape this module
+    exists to catch, committed inside the module that catches it.
+
+    A referenced path can be absent for four reasons: it is build output, it
+    is otherwise gitignored, it lives in another repo, or the reference is
+    genuinely rotten. Only the last is a finding. Asking git separates the
+    first two mechanically; the other two still need a human, which is what
+    PATH_EXISTS_ALLOWLIST is for (credit: nexus-01, 2026-09-19 -- a predicate
+    that cannot tell those apart trains people to allowlist instead of fix).
+    """
+    if not paths:
+        return frozenset()
+    # BOTH forms, and the trailing-slash one is not optional. .gitignore:54 is
+    # `service/target/` -- a DIRECTORY-ONLY pattern. `git check-ignore` has to
+    # decide whether a path is a directory to match one, and it cannot do that
+    # for a path that is not on disk, so on a fresh checkout the bare token
+    # `service/target` comes back NOT ignored while `service/target/` comes
+    # back ignored. Measured on this repo with the directory moved aside:
+    #   service/target           -> not-ignored
+    #   service/target/          -> IGNORED
+    #   service/target/nope.txt  -> IGNORED
+    # This bit twice. The first fix hardcoded the prefix and only worked where
+    # the directory existed; the second asked git but asked it the bare form,
+    # and only worked where the directory existed. Same premise silently
+    # satisfied by ambient state, two fixes running.
+    probe = [p for path in paths for p in (path, f"{path}/")]
+    proc = subprocess.run(  # noqa: S603 -- fixed argv, inputs are repo-relative tokens
+        ["git", "check-ignore", "--stdin"],  # noqa: S607 -- git is on PATH in CI and dev
+        input="\n".join(probe),
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    # rc 0 = some ignored, 1 = none ignored, 128 = real git failure.
+    if proc.returncode not in (0, 1):
+        raise RuntimeError(
+            f"git check-ignore failed (rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+    hits = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    return frozenset(p for p in paths if p in hits or f"{p}/" in hits)
 
 
 def _looks_like_repo_path_token(tok: str) -> bool:
@@ -471,6 +521,7 @@ class PathScanResult:
 
 def scan_referenced_paths(extra_files: Sequence[Path] = ()) -> PathScanResult:
     result = PathScanResult()
+    candidates: list[tuple[str, str, str]] = []  # (rel, token, path_part)
     for f in (*_target_files(), *extra_files):
         if not f.is_file():
             continue
@@ -482,15 +533,19 @@ def scan_referenced_paths(extra_files: Sequence[Path] = ()) -> PathScanResult:
             tok = m.group(1).strip()
             if not _looks_like_repo_path_token(tok):
                 continue
-            path_part = _strip_locator_suffix(tok)
-            if path_part.startswith(_BUILD_OUTPUT_PREFIXES):
-                continue
-            result.tokens_examined += 1
             if tok in seen_this_file:
                 continue
-            if not (REPO_ROOT / path_part).exists():
-                seen_this_file.add(tok)
-                result.violations.append(PathViolation(file=rel, token=tok))
+            seen_this_file.add(tok)
+            candidates.append((rel, tok, _strip_locator_suffix(tok)))
+
+    # One git call for the whole corpus rather than one per token.
+    ignored = _gitignored(tuple(sorted({p for _, _, p in candidates})))
+    for rel, tok, path_part in candidates:
+        if path_part in ignored:
+            continue
+        result.tokens_examined += 1
+        if not (REPO_ROOT / path_part).exists():
+            result.violations.append(PathViolation(file=rel, token=tok))
     return result
 
 
@@ -853,14 +908,53 @@ def test_variable_and_template_paths_are_out_of_scope(tmp_path):
     )
 
 
-def test_build_output_paths_are_excluded(tmp_path):
+@pytest.mark.parametrize(
+    "token",
+    [
+        "service/target/nexus-service",  # a path UNDER the ignored directory
+        "service/target",  # the BARE directory -- the CI failure
+        # Gitignored AND guaranteed absent from disk. This is the case the
+        # first version could not have caught: it excluded by hardcoded
+        # prefix, and every local run had service/target on disk, so the
+        # existence check passed before the exclusion was ever consulted.
+        "service/target/this-file-does-not-exist-anywhere",
+    ],
+)
+def test_gitignored_paths_are_excluded_whether_or_not_they_exist(tmp_path, token):
     canary = tmp_path / "test-canary-path-buildout.md"
-    canary.write_text("See `service/target/nexus-service` after building.\n")
+    canary.write_text(f"See `{token}` after building.\n")
     result = scan_referenced_paths(extra_files=[canary])
     hits = [
         v for v in result.violations if v.file.endswith("test-canary-path-buildout.md")
     ]
-    assert hits == [], "a git-ignored service/target/ reference must never be checked"
+    assert hits == [], (
+        f"{token!r} is git-ignored, so it is not in the repo and its absence "
+        "is not documentation rot"
+    )
+
+
+def test_the_gitignore_predicate_asks_git_and_is_not_vacuous():
+    """Non-vacuity for the exclusion itself: git must actually report
+    `service/target` as ignored. If .gitignore changes so it no longer is,
+    the exclusion above silently becomes a no-op and the bare-directory
+    reference in AGENTS.md starts failing again -- this says so out loud
+    instead."""
+    ignored = _gitignored(("service/target", "service/target/nope.txt", "src/nexus"))
+    assert "service/target" in ignored, (
+        "git no longer ignores service/target -- the build-output exclusion "
+        "has quietly become a no-op"
+    )
+    # Disk-independent anchor: a path UNDER the ignored directory matches the
+    # pattern whether or not anything is on disk, unlike the bare directory.
+    # If this one ever fails, .gitignore changed; if only the bare one fails,
+    # the both-forms probe in _gitignored regressed.
+    assert "service/target/nope.txt" in ignored, (
+        "a path under service/target is no longer ignored -- .gitignore:54 changed"
+    )
+    assert "src/nexus" not in ignored, (
+        "git reports tracked source as ignored -- the predicate is inverted "
+        "or the git call is failing open"
+    )
 
 
 def test_path_allowlist_is_shrink_only():
