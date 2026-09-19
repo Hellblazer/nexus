@@ -11,7 +11,14 @@ For the **tool catalog** (every tool, parameters, which server it lives on), see
 | `nx search` (CLI) | Quick chunk lookup from the terminal | Text chunks with topic grouping | < 1s |
 | `search()` MCP | Chunk search from agents, with topic scoping | Chunks grouped by topic, with boost | < 1s |
 | `query()` MCP | Document-level retrieval with catalog routing | Best snippet per document + metadata | < 2s |
-| `nx_answer` MCP / `/conexus:query` skill | Multi-step analytical queries | Synthesized answer | 5–15s |
+| `nx_answer` MCP / `/conexus:query` skill | Multi-step analytical queries | Synthesized answer | p50 80s, p95 217s |
+
+`nx_answer`'s latency is measured, not estimated: p50 80.1s, p95 217.1s,
+p99 316.7s, mean 97.7s over 142 executed plans, with 0.7% finishing under 5s
+and 88.7% taking 30s or more. Each operator step spawns a subprocess with its
+own bootstrap floor, so it is a background-shaped call, not an interactive
+one. The tool's own docstring carries the same figures and is the source to
+trust if these drift.
 
 **Rule of thumb**: start with `nx search` for quick lookups. Use `search()` MCP with `topic=` to narrow to a specific knowledge domain. Use `query()` when you need to scope by author, content type, or follow citation links. Use `nx_answer` for questions that require extracting, comparing, or generating across multiple sources.
 
