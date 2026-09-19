@@ -396,3 +396,39 @@ halves only have to agree within a single cut.
   `subagent-start.sh` as the source of an agent's claimant id. They now name
   the SubagentStart hook rather than a script that is being deleted.
   INERT until the next cut.
+
+- `sn/hooks/hooks.json`, `sn/hooks/scripts/subagent_start.py`, `sn/hooks/scripts/session_start.py`, `sn/hooks/scripts/_hook_boundary.py`, `sn/hooks/scripts/auto_approve_sn_mcp.py`, `sn/hooks/scripts/mcp-inject.sh` (deleted), `sn/hooks/scripts/session-start.sh` (deleted), `sn/hooks/scripts/auto-approve-sn-mcp.sh` (deleted), `sn/README.md`:
+  bead: nexus-q02nx.23 — RDR-215 Approach item 8, the sn half. All four
+  entries become exec-form `python3` on plugin-resident scripts, and the
+  three bash wrappers are deleted. `auto_approve_sn_mcp.py` and
+  `worktree_guard.py` were already bundled stdlib-only scripts that the
+  wrappers merely called; the two SubagentStart/SessionStart wrappers had
+  bodies, so those move to `subagent_start.py` and `session_start.py`.
+  Approach item 8 named only three exec targets — the SubagentStart entry
+  had none, which a gate residual caught; `subagent_start.py` is it.
+  NO WHEEL FLOOR, and that is the difference from every other hooks.json
+  entry in this ledger. .21 and .22 above are uncuttable alone because
+  their handlers are wheel-resident (`hook_*` tools, `nx-hook` verbs);
+  these four name `python3` and a path inside sn itself. sn ships no
+  Python package and no server, and nothing here imports `nexus` — that
+  independence is a Cross-Cutting Concern in the RDR, and the port keeps
+  it. So this entry is cuttable on the plugin channel on its own, which
+  is worth saying out loud precisely because the neighbouring entries are
+  not and a reader scanning the file would reasonably assume otherwise.
+  TWO DEFECTS FIXED RATHER THAN CARRIED. `auto-approve-sn-mcp.sh` ended
+  in an unconditional `exit 0` that hid a Python crash completely: the
+  wrapper reported success whatever the Python did, so a broken allowlist
+  looked exactly like an empty one. `session-start.sh` was the opposite
+  and the only script in the whole set whose exit was not unconditionally
+  0 — a bare `cat` with no `2>/dev/null` and no fallback, so a missing
+  section file failed the event. Both now run inside
+  `_hook_boundary.guard`, which logs to stderr and returns 0. The
+  envelope's `mktemp`-failure path goes too: the bash buffered the body
+  into a tempfile and wrapped it from an `EXIT` trap, and when `mktemp`
+  failed the capture no-opped and the sections went out UNWRAPPED, which
+  is the silent-drop shape the envelope exists to prevent. Accumulating
+  and dumping once has no half-wrapped state to reach.
+  INERT until the next cut or release: sessions on the pinned tag keep
+  running the three bash wrappers, which are still on disk there and
+  still correct. Unlike .21's entry this one has no fail-open risk if the
+  halves are split, because nothing it names lives outside sn.

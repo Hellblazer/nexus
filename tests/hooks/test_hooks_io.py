@@ -112,7 +112,8 @@ def test_permission_decision_escapes_embedded_quotes_and_newlines():
 # -- additional_context (the SubagentStart form, no permissionDecision) --------
 
 def test_additional_context_envelope():
-    """subagent-start.sh:32 and sn/mcp-inject.sh's EXIT-trap envelope."""
+    """The EXIT-trap envelope both SubagentStart hooks used before RDR-215
+    ported them to Python (subagent-start.sh:32, sn/mcp-inject.sh)."""
     assert _io.additional_context("SubagentStart", "body text") == (
         '{"hookSpecificOutput": {"hookEventName": "SubagentStart", '
         '"additionalContext": "body text"}}'

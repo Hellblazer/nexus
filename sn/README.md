@@ -106,13 +106,13 @@ sn/
 ├── hooks/
 │   ├── hooks.json                 # SessionStart, SubagentStart, PreToolUse, PermissionRequest
 │   └── scripts/
-│       ├── session-start.sh       # main-conversation reminder
-│       ├── mcp-inject.sh          # SubagentStart injection (JSON envelope)
+│       ├── session_start.py       # main-conversation reminder
+│       ├── subagent_start.py      # SubagentStart injection (JSON envelope)
 │       ├── serena-section.md      # injected Serena guidance
 │       ├── context7-section.md    # injected Context7 guidance
-│       ├── auto-approve-sn-mcp.sh # PreToolUse / PermissionRequest wrapper
-│       ├── auto_approve_sn_mcp.py # the allowlist decision (stdlib only)
+│       ├── auto_approve_sn_mcp.py # PreToolUse / PermissionRequest allowlist decision
 │       ├── worktree_guard.py      # linked-worktree detection + Serena write-tool set
+│       ├── _hook_boundary.py      # the never-fail-the-event boundary all four run inside
 │       ├── worktree-section.md    # injected ahead of the routing table in worktrees
 │       └── serena-tools.txt       # generated Serena tool snapshot
 ├── examples/

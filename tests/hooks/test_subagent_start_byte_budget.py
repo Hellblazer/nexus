@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SN_SCRIPT = _REPO_ROOT / "sn" / "hooks" / "scripts" / "mcp-inject.sh"
+_SN_SCRIPT = _REPO_ROOT / "sn" / "hooks" / "scripts" / "subagent_start.py"
 
 _CONEXUS_PY_DRIVER = """
 import json, sys
@@ -82,7 +82,7 @@ _REAL_SHAPE_PAYLOAD = json.dumps({
 #: the same tree in the same session, before concluding either way.
 _SUBAGENT_START_BUDGET_BYTES = 8200
 
-#: Budget for an isolation:worktree dispatch: sn's mcp-inject.sh adds
+#: Budget for an isolation:worktree dispatch: sn's subagent_start.py adds
 #: worktree-section.md on top of its normal output, and conexus's ported
 #: subagent_start.py resolves T2/Knowledge-Map paths via --git-common-dir
 #: instead of --show-toplevel (see TestWorktreeProjectResolution in
@@ -118,7 +118,7 @@ def _run_conexus(*, cwd: str | None = None, payload: str = _REAL_SHAPE_PAYLOAD, 
 def _run_sn(*, payload: str = _REAL_SHAPE_PAYLOAD, timeout: float = 15) -> str:
     env = {**os.environ, "PATH": os.environ.get("PATH", "")}
     result = subprocess.run(
-        ["bash", str(_SN_SCRIPT)],
+        [sys.executable, str(_SN_SCRIPT)],
         input=payload,
         capture_output=True,
         text=True,
@@ -150,13 +150,13 @@ def test_combined_subagent_start_total_under_budget() -> None:
     # Non-vacuity: both scripts must actually have produced content, or the
     # budget "passes" by measuring nothing.
     assert conexus_bytes > 1000, "nexus.hooks.subagent_start produced suspiciously little content"
-    assert sn_bytes > 100, "sn mcp-inject.sh produced suspiciously little content"
+    assert sn_bytes > 100, "sn subagent_start.py produced suspiciously little content"
 
 
 def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> None:
     """nexus-cnzei.6 fix round (critic Critical 1): a worktree dispatch is
     a real, named, larger case (injection audit: ~12KB vs ~10KB) that the
-    non-worktree test above cannot see — sn's mcp-inject.sh only emits
+    non-worktree test above cannot see — sn's subagent_start.py only emits
     worktree-section.md when it detects a linked worktree
     (sn/hooks/scripts/worktree_guard.py::is_linked_worktree, keyed on the
     payload's own `cwd` field), and conexus's ported subagent_start.py only takes
@@ -191,7 +191,7 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
     })
     sn_ctx = _run_sn(payload=worktree_payload)
     assert "worktree" in sn_ctx.lower(), (
-        "sn mcp-inject.sh did not emit worktree-section.md for a real linked "
+        "sn subagent_start.py did not emit worktree-section.md for a real linked "
         "worktree cwd — the worktree-detection path this test exercises is "
         "not firing, so this test would vacuously pass the smaller, wrong case"
     )

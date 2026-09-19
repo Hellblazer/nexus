@@ -19,8 +19,10 @@ PermissionRequest ``hooks.json`` entries to that mcp_tool and deleted the
 bash script; the byte-for-byte parity class that used to compare the port
 against it (``TestNxPortMatchesBashByteForByte``) is gone with it, its
 scenarios already covered directly elsewhere in this file. The sn plugin is
-not ported yet (bead nexus-q02nx.23): every sn assertion still spawns
-``auto-approve-sn-mcp.sh`` exactly as before.
+sn followed at bead nexus-q02nx.23: its wrapper is gone too, so every sn
+assertion here now runs ``auto_approve_sn_mcp.py`` directly under
+``python3`` -- the exec form ``sn/hooks/hooks.json`` declares, argv-free,
+so the snapshot path resolves the way it does in production.
 """
 from __future__ import annotations
 
@@ -28,19 +30,20 @@ import asyncio
 import importlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 NX_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "auto-approve-nx-mcp.sh"
-SN_SCRIPT = Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "auto-approve-sn-mcp.sh"
+SN_SCRIPT = Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "auto_approve_sn_mcp.py"
 
 
 def _run_hook(script: Path, tool_name: str) -> str:
     """Pipe a PermissionRequest payload into a hook script, return stdout."""
     payload = json.dumps({"tool_name": tool_name})
     result = subprocess.run(
-        ["bash", str(script)],
+        [sys.executable, str(script)],
         input=payload,
         capture_output=True,
         text=True,
@@ -291,7 +294,7 @@ def _run_pretooluse(script: Path, tool_name: str) -> str:
     """Pipe a PreToolUse payload (``hook_event_name`` set) into a hook script."""
     payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool_name})
     result = subprocess.run(
-        ["bash", str(script)],
+        [sys.executable, str(script)],
         input=payload,
         capture_output=True,
         text=True,
@@ -374,10 +377,15 @@ class TestPreToolUseApproval:
 
     def test_pretooluse_entry_runs_the_same_handler_as_permissionrequest(self) -> None:
         """Each plugin's PreToolUse and PermissionRequest entries must
-        invoke the identical handler — a bash ``command`` for sn (bead
-        nexus-q02nx.23, not yet ported), the ``hook_auto_approve``
-        mcp_tool for nx (RDR-215 bead nexus-q02nx.21 re-declared it away
-        from the bash ``command`` shape this test used to compare)."""
+        invoke the identical handler — exec-form ``python3 <script>`` for sn
+        (RDR-215 bead nexus-q02nx.23), the ``hook_auto_approve`` mcp_tool
+        for nx (bead nexus-q02nx.21 re-declared it away from the bash
+        ``command`` shape this test used to compare).
+
+        The sn side joins ``command`` with ``args``. Under exec form the
+        ``command`` alone is the bare word ``python3`` for BOTH events, so
+        comparing it would report agreement no matter which scripts the two
+        entries named — the equality would hold vacuously."""
 
         def handlers(hooks_json: Path, event: str) -> set[str]:
             data = json.loads(hooks_json.read_text())["hooks"]
@@ -386,7 +394,10 @@ class TestPreToolUseApproval:
                 if not entry["matcher"].startswith("mcp__plugin_"):
                     continue
                 for h in entry["hooks"]:
-                    out.add(h["tool"] if h.get("type") == "mcp_tool" else h["command"])
+                    if h.get("type") == "mcp_tool":
+                        out.add(h["tool"])
+                    else:
+                        out.add(" ".join([h["command"], *h.get("args", [])]))
             return out
 
         nx_pre, nx_perm = handlers(self.NX_HOOKS, "PreToolUse"), handlers(self.NX_HOOKS, "PermissionRequest")
@@ -396,7 +407,8 @@ class TestPreToolUseApproval:
 
         sn_pre, sn_perm = handlers(self.SN_HOOKS, "PreToolUse"), handlers(self.SN_HOOKS, "PermissionRequest")
         assert sn_pre == sn_perm, f"{self.SN_HOOKS}: PreToolUse {sn_pre} vs PermissionRequest {sn_perm}"
-        assert any("auto-approve-sn-mcp.sh" in c for c in sn_pre)
+        assert all(c.startswith("python3 ") for c in sn_pre), sn_pre
+        assert any(c.endswith("/auto_approve_sn_mcp.py") for c in sn_pre), sn_pre
 
 
 # TestNxPortMatchesBashByteForByte REMOVED (RDR-215 bead nexus-q02nx.21):
