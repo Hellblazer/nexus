@@ -183,7 +183,47 @@ Measured in this repository on 2026-09-19, at develop `7f7cb25a0`:
 
 ### Key Discoveries
 
-**Verified.** The four rows above.
+**Verified.** The four rows above, plus the contract analysis below
+(codebase-deep-analyzer dispatch, 2026-09-19; full record T2
+`nexus_rdr/217-hybrid-search-contract-analysis` [26496], findings
+`nexus_rdr/217-research-1` through `-7`).
+
+- **✅ Verified** (source search) — **The hybrid route is NOT a superset of
+  `/search`.** A row with no text signal never appears, however close its
+  vector; zero text candidates returns an empty list with no silent vector
+  fallback. So this is a *different* retrieval, not an upgraded one, and
+  making it the default would lose results `nx search` returns today.
+  *Source: `PgVectorRepository.java:1140`.*
+- **✅ Verified** (source search) — Rerank parity. Both routes share one tail,
+  `VectorHandler#sendSearchResult`, so `rerank` / `rerank_top_k` dispatch
+  identically. A client switching routes neither gains nor loses reranking.
+  *Source: `VectorHandler.java:540`, invoked at `:516` and `:577`; pinned by
+  `RerankStageIntegrationTest.java:270`
+  `hybridSearchCarriesTheSameRerankEnvelope`.*
+- **✅ Verified** (source search) — Request and response contracts are
+  identical. Same field set on both handlers; at DDL level `plain_search_<dim>`
+  and both branches behind `/hybrid-search` declare a byte-identical
+  `RETURNS TABLE(id, content, collection, distance, metadata, retention)`. The
+  live route selects **no** fusion component — no ts_rank, no trigram score,
+  no RRF score, only cosine distance.
+  *Source: `VectorHandler.java:503` and `:564`;
+  `vectors-017-collection-scoped-tombstone-filter.xml`.*
+- **✅ Verified** (source search) — The route is production-hardened, not
+  harness-shaped. Dedicated tenant tests (cross-tenant bearer rejection,
+  no-pg-backend), the same `tenantScope.withTenant` and `requireTenant` as
+  `searchWithTokens`, and the skipped-collections header, all shared with
+  `/search`. No conexus-only assumption found. This removes the
+  scope-tripling risk this RDR was drafted under.
+  *Source: `VectorHybridHttpTest.java`.*
+- **✅ Verified** (source search) — `SearchResult.hybrid_score` and
+  `topic_boost` in the Python client are a **naming collision only**:
+  client-side post-retrieval scoring over the distance `/search` returns,
+  computed in `nexus/scoring.py`. Nothing to do with engine-side fusion.
+- **✅ Verified** (source search) — The selective-versus-HNSW-first dispatch
+  branch is server-side and invisible to the client; no response field says
+  which branch served a call. That dispatch is what BUG-0148 flipped under
+  stale planner statistics. Exposing it would be a new engine field and is
+  **out of scope** for a thin client method.
 
 **Documented.** The BUG-0148 outage and the "zero nexus-side callers, conexus
 is its only consumer" observation, both cited in Gap 2. The schema, index and
@@ -250,7 +290,12 @@ ranking code changing (nexus-4lnn1).
 result shape as the existing search methods.
 
 **Phase 3 — the surface decision, and it is Sam's.** Whether the lexical leg is
-a new flag, a default, or a per-corpus setting. This RDR does not pre-empt it.
+a new flag, a default, or a per-corpus setting. This RDR does not pre-empt it,
+but research has narrowed it: **the hybrid route cannot be a silent default**,
+because it is not a superset of `/search`. A row with no text signal never
+appears on it, so switching `nx search` over wholesale would lose results the
+vector path returns today. The surface must be additive (a union of both legs)
+or an explicit mode.
 Note that `--hybrid` survives as the git-frecency switch and reusing the name
 for a second meaning would be worse than either alternative.
 
@@ -258,7 +303,13 @@ for a second meaning would be worse than either alternative.
 it.** BUG-0148's failure mode is live and planner-dependent; its remediation
 was a manual `ANALYZE`, not a fix. Any nexus caller inherits that exposure.
 The detector: a fused query that returns zero rows where the vector leg alone
-returns some is a failure, asserted on the fused path rather than reported.
+returns some is a failure, asserted rather than reported. **It requires two
+calls, not one.** Research corrected an earlier draft of this phase that
+assumed a single response could carry the signal: a zero-row hybrid response is
+a legitimate outcome (no text candidates), and the response carries no field
+naming match counts or which leg contributed, so one response cannot
+distinguish a true zero from a gate that matched nothing for the wrong reason.
+The detector calls `/search` and `/hybrid-search` and diffs them client-side.
 Zero rows in production while every health signal stayed green is the same
 shape as a gate passing over a scan that matched nothing, and this project's
 own doctrine (nexus-moht0) is that a sweep which found nothing to check is a
