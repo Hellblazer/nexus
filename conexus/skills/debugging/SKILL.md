@@ -10,12 +10,15 @@ Delegates to the **debugger** agent.
 
 ## Model Selection
 
-Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+Default: **opus** (`conexus/agents/debugger.md` pins `model: opus` in its
+frontmatter, and an agent's own declaration beats the session default, so
+omitting `model` on the Agent tool gets opus). Pass `model: sonnet`
+explicitly for the cheap end of the table below:
 
 | Task Shape | Model | When |
 |-----------|-------|------|
-| Single test failure, clear stack trace | sonnet (default) | Most debugging |
-| Multi-component, non-deterministic, or cross-module | opus | Flaky tests, race conditions, system-level |
+| Single test failure, clear stack trace | sonnet (pass it) | Most debugging |
+| Multi-component, non-deterministic, or cross-module | opus (default) | Flaky tests, race conditions, system-level |
 
 ## Code Navigation
 

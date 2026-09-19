@@ -12,12 +12,15 @@ Delegates to the **deep-analyst** agent.
 
 ## Model Selection
 
-Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+Default: **opus** (`conexus/agents/deep-analyst.md` pins `model: opus` in its
+frontmatter, and an agent's own declaration beats the session default, so
+omitting `model` on the Agent tool gets opus). Pass `model: sonnet`
+explicitly for the cheap end of the table below:
 
 | Task Shape | Model | When |
 |-----------|-------|------|
-| Single-module or focused question | sonnet (default) | Most analysis tasks |
-| >3 modules, system-level, or novel architecture | opus | Cross-cutting investigations |
+| Single-module or focused question | sonnet (pass it) | Most analysis tasks |
+| >3 modules, system-level, or novel architecture | opus (default) | Cross-cutting investigations |
 
 ## When This Skill Activates
 

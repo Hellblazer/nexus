@@ -32,6 +32,14 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.53.0)
 
+- `conexus/skills/{strategic-planning,architecture,debugging,deep-analysis}/SKILL.md`
+  (nexus-3uxbc): each said its agent defaults to sonnet with opus escalation,
+  while the matching agent's frontmatter pins `model: opus`. An agent's own
+  declaration beats the session default, so the stated default was wrong in
+  all four and the escalation advice was backwards. They now name the pinning
+  file and say to pass `model: sonnet` for the cheap end. Wording follows
+  `conexus/skills/code-review/SKILL.md`, the one pair that already agreed.
+
 - `conexus/hooks/hooks.json` (nexus-kdxyv): the SessionStart matcher gains `fork`, so `/branch`
   and `--fork-session` (Claude Code >= 2.1.213 reports them as source
   `fork`) run `nx hook session-start` like a `/clear` does: the session
