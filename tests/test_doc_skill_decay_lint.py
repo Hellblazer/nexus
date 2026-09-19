@@ -312,10 +312,12 @@ def scan_fenced_shell_blocks(extra_files: Sequence[Path] = ()) -> FenceScanResul
 # (a2) Trailing-backslash line-continuation swallows the next command
 # ---------------------------------------------------------------------------
 #
-# Found DURING this module's own construction (2026-09-19): the exact
-# incident 1 in the module docstring is CONFIRMED STILL LIVE on this branch
-# (`.claude/skills/release/SKILL.md`, the multi-line `git add` block) --
-# and `bash -n` genuinely does not catch it. A trailing backslash at the
+# Found DURING this module's own construction (2026-09-19), and it corrected
+# the premise the module was commissioned on: `bash -n` genuinely does NOT
+# catch incident 1. The person who commissioned this had claimed it would,
+# having run `bash -n` only against the ALREADY-FIXED block and inferred the
+# rest -- the same "a check whose domain does not contain the claim" defect
+# this module exists to catch. A trailing backslash at the
 # end of a bash script is accepted cleanly (verified against this exact
 # file's content): the joined `git add ... git commit -m "..."` is one
 # syntactically valid, very long `git add` invocation, so check (a) above
@@ -394,22 +396,15 @@ def scan_trailing_backslash_absorption(
 #: bug this module found but is forbidden from fixing (dispatching task
 #: constraint). Shrink-only, same discipline as PATH_EXISTS_ALLOWLIST.
 ABSORPTION_ALLOWLIST: dict[tuple[str, int], str] = {
-    (".claude/skills/release/SKILL.md", 375): (
-        "2026-09-19: CONFIRMED LIVE on this branch. The multi-line `git "
-        "add` block here ends its last continued path "
-        "(`conexus/PENDING_RELEASE.md \\`) with a trailing backslash, so "
-        'the following `git commit -m "chore(release): conexus X.Y.Z"` '
-        "line is absorbed as extra pathspec arguments rather than running "
-        "as its own command -- the block stages files and never commits. "
-        "This is exactly incident 1 in this module's docstring; it is "
-        "syntactically valid bash (bash -n accepts a dangling continuation "
-        "cleanly), so check (a) does not catch it -- this check does. Per "
-        "the dispatching task, this exact file is already fixed on "
-        "another branch and this module must not modify it. Delete this "
-        "entry once that fix lands here."
-    ),
+    # EMPTY, and it should stay that way. The single entry this shipped
+    # with -- the release skill's `git add` whose trailing backslash
+    # absorbed its own `git commit` -- was fixed on develop at 25b274ece
+    # while this module was being written, and the shrink-only test below
+    # failed immediately on the stale entry. That failure is the proof the
+    # ratchet works: it fired the moment the defect it described stopped
+    # being true.
 }
-_ABSORPTION_ALLOWLIST_CEILING = 1
+_ABSORPTION_ALLOWLIST_CEILING = 0
 
 
 def _unallowlisted_absorption_violations(
@@ -1002,17 +997,16 @@ def test_release_skills_are_in_scope_and_only_the_known_absorption_bug_hits():
     the exact files this module exists to watch, and a real regression on
     either would then go undetected.
 
-    CORRECTION found while building this module (2026-09-19): incident 1's
-    exact defect is CONFIRMED STILL LIVE in this worktree's copy of
-    `.claude/skills/release/SKILL.md`, not already fixed as the dispatching
-    task described -- see `ABSORPTION_ALLOWLIST`'s entry for the full
-    account and why check (a)'s `bash -n` syntax check cannot see it. This
-    test pins the exact, disclosed shape of that fact: clean on checks
-    (a)/(b)/(c), and on check (a2) clean EXCEPT for the one allowlisted,
-    confirmed-live absorption bug. If this ever fails, read it as one of
-    these two files, not this module, having drifted (or the release fix
-    having landed, in which case delete the stale ABSORPTION_ALLOWLIST
-    entry -- `test_absorption_allowlist_is_shrink_only` will insist on it).
+    Incident 1 was fixed on develop at 25b274ece while this module was being
+    written, so both files are now clean on all four checks and this test
+    pins that. A failure here means one of these two files drifted, not that
+    this module is wrong -- and a check (a2) violation in the release skill
+    specifically means incident 1 came back, which is a regression to fix
+    rather than a finding to allowlist.
+
+    Note for anyone extending this: check (a)'s `bash -n` cannot see incident
+    1's shape at all (a dangling continuation is valid bash). That is why
+    check (a2) exists as a separate structural scan.
     """
     files_scanned = {_rel(f) for f in _target_files()}
     for rel_path in (
@@ -1056,13 +1050,13 @@ def test_release_skills_are_in_scope_and_only_the_known_absorption_bug_hits():
             f"dispatching task: {unallowlisted}"
         )
 
-    # And the known one really is there -- if this goes to zero, the fix
-    # landed on this branch; delete the ABSORPTION_ALLOWLIST entry.
-    assert any(
-        v.file == ".claude/skills/release/SKILL.md" and v.line == 375
-        for v in absorption.violations
+    # The motivating bug is FIXED (develop 25b274ece) and both files are now
+    # clean on every check. This asserts it stays that way: the release skill
+    # is the file this module exists to watch, so a new violation in it is a
+    # regression of the exact incident, not a new finding.
+    assert not any(
+        v.file == ".claude/skills/release/SKILL.md" for v in absorption.violations
     ), (
-        "expected the known, allowlisted release-skill absorption bug at "
-        "line 375 -- either it was fixed here (delete the allowlist "
-        "entry) or the scanner regressed"
+        "the release skill regressed to a trailing-backslash absorption -- "
+        "this is incident 1 returning; fix the block, do not allowlist it"
     )
