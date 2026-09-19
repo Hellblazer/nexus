@@ -56,18 +56,31 @@ _REAL_SHAPE_PAYLOAD = json.dumps({
     "prompt_id": "abc123",
 })
 
-#: Budget for the common (non-worktree) case. Measured 2026-09-19 against
-#: the RDR-215 Python port (nexus-q02nx.21 deleted the bash script this
-#: used to measure): conexus 4098B + sn 4100B = 8198B, stable across
-#: repeated runs -- conexus grew ~587B over the bash script's own 3511B,
-#: which is why this budget moves rather than carrying over unchanged.
+#: Budget for the common (non-worktree) case. UNCHANGED across the RDR-215
+#: port, and that is a measurement rather than an assumption.
+#:
+#: The port was briefly credited with ~587B of growth (4098B against the
+#: bash's 3511B) and this budget was raised to 8850 to match. Those two
+#: numbers came from different days and different trees. Measured
+#: 2026-09-19 back to back instead -- the pre-port bash from
+#: origin/develop and nexus.hooks.subagent_start, same payload, same env,
+#: alternating three times so any live-state drift would land on both:
+#:
+#:     round 0: bash 4890B  port 4890B  delta +0B
+#:     round 1: bash 4890B  port 4890B  delta +0B
+#:     round 2: bash 4890B  port 4890B  delta +0B
+#:
+#: Byte-identical. The 587B was live-state churn, which the comment that
+#: the raise deleted had predicted in advance: conexus's content carries a
+#: "Ready Beads"/"Active Bead" section built from T2/bd state on this box,
+#: and a ~600B swing is its documented noise floor. RDR-215 Approach item
+#: 9 says budgets keep their thresholds; this one does.
+#:
 #: nexus-cnzei.6 fix round (critic Critical 1) set the ~8% headroom
-#: convention this keeps: 8198 * 1.08 ~= 8854, rounded down. conexus's own
-#: content includes a live "Ready Beads"/"Active Bead" section (T2/bd
-#: state on this box), so a future budget failure may be live-state churn
-#: rather than a code regression -- re-measure before concluding either
-#: way.
-_SUBAGENT_START_BUDGET_BYTES = 8850
+#: convention. A future failure here may still be live-state churn rather
+#: than a code regression -- re-measure the way this comment does, against
+#: the same tree in the same session, before concluding either way.
+_SUBAGENT_START_BUDGET_BYTES = 8200
 
 #: Budget for an isolation:worktree dispatch: sn's mcp-inject.sh adds
 #: worktree-section.md on top of its normal output, and conexus's ported
