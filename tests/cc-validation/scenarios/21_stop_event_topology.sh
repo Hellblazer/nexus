@@ -131,10 +131,15 @@ scenario_end
 
 # ── 21d: PRODUCTION hook, block round-trip for a zero-SendMessage ────────────
 # ── background teammate (RDR-184 P1.4, nexus-ccs9v.10 — gates .15) ───────────
-# Runs the REAL conexus/hooks/scripts/subagent-stop.sh (via a logging
-# passthrough wrapper), with NX_ORCH_STOP_GUARD=block + XDG_STATE_HOME
-# exported in the PANE so the claude child — and therefore the hook —
-# inherits them the same way a production session's env reaches hooks.
+# Runs the REAL production hook code — nexus.hooks.subagent_stop, which
+# replaced conexus/hooks/scripts/subagent-stop.sh at RDR-215 bead
+# nexus-q02nx.21 — via a logging passthrough wrapper, with
+# NX_ORCH_STOP_GUARD=block + XDG_STATE_HOME exported in the PANE so the
+# claude child — and therefore the hook — inherits them the same way a
+# production session's env reaches hooks. The passthrough reaches the
+# module through tests/e2e/lib/drive_hook.sh; production
+# reaches the same module as the hook_subagent_stop MCP tool, a transport
+# this leg never exercised anyway (its own wrapper displaced it).
 # The orchestrator-side EXPECT row is planted BEFORE the dispatch prompt
 # (write-before-dispatch), keyed to the spawner session_id captured by a
 # SessionStart hook (21b: teammates fire SubagentStop in the SPAWNER's
@@ -162,7 +167,7 @@ cat > "$TEST_HOME/.claude/orch_stop_wrap.sh" <<WRAP_EOF
 #!/usr/bin/env bash
 payload="\$(cat)"
 printf 'STOP_PAYLOAD %s\n' "\$payload" >> "$ORCH_LOG"
-out="\$(printf '%s' "\$payload" | bash "$REPO_ROOT/conexus/hooks/scripts/subagent-stop.sh" 2>>"$ORCH_LOG")"
+out="\$(printf '%s' "\$payload" | "$REPO_ROOT/tests/e2e/lib/drive_hook.sh" subagent_stop 2>>"$ORCH_LOG")"
 if [[ -n "\$out" ]]; then
     printf 'STOP_DECISION %s\n' "\$out" >> "$ORCH_LOG"
     printf '%s\n' "\$out"
@@ -182,7 +187,7 @@ cat > "$TEST_HOME/.claude/settings.json" <<EOF
     ],
     "SubagentStop": [
       { "matcher": "",
-        "hooks": [{ "type": "command", "command": "bash $TEST_HOME/.claude/orch_stop_wrap.sh", "timeout": 15 }] }
+        "hooks": [{ "type": "command", "command": "bash $TEST_HOME/.claude/orch_stop_wrap.sh", "timeout": 40 }] }
     ]
   }
 }
@@ -311,7 +316,7 @@ cat > "$TEST_HOME/.claude/orch_stop_wrap.sh" <<WRAP_EOF
 #!/usr/bin/env bash
 payload="\$(cat)"
 printf 'STOP_PAYLOAD %s\n' "\$payload" >> "$ORCH_LOG_E"
-out="\$(printf '%s' "\$payload" | bash "$REPO_ROOT/conexus/hooks/scripts/subagent-stop.sh" 2>>"$ORCH_LOG_E")"
+out="\$(printf '%s' "\$payload" | "$REPO_ROOT/tests/e2e/lib/drive_hook.sh" subagent_stop 2>>"$ORCH_LOG_E")"
 if [[ -n "\$out" ]]; then
     printf 'STOP_DECISION %s\n' "\$out" >> "$ORCH_LOG_E"
     printf '%s\n' "\$out"
@@ -332,7 +337,7 @@ cat > "$TEST_HOME/.claude/settings.json" <<EOF
     ],
     "SubagentStop": [
       { "matcher": "",
-        "hooks": [{ "type": "command", "command": "bash $TEST_HOME/.claude/orch_stop_wrap.sh", "timeout": 15 }] }
+        "hooks": [{ "type": "command", "command": "bash $TEST_HOME/.claude/orch_stop_wrap.sh", "timeout": 40 }] }
     ]
   }
 }

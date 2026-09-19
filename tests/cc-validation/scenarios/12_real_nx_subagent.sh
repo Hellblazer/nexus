@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # Scenario 12 — REAL-WORLD: install conexus plugin into TEST_HOME, dispatch a
-# subagent, and probe for content that ONLY subagent-start.sh injects (not
-# tool inventory, which is inherited regardless). The hook outputs literal
-# strings like "T1 scratch — session-scoped, shared across all sibling agents"
-# in its plain echo. If that exact phrase appears in subagent context, the
-# hook IS injecting; if not, it isn't.
+# subagent, and probe for content that ONLY the SubagentStart hook injects
+# (not tool inventory, which is inherited regardless). The hook emits literal
+# strings like "T1 scratch — session-scoped, shared across all sibling agents".
+# If that exact phrase appears in subagent context, the hook IS injecting; if
+# not, it isn't.
+#
+# This leg drives the plugin's OWN hooks.json, never a script path of its own,
+# so RDR-215 bead nexus-q02nx.21 changed what it exercises without changing a
+# line of it: the SubagentStart entry is now `type: mcp_tool` ->
+# hook_subagent_start rather than `bash subagent-start.sh`. That makes this
+# the one scenario covering the mcp_tool transport for this hook end to end —
+# scenarios 21 and 27 deliberately displace that transport with their own
+# wrappers, so this is where it is actually proven.
 
-scenario "12 real_nx_subagent: does the actual subagent-start.sh inject specific markdown content?"
+scenario "12 real_nx_subagent: does the real SubagentStart hook inject specific markdown content?"
 
 # Install conexus plugin into TEST_HOME (mirrors tests/e2e/run.sh setup)
 NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
@@ -38,9 +46,9 @@ claude_prompt "Use the Task tool to dispatch the general-purpose agent. Descript
 claude_wait 120
 
 if capture -500 | grep -qE "session-scoped, shared across|sibling agents"; then
-    pass "Unique hook content visible to subagent — subagent-start.sh IS injecting"
+    pass "Unique hook content visible to subagent — the SubagentStart hook IS injecting"
 elif capture -500 | grep -qE "NO-INJECTED-CONTENT"; then
-    fail "Subagent reports NO-INJECTED-CONTENT — confirms subagent-start.sh injection bug"
+    fail "Subagent reports NO-INJECTED-CONTENT — the SubagentStart hook is not injecting"
 else
     fail "indeterminate — neither marker phrase nor NO-INJECTED-CONTENT seen"
     capture -100 | sed 's/^/    | /'
