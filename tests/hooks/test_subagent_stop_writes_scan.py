@@ -18,63 +18,31 @@ class of inert guard this bead exists to eliminate.
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from nexus.hooks import subagent_stop_scans as scans
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCAN = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop-writes-scan.py"
-HOOK = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop.sh"
-
-
-#: Which implementation :func:`run_scan` drives, set per-test by `impl`.
-_IMPL = "bash"
-
-
-@pytest.fixture(params=["script", "python"], autouse=True)
-def impl(request):
-    """Run every assertion against BOTH implementations.
-
-    RDR-215 bead nexus-q02nx.12 ports this scan to
-    ``nexus.hooks.subagent_stop_scans``. The script is still invoked by the
-    live bash hook until bead .21 re-declares the hooks.json entry, so a
-    straight retarget would delete the only coverage of the thing still
-    running in production. Drop the "script" param when it goes.
-
-    NOTE the verdict contract differs by ONE case, deliberately: the script
-    prints SCANERROR for a missing or unreadable transcript, and the bash
-    caller collapsed that to CLEAN before using it. The port's
-    ``writes_verdict`` does that collapse itself, so the tests below that
-    exercise a missing file assert through ``run_scan_raw``, which keeps
-    both sides on the script's own contract.
-    """
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "script"
-
-
-def run_scan_raw(path: Path) -> str:
-    """The SCRIPT's contract: CLEAN / UNLANDED <n> <tools> / SCANERROR."""
-    if _IMPL == "python":
-        try:
-            count, tools = scans.writes_scan(str(path))
-        except Exception:  # noqa: BLE001 — mirrors the script's own bare except
-            return "SCANERROR"
-        return f"UNLANDED {count} {','.join(tools)}" if count else "CLEAN"
-    r = subprocess.run(
-        [sys.executable, str(SCAN), str(path)],
-        capture_output=True, text=True, timeout=60,
-    )
-    return r.stdout.strip()
-
 
 def run_scan(path: Path) -> str:
-    return run_scan_raw(path)
+    """The scan's own contract: CLEAN / UNLANDED <n> <tools> / SCANERROR.
+
+    Ported from the plugin's bash writes-scan script (RDR-215 bead
+    nexus-q02nx.12); the script itself is deleted at bead .21 once
+    ``hooks.json`` no longer runs it (bead .21 also re-points the wired
+    entry). ``nexus.hooks.subagent_stop.writes_verdict`` (the
+    hook's own production wrapper) additionally collapses SCANERROR and a
+    missing/unreadable transcript to CLEAN before use -- exercised
+    directly in :func:`test_hook_consults_the_scan_and_only_acts_on_unlanded`
+    below rather than here, since that collapse is the HOOK's contract,
+    not the scan's.
+    """
+    try:
+        count, tools = scans.writes_scan(str(path))
+    except Exception:  # noqa: BLE001 — mirrors the scan's own bare except
+        return "SCANERROR"
+    return f"UNLANDED {count} {','.join(tools)}" if count else "CLEAN"
 
 
 def _tool_use(tid: str, name: str, tool_input: dict | None = None) -> dict:
@@ -239,14 +207,76 @@ def test_orphan_result_without_its_tool_use_is_ignored(tmp_path):
 
 # ── the hook must actually consult the scan ─────────────────────────────────
 
-def test_hook_invokes_the_scan_and_only_acts_on_unlanded():
-    """Naming is not wiring: assert subagent-stop.sh really calls this."""
-    body = HOOK.read_text(encoding="utf-8")
-    assert "subagent-stop-writes-scan.py" in body
-    assert "UNLANDEDWRITE" in body
-    # fail-open bias: anything that is not the literal UNLANDED verdict
-    # must collapse to CLEAN rather than reaching an actionable branch.
-    assert "_writes_verdict" in body
+def test_hook_consults_the_scan_and_only_acts_on_unlanded(tmp_path, monkeypatch):
+    """Naming is not wiring: assert ``nexus.hooks.subagent_stop.run`` really
+    calls ``writes_verdict`` and gates its block decision on the literal
+    UNLANDED verdict. Re-pointed at the Python module (RDR-215 bead
+    nexus-q02nx.21) from a bash-body string check on ``subagent-stop.sh``,
+    now deleted -- this and the CLEAN companion below are the ONLY
+    coverage anywhere that the stop hook actually consults this scan
+    rather than merely naming it; ``tests/hooks/test_subagent_stop_hook.py``
+    never exercises the unlanded-write branch at all."""
+    from nexus.hooks import expectations as exp
+    from nexus.hooks import subagent_stop
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("NX_ORCH_STOP_GUARD", "block")
+
+    session_id, agent_id, agent_type = "sess-unlanded", "aunlanded00000001", "worker-x"
+    exp.expectations_expect(session_id, agent_type, "background")
+
+    failure = real_store_failure_text()
+    t = write_transcript(tmp_path, [
+        _tool_use("r1", "SendMessage", {"to": "main", "content": "done"}),
+        _tool_use("w1", "mcp__plugin_conexus_nexus__memory_put",
+                  {"project": "nexus", "title": "findings"}),
+        _tool_result("w1", failure),
+    ])
+    payload = {
+        "session_id": session_id, "agent_id": agent_id, "agent_type": agent_type,
+        "agent_transcript_path": str(t), "stop_hook_active": False,
+    }
+    result = subagent_stop.run(payload)
+    assert result.stdout is not None, "an unlanded write on a reporting agent must block"
+    decision = json.loads(result.stdout)
+    assert decision["decision"] == "block"
+    ledger = (
+        tmp_path / "state" / "nexus" / "orchestration" / f"{session_id}.expectations"
+    ).read_text()
+    assert f"\tUNLANDEDWRITE\t{agent_id}\t" in ledger
+    assert f"\tBLOCKED\t{agent_id}\tunlanded-write\n" in ledger
+
+
+def test_hook_never_acts_when_writes_are_clean(tmp_path, monkeypatch):
+    """The other half of "only acts on unlanded": fail-open bias means
+    anything that is not the literal UNLANDED verdict — including a clean
+    transcript's CLEAN — must collapse to no-op rather than reaching the
+    block branch. Same scaffolding as the positive case above, all writes
+    landing instead of failing."""
+    from nexus.hooks import expectations as exp
+    from nexus.hooks import subagent_stop
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("NX_ORCH_STOP_GUARD", "block")
+
+    session_id, agent_id, agent_type = "sess-clean", "aclean0000000001", "worker-y"
+    exp.expectations_expect(session_id, agent_type, "background")
+
+    t = write_transcript(tmp_path, [
+        _tool_use("r1", "SendMessage", {"to": "main", "content": "done"}),
+        _tool_use("w1", "mcp__plugin_conexus_nexus__memory_put", {"title": "x"}),
+        _tool_result("w1", "Stored: [1] nexus/x"),
+    ])
+    payload = {
+        "session_id": session_id, "agent_id": agent_id, "agent_type": agent_type,
+        "agent_transcript_path": str(t), "stop_hook_active": False,
+    }
+    result = subagent_stop.run(payload)
+    assert result.stdout is None
+    ledger = tmp_path / "state" / "nexus" / "orchestration" / f"{session_id}.expectations"
+    content = ledger.read_text() if ledger.exists() else ""
+    assert "UNLANDEDWRITE" not in content
+    assert "BLOCKED" not in content
 
 
 @pytest.mark.parametrize("qualified", [
