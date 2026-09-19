@@ -390,12 +390,36 @@ things to avoid carefully; they are impossible.
    in; `git -C` does not cover it. Direct to `develop` per the project
    rule; the feature branch is a local name that never reaches origin.
 
-9. **Never hand-run `nx index repo` from a worktree.** The post-commit hook
+9. **Whoever pushes to `develop` fast-forwards the primary in the same
+   breath.** `cd` to the primary and `git merge --ff-only origin/develop`.
+   Rule 2 makes the primary the reference checkout — the one place to read
+   what is on `develop` without a fetch dance — and nothing kept it
+   current, so it silently stopped doing that job. Found 2026-09-19 twelve
+   commits behind: `nx rdr preamble` run there omitted an RDR that had
+   been on `develop` for hours, because the tool reads the RDR directory
+   relative to cwd and returned a confident, complete-looking, stale list.
+
+   Attach it to the push rather than to a schedule or a habit, because the
+   push is the event that creates the staleness and is already a thing
+   someone does deliberately. If the primary is dirty, do NOT force it:
+   a dirty primary is a rule-3 violation someone is mid-way through, and
+   clobbering it is worse than a stale read. Say so on the bus instead.
+
+   Same failure shape, for the same reason, one layer up: a stale checkout
+   and a glob that matches nothing both answer confidently with a wrong
+   maximum. `conexus/skills/rdr-create/SKILL.md` Step 2 told sessions to
+   hand-scan for `[0-9][0-9][0-9]-*.md`, which matches none of this repo's
+   `rdr-NNN-*.md` files, so a session following it literally found no
+   maximum, fell through to the step's "start at 001" clause, and would
+   have collided with RDR-001. Fetching fixes neither; each needs its own
+   fix.
+
+10. **Never hand-run `nx index repo` from a worktree.** The post-commit hook
    already refuses worktree indexing by construction (nexus-ws67k, comparing
    `--git-dir` to `--git-common-dir`), but the guard lives in the HOOK and
    not in the command, so a hand-run bypasses it entirely.
 
-10. **Serena differs between a session STARTED in a worktree and one that
+11. **Serena differs between a session STARTED in a worktree and one that
     RELOCATED into it.** A session started there gets its own server rooted
     at the worktree via `--project-from-cwd` and keeps symbol editing. A
     session that relocates mid-flight keeps the server rooted at the
