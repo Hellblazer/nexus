@@ -1012,3 +1012,62 @@ class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:
                        exp.expectations_reconcile("s", _payload())):
             assert result.lines, "a populated ledger always produces lines"
             assert result.lines[-1].startswith(("SUMMARY\t", "BLINDSPOT\t"))
+
+
+# ── the bead .14 obligation, made mechanical ─────────────────────────────
+
+class TestTheDualImplementationParamDiesWithTheLibrary:
+    """When bead .14 deletes the bash library, the "bash" param must go too.
+
+    tests/hooks/test_expectations_reconcile.py and test_expectations_archive.py
+    run every assertion against BOTH implementations while both are live.
+    That is deliberate (a straight retarget would have deleted the only
+    coverage of the running bash path), but it leaves an obligation: the
+    param has to die with the library it drives.
+
+    Left behind, it becomes the vacuous-gate shape this project has a name
+    for — a parametrised test that still reports two passes while one of
+    them exercises nothing, or worse, a skip that reports green forever. So
+    the obligation is enforced here rather than written in a bead nobody
+    re-reads: while the library exists, both params must be present; the
+    moment it does not, a surviving "bash" param fails this test and names
+    the file to fix.
+    """
+
+    _DUAL_FILES = (
+        "tests/hooks/test_expectations_reconcile.py",
+        "tests/hooks/test_expectations_archive.py",
+    )
+
+    def _repo(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def test_the_param_list_tracks_whether_the_library_still_exists(self):
+        library_exists = _BASH_LIB.is_file()
+        for relative in self._DUAL_FILES:
+            source = (self._repo() / relative).read_text()
+            drives_bash = 'params=["bash", "python"]' in source
+            if library_exists:
+                assert drives_bash, (
+                    f"{relative} must drive BOTH implementations while "
+                    f"{_BASH_LIB.name} is still the live production path"
+                )
+            else:
+                assert not drives_bash, (
+                    f"{_BASH_LIB} is gone (bead nexus-q02nx.14), so {relative} "
+                    'still carrying params=["bash", "python"] now runs a '
+                    "parametrisation whose bash half exercises nothing. Drop "
+                    'the param and the fixture, and call the module directly.'
+                )
+
+    def test_neither_dual_file_skips_or_xfails_its_way_to_green(self):
+        """A skip left where the bash param used to be would report green
+        forever while proving nothing — the same failure the param removal
+        exists to prevent, one step later."""
+        for relative in self._DUAL_FILES:
+            source = (self._repo() / relative).read_text()
+            for banned in ("pytest.mark.skip", "pytest.mark.xfail", "pytest.skip("):
+                assert banned not in source, (
+                    f"{relative} uses {banned}: a dual-implementation suite that "
+                    "skips is a suite that stops comparing"
+                )
