@@ -19,28 +19,30 @@ empty envelope. Always exit 0 (``HookResult``'s own default).
 **One deliberate addition, not a bash behaviour carried forward.** The bash
 script's case list is 62 explicit literal names, reproduced verbatim in
 :data:`_ALLOWED_TOOLS` below -- "no wildcards" per the script's own header
-comment, and the contract map records it the same way. This port ADDS a
-second, generic check: any ``mcp__plugin_conexus_nexus__hook_*`` name is also
-allowed. MCP has no way to hide a tool from the model's tool list (RDR-215
-Technical Design, "Hook tools in the model's tool list"), and this hook is
-itself the first tool registered under that prefix -- the RDR names the
-auto-approve matcher as part of that mitigation ("the ``hook_`` prefix, the
-description, and the auto-approve matcher are the mitigation") and bead
-nexus-q02nx.4 states it as a requirement. It is also mechanically forced: the
-live drift guard (``tests/hooks/test_permission_request_hooks.py::
+comment, and the contract map records it the same way. This port adds the
+registered ``hook_<name>`` tools, in :data:`_ALLOWED_HOOK_TOOLS`, by the same
+rule: one explicit name each. MCP has no way to hide a tool from the model's
+tool list (RDR-215 Technical Design), so a hook tool is callable by the model
+and the RDR names the auto-approve matcher as part of the mitigation; the live
+drift guard (``tests/hooks/test_permission_request_hooks.py::
 test_every_registered_conexus_tool_is_auto_approved``) parametrizes over every
-tool the conexus MCP servers actually register, which now includes
-``hook_auto_approve`` itself the moment it is registered -- without this
-carve-out the hook would fail to approve its own tool name. The frozen bash
-script, unedited by this bead (its ``hooks.json`` re-declaration and deletion
-are beads nexus-q02nx.21/.22), has no equivalent: it predates every ``hook_``
-tool and cannot know about them without editing its case list, which is
-exactly the manual-maintenance burden this generic check avoids repeating on
-every future port.
+tool the servers actually register, so a registered hook tool that is not
+listed here fails that test.
+
+**Why a name and not a ``hook_`` prefix match.** The first draft of this port
+matched the prefix, reasoning that the drift guard forced it and that ~14 more
+ports would otherwise each add a line. Both standing reviewers rejected that
+independently, and they were right: the guard forces exactly the names that are
+registered, which today is one, and a prefix grants auto-approval to every
+future ``hook_``-named tool at the moment it is written -- including tools
+nobody has reviewed, and including any later decision to register something
+under that prefix that should have prompted. A one-way door with no one at it.
+The line-per-port cost is the point, not the price: it is what makes each grant
+visible in a diff, and it is what the bash script already paid 62 times.
 
 **AUDIT RESIDUAL (bead nexus-q02nx.4, round 1, Moderate): hook-chain re-entry
 is measured by bead nexus-q02nx.6, not resolved here.** Auto-approving
-``hook_*`` tool calls does not by itself prove a model-initiated call to one
+a hook tool's own name does not by itself prove a model-initiated call to one
 terminates rather than re-entering the PreToolUse chain against its own
 matcher; that measurement, and any consequent exclusion or short-circuit, is
 that bead's job.
@@ -125,12 +127,21 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-#: See the module docstring's "One deliberate addition" section.
-_HOOK_TOOL_PREFIX = "mcp__plugin_conexus_nexus__hook_"
+#: Registered ``hook_<name>`` tools, listed one by one for the same reason the
+#: 62 names above are: a grant a reviewer cannot see is a grant nobody reviewed.
+#: RDR-215 registers roughly fourteen more of these across Phases 2 and 3, and
+#: each one adds a line here as part of its own port. That is the cost of
+#: keeping every auto-approval explicit, and it is the cost the bash script
+#: already paid 62 times.
+_ALLOWED_HOOK_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp__plugin_conexus_nexus__hook_auto_approve",
+    }
+)
 
 
 def _is_allowed(tool_name: str) -> bool:
-    return tool_name in _ALLOWED_TOOLS or tool_name.startswith(_HOOK_TOOL_PREFIX)
+    return tool_name in _ALLOWED_TOOLS or tool_name in _ALLOWED_HOOK_TOOLS
 
 
 def run(payload: dict | None) -> HookResult:

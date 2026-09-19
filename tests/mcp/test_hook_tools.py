@@ -15,7 +15,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 
-from nexus.hooks._io import HookResult
+from nexus.hooks._io import HookResult, permission_decision, stop_decision
 from nexus.mcp.hooks import (
     HOOK_TOOLS,
     HookToolSpec,
@@ -275,3 +275,84 @@ def test_the_live_nx_mcp_server_registers_exactly_the_ported_hook_tools():
 
     hook_names = {t.name for t in core_mcp._tool_manager.list_tools() if t.name.startswith("hook_")}
     assert hook_names == {f"hook_{spec.name}" for spec in HOOK_TOOLS}
+
+
+# ── the deny path ─────────────────────────────────────────────────────────
+
+class TestToolTierCarriesADeny:
+    """The tool tier's DENY path, which neither MVV port exercises.
+
+    ``hook_auto_approve`` (bead .4) only ever allows or stays silent, and
+    ``session_start_verb`` (bead .5) emits no decision at all, so the two ports
+    that exist prove the allow and silent paths and the fail-open-on-crash
+    path — and nothing about a hook that deliberately refuses.
+
+    That gap matters because bead nexus-q02nx.17 ports
+    ``pre_close_verification_hook.sh``, an active allow|deny gate whose refusal
+    text 19 files quote, onto this same mechanism. It would be the first hook
+    to find out whether a deny survives the tool boundary intact. These tests
+    establish it now, on the mechanism, rather than discovering it there.
+    """
+
+    def test_a_deny_envelope_reaches_the_caller_byte_for_byte(self):
+        deny = permission_decision(
+            "PreToolUse",
+            "deny",
+            permission_decision_reason="blocked by the gate",
+            reason="blocked by the gate",
+            system_message="run the gate first",
+        )
+
+        mcp = _fresh_mcp()
+        register_hook_tools(mcp, (HookToolSpec(name="gate", run=lambda p: HookResult(stdout=deny)),))
+
+        result = _run(mcp.call_tool("hook_gate", {}))
+
+        # isError stays False: a deny is a DECISION the event carries, not a
+        # tool failure. Signalling it as an error would make a refusal
+        # indistinguishable from a crash, which on this tier means allow.
+        assert result.isError is False
+        assert result.content[0].text == deny
+
+    def test_a_stop_tier_block_reaches_the_caller_byte_for_byte(self):
+        """The other refusal shape: the top-level ``decision`` form the Stop
+        and SubagentStop hooks use, which is not a hookSpecificOutput envelope.
+        """
+        block = stop_decision("block", reason="owes a report")
+
+        mcp = _fresh_mcp()
+        register_hook_tools(mcp, (HookToolSpec(name="stopper", run=lambda p: HookResult(stdout=block)),))
+
+        result = _run(mcp.call_tool("hook_stopper", {}))
+
+        assert result.isError is False
+        assert result.content[0].text == block
+
+    def test_a_deny_is_distinguishable_from_a_crash(self):
+        """The property bead .17 actually depends on.
+
+        A crash returns empty text, which the event reads as "no opinion" and
+        therefore proceeds — the deliberate fail-open this tier is built on. A
+        deny returns its envelope. If those two were ever the same bytes, a
+        crashing gate would look exactly like a passing one.
+        """
+        deny = permission_decision("PreToolUse", "deny", reason="refused")
+
+        def _boom(payload):
+            raise RuntimeError("gate exploded")
+
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(name="denier", run=lambda p: HookResult(stdout=deny)),
+                HookToolSpec(name="crasher", run=_boom),
+            ),
+        )
+
+        denied = _run(mcp.call_tool("hook_denier", {}))
+        crashed = _run(mcp.call_tool("hook_crasher", {}))
+
+        assert denied.content[0].text == deny
+        assert crashed.content[0].text == ""
+        assert denied.content[0].text != crashed.content[0].text
