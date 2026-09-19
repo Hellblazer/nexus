@@ -399,8 +399,13 @@ call the same functions.
    "tool": "hook_<name>", "input": {...}}`. The `input` map names the
    payload fields the hook reads (the contract map lists them per script)
    as `${session_id}`, `${tool_input.command}` and so on. The tool returns
-   the same decision JSON the script wrote to stdout. That is 15 of the 24
-   conexus entries. One `PreToolUse` entry is excluded:
+   the same decision JSON the script wrote to stdout. That is 13 of the 25
+   conexus entries as shipped -- this sentence said "15 of the 24" when
+   written and both halves moved: `behaviour_census.py` arrived from
+   nexus-4lnn1 and took the count to 25, and two more entries stayed on
+   the command tier than this item anticipated. See the 2026-09-19
+   Revision History entry; the excluded set is three, not one.
+   THE FIRST EXCLUSION, known when this was written:
    `phase_review_close_requires_gate` is the routing framework's only
    `fail_closed: true` rule (`routing/registry.yaml`), and its contract is
    that a crash still emits a deny envelope (`routing/_lib.py`'s
@@ -410,6 +415,16 @@ call the same functions.
    server that is down would read as allow and a phase could close without
    its gate. It takes the command tier instead, where the process can still
    write the deny envelope before it exits.
+   THE OTHER TWO, discovered during the port: `mailbox_drain.py`
+   (`UserPromptSubmit`) and `routing/subagent_git_write_requires_orchestrator.py`
+   (`PreToolUse`) both reach `_endpoint_resolve.py` -- the first directly,
+   the second through `routing/_lib.py` -- and that module cannot leave
+   `conexus/hooks/scripts/` while `t2_prefix_scan.py` and
+   `tuple_ledger_project.py` import it and neither is ported by this
+   epic. Moving them would mean a second copy of a 449-line resolver
+   beside `nexus.db.service_endpoint`, which Approach item 9 forbids as a
+   rewrite. Unlike the first exclusion this one is not about fail-closed
+   semantics; it is a dependency the tier split cannot cross.
 2. **The command tier.** Six of the seven `SessionStart` entries (the
    seventh is item 3) become command hooks in exec form on `nx-hook`, a
    new console script beside
@@ -948,7 +963,13 @@ registration module on the existing server, and one package.
   from the shipped manifest: 13 `mcp_tool` and 12 `command` entries, 25
   total (24 of them this epic's; `behaviour_census.py` arrived from
   nexus-4lnn1). The resolution had existed in T2 since 2026-09-19 and
-  never reached this document. (b) The Contracts section said the close
+  never reached this document. THE SWEEP FOR THIS NUMBER FOUND THREE OF
+  ITS FOUR SITES: Contracts, phase item 5 and this history were corrected
+  in `d4e744e81`, and Approach item 1 was missed and corrected separately
+  after the Phase 4 critique found it (bead `nexus-q02nx.30`). Recorded
+  because it is the datum, not the embarrassment: the fix pass for a
+  wrong number did not begin by grepping for the number. (b) The
+  Contracts section said the close
   gate's deny text was quoted in 19 files. It was quoted in ONE -- the
   script -- measured by `git grep` at `213f4515d`, and the scarcity is
   the argument for pinning it, so the claim was not merely wrong but
