@@ -308,15 +308,41 @@ change does not touch.
 `HttpVectorClient` calling `POST /v1/vectors/hybrid-search`, with the same
 result shape as the existing search methods.
 
-**Phase 3 — the surface decision, and it is Sam's.** Whether the lexical leg is
-a new flag, a default, or a per-corpus setting. This RDR does not pre-empt it,
-but research has narrowed it: **the hybrid route cannot be a silent default**,
-because it is not a superset of `/search`. A row with no text signal never
-appears on it, so switching `nx search` over wholesale would lose results the
-vector path returns today. The surface must be additive (a union of both legs)
-or an explicit mode.
-Note that `--hybrid` survives as the git-frecency switch and reusing the name
-for a second meaning would be worse than either alternative.
+**Phase 3 — the surface decision. Two thirds of it is now settled; the
+remaining third waits on Phase 1.**
+
+Research narrowed the decision before it was taken: **the hybrid route cannot
+be a silent default**, because it is not a superset of `/search`. A row with
+no text signal never appears on it, so switching `nx search` over wholesale
+would lose results the vector path returns today. The surface must be additive
+(a union of both legs) or an explicit mode.
+
+**Settled (Sam, 2026-09-19).**
+
+1. **The name is `--lexical`.** `--hybrid` stays as it is and keeps its
+   current meaning, the git-frecency blend for code corpora (`search_cmd.py`
+   help text: "Blend git frecency into the score for code corpora
+   (0.7\*vector + 0.3\*frecency)"). That flag is a separate, surviving
+   feature and reusing its name for a second meaning would be worse than
+   either alternative. Renaming `--hybrid` to `--frecency` is the cleaner end
+   state but costs a deprecation cycle for a flag with no reported users, so
+   it is not part of this work.
+2. **The MCP `search` tool gets the leg too.** It is not CLI-only. Its
+   parameters today are `query`, `corpus`, `limit`, `offset`, `where`,
+   `cluster_by`, `topic`, `structured` and `threshold`; this adds a tenth.
+   That has a known cost in this repo: registering one MCP tool parameter
+   touches several hand-kept enumerations plus the committed wire snapshot
+   `tests/fixtures/mcp_wire_snapshot.json`, which reds develop on the pin
+   rather than on the change if it is not regenerated in the same commit.
+   Phase 2's implementation carries that cost explicitly rather than
+   discovering it.
+
+**Open, and waiting on Phase 1.** Whether the leg is additive (union both
+legs) or an explicit off-by-default mode. That turns on whether the lexical
+leg finds things the vector leg misses on identifier-shaped queries, which is
+exactly what Phase 1 measures. Deciding it before Phase 1 reports would be
+guessing, and the Decision Rationale is built so that a flat Phase 1 result
+answers it with "explicit, off by default" rather than invalidating the work.
 
 **Phase 4 — the recurrence detector, which ships with Phase 2 and not after
 it.** BUG-0148's failure mode is live and planner-dependent; its remediation
@@ -661,6 +687,19 @@ Per the Technical Design signature. Body construction mirrors `search()`.
 #### Step 2: the wire test
 
 Assert the body carries exactly the seven wire fields and no more.
+
+#### Step 3: the MCP `search` parameter
+
+Phase 3 settled that the leg reaches the MCP surface and not only the CLI, so
+the tool gains a tenth parameter. This step is listed separately because in
+this repo it is not one edit: registering an MCP tool parameter touches
+several hand-kept enumerations, and the committed wire snapshot
+`tests/fixtures/mcp_wire_snapshot.json` must be regenerated in the SAME
+commit. A wire-visible change that leaves the snapshot behind reds develop on
+the pin rather than on the change, which reads as an unrelated failure.
+
+The parameter's name and default follow the flag: `--lexical` on the CLI, so
+`lexical` on the tool, defaulting off until Phase 1 says otherwise.
 
 ### Phase 3: the surface decision
 
