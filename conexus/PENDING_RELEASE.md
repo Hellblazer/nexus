@@ -174,3 +174,125 @@ mechanize, it matters enough to ship.
   unlike the stale checkout this one has no fetch that would save it,
   which is how it survived 217 RDRs unhit.
 
+
+- `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py`:
+  bead: nexus-q02nx.21 — carries the interpreter preamble
+  (`_interpreter.reexec_if_needed()`) ahead of its `_lib` import. Read
+  this one first: its hooks.json entry had ALSO lost the `routing/`
+  segment from its declared path at 9b1081514, so from that commit until
+  86eb999e8 the routing framework's only `fail_closed` rule pointed at a
+  file that does not exist. `python3` on a missing file exits 2 with no
+  envelope, which Claude Code reads as a non-blocking error and not a
+  deny, so the close gate was failing OPEN. The path fix is in
+  hooks.json, already declared; this entry is the preamble.
+  INERT until the next cut: sessions on the pinned tag run the pre-rewrite
+  declaration, where the path was correct and the shim resolved the
+  interpreter — so the failing-open window is this branch's, not theirs.
+
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`:
+  bead: nexus-q02nx.21 — same preamble, and the same lost `routing/`
+  segment, so this hook was equally dead between those two commits. It is
+  `warn`, not `fail_closed`, so the cost was a missing warning rather than
+  an inverted decision.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/_interpreter.py`:
+  bead: nexus-q02nx.21 — NEW. Puts `_run_python_hook.sh`'s interpreter
+  resolution back in Python, per Sam's ruling of 2026-09-19, now that the
+  exec-form entries launch these scripts with a bare `python3` and PATH
+  decides. Mirrors the shim's chain exactly: `$NX_HOOK_PYTHON`, a venv
+  holding this checkout's `nexus`, the generation python, then
+  `python3.13` / `python3.12` by name. Stdlib-only and 3.9-parseable by
+  necessity — it is imported by scripts whose whole point is to be
+  reachable from a 3.9 interpreter.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/version_lockstep_hook.py`:
+  bead: nexus-q02nx.21 — the preamble, ahead of its own 3.12 guard.
+  Measured rc=1 under `/usr/bin/python3` 3.9.6 before it, rc=0 after.
+  INERT until the next cut: a hook whose job is repairing a wheel that is
+  behind the plugin could not run on the interpreter most likely to be
+  present when things are already broken.
+
+- `conexus/hooks/scripts/mailbox_drain.py`:
+  bead: nexus-q02nx.21 — the preamble, ahead of its `_endpoint_resolve`
+  import. Same measurement: rc=1 under 3.9.6 before, rc=0 after.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/tuple_ledger_project.py`:
+  bead: nexus-q02nx.21 — docstring only. It said it was invoked ONLY from
+  inside the two async wrapper shell scripts; those are deleted by this
+  bead and its caller is now `nexus.hooks.tuple_projection`'s `run_start`
+  / `run_stop`. The module itself is unchanged and stays a plugin-resident
+  stdlib-only subprocess.
+  INERT until the next cut, and harmless either way — no behaviour moves.
+
+- `conexus/hooks/scripts/divergence-language-scan.py`:
+  bead: nexus-q02nx.21 — docstring only. It named
+  `divergence-language-guard.sh` as its caller; that script is deleted and
+  the caller is now `nexus.hooks.divergence_language_guard`, which imports
+  this file BY PATH rather than copying it, so the locked pattern bank
+  stays single-copy.
+  INERT until the next cut, and harmless either way.
+
+All twelve entries below are the same deletion, bead nexus-q02nx.21.
+Each script is unreferenced from hooks.json after the re-declaration at
+9b1081514, and its behaviour now lives in `src/nexus/hooks/` as an MCP
+tool or an exec-form `nx-hook` verb. The deletion deliberately lands
+AFTER that re-declaration and never before: three of the four scripts
+that sourced `expectations.sh` did so with `|| exit 0` and no
+diagnostic, so the other order would have silenced the whole RDR-184
+guard with nothing to see.
+
+They are INERT until the next cut, and this is the one place where inert
+cuts the right way: a session on the pinned tag still has all twelve
+files AND a hooks.json that names them, so nothing there breaks. The two
+halves only have to agree within a single cut.
+
+- `conexus/hooks/scripts/agent-dispatch-expect.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.agent_dispatch_expect`, the PreToolUse hook that writes the RDR-184 EXPECT row from a dispatch's own subagent_type.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.auto_approve`.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/divergence-language-guard.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.divergence_language_guard`, which imports the surviving `divergence-language-scan.py` by path.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/expectations.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.expectations`, the RDR-184 ledger library the four sourcers shared.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/post_compact_hook.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.post_compact`.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/pre_close_verification_hook.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.pre_close_verification`.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/stop_verification_hook.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.stop_verification`.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/subagent-start-stamp.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.subagent_start_stamp`.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/subagent-start-tuple-async.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.tuple_projection.run_start`, a daemon thread rather than a disowned subshell.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/subagent-start.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.subagent_start`.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/subagent-stop-tuple-async.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.tuple_projection.run_stop`, same change of detachment.
+  INERT until the next cut.
+
+- `conexus/hooks/scripts/subagent-stop.sh`:
+  bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.subagent_stop`, with its two transcript scans in `nexus.hooks.subagent_stop_scans`.
+  INERT until the next cut.
