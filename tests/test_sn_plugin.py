@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Structural and functional tests for the sn (Serena + Context7) plugin."""
 import json
+import os
 import re
 import subprocess
 import sys
@@ -659,12 +660,26 @@ class TestSnHookErrorBoundary:
         Invalid UTF-8 on stdin raises ``UnicodeDecodeError`` inside
         ``sys.stdin.read()``, before any of the script's own guards, so this
         genuinely exercises ``guard``'s except branch for each script rather
-        than passing on code that never crashed. Measured on both: rc=0,
-        empty stdout, one logged crash.
+        than passing on code that never crashed.
+
+        ``PYTHONIOENCODING`` IS THE POINT OF THIS TEST, not boilerplate.
+        Whether that read is strict is AMBIENT: Python picks stdin's error
+        handler from the locale, so a UTF-8 locale decodes strictly and
+        raises, while under ``LC_ALL=C`` PEP 538/540 coercion gives
+        ``surrogateescape`` and the same bytes decode without complaint.
+        The first version of this test set nothing and passed on macOS,
+        where the ambient locale is UTF-8, then RED CI, where it is not --
+        measured both ways afterwards: under ``LC_ALL=C`` the hook returned
+        a full 4285-byte envelope and never entered the boundary. Pinning
+        the encoding makes the precondition a statement rather than an
+        assumption about whoever runs it. The strict case is a real
+        configuration, not a contrived one: it is the default on the box
+        this plugin is developed on.
         """
         result = subprocess.run(
             [sys.executable, str(script)], input=b"\xff\xfe",
             capture_output=True, timeout=10,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout == b"", "a crashed hook must emit nothing, not half an envelope"
