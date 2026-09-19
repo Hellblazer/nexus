@@ -286,22 +286,22 @@ reclaiming dead tuples moved one query's overlap from 0.818 to 0.333 with no
 ranking code changing (nexus-4lnn1).
 
 A second timing constraint arrived after this record was drafted, and it bears
-on the note corpus only. Note chunk geometry is changing on write:
-nexus-b2tld, on `origin/feature/nexus-b2tld-split-notes` and not in develop as
-of this amendment, splits a note stored through `store_put` at 1,689 characters
-whenever its model imposes no window at all. That is every Voyage collection —
-`window_for_model` returns no window when the model's token limit exceeds the
-12,288-byte chunk cap, and voyage-context-3 reads 32,000 — so those notes were
-never split before. The change is **write-only**: the 257 existing notes over
-2,000 characters are not re-embedded, which is Sam's decision and a bulk write
-over his live store.
+on the note corpus only. Note chunk geometry changed on write: nexus-b2tld,
+which landed on develop at `1be4146da`, splits a note stored through
+`store_put` at 1,689 characters whenever its model imposes no window at all.
+That is every Voyage collection: `window_for_model` returns no window when the
+model's token limit exceeds the 12,288-byte chunk cap, and voyage-context-3
+reads 32,000, so those notes were never split before. The change is
+**write-only**: the 257 existing notes over 2,000 characters are not
+re-embedded, which is Sam's decision and a bulk write over his live store.
 
 The consequence for this phase is a measurement-window constraint, not a
-blocker. A baseline taken today still describes the store as it stands, but
-every note written after that branch lands is one or more pieces where it would
-previously have been exactly one. So if this phase's query set draws on notes
-at all, take the before-measurement and the after-measurement **within one
-window**, or scope the measurement to the file-indexed corpora, which this
+blocker, and the window boundary is now a known commit. Notes written before
+`1be4146da` are each exactly one piece; notes written after it are one or
+more. A baseline drawn from notes therefore straddles a geometry change unless
+it is taken on one side of that commit. So if this phase's query set draws on
+notes at all, take the before-measurement and the after-measurement **within
+one window**, or scope the measurement to the file-indexed corpora, which this
 change does not touch.
 
 **Phase 2 — the client method.** Add a `hybrid_search` method to
@@ -334,6 +334,81 @@ shape as a gate passing over a scan that matched nothing, and this project's
 own doctrine (nexus-moht0) is that a sweep which found nothing to check is a
 failure, not a pass.
 
+### Technical Design
+
+The route already exists and is production-hardened, so this design adds one
+client method and one detector. No engine change.
+
+**Wire contract.** `POST /v1/vectors/hybrid-search`, registered at
+`VectorHandler.java:182`, handled by `VectorHandler#handleHybridSearch`
+(`:564`). The request body field set is identical to `/search`'s: `query`,
+`collections`, `n_results`, `where`, `include_source_uri`, `rerank`,
+`rerank_top_k`. The response is the same flat row shape both routes return,
+`(id, content, collection, distance, metadata, retention)`, declared
+byte-identically by `plain_search_<dim>` and by both branches behind
+`/hybrid-search` (`vectors-017-collection-scoped-tombstone-filter.xml`). The
+live route selects no fusion component: no `ts_rank`, no trigram score, no RRF
+score, only cosine `distance`. Verified by source search (RF-4).
+
+**Data flow.** client to `handleHybridSearch`, then `requireTenant`, then
+`PgVectorRepository#hybridSearchWithTokens`, then `tenantScope.withTenant`,
+then `text_gate_probe_<dim>` to measure how selective the gate is, then either
+`text_gated_search_by_chash_<dim>` or `text_gated_search_hnsw_first_<dim>`,
+then flat rows, then `VectorHandler#sendSearchResult` (`:540`). That tail is
+shared with `/search` and is where `rerank` and `rerank_top_k` are applied, so
+a caller switching routes neither gains nor loses reranking. Verified by source
+search and pinned by `RerankStageIntegrationTest.java:270` (RF-1).
+
+**Client interface.** One new method on `HttpVectorClient`, mirroring
+`search()`'s body construction at `http_vector_client.py:2948`:
+
+```python
+def hybrid_search(
+    self,
+    query: str,
+    collection_names: list[str],
+    n_results: int = 10,
+    where: dict | None = None,
+    *,
+    include_source_uri: bool = False,
+    rerank: bool = False,
+    rerank_top_k: int | None = None,
+    rerank_meta_out: dict | None = None,
+) -> list[dict] | dict: ...
+```
+
+Every field in that signature is Verified (source search). None is Assumed.
+
+`search()`'s three remaining keyword-only parameters, `cluster_by`,
+`threshold` and `structured`, are deliberately absent. They are client-local
+post-retrieval processing and never reach the wire, so carrying them here
+would duplicate helpers rather than extend the route. A caller who wants them
+applies the same helpers to this method's rows, and adding them later is
+mechanical and needs no engine change. This is the one choice in Phase 2 that
+research did not settle, and it is recorded here rather than left implicit.
+
+**Error contract.** Three outcomes, all enforced server-side today and pinned
+by `VectorHybridHttpTest.java`:
+
+| Condition | Result | Pin |
+| --- | --- | --- |
+| bearer bound to another tenant | 422, fails loud | `VectorHybridHttpTest.java:170` |
+| no pgvector backend configured | 503, never a silent vector fallback | `VectorHybridHttpTest.java:189` |
+| gate matched no text candidates | empty list, a legitimate result and not an error | RF-3 |
+
+That third row is the reason the Phase 4 detector cannot read one response.
+
+**An extension point deliberately not taken.** Which branch served a call,
+selective or HNSW-first, is server-side and invisible: no response field names
+it. Exposing it would be a new engine field, out of scope for a thin client
+method, and is recorded here as a separate ask should diagnostics ever want
+it. Verified by source search (RF-7).
+
+**Docstring reuse.** `http_vector_client.py:2914` already documents this
+route's null-content exclusion inside the existing `search()` docstring,
+written before any method for it existed. It checks out against the DDL and is
+reusable for the new method (RF-6).
+
 ### Decision Rationale
 
 Two independent arguments, and only one of them depends on retrieval getting
@@ -358,9 +433,39 @@ leaves every chunk paying for two indexes the client cannot read.
 
 ### Alternative 2: Switch the engine to the SQL RRF function family first
 
-Reopens RDR-156's accepted trade-off and adds a dense-gate regression risk
-(6.50x at 25,000 rows) for no client-visible benefit. The client cannot reach
-either implementation today, so which one it reaches is a separate question.
+The one alternative that was seriously evaluated rather than briefly
+rejected, because RDR-156 P5 built the family for exactly this purpose and its
+gate returned GO.
+
+**Description**: point the caller at `nexus.hybrid_search_384/_768/_1024`,
+which perform the whole fusion in one round trip using Reciprocal Rank Fusion,
+in place of the Java selectivity dispatch behind `/hybrid-search`.
+
+**Pros**:
+
+- One round trip instead of a probe plus a query.
+- Ties or beats the Java path in the selective-gate regime the redesign
+  targeted: 6/6 recall, 638ms against 661ms (RDR-156 P5.G).
+- Would retire the maintenance cost recorded in Gap 3: nine
+  `CREATE OR REPLACE` statements and nine generated jOOQ classes for a
+  function family nothing calls.
+
+**Cons**:
+
+- No escape valve for dense gates. The cost ratio grows with gate size: 0.97x
+  at 6 rows, 2.57x at 1,830, 6.50x at 25,000 (683ms against 105ms).
+- It returns a different shape, `(id, content, collection, score)`, where the
+  live route returns `(id, content, collection, distance, metadata,
+  retention)`. Switching would change the client's response contract, not just
+  its query plan.
+- The trade-off was already accepted deliberately. Bead nexus-76352 was closed
+  WONTFIX on 2026-08-28.
+
+**Reason for rejection**: it buys no client-visible benefit and costs a
+dense-gate regression risk. The client cannot reach either implementation
+today, so which one it eventually reaches is a separate question from whether
+it can reach one at all. If a future record revisits it, Gap 3's maintenance
+cost argues for deleting the dead family rather than adopting it.
 
 ### Alternative 3: Delete the lexical indexes and stop paying for them
 
@@ -369,3 +474,269 @@ Not available: conexus depends on them through `/hybrid-search`.
 ### Alternative 4: Build a new client-side lexical path
 
 This is what ripgrep was. It was deleted this week for good reasons.
+
+## Trade-offs
+
+### Consequences
+
+- The Gap 2 coverage hole closes. An endpoint with a production consumer
+  becomes reachable from the test suite of the repository that builds it, for
+  the first time since it shipped. This consequence does not depend on
+  retrieval improving.
+- The two lexical indexes every chunk already pays to maintain become readable
+  from the client.
+- The client gains a second retrieval route whose semantics differ from the
+  first. `/hybrid-search` is not a superset of `/search`, so "which route
+  served this" becomes a question a reader of client code has to hold.
+- The Phase 4 detector costs two engine calls where one would do. It runs on a
+  diagnostic path and not on the user's search path, so the cost is bounded to
+  where it buys something.
+- The client takes a dependency on a route whose query-plan choice is made
+  server-side and is invisible in the response. That is the exposure BUG-0148
+  realised, and Phase 4 exists because of it.
+
+### Risks and Mitigations
+
+- **Risk**: BUG-0148 recurs. The planner flips sparse text-gate queries onto
+  the budget-bounded HNSW plan under stale statistics, the route returns zero
+  rows, and every health signal stays green.
+  **Mitigation**: Phase 4's two-call detector, asserted rather than reported,
+  shipped with Phase 2 and not after it. Its own non-vacuity is proven by
+  planting the condition (see Test Plan).
+- **Risk**: the surface decision defaults wrong and users silently lose
+  results, because a row with no text signal never appears on the hybrid
+  route.
+  **Mitigation**: Phase 3 is explicit and is Sam's. Research has already
+  narrowed it to additive or explicit-mode; a silent default is ruled out in
+  the Approach, not left to implementation.
+- **Risk**: Phase 1's baseline is measured on ground that moves underneath it,
+  through note chunk geometry (nexus-b2tld), an autovacuum reclaiming dead
+  tuples, or an index a chunker generation behind.
+  **Mitigation**: one window, freshly built index, or scope the measurement to
+  the file-indexed corpora. Stated in Phase 1.
+- **Risk**: RDR-216's instrument gets reused for convenience, returns a null
+  result, and the null is read as "the lexical leg does not help".
+  **Mitigation**: Critical Assumptions says so in terms, and Phase 1 builds a
+  new query set containing identifier-shaped and rare-token queries.
+- **Risk**: the work is judged on retrieval numbers alone and abandoned if
+  they are flat.
+  **Mitigation**: Decision Rationale separates the two arguments. If Phase 1
+  shows no headroom, Phase 2 still buys the coverage and Phase 3 answers "off
+  by default".
+
+### Failure Modes
+
+**Breaks visibly.** A bearer bound to another tenant gets 422. A missing
+pgvector backend gets 503 rather than a silent fall back to vector-only. Both
+are pinned by existing tests.
+
+**Fails silently, and this is the one that matters.** The gate matches nothing
+and the route returns an empty list. That is a legitimate outcome when there
+genuinely are no text candidates, and it is indistinguishable, from a single
+response, from a gate that matched nothing because the planner chose the wrong
+plan. The response carries no match count and no field naming which leg
+contributed. This is exactly the shape of a gate passing over a scan that
+found nothing to check, which this project already treats as a failure rather
+than a pass (nexus-moht0).
+
+**Diagnosis path.** Call `/search` and `/hybrid-search` with the same query
+and collections and diff the row counts. A fused result of zero where the
+vector leg alone returns rows is the signal. There is no server-side shortcut
+for this today.
+
+## Implementation Plan
+
+### Prerequisites
+
+- [x] All Critical Assumptions verified. Seven research findings, all
+      classified verified, all by source search.
+- [ ] Phase 1's baseline taken, since Phase 3's answer depends on it.
+
+### Minimum Viable Validation
+
+**A nexus-side test drives `POST /v1/vectors/hybrid-search` against the engine
+substrate and the two-call detector fails when the zero-row condition is
+planted.** One proof, covering both halves of the case: the first half closes
+Gap 2 by making the route reachable from a nexus journey, and the second half
+proves the detector is not vacuous. In scope for Phase 2 plus Phase 4, not
+deferred.
+
+### Phase 1: an honest baseline
+
+#### Step 1: build the query set
+
+Identifier-shaped and rare-token queries alongside prose queries. Not
+RDR-216's heading-derived prose set, for the reason in Critical Assumptions.
+
+#### Step 2: measure vector-only recall
+
+Freshly built index, one session, within one window. Record the query set with
+the numbers so a later reader can tell which population was measured.
+
+### Phase 2: the client method
+
+#### Step 1: `HttpVectorClient.hybrid_search`
+
+Per the Technical Design signature. Body construction mirrors `search()`.
+
+#### Step 2: the wire test
+
+Assert the body carries exactly the seven wire fields and no more.
+
+### Phase 3: the surface decision
+
+Sam's. Narrowed by research to additive or explicit mode, never a silent
+default. Not executed until Phase 1 reports.
+
+### Phase 4: the recurrence detector
+
+Ships with Phase 2. Two calls, diffed client-side, asserted.
+
+### Day 2 Operations
+
+This RDR creates no persistent resource: no collection, no index, no data
+store, no config entry. The client method is stateless and the detector is a
+test.
+
+| Resource | List | Info | Delete | Verify | Backup |
+| --- | --- | --- | --- | --- | --- |
+| none created | N/A | N/A | N/A | N/A | N/A |
+
+If Phase 3 chooses a surface that introduces a config key, that key is the
+first persistent resource this work creates, and its Day 2 row belongs to
+Phase 3's own change rather than here.
+
+### New Dependencies
+
+None. The route, its tenant handling and its rerank tail all exist; this adds
+a caller.
+
+## Test Plan
+
+- **Scenario**: `hybrid_search()` builds its request body. **Verify**: exactly
+  `query`, `collections`, `n_results`, and only the optional fields the caller
+  set, matching `/search`'s body for the same arguments.
+- **Scenario**: a nexus test calls the route against the engine substrate.
+  **Verify**: rows come back in the flat shape, and the test is the first
+  nexus-side caller, which is the Gap 2 closure itself.
+- **Scenario**: rerank requested on the hybrid route. **Verify**: the same
+  envelope `/search` produces, matching `hybridSearchCarriesTheSameRerankEnvelope`.
+- **Scenario**: a bearer bound to another tenant. **Verify**: 422, not an
+  empty result.
+- **Scenario**: no pgvector backend. **Verify**: 503, not a silent vector
+  fallback.
+- **Scenario**: a query whose gate genuinely matches no text. **Verify**: an
+  empty list, and the detector does NOT fire, since this is the legitimate
+  zero.
+- **Scenario**: the BUG-0148 condition planted, so the fused call returns zero
+  rows where the vector call returns some. **Verify**: the detector FAILS.
+  This is the non-vacuity proof: a detector that has never been observed
+  failing is a sweep that found nothing to check.
+
+## Validation
+
+### Testing Strategy
+
+1. **Scenario**: the MVV above, run in CI rather than by hand.
+   **Expected**: green when the route is healthy, red when the planted
+   zero-row condition is present.
+2. **Scenario**: Phase 1's baseline re-run after Phase 2 lands, within the
+   same measurement window.
+   **Expected**: a number that can be compared. If the two measurements
+   straddle a note chunk geometry change or an index rebuild, the comparison
+   is void and is retaken rather than reported.
+
+### Performance Expectations
+
+No throughput target is set here. The one empirical comparison that bears on
+the choice is RDR-156 P5.G's, which measured the SQL RRF function family
+against the live Java dispatch and found the cost ratio growing with gate
+size, 0.97x at 6 rows to 6.50x at 25,000. That is the evidence for
+Alternative 2 being rejected, and it is not a target for this work.
+
+## Finalization Gate
+
+### Contradiction Check
+
+No contradictions found between research findings, design principles and the
+proposed solution. Two places where an earlier draft contradicted the research
+were corrected before this gate: Phase 4 assumed a single response could carry
+the zero-row signal, which RF-3 refuted, and the draft carried a
+scope-tripling worry about the route being harness-shaped, which RF-5 refuted.
+Both corrections are in the text above.
+
+### Assumption Verification
+
+All seven research findings are classified verified with verification method
+source search. One assumption is stated and deliberately NOT verified: that
+adding a lexical leg improves retrieval for real nexus queries. Nobody has
+measured it. Phase 1 is the plan to verify it, and it runs before Phase 3
+decides the surface. The Decision Rationale is constructed so that this
+assumption failing does not invalidate the work.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| `POST /v1/vectors/hybrid-search` | nexus-service | Source Search |
+| `VectorHandler#handleHybridSearch` | nexus-service | Source Search |
+| `PgVectorRepository#hybridSearchWithTokens` | nexus-service | Source Search |
+| `VectorHandler#sendSearchResult` (rerank tail) | nexus-service | Source Search |
+| `HttpVectorClient.search()` (body construction copied) | nexus client | Source Search |
+
+### Scope Verification
+
+The Minimum Viable Validation is in scope and executes during implementation,
+not after. Specifically: a nexus-side test that drives the route against the
+engine substrate, plus the planted-zero-row proof that the detector fails when
+it should. Phase 4 ships with Phase 2 for this reason, rather than following
+it.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: N/A. No wire change; the route and its contract already
+  exist and are unchanged.
+- **Build tool compatibility**: N/A.
+- **Licensing**: N/A. No new dependency.
+- **Deployment model**: addressed. The route behaves identically in local and
+  cloud mode, and the client method carries no mode-specific branch. A local
+  install reaches it through the same bundled engine that serves `/search`.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: addressed. Phase 2 adds a method nothing calls by
+  default. Phase 3 decides the user-visible surface separately, so the client
+  method can land and be exercised by tests without changing what any user
+  sees.
+- **Secret/credential lifecycle**: N/A. The route uses the same bearer and the
+  same `requireTenant` path as `/search`; no new credential.
+- **Memory management**: N/A. Row counts are bounded by `n_results`, capped at
+  300 by `MAX_QUERY_RESULTS` like every other read.
+
+### Proportionality
+
+Right-sized, with one caveat worth stating rather than trimming silently. The
+Research Findings and Critical Assumptions sections are long relative to the
+change, because the change is small and the reasons it is small are the part
+that took work to establish: five of the seven findings exist to show that
+Phase 2 is thin rather than to design it. That is the document doing its job.
+The section a future reader can safely skim is Gap 3, which records a dead
+function family this RDR explicitly does not touch.
+
+## References
+
+- `service/src/main/java/.../VectorHandler.java` (`:182`, `:503`, `:516`,
+  `:540`, `:564`, `:577`)
+- `service/src/main/java/.../PgVectorRepository.java` (`:1140`, `:1149`,
+  `:1348`)
+- `service/src/test/java/.../VectorHybridHttpTest.java` (`:170`, `:189`)
+- `service/src/test/java/.../RerankStageIntegrationTest.java` (`:270`)
+- `src/nexus/db/http_vector_client.py` (`:2884`, `:2914`, `:2948`)
+- `vectors-017-collection-scoped-tombstone-filter.xml`,
+  `vectors-001-baseline.xml`, `vectors-002-trgm-index.xml`
+- `docs/rdr/post-mortem/180-content-address-chash-binary-32byte.md:104`
+- T2 `nexus/census-engine-fts-hybrid-search-2026-09-19` [26452]
+- T2 `nexus_rdr/217-hybrid-search-contract-analysis` [26496]
+- T2 `nexus_rdr/217-research-1` through `-7`
+- Beads: nexus-06aei, nexus-b2tld, nexus-0hqez
+
+## Revision History
+
