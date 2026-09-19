@@ -68,9 +68,14 @@ mechanize, it matters enough to ship.
   dir and path-safe charset guard now name `nexus.hooks.expectations` rather
   than the deleted shell file. Still MIRRORED rather than imported, and that
   is forced: this file is invoked by a bare `python3` from a detached wrapper
-  and is stdlib-only by contract, so `nexus` is not on its path. Bead
-  nexus-q02nx.20 moves the work into the server, where the import belongs and
-  where the pair should collapse. No behaviour change.
+  and is stdlib-only by contract, so `nexus` is not on its path.
+  An earlier version of this entry said bead nexus-q02nx.20 would move the
+  work into the server, where the import belongs and where the pair should
+  collapse. It did not, and the prediction was wrong when written: .20 moves
+  the two async WRAPPERS to daemon threads and deliberately leaves this file
+  in the plugin, because it is stdlib-only by contract and importing it into
+  the wheel would invert this epic's dependency direction. The mirror stays
+  a mirror. No behaviour change.
 
 - `conexus/agents/codebase-deep-analyzer.md`, `conexus/agents/deep-research-synthesizer.md`: both told the agent that
   `nx search` / the `search` MCP tool provides "semantic search + ripgrep +
