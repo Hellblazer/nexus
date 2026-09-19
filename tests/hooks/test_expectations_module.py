@@ -609,69 +609,19 @@ class TestUndeclaredCreditAccounting:
         assert summary == "SUMMARY\tchecked=2 recognized=1 unrecognized=1 undeclared=1"
 
 
-# ── differential: the port against the still-live bash library ───────────
-
-_BASH_LIB = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "expectations.sh"
-
-
-def _bash_undeclared(session: str, state_home: str) -> tuple[list[str], int]:
-    """Run the REAL bash expectations_undeclared and return (lines, rc)."""
-    proc = subprocess.run(
-        ["bash", "-c", f'. "{_BASH_LIB}"; expectations_undeclared "{session}"'],
-        capture_output=True, text=True,
-        env={**os.environ, "XDG_STATE_HOME": state_home},
-    )
-    return [ln for ln in proc.stdout.splitlines() if ln], proc.returncode
-
-
-class TestPortAgreesWithTheLiveBashLibrary:
-    """Approach item 9 is "move, do not rewrite", and the bash library is
-    still live until bead .14 repoints its consumers — so the two must
-    agree for the whole of Phase 2, and the cheapest proof is to run both.
-
-    This is a stronger oracle than any assertion I could write about the
-    port in isolation: it catches translation drift in the awk logic, the
-    exit codes AND the exact stdout bytes at once, against the
-    implementation whose behaviour is the contract.
-    """
-
-    @pytest.mark.parametrize(
-        "rows,label",
-        [
-            ([("EXPECT", "t", "background"), ("START", "a1", "t")], "clean"),
-            ([("START", "a1", "t")], "undeclared"),
-            ([("EXPECT", "t", "background")], "blindspot"),
-            ([("EXPECT", "t", "background"), ("EXPECT", "t", "background"),
-              ("START", "a1", "t"), ("START", "a2", "t")], "n-of-type"),
-            ([("EXPECT", "t", "background"),
-              ("START", "a1", "t"), ("START", "a2", "t")], "n-plus-one"),
-            ([("EXPECT", "t", "background", "d1"), ("EXPECT", "t", "background", "d1"),
-              ("START", "a1", "t"), ("START", "a2", "t")], "duplicate-dispatch-id"),
-            ([("EXPECT", "t", "sync"), ("START", "a1", "t")], "sync-supplies-credit"),
-            ([("EXPECT", "t1", "background"), ("START", "a1", "t2")], "type-keyed"),
-            ([("EXPECT", "conexus:critic", "background"),
-              ("START", "a1", "conexus:critic")], "colon-qualified-type"),
-            ([("EXPECT", "t", "background"), ("START", "a1", "t"), ("START", "a1", "t")],
-             "duplicate-start-id"),
-        ],
-    )
-    def test_lines_and_exit_code_match_bash(self, state, rows, label):
-        _seed("sdiff", rows)
-        mine = exp.expectations_undeclared("sdiff")
-        theirs_lines, theirs_rc = _bash_undeclared("sdiff", os.environ["XDG_STATE_HOME"])
-        assert mine.lines == theirs_lines, f"{label}: stdout drifted from bash"
-        assert mine.code == theirs_rc, f"{label}: exit code drifted from bash"
-
-    def test_the_no_ledger_case_matches_bash(self, state):
-        """rc 3 with nothing on stdout — the note goes to stderr in both,
-        because a NOTE on stdout would land in a hook's decision channel."""
-        mine = exp.expectations_undeclared("no-such-session")
-        theirs_lines, theirs_rc = _bash_undeclared("no-such-session", os.environ["XDG_STATE_HOME"])
-        assert mine.code == theirs_rc == 3
-        assert mine.lines == theirs_lines == []
-
-
 # ── owes_report: the consult rule, and both disclosed causes ─────────────
+
+#: Retained for :class:`TestTheDualImplementationParamDiesWithTheLibrary`
+#: below, which checks whether the bash library still exists on disk. The
+#: differential classes that used to run it as a live oracle (RDR-215 bead
+#: nexus-q02nx.21: all twelve hooks.json entries, including this one, are
+#: now re-declared to their Python mcp_tools, so the bash path they
+#: compared against no longer runs in production) are gone; every scenario
+#: they covered has a direct assertion above (e.g.
+#: ``test_n_expects_cover_n_starts_of_that_type``,
+#: ``test_a_sync_expect_also_supplies_credit``,
+#: ``test_credit_is_keyed_by_type_not_shared``).
+_BASH_LIB = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "expectations.sh"
 
 class TestOwesReport:
     def test_a_background_expect_makes_the_first_stop_owe(self, state):
@@ -783,101 +733,7 @@ class TestOwesReportSurvivesTheLockBeingDisabled:
         assert len(consumed) == 2
 
 
-class TestOwesReportAgreesWithBash:
-    """owes_report MUTATES (a CONSUMED row and a slot), so the differential
-    runs each implementation on its own fresh session and compares the
-    verdict, the disclosed cause and the resulting ledger rows."""
-
-    def _bash_owes(self, session: str, agent_id: str, agent_type: str, state_home: str):
-        proc = subprocess.run(
-            ["bash", "-c",
-             f'. "{_BASH_LIB}"; expectations_owes_report "{session}" "{agent_id}" '
-             f'"{agent_type}"; rc=$?; echo "RC=$rc CAUSE=$EXPECTATIONS_OWES_CAUSE"'],
-            capture_output=True, text=True,
-            env={**os.environ, "XDG_STATE_HOME": state_home},
-        )
-        tail = [ln for ln in proc.stdout.splitlines() if ln.startswith("RC=")][-1]
-        rc = int(tail.split()[0].split("=")[1])
-        cause = tail.split("CAUSE=", 1)[1]
-        return (rc == 0), cause
-
-    @pytest.mark.parametrize(
-        "rows,label",
-        [
-            ([("EXPECT", "t", "background")], "owes"),
-            ([("EXPECT", "t", "sync")], "sync-only-never-owes"),
-            ([("EXPECT", "t", "background"), ("EXPECT", "t", "sync")], "mixed-never-owes"),
-            ([("EXPECT", "other", "background")], "type-keyed"),
-            ([], "empty-ledger"),
-            ([("EXPECT", "t", "background"), ("CONSUMED", "someone-else", "t")], "spent"),
-            ([("EXPECT", "t", "background"), ("CONSUMED", "a1", "t")], "self-re-entry"),
-        ],
-    )
-    def test_verdict_and_cause_match_bash(self, state, rows, label):
-        _seed("mine", rows)
-        _seed("theirs", rows)
-        mine = exp.expectations_owes_report("mine", "a1", "t")
-        theirs_owes, theirs_cause = self._bash_owes(
-            "theirs", "a1", "t", os.environ["XDG_STATE_HOME"]
-        )
-        assert mine.owes == theirs_owes, f"{label}: verdict drifted from bash"
-        assert mine.cause == theirs_cause, f"{label}: cause drifted from bash"
-
-    def test_the_consumed_row_shape_matches_bash(self, state):
-        _seed("mine", [("EXPECT", "t", "background")])
-        _seed("theirs", [("EXPECT", "t", "background")])
-        exp.expectations_owes_report("mine", "a1", "t")
-        self._bash_owes("theirs", "a1", "t", os.environ["XDG_STATE_HOME"])
-        mine_rows = [r[1:] for r in _rows(Path(exp.expectations_file("mine")))]
-        theirs_rows = [r[1:] for r in _rows(Path(exp.expectations_file("theirs")))]
-        assert mine_rows == theirs_rows, "the appended CONSUMED row must match byte for byte"
-
-    def test_the_slot_name_and_owner_match_bash(self, state):
-        """The sidecar names are part of the contract while both
-        implementations are live: bead .14 has not repointed consumers, so
-        a session can be written by one and read by the other."""
-        _seed("mine", [("EXPECT", "conexus:critic", "background")])
-        _seed("theirs", [("EXPECT", "conexus:critic", "background")])
-        exp.expectations_owes_report("mine", "a1", "conexus:critic")
-        self._bash_owes("theirs", "a1", "conexus:critic", os.environ["XDG_STATE_HOME"])
-        mine_slots = sorted(p.name.split(".expectations", 1)[1]
-                            for p in exp._state_dir().glob("mine.expectations.credit.*"))
-        theirs_slots = sorted(p.name.split(".expectations", 1)[1]
-                              for p in exp._state_dir().glob("theirs.expectations.credit.*"))
-        assert mine_slots == theirs_slots == [".credit.conexus__critic.1"]
-        assert os.readlink(str(exp._state_dir() / f"mine.expectations{mine_slots[0]}")) == "a1"
-
-
 # ── census: the scripted retro count, and its 0/1-only vocabulary ────────
-
-def _bash_census(session: str, state_home: str) -> tuple[list[str], int]:
-    proc = subprocess.run(
-        ["bash", "-c", f'. "{_BASH_LIB}"; expectations_census "{session}"'],
-        capture_output=True, text=True,
-        env={**os.environ, "XDG_STATE_HOME": state_home},
-    )
-    return _ledger_lines_only(proc.stdout.splitlines()), proc.returncode
-
-
-#: The census's ledger lines, excluding the space-backed SPACE_*/VERIFY_*
-#: tail. Applied to BOTH SIDES of the comparison below, which is the fix for
-#: a real asymmetry: this filter used to be applied to bash's output alone
-#: while the port's ``.lines`` went in whole. That was invisible only
-#: because the bead .9 port had not yet reproduced those lines. Bead
-#: nexus-q02nx.14 completed them, twelve tests here went red, and the red
-#: was correct -- the comparison had been narrower on one side all along.
-#: The full-output differential now lives in
-#: ``tests/hooks/test_ledger_verbs.py::TestTheSpaceAndVerifyLines``, so
-#: bounding this file to the ledger lines is a division of labour rather
-#: than a gap.
-_LEDGER_LINE_PREFIXES = (
-    "AGENT\t", "EXPECTED_NO_START\t", "ROWS\t", "CLASSIFIED\t", "BLINDSPOT\t",
-)
-
-
-def _ledger_lines_only(lines: list[str]) -> list[str]:
-    return [ln for ln in lines if ln.startswith(_LEDGER_LINE_PREFIXES)]
-
 
 class TestCensus:
     def test_a_reported_agent_is_classified_and_declared(self, state):
@@ -958,39 +814,6 @@ class TestCensus:
         assert r.code == 0 and r.lines == []
 
 
-class TestCensusAgreesWithBash:
-    @pytest.mark.parametrize(
-        "rows,label",
-        [
-            ([("EXPECT", "t", "background"), ("START", "a1", "t"), ("REPORTED", "a1")], "clean"),
-            ([("EXPECT", "t", "background"), ("START", "a1", "t"),
-              ("BLOCKED", "a1"), ("REPORTED", "a1")], "blocked-resolved"),
-            ([("EXPECT", "t", "background"), ("START", "a1", "t"),
-              ("BLOCKED", "a1"), ("REPORTED", "a1", "later")], "resolved-later"),
-            ([("EXPECT", "t", "background"), ("START", "a1", "t")], "no-terminal"),
-            ([("REPORTED", "ghost")], "no-start"),
-            ([("EXPECT", "t", "background")], "blindspot"),
-            ([("EXPECT", "t", "background"), ("START", "a1", "t"), ("START", "a2", "t")],
-             "undeclared"),
-            ([("EXPECT", "t", "background"), ("WOULDBLOCK", "a1")], "wouldblock"),
-            ([("EXPECT", "a", "background"), ("EXPECT", "b", "sync"),
-              ("START", "x", "a"), ("START", "y", "b"), ("REPORTED", "x")], "two-types"),
-            ([("EXPECT", "t", "background", "d1"), ("START", "a1", "t"),
-              ("EXPECT", "t", "background", "d2")], "expected-no-start"),
-            ([("EXPECT", "t", "background"), ("START", "a1", "t"),
-              ("EXPECT", "t", "background")], "identical-expect-rows-dedupe"),
-        ],
-    )
-    def test_lines_and_exit_code_match_bash(self, state, rows, label):
-        _seed("sc", rows)
-        mine = exp.expectations_census("sc")
-        theirs_lines, theirs_rc = _bash_census("sc", os.environ["XDG_STATE_HOME"])
-        assert _ledger_lines_only(mine.lines) == theirs_lines, (
-            f"{label}: census ledger lines drifted from bash"
-        )
-        assert mine.code == theirs_rc, f"{label}: census exit code drifted from bash"
-
-
 # ── reconcile: the harness's own ground truth ────────────────────────────
 
 def _payload(*tasks) -> str:
@@ -1068,39 +891,6 @@ class TestReconcile:
         assert "harness_tasks=2 unidentified=1" in summary
 
 
-class TestReconcileAgreesWithBash:
-    def _bash_reconcile(self, session: str, payload: str, state_home: str):
-        proc = subprocess.run(
-            ["bash", "-c",
-             f'. "{_BASH_LIB}"; expectations_reconcile "{session}" "$1"', "_", payload],
-            capture_output=True, text=True,
-            env={**os.environ, "XDG_STATE_HOME": state_home},
-        )
-        return [ln for ln in proc.stdout.splitlines() if ln], proc.returncode
-
-    @pytest.mark.parametrize(
-        "rows,payload,label",
-        [
-            ([("START", "a1", "t")], _payload({"agent_id": "a1"}), "clean"),
-            ([("START", "a1", "t")], _payload(), "stranded"),
-            ([("START", "a1", "t"), ("REPORTED", "a1")], _payload(), "terminated"),
-            ([("START", "a1", "t")], _payload({"agent_id": "a1"}, {"id": "ghost"}),
-             "undeclared-task"),
-            ([("START", "a1", "t")], _payload({"id": "ghost"}), "stranded-outranks"),
-            ([("START", "a1", "t")], json.dumps({}), "absent"),
-            ([("START", "a1", "t")], json.dumps({"background_tasks": []}), "empty-list"),
-            ([("START", "a1", "t")], _payload({"agent_id": "a1"}, {"no": "id"}),
-             "unidentified"),
-        ],
-    )
-    def test_lines_and_exit_code_match_bash(self, state, rows, payload, label):
-        _seed("sr", rows)
-        mine = exp.expectations_reconcile("sr", payload)
-        theirs_lines, theirs_rc = self._bash_reconcile("sr", payload, os.environ["XDG_STATE_HOME"])
-        assert mine.lines == theirs_lines, f"{label}: reconcile lines drifted from bash"
-        assert mine.code == theirs_rc, f"{label}: reconcile exit code drifted from bash"
-
-
 class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:
     """A no-ledger result must not be structurally narrower than a
     populated one, or a consumer reading it unconditionally breaks only
@@ -1158,21 +948,30 @@ class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:
 # ── the bead .14 obligation, made mechanical ─────────────────────────────
 
 class TestTheDualImplementationParamDiesWithTheLibrary:
-    """When bead .14 deletes the bash library, the "bash" param must go too.
+    """When the bash library stops being what production runs, the "bash"
+    param must go too.
 
     tests/hooks/test_expectations_reconcile.py and test_expectations_archive.py
-    run every assertion against BOTH implementations while both are live.
-    That is deliberate (a straight retarget would have deleted the only
-    coverage of the running bash path), but it leaves an obligation: the
-    param has to die with the library it drives.
+    ran every assertion against BOTH implementations while both were live.
+    That was deliberate (a straight retarget would have deleted the only
+    coverage of the running bash path), but it left an obligation: the
+    param has to die with the library it drove.
 
     Left behind, it becomes the vacuous-gate shape this project has a name
     for — a parametrised test that still reports two passes while one of
     them exercises nothing, or worse, a skip that reports green forever. So
     the obligation is enforced here rather than written in a bead nobody
-    re-reads: while the library exists, both params must be present; the
-    moment it does not, a surviving "bash" param fails this test and names
-    the file to fix.
+    re-reads.
+
+    The live-ness check is against ``hooks.json`` (whether any wired entry
+    still runs ``expectations.sh``), not against the raw file's presence
+    on disk (RDR-215 bead nexus-q02nx.21): the physical deletion and the
+    hooks.json re-point land in the same change, but the re-point is what
+    actually retires the bash path — a script that still exists on disk
+    with nothing left pointing at it is not "the live production path" by
+    any definition that matters here, and gating on file presence alone
+    would have kept demanding a bash param these two files correctly
+    dropped once their hook was re-declared.
     """
 
     _DUAL_FILES = (
@@ -1183,20 +982,27 @@ class TestTheDualImplementationParamDiesWithTheLibrary:
     def _repo(self) -> Path:
         return Path(__file__).resolve().parents[2]
 
-    def test_the_param_list_tracks_whether_the_library_still_exists(self):
-        library_exists = _BASH_LIB.is_file()
+    def _library_still_wired(self) -> bool:
+        hooks = json.loads(
+            (self._repo() / "conexus" / "hooks" / "hooks.json").read_text()
+        )
+        return _BASH_LIB.name in json.dumps(hooks)
+
+    def test_the_param_list_tracks_whether_the_library_is_still_wired(self):
+        library_wired = self._library_still_wired()
         for relative in self._DUAL_FILES:
             source = (self._repo() / relative).read_text()
             drives_bash = 'params=["bash", "python"]' in source
-            if library_exists:
+            if library_wired:
                 assert drives_bash, (
                     f"{relative} must drive BOTH implementations while "
-                    f"{_BASH_LIB.name} is still the live production path"
+                    f"{_BASH_LIB.name} is still wired in hooks.json"
                 )
             else:
                 assert not drives_bash, (
-                    f"{_BASH_LIB} is gone (bead nexus-q02nx.14), so {relative} "
-                    'still carrying params=["bash", "python"] now runs a '
+                    f"{_BASH_LIB.name} is no longer wired in hooks.json "
+                    f"(RDR-215 bead nexus-q02nx.21), so {relative} still "
+                    'carrying params=["bash", "python"] now runs a '
                     "parametrisation whose bash half exercises nothing. Drop "
                     'the param and the fixture, and call the module directly.'
                 )

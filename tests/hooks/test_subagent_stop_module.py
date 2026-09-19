@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import ast
 import json
-import re
 import subprocess
 import sys
 import time
@@ -33,46 +32,47 @@ from nexus.hooks import subagent_stop_scans as scans
 from nexus.mcp.core import _mcp_tool_error
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop.sh"
 SCAN = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop-scan.py"
 WRITES_SCAN = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop-writes-scan.py"
 
 
-class TestTheReasonTextMatchesTheScript:
+class TestTheReasonTextIsWhatAnOperatorReads:
     """The block reason is the guard's entire user-visible surface.
 
-    Every assertion here reads the CURRENT script text and compares it to the
-    module constant. A retyped copy in the test would let the two drift
-    together while the test stayed green, which is the inert-guard shape this
-    repo keeps paying for. When the script is finally deleted this class goes
-    with it -- by then the port IS the text.
+    RDR-215 bead nexus-q02nx.21 deleted ``subagent-stop.sh``: this class
+    used to read ITS CURRENT bytes and compare them to the module
+    constant, so a retyped copy in the test could never drift from
+    production unnoticed. With the script gone the port IS the only
+    surface left, so these three fixed strings are the exact text
+    extracted from the script immediately before its deletion (verified
+    byte-identical to the module constants at that time) -- a change to
+    any of them is now a deliberate wording decision, not silent drift.
     """
 
-    @staticmethod
-    def _script() -> str:
-        return SCRIPT.read_text()
-
-    def test_the_owes_reason_is_byte_identical(self):
-        m = re.search(r'^REASON="(You are the named.*?)"$', self._script(), re.M)
-        assert m, "the script no longer assigns REASON from a literal"
-        expected = m.group(1).replace("${AGENT_TYPE}", "{agent_type}")
-        assert hook._OWES_REASON == expected
-
-    def test_the_lock_exhausted_note_is_byte_identical(self):
-        # ^\s* because this assignment sits inside the `if` that appends
-        # the note; an anchored ^REASON matched nothing and the test said
-        # "the script no longer appends" when the script was fine.
-        m = re.search(
-            r'^\s*REASON="\$\{REASON\}( \(NOTE:.*?)"$', self._script(), re.M
+    def test_the_owes_reason(self):
+        assert hook._OWES_REASON == (
+            "You are the named background teammate {agent_type} and your "
+            "orchestrator expects a completion report you have not sent. "
+            "Use SubagentHandback (or SendMessage) now to report: outcome, "
+            "artifacts (paths/commits/IDs), and anything blocking. Then stop."
         )
-        assert m, "the script no longer appends the lock-exhausted note"
-        assert hook._LOCK_EXHAUSTED_NOTE == m.group(1)
 
-    def test_the_unlanded_reason_is_byte_identical(self):
-        m = re.search(r'^\s+"(You sent your completion report.*?)"$', self._script(), re.M)
-        assert m, "the script no longer emits the unlanded-write reason"
-        expected = m.group(1).replace("${WRITES_VERDICT#UNLANDED }", "{detail}")
-        assert hook._UNLANDED_REASON == expected
+    def test_the_lock_exhausted_note(self):
+        assert hook._LOCK_EXHAUSTED_NOTE == (
+            " (NOTE: this block could not verify remaining report credit "
+            "under lock contention -- treat it as a precaution, not a "
+            "confirmed miss; see nexus-plycy.)"
+        )
+
+    def test_the_unlanded_reason(self):
+        assert hook._UNLANDED_REASON == (
+            "You sent your completion report, but {detail} of your storage "
+            "writes came back as errors, so those findings are NOT "
+            "persisted -- a caller reading T1/T2/T3 will not see them. "
+            "Retry the failed writes now. If they still fail, say so "
+            "explicitly in a SendMessage and restate the findings inline "
+            "so they are not lost. Then stop."
+        )
 
 
 class TestTheEnvelopeIsRenderedNotPrintfd:

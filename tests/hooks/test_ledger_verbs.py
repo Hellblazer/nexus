@@ -24,14 +24,6 @@ from nexus.hooks.ledger_verbs import VERBS
 from nexus.mcp.hooks import HOOK_TOOLS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: The PLUGIN copy. The reference copy this originally named was deleted
-#: by the SAME commit that added this file (RDR-215 bead nexus-q02nx.14)
-#: — every sibling test got repointed and this one was missed, so it
-#: shipped failing 10 of its own assertions: `source <gone>` fails, bash
-#: falls through the `;`, the verb is not an external command, stdout is
-#: empty. The plugin copy is what the wired hooks.json entries run until
-#: bead .21.
-LIB = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
 
 #: Bounds a HANG, not performance. The defect this file pins made the verb
 #: block forever, so every invocation here is time-bounded and a timeout is
@@ -46,15 +38,6 @@ def _nx_hook(*args: str, state: Path, stdin=subprocess.DEVNULL, env_extra: dict 
         [sys.executable, "-c",
          "from nexus._hook_runtime.entry import main; main()", *args],
         capture_output=True, text=True, timeout=_BUDGET, env=env, stdin=stdin,
-    )
-
-
-def _bash(verb: str, *args: str, state: Path, env_extra: dict | None = None):
-    env = {**os.environ, "XDG_STATE_HOME": str(state), **(env_extra or {})}
-    quoted = " ".join(f"'{a}'" for a in args)
-    return subprocess.run(
-        ["bash", "-c", f'source "{LIB}"; {verb} {quoted}'],
-        capture_output=True, text=True, timeout=_BUDGET, env=env,
     )
 
 
@@ -187,29 +170,45 @@ class TestItDoesNotReadStdin:
             pytest.fail(f"{verb} blocked on an unredirected stdin")
 
 
-class TestTheyAgreeWithTheLibraryTheyReplace:
-    """STDOUT AND EXIT CODE BOTH, because callers use both: the scripts
-    pipe and grep the lines, and branch on the code."""
+class TestTheEntryPointReturnsTheModuleExitCode:
+    """The wiring, not the ledger logic (already pinned in-process by
+    ``test_expectations_module.py``): a real ``nx-hook`` subprocess for
+    each verb must surface the SAME exit code the module computes.
+
+    Re-pointed at the Python entry point alone (RDR-215 bead nexus-q02nx.21):
+    this used to also run the bash library as a same-fixture oracle
+    (``TestTheyAgreeWithTheLibraryTheyReplace``), which is moot now that
+    none of the wired ``hooks.json`` entries run it any more.
+    """
 
     @pytest.mark.parametrize(
-        "verb", ["expectations_undeclared", "expectations_census"]
+        "verb,expected_code",
+        [("expectations_undeclared", 2), ("expectations_census", 0)],
     )
-    def test_a_populated_session_matches(self, ledger, verb):
-        mine = _nx_hook(verb, "sess-probe", state=ledger)
-        theirs = _bash(verb, "sess-probe", state=ledger)
-        assert mine.stdout == theirs.stdout, verb
-        assert mine.returncode == theirs.returncode, verb
+    def test_a_populated_session_exits_with_its_verdict_code(
+        self, ledger, verb, expected_code
+    ):
+        """This fixture's ``a2``/``conexus:critic`` start has no matching
+        EXPECT row: undeclared, so ``expectations_undeclared`` reports 2
+        (a real deficit); ``expectations_census`` never returns 2 (its
+        vocabulary is 0/1 only) and reports 0 for any populated ledger."""
+        assert _nx_hook(verb, "sess-probe", state=ledger).returncode == expected_code, verb
 
     @pytest.mark.parametrize(
-        "verb", ["expectations_undeclared", "expectations_census"]
+        "verb,expected_code",
+        [("expectations_undeclared", 3), ("expectations_census", 0)],
     )
-    def test_an_absent_session_matches(self, ledger, verb):
-        """rc=3 for undeclared: no ledger file is not evidence of
-        cleanliness (nexus-ahl9v), and that distinction is the whole
-        reason these verbs are driven by exit code."""
-        mine = _nx_hook(verb, "no-such-session", state=ledger)
-        theirs = _bash(verb, "no-such-session", state=ledger)
-        assert mine.returncode == theirs.returncode, verb
+    def test_an_absent_session_exits_with_its_verdict_code(
+        self, ledger, verb, expected_code
+    ):
+        """``expectations_undeclared`` reports 3: no ledger file is not
+        evidence of cleanliness (nexus-ahl9v), and that distinction is the
+        whole reason it is driven by exit code. ``expectations_census``
+        treats a missing ledger as code 0 and silent."""
+        assert (
+            _nx_hook(verb, "no-such-session", state=ledger).returncode
+            == expected_code
+        ), verb
 
 
 class TestTheSpaceAndVerifyLines:
@@ -217,27 +216,28 @@ class TestTheSpaceAndVerifyLines:
     nexus-em75s.19) that ``expectations_census`` appends after its TSV
     output -- the gap this bead exists to close.
 
-    Driven through a FAKE ``nx`` (see ``fake_nx_path``/``_NO_NX_PATH``)
-    rather than the real one ``TestTheyAgreeWithTheLibraryTheyReplace``
-    above uses: this repo's dev box has a real, LIVE, shared tuple space
-    (other sessions' ledgers), so the real ``nx tuple list --prefix
-    ledger/`` result is non-deterministic across runs and the specific
-    branch it hits (BLINDSPOT vs. NEVER_RAN vs. OUTSIDE_WINDOW) depends on
-    ambient state this test does not control. Each case below constructs
-    its own deterministic response so the exact branch, and the exact
-    reason string, is pinned rather than incidental.
+    Driven through a FAKE ``nx`` (see ``fake_nx_path``/``_NO_NX_PATH``):
+    this repo's dev box has a real, LIVE, shared tuple space (other
+    sessions' ledgers), so the real ``nx tuple list --prefix ledger/``
+    result is non-deterministic across runs and the specific branch it
+    hits (BLINDSPOT vs. NEVER_RAN vs. OUTSIDE_WINDOW) depends on ambient
+    state this test does not control. Each case below constructs its own
+    deterministic response so the exact branch, and the exact reason
+    string, is pinned rather than incidental.
 
-    Every case compares ``mine``/``theirs`` byte for byte, same bar as the
-    class above -- both sides see the identical fake ``nx``, so a
-    mismatch here is a real divergence, not fixture noise.
+    Re-pointed at the Python entry point alone (RDR-215 bead nexus-q02nx.21):
+    every assertion here used to also run the bash library on the same
+    fake ``nx`` and compare byte for byte, which is moot now that none of
+    the wired ``hooks.json`` entries run it any more. The exact-string
+    assertions below are the same ones the comparison used to license, so
+    no coverage is lost.
 
     NOT covered by a real fixture here, and said so rather than mocked: a
     genuine 124 (deadline-exceeded) bounded-call timeout. Reaching it
     needs a fake ``nx`` that sleeps past ``NX_EXPECT_CENSUS_NX_TIMEOUT_S``,
     which would tax every run of this file by that many seconds for a
-    branch whose bash and python sides already share the same fallback
-    message shape (``nx tuple ... failed (rc=%d): %s``) that every
-    non-timeout non-zero exit here already exercises byte-for-byte. Also
+    branch whose fallback message shape (``nx tuple ... failed (rc=%d):
+    %s``) every non-timeout non-zero exit here already exercises. Also
     not covered: ``nx tuple rd``'s own failure/unparseable-JSON paths --
     reaching them needs ``FAKE_NX_TEMPLATES_JSON`` to declare ``verify``
     (so ``_census_verify_absent`` proceeds past ``VERIFY_UNVERIFIABLE`` to
@@ -248,18 +248,12 @@ class TestTheSpaceAndVerifyLines:
     def test_nx_absent_from_path(self, ledger):
         env = {"PATH": _NO_NX_PATH}
         mine = _nx_hook("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        theirs = _bash("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        assert mine.stdout == theirs.stdout
-        assert mine.returncode == theirs.returncode
         assert "SPACE_FALLBACK\treason=PATH has no nx" in mine.stdout
         assert "VERIFY_FALLBACK\treason=PATH has no nx" in mine.stdout
 
     def test_unparseable_json_from_tuple_list(self, ledger, fake_nx_path):
         env = {"PATH": fake_nx_path, "FAKE_NX_LIST_JSON": "not json"}
         mine = _nx_hook("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        theirs = _bash("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        assert mine.stdout == theirs.stdout
-        assert mine.returncode == theirs.returncode
         assert "SPACE_FALLBACK\treason=unparseable JSON from nx tuple list" in mine.stdout
         # Default FAKE_NX_TEMPLATES_JSON (`{"templates":[]}`) declares no
         # `verify` dimension, so the verify half takes its own fallback --
@@ -272,9 +266,6 @@ class TestTheSpaceAndVerifyLines:
         parse-failure one above."""
         env = {"PATH": fake_nx_path, "FAKE_NX_LIST_JSON": '{"not": "an array"}'}
         mine = _nx_hook("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        theirs = _bash("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        assert mine.stdout == theirs.stdout
-        assert mine.returncode == theirs.returncode
         assert "SPACE_FALLBACK\treason=nx tuple list --json did not return an array" in mine.stdout
 
     def test_tuple_list_nonzero_exit(self, ledger, fake_nx_path):
@@ -284,11 +275,7 @@ class TestTheSpaceAndVerifyLines:
             "FAKE_NX_LIST_JSON": "engine unreachable\nretrying...",
         }
         mine = _nx_hook("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        theirs = _bash("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        assert mine.stdout == theirs.stdout
-        assert mine.returncode == theirs.returncode
-        # The multi-line reason must fold to ONE line (tab/newline scrubbed),
-        # matching bash's `tr '\n\t' '  ' | tr -s ' '`.
+        # The multi-line reason must fold to ONE line (tab/newline scrubbed).
         assert (
             "SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed "
             "(rc=3): engine unreachable retrying..." in mine.stdout
@@ -307,9 +294,6 @@ class TestTheSpaceAndVerifyLines:
             ),
         }
         mine = _nx_hook("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        theirs = _bash("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        assert mine.stdout == theirs.stdout
-        assert mine.returncode == theirs.returncode
         assert "SPACE_PRESENT\tsubspace=ledger/sess-probe total=5" in mine.stdout
         # tsv_newest is the ledger fixture's last row's timestamp
         # (2026-09-19T00:00:02Z); drift = tsv_newest - space_newest = -8s.
@@ -339,9 +323,6 @@ class TestTheSpaceAndVerifyLines:
             ),
         }
         mine = _nx_hook("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        theirs = _bash("expectations_census", "sess-probe", state=ledger, env_extra=env)
-        assert mine.stdout == theirs.stdout
-        assert mine.returncode == theirs.returncode
         # One row explicitly "present", two rows counted as absent (one
         # explicit "absent", one with the dimension missing entirely).
         assert "VERIFY_ABSENT_COUNT\tn=2" in mine.stdout

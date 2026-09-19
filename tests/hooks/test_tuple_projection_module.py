@@ -2,17 +2,25 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The ported tuple projections (RDR-215 bead nexus-q02nx.20).
 
-``test_subagent_tuple_async_wrappers.py`` keeps testing the two bash
-wrappers, which stay wired until bead .21. This file holds the port to
-the same properties those wrappers were written to guarantee — and names
-the one they guarantee BETTER than a daemon thread can.
+Bead nexus-q02nx.21 deleted the two bash wrappers
+(``subagent-start-tuple-async.sh``, ``subagent-stop-tuple-async.sh``) and
+``tests/hooks/test_subagent_tuple_async_wrappers.py`` that drove them; this
+file holds the port to the same properties those wrappers were written to
+guarantee — and names the one they guarantee BETTER than a daemon thread
+can. ``TestTheBackgroundedWriteActuallyLands`` is the one scenario from
+that file with no equivalent above: an end-to-end proof, against a real
+HTTP server, that the detached subprocess still does the work after the
+hook itself has already returned.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -228,3 +236,91 @@ class TestWhatItSubprocesses:
 
         proj._project("start", "{}")  # must not raise
         assert emitted == [expected]
+
+
+class TestTheBackgroundedWriteActuallyLands:
+    """The end-to-end proof, ported from
+    ``tests/hooks/test_subagent_tuple_async_wrappers.py`` (RDR-215 bead
+    nexus-q02nx.21, which deleted the bash wrappers this file's other
+    classes already replace): the thread returns fast, but the real
+    ``tuple_ledger_project.py`` subprocess it spawns must still do the
+    work, confirmed by polling a REAL HTTP server after ``run_start``
+    has already returned. Every other class in this file mocks
+    ``_project``/``_projector``; this one is the one test that must
+    reach the genuine subprocess, so it restores the un-sealed resolver.
+    """
+
+    def test_eventually_the_backgrounded_write_actually_lands(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(proj, "_projector", _REAL_PROJECTOR)
+
+        received: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt: str, *args: object) -> None:  # noqa: A002
+                pass
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b""
+                try:
+                    received.append(json.loads(body.decode("utf-8")))
+                except json.JSONDecodeError:
+                    pass
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            host, port = server.server_address[:2]
+            base_url = f"http://{host}:{port}"
+
+            config_dir = tmp_path / "config"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(
+                f"{urlsplit(base_url).netloc}\x00default".encode("utf-8")
+            ).hexdigest()
+            record = {
+                "format_version": 1,
+                "token": "async-e2e-token",
+                "tenant": "default",
+                "base_url_digest": digest,
+                "expires_at": time.time() + 3600.0,
+                "ttl_seconds": 3600.0,
+                "minted_by_pid": 0,
+            }
+            (config_dir / f"data_token_lease.{digest}").write_text(json.dumps(record))
+
+            monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+            monkeypatch.setenv("NX_SERVICE_URL", base_url)
+            monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+            monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+
+            began = time.monotonic()
+            result = proj.run_start({
+                "session_id": "sess-async-wrap",
+                "agent_id": "aworkerasyncwrap",
+                "agent_type": "developer",
+            })
+            elapsed = time.monotonic() - began
+            assert result.stdout is None
+            assert elapsed < 1.0, (
+                f"run_start took {elapsed:.2f}s -- must return before the "
+                "background thread's own POST completes"
+            )
+
+            assert _settle(lambda: bool(received), timeout=5.0), (
+                "the backgrounded write never reached the engine within 5s"
+            )
+            assert received[0]["subspace"] == "ledger/sess-async-wrap"
+            assert received[0]["keys"] == {
+                "agent_id": "aworkerasyncwrap", "kind": "start",
+            }
+        finally:
+            server.shutdown()
+            server.server_close()

@@ -2,31 +2,27 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The ported PreToolUse(Agent|Task) EXPECT writer (RDR-215 bead nexus-q02nx.10).
 
-The bash script stays live until its ``hooks.json`` entry is re-declared,
-so the differential class at the bottom runs both and compares the ledger
-each produces. That is the only check that catches drift while a live
-session can be written by one and read by the other.
-
 **Stdout is asserted empty on every path.** The hook is stdout-silent by
 contract: a stray byte there is a malformed hook decision, and this is the
 hook that fires on every single agent dispatch.
+
+RDR-215 bead nexus-q02nx.21 re-declared the ``PreToolUse(Agent)`` entry to
+the ``hook_agent_dispatch_expect`` mcp_tool, so the bash script no longer
+runs in production. The differential class that used to compare this
+module against it (``TestAgreesWithTheLiveBashScript``) is gone; every
+scenario it covered has a direct assertion above (e.g.
+``test_a_dispatch_writes_one_expect_row``,
+``test_the_subagent_type_is_carried_verbatim_colon_included``,
+``test_the_same_dispatch_id_writes_once``).
 """
 from __future__ import annotations
 
-import json
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from nexus.hooks import agent_dispatch_expect as hook
 from nexus.hooks import expectations as exp
-
-_SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus" / "hooks" / "scripts" / "agent-dispatch-expect.sh"
-)
 
 
 @pytest.fixture()
@@ -201,42 +197,3 @@ class TestFieldScrubbing:
         assert rows[0][1] == "EXPECT" and rows[0][2] == "conexus:developer"
 
 
-class TestAgreesWithTheLiveBashScript:
-    """The script is still wired in hooks.json, so the two must agree."""
-
-    def _bash(self, payload: dict, state_home: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["bash", str(_SCRIPT)],
-            input=json.dumps(payload), capture_output=True, text=True,
-            env={**os.environ, "XDG_STATE_HOME": state_home},
-        )
-
-    @pytest.mark.parametrize(
-        "payload,label",
-        [
-            (_payload(), "ordinary background dispatch"),
-            (_payload(tool_input={"subagent_type": "t", "run_in_background": False}), "sync"),
-            (_payload(tool_input={}), "missing subagent_type"),
-            (_payload(tool_name="Bash"), "not a dispatch tool"),
-            (_payload(session_id=""), "empty session id"),
-            (_payload(tool_use_id=""), "no dispatch id"),
-            (_payload(tool_input={"subagent_type": "conexus:critic"}), "colon-qualified"),
-        ],
-    )
-    def test_the_ledger_matches(self, state, payload, label):
-        mine = dict(payload, session_id=(payload.get("session_id") and "mine") or "")
-        theirs = dict(payload, session_id=(payload.get("session_id") and "theirs") or "")
-        hook.run(mine)
-        proc = self._bash(theirs, os.environ["XDG_STATE_HOME"])
-        assert proc.returncode == 0, f"{label}: bash must always exit 0"
-        assert proc.stdout == "", f"{label}: bash must be stdout-silent"
-        mine_rows = [r[1:] for r in _rows("mine")]
-        theirs_rows = [r[1:] for r in _rows("theirs")]
-        assert mine_rows == theirs_rows, f"{label}: the ledger drifted from bash"
-
-    def test_bash_also_declines_to_double_count(self, state):
-        """The property that matters most, checked on both sides."""
-        payload = _payload(session_id="theirs")
-        self._bash(payload, os.environ["XDG_STATE_HOME"])
-        self._bash(payload, os.environ["XDG_STATE_HOME"])
-        assert len(_rows("theirs")) == 1

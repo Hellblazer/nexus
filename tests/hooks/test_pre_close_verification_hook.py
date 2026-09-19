@@ -20,6 +20,12 @@ failure; measured converged on a live session) and a durable marker must
 not satisfy a close in a session that performed no review. The old
 dual-source acceptance fixtures survive INVERTED as retirement pins; the
 `fake_nx` memory stub survives to prove memory is never consulted.
+
+RDR-215 bead nexus-q02nx.17 ported this hook from
+``conexus/hooks/scripts/pre_close_verification_hook.sh``; bead .21
+re-declared its ``hooks.json`` entry to the ``hook_pre_close_verification``
+mcp_tool, so the bash script no longer runs in production and this file
+drives the Python module only (nexus-q02nx.21).
 """
 from __future__ import annotations
 
@@ -34,14 +40,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "pre_close_verification_hook.sh"
-)
 
 # A dedicated directory holding ONLY a `python3` symlink -- NOT the parent
 # directory of the resolved interpreter. This repo's venv bin/ (where
@@ -207,27 +205,6 @@ def fake_bd(tmp_path):
     return _make
 
 
-#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
-_IMPL = "bash"
-
-
-@pytest.fixture(params=["bash", "python"], autouse=True)
-def impl(request):
-    """Every assertion in this file runs against BOTH implementations.
-
-    RDR-215 bead nexus-q02nx.17 ports this hook to
-    ``nexus.hooks.pre_close_verification``. The script stays wired until
-    bead .21 re-declares its ``hooks.json`` entry, so both are driven and
-    each of these 67 assertions becomes a differential against the thing
-    still running in production. Drop the "bash" param when the script
-    goes.
-    """
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "bash"
-
-
 #: A CHILD PROCESS, not an in-process call, for the same reason as the
 #: SubagentStop port: this file varies PATH and the environment per call
 #: (a fake ``nx`` via ``path_prefix``, ``CLAUDE_PLUGIN_ROOT`` and
@@ -290,13 +267,8 @@ def _run_hook(
     # into a test that didn't ask for it.
     if "NX_REVIEW_GATE_OVERRIDE" not in (env_overrides or {}):
         env.pop("NX_REVIEW_GATE_OVERRIDE", None)
-    argv = (
-        [sys.executable, "-c", _PY_DRIVER]
-        if _IMPL == "python"
-        else ["bash", str(SCRIPT)]
-    )
     return subprocess.run(
-        argv,
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,
@@ -424,10 +396,6 @@ class TestRunHookIsolatesRoutingLog:
 
 
 class TestFastNoops:
-    def test_script_exists_and_is_executable(self) -> None:
-        assert SCRIPT.exists()
-        assert os.access(SCRIPT, os.X_OK)
-
     def test_exits_zero_always(self) -> None:
         assert _run_hook(_make_payload()).returncode == 0
 

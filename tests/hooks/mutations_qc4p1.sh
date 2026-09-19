@@ -11,14 +11,20 @@
 # is not decoration; if it is RED, the harness ate something.
 #
 # Run from the repo root.
+#
+# RDR-215 bead nexus-q02nx.21 deleted the twelve bash hook scripts this
+# harness used to mutate (agent-dispatch-expect.sh, expectations.sh among
+# them) once their hooks.json entries were re-declared to mcp_tools. Every
+# mutation below that had a mechanical Python analogue was re-pointed at the
+# port (src/nexus/hooks/agent_dispatch_expect.py, already-ported
+# src/nexus/hooks/expectations.py); the ones that did not are recorded as
+# REMOVED, with the reason, rather than silently dropped. See the M1/M3c/M9
+# comments below for exactly which three and why.
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-HOOK=conexus/hooks/scripts/agent-dispatch-expect.sh
-HOOKS_JSON=conexus/hooks/hooks.json
-PLUGIN_LIB=conexus/hooks/scripts/expectations.sh
+HOOK=src/nexus/hooks/agent_dispatch_expect.py
 PY_LIB=src/nexus/hooks/expectations.py
-PENDING_RELEASE=conexus/PENDING_RELEASE.md
 T=tests/hooks/test_agent_dispatch_expect.py
 
 # ⛔ REAL GUARD, not just the warning above: refuse outright on a dirty tree
@@ -29,7 +35,7 @@ T=tests/hooks/test_agent_dispatch_expect.py
 # happened once already (see the header). Checking only the paths this
 # harness actually mutates (not the whole tree) lets it run in a checkout
 # that has unrelated uncommitted work elsewhere.
-MUTATED_PATHS=("$HOOK" "$HOOKS_JSON" "$PLUGIN_LIB" "$PY_LIB" "$PENDING_RELEASE")
+MUTATED_PATHS=("$HOOK" "$PY_LIB")
 DIRTY="$(git status --porcelain -- "${MUTATED_PATHS[@]}")"
 if [[ -n "$DIRTY" ]]; then
     echo "REFUSING TO RUN: uncommitted changes in a file this harness mutates and"
@@ -61,28 +67,31 @@ echo "== baseline =="
 run "baseline" expect-green "$T"
 
 echo
-echo "== M1: hook not registered on Agent PreToolUse =="
-python3 - <<'PY'
-import json, pathlib
-p = pathlib.Path("conexus/hooks/hooks.json")
-d = json.loads(p.read_text())
-d["hooks"]["PreToolUse"] = [
-    e for e in d["hooks"]["PreToolUse"]
-    if not any("agent-dispatch-expect.sh" in h.get("command", "") for h in e.get("hooks", []))
-]
-p.write_text(json.dumps(d, indent=2) + "\n")
-PY
-run "M1 registration removed" expect-red "$T::TestPluginWiring::test_registered_on_agent_pretooluse"
-restore "$HOOKS_JSON"
+echo "== M1: REMOVED (RDR-215 bead nexus-q02nx.21) =="
+# M1 mutated hooks.json to drop the PreToolUse registration and asserted
+# TestPluginWiring::test_registered_on_agent_pretooluse went red. That test
+# and its whole class were deleted (not adapted) in this same bead: the
+# bash command string it matched on no longer exists (the entry is now the
+# hook_agent_dispatch_expect mcp_tool with no "command" field at all), and
+# the wiring invariant it protected does not have a natural home in this
+# file's Python-port test suite the way the write-path mutations below do.
+# Nothing replaces this mutation. The registration itself is still asserted
+# generically by tests/hooks/test_verification_integration.py-style
+# hooks.json structure checks and by the plugin's own dead-wire sweeps, but
+# neither is a mutation-falsified pin for THIS specific entry.
 
 echo
 echo "== M2: key on a literal name instead of subagent_type (the pre-fix defect) =="
 python3 - <<'PY'
 import pathlib
-p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
+p = pathlib.Path("src/nexus/hooks/agent_dispatch_expect.py")
 s = p.read_text().replace(
-    'expectations_expect "$SESSION_ID" "$SUBAGENT_TYPE" "$DISPATCH_MODE" "$DISPATCH_ID"',
-    'expectations_expect "$SESSION_ID" "teammate-1" "$DISPATCH_MODE" "$DISPATCH_ID"')
+    "                _exp.expectations_expect(\n"
+    "                    session_id, subagent_type, dispatch_mode, dispatch_id\n"
+    "                )",
+    "                _exp.expectations_expect(\n"
+    '                    session_id, "teammate-1", dispatch_mode, dispatch_id\n'
+    "                )")
 p.write_text(s)
 PY
 run "M2 unpairable key" expect-red "$T::TestPairsWithSubagentStart" "$T::TestSameTypeDispatchedTwice"
@@ -92,10 +101,20 @@ echo
 echo "== M3: fail-CLOSED on the write path (deny + nonzero on bad input) =="
 python3 - <<'PY'
 import pathlib
-p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
+p = pathlib.Path("src/nexus/hooks/agent_dispatch_expect.py")
 s = p.read_text().replace(
-    '[[ -n "$SESSION_ID" && -n "$SUBAGENT_TYPE" ]] || exit 0',
-    '[[ -n "$SESSION_ID" && -n "$SUBAGENT_TYPE" ]] || { echo \'{"hookSpecificOutput":{"permissionDecision":"deny"}}\'; exit 2; }')
+    "    if not session_id:\n"
+    "        _skip(\n"
+    '            "agent-dispatch-expect: empty/unparseable session_id — EXPECT row NOT "\n'
+    '            f"written for this dispatch (tool_use_id={shown_id})"\n'
+    "        )\n"
+    "        return HookResult()",
+    "    if not session_id:\n"
+    "        _skip(\n"
+    '            "agent-dispatch-expect: empty/unparseable session_id — EXPECT row NOT "\n'
+    '            f"written for this dispatch (tool_use_id={shown_id})"\n'
+    "        )\n"
+    '        return HookResult(stdout=\'{"decision": "deny"}\', exit_code=2)')
 p.write_text(s)
 PY
 run "M3 fail-closed" expect-red "$T::TestFailOpen"
@@ -105,35 +124,49 @@ echo
 echo "== M3b: fail-CLOSED at the tool-name gate (the path M3's inputs REACH) =="
 python3 - <<'PY'
 import pathlib
-p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
+p = pathlib.Path("src/nexus/hooks/agent_dispatch_expect.py")
 s = p.read_text().replace(
-    '[[ "$TOOL_NAME" == "Agent" || "$TOOL_NAME" == "Task" ]] || exit 0',
-    '[[ "$TOOL_NAME" == "Agent" || "$TOOL_NAME" == "Task" ]] || { echo DENY; exit 2; }')
+    "    if tool_name not in _DISPATCH_TOOLS:\n"
+    "        _skip(\n"
+    '            f"agent-dispatch-expect: tool_name \'{tool_name}\' is not Agent/Task — "\n'
+    '            f"EXPECT row NOT written for this dispatch (tool_use_id={shown_id})"\n'
+    "        )\n"
+    "        return HookResult()",
+    "    if tool_name not in _DISPATCH_TOOLS:\n"
+    "        _skip(\n"
+    '            f"agent-dispatch-expect: tool_name \'{tool_name}\' is not Agent/Task — "\n'
+    '            f"EXPECT row NOT written for this dispatch (tool_use_id={shown_id})"\n'
+    "        )\n"
+    '        return HookResult(stdout="DENY", exit_code=2)')
 p.write_text(s)
 PY
 run "M3b fail-closed (reached path)" expect-red "$T::TestFailOpen"
 restore "$HOOK"
 
 echo
-echo "== M3c: revert the empty-field parse to IFS=tab (the collapse bug) =="
-python3 - <<'PY'
-import pathlib
-p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
-s = p.read_text()
-s = s.replace("IFS=$'\\x1f' read -r", "IFS=$'\\t' read -r")
-s = s.replace('print("\\x1f".join(', 'print("\\t".join(')
-p.write_text(s)
-PY
-run "M3c IFS collapse" expect-red "$T::TestFailOpen::test_empty_field_does_not_shift_the_parse"
-restore "$HOOK"
+echo "== M3c: REMOVED (RDR-215 bead nexus-q02nx.21) =="
+# M3c reverted the bash script's field decode from its \x1f delimiter back
+# to the tab-collapsing IFS=$'\t' read idiom -- a bash parameter-parsing
+# defect class (empty fields collapse because tab is IFS whitespace) that
+# has no Python analogue at all: the port reads tool_input as a dict
+# (tool_input.get("subagent_type")), never positionally, so there is no
+# delimiter and nothing to revert. The BEHAVIOUR this pinned (an empty
+# subagent_type must not shift a later field into its slot) is still
+# covered directly -- see test_empty_field_does_not_shift_the_parse and
+# test_empty_session_id_does_not_shift_the_parse in this file -- but there
+# is no way to INJECT the bash's specific defect into code that was never
+# shaped to have it, so this mutation has nothing left to falsify.
 
 echo
 echo "== M4: ignore run_in_background (mark everything background) =="
 python3 - <<'PY'
 import pathlib
-p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
+p = pathlib.Path("src/nexus/hooks/agent_dispatch_expect.py")
 s = p.read_text().replace(
-    'bg = ti.get("run_in_background", True)', 'bg = True')
+    '    if isinstance(value, str):\n'
+    '        return value.strip().lower() not in ("false", "0", "no", "")\n'
+    '    return bool(value)',
+    '    return True')
 p.write_text(s)
 PY
 run "M4 no sync/bg discrimination" expect-red "$T::TestSyncVsBackground"
@@ -143,22 +176,21 @@ echo
 echo "== M5: restore the unrecognised free pass (the pre-houpu defect) =="
 # Was "recogniser back to morphology-only", then (RDR-215 bead nexus-q02nx.9)
 # the same defect re-expressed in the two bash copies' awk. Bead
-# nexus-q02nx.14 deletes tests/e2e/lib/expectations.sh, the reference those
-# needles targeted, so this now mutates the PORT
-# (src/nexus/hooks/expectations.py) instead. The real expressions, read
-# from that file rather than guessed: expectations_undeclared and
-# expectations_census each compute `recognized` from `agent_type in
-# expect_types` (undeclared) / `expect_names` (census) immediately before
-# consulting credit — the free pass is skipping straight to the next
-# agent when that membership check fails, instead of falling through to
-# name the deficit.
+# nexus-q02nx.14 deleted tests/e2e/lib/expectations.sh, the reference those
+# needles targeted, so this mutates the PORT (src/nexus/hooks/expectations.py)
+# instead. The real expressions, read from that file rather than guessed:
+# expectations_undeclared and expectations_census each compute `recognized`
+# from `agent_type in expect_types` (undeclared) / `expect_names` (census)
+# immediately before consulting credit -- the free pass is skipping straight
+# to the next agent when that membership check fails, instead of falling
+# through to name the deficit.
 #
 # The bash-sourcing pins this used to key on
 # (TestNamedBackgroundDispatchAt2_1_251's
 # test_named_background_dispatch_undeclared_without_expect_row /
 # test_census_names_a_start_whose_type_was_never_declared) exercise
 # tests/e2e/lib/expectations.sh via _run_undeclared/_run_census and so
-# cannot see a mutation applied only to the Python port — TestFreePass-
+# cannot see a mutation applied only to the Python port -- TestFreePass-
 # RemovedInPythonPort's two tests call expectations_undeclared /
 # expectations_census directly and are what this mutation must turn red.
 python3 - <<'PY'
@@ -203,10 +235,14 @@ echo
 echo "== M6: drop the tool_use_id 5th field =="
 python3 - <<'PY'
 import pathlib
-p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
+p = pathlib.Path("src/nexus/hooks/agent_dispatch_expect.py")
 s = p.read_text().replace(
-    'expectations_expect "$SESSION_ID" "$SUBAGENT_TYPE" "$DISPATCH_MODE" "$DISPATCH_ID"',
-    'expectations_expect "$SESSION_ID" "$SUBAGENT_TYPE" "$DISPATCH_MODE"')
+    "                _exp.expectations_expect(\n"
+    "                    session_id, subagent_type, dispatch_mode, dispatch_id\n"
+    "                )",
+    "                _exp.expectations_expect(\n"
+    "                    session_id, subagent_type, dispatch_mode\n"
+    "                )")
 p.write_text(s)
 PY
 run "M6 no dispatch id" expect-red "$T::TestWritesTheRow::test_row_carries_the_dispatch_tool_use_id" "$T::TestIdempotence"
@@ -262,7 +298,7 @@ echo
 echo "== M8: REMOVED (RDR-215 bead nexus-q02nx.14) =="
 # M8 asserted the two bash copies stayed byte-identical. Its subject —
 # tests/e2e/lib/expectations.sh, the reference side of that comparison — no
-# longer exists once bead .14 lands, and the parity tests it targeted
+# longer exists once bead .14 landed, and the parity tests it targeted
 # (test_agent_dispatch_expect.py::TestPluginWiring::test_shellib_parity_with_reference,
 # test_subagent_stop_hook.py::TestPluginWiring::test_shellib_parity_with_reference)
 # were deleted rather than adapted: a byte-parity test with one side gone
@@ -271,49 +307,60 @@ echo "== M8: REMOVED (RDR-215 bead nexus-q02nx.14) =="
 # falsify.
 
 echo
-echo "== M9: ledger entry removed =="
-# The target test returns early once the marketplace pin is >= 7.0.0 (the
-# hook shipped there; re-drift is the generic drift-ledger tests' job), so
-# past that pin this mutation has NO subject: removing an entry that is not
-# there and expecting red is a vacuous pin, not a gate. Skip it out loud
-# rather than let it print "stayed GREEN" every run after a release.
-M9_PIN="$(python3 -c 'import json;print(json.load(open(".claude-plugin/marketplace.json"))["plugins"][0]["source"]["ref"])')"
-# Either invariant-R shape (v<X.Y.Z> or plugin-v<X.Y.Z>-<n>, RDR-197): an
-# anchored pin must not crash this parse (a2wmi.12 spike, round 3).
-if python3 -c 'import re,sys;m=re.fullmatch(r"v(\d+\.\d+\.\d+)|plugin-v(\d+\.\d+\.\d+)-[1-9]\d*",sys.argv[1]);v=(m.group(1) or m.group(2)) if m else None;sys.exit(0 if v and tuple(int(x) for x in v.split(".")) >= (7,0,0) else 1)' "$M9_PIN"; then
-    echo "M9 SKIPPED: pin $M9_PIN >= v7.0.0 — the hook is in the pinned tag and test_declared_in_pending_release_ledger returns early by design; nothing to mutate"
-else
-python3 - <<'PY'
-import pathlib, re
-p = pathlib.Path("conexus/PENDING_RELEASE.md")
-s = p.read_text()
-s = re.sub(r"- `conexus/hooks/scripts/agent-dispatch-expect\.sh`.*?(?=\n- `)", "", s, flags=re.S)
-p.write_text(s)
-PY
-run "M9 undeclared drift" expect-red "$T::TestPluginWiring::test_declared_in_pending_release_ledger"
-restore conexus/PENDING_RELEASE.md
-fi
+echo "== M9: REMOVED (RDR-215 bead nexus-q02nx.21) =="
+# M9 mutated conexus/PENDING_RELEASE.md to drop the agent-dispatch-expect.sh
+# declaration line and asserted
+# TestPluginWiring::test_declared_in_pending_release_ledger went red. That
+# test already self-skipped once the marketplace pin passed v7.0.0 (the
+# hook ships in the pinned tag; the drift ledger's own generic tests own
+# re-drift from there), and this bead's client pin is 7.54.0, well past
+# that boundary -- so this mutation was already a permanent no-op before
+# TestPluginWiring was deleted in this same bead. Nothing replaces it.
 
 echo
 echo "== M10: reader-side dispatch_id dedup removed (review finding 1) =="
+# The target test writes the duplicate EXPECT row directly to the ledger
+# file (bypassing the write-side lock and _already_written entirely -- its
+# own docstring says so: "holds regardless of whether the lock ever leaks
+# one"), so the mechanism it falsifies is the READER's dedup in
+# expectations_census, not the writer's in agent_dispatch_expect.py.
 python3 - <<'PY'
-import pathlib
-for f in ("conexus/hooks/scripts/expectations.sh",):
-    p = pathlib.Path(f)
-    s = p.read_text().replace(
-        '$2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }', "")
-    p.write_text(s)
+import pathlib, sys
+TARGET = "src/nexus/hooks/expectations.py"
+needle = (
+    '        if verb == "EXPECT":\n'
+    '            dispatch_id = row[4] if len(row) > 4 else ""\n'
+    '            if dispatch_id and dispatch_id in seen_dispatch:\n'
+    '                continue\n'
+    '            if dispatch_id:\n'
+    '                seen_dispatch.add(dispatch_id)\n'
+)
+repl = (
+    '        if verb == "EXPECT":\n'
+    '            dispatch_id = row[4] if len(row) > 4 else ""\n'
+)
+p = pathlib.Path(TARGET)
+s = p.read_text()
+if needle not in s:
+    sys.exit(f"M10 mutation did not apply: needle absent from {TARGET}")
+s = s.replace(needle, repl, 1)
+p.write_text(s)
 PY
 run "M10 no dedup by dispatch id" expect-red "$T::TestIdempotence::test_duplicate_rows_do_not_inflate_the_credit_pool"
-restore "$PLUGIN_LIB"
+restore "$PY_LIB"
 
 echo
 echo "== M11: stale-lockdir reaping removed (review finding 3) =="
 python3 - <<'PY'
-import pathlib, re
-p = pathlib.Path("conexus/hooks/scripts/agent-dispatch-expect.sh")
-s = p.read_text()
-s = re.sub(r'if \[\[ -d "\$LOCKDIR" \]\].*?\nfi\n', "", s, flags=re.S, count=1)
+import pathlib
+p = pathlib.Path("src/nexus/hooks/agent_dispatch_expect.py")
+s = p.read_text().replace(
+    '    try:\n'
+    '        if os.path.isdir(lockdir) and (time.time() - os.stat(lockdir).st_mtime) > 60:\n'
+    '            os.rmdir(lockdir)\n'
+    '    except OSError:\n'
+    '        pass\n',
+    '')
 p.write_text(s)
 PY
 run "M11 no stale-lock reaping" expect-red "$T::TestIdempotence::test_stale_lockdir_is_reaped"

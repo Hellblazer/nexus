@@ -45,18 +45,49 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "conexus" / "hooks" / "scripts" / "agent-dispatch-expect.sh"
-STAMP = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-start-stamp.sh"
-#: The bash side of every differential in this file. It points at the
-#: PLUGIN copy, not the deleted reference copy (RDR-215 bead
-#: nexus-q02nx.14): ~45 call sites across this file and its sibling
-#: source it, and the plugin copy is what the four wired hooks.json
-#: entries actually run until bead .21 re-points them. So the
-#: differential moved to the copy still in production rather than
-#: dying with the one that was only a reference.
-LIB = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
 
 SESSION = "sess-dispatch"
+
+#: Drives ``nexus.hooks.agent_dispatch_expect`` in a CHILD PROCESS: these
+#: tests vary env (``NX_ORCH_STOP_GUARD``, a stubbed ``nx`` on PATH) and
+#: read a stdout-silence contract, and ``os.environ`` is process-global.
+_DISPATCH_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import agent_dispatch_expect as _hook
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: _hook.run(payload), "agent_dispatch_expect")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout)
+sys.exit(result.exit_code)
+"""
+
+#: Same shape, for ``nexus.hooks.subagent_start_stamp`` (the STAMP side of
+#: the pairing tests below).
+_STAMP_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import subagent_start_stamp as _hook
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: _hook.run(payload), "subagent_start_stamp")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout)
+sys.exit(result.exit_code)
+"""
 
 
 def _pretooluse(
@@ -150,10 +181,11 @@ def _env(tmp_path: Path, mode: str | None, *, nx_stub: bool = False) -> dict[str
 
 
 def _run(
-    stdin: str, tmp_path: Path, *, mode: str | None = None, script: Path = SCRIPT
+    stdin: str, tmp_path: Path, *, mode: str | None = None, hook: str = "dispatch"
 ) -> subprocess.CompletedProcess[str]:
+    driver = _STAMP_PY_DRIVER if hook == "stamp" else _DISPATCH_PY_DRIVER
     return subprocess.run(
-        ["bash", str(script)],
+        [sys.executable, "-c", driver],
         input=stdin, capture_output=True, text=True, timeout=30, env=_env(tmp_path, mode),
     )
 
@@ -165,17 +197,20 @@ def _expfile(tmp_path: Path, session_id: str = SESSION) -> Path:
 def _lib_call(
     func: str, tmp_path: Path, *args: str, nx_stub: bool = False
 ) -> subprocess.CompletedProcess[str]:
-    """Invoke a shellib function the way real callers do: source, then call.
+    """Invoke a ledger verb the way real callers do: the real ``nx-hook``
+    console-script entry point, arguments on argv (RDR-215 bead
+    nexus-q02nx.21 -- was ``source expectations.sh; func args...``).
 
     ``nx_stub=True`` (every ``expectations_census`` call site below — the
     only function that shells out to ``nx``) routes the census's
     space-backed check to a stub ``nx`` instead of the live per-test engine
     substrate — see ``_fake_nx_dir``.
     """
-    quoted = " ".join(f"'{a}'" for a in args)
     return subprocess.run(
-        ["bash", "-c", f"source '{LIB}'; {func} {quoted}"],
+        [sys.executable, "-c", "from nexus._hook_runtime.entry import main; main()",
+         func, *args],
         capture_output=True, text=True, timeout=30, env=_env(tmp_path, None, nx_stub=nx_stub),
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -308,7 +343,7 @@ class TestPairsWithSubagentStart:
         _run(_pretooluse(subagent_type="conexus:code-review-expert"), tmp_path)
         _run(
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
-            tmp_path, script=STAMP,
+            tmp_path, hook="stamp",
         )
         census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, f"BLINDSPOT hard-failure: {census.stdout}"
@@ -353,7 +388,7 @@ class TestPairsWithSubagentStart:
         )
         _run(
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
-            tmp_path, script=STAMP,
+            tmp_path, hook="stamp",
         )
         census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, f"colon form must pair: {census.stdout}"
@@ -377,7 +412,7 @@ class TestPairsWithSubagentStart:
         assert proc.returncode == 0, "the dash form is accepted — that is the trap"
         _run(
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
-            tmp_path, script=STAMP,
+            tmp_path, hook="stamp",
         )
         census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert "BLINDSPOT\tchecked=1 recognized=0 unrecognized=1" in census.stdout
@@ -391,7 +426,7 @@ class TestPairsWithSubagentStart:
         rc=2 verdict on the same ledger comes from expectations_undeclared."""
         _run(
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
-            tmp_path, script=STAMP,
+            tmp_path, hook="stamp",
         )
         census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, census.stdout
@@ -416,8 +451,8 @@ class TestSameTypeDispatchedTwice:
     def test_two_dispatches_two_starts_all_declared(self, tmp_path: Path) -> None:
         _run(_pretooluse("general-purpose", tool_use_id="toolu_A"), tmp_path)
         _run(_pretooluse("general-purpose", tool_use_id="toolu_B"), tmp_path)
-        _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, script=STAMP)
-        _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, script=STAMP)
+        _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, hook="stamp")
+        _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, hook="stamp")
         census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, census.stdout
         assert "BLINDSPOT\tchecked=2 recognized=2 unrecognized=0" in census.stdout
@@ -430,8 +465,8 @@ class TestSameTypeDispatchedTwice:
         what makes this visible; plain set membership would report a clean
         undeclared=0 and hide a half-working hook."""
         _run(_pretooluse("general-purpose", tool_use_id="toolu_A"), tmp_path)
-        _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, script=STAMP)
-        _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, script=STAMP)
+        _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, hook="stamp")
+        _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, hook="stamp")
         census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert "undeclared=1" in census.stdout, census.stdout
         undeclared = _lib_call("expectations_undeclared", tmp_path, SESSION)
@@ -518,8 +553,8 @@ class TestIdempotence:
         dup = f.read_text().splitlines()[0].split("\t")
         dup[0] = "2099-01-01T00:00:00Z"          # different ts => not an exact-line dup
         f.write_text(f.read_text() + "\t".join(dup) + "\n")
-        _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, script=STAMP)
-        _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, script=STAMP)
+        _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, hook="stamp")
+        _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, hook="stamp")
         census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert "undeclared=1" in census.stdout, (
             "a re-registered dispatch inflated the credit pool and masked an "
@@ -584,17 +619,6 @@ class TestFailOpen:
             assert proc.stdout == ""
         finally:
             state.chmod(0o700)
-
-    def test_missing_lib_does_not_block(self, tmp_path: Path) -> None:
-        """Source failure is the one path that cannot be exercised in
-        place, so the script is copied somewhere its sibling lib is absent."""
-        lone = tmp_path / "lone"
-        lone.mkdir()
-        copy = lone / SCRIPT.name
-        copy.write_bytes(SCRIPT.read_bytes())
-        proc = _run(_pretooluse(), tmp_path, script=copy)
-        assert proc.returncode == 0
-        assert proc.stdout == ""
 
     def test_empty_field_does_not_shift_the_parse(self, tmp_path: Path) -> None:
         """An empty subagent_type must default to general-purpose (nexus-a795d)
@@ -716,17 +740,6 @@ class TestSkippedWriteIsLoud:
         assert "expectations_file rejected" in proc.stderr
         assert "../../../etc/pwn" in proc.stderr
 
-    def test_missing_lib_is_named_on_stderr(self, tmp_path: Path) -> None:
-        lone = tmp_path / "lone"
-        lone.mkdir()
-        copy = lone / SCRIPT.name
-        copy.write_bytes(SCRIPT.read_bytes())
-        proc = _run(_pretooluse(), tmp_path, script=copy)
-        assert proc.returncode == 0
-        assert proc.stdout == ""
-        assert "could not source" in proc.stderr
-        assert "expectations.sh" in proc.stderr
-
     def test_unexpected_tool_name_is_named_on_stderr(self, tmp_path: Path) -> None:
         proc = _run(_pretooluse(tool_name="Bash"), tmp_path)
         assert proc.returncode == 0
@@ -738,13 +751,15 @@ class TestSkippedWriteIsLoud:
         self, tmp_path: Path,
     ) -> None:
         """A subagent_type outside the agent-type charset makes
-        expectations_expect refuse the row; its ERROR line must reach the
-        hook's stderr instead of being swallowed (the fourth skip path)."""
+        expectations_expect refuse the row; its validation error must
+        reach the hook's stderr instead of being swallowed (the fourth
+        skip path)."""
         proc = _run(_pretooluse(subagent_type="bad type!"), tmp_path)
         assert proc.returncode == 0
         assert proc.stdout == ""
-        assert "expectations_expect: ERROR" in proc.stderr
+        assert "expectations_expect" in proc.stderr
         assert "invalid name" in proc.stderr
+        assert "bad type!" in proc.stderr
 
     def test_explicit_off_mode_prints_nothing_anywhere(self, tmp_path: Path) -> None:
         """A deliberate NX_ORCH_STOP_GUARD=off opt-out is not a failure —
@@ -802,49 +817,11 @@ class TestCapturedPayloads:
             }, payload["tool_input"]
 
 
-class TestPluginWiring:
-    def test_registered_on_agent_pretooluse(self) -> None:
-        hooks = json.loads((REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
-        entries = hooks["hooks"].get("PreToolUse", [])
-        matched = [
-            entry for entry in entries
-            if any("agent-dispatch-expect.sh" in h["command"] for h in entry.get("hooks", []))
-        ]
-        assert matched, "agent-dispatch-expect.sh not registered under PreToolUse"
-        matcher = matched[0]["matcher"]
-        assert "Agent" in matcher, f"matcher must fire on the Agent tool, got {matcher!r}"
-
-    # test_shellib_parity_with_reference REMOVED (RDR-215 bead nexus-q02nx.14):
-    # tests/e2e/lib/expectations.sh, the reference this compared the plugin
-    # copy against, is deleted -- a byte-parity test with one side gone
-    # either errors on a missing file or passes vacuously, and vacuous is
-    # worse. The plugin copy's own deletion is bead nexus-q02nx.21's,
-    # landing in the same change that re-points hooks.json.
-
-    def test_script_is_bash_clean(self) -> None:
-        proc = subprocess.run(
-            ["bash", "-n", str(SCRIPT)], capture_output=True, text=True, timeout=10
-        )
-        assert proc.returncode == 0, proc.stderr
-
-    def test_declared_in_pending_release_ledger(self) -> None:
-        """conexus/ loads from the pinned release tag, so this hook is INERT
-        until the next plugin release ships — the declaration duty ends the
-        moment a release advances the pin past it (the 7.0.0 cut emptied the
-        ledger; the release-window predicate is the drift ledger's)."""
-        ledger = (REPO_ROOT / "conexus" / "PENDING_RELEASE.md").read_text()
-        pin = json.loads(
-            (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text()
-        )["plugins"][0]["source"]["ref"]
-        from plugin_channel import client_version_of
-
-        version = client_version_of(pin)
-        assert version is not None, (
-            f"marketplace pin {pin!r} matches neither invariant-R ref shape"
-        )
-        if tuple(int(x) for x in version.split(".")) >= (7, 0, 0):
-            # Shipped at 7.0.0: the hook lives in the pinned tag now. The
-            # ledger owes an entry only if the file drifts AGAIN, which the
-            # drift-ledger tests enforce generically.
-            return
-        assert "agent-dispatch-expect.sh" in ledger
+# TestPluginWiring REMOVED (RDR-215 bead nexus-q02nx.21): it asserted three
+# things about the departing bash artifact -- hooks.json registered
+# "agent-dispatch-expect.sh" under PreToolUse, the script parsed as clean
+# bash, and its (already-shipped) plugin-release declaration -- all three
+# obsolete now that this same change re-points the PreToolUse(Agent) entry
+# to the ``hook_agent_dispatch_expect`` mcp_tool and the script is deleted.
+# test_shellib_parity_with_reference had already been removed for the same
+# reason one library earlier (bead nexus-q02nx.14).
