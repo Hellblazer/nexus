@@ -6,43 +6,23 @@ Cross-checks the ledger's outstanding background STARTs against the
 harness's OWN background-task ground truth, now available in Stop/
 SubagentStop hook input (CC 2.1.145: ``background_tasks``). The exact
 per-task field schema is NOT independently verified as of this bead (see
-the function's own SCHEMA CAUTION docstring in expectations.sh) — these
+the function's own SCHEMA CAUTION docstring in expectations.py) — these
 tests pin the CURRENT best-effort candidate-field behavior and the
 fields-absent no-op contract, not a confirmed harness schema.
 """
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
 
 from nexus.hooks import expectations
+from nexus.hooks import stop_verification
 
 REPO = Path(__file__).resolve().parents[2]
-PLUGIN_LIB = REPO / "conexus" / "hooks" / "scripts" / "expectations.sh"
-#: The differential drives the PLUGIN copy now that the reference copy
-#: is deleted (RDR-215 bead nexus-q02nx.14). It moved rather than died
-#: on purpose: this copy is what the wired hooks.json entries actually
-#: run until bead .21 re-points them, so it is the copy worth being
-#: equal to. The "bash" param goes when it does.
-STOP_HOOK = REPO / "conexus" / "hooks" / "scripts" / "stop_verification_hook.sh"
 
 SESSION = "sess-reconcile"
-
-
-def _bash(script: str, state: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    full_env = dict(os.environ, XDG_STATE_HOME=str(state), HOME=str(state / "home"))
-    full_env.pop("NX_ORCH_STOP_GUARD", None)
-    if env:
-        full_env.update(env)
-    return subprocess.run(
-        ["bash", "-c", f"source {PLUGIN_LIB}\n{textwrap.dedent(script)}"],
-        capture_output=True, text=True, env=full_env,
-    )
 
 
 @pytest.fixture
@@ -61,35 +41,8 @@ def _write_ledger(state: Path, rows: list[str], session_id: str = SESSION) -> No
     _ledger(state, session_id).write_text("".join(r + "\n" for r in rows))
 
 
-#: Which implementation `_reconcile` drives. Set per-test by the autouse
-#: `impl` fixture below.
-_IMPL = "bash"
-
-
-@pytest.fixture(params=["bash", "python"], autouse=True)
-def impl(request, monkeypatch):
-    """Run every assertion in this file against BOTH implementations.
-
-    RDR-215 bead nexus-q02nx.9 ports this library to
-    ``nexus.hooks.expectations``. The bead asks for these tests to be
-    retargeted at the module — but the bash library is STILL THE LIVE
-    PRODUCTION PATH until bead .14 repoints its consumers, so a straight
-    retarget would delete the only coverage of running code to cover its
-    replacement. Parametrising instead keeps bash covered, adds the module,
-    and makes every assertion here a differential: any behavioural drift
-    between the two fails on the implementation that drifted, in the test
-    that names the behaviour.
-
-    Drop the "bash" param in bead .14, when the library is deleted.
-    """
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "bash"
-
-
 class _Result:
-    """The CompletedProcess surface these tests already assert against."""
+    """The stdout/returncode surface these tests already assert against."""
 
     def __init__(self, stdout: str, returncode: int) -> None:
         self.stdout = stdout
@@ -97,84 +50,52 @@ class _Result:
         self.stderr = ""
 
 
-def _reconcile_script(state: Path, session_id: str, payload: str) -> subprocess.CompletedProcess:
-    """Drive reconcile with a RAW payload string, through whichever
-    implementation `impl` selected.
-
-    Two tests here used to call `_bash` directly, so they ran bash under
-    BOTH parametrize ids — the `[python]` id claimed coverage it did not
-    have. Found by the bead .9 critique.
-    """
-    if _IMPL == "python":
-        prior = os.environ.get("XDG_STATE_HOME")
-        os.environ["XDG_STATE_HOME"] = str(state)
-        try:
-            report = expectations.expectations_reconcile(session_id, payload)
-        finally:
-            if prior is None:
-                os.environ.pop("XDG_STATE_HOME", None)
-            else:
-                os.environ["XDG_STATE_HOME"] = prior
-        return _Result("".join(line + "\n" for line in report.lines), report.code)
-    quoted = payload.replace("'", "'\\''")
-    return _bash(f"expectations_reconcile {session_id!r} '{quoted}'", state)
+def _reconcile_script(state: Path, session_id: str, payload: str, monkeypatch) -> _Result:
+    """Drive ``expectations_reconcile`` with a RAW payload string."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    report = expectations.expectations_reconcile(session_id, payload)
+    return _Result("".join(line + "\n" for line in report.lines), report.code)
 
 
-def _reconcile(state: Path, payload: dict, session_id: str = SESSION) -> subprocess.CompletedProcess:
-    payload_json = json.dumps(payload)
-    if _IMPL == "python":
-        prior = os.environ.get("XDG_STATE_HOME")
-        os.environ["XDG_STATE_HOME"] = str(state)
-        try:
-            report = expectations.expectations_reconcile(session_id, payload_json)
-        finally:
-            if prior is None:
-                os.environ.pop("XDG_STATE_HOME", None)
-            else:
-                os.environ["XDG_STATE_HOME"] = prior
-        out = "".join(line + "\n" for line in report.lines)
-        return _Result(out, report.code)
-    return _bash(
-        f"expectations_reconcile {session_id!r} {payload_json!r}",
-        state,
-    )
+def _reconcile(state: Path, payload: dict, monkeypatch, session_id: str = SESSION) -> _Result:
+    return _reconcile_script(state, session_id, json.dumps(payload), monkeypatch)
 
 
 class TestFieldsAbsentIsANoOp:
     """Absent/malformed background_tasks must never change behavior on an
     older harness — zero output, rc 0, unconditionally."""
 
-    def test_no_background_tasks_key_at_all(self, state):
+    def test_no_background_tasks_key_at_all(self, state, monkeypatch):
         _write_ledger(state, ["a\tSTART\ta1\tconexus:developer"])
-        proc = _reconcile(state, {"session_id": SESSION})
+        proc = _reconcile(state, {"session_id": SESSION}, monkeypatch)
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout == ""
 
-    def test_background_tasks_is_null(self, state):
+    def test_background_tasks_is_null(self, state, monkeypatch):
         _write_ledger(state, ["a\tSTART\ta1\tconexus:developer"])
-        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": None})
+        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": None}, monkeypatch)
         assert proc.returncode == 0
         assert proc.stdout == ""
 
-    def test_background_tasks_is_not_a_list(self, state):
+    def test_background_tasks_is_not_a_list(self, state, monkeypatch):
         _write_ledger(state, ["a\tSTART\ta1\tconexus:developer"])
-        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": "oops"})
+        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": "oops"}, monkeypatch)
         assert proc.returncode == 0
         assert proc.stdout == ""
 
-    def test_unparseable_payload_never_crashes(self, state):
+    def test_unparseable_payload_never_crashes(self, state, monkeypatch):
         _write_ledger(state, ["a\tSTART\ta1\tconexus:developer"])
-        proc = _reconcile_script(state, SESSION, "not json at all")
+        proc = _reconcile_script(state, SESSION, "not json at all", monkeypatch)
         assert proc.returncode == 0
         assert proc.stdout == ""
 
-    def test_missing_session_id_or_payload_is_a_noop(self, state):
-        proc = _reconcile_script(state, "", "")
+    def test_missing_session_id_or_payload_is_a_noop(self, state, monkeypatch):
+        proc = _reconcile_script(state, "", "", monkeypatch)
         assert proc.returncode == 0
         assert proc.stdout == ""
 
-    def test_no_ledger_file_is_a_noop(self, state):
-        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []})
+    def test_no_ledger_file_is_a_noop(self, state, monkeypatch):
+        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []}, monkeypatch)
         assert proc.returncode == 0
         assert proc.stdout == ""
 
@@ -183,7 +104,7 @@ class TestStrandedDetection:
     """The new detection class: ledger outstanding, harness no longer
     tracks it."""
 
-    def test_outstanding_start_absent_from_harness_is_stranded(self, state):
+    def test_outstanding_start_absent_from_harness_is_stranded(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -191,23 +112,23 @@ class TestStrandedDetection:
         proc = _reconcile(state, {
             "session_id": SESSION,
             "background_tasks": [{"agent_id": "aOTHER"}],
-        })
+        }, monkeypatch)
         assert proc.returncode == 4, proc.stdout + proc.stderr
         assert "STRANDED\ta1\tconexus:developer" in proc.stdout
 
-    def test_empty_background_tasks_list_strands_every_outstanding_start(self, state):
+    def test_empty_background_tasks_list_strands_every_outstanding_start(self, state, monkeypatch):
         # The load-bearing edge case: an EMPTY harness list is not the same
         # as an ABSENT key, and must not be silently treated as a no-op.
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
         ])
-        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []})
+        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []}, monkeypatch)
         assert proc.returncode == 4, proc.stdout + proc.stderr
         assert "STRANDED\ta1\tconexus:developer" in proc.stdout
         assert "SUMMARY\toutstanding=1 harness_tasks=0 unidentified=0 stranded=1 undeclared_tasks=0" in proc.stdout
 
-    def test_matched_agent_id_is_not_stranded(self, state):
+    def test_matched_agent_id_is_not_stranded(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -215,11 +136,11 @@ class TestStrandedDetection:
         proc = _reconcile(state, {
             "session_id": SESSION,
             "background_tasks": [{"agent_id": "a1"}],
-        })
+        }, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "STRANDED" not in proc.stdout
 
-    def test_reported_agent_is_not_outstanding_even_if_harness_forgot_it(self, state):
+    def test_reported_agent_is_not_outstanding_even_if_harness_forgot_it(self, state, monkeypatch):
         # A START with a terminal row (REPORTED/BLOCKED/WOULDBLOCK) already
         # resolved through the normal ledger path and must never be flagged
         # STRANDED regardless of what the harness's task list says.
@@ -228,17 +149,17 @@ class TestStrandedDetection:
             "t\tSTART\ta1\tconexus:developer",
             "t\tREPORTED\ta1",
         ])
-        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []})
+        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []}, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "STRANDED" not in proc.stdout
 
-    def test_blocked_agent_is_not_outstanding(self, state):
+    def test_blocked_agent_is_not_outstanding(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
             "t\tBLOCKED\ta1",
         ])
-        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []})
+        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": []}, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "STRANDED" not in proc.stdout
 
@@ -247,7 +168,7 @@ class TestUndeclaredTaskCorroboration:
     """Harness knows about a task with no ledger START row at all — rc=2,
     reused deliberately from expectations_undeclared's vocabulary."""
 
-    def test_harness_only_task_is_flagged_and_reuses_rc2(self, state):
+    def test_harness_only_task_is_flagged_and_reuses_rc2(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -256,11 +177,11 @@ class TestUndeclaredTaskCorroboration:
         proc = _reconcile(state, {
             "session_id": SESSION,
             "background_tasks": [{"agent_id": "a1"}, {"agent_id": "aNEVER-STARTED"}],
-        })
+        }, monkeypatch)
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert "UNDECLARED_TASK\taNEVER-STARTED" in proc.stdout
 
-    def test_stranded_takes_priority_over_undeclared_when_both_present(self, state):
+    def test_stranded_takes_priority_over_undeclared_when_both_present(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -268,14 +189,14 @@ class TestUndeclaredTaskCorroboration:
         proc = _reconcile(state, {
             "session_id": SESSION,
             "background_tasks": [{"agent_id": "aNEVER-STARTED"}],
-        })
+        }, monkeypatch)
         assert proc.returncode == 4, proc.stdout + proc.stderr
         assert "STRANDED\ta1\tconexus:developer" in proc.stdout
         assert "UNDECLARED_TASK\taNEVER-STARTED" in proc.stdout
 
 
 class TestCleanCase:
-    def test_fully_matched_is_clean(self, state):
+    def test_fully_matched_is_clean(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -283,7 +204,7 @@ class TestCleanCase:
         proc = _reconcile(state, {
             "session_id": SESSION,
             "background_tasks": [{"agent_id": "a1"}],
-        })
+        }, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "SUMMARY\toutstanding=1 harness_tasks=1 unidentified=0 stranded=0 undeclared_tasks=0" in proc.stdout
 
@@ -294,7 +215,7 @@ class TestCandidateFieldFallbackAndUnidentified:
     'unidentified' rather than crashing or silently matching."""
 
     @pytest.mark.parametrize("field", ["agent_id", "id", "task_id", "taskId", "subagent_id"])
-    def test_each_candidate_field_is_read(self, state, field):
+    def test_each_candidate_field_is_read(self, state, field, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -302,18 +223,18 @@ class TestCandidateFieldFallbackAndUnidentified:
         proc = _reconcile(state, {
             "session_id": SESSION,
             "background_tasks": [{field: "a1"}],
-        })
+        }, monkeypatch)
         assert proc.returncode == 0, f"field={field}: {proc.stdout + proc.stderr}"
 
-    def test_bare_string_entries_are_taken_verbatim(self, state):
+    def test_bare_string_entries_are_taken_verbatim(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
         ])
-        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": ["a1"]})
+        proc = _reconcile(state, {"session_id": SESSION, "background_tasks": ["a1"]}, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
 
-    def test_unrecognized_shape_counts_as_unidentified_not_a_false_match(self, state):
+    def test_unrecognized_shape_counts_as_unidentified_not_a_false_match(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -321,7 +242,7 @@ class TestCandidateFieldFallbackAndUnidentified:
         proc = _reconcile(state, {
             "session_id": SESSION,
             "background_tasks": [{"weird_unrecognized_field": "a1"}],
-        })
+        }, monkeypatch)
         # a1 is still outstanding and unmatched (the unidentified entry
         # never resolves to "a1"), so it must still be STRANDED, not
         # silently waved through by an accidental match.
@@ -330,54 +251,59 @@ class TestCandidateFieldFallbackAndUnidentified:
 
 
 class TestNeverMutatesTheLedger:
-    def test_ledger_content_unchanged_after_reconcile(self, state):
+    def test_ledger_content_unchanged_after_reconcile(self, state, monkeypatch):
         original = "t\tEXPECT\tconexus:developer\tbackground\nt\tSTART\ta1\tconexus:developer\n"
         _ledger(state).write_text(original)
-        _reconcile(state, {"session_id": SESSION, "background_tasks": []})
+        _reconcile(state, {"session_id": SESSION, "background_tasks": []}, monkeypatch)
         assert _ledger(state).read_text() == original
 
 
 class TestStopHookWiring:
     """The Stop-hook site: WARN-ONLY, never blocks, gated on
-    NX_ORCH_STOP_GUARD, degrades silently on any missing/malformed input."""
+    NX_ORCH_STOP_GUARD, degrades silently on any missing/malformed input.
 
-    def _run_stop_hook(self, state: Path, stdin: str, guard: str | None = "block") -> subprocess.CompletedProcess:
-        env = dict(
-            os.environ,
-            XDG_STATE_HOME=str(state),
-            HOME=str(state / "home"),
-            CLAUDE_PLUGIN_ROOT=str(REPO / "conexus"),
-        )
-        env.pop("NX_ORCH_STOP_GUARD", None)
-        if guard is not None:
-            env["NX_ORCH_STOP_GUARD"] = guard
-        # cwd is the isolated state dir, NOT the repo (nexus-2v0v7 follow-up).
-        # The hook's advisory checks shell out to `git status --porcelain` and
-        # `bd list --status=in_progress` in whatever cwd it inherits. Pointed at
-        # the live checkout those read AMBIENT DEVELOPER STATE, so the
-        # plain-approve assertions below fail for reasons that have nothing to
-        # do with reconciliation:
-        #   - any untracked file makes Check 1 emit "Uncommitted changes". This
-        #     bites even on a clean tree, because `env` above overrides HOME and
-        #     git then loses the user's ~/.config/git/ignore, so files ignored
-        #     ONLY globally (`.claude/settings.local.json` is the standing one)
-        #     resurface as untracked.
-        #   - any in-progress bead makes Check 3 emit its own warning.
-        # CI never saw either: fresh checkout, no local settings file, no beads.
-        # Running from the state dir means neither command finds a repo or a
-        # beads db, both degrade to empty exactly as the hook intends, and the
-        # test observes reconciliation alone.
-        return subprocess.run(
-            ["bash", str(STOP_HOOK)],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-            cwd=str(state),
-        )
+    Re-pointed at ``nexus.hooks.stop_verification`` (bead nexus-q02nx.21):
+    the bash original is no longer wired into hooks.json (the Stop event
+    dispatches to the ``hook_stop_verification`` mcp_tool) and is retired
+    along with the shell ledger library it sourced. ``stop_verification.run``
+    is the RDR-215 bead nexus-q02nx.13 port and calls
+    ``expectations.expectations_reconcile`` directly, so this class now
+    drives the same reconcile integration one
+    layer closer to the real call than a subprocess ever did.
+    """
 
-    def test_stranded_agent_produces_a_warning_but_still_approves(self, state):
+    def _run_stop_hook(
+        self, state: Path, monkeypatch, stdin: str, guard: str | None = "block"
+    ) -> _Result:
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        monkeypatch.setenv("HOME", str(state / "home"))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(REPO / "conexus"))
+        if guard is None:
+            monkeypatch.delenv("NX_ORCH_STOP_GUARD", raising=False)
+        else:
+            monkeypatch.setenv("NX_ORCH_STOP_GUARD", guard)
+        # chdir to the isolated state dir, NOT the repo (nexus-2v0v7
+        # follow-up). The hook's advisory checks shell out to `git status
+        # --porcelain` and `bd list --status=in_progress` in whatever cwd
+        # the process is in when on_stop is enabled. Pointed at the live
+        # checkout those read AMBIENT DEVELOPER STATE (an untracked file,
+        # an in-progress bead) for reasons that have nothing to do with
+        # reconciliation. CI never saw either: fresh checkout, no local
+        # settings file, no beads. From the state dir both degrade to
+        # empty exactly as the hook intends, and the test observes
+        # reconciliation alone. The default config has on_stop=False, so
+        # neither check runs at all here, but the isolation is kept for
+        # robustness against that default changing out from under this
+        # file.
+        monkeypatch.chdir(state)
+        try:
+            payload = json.loads(stdin)
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+        result = stop_verification.run(payload)
+        return _Result(result.stdout or "", result.exit_code)
+
+    def test_stranded_agent_produces_a_warning_but_still_approves(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -387,14 +313,14 @@ class TestStopHookWiring:
             "hook_event_name": "Stop",
             "background_tasks": [],
         })
-        proc = self._run_stop_hook(state, payload)
+        proc = self._run_stop_hook(state, monkeypatch, payload)
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout)
         assert out["decision"] == "approve"
         assert "nexus-2v0v7" in out.get("reason", "")
         assert "a1" in out.get("reason", "")
 
-    def test_clean_reconciliation_produces_plain_approve(self, state):
+    def test_clean_reconciliation_produces_plain_approve(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -404,23 +330,23 @@ class TestStopHookWiring:
             "hook_event_name": "Stop",
             "background_tasks": [{"agent_id": "a1"}],
         })
-        proc = self._run_stop_hook(state, payload)
+        proc = self._run_stop_hook(state, monkeypatch, payload)
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout)
         assert out == {"decision": "approve"}
 
-    def test_older_harness_payload_without_background_tasks_is_unaffected(self, state):
+    def test_older_harness_payload_without_background_tasks_is_unaffected(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
         ])
         payload = json.dumps({"session_id": SESSION, "hook_event_name": "Stop"})
-        proc = self._run_stop_hook(state, payload)
+        proc = self._run_stop_hook(state, monkeypatch, payload)
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout)
         assert out == {"decision": "approve"}
 
-    def test_guard_off_skips_reconciliation_entirely(self, state):
+    def test_guard_off_skips_reconciliation_entirely(self, state, monkeypatch):
         _write_ledger(state, [
             "t\tEXPECT\tconexus:developer\tbackground",
             "t\tSTART\ta1\tconexus:developer",
@@ -430,35 +356,26 @@ class TestStopHookWiring:
             "hook_event_name": "Stop",
             "background_tasks": [],
         })
-        proc = self._run_stop_hook(state, payload, guard="off")
+        proc = self._run_stop_hook(state, monkeypatch, payload, guard="off")
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout)
         assert out == {"decision": "approve"}
 
-    def test_junk_stdin_never_breaks_the_hook(self, state):
-        proc = self._run_stop_hook(state, "not json at all")
+    def test_junk_stdin_never_breaks_the_hook(self, state, monkeypatch):
+        proc = self._run_stop_hook(state, monkeypatch, "not json at all")
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout)
         assert out["decision"] == "approve"
 
-    def test_hook_is_bash_clean(self):
-        proc = subprocess.run(["bash", "-n", str(STOP_HOOK)], capture_output=True, text=True, timeout=10)
-        assert proc.returncode == 0, proc.stderr
-
     def test_registered_in_hooks_json(self):
         hooks = json.loads((REPO / "conexus" / "hooks" / "hooks.json").read_text())
         stop_entries = hooks["hooks"].get("Stop", [])
-        commands = [h["command"] for entry in stop_entries for h in entry.get("hooks", [])]
-        assert any("stop_verification_hook.sh" in c for c in commands)
-
-
-# The reference copy `tests/e2e/lib/expectations.sh` is DELETED (RDR-215
-# bead nexus-q02nx.14); the ledger is `nexus.hooks.expectations`. The
-# byte-identity class that lived here went with it — a parity assert with
-# one side missing either errors or passes vacuously, and vacuous is
-# worse. The PLUGIN copy `conexus/hooks/scripts/expectations.sh` still
-# exists and is still what the wired hooks.json entries run; bead
-# nexus-q02nx.21 deletes it in the same change that re-points those
-# entries, which is also where this file's `impl` fixture loses its
-# "bash" param.
-
+        tools = [
+            h.get("tool")
+            for entry in stop_entries
+            for h in entry.get("hooks", [])
+            if h.get("type") == "mcp_tool"
+        ]
+        assert "hook_stop_verification" in tools, (
+            "the Stop event must dispatch to the ported hook_stop_verification mcp_tool"
+        )
