@@ -332,6 +332,21 @@ _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
         '`startswith("mcp__")` check as the other three sites.'
     ),
     (
+        "src/nexus/hooks/subagent_stop_scans.py",
+        (
+            'return text.rsplit("__", 1)[-1] if text.startswith("mcp__") '
+            "else text",
+        ),
+    ): (
+        "mcp__ tool name: `_tool_key` reduces a fully-qualified MCP tool "
+        "name (mcp__plugin_conexus_nexus__memory_put) to its bare form so "
+        "RDR-215's ported SubagentStop writes-scan can match it against "
+        "_WRITE_TOOLS. Guarded by the same `startswith(\"mcp__\")` check as "
+        "the four sibling strippers in plans/ and mcp/core.py. No "
+        "collection name reaches this path -- the input is a transcript "
+        "tool_use block's `name` field."
+    ),
+    (
         "src/nexus/mcp/hooks.py",
         ('*parents, leaf = flat_name.split("__")',),
     ): (

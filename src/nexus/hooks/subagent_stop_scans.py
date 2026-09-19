@@ -124,8 +124,21 @@ def report_verdict(path: str) -> str:
 
 
 def _tool_key(name: Any) -> str:
-    """Bare tool name from a possibly MCP-qualified one."""
-    return str(name or "").rsplit("__", 1)[-1]
+    """Bare tool name from a possibly MCP-qualified one.
+
+    Guarded on the ``mcp__`` prefix, matching the four sibling tool-name
+    strippers in ``plans/`` and ``mcp/core.py``. The bash split
+    unconditionally; the guard is behaviour-preserving for every decision
+    this module makes, because a name that reaches the unguarded split
+    without an ``mcp__`` prefix (``weird__thing``) is not a key of
+    :data:`_WRITE_TOOLS` in either form, so ``_is_write_call`` answers
+    False either way. It is here because an unguarded ``rsplit("__")`` is
+    indistinguishable, to a reader or to the RDR-204 parse census, from
+    re-deriving a collection's owner from its name -- which is the thing
+    that census exists to stop.
+    """
+    text = str(name or "")
+    return text.rsplit("__", 1)[-1] if text.startswith("mcp__") else text
 
 
 def _is_write_call(name: Any, tool_input: Any) -> bool:
