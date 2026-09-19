@@ -321,18 +321,48 @@ for a second meaning would be worse than either alternative.
 **Phase 4 — the recurrence detector, which ships with Phase 2 and not after
 it.** BUG-0148's failure mode is live and planner-dependent; its remediation
 was a manual `ANALYZE`, not a fix. Any nexus caller inherits that exposure.
-The detector: a fused query that returns zero rows where the vector leg alone
-returns some is a failure, asserted rather than reported. **It requires two
-calls, not one.** Research corrected an earlier draft of this phase that
-assumed a single response could carry the signal: a zero-row hybrid response is
-a legitimate outcome (no text candidates), and the response carries no field
-naming match counts or which leg contributed, so one response cannot
-distinguish a true zero from a gate that matched nothing for the wrong reason.
-The detector calls `/search` and `/hybrid-search` and diffs them client-side.
-Zero rows in production while every health signal stayed green is the same
-shape as a gate passing over a scan that matched nothing, and this project's
-own doctrine (nexus-moht0) is that a sweep which found nothing to check is a
-failure, not a pass.
+**It requires two calls, not one.** Research corrected an earlier draft of
+this phase that assumed a single response could carry the signal: a zero-row
+hybrid response is a legitimate outcome (no text candidates), and the response
+carries no field naming match counts or which leg contributed, so one response
+cannot distinguish a true zero from a gate that matched nothing for the wrong
+reason. The detector calls `/search` and `/hybrid-search` and diffs them
+client-side.
+
+**The two-call diff alone is not the failure condition, and an earlier draft
+of this phase said it was.** "Zero from the fused leg where the vector leg
+returns rows" is also the ordinary, expected result for any query whose tokens
+have no literal or trigram-similar match in the corpus but which has
+semantically near chunks. English stemming and a 0.6 trigram threshold are
+narrower targets than vector similarity, so that case is common rather than
+exceptional. Telling it apart from a mis-planned zero needs one more thing the
+response cannot supply: ground truth about whether the corpus contains a
+lexical match for the query at all.
+
+**So the detector is defined over a fixture that supplies that ground truth,
+and only over such a fixture.** It runs against a corpus containing a chunk
+whose text carries the query's literal tokens. On that fixture the fused leg
+returning zero has exactly one explanation, since a lexical match provably
+exists, and the assertion is sound. This is what makes the genuine-zero case
+and the planted-bug case distinguishable at the fixture level rather than only
+in narrative, which is the distinction the Test Plan's scenarios 6 and 7 turn
+on.
+
+**What this delivers, stated precisely, because the distinction matters for
+what it is credited with.** Phase 4 proves the client-side comparison logic is
+correct on a fixture where the answer is known. It is a CI assertion. It is
+NOT production monitoring, and it would not by itself have caught BUG-0148,
+whose defining property was that it was invisible in production while every
+health signal stayed green. A general-purpose version running against
+arbitrary live queries is explicitly out of scope here: without corpus ground
+truth it would fire on every ordinary no-lexical-overlap query. Live
+recurrence detection is named as future work under Failure Modes and is not
+claimed by this RDR.
+
+The doctrine this rests on is the project's own (nexus-moht0): a sweep that
+found nothing to check is a failure, not a pass. A detector that has never
+been observed failing is such a sweep, which is why the planted case is part
+of the Minimum Viable Validation rather than a later addition.
 
 ### Technical Design
 
@@ -397,6 +427,17 @@ by `VectorHybridHttpTest.java`:
 | gate matched no text candidates | empty list, a legitimate result and not an error | RF-3 |
 
 That third row is the reason the Phase 4 detector cannot read one response.
+
+**The detector's own error behaviour**, which the table above does not cover
+because the table describes one call and the detector makes two. If either
+call errors, times out or returns a non-200, the detector propagates and
+fails loud. It does not treat an unanswered call as a pass, and it does not
+substitute a zero-row reading for a call that never returned. The reasoning is
+the project's fail-loud doctrine (nexus-moht0) and the specific circumstance:
+a degraded engine is exactly when a second round trip is likeliest to fail, so
+a detector that swallowed that failure would go quiet precisely when it is
+needed. Retrying is deliberately not specified: a retry that masks a flapping
+engine reintroduces the silence this detector exists to break.
 
 **An extension point deliberately not taken.** Which branch served a call,
 selective or HNSW-first, is server-side and invisible: no response field names
@@ -500,9 +541,16 @@ This is what ripgrep was. It was deleted this week for good reasons.
 - **Risk**: BUG-0148 recurs. The planner flips sparse text-gate queries onto
   the budget-bounded HNSW plan under stale statistics, the route returns zero
   rows, and every health signal stays green.
-  **Mitigation**: Phase 4's two-call detector, asserted rather than reported,
-  shipped with Phase 2 and not after it. Its own non-vacuity is proven by
-  planting the condition (see Test Plan).
+  **Mitigation**: PARTIAL, and the part it does not cover is named here rather
+  than left to be discovered. Phase 4's detector proves the client-side
+  comparison logic is correct against a fixture with known ground truth, and
+  its own non-vacuity is proven by planting the condition (see Test Plan).
+  That is a CI assertion. Nothing in this RDR watches live traffic on any
+  cadence, so a production recurrence would still be as quiet as BUG-0148 was.
+  Live detection needs corpus ground truth the response does not carry and is
+  future work, recorded under Failure Modes. **This risk is reduced, not
+  closed, and this RDR should not be accepted on the belief that it is
+  closed.**
 - **Risk**: the surface decision defaults wrong and users silently lose
   results, because a row with no text signal never appears on the hybrid
   route.
@@ -539,17 +587,41 @@ contributed. This is exactly the shape of a gate passing over a scan that
 found nothing to check, which this project already treats as a failure rather
 than a pass (nexus-moht0).
 
-**Diagnosis path.** Call `/search` and `/hybrid-search` with the same query
-and collections and diff the row counts. A fused result of zero where the
-vector leg alone returns rows is the signal. There is no server-side shortcut
-for this today.
+**Diagnosis path, and its limit.** Call `/search` and `/hybrid-search` with
+the same query and collections and diff the row counts. A fused result of zero
+where the vector leg alone returns rows is the signal **only when the corpus
+is known to contain a lexical match for that query**. Without that ground
+truth the same reading is the ordinary result for a query with no lexical
+overlap, so this is a diagnostic an operator runs against a query they have
+chosen for the purpose, not a check that can be pointed at arbitrary traffic.
+There is no server-side shortcut for this today.
+
+Two limits on the diff itself. A write landing between the two calls can
+present a genuine visibility difference as the BUG-0148 signature, so a
+positive reading is confirmed by repeating it rather than acted on from one
+observation. And if either call errors, times out or returns non-200, the
+diff is not computed at all: see the detector's error behaviour in the
+Technical Design.
+
+**Live recurrence detection is future work and is not in this RDR.** Making
+this an unattended production check needs a ground-truth corpus (a small set
+of canary documents whose literal tokens are known) and a cadence to run it
+on. Both are real design, neither is specified here, and no bead exists for
+it yet. Naming it is how this RDR avoids being read as having closed the
+BUG-0148 risk.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [x] All Critical Assumptions verified. Seven research findings, all
-      classified verified, all by source search.
+- [x] Wire-contract assumptions (RF-1 to RF-7) verified by source search.
+      These cover the route's request and response shape, rerank parity,
+      tenant handling and the zero-row semantics. They are NOT the section
+      titled Critical Assumptions, which concerns RDR-216 baseline reuse.
+- [ ] The one assumption that gates Phase 3, that a lexical leg improves
+      retrieval for real nexus queries, is deliberately unverified. See
+      Finalization Gate > Assumption Verification. Phase 1 is the plan to
+      verify it.
 - [ ] Phase 1's baseline taken, since Phase 3's answer depends on it.
 
 ### Minimum Viable Validation
@@ -558,8 +630,15 @@ for this today.
 substrate and the two-call detector fails when the zero-row condition is
 planted.** One proof, covering both halves of the case: the first half closes
 Gap 2 by making the route reachable from a nexus journey, and the second half
-proves the detector is not vacuous. In scope for Phase 2 plus Phase 4, not
-deferred.
+proves the detector is not vacuous.
+
+The fixture carries the property the detector's soundness rests on: it
+contains a chunk whose text holds the query's literal tokens, so a lexical
+match provably exists and a zero from the fused leg has exactly one
+explanation. Without that property the planted case and an ordinary
+no-lexical-overlap query are the same observation and the proof is empty.
+
+In scope for Phase 2 plus Phase 4, not deferred.
 
 ### Phase 1: an honest baseline
 
@@ -625,13 +704,26 @@ a caller.
   empty result.
 - **Scenario**: no pgvector backend. **Verify**: 503, not a silent vector
   fallback.
-- **Scenario**: a query whose gate genuinely matches no text. **Verify**: an
-  empty list, and the detector does NOT fire, since this is the legitimate
-  zero.
-- **Scenario**: the BUG-0148 condition planted, so the fused call returns zero
-  rows where the vector call returns some. **Verify**: the detector FAILS.
-  This is the non-vacuity proof: a detector that has never been observed
-  failing is a sweep that found nothing to check.
+- **Scenario**: a query whose gate genuinely matches no text, against a corpus
+  containing NO chunk with its literal tokens. **Verify**: an empty list, and
+  the detector does NOT fire, since no lexical match exists to have been
+  missed. The fixture's defining property is the absence of a lexical match,
+  and the test asserts that absence directly rather than assuming it.
+- **Scenario**: the BUG-0148 condition planted, against a corpus that DOES
+  contain a chunk carrying the query's literal tokens, so the fused call
+  returns zero where a lexical match provably exists. **Verify**: the detector
+  FAILS. This is the non-vacuity proof: a detector that has never been
+  observed failing is a sweep that found nothing to check.
+- **Scenario**: the two scenarios above are compared as fixtures, not as
+  narratives. **Verify**: they differ in whether the corpus contains a literal
+  match, and that difference is asserted in the test setup. Two scenarios that
+  assert opposite detector outcomes from an identical observable signature
+  would prove nothing, and an earlier draft of this plan had exactly that
+  defect.
+- **Scenario**: one of the detector's two calls errors, times out or returns
+  non-200. **Verify**: the detector propagates and fails loud. It never treats
+  a failed call as a pass, and never silently substitutes a zero-row reading
+  for an unanswered one.
 
 ## Validation
 
