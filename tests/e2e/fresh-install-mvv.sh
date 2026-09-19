@@ -1010,19 +1010,25 @@ echo "── 8d/10 tuple ledger projector hook drive (nexus-g2lln pre-tag proof,
 # tests/hooks/test_tuple_ledger_project.py hand-writes the data-token lease
 # the projector reads (T2 nexus/shakeout-7.41.0-projector-local-install-
 # proof-2026-09-11), so a fully-inert projector shipped through every
-# existing gate unnoticed. This leg drives the real wrapper scripts against
-# the sandbox's own local install (supervisor up since leg 4/10) with a
-# synthetic SubagentStart/SubagentStop payload and polls for the tuples
-# they are supposed to write.
+# existing gate unnoticed. This leg drives the real projection entry points
+# against the sandbox's own local install (supervisor up since leg 4/10)
+# with a synthetic SubagentStart/SubagentStop payload and polls for the
+# tuples they are supposed to write.
 #
-# The wheel under test does NOT ship conexus/hooks/scripts -- only
-# conexus/plans/ travels into the wheel (pyproject.toml's [tool.hatch.
-# build.targets.wheel.force-include] comment: "the rest of conexus/
-# (agents, skills, commands, hooks, .claude-plugin/plugin.json) is
-# consumed by Claude Code from the repo at plugin-install time, not from
-# the Python wheel"). The plugin is what actually runs these scripts on a
-# user's box, never the installed package, so there is no wheel copy to
-# prefer here -- this drives THIS CHECKOUT's own conexus/hooks/scripts.
+# WHAT IS DRIVEN MOVED AT RDR-215 bead nexus-q02nx.21, and the two halves
+# now live in different places. The WRAPPERS
+# (subagent-{start,stop}-tuple-async.sh) were ported to
+# nexus.hooks.tuple_projection and ARE in the wheel under test, so this
+# leg drives them out of the installed wheel -- which is strictly better
+# coverage than before, since the wheel's copy is now the one a user
+# runs. The PROJECTOR (tuple_ledger_project.py) was deliberately NOT
+# ported: it stays plugin content, and the wheel does not ship
+# conexus/hooks/scripts -- only conexus/plans/ travels into the wheel
+# (pyproject.toml's [tool.hatch.build.targets.wheel.force-include]
+# comment: "the rest of conexus/ (agents, skills, commands, hooks,
+# .claude-plugin/plugin.json) is consumed by Claude Code from the repo at
+# plugin-install time, not from the Python wheel"). So the projector is
+# still supplied from THIS CHECKOUT, via CLAUDE_PLUGIN_ROOT below.
 #
 # EXPECTED TO FAIL while bead nexus-g2lln is open: the projector presents
 # ONLY a data-token-lease bearer, and a default local install runs on the
@@ -1042,27 +1048,66 @@ HOOK_SID="$("$PROBE_PYTHON" -c 'import uuid; print(uuid.uuid4().hex)')"
 HOOK_AGENT="mvv-hook-probe"
 HOOK_LOG="$HOME_DIR/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
 
+cat > "$HOOK_PY_DIR/drive.py" <<'PY'
+# Drives nexus.hooks.tuple_projection -- the port of the two deleted
+# subagent-{start,stop}-tuple-async.sh wrappers (RDR-215 beads
+# nexus-q02nx.20 / .21) -- out of the INSTALLED wheel under test, which
+# is the point of this leg: the port travels in the wheel, the projector
+# it spawns does not.
+#
+# THE JOIN IS LOAD-BEARING. The bash detached a disowned subshell that
+# outlived the hook; the port uses a DAEMON thread, which dies at
+# interpreter exit (tuple_projection's own docstring records this as a
+# real durability regression). Without the join this process would start
+# the POST and then kill it, and the poll below would wait 30s for a
+# tuple nobody sent -- a false FAIL on a release gate.
+import json, sys, threading
+from nexus.hooks.tuple_projection import run_start, run_stop
+payload = json.loads(sys.stdin.read())
+(run_start if sys.argv[1] == "start" else run_stop)(payload)
+# The projector subprocess's own cap is _TIMEOUT_S=120; join past it so a
+# wedged projector is reported as wedged rather than silently truncated.
+for t in threading.enumerate():
+    if t.name.startswith("tuple-projection-"):
+        t.join(timeout=150)
+        if t.is_alive():
+            print(f"  WARNING: {t.name} still running after 150s", file=sys.stderr)
+PY
+
 _drive_hook() {
-    # $1 = wrapper script basename under conexus/hooks/scripts; stdin = the
-    # JSON payload. Scrubbed env, matching _nx()'s discipline -- HOME
-    # points at the sandbox so the script resolves the sandbox's own
-    # config dir / state dir / data-token lease, never the operator's.
+    # $1 = "start"|"stop"; stdin = the JSON payload. Scrubbed env,
+    # matching _nx()'s discipline -- HOME points at the sandbox so the
+    # projector resolves the sandbox's own config dir / state dir /
+    # data-token lease, never the operator's.
+    #
+    # CLAUDE_PLUGIN_ROOT is REQUIRED here, and was not needed by the
+    # bash. tuple_projection._projector() looks under
+    # $CLAUDE_PLUGIN_ROOT/hooks/scripts first and then falls back to
+    # Path(__file__).parents[3]/conexus/hooks/scripts -- a fallback that
+    # resolves to the repo only from a source checkout. Run from the
+    # INSTALLED wheel, __file__ is <venv>/.../site-packages/nexus/hooks/,
+    # so the fallback misses, _projector() returns None, and the
+    # projection becomes a logged no-op. Exporting it is also what makes
+    # this leg drive THIS CHECKOUT's projector, exactly as the deleted
+    # wrappers did by resolving their own sibling.
     env -i \
         HOME="$HOME_DIR" \
         PATH="$HOOK_PY_DIR:/usr/bin:/bin" \
         TERM="${TERM:-dumb}" \
         NX_NO_TELEMETRY=1 \
-        bash "$REPO_ROOT/conexus/hooks/scripts/$1"
+        CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
+        "$PROBE_PYTHON" "$HOOK_PY_DIR/drive.py" "$1"
 }
 
 printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook subagent-start-tuple-async.sh
+    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook start
 printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook subagent-stop-tuple-async.sh
+    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook stop
 
-# Both wrappers detach a background subshell and return in milliseconds
-# (see their own headers) -- the actual resolve+POST can take up to the
-# projector's 5s per-call timeout, so poll rather than assume completion.
+# The join inside drive.py means the POST has normally already completed
+# by here -- but poll anyway rather than assume: the join has its own
+# timeout, and a projector that gave up early writes its reason to the
+# log this loop also watches.
 HOOK_DEADLINE=$(( $(date +%s) + 30 ))
 HOOK_TOTAL=0
 HOOK_STATS=""

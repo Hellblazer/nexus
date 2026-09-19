@@ -116,14 +116,24 @@ scenario_end
 
 scenario "00 debug-load: SubagentStart hook injects RELAY_TEMPLATE"
 
-# Run subagent-start.sh directly with CLAUDE_PLUGIN_ROOT set
+# Drive nexus.hooks.subagent_start, the port of the deleted
+# conexus/hooks/scripts/subagent-start.sh (RDR-215 bead nexus-q02nx.21).
+# HookResult.stdout is the same rendered JSON envelope the bash printed --
+# a SubagentStart hook only injects through
+# {"hookSpecificOutput": {"additionalContext": ...}}, never plain stdout
+# (scenarios 01 and 13) -- so the three greps below are unchanged and
+# still read the injected markdown out of that envelope.
 subagent_hook_out=$(CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
     HOME="$TEST_HOME" \
     PATH="$TEST_HOME/.local/bin:$PATH" \
     CLAUDE_PROJECT_DIR="$REPO_ROOT" \
-    bash "$REPO_ROOT/conexus/hooks/scripts/subagent-start.sh" 2>&1 || true)
+    uv run --project "$REPO_ROOT" python -c '
+import sys
+from nexus.hooks.subagent_start import run
+sys.stdout.write(run({"subagent_type": "developer"}).stdout or "")
+' 2>&1 || true)
 
-echo "    --- subagent-start.sh output ---"
+echo "    --- nexus.hooks.subagent_start output ---"
 echo "$subagent_hook_out" | head -30 | sed 's/^/    | /'
 echo "    ---"
 
@@ -150,19 +160,14 @@ fi
 
 scenario_end
 
-scenario "00 debug-load: hook shell scripts are executable"
-
-for script in \
-    "$REPO_ROOT/conexus/hooks/scripts/subagent-start.sh"; do
-    name=$(basename "$script")
-    if [[ -x "$script" ]]; then
-        pass "$name is executable"
-    else
-        fail "$name is NOT executable (chmod +x needed)"
-    fi
-done
-
-scenario_end
+# The "hook shell scripts are executable" scenario that stood here checked
+# the +x bit on exactly one file, conexus/hooks/scripts/subagent-start.sh,
+# deleted at RDR-215 bead nexus-q02nx.21. Its subject was the bash qua
+# bash -- an executable bit is a property of a shell script, and the port
+# (nexus.hooks.subagent_start, driven above) is a Python module reached by
+# import, which has no such bit to lose. Nothing survived it to re-point,
+# so the scenario went with the file rather than being kept as a check
+# over an empty loop.
 
 # ─── Part 3: Component discovery via -p mode ─────────────────────────────────
 
