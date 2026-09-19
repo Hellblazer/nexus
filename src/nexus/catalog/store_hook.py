@@ -21,7 +21,7 @@ import httpx
 import structlog
 
 from nexus.aspect_readers import uri_for
-from nexus.embed_window import has_small_window, window_for_model
+from nexus.embed_window import window_for_model
 
 _log = structlog.get_logger(__name__)
 
@@ -192,17 +192,27 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
 
 def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str, str, int] | None:
     """``(first chunk id, full text, chunk count)`` when *chunk_ids* are
-    chunks of ONE split note, else ``None`` (nexus-spujb).
+    chunks of ONE split note, else ``None`` (nexus-spujb, nexus-b2tld).
 
     One id resolves to the note it belongs to; several ids (a title lookup)
-    resolve only when all of them belong to one note. Only a collection
-    whose model has a small token window can hold a split note, so any other
-    collection returns ``None`` with no catalog round trip. A note missing
-    any of its chunks returns ``None``, never a partial text.
-    """
-    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred to avoid import cycle
+    resolve only when all of them belong to one note. A note missing any of
+    its chunks returns ``None``, never a partial text.
 
-    if not chunk_ids or not has_small_window(embedding_model_for_collection_calibrated(collection)):
+    nexus-b2tld: this used to short-circuit on
+    ``has_small_window(...)`` before any catalog round trip, on the premise
+    that "only a collection whose model has a small token window can hold a
+    split note". :func:`note_pieces` splitting a WINDOWLESS collection for
+    retrieval granularity made that premise false, and the short-circuit
+    then declined to join pieces that were written and manifested correctly
+    — :func:`store_get` fell back to the first piece alone, with no
+    ``Chunks:`` line and no error. Measured against the live cloud store on
+    2026-09-19: a 2,064-character note read back as 1,621 characters.
+
+    The manifest is now the only authority: ``len(chashes) < 2`` below is
+    the honest test of whether a document is split, and it costs one catalog
+    round trip per read that the short-circuit used to save.
+    """
+    if not chunk_ids:
         return None
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
 

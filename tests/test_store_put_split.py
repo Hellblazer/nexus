@@ -64,8 +64,19 @@ def small_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TokenWindow
     tok.save(str(tmp_path / "tokenizer.json"))
     window = TokenWindow(40, tmp_path / "tokenizer.json")
     monkeypatch.setattr(store_hook, "window_for_model", lambda model: window)
-    monkeypatch.setattr(store_hook, "has_small_window", lambda model: True)
     return window
+
+
+@pytest.fixture
+def windowless(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A collection whose model imposes no window — the real Voyage shape.
+
+    The mirror of `small_window`: window_for_model returns None, which is
+    what embed_window reports for a model whose token limit sits above the
+    12,288-byte chunk cap. The read path no longer consults has_small_window
+    at all (nexus-b2tld), so there is nothing else to patch.
+    """
+    monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
 
 
 def _store(t3: T3Database, content: str, title: str) -> str:
@@ -180,6 +191,52 @@ def test_store_get_returns_the_whole_note_by_id_and_by_title(
     assert NOTE in by_id, by_id[:300]
     assert NOTE in by_title, by_title[:300]
     assert "Multiple documents" not in by_title
+
+
+def test_store_get_reassembles_a_windowless_split_note(
+    inject_local_t3, catalog_env, windowless,
+) -> None:
+    """nexus-b2tld read side. Until note_pieces learned to split a windowless
+    collection, `only a collection whose model has a small token window can
+    hold a split note` was true, and split_note_text short-circuited on
+    has_small_window for exactly that reason. Splitting for granularity made
+    it false: the pieces are written and manifested, but the read path
+    declined to join them and store_get fell back to entry["content"] — the
+    FIRST PIECE ONLY, with no Chunks: line and no error. Measured against the
+    live cloud store 2026-09-19: a 2,064-character note read back as 1,621."""
+    col_name = t3_collection_name(SUBJECT)
+    pieces = store_hook.note_pieces(NOTE, col_name)
+    assert len(pieces) > 1, "fixture note must cross NOTE_SPLIT_CHARS"
+    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
+    _store(inject_local_t3, NOTE, "windowless-note-get")
+
+    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+        by_id = store_get(_sha(pieces[0]), SUBJECT)
+        by_title = store_get("windowless-note-get", SUBJECT)
+
+    assert NOTE in by_id, by_id[:300]
+    assert NOTE in by_title, by_title[:300]
+    assert f"Chunks:     {len(pieces)}" in by_id
+    assert "Multiple documents" not in by_title
+
+
+def test_a_windowless_single_chunk_note_still_reads_back_plain(
+    inject_local_t3, catalog_env, windowless,
+) -> None:
+    """The other side of dropping the has_small_window short-circuit: a note
+    that fits in one piece has a one-row manifest, so split_note_text must
+    still return None and store_get must not grow a Chunks: line."""
+    short = "A short windowless note."
+    col_name = t3_collection_name(SUBJECT)
+    assert store_hook.note_pieces(short, col_name) == [short]
+    seed_manifest_chunks(col_name, [_sha(short)])
+    _store(inject_local_t3, short, "windowless-short")
+
+    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+        out = store_get(_sha(short), SUBJECT)
+
+    assert short in out
+    assert "Chunks:" not in out
 
 
 # ── failure, hook shape, resolver (review round 1) ───────────────────────────
