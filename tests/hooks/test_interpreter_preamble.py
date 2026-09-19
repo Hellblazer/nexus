@@ -79,11 +79,27 @@ def _old_python() -> str | None:
 
 
 def _fake_generation(tools: Path, marker: str) -> None:
-    """A stand-in generation python that announces itself, then really runs."""
+    """A stand-in generation python that announces itself, then really runs.
+
+    The ``-c ""`` branch answers ``_runs()``'s probe without spawning a real
+    CPython. That is a cheapness measure only, and it is NOT the cause of the
+    intermittent failure below — that was this author's first hypothesis and
+    it was wrong: with it in place the test still failed a full ``-n auto``
+    run, and ``resolve()`` was measured picking the generation correctly 12
+    times out of 12 at load average 69. The branch is kept because a probe
+    asks one question, "does this executable start", and answering it without
+    a process spawn is a truthful answer; it is narrowed to the EXACT empty
+    probe so a genuine ``-c <code>`` re-exec is never swallowed.
+    """
     gen = tools / "gen-test"
     (gen / "bin").mkdir(parents=True)
     py = gen / "bin" / "python"
-    py.write_text(f"#!/bin/sh\necho {marker} >&2\nexec {sys.executable} \"$@\"\n")
+    py.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = "-c" ] && [ -z "$2" ] && exit 0\n'
+        f"echo {marker} >&2\n"
+        f'exec {sys.executable} "$@"\n'
+    )
     py.chmod(py.stat().st_mode | stat.S_IXUSR)
     (tools / "current").symlink_to(gen)
 
@@ -101,12 +117,36 @@ class TestTheMechanism:
     """Always runs -- the non-vacuity floor under the measured tests below."""
 
     def test_it_reexecs_into_the_generation_python(self, tmp_path: Path) -> None:
+        """THE DIAGNOSTIC LINE IS PART OF THE TEST, not debug residue.
+
+        This assertion failed intermittently in full ``-n auto`` runs (bead
+        nexus-q02nx.22) reporting ``assert 'GEN-PY-RAN' in ''`` -- an EMPTY
+        stderr, with rc 0 and correct stdout. Two different faults produce
+        that byte-for-byte and the failure could not tell them apart:
+
+        * ``resolve()`` picked a DIFFERENT interpreter (say ``python3.13`` by
+          name, because the generation probe lost its 1.5 s race), re-exec'd
+          into it successfully, and that interpreter emits no marker; or
+        * ``resolve()`` picked the generation correctly and ``os.execv``
+          ITSELF failed -- under process-table pressure it raises EAGAIN, and
+          ``reexec_if_needed`` swallows ``OSError`` by design, returning
+          silently so the caller's own version guard stays the backstop.
+          Reproduced deliberately by raising EAGAIN from ``os.execv``: rc 0,
+          ``hook ran ['an-arg']``, stderr ``''``. Byte-identical.
+
+        So the hook now prints what ``resolve()`` returned BEFORE trying to
+        act on it. stderr can no longer be empty, and the next failure says
+        which of the two happened instead of leaving the reader to guess --
+        which is what happened here, at the cost of one wrong fix.
+        """
         tools = tmp_path / "tools"
         _fake_generation(tools, "GEN-PY-RAN")
         script = tmp_path / "hook.py"
         script.write_text(
             f"import sys; sys.path.insert(0, {str(SCRIPTS)!r})\n"
-            "import _interpreter; _interpreter.reexec_if_needed()\n"
+            "import _interpreter\n"
+            "sys.stderr.write('RESOLVED=%r\\n' % (_interpreter.resolve(),))\n"
+            "_interpreter.reexec_if_needed()\n"
             "print('hook ran', sys.argv[1:])\n"
         )
         proc = subprocess.run(
@@ -115,7 +155,19 @@ class TestTheMechanism:
             capture_output=True, text=True, timeout=60,
         )
         assert proc.returncode == 0, proc.stderr
-        assert "GEN-PY-RAN" in proc.stderr, "never re-exec'd into the generation python"
+        # Non-vacuity: the diagnostic must actually be there, or the two
+        # assertions below are reading a stream nothing wrote to.
+        assert "RESOLVED=" in proc.stderr, proc.stderr
+        assert str(tools) in proc.stderr, (
+            "resolve() did not pick the generation python -- so this is the "
+            f"resolution half, not the exec half.\nstderr: {proc.stderr!r}"
+        )
+        assert "GEN-PY-RAN" in proc.stderr, (
+            "resolve() picked the generation (see RESOLVED= above) but the "
+            "marker never ran, so the re-exec itself did not happen -- "
+            "os.execv failing is swallowed by design in reexec_if_needed.\n"
+            f"stderr: {proc.stderr!r}"
+        )
         assert proc.stdout.strip() == "hook ran ['an-arg']", proc.stdout
 
     def test_the_marker_stops_a_second_pass(self, tmp_path: Path) -> None:
