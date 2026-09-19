@@ -46,6 +46,27 @@ import sys
 #: real finding, because the shim runs before the handler can decline to speak.
 SILENT_BY_DESIGN = {"nx-hook preflight", "behaviour_census.py"}
 
+#: Removed from the staged manifest by run.sh because they would mutate the
+#: wheel under test: `upgrade-auto` installs a generation and flips
+#: <tools>/current, `self-gc` reaps generations. The denominator is the
+#: ORIGINAL manifest, so they must be named as excluded rather than counted
+#: as absent -- a harness's own exclusions appearing as findings is how a
+#: census loses the reader's trust in the findings that are real.
+EXCLUDED_BY_HARNESS = {"nx-hook upgrade-auto", "nx-hook self-gc"}
+
+#: Real, documented events (code.claude.com/docs/en/hooks.md) that this
+#: harness cannot provoke. Verified with claude-code-guide rather than
+#: guessed, because "the event name is wrong" and "the event did not occur"
+#: are the same observation and only one of them is a defect:
+#:   PostCompact fires only when compaction ACTUALLY occurs -- `/compact` on
+#:     a short session has nothing to compact, so the turn completes and no
+#:     hook runs.
+#:   StopFailure fires only on an API error, which this run does not induce.
+NOT_PROVOKED = {
+    "hook_post_compact": "PostCompact fires only when compaction actually occurs",
+    "hook_stop_failure": "StopFailure fires only on an API error",
+}
+
 
 def declared(hooks_json: pathlib.Path) -> dict[str, str]:
     """``handler -> the events it is declared on``.
@@ -188,14 +209,32 @@ def main(argv: list[str]) -> int:
         return 2
 
     rc = 0
-    never = sorted(set(decl) - fired)
+    absent = set(decl) - fired
+    excluded = sorted(absent & EXCLUDED_BY_HARNESS)
+    unprovoked = sorted(absent & set(NOT_PROVOKED))
+    never = sorted(absent - set(excluded) - set(unprovoked))
+
+    if excluded:
+        print()
+        print("EXCLUDED BY THIS HARNESS (cannot fire, by construction):")
+        for name in excluded:
+            print(f"  {name}  -- dropped from the staged manifest; it would "
+                  f"replace the wheel under test")
+    if unprovoked:
+        print()
+        print("NOT PROVOKED BY THIS RUN (real events, verified documented):")
+        for name in unprovoked:
+            print(f"  {name}  -- {NOT_PROVOKED[name]}")
+        print("These are gaps in the PROVOCATION SET, not in the hooks. Saying "
+              "so is the point: a run that cannot trigger an event has no "
+              "opinion about its handler.")
     if never:
         print()
-        print(f"NEVER FIRED ({len(never)}), by name:")
+        print(f"NEVER FIRED ({len(never)}), unexplained, by name:")
         for name in never:
             print(f"  {decl[name]:<26} {name}")
-        print("Each is either a real fail-open or an event this run did not "
-              "trigger. Decide per handler; do not total them.")
+        print("Each is a candidate fail-open. Decide per handler; do not "
+              "total them.")
         rc = 1
 
     if trouble:
@@ -206,10 +245,13 @@ def main(argv: list[str]) -> int:
         rc = 1
 
     if rc == 0:
+        covered = len(decl) - len(excluded) - len(unprovoked)
         print()
-        print(f"All {len(decl)} declared handlers fired, silent ones included "
-              f"({', '.join(sorted(silent_present))} prove the roster sees "
-              f"quiet hooks), with no error line.")
+        print(f"Every provocable handler fired: {covered} of {len(decl)} "
+              f"declared, with {len(excluded)} excluded by the harness and "
+              f"{len(unprovoked)} not provocable here. Silent ones included "
+              f"({', '.join(sorted(silent_present))}), which is what proves "
+              f"the roster sees quiet hooks. No error line.")
     return rc
 
 
