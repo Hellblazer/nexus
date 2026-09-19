@@ -11,14 +11,10 @@ records rather than fixes.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 from nexus.hooks import pre_close_verification as gate
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "conexus" / "hooks" / "scripts" / "pre_close_verification_hook.sh"
 
 #: Split so this file cannot trip the gate it tests. Not decoration: the
 #: verb detector reads heredoc and docstring bytes as shell structure
@@ -31,19 +27,23 @@ class TestTheDenyTextIsACarriedContract:
     """The remedy block is duplicated NOWHERE, and that is why it needs
     pinning.
 
-    Measured rather than repeated: before this port exactly one file on
-    disk carried the string ``Close blocked: no review-completed`` --
-    the script. The gate CONCEPT is referenced in about ten documents,
-    which is a different claim and the one the bead actually makes.
+    Measured rather than repeated: before the RDR-215 port exactly one
+    file on disk carried the string ``Close blocked: no
+    review-completed`` -- the script. The gate CONCEPT is referenced in
+    about ten documents, which is a different claim and the one the bead
+    actually makes.
 
     Scarcity is the hazard, not ubiquity. A text living in twenty places
     cannot be quietly reworded; one living in a single place can, and
     then the documents describing the gate drift from what it says with
     nothing to disagree with them.
 
-    Asserted against the SCRIPT'S OWN BYTES, never against a copy living
-    here: a test holding its own copy of a contract drifts with the code
-    it is supposed to pin, and both stay green.
+    RDR-215 bead nexus-q02nx.21 deleted the script: the port's own
+    ``_deny_message`` output is now the single place this wording lives,
+    so this class asserts against it directly. The comparison against
+    the script's own bytes (never a retyped copy) that used to guard
+    against silent drift served its purpose during the port; there is no
+    longer a second copy to drift from.
     """
 
     @staticmethod
@@ -54,31 +54,6 @@ class TestTheDenyTextIsACarriedContract:
             incomplete=[],
             deadline_seconds="3.5",
             seen_names={},
-        )
-
-    @staticmethod
-    def _script_text() -> str:
-        # the script stores these escaped inside a double-quoted bash
-        # string; normalise only that so the comparison is about wording
-        raw = SCRIPT.read_text()
-        return raw.replace('\\"', '"').replace("\\'", "'")
-
-    @pytest.mark.parametrize(
-        "phrase",
-        [
-            "Close blocked: no review-completed marker found in T1 scratch",
-            "Run the marker write as a SEPARATE tool call",
-            "Run the stacked reviewers (code-review-expert + substantive-critic)",
-            "The marker MUST name both reviewers; naming one (or neither) is refused",
-            "the marker is reserved to the gate-owning session",
-            "it is not yours to reach for",
-        ],
-    )
-    def test_each_contract_phrase_is_still_in_the_script(self, phrase):
-        assert phrase in self._script_text(), (
-            "the SCRIPT no longer contains this phrase — if the wording "
-            "changed deliberately, the 19 documents quoting it need the "
-            "same change, and this test is the place that says so"
         )
 
     @pytest.mark.parametrize(

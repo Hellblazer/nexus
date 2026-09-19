@@ -2,32 +2,31 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The ported SubagentStart ledger stamp (RDR-215 bead nexus-q02nx.11).
 
-The bash script stays wired until beads .21/.22 re-declare it, so the
-differential class runs both and compares the resulting ledger.
+RDR-215 bead nexus-q02nx.21 re-declared the ``SubagentStart`` entry to the
+``hook_subagent_start_stamp`` mcp_tool and the bash script is deleted, so
+this file drives the Python module only. The differential class that used
+to compare it against bash (``TestAgreesWithTheLiveBashScript``) is gone;
+every scenario it covered has a direct assertion above (e.g.
+``test_a_start_row_is_written``, ``test_the_agent_type_is_verbatim_colon_included``,
+``test_the_same_agent_is_stamped_once``,
+``test_an_agent_id_with_dashes_and_underscores_stamps``).
 
-One case is deliberately NOT expected to match: an empty middle field.
-The bash decodes with ``IFS=$'\\t' read``, and tab is IFS whitespace, so
-an empty ``agent_id`` collapses and ``agent_type`` shifts into its place.
-``agent-dispatch-expect.sh``'s own header says this script "is currently
-benign only by luck". The port cannot reproduce that because it reads the
-payload dict directly, and it should not try.
+The bash had one known defect the port deliberately does NOT reproduce: it
+decoded with ``IFS=$'\\t' read``, and tab is IFS whitespace, so an empty
+``agent_id`` collapsed and ``agent_type`` shifted into its place. Reading
+the payload dict directly cannot shift anything; that guarantee is what
+``TestTheFieldShiftBugClassIsGone`` pins (the bash-side proof of the
+defect it used to carry alongside is gone with the script it drove).
 """
 from __future__ import annotations
 
-import json
-import os
-import subprocess
+import concurrent.futures
 from pathlib import Path
 
 import pytest
 
 from nexus.hooks import expectations as exp
 from nexus.hooks import subagent_start_stamp as hook
-
-_SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus" / "hooks" / "scripts" / "subagent-start-stamp.sh"
-)
 
 
 @pytest.fixture()
@@ -69,6 +68,27 @@ class TestTheStamp:
         hook.run(_payload(agent_id="a1"))
         hook.run(_payload(agent_id="a2"))
         assert len(_rows()) == 2
+
+    def test_an_agent_id_with_dashes_and_underscores_stamps(self, state):
+        hook.run(_payload(agent_id="a-with-dashes_and_underscores"))
+        assert _rows()[0][2] == "a-with-dashes_and_underscores"
+
+    def test_idempotent_under_concurrent_invocation(self, state):
+        """The shape that actually broke in production (nexus-3h0u6),
+        ported from ``tests/hooks/test_subagent_start_stamp.py``'s bash
+        version: a sequential double-call cannot reproduce a TOCTOU, since
+        production wrote duplicate START rows with identical timestamps
+        because the guard was a check-then-append and two registrations
+        fired at the same instant. This launches the calls simultaneously
+        against the SAME state dir."""
+        payload = _payload()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(hook.run, payload) for _ in range(8)]
+            for f in futures:
+                assert f.result().exit_code == 0
+        assert len(_rows()) == 1, (
+            "8 concurrent stamps must compose to ONE row, got:\n" + repr(_rows())
+        )
 
 
 class TestTheSkipPaths:
@@ -113,56 +133,3 @@ class TestTheFieldShiftBugClassIsGone:
     def test_an_empty_agent_id_never_becomes_the_agent_type(self, state):
         hook.run(_payload(agent_id="", agent_type="conexus:developer"))
         assert _rows() == [], "no row at all — not a row with the type in the id slot"
-
-    def test_bash_really_does_shift_the_field(self, state):
-        """Pins the defect the port is NOT reproducing, so the claim above
-        is evidence rather than assertion. If bash is ever fixed, this
-        turns red and the docstrings should stop claiming a divergence."""
-        payload = {"session_id": "theirs", "agent_id": "", "agent_type": "conexus:developer"}
-        subprocess.run(
-            ["bash", str(_SCRIPT)],
-            input=json.dumps(payload), capture_output=True, text=True,
-            env={**os.environ, "XDG_STATE_HOME": os.environ["XDG_STATE_HOME"]},
-        )
-        rows = _rows("theirs")
-        if rows:
-            assert rows[0][2] == "conexus:developer", (
-                "bash is expected to shift agent_type into the agent_id slot; "
-                "if it no longer does, the port's divergence note is stale"
-            )
-
-
-class TestAgreesWithTheLiveBashScript:
-    def _bash(self, payload: dict, state_home: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["bash", str(_SCRIPT)],
-            input=json.dumps(payload), capture_output=True, text=True,
-            env={**os.environ, "XDG_STATE_HOME": state_home},
-        )
-
-    @pytest.mark.parametrize(
-        "payload,label",
-        [
-            (_payload(), "ordinary stamp"),
-            (_payload(agent_type="conexus:critic"), "colon-qualified type"),
-            (_payload(session_id=""), "no session id"),
-            (_payload(agent_type=""), "no agent type"),
-            (_payload(agent_id="a-with-dashes_and_underscores"), "id charset"),
-        ],
-    )
-    def test_the_ledger_matches(self, state, payload, label):
-        mine = dict(payload, session_id=payload["session_id"] and "mine")
-        theirs = dict(payload, session_id=payload["session_id"] and "theirs")
-        hook.run(mine)
-        proc = self._bash(theirs, os.environ["XDG_STATE_HOME"])
-        assert proc.returncode == 0, f"{label}: bash must always exit 0"
-        assert proc.stdout == "", f"{label}: bash is stdout-silent"
-        assert [r[1:] for r in _rows("mine")] == [r[1:] for r in _rows("theirs")], (
-            f"{label}: the ledger drifted from bash"
-        )
-
-    def test_bash_also_stamps_at_most_once(self, state):
-        payload = _payload(session_id="theirs")
-        self._bash(payload, os.environ["XDG_STATE_HOME"])
-        self._bash(payload, os.environ["XDG_STATE_HOME"])
-        assert len(_rows("theirs")) == 1
