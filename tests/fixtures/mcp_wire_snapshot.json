@@ -105,6 +105,41 @@
       },
       "qualname": "_make_tool_function.<locals>._tool"
     },
+    "hook_pre_close_verification": {
+      "is_async": false,
+      "module": "nexus.mcp.hooks",
+      "parameters": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "tool_input": {
+            "default": null
+          },
+          "tool_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "_make_tool_function.<locals>._tool"
+    },
     "hook_stop_verification": {
       "is_async": false,
       "module": "nexus.mcp.hooks",

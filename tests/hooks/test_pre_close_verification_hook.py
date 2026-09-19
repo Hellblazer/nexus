@@ -207,6 +207,53 @@ def fake_bd(tmp_path):
     return _make
 
 
+#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
+_IMPL = "bash"
+
+
+@pytest.fixture(params=["bash", "python"], autouse=True)
+def impl(request):
+    """Every assertion in this file runs against BOTH implementations.
+
+    RDR-215 bead nexus-q02nx.17 ports this hook to
+    ``nexus.hooks.pre_close_verification``. The script stays wired until
+    bead .21 re-declares its ``hooks.json`` entry, so both are driven and
+    each of these 67 assertions becomes a differential against the thing
+    still running in production. Drop the "bash" param when the script
+    goes.
+    """
+    global _IMPL
+    _IMPL = request.param
+    yield request.param
+    _IMPL = "bash"
+
+
+#: A CHILD PROCESS, not an in-process call, for the same reason as the
+#: SubagentStop port: this file varies PATH and the environment per call
+#: (a fake ``nx`` via ``path_prefix``, ``CLAUDE_PLUGIN_ROOT`` and
+#: ``NX_CLOSE_GATE_DEADLINE_SECONDS`` via ``env_overrides``), and
+#: ``os.environ`` is process-global. Driving the port in process would
+#: mean mutating it per test, which is the hazard that made the ledger's
+#: contention seams environment variables in the first place.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import pre_close_verification
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: pre_close_verification.run(payload), "pre_close_verification")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+
 def _run_hook(
     stdin: str,
     *,
@@ -243,8 +290,13 @@ def _run_hook(
     # into a test that didn't ask for it.
     if "NX_REVIEW_GATE_OVERRIDE" not in (env_overrides or {}):
         env.pop("NX_REVIEW_GATE_OVERRIDE", None)
+    argv = (
+        [sys.executable, "-c", _PY_DRIVER]
+        if _IMPL == "python"
+        else ["bash", str(SCRIPT)]
+    )
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        argv,
         input=stdin,
         capture_output=True,
         text=True,

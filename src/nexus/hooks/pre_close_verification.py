@@ -317,7 +317,7 @@ def _coverage(bead_ids: list[str]) -> dict:
     t1_entries = []
     if shutil.which('nx'):
         try:
-            r = subprocess.run(['nx', 'scratch', 'list'], capture_output=True, text=True, timeout=_clamp_timeout())
+            r = subprocess.run(['nx', 'scratch', 'list'], capture_output=True, text=True, timeout=_clamp_timeout(), env=_nx_env())
             if r.returncode == 0:
                 t1_reachable = True
                 t1_entries = _parse_entries(r.stdout)
@@ -454,12 +454,24 @@ def run(payload: dict | None) -> HookResult:
     IS the semantics here, and every reordering is a chance to change
     which arm wins. "Move, do not rewrite" (RDR-215 Approach item 9)
     names this file.
+    EVERY exit here EMITS an allow envelope rather than staying silent.
+    The script calls its ``allow`` helper on each no-op path, and while a
+    silent PreToolUse result means the same thing to the harness, it does
+    not to the 67 tests that parse stdout -- ten of them failed on
+    JSONDecodeError against an empty string. Silence and an explicit
+    allow are the same DECISION and different OUTPUT, and the output is
+    the part with consumers.
     """
     data = payload if isinstance(payload, dict) else {}
+    # Record the session id BEFORE any branch: every `nx` subprocess this
+    # hook spawns needs it forced, because the hook can run detached from
+    # any live nx-mcp and would otherwise resolve a sibling session's
+    # machine-wide pointer. See _nx_env.
+    _SESSION_ID[0] = str(data.get("session_id") or "")
 
     # 1. fast no-op: anything that is not a Bash call is not our business.
     if data.get("tool_name") != "Bash":
-        return HookResult()
+        return _allow()
 
     tool_input = data.get("tool_input")
     command = ""
@@ -468,11 +480,339 @@ def run(payload: dict | None) -> HookResult:
     elif isinstance(tool_input, str):
         command = tool_input
     if not command:
-        return HookResult()
+        return _allow()
 
     # 2. which bd verb, if any. No verb, no gate.
     verbs = _bd_verbs(command)
     if not verbs["has_create"] and not verbs["has_close_or_done"]:
-        return HookResult()
+        return _allow()
 
     return _run_gate(data, command, verbs)
+
+
+# --- the bd create branch --------------------------------------------------
+
+#: The three commitment markers a follow-up bead must carry when an RDR
+#: close is active. Carried verbatim, matched case-insensitively, and
+#: 'sprint or due' is one requirement satisfied by either word.
+_CREATE_MARKERS = (
+    ("reopens_rdr", ("reopens_rdr",)),
+    ("sprint or due", ("sprint", "due")),
+    ("drift_condition", ("drift_condition",)),
+)
+
+
+def _active_close_rdr() -> str:
+    """The RDR number of an in-flight close, from T1 scratch, or "".
+
+    Best-effort by design: no ``nx`` on PATH, an unreachable T1 or a
+    malformed entry all yield "" and the create branch then allows. The
+    script reaches for ``nx scratch list`` rather than search because the
+    lookup is an exact tag match, not a semantic one.
+    """
+    if shutil.which("nx") is None:
+        return ""
+    try:
+        r = subprocess.run(
+            ["nx", "scratch", "list"],
+            capture_output=True, text=True, timeout=5.0,
+            env=_nx_env(),
+        )
+    except Exception:  # noqa: BLE001 — carried: best-effort, absence is not a verdict
+        return ""
+    m = re.search(r"active-close[- :]+rdr[- :]*0*(\d+)", r.stdout, re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _nx_env(session_id: str = "") -> dict:
+    """The environment every ``nx`` subprocess here needs.
+
+    Carried from the script's own session handling: this hook can run
+    DETACHED from any live nx-mcp, so it cannot rely on inheriting a
+    session. It forces ``NX_SESSION_ID`` from the stdin payload -- the
+    highest-priority tier of the resolution chain -- so ``nx scratch
+    list`` resolves to the session actually running the hook rather than
+    a sibling session's clobbered machine-wide pointer. It also opts back
+    into the shared CLI fallback, because post-nexus-f7xyq an explicit
+    NX_SESSION_ID with no live lease fails LOUD, and that is precisely
+    the state a detached hook is in.
+
+    Surfaced by the differential: without this the port read an empty
+    session and every marker lookup came back unset.
+    """
+    env = dict(os.environ)
+    sid = session_id or _SESSION_ID[0]
+    if sid:
+        env["NX_SESSION_ID"] = sid
+        env["NX_T1_ALLOW_SHARED_FALLBACK"] = "1"
+    return env
+
+
+#: The session id for this dispatch, set once by run() from the payload.
+#: A module-level slot rather than a parameter threaded through six
+#: functions: the script used an exported environment variable for the
+#: same reason, and the call graph is identical.
+_SESSION_ID = [""]
+
+
+def _create_parse(command: str) -> str:
+    """``--title`` and ``--description`` values, joined. Carried."""
+    title, desc = "", ""
+    try:
+        tokens = shlex.split(command)
+        for i, t in enumerate(tokens):
+            if t == "--title" and i + 1 < len(tokens):
+                title = tokens[i + 1]
+            elif t.startswith("--title="):
+                title = t.split("=", 1)[1]
+            elif t == "--description" and i + 1 < len(tokens):
+                desc = tokens[i + 1]
+            elif t.startswith("--description="):
+                desc = t.split("=", 1)[1]
+    except Exception:  # noqa: BLE001 — carried: a malformed command is not a denial
+        pass
+    return f"{title} {desc}"
+
+
+def _create_gate(command: str) -> HookResult:
+    """Advisory on ``bd create`` while an RDR close is active.
+
+    Three outcomes, in the script's order: no active close allows
+    silently; an active close the bead does not reference allows WITH an
+    advisory; an active close it does reference requires all three
+    commitment markers and denies naming the missing ones.
+    """
+    rdr = _active_close_rdr()
+    if not rdr:
+        return _allow()
+
+    combined = _create_parse(command)
+    rdr_int = rdr.lstrip("0") or rdr
+    mentioned = re.search(
+        rf"(^|[^0-9])0*{re.escape(rdr_int)}([^0-9]|$)|rdr-0*{re.escape(rdr_int)}",
+        combined,
+        re.IGNORECASE,
+    )
+    if not mentioned:
+        return _allow(
+            f"RDR close active for RDR-{rdr} \u2014 if this bead is a follow-up, "
+            "add reopens_rdr/sprint/drift_condition metadata to the description."
+        )
+
+    lowered = combined.lower()
+    missing = [
+        label for label, words in _CREATE_MARKERS
+        if not any(w in lowered for w in words)
+    ]
+    if not missing:
+        return _allow()
+
+    missing_display = "".join(f"- {m}{chr(10)}" for m in missing)
+    reason = (
+        f"Follow-up bead for RDR-{rdr} is missing required commitment "
+        f"metadata.{chr(10)}Missing fields:{chr(10)}{missing_display}"
+        f"Add these to the --description, e.g.:{chr(10)}"
+        f"  reopens_rdr: {rdr}{chr(10)}"
+        f"  sprint: implementation-2026-04{chr(10)}"
+        f"  drift_condition: <what drift looks like>"
+    )
+    # Routed through the shared envelope. The script hand-built its own
+    # JSON here and omitted permissionDecisionReason AND systemMessage;
+    # see _deny's docstring.
+    return _deny(reason)
+
+
+# --- stamping --------------------------------------------------------------
+
+
+def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
+    """Best-effort ``bd set-state`` per id. NEVER called on a deny path.
+
+    A denied close must acquire no verification record at all -- that is
+    the false-record fix this gate exists for. A failed stamp is LOUD on
+    stderr rather than swallowed, so a broken ``bd`` at close time is
+    observable instead of producing an audit record nobody can trust and
+    nobody was told is missing.
+    """
+    if not ids:
+        return
+    if shutil.which("bd") is None:
+        _warn(f"bd not found on PATH \u2014 cannot stamp verification={state} "
+              f"for: {' '.join(ids)}")
+        return
+    for bid in ids:
+        try:
+            r = subprocess.run(
+                ["bd", "set-state", bid, f"verification={state}", "--reason", reason],
+                capture_output=True, text=True, timeout=5.0,
+            )
+            if r.returncode != 0:
+                _warn(f"could not stamp verification={state} for {bid}")
+        except Exception:  # noqa: BLE001 — carried: a stamp failure never blocks
+            _warn(f"could not stamp verification={state} for {bid}")
+
+
+def _warn(message: str) -> None:
+    """Straight to stderr, carrying the script's own wording.
+
+    NOT through ``_emit``. PreToolUse stdout must stay pure JSON so stderr
+    is the only channel either way, but the script's text is
+    ``WARNING: ...`` and a test greps for that token. Routing it through
+    structlog rewrote the line as ``level='warning' message='...'`` and
+    the grep stopped matching -- the differential caught it. An
+    operator-facing string that something greps is a contract like any
+    other.
+    """
+    import sys  # noqa: PLC0415 — only the warn path pays it
+
+    sys.stderr.write(f"WARNING: {message}{chr(10)}")
+
+
+# --- the gate ---------------------------------------------------------------
+
+
+def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
+    """The decision table, in the script's order.
+
+    Linear with early returns because the ORDER is the semantics. Every
+    uncertain path allows: this gate fails open by design and the RDR
+    deliberately does not revisit that.
+    """
+    if verbs["has_create"]:
+        return _create_gate(command)
+
+    # on_close must be enabled for the close half to gate at all.
+    from nexus.hooks.stop_verification import _read_config  # noqa: PLC0415 — shared reader
+
+    if _read_config().get("on_close") is not True:
+        return _allow()
+
+    ids = _bead_ids(command)
+    if not ids:
+        return _allow(
+            "INDETERMINATE: no literal bead id (nexus-*) found anywhere in this "
+            "bd close/done command \u2014 cannot check a review marker statically, "
+            "so verification is NOT stamped. Prefer literal ids over shell "
+            "variables so the review gate can verify coverage."
+        )
+
+    override = (
+        os.environ.get("NX_REVIEW_GATE_OVERRIDE") == "1" or verbs["inline_override"]
+    )
+
+    result = _coverage(ids)
+    status = result["status"]
+    covered = _ids_with_status(status, "covered")
+    missing = _ids_with_status(status, "missing")
+    uncertain = _ids_with_status(status, "uncertain")
+    deadline = _ids_with_status(status, "deadline")
+    incomplete = _ids_with_status(status, "incomplete")
+
+    if override and (missing or uncertain or deadline or incomplete):
+        _log_override_escape(ids, command)
+        # The override still STAMPS, with its own state. Surfaced by the
+        # differential: leaving the bypass unstamped would make an
+        # overridden close indistinguishable from one that was never
+        # gated, which is the record this gate exists to produce.
+        _stamp_ids(ids, "overridden", "NX_REVIEW_GATE_OVERRIDE=1 at close")
+        return _allow(
+            "NX_REVIEW_GATE_OVERRIDE=1 \u2014 review gate bypassed for: "
+            f"{' '.join(ids)}. Logged as a routing escape."
+        )
+
+    if missing or deadline or incomplete:
+        # No stamp for ANY id on this path, covered ones included.
+        return _deny(
+            _deny_message(
+                missing, deadline, incomplete,
+                str(result["deadline_seconds"]), result["seen_names"],
+            )
+        )
+
+    if uncertain:
+        _stamp_ids(covered, "passed", "review-completed marker verified at close")
+        _stamp_ids(
+            uncertain, "unverified",
+            "T1 scratch unreachable at close time (capability gap, not a "
+            "time-budget issue)",
+        )
+        return _allow(
+            "WARNING: could not verify review-completed coverage in T1 scratch "
+            f"for {' '.join(uncertain)} \u2014 T1 unreachable (the nx binary is "
+            "absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes "
+            "a dead CLI T1 lease failing loud, check 'nx doctor --check-t1'). "
+            "Closing anyway (a broken verification path must not brick every "
+            "bead close) but stamped verification=unverified for those ids, NOT "
+            "passed. If review truly happened this is a capability gap, not a "
+            "review gap. An override (NX_REVIEW_GATE_OVERRIDE=1) exists for this "
+            "gate, but only on explicit instruction from the user to use it."
+        )
+
+    _stamp_ids(covered, "passed", "review-completed marker verified at close")
+    return _allow(f"Review completed for {' '.join(ids)}.")
+
+
+def _log_override_escape(ids: list[str], command: str) -> None:
+    """Every override use is auditable, via the routing JSONL sink.
+
+    Import is deferred to the override path only: the fast-no-op path must
+    not pay for a sink it never writes to.
+    THE ONE PART OF THIS HOOK THAT DOES NOT PORT CLEANLY, recorded rather
+    than faked. ``log_routing_event`` lives in
+    ``conexus/hooks/scripts/routing/_lib.py`` -- PLUGIN content, not the
+    wheel -- and since 2026-09-05 it POSTs to the engine's
+    ``routing_events`` table; the JSONL append it used to do was deleted,
+    so writing that file from here would resurrect a sink nothing reads.
+    There is no wheel-side writer to call instead.
+
+    So this does what the bash did: resolves the plugin's own ``_lib`` and
+    calls it. The difference is that a FAILURE IS LOUD. The bash ended its
+    import in a bare ``except: pass``, which for an AUDIT of override use
+    is the wrong direction -- the whole point is that a bypass leaves a
+    trace, and a silently-missing trace is indistinguishable from a bypass
+    that never happened. First draft of this port imported a
+    ``nexus.hooks.routing_log`` that does not exist, inside a try/except
+    that would have swallowed it forever; that is the same defect one
+    level worse, and it is why this now warns.
+    """
+    # NOT off CLAUDE_PLUGIN_ROOT alone. The script resolves this off its
+    # OWN real location and says why in a comment I read and then ignored:
+    # "tests deliberately fake that var to redirect the
+    # read_verification_config.py lookup earlier in this file, and
+    # following it here would silently miss the import (caught below, so
+    # the miss would otherwise be invisible)". The differential caught it
+    # exactly as predicted. The port has no script location, so it tries
+    # the env var first and then the checkout-relative plugin path, which
+    # is this module's equivalent anchor.
+    candidates = []
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    if root:
+        candidates.append(os.path.join(root, "hooks", "scripts", "routing"))
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    candidates.append(
+        os.path.join(repo, "conexus", "hooks", "scripts", "routing")
+    )
+    routing = next((c for c in candidates if os.path.isdir(c)), "")
+    if not routing:
+        _warn(
+            "override audit NOT recorded: no plugin routing dir "
+            f"(tried {candidates!r}). The bypass happened and left no trace."
+        )
+        return
+    import sys  # noqa: PLC0415 — only the override path pays this
+
+    if routing not in sys.path:
+        sys.path.insert(0, routing)
+    try:
+        import _lib  # noqa: PLC0415 — plugin-side, resolved above
+
+        _lib.log_routing_event(
+            rule="pre_close_verification_hook",
+            outcome="escape",
+            tool_name="Bash",
+            command_fragment=command,
+            escape_reason="NX_REVIEW_GATE_OVERRIDE=1: " + " ".join(ids),
+        )
+    except Exception as exc:  # noqa: BLE001 — never blocks the escape, but SAYS so
+        _warn(f"override audit NOT recorded ({exc!r}). The bypass left no trace.")

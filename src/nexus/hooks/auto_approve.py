@@ -140,6 +140,7 @@ _ALLOWED_HOOK_TOOLS: frozenset[str] = frozenset(
         "mcp__plugin_conexus_nexus__hook_subagent_start_stamp",
         "mcp__plugin_conexus_nexus__hook_subagent_stop",
         "mcp__plugin_conexus_nexus__hook_stop_verification",
+        "mcp__plugin_conexus_nexus__hook_pre_close_verification",
     }
 )
 

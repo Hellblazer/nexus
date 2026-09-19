@@ -77,6 +77,7 @@ from pydantic import Field as _PydanticField
 from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.hooks.agent_dispatch_expect import run as _run_agent_dispatch_expect
 from nexus.hooks.auto_approve import run as _run_auto_approve
+from nexus.hooks.pre_close_verification import run as _run_pre_close_verification
 from nexus.hooks.stop_verification import run as _run_stop_verification
 from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
 from nexus.hooks.subagent_stop import run as _run_subagent_stop
@@ -271,6 +272,32 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
             "warns at session close about uncommitted changes, beads still "
             "in progress, and background agents the ledger lists as "
             "outstanding — advisory only, it can never block a stop"
+        ),
+    ),
+    HookToolSpec(
+        name="pre_close_verification",
+        run=_run_pre_close_verification,
+        fields=("session_id", "tool_name", "tool_input"),
+        structured_fields=frozenset({"tool_input"}),
+        field_docs={
+            "session_id": (
+                "Forced onto every nx subprocess this hook spawns. It runs "
+                "detached from any live server, so without it the marker "
+                "lookup resolves a sibling session's machine-wide pointer."
+            ),
+            "tool_name": (
+                "Only Bash is gated. Everything else allows immediately."
+            ),
+            "tool_input": (
+                "The Bash call. Its command is inspected for a bd "
+                "create/close/done; a close requires a review-completed "
+                "marker in T1 scratch naming BOTH standing reviewers."
+            ),
+        },
+        summary=(
+            "the close gate: refuses a bd close whose beads have no "
+            "review-completed marker, and warns on a bd create that omits "
+            "commitment metadata while an RDR close is active"
         ),
     ),
 )
