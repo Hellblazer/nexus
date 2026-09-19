@@ -32,9 +32,44 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import IO
 
-import structlog
 
-_log = structlog.get_logger(__name__)
+def _emit(level: str, event: str, **fields: object) -> None:
+    """Log a hook diagnostic without ever touching stdout.
+
+    **stdout is the decision channel.** Claude Code parses this process's stdout
+    as the hook's JSON decision. An unconfigured structlog logger writes there
+    by default — ``PrintLoggerFactory``, with no level filtering — so a debug
+    line about malformed stdin is enough to corrupt a decision and read as a
+    hook malfunction. That is the nexus D9 defect class, and
+    :func:`nexus.logging_setup.emit_import_time_warning` exists because of it.
+    Bridging at each entry point works only while every caller remembers; this
+    module is the spine both tiers call, so the guarantee belongs here.
+
+    **The import is deferred for a second reason.** ``import structlog`` costs
+    about 0.06 s against about 0.01 s of interpreter startup (25.5.0 pulls
+    ``structlog.dev`` -> ``rich.traceback`` -> ``pygments`` -> an entry-point
+    scan). Every command-tier hook loads this module on every invocation, and
+    the close gate runs on every Bash call, so only a hook that actually logs —
+    a malformed payload or a swallowed crash, both rare — should pay it.
+    """
+    try:
+        from nexus.logging_setup import (  # noqa: PLC0415 — deferred; see above
+            active_log_file,
+            emit_import_time_warning,
+        )
+
+        if active_log_file() is None:
+            # No configured sink. A debug line has nowhere safe to go, so it is
+            # dropped rather than risked on stdout; a warning goes to the
+            # stderr-bound logger that never reads global structlog state.
+            if level == "warning":
+                emit_import_time_warning(event, **fields)
+            return
+        import structlog  # noqa: PLC0415 — deferred; see above
+
+        getattr(structlog.get_logger(__name__), level)(event, **fields)
+    except Exception:  # noqa: BLE001 — a hook must never fail, least of all on its own logging
+        return
 
 __all__ = [
     "HookResult",
@@ -80,14 +115,14 @@ def read_payload(stream: IO[str]) -> dict | None:
             return None
         raw = stream.read()
     except Exception as exc:  # noqa: BLE001 — a hook must never fail on its own stdin
-        _log.debug("hook_stdin_read_failed", error=str(exc))
+        _emit("debug", "hook_stdin_read_failed", error=str(exc))
         return None
     if not raw:
         return None
     try:
         data = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 — same swallow as an empty read
-        _log.debug("hook_stdin_parse_failed", error=str(exc))
+        _emit("debug", "hook_stdin_parse_failed", error=str(exc))
         return None
     if not isinstance(data, dict):
         return None
@@ -196,5 +231,5 @@ def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
 
         if isinstance(exc, asyncio.CancelledError):
             raise
-        _log.warning("hook_boundary_swallowed_exception", hook=hook, error=str(exc))
+        _emit("warning", "hook_boundary_swallowed_exception", hook=hook, error=str(exc))
         return HookResult()

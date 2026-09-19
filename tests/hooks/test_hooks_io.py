@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from pathlib import Path
+from unittest import mock
 
 import pytest
 from structlog.testing import capture_logs
@@ -171,14 +173,49 @@ def test_never_fail_swallows_an_exception_into_a_silent_zero_result():
     assert _io.never_fail(boom, "demo") == _io.HookResult(stdout=None, exit_code=0)
 
 
-def test_never_fail_logs_the_swallowed_exception():
-    """Swallowed is not invisible: the crash still reaches the hook log, naming
-    the hook, so a hook that silently stopped deciding is diagnosable."""
+def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
+    """Swallowed is not invisible.
+
+    The crash still has to be diagnosable, and with no configured sink the only
+    safe channel is stderr — stdout belongs to the decision. Paired with
+    `test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured`:
+    together they pin that the diagnostic went somewhere, and that somewhere is
+    not the decision channel.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    program = textwrap.dedent(
+        """
+        from nexus.hooks import _io
+
+        def boom():
+            raise RuntimeError("hook logic exploded")
+
+        _io.never_fail(boom, "demo_hook")
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "demo_hook" in proc.stderr, proc.stderr
+    assert "hook logic exploded" in proc.stderr, proc.stderr
+
+
+def test_never_fail_logs_the_swallowed_exception_through_structlog_when_configured():
+    """With a sink configured, the diagnostic takes the normal structured path
+    rather than the stderr fallback, so the tool tier keeps its log file."""
+    import nexus.logging_setup as logging_setup
 
     def boom() -> _io.HookResult:
         raise RuntimeError("hook logic exploded")
 
-    with capture_logs() as cap:
+    with (
+        mock.patch.object(logging_setup, "active_log_file", return_value=Path("/tmp/x.log")),
+        capture_logs() as cap,
+    ):
         _io.never_fail(boom, "demo_hook")
 
     assert any(
@@ -216,3 +253,64 @@ def test_never_fail_lets_shutdown_and_cancellation_through(exc):
 
     with pytest.raises(exc):
         _io.never_fail(boom, "demo")
+
+
+# -- stdout is the decision channel ------------------------------------------
+
+def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured():
+    """The defect this guards is a corrupted decision envelope.
+
+    Claude Code parses the hook's stdout as JSON. Structlog's unconfigured
+    default writes there, with no level filtering, so before this fix a
+    swallowed exception printed a log line onto the decision channel. Measured
+    live on 4930cb597 before the fix: `[warning ] hook_boundary_swallowed_
+    exception ...` on stdout, from a process that had imported nothing but
+    `nexus.hooks._io`.
+
+    This runs in a subprocess because the assertion is about the real file
+    descriptor in a process where nothing has called `configure_logging`, which
+    is exactly the condition `capsys` cannot reproduce inside a configured
+    pytest run.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    program = textwrap.dedent(
+        """
+        from nexus.hooks import _io
+
+        def boom():
+            raise RuntimeError("crash inside hook logic")
+
+        result = _io.never_fail(boom, "stdout_guard")
+        assert result == _io.HookResult(), result
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", f"hook logging leaked onto the decision channel: {proc.stdout!r}"
+
+
+def test_a_malformed_payload_writes_nothing_to_stdout_when_logging_is_unconfigured():
+    """Same channel, the other two log sites: read_payload's debug lines."""
+    import subprocess
+    import sys
+    import textwrap
+
+    program = textwrap.dedent(
+        """
+        import io
+        from nexus.hooks import _io
+
+        assert _io.read_payload(io.StringIO("{not json")) is None
+        assert _io.read_payload(io.StringIO("")) is None
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", f"hook logging leaked onto the decision channel: {proc.stdout!r}"
