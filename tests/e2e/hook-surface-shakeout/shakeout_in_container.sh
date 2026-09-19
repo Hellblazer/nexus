@@ -194,8 +194,9 @@ ok "/exit issued"
 
 # --- the census -----------------------------------------------------------
 say "census: every declared handler against what fired"
+TRANSCRIPTS="$(find "$HOME_DIR/.claude/projects" -name '*.jsonl' 2>/dev/null | tr '\n' ' ')"
 python3 "$HOME_DIR/hook_census.py" "$PLUGIN/hooks/hooks.json" \
-    "$RUN/pane.log"
+    "$RUN/hook-census.tsv" "$RUN/mcp-stdin.jsonl" $TRANSCRIPTS
 CENSUS=$?
 
 say "RDR-184 ledger (the subagent family's own record)"

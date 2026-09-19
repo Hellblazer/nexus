@@ -96,13 +96,32 @@ cp -R "$ROOT/conexus/hooks/scripts" "$STAGE/plugin/hooks/scripts"
 # by the harness instead of by the product.
 # The sequential-thinking entry is dropped: it shells out to npx, which this
 # image has no node for, and nothing under test needs it.
+# The nexus server is routed through a tee so the TOOL TIER gets a roster
+# too. Twelve of the entries are `mcp_tool`, which have no command to shim,
+# and Claude Code only writes a transcript attachment when a hook produces
+# OUTPUT -- so a silent tool-tier hook is indistinguishable from one that
+# never ran. nx-mcp is ours and every dispatch crosses its stdin as JSON-RPC
+# naming the tool, whether or not the handler says anything. Teeing that is
+# the server-side roster without changing the wheel under test to measure it.
 python3 - "$ROOT/conexus/.mcp.json" "$STAGE/plugin/.mcp.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-d.pop("sequential-thinking", None)
+d.pop("sequential-thinking", None)   # shells to npx; no node in this image
+if "nexus" in d:
+    d["nexus"]["command"] = "/home/nexus/mcp_tee.sh"
+    d["nexus"]["args"] = []
 json.dump(d, open(sys.argv[2], "w"), indent=2)
-print(f"[stage] plugin .mcp.json: {', '.join(sorted(d))}")
+print(f"[stage] plugin .mcp.json: {', '.join(sorted(d))} (nexus via tee)")
 PY
+
+cat > "$STAGE/mcp_tee.sh" <<'SH'
+#!/bin/sh
+# Every JSON-RPC frame Claude Code sends nx-mcp, appended verbatim, then
+# passed through untouched. The tool tier's roster comes from here because a
+# `mcp_tool` hook that returns no output leaves no transcript record at all.
+exec tee -a /home/nexus/run/mcp-stdin.jsonl | /home/nexus/nxenv/bin/nx-mcp
+SH
+chmod +x "$STAGE/mcp_tee.sh"
 
 # hooks.json UNTRIMMED except for the two entries that would mutate the thing
 # under test. `upgrade-auto` installs a generation and flips <tools>/current,
@@ -111,12 +130,33 @@ PY
 # leaves every tool-tier entry and every other verb in place -- which is the
 # surface this shakeout exists to exercise. Anything else removed here would
 # be the trim that made rdr208-mvv unable to answer this question.
-python3 - "$ROOT/conexus/hooks/hooks.json" "$STAGE/plugin/hooks/hooks.json" <<'PY'
-import json, sys
-src, dst = sys.argv[1], sys.argv[2]
+mkdir -p "$STAGE/shims"
+python3 - "$ROOT/conexus/hooks/hooks.json" "$STAGE/plugin/hooks/hooks.json" "$STAGE/shims" <<'PY'
+import json, os, stat, sys
+src, dst, shimdir = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(src))
 DROP = {"upgrade-auto", "self-gc"}
-kept = dropped = 0
+
+# EVERY COMMAND-TIER ENTRY IS ROUTED THROUGH A SHIM that appends one row and
+# THEN execs the real handler. Three properties, in the order they matter:
+#
+#  1. The row is written BEFORE delegating. A handler that crashes, hangs or
+#     exits non-zero still leaves evidence, so "never invoked" separates from
+#     "invoked and died" -- a distinction no transcript channel can make,
+#     because Claude Code writes an attachment only when a hook produces
+#     OUTPUT. `preflight` returns stdout=None on a healthy host BY DESIGN
+#     (preflight_verb.py), so without this it is indistinguishable from dead.
+#  2. The census path is a BAKED LITERAL, never $CENSUS_LOG. Command hooks run
+#     under Claude Code's stripped env and do not inherit the harness
+#     environment; a shim reading the path from env appends to "" and still
+#     exits 0 because the delegated handler succeeded, so the census reads
+#     zero rows and presents exactly as "the hook never fired".
+#     (tests/cc-validation/README.md trap 3; it has cost an hour before.)
+#  3. The original args are left on the ENTRY, not folded into the shim, so
+#     Claude Code still expands ${CLAUDE_PLUGIN_ROOT} before the shim sees
+#     them. The shim just execs the real command with "$@".
+CENSUS = "/home/nexus/run/hook-census.tsv"
+kept = dropped = shimmed = 0
 for event, groups in d["hooks"].items():
     for g in groups:
         out = []
@@ -125,11 +165,27 @@ for event, groups in d["hooks"].items():
             if h.get("command") == "nx-hook" and args and args[0] in DROP:
                 dropped += 1
                 continue
+            if h.get("type") != "mcp_tool" and h.get("command"):
+                real = h["command"]
+                declared = f"{real} {args[0]}".strip() if args else real
+                name = f"shim{shimmed:02d}.sh"
+                path = os.path.join(shimdir, name)
+                with open(path, "w") as fh:
+                    fh.write(
+                        "#!/bin/sh\n"
+                        f"printf '%s\\t%s\\t%s\\t%s\\n' "
+                        f"'{event}' '{declared}' \"$$\" \"$(date +%s)\" >> {CENSUS}\n"
+                        f"exec {real} \"$@\"\n"
+                    )
+                os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+                h["command"] = f"/home/nexus/shims/{name}"
+                shimmed += 1
             out.append(h)
             kept += 1
         g["hooks"] = out
 json.dump(d, open(dst, "w"), indent=2)
-print(f"[stage] hooks.json: {kept} entries kept, {dropped} dropped (mutate-the-wheel only)")
+print(f"[stage] hooks.json: {kept} entries kept, {dropped} dropped "
+      f"(mutate-the-wheel only), {shimmed} command-tier entries shimmed")
 PY
 
 # A checkout, because several hooks read one (rdr reads docs/rdr, the routing
