@@ -356,3 +356,105 @@ class TestToolTierCarriesADeny:
         assert denied.content[0].text == deny
         assert crashed.content[0].text == ""
         assert denied.content[0].text != crashed.content[0].text
+
+
+# ── non-scalar payload fields (bead nexus-9ifls) ──────────────────────────
+
+class TestNonScalarPayloadFields:
+    """A hook-tool field must accept what ``${path}`` substitution delivers.
+
+    Bead nexus-q02nx.6 measured, against a real Claude Code 2.1.278, that
+    substitution hands an ``mcp_tool`` hook REAL STRUCTURES rather than
+    JSON-encoded strings: ``${tool_input}`` arrives as a ``dict`` and
+    ``${background_tasks}`` as a ``list`` of ``dict``s carrying a mixed
+    ``type: shell`` / ``type: subagent`` population with different key sets.
+
+    These drive FastMCP's ACTUAL argument validation through the server's own
+    in-process dispatch, so they fail against the ``str | None`` annotation
+    the tier shipped with -- which is the point. Reverting
+    ``_make_tool_function``'s annotation to ``str | None`` must turn both
+    ``test_a_dict_...`` and ``test_a_list_...`` red; if it does not, they are
+    not testing validation.
+    """
+
+    def test_a_dict_valued_field_reaches_run_intact(self):
+        received: list[dict | None] = []
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
+                    fields=("tool_input",),
+                ),
+            ),
+        )
+
+        tool_input = {"command": "echo hi", "description": "Echo a test string"}
+        _run(mcp.call_tool("hook_probe", {"tool_input": tool_input}))
+
+        assert received == [{"tool_input": tool_input}]
+
+    def test_a_list_valued_field_survives_a_mixed_population(self):
+        """The shape nexus-q02nx.13 cross-checks: heterogeneous key sets.
+
+        An EMPTY list would pass even a stringly schema's coercion in some
+        pydantic configurations and proves nothing about structure, so this
+        deliberately carries two entries whose keys DIFFER -- ``shell`` has
+        ``command`` where ``subagent`` has ``agent_type`` -- exactly as
+        measured from a real ``Stop`` event.
+        """
+        received: list[dict | None] = []
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
+                    fields=("background_tasks",),
+                ),
+            ),
+        )
+
+        background_tasks = [
+            {
+                "id": "bm72q9d6v",
+                "type": "shell",
+                "status": "running",
+                "description": "Sleep for 45 seconds in background",
+                "command": "sleep 45",
+            },
+            {
+                "id": "a1ea45d8d324ca24a",
+                "type": "subagent",
+                "status": "running",
+                "description": "Count to ten slowly",
+                "agent_type": "general-purpose",
+            },
+        ]
+        _run(mcp.call_tool("hook_probe", {"background_tasks": background_tasks}))
+
+        assert received == [{"background_tasks": background_tasks}]
+        assert received[0]["background_tasks"][0]["command"] == "sleep 45"
+        assert received[0]["background_tasks"][1]["agent_type"] == "general-purpose"
+
+    def test_a_scalar_field_still_works(self):
+        """Widening to ``Any`` must not regress the ordinary scalar case."""
+        received: list[dict | None] = []
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
+                    fields=("tool_name",),
+                ),
+            ),
+        )
+
+        _run(mcp.call_tool("hook_probe", {"tool_name": "Bash"}))
+
+        assert received == [{"tool_name": "Bash"}]

@@ -250,8 +250,23 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
             flatten_field_name(payload_field),
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             default=None,
+            # ``Any``, not ``str | None``, and that is a correctness fix rather
+            # than laxness (bead nexus-9ifls). Claude Code builds this map by
+            # ``${path}`` substitution from the hook payload, and bead
+            # nexus-q02nx.6 MEASURED that non-scalar fields arrive as real
+            # structures: ``${tool_input}`` as a ``dict``,
+            # ``${background_tasks}`` as a ``list`` of ``dict``s carrying a
+            # mixed ``shell``/``subagent`` population. Against ``str | None``
+            # pydantic rejects both with ``string_type``, so the first port
+            # declaring such a field (``nexus-q02nx.13`` cross-checks
+            # ``background_tasks`` by definition) would fail validation at the
+            # tool boundary -- and per this module's own contract a raised
+            # exception there renders ``isError=False``, so it would read as
+            # allow rather than as a failure. A hook payload field is
+            # arbitrary JSON; the schema says so. Meaning lives in the
+            # description, and ``nest_payload`` already reassembles structures.
             annotation=Annotated[
-                str | None,
+                Any,
                 _PydanticField(description=_field_description(spec, payload_field)),
             ],
         )
