@@ -2,7 +2,8 @@
 title: "Plugin Hooks as nx Verbs: Retire the Bash Hook Layer"
 id: RDR-215
 type: Technical Debt
-status: accepted
+status: closed
+closed_date: 2026-09-19
 priority: medium
 author: Sam
 reviewed-by: self
@@ -308,6 +309,16 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   human can submit input the instant a prompt appears, which a scripted
   invocation does not exercise. Before Phase 2 relies on "no command-tier
   twin is needed for any event", run the same delay ladder interactively.
+  **THIS WAS NEVER RUN, and Phases 2 through 4 relied on the conclusion
+  anyway** -- the shipped manifest carries 13 `mcp_tool` entries with no
+  command-tier fallback for any of them. Found by the isolated close
+  critique, not during implementation, and tracked as bead `nexus-veh77`
+  (P1) against the plugin cut or client release that activates this
+  manifest for real users, NOT against a develop push: fail-open is the
+  posture here, so a race silently skips the hook, and
+  `conexus/PENDING_RELEASE.md` already gates the release on the wheel
+  floor. The hooks that would silently skip include the bd-close gate and
+  the RDR-184 EXPECT writer.
   The barrier is more than a timing correlation: at the 35 s point the
   server was still sleeping when the 30 s timeout fired, and turn 1
   started 33 ms after the TIMEOUT resolved rather than after the server
@@ -497,6 +508,11 @@ daemon thread started inside the server, which replaces the double-fork,
 and the Stop hook's `nx catalog sync`, synchronous in the script today
 (line 94), moves to a daemon thread as well so a git push never holds
 the server; that is a deliberate change, listed under Failure Modes.
+**CORRECTED 2026-09-19: it was DELETED, not threaded.** The command has
+raised `ClickException` unconditionally since conexus 7.0.0 and the
+substrate it synced was retired at RDR-158 P4, so threading it would have
+moved dead code off the synchronous path. `src/nexus/hooks/stop_verification.py`
+carries the deviation in its own docstring under "DEVIATION, STATED".
 The hook tools are visible in the model's tool list, since MCP has no
 way to hide a tool; the `hook_` prefix and a one-line description saying
 so are the mitigation, and the auto-approve matcher covers them.
@@ -589,8 +605,15 @@ one of two shapes. Tool tier: `type` is `mcp_tool`, `server` is
 `plugin:conexus:nexus`, `tool` starts with `hook_` and names a registered
 tool, and the event is not `SessionStart`. Command tier: the entry has an
 `args` key, `command` is exactly one of `nx-hook`,
-`nx-session-end-launcher`, or `python3` whose sole `args` element ends in
-`version_lockstep_hook.py`, and no `command` or `args` element equals
+`nx-session-end-launcher`, or `python3` whose sole `args` element is one
+of FIVE plugin-resident scripts -- `version_lockstep_hook.py`,
+`mailbox_drain.py`, `behaviour_census.py`,
+`routing/phase_review_close_requires_gate.py` and
+`routing/subagent_git_write_requires_orchestrator.py`, pinned by name as
+`PLUGIN_RESIDENT_SCRIPTS` in `tests/test_hooks_json_shape_lint.py`
+(CORRECTED 2026-09-19: this paragraph named only the lockstep, which was
+true when written and became false when bead .21's tier resolution
+settled the other four) -- and no `command` or `args` element equals
 `bash`, `sh` or `nx` or ends in `.sh`; matching is whole-string, so
 `nx-hook` is not `nx`. A `SessionStart` entry must be command tier. For
 the sn `hooks.json`: every entry has `args`, `command` is exactly
@@ -687,6 +710,9 @@ that client or shell out to `nx` for every call.
 - **A hook tool blocks the server.** Mitigation: hook tools do no more
   than the script did, and the one long call, the Stop hook's
   `nx catalog sync`, moves off the synchronous path into a daemon thread.
+  CORRECTED 2026-09-19: deleted rather than threaded -- see Technical
+  Design. The mitigation holds more strongly than planned, since the call
+  is gone rather than relocated.
 
 ### Failure Modes
 
@@ -773,6 +799,13 @@ Assumptions).
 - Every ported hook keeps its test, retargeted at the tool or the verb
   with the same payload and the same expected output.
 - One stdio integration test drives a real `nx-mcp` for one hook tool.
+  MET IN SHAPE ONLY UNTIL 2026-09-19: the test drove a synthetic
+  `hook_stdio_probe` whose own summary read "never a real hook",
+  authored correctly at bead .3 before any hook was ported and never
+  revisited after bead .4 ported the first. Twelve real `hook_*` tools
+  shipped and the number ever proven reachable over the wire was ZERO,
+  for the whole epic, while this line read as satisfied. Closed by bead
+  .31 / commit `4842e0c12`, which registers the real `HOOK_TOOLS` tuple.
 - The lint test of Technical Design, both shapes, whole-string matching.
 - The expectations module gets unit tests for every verb's exit codes
   against fixture ledgers: `undeclared`'s 0, 1, 2 and 3, `reconcile`'s
@@ -986,3 +1019,27 @@ registration module on the existing server, and one package.
   tables are now derived from one constant); and the bead `.20` daemon
   thread logged only failure, so a clean projection and a thread that
   never started were the same absence in the hook log.
+- 2026-09-19: Closed. All 31 beads and the epic closed; four gates green
+  (unit 20787/0, lint 1273, local-service-gate 597, plugin-lockstep
+  PASSED). The isolated close critique returned `partial` on one finding
+  worth recording here rather than only in T2: the Critical Assumptions
+  precondition above -- run the delay ladder INTERACTIVELY before Phase 2
+  relies on "no command-tier twin is needed" -- was never met, and unlike
+  every other open item in this epic it was absent from both closure
+  records. Now bead `nexus-veh77`. The instructive part is WHERE it hid:
+  the closure records tracked everything DISCOVERED during implementation
+  and were blind to a constraint WRITTEN DOWN before it started, and both
+  were assembled by the session that did the work. The critique that
+  found it is the one the rdr-close skill deliberately gives no session
+  context, reading only this document and the repo.
+- 2026-09-19: Round-2 close critique found THREE more instances of this
+  document's own standing lesson -- verified false, fixed in code, RDR
+  text unchanged -- and the point is that the sweep had already been run
+  twice (beads .25 and .30) and was not run a third time. All three are
+  corrected in place above: the Lint paragraph named one plugin-resident
+  python3 script where five shipped; Technical Design and Risks both said
+  `nx catalog sync` moves to a daemon thread where it was deleted; and the
+  Test Plan's stdio line read as satisfied for the epic's whole life while
+  the test drove a placeholder. None required a code change -- the code
+  was already correct in every case, which is exactly what makes this
+  class survive: nothing fails, so nothing asks.
