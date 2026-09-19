@@ -98,7 +98,7 @@ fi
 # Check (d) runs `nx-hook expectations_census`, so a missing shim is a
 # prerequisite absence, not a dispatch finding.
 if ! command -v nx-hook >/dev/null 2>&1; then
-    _prereq_fail "PATH has nx but no nx-hook -- this generation predates the nx-hook console script; reinstall/activate a current conexus generation before running this check"
+    _prereq_fail "nx-hook is not on PATH, though nx is -- this generation predates the nx-hook console script; reinstall/activate a current conexus generation before running this check"
 fi
 
 # The per-session ledger path, formerly expectations_file(). Same charset
