@@ -23,6 +23,7 @@ entry and is perfectly mutable. This file is what replaces it.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -103,4 +104,82 @@ def test_every_declared_nx_hook_verb_resolves(event: str, verb: str) -> None:
         f"hooks.json [{event}] runs `nx-hook {verb}`, which is not in "
         f"nexus._hook_runtime.entry.VERB_TABLE. Known verbs: "
         f"{sorted(VERB_TABLE)}"
+    )
+
+
+README = REPO_ROOT / "conexus" / "README.md"
+
+
+def _readme_handler_cells() -> list[str]:
+    """The Handler column of every row in the README's hook table."""
+    cells = []
+    for line in README.read_text().splitlines():
+        if not line.startswith("| `"):
+            continue
+        # Split on unescaped pipes only. An Event cell can legitimately
+        # contain one -- `PreToolUse` (`Agent\|Task`) -- and splitting
+        # naively shifts every later column, which made this check report
+        # a missing row for hook_agent_dispatch_expect that was there all
+        # along. The checker's own parsing, again.
+        parts = [
+            c.strip().replace("\\|", "|")
+            for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))
+        ]
+        if len(parts) >= 2:
+            cells.append(parts[1])
+    return cells
+
+
+def _declared_handlers() -> list[tuple[str, str]]:
+    """``(event, handler)`` for every hooks.json entry, in its own spelling."""
+    data = json.loads(HOOKS_JSON.read_text())
+    out = []
+    for event, entries in data.get("hooks", data).items():
+        for entry in entries:
+            for sub in (entry.get("hooks", [entry]) if isinstance(entry, dict) else []):
+                if not isinstance(sub, dict):
+                    continue
+                if sub.get("type") == "mcp_tool":
+                    name = sub.get("tool_name") or sub.get("tool") or sub.get("name")
+                    out.append((event, str(name)))
+                else:
+                    cmd = sub.get("command", "")
+                    args = [a for a in sub.get("args", []) if isinstance(a, str)]
+                    out.append((event, " ".join([cmd, *args]).strip()))
+    return out
+
+
+def _mentions(handler: str, cells: list[str]) -> bool:
+    """Is *handler* named in some Handler cell, allowing for shortening?"""
+    if handler.startswith("hook_"):
+        return any(handler in c for c in cells)
+    # A command line: the table gives the readable core, not the full
+    # shell with its redirections and fallbacks.
+    core = handler.split(" 2>")[0].split(" >")[0].strip()
+    if core.startswith("python3 "):
+        core = core.split("/")[-1]
+    return any(core in c for c in cells)
+
+
+@pytest.mark.parametrize(
+    "event,handler",
+    _declared_handlers(),
+    ids=[f"{e}:{h[:40]}" for e, h in _declared_handlers()],
+)
+def test_the_readme_hook_table_names_every_declared_handler(
+    event: str, handler: str
+) -> None:
+    """The table is documentation people act on, and it drifted silently.
+
+    Bead .21 corrected three rows by hand and the commit said the table
+    now matched hooks.json. It did not: two rows still named a ported
+    script, and four entries had no row at all. Hand-checking a table
+    against a JSON file is the kind of claim that should not be made by
+    hand twice.
+    """
+    cells = _readme_handler_cells()
+    assert cells, "no hook table rows found in conexus/README.md"
+    assert _mentions(handler, cells), (
+        f"hooks.json declares [{event}] {handler!r}, which no row of the "
+        f"README's hook table names. Handlers listed: {cells}"
     )
