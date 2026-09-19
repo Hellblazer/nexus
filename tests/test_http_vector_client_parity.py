@@ -115,6 +115,16 @@ EXCLUSIONS: dict[str, str] = {
         "itself IS pinned above; its return shape {name, count} is asserted in "
         "tests/test_http_vector_client_stats.py."
     ),
+    "hybrid_search": (
+        "HttpVectorClient.hybrid_search() is an Http-path-only extension "
+        "(RDR-217 P2.1, bead nexus-lqo4p.6): POST /v1/vectors/hybrid-search "
+        "reads the engine's tsvector and pg_trgm indexes, and T3Database has "
+        "no hybrid route for it to be a drop-in for. Deliberately NOT a "
+        "drop-in: the route is not a superset of search(), so a caller "
+        "reaching retrieval through the duck-typed t3 must gate on the "
+        "capability rather than assume the method is there. What --lexical "
+        "does against a backend without the leg is RDR-217 bead .5's ask."
+    ),
     "ids_for_doc_id": (
         "NOT ported to HttpVectorClient — dead code (wave review, substantive-"
         "critic): no caller outside T3Database itself. Documented here so the "
