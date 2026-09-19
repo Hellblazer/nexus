@@ -539,15 +539,37 @@ def test_registry_lists_rule_with_fail_closed():
 # ---------------------------------------------------------------------------
 
 
+def _declared_paths(hooks: dict, event: str) -> list[str]:
+    """Every script path the *event*'s entries name, from either form.
+
+    RDR-215 nexus-q02nx.21 moved the script out of the ``command`` string
+    and into ``args``, and left some entries as ``mcp_tool`` with no
+    ``command`` key at all. A reader that indexes ``h["command"]``
+    KeyErrors on those; one that uses ``.get`` sees only ``"python3"``.
+    Asserting on the full path is also strictly stronger than the
+    filename substring these tests used to match: the rewrite declared
+    this script at ``hooks/scripts/<name>.py`` when it lives in
+    ``hooks/scripts/routing/``, which a substring match cannot see and a
+    path match can.
+    """
+    out = []
+    for entry in hooks["hooks"].get(event, []):
+        for h in entry.get("hooks", []):
+            if not isinstance(h, dict):
+                continue
+            out.append(h.get("command", ""))
+            out.extend(a for a in h.get("args", []) if isinstance(a, str))
+    return out
+
+
 def test_hooks_json_registers_routing_hook():
     hooks_json = PROJECT_ROOT / "conexus" / "hooks" / "hooks.json"
     data = json.loads(hooks_json.read_text())
-    bash_hooks = data["hooks"]["PreToolUse"]
-    found = False
-    for entry in bash_hooks:
-        if entry.get("matcher") != "Bash":
-            continue
-        for hook in entry.get("hooks", []):
-            if "phase_review_close_requires_gate.py" in hook.get("command", ""):
-                found = True
-    assert found, "phase_review_close_requires_gate.py must be registered"
+    declared = _declared_paths(data, "PreToolUse")
+    assert any(
+        p.endswith("hooks/scripts/routing/phase_review_close_requires_gate.py")
+        for p in declared
+    ), (
+        "phase_review_close_requires_gate.py must be registered at its real "
+        f"path, hooks/scripts/routing/. Declared: {declared}"
+    )
