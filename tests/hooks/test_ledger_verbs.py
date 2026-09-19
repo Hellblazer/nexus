@@ -19,11 +19,19 @@ from pathlib import Path
 import pytest
 
 from nexus._hook_runtime.entry import LEDGER_VERBS, VERB_TABLE
+from nexus.hooks import expectations as exp
 from nexus.hooks.ledger_verbs import VERBS
 from nexus.mcp.hooks import HOOK_TOOLS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LIB = REPO_ROOT / "tests" / "e2e" / "lib" / "expectations.sh"
+#: The PLUGIN copy. The reference copy this originally named was deleted
+#: by the SAME commit that added this file (RDR-215 bead nexus-q02nx.14)
+#: — every sibling test got repointed and this one was missed, so it
+#: shipped failing 10 of its own assertions: `source <gone>` fails, bash
+#: falls through the `;`, the verb is not an external command, stdout is
+#: empty. The plugin copy is what the wired hooks.json entries run until
+#: bead .21.
+LIB = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
 
 #: Bounds a HANG, not performance. The defect this file pins made the verb
 #: block forever, so every invocation here is time-bounded and a timeout is
@@ -412,3 +420,73 @@ class TestTheyAreCommandTierOnly:
                 f"{verb} would have its exit code forced to 0, discarding "
                 "the answer"
             )
+
+
+class TestABrokenLockIsDisclosedNotSilentlyIgnored:
+    """The bead .15 review finding, pinned in both directions.
+
+    ``_acquire_owes_lock`` used to ``return True`` on any non-EEXIST
+    ``OSError`` -- an unwritable or missing state dir -- which told the
+    caller "lock acquired" and sent it into the credit consult unlocked,
+    with nothing on stderr. Bash makes no such distinction: a failed
+    ``mkdir`` is a failed attempt whatever the cause, the loop runs its
+    budget, and exhaustion is DISCLOSED (a named stderr line and
+    ``cause=lock-exhausted``).
+
+    That direction matters more than the mechanism. This module's own
+    posture is that over-blocking is explicable and a silent miss is the
+    failure the subsystem exists to prevent, and the old branch inverted
+    it for exactly the case where the lock is BROKEN rather than
+    contended -- the case least likely to be noticed.
+    """
+
+    def test_an_unusable_lock_dir_exhausts_rather_than_reporting_acquired(
+        self, monkeypatch, tmp_path
+    ):
+        """EACCES on every mkdir must run the budget out and return False,
+        which is what routes the caller to the disclosed cause."""
+        monkeypatch.setenv("NX_EXPECT_LOCK_TRIES", "2")
+        monkeypatch.delenv("NX_EXPECT_LOCK_DISABLE", raising=False)
+
+        def _refuse(path, *a, **k):
+            raise PermissionError(13, "Permission denied", path)
+
+        monkeypatch.setattr(exp.os, "mkdir", _refuse)
+        assert exp._acquire_owes_lock(str(tmp_path / "x.lock")) is False, (
+            "a broken lock must exhaust and be disclosed, never report acquired"
+        )
+
+    def test_the_owes_verdict_carries_the_disclosed_cause(
+        self, monkeypatch, tmp_path
+    ):
+        """End to end: a broken lock produces owes=True with
+        cause=lock-exhausted, not a silent normal consult."""
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        monkeypatch.setenv("NX_EXPECT_LOCK_TRIES", "2")
+        monkeypatch.delenv("NX_EXPECT_LOCK_DISABLE", raising=False)
+        d = tmp_path / "nexus" / "orchestration"
+        d.mkdir(parents=True)
+        (d / "sess-lock.expectations").write_text(
+            "2026-09-19T00:00:00Z\tEXPECT\tconexus:developer\tbackground\td1\n"
+        )
+
+        def _refuse(path, *a, **k):
+            raise PermissionError(13, "Permission denied", path)
+
+        monkeypatch.setattr(exp.os, "mkdir", _refuse)
+        verdict = exp.expectations_owes_report(
+            "sess-lock", "a1", "conexus:developer"
+        )
+        assert verdict.owes is True
+        assert verdict.cause == "lock-exhausted", (
+            f"a broken lock must disclose its cause, got {verdict.cause!r}"
+        )
+
+    def test_a_contended_lock_still_exhausts_the_same_way(self, monkeypatch, tmp_path):
+        """The ordinary contention path is unchanged -- this fix must not
+        turn a FileExistsError into something else."""
+        monkeypatch.setenv("NX_EXPECT_LOCK_TRIES", "2")
+        monkeypatch.delenv("NX_EXPECT_LOCK_DISABLE", raising=False)
+        lockdir = tmp_path / "held.lock"
+        lockdir.mkdir()
+        assert exp._acquire_owes_lock(str(lockdir)) is False

@@ -109,7 +109,7 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **`develop` release boundary LIFTED 2026-06-29** — release-blocker bead `nexus-luxe6` closed; conexus 6.0.0 (the migration-capable release) published from develop, and `develop` is releasable again. **RDR-155 P4b (the FINAL Chroma deletion) SHIPPED 2026-07-25** — the dependency is dropped (absent from `uv.lock`), `guided_upgrade_cmd.py`/`migrate_cmd.py` are deleted outright, and `nx guided-upgrade` no longer exists. Pre-PG installs redirect through a two-hop path: pin to the last migration-capable release, `conexus==6.18.1`, where `nx guided-upgrade` still runs (Chroma → PG17+pgvector, copy-not-move), then upgrade normally from there. Frozen Chroma directories left on disk are relics: nothing reads them and there is no path back to that era (Hal, 2026-08-29). Authoritative record: T2 `nexus/release-boundary-since-p4a` (updated).
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via a PR-gated release branch (nexus-mkj6u) — there are NO direct-to-`main` commits at all (`docs/contributing.md` § Release Process). The plugin no longer ships a review-coverage push gate (deleted 2026-08-22, Sam's decision: self-attested, one true positive against denying correct pushes, and `develop` is already PR-gated to `main` with required checks so unreviewed code ships to nobody) — push-to-main protection and the `git add` wildcard redirect remain Hal's user-level hook (`~/.claude/hooks/nexus-git-policy.py`), personal workflow policy rather than a plugin behavior other conexus users inherit.
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
-- **Push `develop` only through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6): it refuses unless `origin/develop..develop` equals the commits you name, so a peer's unpushed commits in the shared checkout never ride your push (four times on 2026-09-07). `NX_PUSH_SOURCE=HEAD` from a detached worktree pushes your commits without touching the local branch. Never `git commit --amend` in the primary checkout; the user-level hook denies it when HEAD is not this session's commit. See `docs/contributing.md` § Git Workflow.
+- **Push `develop` only through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6): it refuses unless `origin/develop..develop` equals the commits you name, so a peer's unpushed commits in the shared checkout never ride your push (four times on 2026-09-07). `NX_PUSH_SOURCE=HEAD` from a detached worktree pushes your commits without touching the local branch. Never `git commit --amend` in the primary checkout; the user-level hook denies it when HEAD is not this session's commit. See `docs/contributing.md` § Git Workflow. **Sessions no longer work in the shared primary at all** (§ Worktrees below), so this guard now fires rarely rather than routinely — it stays because it is the mechanical check, not because the shared-tree workflow it was written for is still the practice.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
 - **Closed vocabularies (RDR status, and future ones) are CHECKED TABLES, not prose — see [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md) § RDR lifecycle for the full story.** `src/nexus/tables/` (packaged, checked at load time); `docs/tables/` for repo-only tables (the release-choreography table both release gates resolve).
@@ -119,7 +119,7 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
   nx-hook expectations_census "$SESSION_ID"      # retro counts — NEVER hand-count (nexus-hybv1)
   nx-hook expectations_undeclared "$SESSION_ID"  # rc: 0 clean, 1 BLINDSPOT (EXPECT rows present but zero STARTs walked — the audit examined nothing, not a pass; nexus-houpu), 2 undeclared>0 deficit (nexus-suuja), 3 no ledger file for this session — nothing checkable, not evidence of cleanliness (nexus-ahl9v)
   ```
-  No `source` step, and nothing to keep in sync. **`nx-hook` needs a conexus generation at or past the wheel that declares it** — it is a console script, so an older installed generation simply has no `nx-hook` shim and the command is not found (measured 2026-09-19 on this box: `~/.local/bin/` had `nx`, `nx-mcp`, `nx-mcp-catalog` and `nx-session-end-launcher`, no `nx-hook`; `scripts/reinstall-tool.sh` writes it, and a fresh install always carries it). In a dev checkout, `uv run nx-hook ...` works regardless. The plugin's bash copy still exists and is still what the wired `hooks.json` entries run; bead nexus-q02nx.21 deletes it in the same change that re-points those entries, never before (deleting it first would strip the library from four live hooks, three of which source it as `|| exit 0` and would go silent).
+  No `source` step, and nothing to keep in sync. **`nx-hook` needs a conexus generation at or past the wheel that declares it** — it is a console script, so an older installed generation simply has no `nx-hook` shim and the command is not found (measured 2026-09-19 on this box: `~/.local/bin/` had `nx`, `nx-mcp`, `nx-mcp-catalog` and `nx-session-end-launcher`, no `nx-hook`; `scripts/reinstall-tool.sh` writes it, and a fresh install always carries it). In a dev checkout, `uv run nx-hook ...` works regardless. The plugin's bash copy still exists and is still what the wired `hooks.json` entries run; bead nexus-q02nx.21 deletes it in the same change that re-points those entries, never before (deleting it first would strip the library from the four live hooks that source it: two go wholly silent on a bare `|| exit 0`, one prints a single stderr line, and the Stop hook drops its reconcile check without saying anything).
   **The EXPECT row is MECHANIZED and LIVE** (nexus-qc4p1, shipped at the 7.0.0 plugin pin; verified 2026-08-02: 70/70 recognized, 0 undeclared): a PreToolUse hook on the Agent tool writes it from the dispatch's own `subagent_type` + `run_in_background`. **Do NOT hand-write EXPECT rows** — the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. Hand-call `nx-hook expectations_expect` ONLY for a dispatch the hook cannot see, keyed on the **subagent type verbatim, colon included** — never an invented name (the Agent tool has no `name` parameter; nexus-nu7fo). `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable — two 2026-07 sessions concluded the ledger was unavailable and skipped it, and it was available both times.
 - **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh [required-sha]` as their FIRST action and stop on any `PREFLIGHT_FAIL` line.** The harness cuts `isolation:worktree` worktrees from the DEFAULT branch's tip, not the session's current branch, so a fresh worktree can be silently stale relative to `develop` by construction (nexus-5kwkf); the script also refuses outright if the agent turns out to be in the shared primary checkout, not a worktree at all. `required-sha` is optional — when omitted it defaults to local `develop` if that branch exists, else `origin/develop`, else refuses (`PREFLIGHT_FAIL_BAD_SHA`); local is checked first because this project's own batched-push workflow routinely runs local `develop` ahead of `origin/develop`. It recovers a stale-but-clean worktree via `git merge --ff-only`; a dirty or diverged worktree is refused untouched. The conexus SubagentStart hook injects this instruction for `isolation:worktree` dispatches once the plugin ships it (`conexus/PENDING_RELEASE.md`); until then this bullet is the delivery path.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
@@ -323,6 +323,99 @@ clone (see `docs/contributing.md` § Step 0b KNOWN LIMITATION, nexus-2zmfw).
 9. **Reinstall locally.** `scripts/reinstall-tool.sh && nx --version` — `pyproject.toml` is bumped, but the shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until the reinstall flips `current` every new spawn lands in the old generation (and existing holders keep running from theirs afterwards).
 
 Full checklist with rollback / one-time setup steps lives in [`docs/contributing.md` § Release Process](docs/contributing.md#release-process).
+
+## Worktrees: one session, one worktree (2026-09-19)
+
+**Every session works in its own worktree on its own branch. The shared
+primary checkout is not edited.** Agreed by the three sessions sharing this
+box after a day in which every coordination failure traced to one cause: a
+commit that nearly carried a peer's uncommitted draft, `PUSH_REFUSED_FOREIGN`
+in both directions, a deadlock where a fix could not reach origin because a
+peer's unpushed commit was its ancestor, subagent briefs restricted to named
+files purely because the tree was shared, and a branch pointer nobody could
+reconcile while anyone's tree was dirty. In separate worktrees these are not
+things to avoid carefully; they are impossible.
+
+1. **Site worktrees as siblings**: `../nexus-wt/<session>`, branch
+   `feature/<bead-id>-<slug>`.
+
+2. **The primary KEEPS `develop` checked out** and is the reference
+   checkout. Not detached: git refuses to check out a branch that is
+   already checked out elsewhere, so the primary holding `develop` makes
+   rule 1 self-enforcing at zero discipline.
+
+3. **In the primary: no edits, no commits, no staging, no branch
+   switches.** Build and test output (`.venv/`, `service/target/`,
+   `__pycache__`, coverage) is expected and fine. "Read-only" would be
+   false the first time someone runs a suite there, and a rule that is
+   false on first contact becomes advisory.
+
+4. **The release battery runs IN THE PRIMARY.** It keys artifacts on the
+   working tree's identity and refuses artifacts whose manifest identity is
+   not this checkout's (nexus-mbeke), so rotating worktrees would rebuild
+   the wheel, jar and native candidate every time. The engine build does
+   NOT need the primary: the lease lives in the git common dir and the jar
+   cache is keyed on `service/` content, so any worktree gets a copy.
+
+5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Scoped runs
+   are unaffected. This rule exists because worktrees DESTROY an accidental
+   serialisation: three sessions in one tree cannot comfortably run three
+   suites at once, so they take turns without agreeing to. Three worktrees
+   make three concurrent `pytest -n auto` runs easy, and that exhausts the
+   machine-wide SysV shared-memory budget — each xdist worker boots its own
+   Postgres substrate holding a segment against `kern.sysv.shmmni`
+   (nexus-6qp25). The build lease does not cover this; it is a separate
+   budget.
+
+6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST
+   SUBSTRATE-BACKED TEST.** `service/target/` is untracked build output, so
+   a fresh worktree has no service jar and every substrate-backed test
+   errors at setup. The fix is seconds rather than a nine-minute rebuild
+   because the cache key is on `service/` CONTENT and lives in the git
+   common dir, so every worktree on the box shares one build.
+
+   **This produces the SAME SYMPTOM as rule 5's exhaustion** — thousands of
+   setup errors that read as catastrophic breakage. Two causes, one
+   symptom. Check `ipcs -m` first because it is one command; if segments
+   are clear, it is the jar. Measured 2026-09-19: 20673 setup errors in a
+   fresh worktree, zero shared-memory segments, missing jar.
+
+7. **Before pushing, `gh run list --limit 1`.** Ask whether a verdict
+   someone is waiting on is in flight — not whether the slot is free.
+   Worktrees split the tree; CI remains one shared resource with one queue,
+   and a push destroys a running verdict.
+
+8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...`
+   from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`
+   in; `git -C` does not cover it. Direct to `develop` per the project
+   rule; the feature branch is a local name that never reaches origin.
+
+9. **Never hand-run `nx index repo` from a worktree.** The post-commit hook
+   already refuses worktree indexing by construction (nexus-ws67k, comparing
+   `--git-dir` to `--git-common-dir`), but the guard lives in the HOOK and
+   not in the command, so a hand-run bypasses it entirely.
+
+10. **Serena differs between a session STARTED in a worktree and one that
+    RELOCATED into it.** A session started there gets its own server rooted
+    at the worktree via `--project-from-cwd` and keeps symbol editing. A
+    session that relocates mid-flight keeps the server rooted at the
+    primary, so it must use Edit/Write with absolute worktree paths and not
+    Serena write tools.
+
+**Moving an in-flight session.** Cherry-pick or apply into the new worktree
+FIRST and verify there, and only then revert the primary — never the
+reverse. Two methods, and the right one depends on the starting state:
+uncommitted work moves with `git diff origin/develop -- <paths>` then
+`git apply` in the worktree (checking that diff-vs-origin and diff-vs-HEAD
+are identical first, which is what proves the paths rebase cleanly BEFORE
+anything moves); work that is already committed is cherry-picked, because a
+commit is recoverable where an applied-but-unverified diff is not.
+
+**A note on reading long runs.** Preconditions are warned at the TOP of a
+run (the stale-jar banner above is one). Whether such a warning reaches you
+depends on how much output follows it, which inverts against its value: the
+longer and more expensive the run, the further the warning sits from the
+tail. `head` as well as `tail`, or grep the warning shape.
 
 ## Task tracking
 

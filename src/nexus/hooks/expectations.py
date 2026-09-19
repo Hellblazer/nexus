@@ -862,7 +862,20 @@ def _acquire_owes_lock(lockdir: str) -> bool:
         except FileExistsError:
             time.sleep(0.1)
         except OSError:
-            return True  # fail open: an unusable lock must not block a stop
+            # NOT "return True". An earlier version treated any non-EEXIST
+            # OSError -- EACCES, EROFS, ENOSPC, ENOTDIR on the state dir --
+            # as "lock acquired" and proceeded unlocked with no diagnostic.
+            # Bash does not distinguish the cause: every mkdir failure is
+            # just a failed attempt, the loop runs its full budget, and
+            # exhaustion takes the DISCLOSED path (a stderr line and
+            # cause=lock-exhausted). Returning True silently inverted this
+            # module's own stated direction -- over-blocking is explicable,
+            # a silent miss is the failure this subsystem exists to prevent
+            # -- for the one case where the lock is broken rather than
+            # contended. Found in the bead .15 review; it was neither
+            # announced in the RDR nor covered by a test in either
+            # direction.
+            time.sleep(0.1)
     return False
 
 

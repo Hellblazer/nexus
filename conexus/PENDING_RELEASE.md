@@ -32,6 +32,28 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.54.0)
 
+- `conexus/commands/continuation.md`, `conexus/skills/orchestration/SKILL.md`:
+  bead: nexus-q02nx.14 — both told the reader to reach the RDR-184 ledger by
+  `source tests/e2e/lib/expectations.sh`. That file is deleted; the ledger is
+  `nexus.hooks.expectations`, reachable as `nx-hook expectations_census` /
+  `expectations_undeclared`. No source step, and nothing to keep in sync.
+  WHEEL FLOOR: `nx-hook` is a console script, so these instructions need a
+  conexus generation at or past the wheel that declares it — an older
+  installed generation has no `nx-hook` shim and the command is not found.
+  INERT until then, which for prose means a session reading the pinned plugin
+  is told to source a file that no longer exists; the plugin copy at
+  `conexus/hooks/scripts/expectations.sh` still exists, so that instruction
+  still WORKS from the pinned tag, it is merely the older of the two paths.
+
+- `conexus/hooks/scripts/tuple_ledger_project.py`:
+  bead: nexus-q02nx.14 — comments only. The two mirrors of the ledger's state
+  dir and path-safe charset guard now name `nexus.hooks.expectations` rather
+  than the deleted shell file. Still MIRRORED rather than imported, and that
+  is forced: this file is invoked by a bare `python3` from a detached wrapper
+  and is stdlib-only by contract, so `nexus` is not on its path. Bead
+  nexus-q02nx.20 moves the work into the server, where the import belongs and
+  where the pair should collapse. No behaviour change.
+
 - `conexus/agents/codebase-deep-analyzer.md`, `conexus/agents/deep-research-synthesizer.md`: both told the agent that
   `nx search` / the `search` MCP tool provides "semantic search + ripgrep +
   git frecency". The ripgrep path is deleted (nexus-06aei) — it was opt-in,

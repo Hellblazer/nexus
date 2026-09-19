@@ -15,6 +15,7 @@ comment gives. This file owns the three things that harness cannot reach:
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -398,7 +399,19 @@ class TestTheNoSpawnClaim:
         bead is fixing.
         """
         spawns: list = []
+        scans_called: list[str] = []
         real_popen = subprocess.Popen
+
+        for _name in ("report_verdict", "writes_verdict"):
+            _real = getattr(hook, _name)
+
+            def _watch(name=_name, real=_real):
+                def _call(*a, **k):
+                    scans_called.append(name)
+                    return real(*a, **k)
+                return _call
+
+            monkeypatch.setattr(hook, _name, _watch())
 
         def _record(*args, **kwargs):
             spawns.append(args[0] if args else kwargs.get("args"))
@@ -407,6 +420,23 @@ class TestTheNoSpawnClaim:
         monkeypatch.setattr(subprocess, "Popen", _record)
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
         monkeypatch.setenv("NX_ORCH_STOP_GUARD", "block")
+
+        # SEED A GENUINELY-OWING LEDGER, or this test does not reach the
+        # thing it is named for. Without an EXPECT/START pair,
+        # expectations_owes_report returns False on its first readable-rows
+        # check and run() returns BEFORE calling report_verdict or
+        # writes_verdict -- the two functions that used to be separate
+        # python3 spawns and are the entire subject of the no-spawn claim.
+        # Measured at the bead .16 critique: the earlier version of this
+        # test called them ZERO times while its own docstring called itself
+        # "the actual claim". A regression reintroducing a subprocess
+        # inside either scan would have passed it untouched.
+        ledger = tmp_path / "state" / "nexus" / "orchestration"
+        ledger.mkdir(parents=True)
+        (ledger / "sess-nospawn.expectations").write_text(
+            "2026-09-19T00:00:00Z\tEXPECT\tworker\tbackground\td1\n"
+            "2026-09-19T00:00:01Z\tSTART\ta-nospawn\tworker\n"
+        )
 
         transcript = tmp_path / "t.jsonl"
         transcript.write_text(
@@ -423,3 +453,36 @@ class TestTheNoSpawnClaim:
             }
         )
         assert spawns == [], f"the ported hook spawned {spawns}"
+        assert scans_called == ["report_verdict", "writes_verdict"], (
+            "the no-spawn assertion must run on the branch that CALLS the "
+            f"scans; it reached {scans_called or 'neither'}"
+        )
+
+    def test_neither_scan_can_reach_a_subprocess_at_all(self):
+        """A shape guard beside the behavioural one, for the same reason
+        ``test_expectations_module.py::TestTheClaimIsStructurallyAtomic``
+        exists: a behavioural test can only catch a spawn on the paths it
+        happens to walk. ``subagent_stop_scans`` replaced two ``python3``
+        invocations, so the property worth pinning is that the module
+        cannot spawn anything on ANY path."""
+        src = Path(hook.__file__).with_name("subagent_stop_scans.py").read_text()
+        tree = ast.parse(src)
+        imported = {
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert "subprocess" not in imported, (
+            "subagent_stop_scans imports subprocess — the two scans it "
+            "replaced WERE subprocesses, and removing that cost is the "
+            "whole point of the tier change"
+        )
+        assert "os" not in imported or "system" not in src, (
+            "subagent_stop_scans may use os.path, but os.system would be a "
+            "spawn by another name"
+        )

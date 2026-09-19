@@ -10,32 +10,33 @@ own stated contract, hard enforcement belongs to the PreToolUse close gate,
 and :func:`run` has exactly one stdout shape, ``decision: approve``, with
 or without a reason.
 
-**The one deliberate behaviour change: ``nx catalog sync`` moves off the
-synchronous path** (RDR Technical Design, Failure Modes). Today it is a git
-commit and push run inline at session close, with its result discarded by
-``|| true``. Inline, it holds the hook -- and on the tool tier it would
-hold the MCP server -- for the length of a network round trip. Here it runs
-on a daemon thread.
+**THE CATALOG-SYNC LEG IS DELETED, not moved to a thread** (bead
+nexus-q02nx.13 planned the move; the bead .16 critique found the premise
+false). The bash called ``nx catalog sync`` at session close with its
+result discarded by ``|| true``. That command has raised
+``click.ClickException`` unconditionally since conexus 7.0.0 --
+``commands/catalog.py``'s ``sync_cmd``, "retired: the nexus service's
+Postgres is the sole catalog authority" -- so it was already dead when
+the bash was written, and the git-backed ``~/.config/nexus/catalog`` it
+looked for was itself retired at RDR-158 P4.
 
-Two things about that change, stated rather than glossed:
+Moving a call that cannot succeed onto a daemon thread would have bought
+nothing and cost something: the port briefly logged a warning on every
+fire where the bash discarded silently, which is new permanent noise for
+a permanently-failing command. The whole "a killed thread costs a
+deferred sync, never a corrupt one, because the work is idempotent"
+analysis in the first draft of this file was reasoning carefully about a
+scenario that cannot occur -- inherited unexamined from a bash comment
+("auto-commit + push if remote configured") that was stale before it was
+written.
 
-*It cannot affect the decision, and it never could.* The synchronous call's
-result was discarded, so success and failure produced byte-identical
-stdout. The approve envelope is now emitted before the sync finishes, which
-changes when the envelope is written but not what it says. There is no
-outcome the old code could express that the new code cannot.
-
-*It gains a logged outcome and a truncation window.* The RDR names the risk
-as "a thread that fails silently where the synchronous call would have
-logged" -- but the synchronous call redirected both streams to
-``/dev/null`` and logged nothing at all, so the port strictly ADDS
-visibility rather than risking its loss. The real new exposure is the other
-one: a daemon thread does not keep the interpreter alive, so a server
-exiting soon after Stop can kill a sync mid-push. That costs a DEFERRED
-sync, never a corrupt one -- the work is gated on the catalog being dirty,
-so the next session's Stop finds the same dirty state and syncs again.
-Idempotent by construction, which is what makes the daemon thread the right
-choice rather than a merely convenient one.
+DEVIATION, STATED: bead .13's own wording was "moving nx catalog sync off
+the synchronous path". Deleting it is a different outcome and this is the
+notice. The edge it changes: a box still running a pre-7.0.0 conexus
+generation, WITH a git-backed catalog relic, would have had that relic
+auto-committed at session close and now will not. Postgres has been the
+catalog authority since RDR-158 P4, so nothing reads that relic; it is a
+file that stopped being written, not data that stops being saved.
 """
 from __future__ import annotations
 
@@ -43,7 +44,6 @@ import json
 import os
 import shutil
 import subprocess
-import threading
 from pathlib import Path
 
 from nexus._hook_runtime._config import stop_guard_mode
@@ -165,80 +165,6 @@ def _git_is_dirty(path: str | None = None) -> bool:
     return bool(proc.stdout.strip())
 
 
-def _catalog_sync_target() -> str | None:
-    """The catalog path to sync, or None when there is nothing to do.
-
-    Same three conditions the script checks, in the same order: ``nx`` on
-    PATH, a git-backed catalog with a ``documents.jsonl``, and at least one
-    dirty ``.jsonl`` in it.
-    """
-    if shutil.which("nx") is None:
-        return None
-    catalog = os.environ.get("NEXUS_CATALOG_PATH") or str(
-        Path.home() / ".config" / "nexus" / "catalog"
-    )
-    root = Path(catalog)
-    if not (root / ".git").is_dir() or not (root / "documents.jsonl").is_file():
-        return None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", catalog, "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except Exception:  # noqa: BLE001 — treated as "nothing to sync"
-        return None
-    if not any(".jsonl" in line for line in proc.stdout.splitlines()):
-        return None
-    return catalog
-
-
-def _run_catalog_sync(catalog: str) -> None:
-    """The body of the daemon thread. Logs its outcome either way.
-
-    The synchronous version discarded both streams and its exit status, so
-    an operator had no way to learn that a session-close push had failed.
-    That is the whole reason this logs rather than merely not-crashing.
-    """
-    try:
-        proc = subprocess.run(
-            ["nx", "catalog", "sync", "-m", "auto-sync at session close"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except Exception as exc:  # noqa: BLE001 — a thread must not raise into the server
-        _emit(
-            "warning",
-            "stop_verification_catalog_sync_failed",
-            catalog=catalog,
-            error=str(exc),
-        )
-        return
-    if proc.returncode == 0:
-        _emit("info", "stop_verification_catalog_sync_ok", catalog=catalog)
-    else:
-        _emit(
-            "warning",
-            "stop_verification_catalog_sync_failed",
-            catalog=catalog,
-            returncode=proc.returncode,
-            stderr=(proc.stderr or "").strip()[:500],
-        )
-
-
-def _start_catalog_sync(catalog: str) -> threading.Thread:
-    thread = threading.Thread(
-        target=_run_catalog_sync,
-        args=(catalog,),
-        name="stop-verification-catalog-sync",
-        daemon=True,
-    )
-    thread.start()
-    return thread
-
-
 def _beads_in_progress() -> bool:
     if shutil.which("bd") is None:
         return False
@@ -266,10 +192,6 @@ def run(payload: dict | None) -> HookResult:
     warnings = reconcile
     if _git_is_dirty():
         warnings += _UNCOMMITTED_WARNING
-
-    catalog = _catalog_sync_target()
-    if catalog is not None:
-        _start_catalog_sync(catalog)
 
     if _beads_in_progress():
         warnings += _BEADS_WARNING

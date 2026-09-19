@@ -62,8 +62,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/expectations.sh
-source "$SCRIPT_DIR/lib/expectations.sh"
+# The PLUGIN copy, not the deleted reference copy (RDR-215 bead
+# nexus-q02nx.14). This script uses expectations_file and
+# expectations_census; census has an `nx-hook` verb now, but
+# expectations_file does not, so a full repoint would need one (or this
+# script computing the path itself). Bead nexus-q02nx.21 deletes the
+# plugin copy and is where that decision lands.
+# shellcheck source=../../conexus/hooks/scripts/expectations.sh disable=SC1091
+source "$SCRIPT_DIR/../../conexus/hooks/scripts/expectations.sh"
 
 _prereq_fail() {
     echo "POST-PUBLISH DISPATCH CHECK FAILED (prerequisite absent): $*" >&2

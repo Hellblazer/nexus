@@ -905,10 +905,22 @@ registration module on the existing server, and one package.
   re-declares the `hooks.json` entries. All four live entries still run
   bash scripts that source it, so the deletion would have preceded the
   re-declaration and removed the library from the production
-  implementation; three of the four source it as `|| exit 0` with no
-  diagnostic, so the whole RDR-184 guard would have gone quiet in every
-  session with nothing to see. `.14` already forbade this in its own words
-  -- "nothing is deleted while a consumer still sources it" -- but its
-  three enumerated consumer classes are test scripts, Python tests and
-  prose, and the production bash hooks are a fourth the enumeration
-  missed. `.14` keeps the `tests/e2e/lib/` copy and the byte-identity test.
+  implementation, and the guard would have gone quiet with almost nothing
+  to see. The exact breakdown, re-verified at the bead .16 critique after
+  this entry first got it wrong: FOUR wired entries source it --
+  SubagentStart/`subagent-start-stamp.sh` and
+  SubagentStop/`subagent-stop.sh` as bare `|| exit 0`,
+  PreToolUse/`agent-dispatch-expect.sh` with one stderr line then exit 0,
+  and Stop/`stop_verification_hook.sh` unguarded, degrading silently via
+  its own `command -v expectations_reconcile` check. So two of the four
+  are wholly silent, one says one line, one drops a feature without
+  saying anything. (`subagent-start.sh` does NOT source it and never has,
+  despite this RDR's Approach naming it at line 719 as a script to port
+  "since they source it" -- that line is wrong and no
+  `subagent_start.py` was ever written.) `.14` already forbade this in
+  its own words -- "nothing is deleted while a consumer still sources
+  it" -- but its three enumerated consumer classes are test scripts,
+  Python tests and prose, and the production bash hooks are a fourth the
+  enumeration missed. `.14` DELETES the `tests/e2e/lib/` copy and keeps
+  the PLUGIN copy; an earlier version of this entry stated that
+  backwards.
