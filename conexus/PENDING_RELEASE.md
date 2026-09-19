@@ -32,13 +32,30 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.53.0)
 
-- `conexus/skills/{strategic-planning,architecture,debugging,deep-analysis}/SKILL.md`
-  (nexus-3uxbc): each said its agent defaults to sonnet with opus escalation,
-  while the matching agent's frontmatter pins `model: opus`. An agent's own
-  declaration beats the session default, so the stated default was wrong in
-  all four and the escalation advice was backwards. They now name the pinning
-  file and say to pass `model: sonnet` for the cheap end. Wording follows
-  `conexus/skills/code-review/SKILL.md`, the one pair that already agreed.
+- `conexus/skills/strategic-planning/SKILL.md` (nexus-3uxbc): its Model Selection
+  section said the default is sonnet with opus escalation, while
+  `conexus/agents/strategic-planner.md` pins `model: opus`. An agent's own
+  frontmatter beats the session default, so the stated default was wrong
+  and the escalation advice pointed the wrong way. It now names the
+  pinning file and says to pass `model: sonnet` for the cheap end.
+- `conexus/skills/architecture/SKILL.md` (nexus-3uxbc): its Model Selection
+  section said the default is sonnet with opus escalation, while
+  `conexus/agents/architect-planner.md` pins `model: opus`. An agent's own
+  frontmatter beats the session default, so the stated default was wrong
+  and the escalation advice pointed the wrong way. It now names the
+  pinning file and says to pass `model: sonnet` for the cheap end.
+- `conexus/skills/debugging/SKILL.md` (nexus-3uxbc): its Model Selection
+  section said the default is sonnet with opus escalation, while
+  `conexus/agents/debugger.md` pins `model: opus`. An agent's own
+  frontmatter beats the session default, so the stated default was wrong
+  and the escalation advice pointed the wrong way. It now names the
+  pinning file and says to pass `model: sonnet` for the cheap end.
+- `conexus/skills/deep-analysis/SKILL.md` (nexus-3uxbc): its Model Selection
+  section said the default is sonnet with opus escalation, while
+  `conexus/agents/deep-analyst.md` pins `model: opus`. An agent's own
+  frontmatter beats the session default, so the stated default was wrong
+  and the escalation advice pointed the wrong way. It now names the
+  pinning file and says to pass `model: sonnet` for the cheap end.
 
 - `conexus/hooks/hooks.json` (nexus-kdxyv): the SessionStart matcher gains `fork`, so `/branch`
   and `--fork-session` (Claude Code >= 2.1.213 reports them as source
