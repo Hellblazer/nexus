@@ -2,10 +2,11 @@
 title: "A Lexical Leg for the nexus Client: Reach the Engine's FTS Hybrid Route"
 id: RDR-217
 type: Feature
-status: draft
+status: accepted
+accepted_date: 2026-09-19
 priority: medium
 author: Sam
-reviewed-by: unreviewed
+reviewed-by: self
 created: 2026-09-19
 related_issues: [nexus-06aei]
 related_rdrs: [RDR-026, RDR-155, RDR-156, RDR-180, RDR-188]
@@ -40,7 +41,9 @@ built.
 A chunk is a passage of text the engine has embedded and can retrieve. For each
 one, `nexus.chunks` carries `chunk_tsv`, a `GENERATED ALWAYS AS
 (to_tsvector('english', chunk_text)) STORED` column, indexed by the GIN index
-`idx_chunks_tsv`; and a second GIN index `idx_chunks_trgm` over `chunk_text`
+`idx_chunks_tsv` (GIN, the Generalized Inverted Index, is Postgres's index
+type for values holding many searchable elements, such as the words of a
+document); and a second GIN index `idx_chunks_trgm` over `chunk_text`
 using `gin_trgm_ops`, which supports trigram matching (comparing three-character
 sequences, so `authenticat` can match `authentication` without either being a
 whole word). Every chunk write pays both index insertions, in addition to the
@@ -79,7 +82,8 @@ BUG-0148 itself (2026-07-19, engine v0.1.48) is the outage that lesson came
 from. An `ALTER TYPE` conversion rewrote its tables and reset the planner's
 statistics. The planner, now working from stale statistics, moved sparse
 text-gate hybrid queries off the GIN-bitmap plan and onto a budget-bounded
-HNSW plan, and **hybrid-search returned zero rows in production while
+HNSW plan (HNSW, Hierarchical Navigable Small World, is pgvector's approximate
+nearest-neighbour index: fast, and it examines only part of the table), and **hybrid-search returned zero rows in production while
 `/health`, `/version`, the smoke round-trip and the aggregate STEP-6 exit code
 all stayed green**. Remediation was a manual `ANALYZE`.
 
@@ -164,7 +168,8 @@ built on indexes the client already pays to maintain.
   leg is the schema's intended answer for identifiers and substrings, with
   `pg_trgm.word_similarity_threshold` set to 0.6 by the caller
   (`PgVectorRepository.java:1348`), because the SQL functions are
-  `LANGUAGE sql` / `STABLE` and cannot set the GUC themselves.
+  `LANGUAGE sql` / `STABLE` and cannot set the GUC themselves (a GUC, Grand
+  Unified Configuration, is a Postgres runtime setting).
 - The route is `POST /v1/vectors/hybrid-search`, registered at
   `VectorHandler.java:182`.
 
@@ -201,7 +206,8 @@ Measured in this repository on 2026-09-19, at develop `7f7cb25a0`:
   `RerankStageIntegrationTest.java:270`
   `hybridSearchCarriesTheSameRerankEnvelope`.*
 - **✅ Verified** (source search) — Request and response contracts are
-  identical. Same field set on both handlers; at DDL level `plain_search_<dim>`
+  identical. Same field set on both handlers; at the level of the DDL, the SQL that
+  declares the schema, `plain_search_<dim>`
   and both branches behind `/hybrid-search` declare a byte-identical
   `RETURNS TABLE(id, content, collection, distance, metadata, retention)`. The
   live route selects **no** fusion component — no ts_rank, no trigram score,
@@ -880,11 +886,19 @@ Alternative 2 being rejected, and it is not a target for this work.
 ### Contradiction Check
 
 No contradictions found between research findings, design principles and the
-proposed solution as it now stands, and that clause has been earned twice
-rather than asserted: the previous time this section made it, a fix check
-found a contradiction it had missed. Seven were found and corrected on the way
-here, and they are listed rather than summarised because the count is the
-honest measure of how much this document changed under review.
+proposed solution as it now stands. That clause is not asserted here: this
+section has made it twice before and been falsified both times, once by gate
+round 1 and once by the fix check on that round's diff, each of which found a
+contradiction this section had already declared absent.
+
+What follows enumerates every correction the review produced, not
+contradictions alone. Four of the seven are document-internal contradictions
+(items 1, 2, 3 and 7); the remaining three are a different defect each: an
+under-specification, a false factual claim, and a scope-placement error. They
+are listed here because the count is the honest measure of how much this
+document changed under review, not because they belong to the heading. They
+are also the corrections that changed a decision; smaller wording and citation
+repairs landed in the same commits and are not enumerated.
 
 Two were corrected before the first gate:
 
@@ -901,7 +915,8 @@ One was corrected after gate round 1 (critique
    is now defined only over a ground-truth fixture and the risk is marked
    PARTIAL.
 
-Three were corrected by the fix check on that round's diff:
+Three were corrected by the fix check on that round's diff, and none of the
+three is a contradiction:
 
 4. The corrected Phase 4 still left the comparator's inputs unstated, so an
    implementer could have built the genuine-zero fixture with no retrievable
