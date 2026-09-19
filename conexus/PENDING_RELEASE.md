@@ -397,7 +397,7 @@ halves only have to agree within a single cut.
   the SubagentStart hook rather than a script that is being deleted.
   INERT until the next cut.
 
-- `sn/hooks/hooks.json`, `sn/hooks/scripts/subagent_start.py`, `sn/hooks/scripts/session_start.py`, `sn/hooks/scripts/_hook_boundary.py`, `sn/hooks/scripts/auto_approve_sn_mcp.py`, `sn/hooks/scripts/mcp-inject.sh` (deleted), `sn/hooks/scripts/session-start.sh` (deleted), `sn/hooks/scripts/auto-approve-sn-mcp.sh` (deleted), `sn/README.md`:
+- `sn/hooks/hooks.json`, `sn/hooks/scripts/subagent_start.py`, `sn/hooks/scripts/session_start.py`, `sn/hooks/scripts/_hook_boundary.py`, `sn/hooks/scripts/auto_approve_sn_mcp.py`, `sn/hooks/scripts/mcp-inject.sh` (deleted), `sn/hooks/scripts/session-start.sh` (deleted), `sn/hooks/scripts/auto-approve-sn-mcp.sh` (deleted), `sn/hooks/scripts/worktree_guard.py`, `sn/README.md`:
   bead: nexus-q02nx.23 — RDR-215 Approach item 8, the sn half. All four
   entries become exec-form `python3` on plugin-resident scripts, and the
   three bash wrappers are deleted. `auto_approve_sn_mcp.py` and
@@ -428,6 +428,21 @@ halves only have to agree within a single cut.
   failed the capture no-opped and the sections went out UNWRAPPED, which
   is the silent-drop shape the envelope exists to prevent. Accumulating
   and dumping once has no half-wrapped state to reach.
+  TWO REVIEW FINDINGS ARE IN HERE TOO, both in paths declared above.
+  `subagent_start.py` guards its `worktree_guard` import: the bash ran
+  that detection in its own subprocess under `2>/dev/null`, so nothing it
+  could do reached the `cat` calls after it, and importing it at module
+  scope put it ahead of the boundary — measured, a sibling raising at
+  import took the whole envelope where the bash exited 0 with both
+  universal sections. `auto_approve_sn_mcp.py` deliberately does NOT do
+  the same, because there the dependency IS the guard and degrading would
+  approve a Serena write from a linked worktree; both sides carry that
+  reasoning in place so the asymmetry is not "fixed" later.
+  `worktree_guard.py` itself gains one isinstance check: `is_serena_write_tool`
+  raised `AttributeError` on a non-string `tool_name`, which is valid JSON
+  a payload can carry. Never unsafe — the crash reached a boundary and
+  nothing was approved — so this is a quality fix, not a security one.
+  Declared because the ledger is about what differs from the pinned tag.
   INERT until the next cut or release: sessions on the pinned tag keep
   running the three bash wrappers, which are still on disk there and
   still correct. Unlike .21's entry this one has no fail-open risk if the
