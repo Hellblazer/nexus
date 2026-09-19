@@ -3723,6 +3723,39 @@ class TestSkippedCollectionsHeaderLogging:
         assert events[0]["route"] == "search_aspect_scoped"
         assert events[0]["skipped"] == ["docs__ghost__model-ctx__v1"]
 
+    def test_hybrid_search_logs_a_warning_under_its_own_route_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """RDR-217 P2.2 (bead nexus-lqo4p.7): the label names the route the
+        caller actually asked for, not "search".
+
+        THIS ASSERTION HAS TO LIVE HERE rather than beside hybrid_search's
+        body tests in ``tests/db/test_http_vector_client_hybrid.py``. That
+        file fakes the module-global ``_post``, which — per
+        ``_wire_fake_opener``'s own docstring above — bypasses
+        ``_request_once`` and therefore never populates the thread-local
+        ``_response_header_capture`` that ``_warn_skipped_collections``
+        reads. A ``capture_logs`` assertion there would pass while the
+        behaviour was absent, which is this RDR's own failure shape
+        reproduced inside the test written to prevent it. Measured during the
+        P2.1 review: mutating the method to pass "search" left all six tests
+        in that file green.
+
+        Neutral model tokens on purpose (RDR-109 mode lint): same reason as
+        the sibling tests above.
+        """
+        from structlog.testing import capture_logs
+
+        _wire_fake_opener(
+            monkeypatch, [],
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__model-ctx__v1"},
+        )
+        client = HttpVectorClient()
+        with capture_logs() as logs:
+            client.hybrid_search("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
+        events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
+        assert len(events) == 1
+        assert events[0]["route"] == "hybrid_search"
+        assert events[0]["skipped"] == ["docs__ghost__model-ctx__v1"]
+
     def test_a_later_unrelated_call_does_not_see_a_stale_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pop-not-peek: the thread-local clears itself after each read, so
         a second call issued with no header present must not replay the
