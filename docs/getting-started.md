@@ -7,6 +7,15 @@
 - **git**
 - **[Node.js](https://nodejs.org/)** — required *only* if you install the Claude Code plugin(s). The conexus plugin bundles the `sequential-thinking` MCP server, spawned via `npx -y …`; the companion `sn` plugin bundles `context7` the same way. Either requires `node` and `npm` on PATH. The `nx` CLI alone does not need it. Install with `brew install node` (macOS) or follow the [Node.js installer](https://nodejs.org/) for your platform.
 
+- **Hardware** — an Apple Silicon Mac (arm64), or Linux on x86-64 or arm64.
+  Those are the three targets the bundled PostgreSQL ships for
+  (`nexus.db.pg_bundle.current_platform_tag`). An **Intel Mac** gets no
+  bundle: nexus falls back to a PostgreSQL you install yourself, rather than
+  mislabelling the platform. **Windows is not supported** — the resolver
+  raises rather than guessing, and Windows is named as a later release.
+  No GPU is required or used: the local embedding model is a bundled ONNX
+  model that runs on CPU, and there is no CUDA or Metal path in the code.
+
 Check your Python version:
 
 ```bash
