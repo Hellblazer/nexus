@@ -143,6 +143,18 @@ def reject_conexus(event: str, entry: dict) -> str | None:
             )
         return None
 
+    # EVERY entry declares its tier explicitly. Without this the function
+    # fell THROUGH to the command tier for any `type` at all -- a missing
+    # key, or a typo like "commnd" -- and such an entry was accepted as
+    # long as its command happened to be permitted. The fallthrough was
+    # the default branch, so nothing pointed at it and no fixture reached
+    # it (nexus-q02nx.29).
+    if entry.get("type") != "command":
+        return (
+            f"declares type {entry.get('type')!r}. Every entry is exactly one "
+            f"of `mcp_tool` or `command`; anything else is a typo that would "
+            f"otherwise be read as the command tier by default."
+        )
     if "args" not in entry:
         return (
             "is command tier with no `args` key. Exec form carries its "
@@ -152,8 +164,19 @@ def reject_conexus(event: str, entry: dict) -> str | None:
     command = entry.get("command")
     if command not in CONEXUS_COMMANDS:
         return f"runs command {command!r}, which is not one of {sorted(CONEXUS_COMMANDS)}"
+    args = entry.get("args", [])
+    if command == "nx-hook" and len(args) != 1:
+        return (
+            f"runs `nx-hook` with {len(args)} args; exactly one verb is "
+            f"permitted. An empty `args` spawns the entry point with no verb, "
+            f"which is a live hook that does nothing."
+        )
+    if command == "nx-session-end-launcher" and args:
+        return (
+            f"runs `nx-session-end-launcher` with {len(args)} args; it takes "
+            f"none, and its empty `args` is what makes the entry exec form."
+        )
     if command == "python3":
-        args = entry.get("args", [])
         if len(args) != 1:
             return f"runs python3 with {len(args)} args; exactly one script path is permitted"
         if args[0] not in PLUGIN_RESIDENT_SCRIPTS:
@@ -183,6 +206,11 @@ def reject_sn(event: str, entry: dict) -> str | None:
         return (
             "is an mcp_tool. sn runs no MCP server of its own and must not "
             "depend on conexus's, so every sn entry is command tier."
+        )
+    if entry.get("type") != "command":
+        return (
+            f"declares type {entry.get('type')!r}, not `command`. Same default"
+            f"-branch gap as the conexus side (nexus-q02nx.29)."
         )
     if "args" not in entry:
         return "is command tier with no `args` key"
@@ -314,6 +342,55 @@ CONEXUS_REJECTS = [
         },
         id="unargued-sixth-python3-script",
     ),
+    # The default-branch gap. Each of these was ACCEPTED before
+    # nexus-q02nx.29, because anything that was not `mcp_tool` fell
+    # through to the command tier and was judged only on its command.
+    pytest.param(
+        "PreToolUse",
+        {"command": "nx-hook", "args": ["preflight"]},
+        id="no-type-key-at-all",
+    ),
+    pytest.param(
+        "PreToolUse",
+        {"type": "commnd", "command": "nx-hook", "args": ["preflight"]},
+        id="misspelt-type",
+    ),
+    pytest.param(
+        "SessionStart",
+        {"type": "command", "command": "nx-hook", "args": []},
+        id="nx-hook-with-no-verb",
+    ),
+    pytest.param(
+        "SessionStart",
+        {"type": "command", "command": "nx-hook", "args": ["rdr", "extra"]},
+        id="nx-hook-with-two-verbs",
+    ),
+    pytest.param(
+        "SessionEnd",
+        {"type": "command", "command": "nx-session-end-launcher", "args": ["x"]},
+        id="launcher-with-an-argument",
+    ),
+    # A command that is neither permitted nor a forbidden token. Without
+    # this the CONEXUS_COMMANDS membership check had no case of its own:
+    # every command-tier fixture above was rejected by the token ban or
+    # the type check first, so the clause was carried by its neighbours.
+    pytest.param(
+        "PreToolUse",
+        {"type": "command", "command": "perl", "args": ["-e", "1"]},
+        id="unpermitted-command-that-is-not-a-forbidden-token",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": [
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+                "--extra",
+            ],
+        },
+        id="python3-with-two-args",
+    ),
 ]
 
 
@@ -358,6 +435,52 @@ SN_REJECTS = [
         {"type": "command", "command": "python3"},
         id="no-args-key",
     ),
+    pytest.param(
+        "SessionStart",
+        {"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/x.py"]},
+        id="no-type-key-at-all",
+    ),
+    pytest.param(
+        "SessionStart",
+        {
+            "type": "weird",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/x.py"],
+        },
+        id="bogus-type",
+    ),
+    # The conexus side had an `async-key` fixture from the start and sn's
+    # identical clause had none: the clause was MIRRORED across the two
+    # validators and its PROOF was not. Caught in the Phase 4 critique
+    # (nexus-q02nx.30), on the plugin whose independence the RDR's
+    # Cross-Cutting Concerns single out.
+    pytest.param(
+        "SubagentStart",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/subagent_start.py"],
+            "async": True,
+        },
+        id="async-key",
+    ),
+    pytest.param(
+        "SessionStart",
+        {"type": "command", "command": "node", "args": ["x.js"]},
+        id="unpermitted-command-that-is-not-a-forbidden-token",
+    ),
+    pytest.param(
+        "SessionStart",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": [
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session_start.py",
+                "--extra",
+            ],
+        },
+        id="python3-with-two-args",
+    ),
 ]
 
 
@@ -377,10 +500,16 @@ def test_the_permitted_commands_are_not_rejected_as_substrings() -> None:
     rewrites the token comparison as `in`.
     """
     assert (
-        reject_conexus("SessionStart", {"command": "nx-hook", "args": ["session-start"]})
+        reject_conexus(
+            "SessionStart",
+            {"type": "command", "command": "nx-hook", "args": ["session-start"]},
+        )
         is None
     )
     assert (
-        reject_conexus("SessionEnd", {"command": "nx-session-end-launcher", "args": []})
+        reject_conexus(
+            "SessionEnd",
+            {"type": "command", "command": "nx-session-end-launcher", "args": []},
+        )
         is None
     )
