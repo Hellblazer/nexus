@@ -1009,7 +1009,7 @@ def architecture(args: tuple[str, ...]) -> None:
         "",
         "### Tip",
         "",
-        "The agent uses the search tool with corpus='code' and hybrid=true (30-50 results) for discovery,",
+        "The agent uses the search tool with corpus='code' (30-50 results) for discovery,",
         "then LSP for precision navigation (documentSymbol, goToImplementation, findReferences).",
     ])
     print("\n".join(parts))
