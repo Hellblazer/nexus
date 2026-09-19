@@ -161,7 +161,36 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
     return results
 
 
+_PLUGIN_ROOT_REF = re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT\}?/([^\s'\"]+)")
+
+_MIN_HOOK_SCRIPT_REFS = 5
+"""Non-vacuity floor for :func:`_hook_script_refs`.
+
+RDR-215 nexus-q02nx.21 rewrote 21 of the 25 hooks.json entries into
+exec form: the script path moved out of the ``command`` string and into
+``args``, and ``$CLAUDE_PLUGIN_ROOT`` became ``${CLAUDE_PLUGIN_ROOT}``.
+The extractor read only ``command`` and only the brace-less form, so its
+domain silently emptied out and ``test_hook_script_exists`` went green
+over nothing -- while two entries pointed at
+``hooks/scripts/<x>.py`` for scripts that live in
+``hooks/scripts/routing/``. One of the two is the routing framework's
+only fail_closed rule, so a missing-path exit is not a deny and the
+close gate failed open. This floor makes the emptying itself a failure.
+
+Five is the measured count after that rewrite, not a margin: the other
+20 entries are ``mcp_tool`` or exec-form ``nx-hook`` and name no
+plugin-root path at all. Raise it when an entry is added, and read a
+drop as the extractor going blind before reading it as a deletion.
+"""
+
+
 def _hook_script_refs() -> list[tuple[str, str]]:
+    """Every plugin-root-relative path hooks.json names, from either form.
+
+    Covers the legacy ``command``-string declaration and the exec form
+    that carries the script in ``args``, and both ``$CLAUDE_PLUGIN_ROOT``
+    and ``${CLAUDE_PLUGIN_ROOT}``.
+    """
     data = json.loads(HOOKS_PATH.read_text())
     events = data.get("hooks", data)
     results = []
@@ -169,9 +198,13 @@ def _hook_script_refs() -> list[tuple[str, str]]:
         for entry in entries:
             sub_hooks = entry.get("hooks", [entry]) if isinstance(entry, dict) else []
             for sub in sub_hooks:
-                cmd = sub.get("command", "") if isinstance(sub, dict) else ""
-                for m in re.finditer(r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"]+)", cmd):
-                    results.append((event, m.group(1)))
+                if not isinstance(sub, dict):
+                    continue
+                fields = [sub.get("command", "")]
+                fields.extend(a for a in sub.get("args", []) if isinstance(a, str))
+                for field in fields:
+                    for m in _PLUGIN_ROOT_REF.finditer(field):
+                        results.append((event, m.group(1)))
     return results
 
 
@@ -577,6 +610,20 @@ class TestHooks:
     ])
     def test_hook_script_exists(self, event: str, rel_path: str) -> None:
         assert (PLUGIN_DIR / rel_path).exists(), f"hooks.json [{event}] references missing: {rel_path}"
+
+    def test_hook_script_refs_is_not_vacuous(self) -> None:
+        """``test_hook_script_exists`` must have something to check.
+
+        It is parametrized over the extractor's output, so an extractor
+        that stops recognising a declaration form collapses to zero
+        parameters and reports green. See ``_MIN_HOOK_SCRIPT_REFS``.
+        """
+        refs = _hook_script_refs()
+        assert len(refs) >= _MIN_HOOK_SCRIPT_REFS, (
+            f"only {len(refs)} plugin-root refs found in hooks.json; expected "
+            f">= {_MIN_HOOK_SCRIPT_REFS}. Either entries were removed, or the "
+            f"extractor no longer recognises how they are declared."
+        )
 
     @pytest.mark.parametrize("script_name", [
         "session_start_hook.py",
