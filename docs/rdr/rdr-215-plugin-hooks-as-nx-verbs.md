@@ -244,15 +244,41 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   list (`''` against `[]`). The tool tier therefore carries
   `stop_verification_hook.sh`'s `background_tasks` cross-check intact,
   and beads `nexus-q02nx.10`, `.12` and `.13` stay on the tool tier.
-  The one limit: `''` is unambiguous only where the field can never
-  legitimately be an empty STRING. *Source: T2
-  `nexus_rdr/215-phase1-measurements`.*
+  The determining case was measured, not assumed: a populated MIXED
+  population survives intact. A `Stop` event carrying one `type: shell`
+  task (keys `id/type/status/description/command`) and one
+  `type: subagent` task (`agent_type` in place of `command`) arrived as
+  a `list` of two `dict`s with both key sets and every value intact,
+  including a `command` containing `$i`, quotes and semicolons. So
+  `expectations.sh`'s documented "mixed population, field names not yet
+  stable" concern is answered for transport.
+  Two limits: `''` is unambiguous only where the field can never
+  legitimately be an empty STRING; and the empty-list case (`[]`) alone
+  would NOT have shown this, so do not cite it as the evidence.
+  *Source: T2 `nexus_rdr/215-phase1-measurements`.*
+- **Verified, and it is a landmine for the ports** (same bead): Claude
+  Code delivers those structures, but the tool tier's own registration
+  schema cannot currently accept them. `_make_tool_function`
+  (`src/nexus/mcp/hooks.py`) types EVERY hook-tool field
+  `Annotated[str | None, ...]`, and pydantic 2.12.5 rejects both a
+  `dict` and a `list` against that with `string_type`. So the transport
+  is proven and the implementation is not: the first port that declares
+  a field carrying `${tool_input}` or `${background_tasks}` will fail
+  validation. The annotation has to widen before or during
+  `nexus-q02nx.10`, `.12` and `.13`, with a test that drives a real
+  `hook_` tool call carrying a `dict` through FastMCP's own validation.
+  Tracked as its own bead; nothing ships broken today because no
+  `hooks.json` entry names a hook tool yet.
 - **Verified** (same bead): a hook tool's own invocation is exempt from
   the hook chain, but a MODEL-initiated call to one is not. With a
   `PreToolUse` matcher covering the server's own tools, the hook fired
   once on the model's call and its own tool call did not re-trigger it —
   one dispatch, terminating. So `hook_auto_approve` matching
   `mcp__plugin_conexus_.*` is benign and needs no recursion guard.
+  Scoped to the topology tested: ONE hook tool whose own matcher covers
+  it. Phases 2 and 3 register roughly fourteen `hook_*` tools against
+  that same matcher; if the exemption proves per-invocation rather than
+  blanket, re-check with two registered at once.
 
 ### Critical Assumptions
 
@@ -266,6 +292,18 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   `Successfully connected`. On WSL2 the same ordering held at 73 ms.
   Since every tool-tier event is reached only through a model-initiated
   tool call, none of them can fire before the servers are available.
+  **Measured under headless `claude -p` only** (`cc_entrypoint=sdk-cli`,
+  `nonInteractive=true`), on both host shapes. Interactive ordering is
+  NOT established here, and interactive is what users actually run — a
+  human can submit input the instant a prompt appears, which a scripted
+  invocation does not exercise. Before Phase 2 relies on "no command-tier
+  twin is needed for any event", run the same delay ladder interactively.
+  The barrier is more than a timing correlation: at the 35 s point the
+  server was still sleeping when the 30 s timeout fired, and turn 1
+  started 33 ms after the TIMEOUT resolved rather than after the server
+  became ready, so turn 1 waits on the connection ATTEMPT's resolution
+  and not merely on a freed event loop. That discriminates a real
+  barrier from scheduling starvation — for this launch mode.
   *Source: T2 `nexus_rdr/215-phase1-measurements`.*
 - **Verified, and it relocates the risk**: the real failure mode is a
   server that never connects, not one that connects late. At a 35 s
@@ -281,7 +319,12 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   intervening login shell, and hands it its own PATH unmodified.
   Terminal-launched macOS: `nx-hook` resolves from `~/.local/bin`.
   WSL2 (Ubuntu 26.04, same CLI 2.1.278): an exec-form `nx-hook` named
-  bare on the PATH resolved and ran, argv intact. App-launched macOS:
+  bare on the PATH resolved and ran, argv intact — with a STAND-IN
+  executable of that name, not the real console script. A full conexus
+  install fails on that distro (`uv tool install conexus` needs
+  `x86_64-linux-gnu-g++` to build `fasttext-predict` via `mineru`), so
+  WSL2 proves PATH resolution of an exec-form hook, not the real verb
+  end to end. App-launched macOS:
   the desktop app REPAIRS the PATH for the children that run user
   tooling. Measured on a Finder-launched `/Applications/Claude.app`:
   the app's own process and its generic node helper carry the bare
