@@ -62,6 +62,22 @@ mechanize, it matters enough to ship.
   is told to source a file that no longer exists; the plugin copy at
   `conexus/hooks/scripts/expectations.sh` still exists, so that instruction
   still WORKS from the pinned tag, it is merely the older of the two paths.
+  EXTENDED by bead nexus-q02nx.27, same paths, no new ones. The skill's
+  line 29 still carried the by-design claim this epic INVERTS -- "the
+  declaration surface is a SHELL LIB, not an nx verb" -- so the file
+  simultaneously told a reader to use `nx-hook` (line 23, fixed at .14)
+  and that no such verb exists. It now states the verb form and says why
+  the registry absence survives the inversion for a different reason: the
+  answer IS the exit code and an MCP tool has none, so these stay command
+  tier. `nx expectations` / `nx orchestration` / `nx guard` still do not
+  exist, so that half of nexus-3ra9h is unchanged. The three bare
+  invocations at :35 and :38 gain the `nx-hook` prefix. EVERY EXIT CODE IS
+  UNTOUCHED and was checked one by one against
+  `tests/hooks/test_expectations_module.py` (0 clean, 1 BLINDSPOT, 2
+  undeclared, 3 no ledger; census never returns 2) -- they are the
+  caller-facing contract and the bead forbids moving them.
+  INERT until then: a session on the pinned tag reads the SHELL LIB claim,
+  and on the pinned tag that claim is still true.
 
 - `conexus/hooks/scripts/tuple_ledger_project.py`:
   bead: nexus-q02nx.14 — comments only. The two mirrors of the ledger's state
