@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.54.0] - 2026-09-19
+
+Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129)),
+unchanged from 7.53.0. No engine cut: pin and cloud are both at v0.1.129 with
+no `service/src/main` drift.
+
+This release is what makes the plugin-side fixes below LIVE. Claude Code loads
+the plugin from the tag `marketplace.json` pins, so every change under
+`conexus/` since 7.53.0 has been inert in every session until now. The `fork`
+matcher is the one that matters most: until this tag, `/branch` fired no hook
+at all, for anyone.
+
+### Plugin changes that become active with this release
+
+- `conexus/hooks/hooks.json`: the SessionStart matcher gains `fork`, so
+  `/branch` and `--fork-session` run the session-start hook (nexus-kdxyv).
+- `conexus/hooks/scripts/mailbox_drain.py`: the dead `_session_marker_names`
+  is deleted (nexus-kdxyv).
+- Five skills (`conexus/skills/research-synthesis`, `strategic-planning`, `architecture`, `debugging` and `deep-analysis`) each stated a default
+  model their own agent's frontmatter contradicts; all five now name the
+  pinning file and what omitting `model` actually gets (nexus-3uxbc).
+
 ### Fixed
 
 - **Retired CLI verbs no longer appear in `--help`** (nexus-uks83). Six groups'
