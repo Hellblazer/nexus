@@ -86,7 +86,7 @@ Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, c
 | `pdf.mineru_table_enable` | — | `true` | Table extraction in MinerU. Off, every table becomes an image reference and its values are not indexed; the chunk then carries a `[Table N not extracted as text; values not indexed]` marker. Set `false` only for corpora with no tables where the table models' memory matters |
 | `pdf.mineru_page_batch` | — | `1` | Pages per MinerU request. Increase for faster throughput at the cost of memory |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
-| `search.hybrid_default` | — | `false` | Default ripgrep hybrid search mode for `nx search`. Set `true` to always run hybrid |
+| `search.hybrid_default` | — | `false` | Default hybrid-scoring mode for `nx search`: blends git frecency into the score for code corpora (0.7*vector + 0.3*frecency). Set `true` to always blend |
 | `search.hnsw_ef` | — | `256` | HNSW `search_ef` parameter for local-mode collections. Higher values improve tail recall at the cost of query latency. Ignored in cloud mode (SPANN) |
 | `search.distance_threshold.code` | — | `0.45` | Maximum distance for code corpus results. Results above this are filtered as noise |
 | `search.distance_threshold.knowledge` | — | `0.65` | Maximum distance for knowledge corpus results |
@@ -294,7 +294,6 @@ tuning:
     pdf_chunk_chars: 1500         # target chars per PDF chunk
   timeouts:
     git_log: 30                   # seconds — timeout for git log subprocess
-    ripgrep: 10                   # seconds — timeout for ripgrep subprocess in hybrid search
 ```
 
 | YAML path | Default | Description |
@@ -306,7 +305,6 @@ tuning:
 | `tuning.chunking.code_chunk_lines` | `150` | Target lines per code chunk (line-based fallback) |
 | `tuning.chunking.pdf_chunk_chars` | `1500` | Target characters per PDF chunk |
 | `tuning.timeouts.git_log` | `30` | Timeout (seconds) for `git log` subprocess |
-| `tuning.timeouts.ripgrep` | `10` | Timeout (seconds) for `rg` subprocess in hybrid search |
 
 These values are exposed as a `TuningConfig` dataclass in `nexus.config`. The search command, indexer, and scoring modules all read from this config — changes take effect on the next invocation without restarting anything.
 

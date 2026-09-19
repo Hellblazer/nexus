@@ -31,3 +31,17 @@ mechanize, it matters enough to ship.
 
 
 ## Awaiting the next release or plugin cut (pinned: v7.54.0)
+
+- `conexus/agents/codebase-deep-analyzer.md`, `conexus/agents/deep-research-synthesizer.md`: both told the agent that
+  `nx search` / the `search` MCP tool provides "semantic search + ripgrep +
+  git frecency". The ripgrep path is deleted (nexus-06aei) — it was opt-in,
+  default-off, nothing enabled it, and it cost 1.9 GB of line caches on this
+  box with one past its 500 MB cap and therefore silently truncated. Both
+  lines now say "semantic search + git frecency", which is what the surviving
+  `--hybrid` / `hybrid_default` switch actually does. These two changes are
+  prose only and carry no tool, hook or command surface change — that is a
+  statement about THESE edits, not a claim that every mention of `--hybrid`
+  in the plugin was swept. `conexus/skills/architecture/SKILL.md` still
+  recommends `nx search --hybrid` for discovery in three places and is
+  deliberately unchanged: it is still true (the flag exists and still blends
+  frecency), just narrower than when written.

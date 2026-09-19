@@ -1304,30 +1304,6 @@ def _check_t3_cloud() -> list[HealthResult]:
 def _check_tools() -> list[HealthResult]:
     results: list[HealthResult] = []
 
-    # ripgrep
-    rg_path = shutil.which("rg")
-    # nexus-9xfx5 (fresh-install MVV finding #3): rg is an OPTIONAL system
-    # accelerator that `pip install conexus` can never provide — its absence
-    # is a degradation (hybrid search off), not a broken install. Render it
-    # like an uninstalled git hook: ✓ with the detail + install suggestions,
-    # never a red ✗ / non-zero doctor exit on a virgin box.
-    r = HealthResult(
-        label="ripgrep   (rg)",
-        ok=True,
-        detail=rg_path or "not installed — hybrid search disabled (optional)",
-        fatal=False,
-    )
-    if not rg_path:
-        # nexus-njmg (GH #622): winget --scope user avoids UAC-prompt
-        # failures during unattended install on Windows.
-        r.fix_suggestions = [
-            "brew install ripgrep                                          (macOS)",
-            "apt install ripgrep                                           (Ubuntu/Debian)",
-            "winget install --id BurntSushi.ripgrep.MSVC --scope user      (Windows)",
-            "https://github.com/BurntSushi/ripgrep#installation",
-        ]
-    results.append(r)
-
     # git
     git_path = shutil.which("git")
     r = HealthResult(

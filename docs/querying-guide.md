@@ -47,7 +47,7 @@ All paths query T3 and benefit from topic-aware ranking. `search()` and `query()
 ```bash
 nx search "authentication middleware"                    # basic semantic search
 nx search "caching strategy" --corpus code               # search only code
-nx search "schema design" --hybrid                       # semantic + frecency + ripgrep
+nx search "schema design" --hybrid                       # semantic + git frecency
 nx search "database" --where bib_year>=2024              # metadata filter
 nx search "error handling" -c --bat                      # show content with syntax highlighting
 ```

@@ -11,7 +11,7 @@ from nexus.db.http_vector_client import HttpVectorClient
 _EXPECTED_DEFAULTS = {
     "vector_weight": 0.7, "frecency_weight": 0.3, "file_size_threshold": 30,
     "decay_rate": 0.01, "code_chunk_lines": 150, "pdf_chunk_chars": 1500,
-    "git_log_timeout": 30, "ripgrep_timeout": 10,
+    "git_log_timeout": 30,
 }
 
 
@@ -37,12 +37,12 @@ def test_tuning_from_dict_all_sections_override() -> None:
         "scoring": {"vector_weight": 1.0, "frecency_weight": 0.0, "file_size_threshold": 50},
         "frecency": {"decay_rate": 0.05},
         "chunking": {"code_chunk_lines": 100, "pdf_chunk_chars": 2000},
-        "timeouts": {"git_log": 60, "ripgrep": 5},
+        "timeouts": {"git_log": 60},
     })
     assert (cfg.vector_weight, cfg.frecency_weight, cfg.file_size_threshold) == (1.0, 0.0, 50)
     assert cfg.decay_rate == 0.05
     assert (cfg.code_chunk_lines, cfg.pdf_chunk_chars) == (100, 2000)
-    assert (cfg.git_log_timeout, cfg.ripgrep_timeout) == (60, 5)
+    assert cfg.git_log_timeout == 60
 
 def test_tuning_from_dict_unknown_keys_ignored() -> None:
     cfg = _tuning_from_dict({"scoring": {"vector_weight": 0.6, "unknown_key": "ignored"}, "unknown_section": {"also_ignored": True}})
@@ -66,7 +66,6 @@ def test_tuning_from_dict_invalid_raises(section, key, value, match) -> None:
 @pytest.mark.parametrize("section,key,pattern", [
     ("scoring", "vector_weight", r"tuning\.scoring\.vector_weight"),
     ("chunking", "pdf_chunk_chars", r"tuning\.chunking\.pdf_chunk_chars"),
-    ("timeouts", "ripgrep", r"tuning\.timeouts\.ripgrep"),
 ])
 def test_error_message_shows_full_yaml_path(section, key, pattern) -> None:
     with pytest.raises(ValueError, match=pattern):
@@ -86,7 +85,6 @@ def test_defaults_tuning_section_matches_tuning_config() -> None:
     assert d["chunking"]["code_chunk_lines"] == tc.code_chunk_lines
     assert d["chunking"]["pdf_chunk_chars"] == tc.pdf_chunk_chars
     assert d["timeouts"]["git_log"] == tc.git_log_timeout
-    assert d["timeouts"]["ripgrep"] == tc.ripgrep_timeout
 
 
 # ── get_tuning_config with .nexus.yml ───────────────────────────────────────
@@ -110,16 +108,14 @@ def test_load_config_includes_tuning_section_defaults(tmp_path, monkeypatch) -> 
     assert cfg["tuning"]["scoring"]["vector_weight"] == 0.7
     assert cfg["tuning"]["frecency"]["decay_rate"] == 0.01
     assert cfg["tuning"]["chunking"]["code_chunk_lines"] == 150
-    assert cfg["tuning"]["timeouts"]["ripgrep"] == 10
 
 def test_get_tuning_config_nexus_yml_overrides_global(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     global_dir = tmp_path / ".config" / "nexus"
     global_dir.mkdir(parents=True)
-    (global_dir / "config.yml").write_text(yaml.dump({"tuning": {"timeouts": {"ripgrep": 20}}}))
-    (tmp_path / ".nexus.yml").write_text(yaml.dump({"tuning": {"timeouts": {"ripgrep": 5, "git_log": 45}}}))
+    (global_dir / "config.yml").write_text(yaml.dump({"tuning": {"timeouts": {"git_log": 20}}}))
+    (tmp_path / ".nexus.yml").write_text(yaml.dump({"tuning": {"timeouts": {"git_log": 45}}}))
     cfg = get_tuning_config(repo_root=tmp_path)
-    assert cfg.ripgrep_timeout == 5
     assert cfg.git_log_timeout == 45
 
 
@@ -200,37 +196,3 @@ def test_apply_hybrid_scoring_uses_tuning_weights() -> None:
     assert scored_v[0].id == "a"
     assert scored_f[0].id == "a"
 
-
-def test_search_cmd_passes_ripgrep_timeout(tmp_path, monkeypatch) -> None:
-    from click.testing import CliRunner
-    from nexus.cli import main
-
-    monkeypatch.setenv("CHROMA_API_KEY", "k")
-    monkeypatch.setenv("VOYAGE_API_KEY", "v")
-    monkeypatch.setenv("CHROMA_TENANT", "t")
-    monkeypatch.setenv("CHROMA_DATABASE", "d")
-    monkeypatch.setattr("nexus.commands.search_cmd._CONFIG_DIR", tmp_path)
-    (tmp_path / "repo-abcd1234.cache").write_text("/repo/a.py:1:content\n")
-
-    captured: list[int] = []
-    def fake_rg(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
-        captured.append(timeout)
-        return []
-
-    # cloud-shaped creds are set above -> the real _t3() would hand back
-    # an HttpVectorClient (make_t3() is unconditional post-RDR-155
-    # P4a.2 regardless, but this test also matches is_local_mode()'s
-    # legacy heuristic). Mirrors the sibling test_search_cmd.py::_mock_t3
-    # helper's spec= fix.
-    mock_t3 = MagicMock(spec=HttpVectorClient)
-    mock_t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
-    with (
-        patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
-        patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]),
-        patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_rg),
-        patch("nexus.commands.search_cmd.load_config", return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}),
-        patch("nexus.commands.search_cmd.get_tuning_config", return_value=TuningConfig(ripgrep_timeout=99)),
-    ):
-        result = CliRunner().invoke(main, ["search", "query", "--hybrid", "--corpus", "code__repo-abcd1234", "--no-rerank"])
-    assert result.exit_code == 0, result.output
-    assert captured and all(t == 99 for t in captured)

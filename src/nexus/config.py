@@ -46,7 +46,6 @@ class TuningConfig:
             pdf_chunk_chars: 1500
           timeouts:
             git_log: 30
-            ripgrep: 10
     """
 
     # scoring.py constants
@@ -63,7 +62,6 @@ class TuningConfig:
 
     # timeout constants
     git_log_timeout: int = 30
-    ripgrep_timeout: int = 10
 
 
 def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
@@ -103,7 +101,6 @@ def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
         code_chunk_lines=_int(chunking, "chunking", "code_chunk_lines", _d.code_chunk_lines),
         pdf_chunk_chars=_int(chunking, "chunking", "pdf_chunk_chars", _d.pdf_chunk_chars),
         git_log_timeout=_int(timeouts, "timeouts", "git_log", _d.git_log_timeout),
-        ripgrep_timeout=_int(timeouts, "timeouts", "ripgrep", _d.ripgrep_timeout),
     )
 
 
@@ -1214,7 +1211,6 @@ _DEFAULTS: dict[str, Any] = {
         },
         "timeouts": {
             "git_log": _tc.git_log_timeout,
-            "ripgrep": _tc.ripgrep_timeout,
         },
     })(TuningConfig()),
 }

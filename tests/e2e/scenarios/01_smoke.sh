@@ -8,14 +8,12 @@ assert_cmd "nx --version reports a version" \
     "nx --version" \
     "nx, version"
 
-# nx doctor — check structural items (Python, rg, git always present in container)
+# nx doctor — check structural items (Python, git always present in container).
+# The ripgrep row was removed with the ripgrep path itself (nexus-06aei); it
+# is not "temporarily absent", there is nothing left for doctor to report.
 assert_cmd "nx doctor: Python >= 3.12" \
     "nx doctor 2>&1" \
     "Python ≥ 3.12"
-
-assert_cmd "nx doctor: ripgrep found" \
-    "nx doctor 2>&1" \
-    "ripgrep.*rg"
 
 assert_cmd "nx doctor: git found" \
     "nx doctor 2>&1" \

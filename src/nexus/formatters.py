@@ -38,37 +38,25 @@ def _display_path(meta: dict, default: str = "") -> str:
     )
 
 
-def _find_matching_lines(
-    chunk_text: str,
-    query: str,
-    rg_matched_lines: list[int] | None = None,
-    chunk_line_start: int = 0,
-) -> list[int]:
+def _find_matching_lines(chunk_text: str, query: str) -> list[int]:
     """Return 0-based line indices within *chunk_text* that best match *query*.
 
     Priority order:
-    1. *rg_matched_lines* (absolute line numbers from ripgrep) translated to
-       chunk-relative indices.
-    2. Keyword match: split *query* on ``\\W+``, case-insensitive substring
+    1. Keyword match: split *query* on ``\\W+``, case-insensitive substring
        match — a line matches if any token appears.
-    3. Fallback to ``[0]`` (first line of chunk).
+    2. Fallback to ``[0]`` (first line of chunk).
+
+    A third lane used to come first: absolute line numbers carried over from
+    a ripgrep hit (``rg_matched_lines``), translated to chunk-relative. The
+    ripgrep path is gone (nexus-06aei), so nothing populates it and the
+    parameter is removed rather than left as a permanently-None argument.
     """
     lines = chunk_text.splitlines()
     n = len(lines)
     if n == 0:
         return [0]
 
-    # 1. rg_matched_lines: translate absolute → chunk-relative
-    if rg_matched_lines:
-        relative = []
-        for abs_ln in rg_matched_lines:
-            idx = abs_ln - chunk_line_start
-            if 0 <= idx < n:
-                relative.append(idx)
-        if relative:
-            return sorted(set(relative))
-
-    # 2. Keyword match
+    # 1. Keyword match
     tokens = [t.lower() for t in re.split(r"\W+", query) if t]
     if tokens:
         matches = []
@@ -79,7 +67,7 @@ def _find_matching_lines(
         if matches:
             return matches
 
-    # 3. Fallback
+    # 2. Fallback
     return [0]
 
 
@@ -291,11 +279,7 @@ def format_compact(
             continue
 
         if query:
-            matches = _find_matching_lines(
-                content, query,
-                rg_matched_lines=r.metadata.get("rg_matched_lines"),
-                chunk_line_start=line_start,
-            )
+            matches = _find_matching_lines(content, query)
             best_idx = matches[0]
         else:
             best_idx = 0
@@ -326,11 +310,7 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
         chunk_lines = content.splitlines() if content else [""]
 
         if query and chunk_lines:
-            matches = _find_matching_lines(
-                content, query,
-                rg_matched_lines=r.metadata.get("rg_matched_lines"),
-                chunk_line_start=line_start,
-            )
+            matches = _find_matching_lines(content, query)
             best_idx = min(matches[0], len(chunk_lines) - 1)
             line_no = line_start + best_idx
             text = chunk_lines[best_idx]
@@ -344,7 +324,7 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
 
 def format_json(results: list[SearchResult]) -> str:
     """Format results as a JSON array with id, content, distance,
-    hybrid_score, keyword_only, collection, and metadata.
+    hybrid_score, collection, and metadata.
 
     Metadata fields are spread into the top-level object first, then the canonical
     fields (id, content, distance, collection) are written last so they always win
@@ -352,21 +332,12 @@ def format_json(results: list[SearchResult]) -> str:
     """
     items: list[dict[str, Any]] = []
     for r in results:
-        # A ripgrep hit has no embedding and therefore no vector distance.
-        # It was reported as 0.0 -- a PERFECT match, the best value in the
-        # range -- so a keyword hit outranked every real vector hit for any
-        # consumer that read the number (nexus-la5pr). null says what is
-        # true: this row was not scored by distance. `keyword_only` is the
-        # positive form of the same fact, so a consumer can branch on it
-        # without special-casing a collection name.
-        keyword_only = r.collection == "rg__cache"
         item: dict[str, Any] = {
             **r.metadata,
             "id": r.id,
             "content": r.content,
-            "distance": None if keyword_only else r.distance,
+            "distance": r.distance,
             "hybrid_score": r.hybrid_score,
-            "keyword_only": keyword_only,
             "collection": r.collection,
         }
         items.append(item)
@@ -408,7 +379,7 @@ def format_plain_with_context(
     """Plain-text format with optional context-line windowing.
 
     When *query* is provided and context flags are active, windows are
-    centered on matching lines (keyword or rg_matched_lines) rather than
+    centered on matching lines (keyword) rather than
     the chunk start.  When *query* is ``None``, falls back to showing the
     first N lines from the chunk start (current behavior).
 
@@ -430,11 +401,7 @@ def format_plain_with_context(
 
         if query and (lines_before > 0 or lines_after > 0):
             # Smart windowing: center on matching lines
-            matches = _find_matching_lines(
-                content, query,
-                rg_matched_lines=r.metadata.get("rg_matched_lines"),
-                chunk_line_start=line_start,
-            )
+            matches = _find_matching_lines(content, query)
             context = _extract_context(chunk_lines, matches, lines_before, lines_after)
             for idx, _line_type, text in context:
                 line_no = line_start + idx

@@ -9,7 +9,6 @@ import structlog
 from nexus.config import get_telemetry_config, get_tuning_config, load_config
 from nexus.corpus import is_conformant_collection_name, resolve_corpus
 from nexus.commands.store import _t3
-from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import (
     _format_with_bat,
     _is_bat_installed,
@@ -18,7 +17,7 @@ from nexus.formatters import (
     format_plain_with_context,
     format_vimgrep,
 )
-from nexus.scoring import RG_FLOOR_SCORE, round_robin_interleave
+from nexus.scoring import round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.search_engine import (
     SearchDiagnostics,
@@ -44,8 +43,6 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
         raise click.BadParameter(str(e), param_hint="'--where'")
 
 _CONTENT_MAX_CHARS: int = 200
-EXACT_MATCH_BOOST: float = 0.15
-RG_ONLY_PENALTY: float = 0.8  # Multiplier for rg-only results (files not in vector top-K)
 
 # Threshold recommendation offset: worst-offender threshold + this value is
 # suggested as the ``--threshold`` users should try first. 0.20 empirically
@@ -103,59 +100,6 @@ def _maybe_emit_silent_zero_note(
         err=True,
     )
 
-# Directory where ripgrep cache files are stored (overridable in tests via monkeypatch).
-# Resolved at import time via NEXUS_CONFIG_DIR helper for sandbox isolation.
-def _resolve_config_dir_at_import() -> Path:
-    import os as _os  # noqa: PLC0415 — stdlib os deferred to function scope
-
-    override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".config" / "nexus"
-
-
-_CONFIG_DIR: Path = _resolve_config_dir_at_import()
-
-# Prefixes to strip when mapping collection names to cache file names
-_COLLECTION_PREFIXES = ("code__", "docs__", "rdr__", "knowledge__")
-
-
-def _find_rg_cache_paths(corpus: str | None = None) -> list[Path]:
-    """Return ripgrep cache files, optionally filtered by corpus.
-
-    When *corpus* is provided (e.g. ``"code__nexus-a1b2c3d4"``), strip the
-    collection prefix and glob for ``{slug}.cache`` instead of ``*.cache``.
-    """
-    if corpus is None:
-        return list(_CONFIG_DIR.glob("*.cache"))
-    slug = corpus
-    for prefix in _COLLECTION_PREFIXES:
-        if slug.startswith(prefix):
-            slug = slug[len(prefix):]
-            break
-    return list(_CONFIG_DIR.glob(f"{slug}.cache"))
-
-
-def _rg_hit_to_result(hit: dict) -> SearchResult:
-    """Convert a ripgrep hit dict to a SearchResult for hybrid scoring."""
-    file_path = hit["file_path"]
-    line_number = hit["line_number"]
-    return SearchResult(
-        id=f"rg:{file_path}:{line_number}",
-        content=hit["line_content"],
-        distance=0.0,
-        collection="rg__cache",
-        metadata={
-            "file_path": file_path,
-            "source_path": file_path,
-            "line_start": line_number,
-            "frecency_score": hit.get("frecency_score", 0.5),
-            "source": "ripgrep",
-        },
-        hybrid_score=0.0,
-    )
-
-
 @click.command("search")
 @click.argument("query")
 @click.argument("path", required=False, default=None)
@@ -169,7 +113,8 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.option("--n", "-m", "--max-results", "n", default=10, show_default=True,
               help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,
-              help="Merge semantic + ripgrep results for code (0.7*vector + 0.3*frecency)")
+              help="Blend git frecency into the score for code corpora "
+                   "(0.7*vector + 0.3*frecency)")
 @click.option("--no-rerank", "no_rerank", is_flag=True, default=False,
               help="Disable cross-corpus reranking (use round-robin instead)")
 @click.option("--vimgrep", is_flag=True, default=False,
@@ -467,12 +412,6 @@ def search_cmd(
                 rerank=want_server_rerank,
                 rerank_meta_out=rerank_meta,
             )
-        if hybrid:
-            # Scope ripgrep to matching caches when a single corpus is targeted
-            rg_corpus = target_collections[0] if len(target_collections) == 1 else None
-            for cache_path in _find_rg_cache_paths(corpus=rg_corpus):
-                rg_hits = search_ripgrep(q, cache_path, n_results=n * 2, timeout=tuning.ripgrep_timeout)
-                raw.extend(_rg_hit_to_result(h) for h in rg_hits)
         return raw
 
     try:
@@ -562,20 +501,6 @@ def search_cmd(
                 click.echo("No results.")
             return
 
-    # Pre-reranker: capture rg file paths and matched line numbers while all
-    # results are present. The reranker's top_k may drop rg hits.
-    rg_file_paths: set[str] = set()
-    rg_matched_lines: dict[str, list[int]] = {}  # file_path → [line_numbers]
-    if hybrid:
-        for r in results:
-            if r.collection == "rg__cache":
-                fp = r.metadata.get("file_path", "")
-                if fp:
-                    rg_file_paths.add(fp)
-                    ln = r.metadata.get("line_start")
-                    if ln is not None:
-                        rg_matched_lines.setdefault(fp, []).append(int(ln))
-
     # Hybrid scoring — pass tuning weights from config (honours per-repo .nexus.yml)
     # nexus-0bmhd: apply_hybrid_scoring's chunk-count penalty (nexus-dxly's
     # catalog-backed chunk_count resolution) is removed — scoring no longer
@@ -639,53 +564,6 @@ def search_cmd(
         for r in results:
             groups.setdefault(r.collection, []).append(r)
         results = apply_file_diversity_cap(round_robin_interleave(list(groups.values())))[:n]
-
-    # Post-reranker: apply exact-match boost using pre-captured rg file paths.
-    # Fires unconditionally after both reranked and no-rerank paths.
-    # Also attach matched line numbers for downstream context windowing (RDR-027).
-    if rg_file_paths:
-        for r in results:
-            # nexus-1qed: rg paths are filesystem absolute; prefer the
-            # catalog-resolved _display_path so post-prune chunks still
-            # match. Falls through to source_path / file_path for legacy
-            # chunks predating the doc_id backfill.
-            src = (
-                r.metadata.get("_display_path")
-                or r.metadata.get("source_path")
-                or r.metadata.get("file_path", "")
-            )
-            if src in rg_file_paths:
-                r.hybrid_score = min(1.0, r.hybrid_score + EXACT_MATCH_BOOST)
-                if src in rg_matched_lines:
-                    r.metadata["rg_matched_lines"] = rg_matched_lines[src]
-
-    # Filter rg__cache signals from output. Promote rg-only results (files that
-    # ripgrep found but vector search missed) with a penalty score.
-    if hybrid:
-        # nexus-1qed: same path-priority as the rg exact-match boost so
-        # post-prune chunks dedupe correctly against rg results.
-        vector_paths = {
-            (
-                r.metadata.get("_display_path")
-                or r.metadata.get("source_path")
-                or r.metadata.get("file_path", "")
-            )
-            for r in results if r.collection != "rg__cache"
-        }
-        seen_rg_paths: set[str] = set()
-        kept: list[SearchResult] = []
-        for r in results:
-            if r.collection != "rg__cache":
-                kept.append(r)
-            else:
-                fp = r.metadata.get("file_path", "")
-                if fp not in vector_paths and fp not in seen_rg_paths:
-                    # rg-only: file not in vector results — keep first hit, penalized
-                    r.hybrid_score = RG_FLOOR_SCORE * RG_ONLY_PENALTY
-                    kept.append(r)
-                    seen_rg_paths.add(fp)
-                # else: rg hit for a file already in vector results → drop (signal only)
-        results = kept if kept else results
 
     # --reverse: invert final order
     if reverse:

@@ -4,7 +4,7 @@
 
 Sandbox + test isolation depends on a single env var redirecting the
 entire footprint (T2, catalog, sessions, checkpoints, pipeline buffer,
-logs, locks, ripgrep caches, MinerU output, PID files). The review that
+logs, locks, MinerU output, PID files). The review that
 spawned this test discovered that ``default_db_path()`` hard-coded
 ``~/.config/nexus/memory.db`` and silently routed sandbox runs back to
 the user's production T2. Every helper listed here must resolve under
@@ -226,13 +226,6 @@ class TestContextRedirects:
         from nexus.context import CONTEXT_L1_PATH
 
         assert CONTEXT_L1_PATH == sandbox_dir / "context_l1.txt"
-
-
-class TestSearchRipgrepCacheRedirects:
-    def test_search_config_dir_redirects(self, sandbox_dir: Path):
-        from nexus.commands.search_cmd import _CONFIG_DIR
-
-        assert _CONFIG_DIR == sandbox_dir
 
 
 class TestCommandHelpers:

@@ -53,6 +53,7 @@ nexus-05m1i
 nexus-064jj
 nexus-064jj.1
 nexus-065ib
+nexus-06aei
 nexus-06fu4
 nexus-06tlz
 nexus-06y9e

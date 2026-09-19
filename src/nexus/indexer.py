@@ -4343,7 +4343,6 @@ def _run_index(
     from nexus.classifier import ContentClass, classify_file, looks_like_binary_content  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.config import load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.ripgrep_cache import build_cache  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     info = registry.get(repo)
     if info is None:
@@ -4576,7 +4575,6 @@ def _run_index(
     code_files: list[tuple[float, Path]] = []
     prose_files: list[tuple[float, Path]] = []
     pdf_files: list[tuple[float, Path]] = []
-    all_text_scored: list[tuple[float, Path]] = []  # code + prose for ripgrep cache
 
     # Use git ls-files to respect .gitignore (security + efficiency)
     include_untracked = indexing_config.get("include_untracked", False)
@@ -4656,7 +4654,6 @@ def _run_index(
         match classification:
             case ContentClass.CODE:
                 code_files.append((score, path))
-                all_text_scored.append((score, path))
             case ContentClass.PROSE:
                 # nexus-rqsh1: extensions unknown to classify_file's
                 # code/skip/binary-asset tables fall through to PROSE
@@ -4674,10 +4671,9 @@ def _run_index(
                     )
                 else:
                     prose_files.append((score, path))
-                    all_text_scored.append((score, path))
             case ContentClass.PDF:
                 pdf_files.append((score, path))
-                # PDF files not included in ripgrep text cache
+                # PDF files are not text-scored
             case ContentClass.SKIP:
                 # Known-noise or binary asset (nexus-6e6u1). Logged at debug so
                 # the operator can see what got dropped at classification time
@@ -4694,7 +4690,6 @@ def _run_index(
     code_files.sort(key=lambda x: x[0], reverse=True)
     prose_files.sort(key=lambda x: x[0], reverse=True)
     pdf_files.sort(key=lambda x: x[0], reverse=True)
-    all_text_scored.sort(key=lambda x: x[0], reverse=True)
 
     # GH #371 + #436: surface the oversize-skip set so the operator
     # knows what got dropped. Single structured log + on_phase line
@@ -4738,18 +4733,13 @@ def _run_index(
     if on_start:
         on_start(len(code_files) + len(prose_files) + len(pdf_files))
 
-    # Update ripgrep cache (code + prose text files, not PDFs)
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    # Repo identity for the catalog hook below. This used to be computed a
+    # few lines further down, inside the ripgrep-cache block, and was taken
+    # out with it (nexus-06aei) — _catalog_hook needs both halves, so it is
+    # computed here on its own account rather than as a side effect of
+    # naming a cache file.
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     _repo_basename, _repo_hash = _repo_identity(repo)
-    cache_path = nexus_config_dir() / f"{_repo_basename}-{_repo_hash}.cache"
-    if delta_changed is None:
-        build_cache(repo, cache_path, all_text_scored)
-    else:
-        # nexus-fltb4: rebuilding the rg cache from a delta-filtered file
-        # list would CLOBBER the full cache with a sliver. Leave the cache
-        # slightly stale; the next full run refreshes it.
-        _log.debug("since_head_rg_cache_skipped", files=len(all_text_scored))
 
     # Credential check and T3 setup
     from nexus.config import is_local_mode as _is_local  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)

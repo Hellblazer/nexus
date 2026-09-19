@@ -18,8 +18,6 @@ _EPSILON = 1e-9
 # search_engine.apply_ranking_boosts() is accepted-but-unused vestige, kept
 # only so TuningConfig.file_size_threshold and existing callers keep
 # working unchanged.
-RG_FLOOR_SCORE = 0.5
-
 # Default scoring weights (kept as module constants for backward compatibility).
 # Override by passing explicit weights to hybrid_score() / apply_hybrid_scoring().
 _VECTOR_WEIGHT: float = 0.7
@@ -110,7 +108,7 @@ def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float
     actually spans more than one embedding model.
 
     Returns ``{collection_name: factor}`` covering every distinct
-    non-``rg__cache`` collection in *results*. When every collection
+    collection in *results*. When every collection
     resolves to the SAME model (the local-mode default, and any single-
     corpus cloud-mode search), every factor is exactly ``1.0`` — a true
     no-op, not a prefix-derived reshuffle. Only when two or more distinct
@@ -127,7 +125,7 @@ def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float
             model_by_collection[collection] = model
         return model
 
-    collections = {r.collection for r in results if r.collection != "rg__cache"}
+    collections = {r.collection for r in results}
     models = {_model_for(c) for c in collections}
 
     if len(models) <= 1:
@@ -306,9 +304,6 @@ def apply_hybrid_scoring(
     if hybrid and not has_code:
         _log.warning("--hybrid has no effect — no code corpus in scope")
 
-    # Exclude rg__cache from normalization window — distance=0.0 from ripgrep
-    # hits distorts the min-max range for real vector distances.
-    #
     # nexus-tox2m: ONE pooled window across every result, computed over
     # CALIBRATED distances — see this function's docstring "Normalization
     # window" section. calibration_factors resolves to 1.0 everywhere when
@@ -316,10 +311,7 @@ def apply_hybrid_scoring(
     # _resolve_calibration_factors docstring — this is the local-mode
     # no-op gate).
     calibration_factors = _resolve_calibration_factors(results)
-    distances = [
-        _effective_distance(r, calibration_factors)
-        for r in results if r.collection != "rg__cache"
-    ]
+    distances = [_effective_distance(r, calibration_factors) for r in results]
     frecencies = [
         r.metadata.get("frecency_score", 0.0)
         for r in results
@@ -327,9 +319,6 @@ def apply_hybrid_scoring(
     ]
 
     for r in results:
-        if r.collection == "rg__cache":
-            r.hybrid_score = RG_FLOOR_SCORE
-            continue
         # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0.
         # A single-element window normalizes to 1.0 ("trivially the maximum" —
         # min_max_normalize's own contract, pinned in test_min_max_normalize);
