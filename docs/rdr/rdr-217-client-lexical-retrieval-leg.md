@@ -769,10 +769,32 @@ with the right name.
 
 Two surfaces, one decision, and neither is built before Phase 1 reports.
 
+Two further questions were settled by Sam on 2026-09-19, both of which apply
+to whichever behaviour Phase 1 selects.
+
+A lexical row is NOT filtered by the per-collection distance threshold. That
+filter, applied to every row at `search_engine.py:837-841`, is a ceiling on
+vector distance, and a row the lexical gate matched can sit far away in vector
+space precisely because a different gate found it. Filtering it there would
+drop the rows this leg exists to find, which is this document's own failure
+shape on a new surface. The filter continues to apply to the vector leg
+unchanged. The consequence to handle rather than discover: distance is not
+comparable across the two legs, so no ordering may assume it is.
+
+On a backend without the hybrid route, the flag REFUSES and names the backend.
+It does not fall back to vectors silently, and it does not warn and continue: a
+warning is routinely unread, and an agent calling the MCP tool will not act on
+one. The shape is the existing `supports_server_rerank` capability marker, a
+class attribute `HttpVectorClient` carries and `InMemoryVectorClient`
+deliberately does not define, read through `getattr(t3, ..., False)`. The gate
+belongs in `search_engine.py` rather than only in `search_cmd.py`, so the MCP
+surface inherits the refusal instead of re-deriving it.
+
 #### Step 1: the CLI flag `--lexical`
 
 Name settled by Sam; behaviour depends on Phase 1's answer to additive union
 versus explicit mode. `--hybrid` is untouched and keeps its frecency meaning.
+Threshold exemption and no-leg refusal as settled above.
 
 #### Step 2: the MCP `search` parameter `lexical`
 
@@ -1017,4 +1039,4 @@ function family this RDR explicitly does not touch.
 
 - 2026-09-19: Gate round 1 — BLOCKED (1 Critical, 2 Significant, 1 ship-blocker(s)); commit `8f71c96f8`; critique `nexus_rdr/217-gate-critique-2026-09-19-r1`.
 - 2026-09-19: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `7d27a4a55`; critique `nexus_rdr/217-gate-critique-2026-09-19-r2`.
-
+- 2026-09-19: Sam settled two Phase 3 questions after accept: a lexical row is exempt from the per-collection distance threshold, and the flag refuses on a backend without the hybrid route rather than falling back. Additive union versus explicit mode remains open on Phase 1.
