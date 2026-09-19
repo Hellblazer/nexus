@@ -331,7 +331,7 @@ _recovery_cmds.register(catalog)
 _trash_cmds.register(catalog)
 
 
-@catalog.command("init")
+@catalog.command("init", hidden=True)
 @click.option("--remote", default="", help="Retired option (kept so old invocations parse).")
 def init_cmd(remote: str) -> None:
     """Retired: the nexus service owns the catalog — there is nothing to init."""
@@ -346,7 +346,7 @@ def init_cmd(remote: str) -> None:
     )
 
 
-@catalog.command("setup")
+@catalog.command("setup", hidden=True)
 @click.option("--remote", default="", help="Retired option (kept so old invocations parse).")
 def setup_cmd(remote: str) -> None:
     """Retired: the nexus service owns the catalog — there is nothing to set up."""
@@ -830,7 +830,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
         click.echo(f"Not found: {t}")
 
 
-@catalog.command("sync")
+@catalog.command("sync", hidden=True)
 @click.option("--message", "-m", default="catalog update", help="Retired option (kept so old invocations parse).")
 def sync_cmd(message: str) -> None:
     """Retired: the nexus service's Postgres is the sole catalog authority — nothing to sync."""
@@ -845,7 +845,7 @@ def sync_cmd(message: str) -> None:
     )
 
 
-@catalog.command("pull")
+@catalog.command("pull", hidden=True)
 def pull_cmd() -> None:
     """Retired: the nexus service's Postgres is the sole catalog authority — nothing to pull."""
     # catalog-git-DECISION OPTION C: see sync_cmd above.

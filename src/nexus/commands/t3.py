@@ -188,7 +188,7 @@ def t3() -> None:
     """T3 vector-store maintenance commands."""
 
 
-@t3.command("prune-stale")
+@t3.command("prune-stale", hidden=True)
 @click.option(
     "--collection",
     "-c",

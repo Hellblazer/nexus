@@ -8,6 +8,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Retired CLI verbs no longer appear in `--help`** (nexus-uks83). Six groups'
+  worth: four in `nx aspects`, four in `nx catalog`, one in `nx taxonomy`, one
+  in `nx t3`. Each still EXISTS and still refuses loudly with guidance naming
+  what to do instead, because answering an old invocation with "No such
+  command" drops that guidance; they are hidden, not deleted, following the
+  `link-*` verbs in `nx catalog` that were already hidden the same way.
+
 - **The git hook stanza now passes `--since-head`** (nexus-0l5so). That flag
   was built as "the per-commit fast path the removed git hooks needed"
   (b38435724), and `docs/cli-reference.md` has described it that way ever

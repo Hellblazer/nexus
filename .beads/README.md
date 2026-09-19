@@ -54,9 +54,9 @@ Issues in Beads are:
 - Fast, lightweight, and stays out of your way
 
 🔧 **Git Integration**
-- Automatic sync with git commits
+- A Dolt-backed database you push with `bd dolt push`
 - Branch-aware issue tracking
-- Intelligent JSONL merge resolution
+- Dolt handles concurrent edits; the JSONL is an export, not the merge surface
 
 ## Get Started with Beads
 

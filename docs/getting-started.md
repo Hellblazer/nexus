@@ -15,9 +15,13 @@
   is built for those three targets only, so an **Intel Mac** or **Windows**
   cannot run a local install: `nx init` stops with an error naming how to get
   a bundle, rather than falling back to anything.
-  No GPU is required or used: the local embedding model is a bundled ONNX
-  model that runs on CPU (only `CPUExecutionProvider` appears anywhere), and
-  there is no CUDA or Metal path in the code.
+  No GPU is required, and none is used by default. Search embeds through a
+  bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
+  the tree). On Linux the installer additionally pins torch to its CPU build,
+  because the PyPI wheel is the CUDA one and drags about 4.5 GB of nvidia
+  packages that nothing on this path uses; set `NX_TORCH_BACKEND` (to `auto`,
+  `cu130`, and so on) to opt a GPU box back in. macOS wheels carry no CUDA
+  payload, so nothing is pinned there.
 
 Check your Python version:
 
