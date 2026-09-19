@@ -144,6 +144,8 @@ _ALLOWED_HOOK_TOOLS: frozenset[str] = frozenset(
         "mcp__plugin_conexus_nexus__hook_subagent_start",
         "mcp__plugin_conexus_nexus__hook_post_compact",
         "mcp__plugin_conexus_nexus__hook_divergence_language_guard",
+        "mcp__plugin_conexus_nexus__hook_subagent_start_tuple",
+        "mcp__plugin_conexus_nexus__hook_subagent_stop_tuple",
     }
 )
 

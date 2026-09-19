@@ -80,6 +80,8 @@ from nexus.hooks.auto_approve import run as _run_auto_approve
 from nexus.hooks.subagent_start import run as _run_subagent_start
 from nexus.hooks.post_compact import run as _run_post_compact
 from nexus.hooks.divergence_language_guard import run as _run_divergence_language_guard
+from nexus.hooks.tuple_projection import run_start as _run_subagent_start_tuple
+from nexus.hooks.tuple_projection import run_stop as _run_subagent_stop_tuple
 from nexus.hooks.pre_close_verification import run as _run_pre_close_verification
 from nexus.hooks.stop_verification import run as _run_stop_verification
 from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
@@ -350,6 +352,50 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         },
         summary=(
             "flags divergence language in a post-mortem just written — advisory only, since acknowledged deferral and silent scope reduction look alike and only a reader can tell them apart"
+        ),
+    ),
+    HookToolSpec(
+        name="subagent_start_tuple",
+        run=_run_subagent_start_tuple,
+        fields=("session_id", "agent_id", "agent_type", "task"),
+        field_docs={
+            "session_id": (
+                "Names the ledger the projection writes beside. The "
+                "projector resolves it itself; this carries the hook's "
+                "own view so a detached run cannot pick up a sibling "
+                "session's machine-wide pointer."
+            ),
+            "agent_id": (
+                "The tuple's identity. Its id derives from (agent_id, "
+                "kind), so a wrong value lands on a different tuple "
+                "rather than colliding visibly."
+            ),
+            "agent_type": "Recorded on the tuple as the dispatch's declared type.",
+            "task": "The dispatch's task text, carried onto the tuple.",
+        },
+        summary=(
+            "projects the RDR-205 ledger START tuple for a subagent that "
+            "just began — a sibling of hook_subagent_start, never a child, "
+            "so the projection still runs when that hook fails"
+        ),
+    ),
+    HookToolSpec(
+        name="subagent_stop_tuple",
+        run=_run_subagent_stop_tuple,
+        fields=("session_id", "agent_id", "agent_type"),
+        field_docs={
+            "session_id": "Names the ledger the projection writes beside.",
+            "agent_id": (
+                "The same harness-issued id the SubagentStart payload "
+                "carried, which subagent-start already injected into that "
+                "agent's context as its claimant id — so the REPORT tuple "
+                "needs no cooperation from the stopping agent."
+            ),
+            "agent_type": "Recorded on the tuple as the dispatch's declared type.",
+        },
+        summary=(
+            "projects the RDR-205 ledger REPORT tuple for a subagent that "
+            "just stopped — a sibling of hook_subagent_stop, never a child"
         ),
     ),
 )
