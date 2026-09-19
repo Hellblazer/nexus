@@ -104,7 +104,7 @@ if [ -f "$NX_INDEX_LOG" ] && [ "$(wc -c < "$NX_INDEX_LOG" 2>/dev/null || echo 0)
 fi
 echo "=== nx index post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
   >> "$NX_INDEX_LOG"
-nx index repo "$REPO_TOP" --on-locked=skip \\
+nx index repo "$REPO_TOP" --since-head --on-locked=skip \\
   >> "$NX_INDEX_LOG" 2>&1 &
 disown
 {end}""".format(begin=SENTINEL_BEGIN, end=SENTINEL_END)

@@ -151,6 +151,20 @@ class TestT1HandoffMarkerWriter:
             assert marker is not None
             assert marker.new_session_id == "new-sess-id"
 
+    def test_fork_writes_markers_for_every_sibling(self, tmp_path, monkeypatch) -> None:
+        """nexus-kdxyv: ``/branch`` and ``--fork-session`` fire SessionStart
+        with ``source: "fork"`` (Claude Code >= 2.1.213), a new session id
+        in the SAME process, so the live MCP server needs the same handoff
+        a ``/clear`` gets: its waiter and lease move to the fork, the
+        parent's mailbox stays with the parent (RDR-208 Fork paragraph)."""
+        from nexus.daemon.t1_handoff import read_handoff_marker
+
+        self._session_start(monkeypatch, tmp_path, source="fork")
+        for pid in (5001, 5002):
+            marker = read_handoff_marker(pid, tmp_path)
+            assert marker is not None
+            assert marker.new_session_id == "new-sess-id"
+
     def test_startup_writes_no_marker(self, tmp_path, monkeypatch) -> None:
         from nexus.daemon.t1_handoff import read_handoff_marker
 

@@ -219,6 +219,30 @@ def _directory_heartbeat(
     lease.last_send = t
 
 
+def _release_directory_entry(
+    store: Any, name: str, session_id: str, lease: _DirectoryLease,
+) -> None:
+    """Release this lease's live ``directory/<name>`` row on a DELIBERATE
+    stop (an ``unsubscribe`` of the instance mailbox, or ``shutdown`` on
+    a session handoff): re-send the SAME nonce with ``ttl_seconds=1``, so
+    the idempotent tuple id updates the live row's expiry and it lapses
+    within about a second instead of at :data:`DIRECTORY_TTL_S` (RDR-208
+    test plan; bead nexus-kdxyv restored it from the deleted CLI watcher's
+    own ``_release_directory_entry``). A plain process exit never runs
+    this and leaves the row for one TTL, as the RDR says. A no-op when
+    the lease was never armed. Best-effort: a failure is logged and the
+    row lapses by TTL, never raised into a handoff or a tool call."""
+    if not lease.armed:
+        return
+    try:
+        store.out(
+            f"directory/{name}", {"name": name}, dims={"session_id": session_id},
+            nonce=lease.nonce, ttl_seconds=1,
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort release; the row lapses by TTL otherwise
+        _log.warning("subscriptions_directory_release_failed", name=name, error=str(e))
+
+
 def _lease_loop(
     stop: threading.Event,
     store_factory: Callable[[], Any],
@@ -312,6 +336,11 @@ class SubscriptionSet:
     _listeners: list[Callable[["SubscriptionSet"], None]] = field(default_factory=list, repr=False)
     _lease_thread: threading.Thread | None = field(default=None, repr=False, compare=False)
     _lease_stop: threading.Event | None = field(default=None, repr=False, compare=False)
+    #: The live lease's state, name and store factory, kept so a deliberate
+    #: stop can release the row it wrote (:func:`_release_directory_entry`).
+    _lease: _DirectoryLease | None = field(default=None, repr=False, compare=False)
+    _lease_name: str | None = field(default=None, repr=False, compare=False)
+    _lease_store_factory: Callable[[], Any] | None = field(default=None, repr=False, compare=False)
 
     @property
     def session_mailbox(self) -> str:
@@ -496,17 +525,33 @@ class SubscriptionSet:
             daemon=True,
         )
         self._lease_stop, self._lease_thread = stop, thread
+        self._lease, self._lease_name, self._lease_store_factory = lease, name, store_factory
         thread.start()
 
     def _stop_lease(self) -> None:
-        if self._lease_stop is not None:
-            self._lease_stop.set()
-        self._lease_thread = None
-        self._lease_stop = None
+        """Stop the heartbeat thread, wait for an in-flight tick so it
+        cannot re-send after the release, then release the row. Idempotent:
+        a second call finds no lease and writes nothing."""
+        stop, thread = self._lease_stop, self._lease_thread
+        lease, name, factory = self._lease, self._lease_name, self._lease_store_factory
+        self._lease_thread = self._lease_stop = None
+        self._lease = self._lease_name = self._lease_store_factory = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=_LEASE_POLL_S + 5.0)
+        if lease is None or name is None or factory is None:
+            return
+        try:
+            with factory() as db:
+                _release_directory_entry(db.tuples, name, self.session_id, lease)
+        except Exception as e:  # noqa: BLE001 — best-effort release; see _release_directory_entry
+            _log.warning("subscriptions_directory_release_failed", name=name, error=str(e))
 
     def shutdown(self) -> None:
-        """Stop any live lease thread. Call before dropping a
-        :class:`SubscriptionSet` (tests; a session-end/handoff path)."""
+        """Stop any live lease thread and release its directory row. Call
+        before dropping a :class:`SubscriptionSet` (tests; the session
+        handoff in ``nexus.mcp.core._t1_handoff_tick``)."""
         self._stop_lease()
 
     # ── Persistence (T1, keyed by session id) ───────────────────────────
@@ -549,13 +594,18 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
     set with just the session mailbox (a ``/clear`` — a new session id has
     nothing to find, since T1 itself is already session-scoped).
 
-    When the restored state names an instance mailbox and *store_factory*
-    is given, the directory lease is restarted immediately (a resumed
-    session keeps holding the name it registered before). Passing no
-    *store_factory* restores the list without restarting the lease --
-    used by callers (tests; :func:`get_or_load` cache misses that will
-    call :meth:`SubscriptionSet.subscribe` again themselves) that manage
-    the lease separately.
+    Board topics only. The instance mailbox is NOT restored (bead
+    nexus-kdxyv): the ``ListAgents`` name changes at every process start
+    (RDR-208's identity table), so the name a resumed session held is
+    stale by construction; RDR-211's own Subscriptions design says a
+    ``/resume`` under a new name repeats the ``tuple_subscribe`` call and
+    the old name's mail strands, as RDR-208 accepted. Restoring the old
+    name re-armed its directory lease for the life of the new process and
+    made the new name's subscribe refuse as a second instance mailbox.
+    The old name's row lapses at its TTL from the old process's exit, as
+    a plain exit leaves it. *store_factory* is accepted for the call
+    shape :func:`get_or_load` passes and is unused: nothing restored here
+    holds a lease.
     """
     for entry in t1.list_entries():
         tags = (entry.get("tags") or "").split(",")
@@ -568,10 +618,8 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
         if data.get("session_id") != session_id:
             continue
         obj = SubscriptionSet.from_json(data)
-        if obj.instance_mailbox and obj._instance_name and store_factory is not None:
-            obj._start_lease(
-                obj._instance_name, store_factory, DIRECTORY_TTL_S, DIRECTORY_HEARTBEAT_S, _LEASE_POLL_S,
-            )
+        obj.instance_mailbox = None  # see the docstring: the name is stale on resume
+        obj._instance_name = None
         return obj
     return SubscriptionSet(session_id=session_id)
 

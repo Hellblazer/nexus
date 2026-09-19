@@ -6,6 +6,81 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.54.0] - 2026-09-19
+
+Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129)),
+unchanged from 7.53.0. No engine cut: pin and cloud are both at v0.1.129 with
+no `service/src/main` drift.
+
+This release is what makes the plugin-side fixes below LIVE. Claude Code loads
+the plugin from the tag `marketplace.json` pins, so every change under
+`conexus/` since 7.53.0 has been inert in every session until now. The `fork`
+matcher is the one that matters most: until this tag, `/branch` fired no hook
+at all, for anyone.
+
+### Plugin changes that become active with this release
+
+- `conexus/hooks/hooks.json`: the SessionStart matcher gains `fork`, so
+  `/branch` and `--fork-session` run the session-start hook (nexus-kdxyv).
+- `conexus/hooks/scripts/mailbox_drain.py`: the dead `_session_marker_names`
+  is deleted (nexus-kdxyv).
+- Five skills (`conexus/skills/research-synthesis`, `strategic-planning`, `architecture`, `debugging` and `deep-analysis`) each stated a default
+  model their own agent's frontmatter contradicts; all five now name the
+  pinning file and what omitting `model` actually gets (nexus-3uxbc).
+
+### Fixed
+
+- **Retired CLI verbs no longer appear in `--help`** (nexus-uks83). Six groups'
+  worth: four in `nx aspects`, four in `nx catalog`, one in `nx taxonomy`, one
+  in `nx t3`. Each still EXISTS and still refuses loudly with guidance naming
+  what to do instead, because answering an old invocation with "No such
+  command" drops that guidance; they are hidden, not deleted, following the
+  `link-*` verbs in `nx catalog` that were already hidden the same way.
+
+- **The git hook stanza now passes `--since-head`** (nexus-0l5so). That flag
+  was built as "the per-commit fast path the removed git hooks needed"
+  (b38435724), and `docs/cli-reference.md` has described it that way ever
+  since, but the stanza `nx hooks install` writes never carried it, so every
+  commit paid the full-repo tax the flag exists to remove. It falls back
+  loudly to a full index whenever the delta is unusable (no stored base, an
+  unreachable one after a rewrite, a parse surprise), which is what makes it
+  correct on `post-merge` and `post-rewrite` as well as `post-commit`.
+  Existing installs keep the old stanza until `nx hooks update`; `nx doctor`
+  reports the drift.
+
+
+- **A `/clear` or `/resume` handoff now moves the channel waiter with the
+  session** (nexus-kdxyv). The MCP server's T1 handoff swapped the session
+  id but left the channel waiter and subscription set built for the old
+  id running: the old mailbox's references kept flowing into the new
+  conversation, no channel-status record was written for the new id, the
+  old instance name's directory lease kept heartbeating, and teardown
+  never cancelled the old waiter. The handoff now cancels the old waiter
+  (recording `alive: false` under the old id), releases the old
+  subscription set's `directory/<name>` row within about a second (the
+  RDR-208 release, re-sending the same nonce with a one-second TTL, which
+  `tuple_unsubscribe` now performs too) and starts a waiter under the new
+  id.
+- **A resumed session no longer restores its old instance-name mailbox.**
+  `nexus.mcp.subscriptions.load()` restored the whole subscription list on
+  a `/resume`, instance mailbox included, but the `ListAgents` name changes
+  at every process start, so the restored name was stale by construction:
+  its `directory/<name>` lease was re-armed for the life of the new
+  process, and the session's own `tuple_subscribe` under its NEW name was
+  then refused as a second instance mailbox. Board topics still restore.
+  This is what RDR-211 already describes ("a `/resume` under a new name
+  repeats it, and the old name's mail strands"); the old name's row now
+  lapses at its TTL from the previous process's exit.
+- **`/branch` and `--fork-session` are handoff sources.** Claude Code has
+  reported them to SessionStart as source `fork` since 2.1.213; the
+  plugin's matcher excluded it, so a fork fired no hook, the session
+  marker kept naming the parent, and the parent's waiter pushed the
+  parent's mail into the fork. `fork` joins the matcher and the wheel's
+  `_T1_HANDOFF_SOURCES`: the marker moves to the fork, no cleared record
+  is written (the parent's mailbox stays with the parent, RDR-208), and
+  the waiter and lease follow the fork. The T1 scope moves with it, which
+  JDR-001 lists only for `/clear` and `/resume`.
+
 ## [7.53.0] - 2026-09-18
 
 Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129);

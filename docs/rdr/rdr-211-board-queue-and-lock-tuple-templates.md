@@ -956,7 +956,9 @@ server's `in` reclaims with one expiry logged; a session's `tuple_nack` on
 delivered mail counts one attempt; `tuple_subscribe` on a queue, a lock or
 another session's mailbox is refused, and so is the thirty-third board topic;
 a subscription change re-issues `wait` and the old parked
-call is gone from the park report; the list survives a resume and not a clear;
+call is gone from the park report; the board topics survive a resume and not
+a clear, while the instance mailbox survives neither and is re-subscribed
+under the session's new name (amended 2026-09-18, item 7);
 a second message is not claimed until the first is acked, nacked or
 released; after the fifth re-send the message is released and the floor
 delivers it; a server whose handshake carried no client capability claims
@@ -1086,7 +1088,17 @@ the number.
    one message over throughput.
 7. **Subscriptions.** Answered (Sam, 2026-09-16, the same decision record,
    item 4): the set is managed, not fixed at startup: three tools, per session,
-   persisted in T1 across a resume, boards and mailboxes only.
+   persisted in T1 across a resume, boards and mailboxes only. Amended
+   2026-09-18 (Sam, bead nexus-kdxyv): BOARDS persist across a resume; the
+   INSTANCE MAILBOX does not, and the resumed session subscribes its new
+   name. The `ListAgents` name changes at every process start (RDR-208's
+   identity table), so a restored instance name is unreachable by
+   construction, and restoring it also made the session's own
+   `tuple_subscribe` of its new name refuse as a second instance mailbox --
+   a resumed session could be addressed by neither name. This is what the
+   Subscriptions subsection already described ("a `/resume` under a new
+   name repeats it, and the old name's mail strands, as RDR-208 accepted");
+   the clause above had contradicted it.
 
 ## Finalization Gate
 
@@ -1293,3 +1305,16 @@ enumerate every one with its test.
   Problem Statement's scope sentence counts two engine operations and the
   delivery path; the Consequences bullet names what a session without the
   channel loses; the post-mortem carries the channel-flag qualifier.
+- 2026-09-18: Sam's amendment to decision-record item 7 and the matching Test
+  Plan line (bead nexus-kdxyv): a resume restores the board topics only. The
+  instance mailbox is not restored, because the `ListAgents` name changes at
+  every process start, so the restored name was unreachable and its presence
+  made the resumed session's own `tuple_subscribe` refuse as a second
+  instance mailbox. The Subscriptions subsection already said a resume under
+  a new name repeats the call; item 7 and the Test Plan had contradicted it.
+  The same bead fixes two defects in this RDR's own delivery path: the T1
+  handoff never re-keyed the channel waiter or the subscription set, so a
+  `/clear` left the old waiter parked on the old mailbox for the life of the
+  process, and nothing released a `directory/<name>` entry on a deliberate
+  stop. Reconciliation record: T2
+  `nexus/rdr-211-reconciliation-instance-mailbox-not-restored-on-resume`.

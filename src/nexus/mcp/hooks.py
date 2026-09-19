@@ -1,0 +1,229 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""Tool-tier hook registration on ``nx-mcp`` (RDR-215 Approach items 1 and 4).
+
+Every conexus ``hooks.json`` entry other than ``SessionStart`` and
+``phase_review_close_requires_gate`` becomes an ``mcp_tool`` call against a
+``hook_<name>`` tool registered here. This module is the registration
+*mechanism* only (bead nexus-q02nx.3) -- no hook module is ported yet, so
+:data:`HOOK_TOOLS` is empty and registers nothing on the live server. Bead
+nexus-q02nx.4 (and every port after it) plugs in with one line: a new
+:class:`HookToolSpec` appended to :data:`HOOK_TOOLS`, naming the ported
+module's ``run(payload) -> HookResult`` (``src/nexus/hooks/_io.py``).
+
+**Never registers ``phase_review_close_requires_gate`` here.** That hook is
+the routing framework's one ``fail_closed: true`` rule
+(``conexus/hooks/scripts/routing/registry.yaml``; see ``_io.py``'s module
+docstring). On this tier a crash reads as ``isError=False``/allow (below),
+which is exactly the wrong answer for a hook whose contract is "a crash
+still emits a deny envelope" -- it belongs on the command tier (``nx-hook``)
+instead, where the process can still write that envelope before it exits.
+:func:`register_hook_tools` refuses that name outright (see
+``_NEVER_TOOL_TIER``) rather than relying on nobody ever adding it by habit
+or via a future "walk every hook module" sweep.
+
+**The tool boundary.** Each registered tool calls the module's ``run()``
+through :func:`nexus.hooks._io.never_fail` -- the shared swallow primitive
+``_io.py`` documents as the deliberate replacement for bash's missing
+``set -e``. A crash renders as an empty ``TextContent`` with ``isError=False``,
+the same thing a hook that silently declined to say anything produces; the
+event proceeds exactly as it would past a bash script with no ``set -e``.
+``never_fail`` also logs the swallowed exception via structlog, which lands
+in ``nx-mcp``'s own configured log sink (``<config>/logs/mcp.log`` --
+``main()`` already calls ``configure_logging("mcp")`` before any hook tool
+is ever invoked, so there is no separate "logged to the hook log" step to
+perform here the way a bash-launched Python hook script needs
+``conexus/hooks/scripts/_hook_logging.py`` to bridge structlog away from
+stdout before its first ``nexus.*`` import; that module lives under the
+plugin directory, is not on ``nx-mcp``'s import path, and solves a problem
+this tier does not have).
+
+**Field names.** A hook module's payload fields are named the way the
+contract map (T2 ``nexus_rdr/215-hook-contract-map``) records them, dotted
+for a nested field (``tool_input.command``). A dot is not a legal Python
+parameter name, so :func:`flatten_field_name` maps each dotted path to a
+double-underscore-joined tool parameter name (``tool_input__command``) --
+the identifier the tool's input schema actually exposes, and the key a
+``hooks.json`` ``input`` map entry would carry on its LEFT side (the RIGHT
+side keeps the dotted ``${tool_input.command}`` substitution: the two
+namespaces are independent). :func:`nest_payload` is the exact inverse,
+reassembling the flat tool arguments back into the nested dict shape
+``run()`` reads on both tiers. Whether Claude Code's own ``${path}``
+substitution reaches a *nested* field faithfully through that ``input`` map
+is the open question bead nexus-q02nx.6 measures -- this module does not
+resolve it, and nothing here depends on the answer: the flatten/nest pair
+is exercised directly, independent of how (or whether) a real
+``hooks.json`` entry populates the flattened arguments.
+"""
+from __future__ import annotations
+
+import inspect
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
+
+from nexus.hooks._io import HookResult, never_fail
+
+__all__ = [
+    "HOOK_TOOLS",
+    "HookToolSpec",
+    "flatten_field_name",
+    "nest_payload",
+    "register_hook_tools",
+]
+
+
+@dataclass(frozen=True)
+class HookToolSpec:
+    """One row of the tool-tier registration table.
+
+    ``name`` is the hook's short name; it is registered as ``hook_<name>``.
+    ``run`` is the ported module's ``run(payload) -> HookResult`` entry
+    point -- the same callable the command tier's ``nx-hook`` registers
+    under its own verb table (RDR-215 Approach item 4: one implementation,
+    two entries). ``fields`` names the payload fields this tool's input
+    schema exposes, dotted for a nested field, in the shape the contract
+    map's "stdin fields used" column already records per script. ``summary``
+    is a short, human-readable one-liner folded into the tool's description
+    (see :func:`_description`) -- MCP has no way to hide a tool from the
+    model's tool list, so the description is part of the mitigation the RDR
+    names, not incidental documentation.
+    """
+
+    name: str
+    run: Callable[[dict[str, Any] | None], HookResult]
+    fields: tuple[str, ...] = ()
+    summary: str = ""
+
+
+# One entry per ported hook module (RDR-215 Approach item 4). EMPTY today --
+# bead nexus-q02nx.3 is the registration mechanism only; the first real port
+# is bead nexus-q02nx.4. Adding a hook after that is one line: append a
+# HookToolSpec here.
+#
+# `phase_review_close_requires_gate` NEVER belongs in this tuple -- see the
+# module docstring and `_NEVER_TOOL_TIER` below, which refuses it even if a
+# future edit adds it by habit or via an automated "every hook module"
+# sweep. Do not build such a sweep without carrying that exclusion with it.
+HOOK_TOOLS: tuple[HookToolSpec, ...] = ()
+
+
+#: Names that must never reach this tier. See the module docstring's
+#: "Never registers phase_review_close_requires_gate here" paragraph.
+_NEVER_TOOL_TIER = frozenset({"phase_review_close_requires_gate"})
+
+
+def flatten_field_name(dotted: str) -> str:
+    """A payload field path -> a valid tool-parameter / JSON-Schema name.
+
+    ``"tool_input.command"`` -> ``"tool_input__command"``. Inverted by
+    :func:`nest_payload`. Bijective for every field name in the RDR-215
+    contract map, none of which contain a literal ``__``.
+    """
+    return dotted.replace(".", "__")
+
+
+def nest_payload(flat: Mapping[str, Any]) -> dict[str, Any]:
+    """Reassemble a tool's flat arguments into the nested payload ``run()`` reads.
+
+    The inverse of :func:`flatten_field_name`: an argument named
+    ``tool_input__command`` becomes ``{"tool_input": {"command": ...}}``,
+    matching the shape the command tier's full stdin JSON payload has at
+    that same path. A field whose value is ``None`` (the tool's own
+    optional-parameter default -- nothing was substituted for it) is
+    omitted entirely, so an unpopulated field reads exactly as an absent
+    key, never an explicit null the bash layer's ``jq``/``python3 -c``
+    reads would never have produced.
+    """
+    payload: dict[str, Any] = {}
+    for flat_name, value in flat.items():
+        if value is None:
+            continue
+        *parents, leaf = flat_name.split("__")
+        node = payload
+        for part in parents:
+            node = node.setdefault(part, {})
+        node[leaf] = value
+    return payload
+
+
+def _description(spec: HookToolSpec) -> str:
+    """A one-line description marking the tool as a hook entry, not a capability.
+
+    MCP has no way to hide a tool from the model's tool list (RDR-215
+    Technical Design); the ``hook_`` prefix, this sentence, and the
+    auto-approve matcher are the stated mitigation.
+    """
+    body = spec.summary or f"the {spec.name} Claude Code hook"
+    return (
+        f"Hook entry point (RDR-215): {body}. Registered so a Claude Code "
+        "hooks.json entry can call it as an mcp_tool; not a general-purpose "
+        "capability, and not meant to be invoked directly."
+    )
+
+
+def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
+    """Build the ``hook_<name>`` tool function FastMCP registers.
+
+    The function itself is generic (``**kwargs``); what makes it look like a
+    tool with *named* parameters to FastMCP's schema builder is the
+    ``__signature__`` override below -- ``inspect.signature()`` honours an
+    explicit override before falling back to introspecting ``__code__``, so
+    the pydantic arg-model FastMCP builds from ``inspect.signature(fn)`` sees
+    exactly the flattened field names in ``spec.fields``, each an optional
+    string parameter, while the function body still receives them as
+    ordinary keyword arguments.
+    """
+    tool_name = f"hook_{spec.name}"
+
+    def _tool(**kwargs: Any) -> CallToolResult:
+        result = never_fail(lambda: spec.run(nest_payload(kwargs) or None), hook=tool_name)
+        return CallToolResult(content=[TextContent(type="text", text=result.stdout or "")], isError=False)
+
+    _tool.__name__ = tool_name
+    _tool.__doc__ = _description(spec)
+    params = [
+        inspect.Parameter(
+            flatten_field_name(payload_field),
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            default=None,
+            annotation=str | None,
+        )
+        for payload_field in spec.fields
+    ]
+    _tool.__signature__ = inspect.Signature(params, return_annotation=CallToolResult)
+    return _tool
+
+
+def _register_one(mcp: FastMCP, spec: HookToolSpec) -> None:
+    if spec.name in _NEVER_TOOL_TIER:
+        raise ValueError(
+            f"{spec.name!r} is the routing framework's one fail_closed hook "
+            "(RDR-215 Approach item 1) and must never register as a "
+            "tool-tier hook_<name> -- a tool-boundary crash reads as "
+            "isError=False/allow here, which is exactly wrong for it. It "
+            "takes the command tier (nx-hook) instead, where a crash can "
+            "still emit a deny envelope before the process exits."
+        )
+    mcp.tool(
+        name=f"hook_{spec.name}",
+        title=f"Hook: {spec.name}",
+        description=_description(spec),
+        structured_output=False,
+    )(_make_tool_function(spec))
+
+
+def register_hook_tools(mcp: FastMCP, specs: Iterable[HookToolSpec] | None = None) -> None:
+    """Register one ``hook_<name>`` tool per entry in *specs*.
+
+    *specs* defaults to :data:`HOOK_TOOLS`, read from this module's current
+    global -- not bound at this function's definition time -- so a caller
+    (a test, or a future port) that mutates ``nexus.mcp.hooks.HOOK_TOOLS``
+    before calling this with no explicit *specs* argument sees that
+    mutation, exactly as ``nexus.mcp.core``'s own call site does.
+    """
+    for spec in (HOOK_TOOLS if specs is None else specs):
+        _register_one(mcp, spec)

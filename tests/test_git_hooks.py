@@ -193,6 +193,15 @@ class TestHookContent:
         for token in (
             "index.log", "disown", "--on-locked=skip", "nx index repo",
             "pgrep -f", "exit 0",
+            # nexus-0l5so: --since-head IS the per-commit fast path this hook
+            # exists to use (b38435724 built it as "the per-commit fast path
+            # the removed git hooks needed"), and the stanza had never carried
+            # it, so every commit paid the full-repo tax the flag removes. The
+            # flag falls back LOUDLY to a full index whenever the delta is not
+            # usable -- no stored base, an unreachable one after a rewrite, a
+            # parse surprise -- which is what makes it safe on post-rewrite
+            # and post-merge too.
+            "--since-head",
         ):
             assert token in content
 

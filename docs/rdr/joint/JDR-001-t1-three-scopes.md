@@ -17,8 +17,12 @@ one it means:
 1. **MCP-tool T1** (`mcp__plugin_conexus_nexus__scratch`) is scoped to the
    session id the MCP server leased at spawn. It moves only when the
    SessionStart hook writes a `~/.config/nexus/t1_handoff.<mcp_pid>` marker
-   on `/clear` or `/resume` and the MCP lifespan's watcher consumes it
-   (nexus-d76vc); between markers it is frozen. Agent-tool subagents share
+   on `/clear`, `/resume` or a fork (`/branch` and `--fork-session`, which
+   Claude Code reports as `source=fork`) and the MCP lifespan's watcher
+   consumes it (nexus-d76vc; fork added at nexus-kdxyv, Sam 2026-09-18);
+   between markers it is frozen. A fork's rows do not migrate, exactly as
+   a `/clear`'s do not: scratch written before the fork stays under the
+   parent's session id. Agent-tool subagents share
    it with their parent at any nesting depth.
 2. **`nx` CLI T1** (`nx scratch`) is scoped to the current transcript
    session when a live `t1_session_lease.<sid>` exists. An explicit
@@ -43,9 +47,9 @@ the old id rather than migrating.
 The MCP protocol carries no per-request session id, so a long-lived MCP
 server samples the id once at spawn. The handoff supplies the missing
 signal instead of accepting the freeze. The conexus SessionStart hook
-(`nx hook session-start`, matcher `startup|resume|clear|compact`) writes
-`~/.config/nexus/t1_handoff.<mcp_pid>` naming the NEW session id on
-`source=clear` or `source=resume` only, for every live `nx-mcp` /
+(`nx hook session-start`, matcher `startup|resume|clear|compact|fork`)
+writes `~/.config/nexus/t1_handoff.<mcp_pid>` naming the NEW session id on
+`source=clear`, `source=resume` or `source=fork` only, for every live `nx-mcp` /
 `nx-mcp-catalog` sibling of the hook's own claude ancestor
 (`nexus.session.find_mcp_sibling_pids`); `startup` spawns fresh servers
 and `compact` keeps the id, so neither writes one. The MCP lifespan's
@@ -117,3 +121,14 @@ Confirm an agent has terminated before declaring its write-back lost.
   summary plus this pointer, and the handoff mechanism (nexus-d76vc), the
   respawn falsification (nexus-ggvi0) and the measured record they carried
   move here, condensed. This file is the only full text.
+- 2026-09-18: A fork (`/branch`, `--fork-session`) joins `/clear` and
+  `/resume` as a source that moves MCP-tool T1 (bead nexus-kdxyv; Sam's
+  ruling the same day). Claude Code has reported forks to SessionStart as
+  `source=fork` since 2.1.213, and the conexus matcher
+  `startup|resume|clear|compact` had excluded it, so a fork fired no hook
+  at all: the session marker kept naming the parent, and the parent's
+  channel waiter kept pushing the parent's mail into the fork. The same
+  bead makes the handoff re-key the channel waiter and the subscription
+  set, which it had never done. Recorded here rather than only in the
+  bead because this file is the rule and its enumeration was short by one.
+  conexus was notified the same day (the joint half of this record).

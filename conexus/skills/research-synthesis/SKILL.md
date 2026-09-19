@@ -12,12 +12,15 @@ Delegates to the **deep-research-synthesizer** agent.
 
 ## Model Selection
 
-Default: **haiku**. Escalate via `model` parameter on the Agent tool:
+Default: **sonnet** (`conexus/agents/deep-research-synthesizer.md` pins
+`model: sonnet` in its frontmatter, and an agent's own declaration beats the
+session default, so omitting `model` on the Agent tool gets sonnet). Pass
+`model: haiku` explicitly for the cheap end of the table below:
 
 | Task Shape | Model | When |
 |-----------|-------|------|
-| Single-topic lookup, ≤3 sources | haiku (default) | Quick research |
-| Multi-source synthesis, >5 sources, or cross-project | sonnet | Comprehensive research |
+| Single-topic lookup, ≤3 sources | haiku (pass it) | Quick research |
+| Multi-source synthesis, >5 sources, or cross-project | sonnet (default) | Comprehensive research |
 
 ## When This Skill Activates
 

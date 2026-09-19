@@ -317,10 +317,16 @@ RDR-079 P5). Passing an explicit float overrides both the `plan_match`
 gate and the `_nx_answer_match_is_hit` check so a tighter precision
 floor is honoured consistently.
 
-### Via /conexus:query
+### Via the query skill
 
-The `/conexus:query` slash command is now a thin pointer to `nx_answer` —
-convenience shortcut when you're in Claude Code.
+`query` is a SKILL (`conexus/skills/query`), not a slash command: there is
+no `conexus/commands/query.md`. Claude Code surfaces a skill under the same
+`/conexus:query` spelling, so the invocation reads the same, but the surface
+it comes from is the skill directory and that is where its behaviour is
+defined. The skill is a thin pointer to `nx_answer`, for when an analytical
+question has to be reduced from many documents rather than looked up; its own
+description says when NOT to reach for it (a file:line, a single fact, or a
+question `search`/`query` already answer in seconds).
 
 ## Plan operators (what plan_run can call)
 

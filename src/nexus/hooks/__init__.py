@@ -135,11 +135,14 @@ def _infer_repo() -> str:
 #: sampled at spawn" (nexus-d76vc). ``startup`` spawns fresh MCP servers
 #: (nothing frozen yet, nothing to hand off) and ``compact`` keeps the
 #: SAME session id (no divergence) -- neither writes a marker. ``fork``
-#: (``--fork-session``) is a real Claude Code source value too but is
-#: deliberately NOT included here: the bead's design of record enumerates
-#: clear/resume only, and widening to fork is scope this bead did not
-#: size or test -- tracked as a follow-up, not silently folded in.
-_T1_HANDOFF_SOURCES = frozenset({"clear", "resume"})
+#: (``/branch`` and ``--fork-session``, Claude Code >= 2.1.213) mints a
+#: new session id in the SAME process, so it needs the handoff exactly as
+#: ``clear`` does; added by bead nexus-kdxyv (it was deferred at d76vc as
+#: unsized scope) so the live MCP server's channel waiter and directory
+#: lease follow the fork and the parent's mail stays with the parent
+#: (RDR-208 Fork paragraph). The plugin's SessionStart matcher must name
+#: ``fork`` for this source to reach here at all (conexus/hooks/hooks.json).
+_T1_HANDOFF_SOURCES = frozenset({"clear", "resume", "fork"})
 
 
 def _write_t1_handoff_markers(new_session_id: str) -> None:
@@ -334,7 +337,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
 
     ``source`` (nexus-d76vc, RDR-105 aj564 follow-up): the Claude Code
     SessionStart ``source`` field (``startup``/``resume``/``clear``/
-    ``compact``/``fork``). On ``resume``/``clear`` -- the two sources
+    ``compact``/``fork``). On ``resume``/``clear``/``fork`` -- the sources
     where the transcript's session id changes out from under a live,
     already-frozen MCP server -- writes a T1 handoff marker for each MCP
     server sibling so its FastMCP lifespan can re-lease onto the new

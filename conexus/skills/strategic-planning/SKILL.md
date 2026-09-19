@@ -10,12 +10,15 @@ Delegates to the **strategic-planner** agent.
 
 ## Model Selection
 
-Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+Default: **opus** (`conexus/agents/strategic-planner.md` pins `model: opus` in its
+frontmatter, and an agent's own declaration beats the session default, so
+omitting `model` on the Agent tool gets opus). Pass `model: sonnet`
+explicitly for the cheap end of the table below:
 
 | Task Shape | Model | When |
 |-----------|-------|------|
-| ≤10 beads, single-phase, clear scope | sonnet (default) | Most planning work |
-| >15 beads, multi-RDR, or ambiguous requirements | opus | Complex decomposition |
+| ≤10 beads, single-phase, clear scope | sonnet (pass it) | Most planning work |
+| >15 beads, multi-RDR, or ambiguous requirements | opus (default) | Complex decomposition |
 
 ## When This Skill Activates
 

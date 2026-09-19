@@ -7,6 +7,22 @@
 - **git**
 - **[Node.js](https://nodejs.org/)** — required *only* if you install the Claude Code plugin(s). The conexus plugin bundles the `sequential-thinking` MCP server, spawned via `npx -y …`; the companion `sn` plugin bundles `context7` the same way. Either requires `node` and `npm` on PATH. The `nx` CLI alone does not need it. Install with `brew install node` (macOS) or follow the [Node.js installer](https://nodejs.org/) for your platform.
 
+- **Hardware** — an Apple Silicon Mac (arm64), or Linux on x86-64 or arm64.
+  Nexus ships its own PostgreSQL and **never** uses a host install: there is
+  no fallback leg (`_NO_HOST_FALLBACK`, `nexus.db.pg_provision`), because the
+  bundle is a specific PG17 carrying pgvector and a Homebrew or distro
+  PostgreSQL is a different server with a different contrib set. The bundle
+  is built for those three targets only, so an **Intel Mac** or **Windows**
+  cannot run a local install: `nx init` stops with an error naming how to get
+  a bundle, rather than falling back to anything.
+  No GPU is required, and none is used by default. Search embeds through a
+  bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
+  the tree). On Linux the installer additionally pins torch to its CPU build,
+  because the PyPI wheel is the CUDA one and drags about 4.5 GB of nvidia
+  packages that nothing on this path uses; set `NX_TORCH_BACKEND` (to `auto`,
+  `cu130`, and so on) to opt a GPU box back in. macOS wheels carry no CUDA
+  payload, so nothing is pinned there.
+
 Check your Python version:
 
 ```bash

@@ -4,6 +4,32 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.54.0] - 2026-09-19
+
+Paired engine: engine-service-v0.1.129, unchanged from 7.53.0. No engine cut.
+
+The pin advance IS this release. Everything below has been on `develop` and
+inert in every session, because Claude Code loads this plugin from the tag
+`marketplace.json` names.
+
+- `hooks/hooks.json`: the SessionStart matcher gains `fork`. Claude Code has
+  reported `/branch` and `--fork-session` as `source: "fork"` since 2.1.213
+  and this matcher excluded it, so a fork fired no hook at all: the session
+  marker kept naming the parent and the parent's channel waiter pushed the
+  parent's mail into the fork. With the wheel's matching change a fork now
+  hands the session off -- marker to the fork, no cleared record, the parent's
+  mail left in the parent's mailbox (nexus-kdxyv, RDR-208).
+- `hooks/scripts/mailbox_drain.py`: the dead `_session_marker_names` is
+  deleted; unused since RDR-211 (nexus-kdxyv).
+- Five skills' Model Selection sections named a default their own agent
+  contradicts. An agent's frontmatter beats the session default, so each
+  stated the wrong default and pointed its escalation advice the wrong way.
+  `conexus/skills/research-synthesis`, `strategic-planning`, `architecture`, `debugging` and `deep-analysis` now name the file that pins the model (nexus-3uxbc).
+- `nx-hook` is deliberately NOT registered as a console script yet: the
+  command tier ships with an empty verb table, so the wheel does not put a
+  binary on your PATH that exits with a diagnostic on every invocation
+  (nexus-q02nx.2).
+
 ## [7.53.0] - 2026-09-18
 
 Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129),

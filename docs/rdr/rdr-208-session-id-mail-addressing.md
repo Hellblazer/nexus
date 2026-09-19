@@ -275,8 +275,16 @@ own record. `/resume` and `/compact` need nothing.
 
 **Fork.** `/branch` and `--fork-session` mint a new session id, but the parent
 session still exists and can be resumed, so its mailbox stays with it. A forked
-session starts with an empty mailbox and is reachable by name once its watcher
-arms.
+session starts with an empty mailbox and is reachable by name once it
+subscribes that name itself. Claude Code reports a fork's SessionStart as
+`source=fork`, which the hook handles like a `/clear` without the cleared
+record: the session marker moves to the fork, so the fork's own sends carry
+the fork's id, and the live MCP server hands its channel waiter and its
+`directory/<name>` lease to the fork, releasing the parent's entry. Mail
+already in the parent's mailbox is never delivered into the fork; it waits
+for the parent (bead nexus-kdxyv, 2026-09-18, which also added `fork` to the
+hook's matcher -- until then a fork fired no hook at all and the parent's
+waiter pushed the parent's mail into the fork).
 
 **Two processes on one session id.** Two terminals resuming one session both
 drain its mailbox, and each message is claimed by one of them. When one of them
@@ -296,9 +304,9 @@ this RDR.
 |---|---|---|
 | Mailbox template | `service/src/main/resources/tuples/templates/mailbox.yaml` | `address_kind` values gain `session`; `instance` retired after Phase 3 |
 | Directory template | new, same directory, added to the engine's boot list | new template; an engine release |
-| Watcher | `src/nexus/tuple_watch.py`, `src/nexus/commands/tuple_cmd.py` | writes its directory entry at arm and re-sends it on a heartbeat; stops watching instance mailboxes after Phase 3 |
+| Directory lease | `src/nexus/mcp/subscriptions.py`, `src/nexus/commands/tuple_cmd.py` | writes its directory entry at subscribe and re-sends it on a heartbeat; releases it on a deliberate stop; stops watching instance mailboxes after Phase 3. (Was `src/nexus/tuple_watch.py`'s CLI watcher, deleted at RDR-211 nexus-rplay.14; the lease moved to the MCP subscription set.) |
 | Drain hook | `conexus/hooks/scripts/mailbox_drain.py` | drains each mailbox the cleared record names, and deletes the record only under the three conditions in the Technical Design's `/clear` paragraph; drops instance mailboxes after Phase 3 |
-| SessionStart | `src/nexus/hooks.py`, `src/nexus/tuple_watch.py` | on `source=clear`, reads the previous id from the pid marker before overwriting it |
+| SessionStart | `src/nexus/hooks.py`, `src/nexus/session_marker.py` | on `source=clear`, reads the previous id from the pid marker before overwriting it |
 | MCP | `src/nexus/mcp/core.py`; name pins in `tests/test_mcp_package.py` and `tests/test_mcp_tuple_tools.py`; `tests/test_mcp_tool_description_lint.py` | `mailbox_send` |
 
 ### Decision Rationale

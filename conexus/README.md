@@ -300,12 +300,15 @@ self-referential "invoke the X skill" loop). The bash-preamble context these
 commands used to inject is not replaced; the skill's own MCP-tool
 project-context calls cover the same ground.
 
-**MCP-tool pointer commands** (RDR-080 — dispatch the named MCP tool directly):
-- `/conexus:query` → `nx_answer` (multi-step retrieval)
-- `/conexus:knowledge-tidying` → `nx_tidy` *(was → knowledge-tidier agent; command `/conexus:knowledge-tidy` merged into this skill at nexus-cnzei.4)*
-- `/conexus:plan-audit` → `nx_plan_audit` *(was → plan-auditor agent)*
-- `/conexus:enrich-plan` → `nx_enrich_beads` *(was → plan-enricher agent)*
-- `/conexus:pdf-process` → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
+**MCP-tool pointers** (RDR-080 — dispatch the named MCP tool directly). Some
+are commands (`conexus/commands/*.md`) and some are skills
+(`conexus/skills/*/SKILL.md`); Claude Code spells both `/conexus:<name>`, so
+the invocation reads the same and the surface is marked per line below:
+- `/conexus:query` (skill) → `nx_answer` (multi-step retrieval)
+- `/conexus:knowledge-tidying` (skill) → `nx_tidy` *(was → knowledge-tidier agent; command `/conexus:knowledge-tidy` merged into this skill at nexus-cnzei.4)*
+- `/conexus:plan-audit` (command) → `nx_plan_audit` *(was → plan-auditor agent)*
+- `/conexus:enrich-plan` (skill) → `nx_enrich_beads` *(was → plan-enricher agent)*
+- `/conexus:pdf-process` (command) → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
 
 **Utility commands** (no agent dispatch, no MCP call — direct local action):
 - `/conexus:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.

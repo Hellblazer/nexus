@@ -3161,7 +3161,7 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
     raise click.exceptions.Exit(0)
 
 
-@taxonomy.command("backfill-source-collection")
+@taxonomy.command("backfill-source-collection", hidden=True)
 @click.option(
     "--apply",
     "apply_",

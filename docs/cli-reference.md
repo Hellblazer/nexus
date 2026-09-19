@@ -769,12 +769,17 @@ nx aspects drain [--timeout SECONDS] [--poll-interval SECONDS]
 
 Stops the singleton `AspectExtractionWorker` (if running in this process), then waits until all pending and in-progress rows are processed or `--timeout` (default 30s) elapses; `--poll-interval` (default 0.1s) sets the queue-empty poll cadence. Use before `nx upgrade` when a `MigrationError` reports the aspect_extraction_queue is not drained. Exit 0 once drained (or already empty); exit 1 on timeout, naming the stuck-row count.
 
-### nx aspects gc / gc-fixtures — RETIRED
+### nx aspects gc / gc-fixtures — RETIRED (hidden from `--help`)
 
 ```
 nx aspects gc [--apply]              # refuses unconditionally
 nx aspects gc-fixtures [--yes]       # refuses unconditionally
 ```
+
+All four retired aspect verbs are hidden from `nx aspects --help` (nexus-uks83)
+so the help lists only what works; each still EXISTS and still refuses loudly
+with guidance, because answering an old invocation with "No such command"
+would drop the guidance entirely.
 
 Both verbs are RETIRED and always raise a `click.UsageError` regardless of the flag — they are guided refusals, not report-only fallbacks. `gc` ATTACHed the local `.catalog.db` SQLite cache to the local T2 to sweep `source_uri`-keyed orphan aspect rows; `gc-fixtures` issued raw SQL `DELETE`s against the local SQLite `document_aspects` / `aspect_extraction_queue` tables (RDR-120 §A8). Both local SQLite substrates were deleted in the RDR-158 P4 retirement, so neither has a service-backend equivalent. On the service backend, aspect rows orphaned by a document delete cannot accumulate — `document_aspects.doc_id` is FK-bound to `catalog_documents` `ON DELETE CASCADE` (`fk-001-catalog-cross-store`) — but that FK does not cover the `source_uri`-keyed class `gc` used to sweep, since `source_uri` is a path string, not a tumbler reference. Tracked: nexus-ingey (`gc`), nexus-gmiaf.37 (`gc-fixtures`).
 
@@ -797,7 +802,7 @@ nx aspects requeue-failed --limit 100            # pace a large backlog
 nx aspects requeue-failed --dry-run              # report only, no writes
 ```
 
-### nx aspects backfill-source-uri (retired)
+### nx aspects backfill-source-uri (retired, hidden from `--help`)
 
 ```
 nx aspects backfill-source-uri [--apply]   # refuses with guidance
@@ -814,7 +819,7 @@ without `--apply`. If a pre-migration install still needs the repair, run it
 on the last migration-capable 6.x release, which still ships both the verb
 and the migration it serves.
 
-### nx aspects gc-pre-rdr096 (retired)
+### nx aspects gc-pre-rdr096 (retired, hidden from `--help`)
 
 ```
 nx aspects gc-pre-rdr096 [--apply]   # refuses with guidance

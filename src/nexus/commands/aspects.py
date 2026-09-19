@@ -84,7 +84,14 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
     click.echo("Aspect queue drained. Safe to run 'nx upgrade'.")
 
 
-@aspects_group.command(name="gc")
+# nexus-uks83: the four retired verbs below are HIDDEN from `--help`, not
+# deleted. Deleting them would answer an old invocation with "No such
+# command", which is exactly the silent outcome the nexus-ingey precedent
+# rejected: each one refuses LOUDLY and names what to do instead, and
+# tests/test_aspects_consumer_verbs.py pins that guidance. Hiding keeps the
+# guidance for anyone who still types the verb while leaving `--help` a list
+# of things that work.
+@aspects_group.command(name="gc", hidden=True)
 @click.option(
     "--apply",
     is_flag=True,
@@ -132,7 +139,7 @@ def aspects_gc(apply: bool) -> None:
     )
 
 
-@aspects_group.command(name="gc-fixtures")
+@aspects_group.command(name="gc-fixtures", hidden=True)
 @click.option(
     "--yes",
     is_flag=True,
@@ -158,7 +165,7 @@ def aspects_gc_fixtures(yes: bool) -> None:
     )
 
 
-@aspects_group.command(name="backfill-source-uri")
+@aspects_group.command(name="backfill-source-uri", hidden=True)
 @click.option(
     "--apply",
     is_flag=True,
@@ -190,7 +197,7 @@ def aspects_backfill_source_uri(apply: bool) -> None:
     )
 
 
-@aspects_group.command(name="gc-pre-rdr096")
+@aspects_group.command(name="gc-pre-rdr096", hidden=True)
 @click.option(
     "--apply",
     is_flag=True,

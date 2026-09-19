@@ -10,12 +10,15 @@ Delegates to the **architect-planner** agent.
 
 ## Model Selection
 
-Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
+Default: **opus** (`conexus/agents/architect-planner.md` pins `model: opus` in its
+frontmatter, and an agent's own declaration beats the session default, so
+omitting `model` on the Agent tool gets opus). Pass `model: sonnet`
+explicitly for the cheap end of the table below:
 
 | Task Shape | Model | When |
 |-----------|-------|------|
-| Single-module design, extension of existing pattern | sonnet (default) | Most architecture work |
-| Multi-phase, novel architecture, or system-wide redesign | opus | Greenfield, cross-cutting concerns |
+| Single-module design, extension of existing pattern | sonnet (pass it) | Most architecture work |
+| Multi-phase, novel architecture, or system-wide redesign | opus (default) | Greenfield, cross-cutting concerns |
 
 ## Code Navigation
 

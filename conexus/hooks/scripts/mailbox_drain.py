@@ -1068,34 +1068,10 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
 #: (nexus.session_marker.session_marker_path). This script cannot import
 #: nexus, so it spells the literal itself, pinned against drift by
 #: tests/test_session_marker.py::TestPathsMatchTheMailboxDrainHookLiterals.
+#: Unused by this hook since RDR-211 nexus-rplay.14 deleted its per-prompt
+#: re-arm (the reader that globbed it went with bead nexus-kdxyv); kept as
+#: the literal that pin reads.
 _SESSION_MARKER_PREFIX = "session."
-
-
-def _session_marker_names(config_dir: Path, session_id: str) -> bool:
-    """True when some claude process's session marker names *session_id*,
-    that is, a SessionStart ran for it. ``/branch`` forks a session without
-    one, so a fork's first prompt finds none.
-
-    RDR-211 nexus-rplay.14 deleted this hook's own per-prompt re-arm, this
-    function's only caller in this file -- kept, unused here, only because
-    ``tests/e2e/rdr208-mvv/run.sh`` still greps for its name to derive
-    step 6's expectation; that MVV's disposition (like nexus-6konb's other
-    open beads) is Sam's per T2 nexus_rdr/211-decision-channel-delivery-
-    2026-09-16.
-    """
-    try:
-        markers = list((config_dir / "tuple-watch").glob(_SESSION_MARKER_PREFIX + "*"))
-    except OSError:
-        return False
-    for marker in markers:
-        if marker.name.endswith(".tmp"):
-            continue
-        try:
-            if marker.read_text(encoding="utf-8").strip() == session_id:
-                return True
-        except OSError:
-            continue
-    return False
 
 
 def main() -> int:

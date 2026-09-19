@@ -45,6 +45,11 @@ from nexus.migration.banner import degrade_loud_when_migrating
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
+# RDR-215 Approach items 1 and 4: the tool-tier registration mechanism for
+# ported Claude Code hooks. HOOK_TOOLS is empty until the first port
+# (bead nexus-q02nx.4) -- this call registers nothing on the live server
+# today. See nexus/mcp/hooks.py's module docstring for the full contract.
+from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
@@ -1257,6 +1262,41 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     _DEFERRED_T1_MINT.clear()
     mcp_infra.set_t1_pre_init_hook(None)
 
+    # nexus-kdxyv: the channel waiter and the subscription set are keyed by
+    # session id and were built for the OLD one at spawn (or at the last
+    # handoff). Left alone they park on the old mailbox for the rest of
+    # this process, keep the old instance name's directory lease alive,
+    # write their status under the old id, and are never cancelled at
+    # teardown (which looks the waiter up by the CURRENT id). Cancel the
+    # old waiter (its own `finally` records alive=false under the old id),
+    # shut the old set down (releasing its directory row within about a
+    # second, RDR-208), drop it from the cache, and start a waiter for the
+    # new id once the env names it (below). `/branch` reaches here too
+    # (source "fork" is a handoff source), which is what keeps the parent's
+    # mail with the parent instead of pushed into the fork.
+    #
+    # Wrapped, like every other failure-prone step in this function: both
+    # callees are exception-safe by inspection today (`cancel()` swallows its
+    # task's teardown, `_release_directory_entry` swallows a write failure),
+    # but a raise here would strand the handoff with the marker neither
+    # consumed nor reinstated, and nothing would retry it. The delivery
+    # consequence of a failure is bounded and self-healing -- a stale waiter
+    # until the process ends, a directory row until its 300 s TTL -- which is
+    # strictly better than a wedged session identity.
+    if old_session_id is not None:
+        try:
+            old_waiter = _channel.active_waiter(old_session_id)
+            if old_waiter is not None:
+                _channel.unregister_active_waiter(old_session_id)
+                await old_waiter.cancel()
+            await asyncio.to_thread(_subscriptions.reset_cache, old_session_id)
+        except Exception as exc:  # noqa: BLE001 — see above: never strand the handoff over delivery bookkeeping
+            log.warning(
+                "t1_handoff_channel_rekey_failed",
+                mcp_pid=mcp_pid, old_session_id=old_session_id,
+                new_session_id=new_session_id, error=repr(exc),
+            )
+
     _os.environ["NX_T1_SESSION"] = token
     _os.environ["NX_T1_SESSION_ID"] = new_session_id
 
@@ -1265,6 +1305,13 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # env vars just swapped above, then stays frozen there until the next
     # consumed marker -- never a per-call re-resolve.
     mcp_infra.reset_t1_for_release()
+    try:
+        _start_channel_waiter()  # nexus-kdxyv: the new id's waiter, see above
+    except Exception as exc:  # noqa: BLE001 — `_start_channel_waiter` already swallows its own failures; this is the same never-strand-the-handoff boundary as above
+        log.warning(
+            "t1_handoff_channel_start_failed",
+            mcp_pid=mcp_pid, new_session_id=new_session_id, error=repr(exc),
+        )
 
     if minted_fresh:
         _OWNED_T1_SESSION["session_id"] = new_session_id
@@ -1859,6 +1906,11 @@ else:  # pragma: no cover — future SDK restructure
     structlog.get_logger(__name__).debug("fastmcp_settings_symbol_unavailable")
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
+
+# RDR-215: register any ported hook_<name> tool-tier tools. HOOK_TOOLS is
+# empty until bead nexus-q02nx.4 lands its first port, so this call
+# currently registers zero tools -- see nexus/mcp/hooks.py.
+_register_hook_tools(mcp)
 
 _DEFAULT_PAGE_SIZE = 10
 

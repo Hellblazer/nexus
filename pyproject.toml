@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.53.0"
+version = "7.54.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -231,6 +231,11 @@ nx = "nexus.cli:main"
 nx-mcp = "nexus.mcp.core:main"
 nx-mcp-catalog = "nexus.mcp.catalog:main"
 nx-session-end-launcher = "nexus._session_end_launcher:main"
+# nx-hook is deliberately NOT registered yet (RDR-215 bead nexus-q02nx.2).
+# nexus/hooks/entry.py ships and is tested, but its VERB_TABLE is empty until
+# bead nexus-q02nx.5 ports the first verb, and a console script that exits 2 on
+# every invocation is a discoverable binary on every user's PATH for a feature
+# that does not exist yet. The line returns with the verb that makes it work.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexus"]
