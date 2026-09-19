@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import os
 import subprocess
 import sys
@@ -743,3 +744,271 @@ class TestOwesReportAgreesWithBash:
                               for p in exp._state_dir().glob("theirs.expectations.credit.*"))
         assert mine_slots == theirs_slots == [".credit.conexus__critic.1"]
         assert os.readlink(str(exp._state_dir() / f"mine.expectations{mine_slots[0]}")) == "a1"
+
+
+# ── census: the scripted retro count, and its 0/1-only vocabulary ────────
+
+def _bash_census(session: str, state_home: str) -> tuple[list[str], int]:
+    proc = subprocess.run(
+        ["bash", "-c", f'. "{_BASH_LIB}"; expectations_census "{session}"'],
+        capture_output=True, text=True,
+        env={**os.environ, "XDG_STATE_HOME": state_home},
+    )
+    # The space-backed SPACE_*/VERIFY_* lines are appended by helpers that
+    # talk to the tuple engine and never affect the exit code; they are out
+    # of this bead's scope, so the comparison is bounded to the ledger lines.
+    keep = ("AGENT\t", "EXPECTED_NO_START\t", "ROWS\t", "CLASSIFIED\t", "BLINDSPOT\t")
+    return [ln for ln in proc.stdout.splitlines() if ln.startswith(keep)], proc.returncode
+
+
+class TestCensus:
+    def test_a_reported_agent_is_classified_and_declared(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t"),
+                    ("REPORTED", "a1")])
+        lines = exp.expectations_census("s").lines
+        assert "AGENT\ta1\tt\tREPORTED\tdeclared" in lines
+
+    def test_blocked_then_reported_is_the_success_path(self, state):
+        """BLOCKED then REPORTED is the whole guard working: stopped, told
+        why, came back. It is BLOCKED_RESOLVED, not two separate states."""
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t"),
+                    ("BLOCKED", "a1"), ("REPORTED", "a1")])
+        lines = exp.expectations_census("s").lines
+        assert "AGENT\ta1\tt\tBLOCKED_RESOLVED\tdeclared" in lines
+        assert any("blocked_resolved=1 (immediate=1 later=0)" in ln for ln in lines)
+
+    def test_a_later_resolution_is_counted_separately(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t"),
+                    ("BLOCKED", "a1"), ("REPORTED", "a1", "later")])
+        assert any("(immediate=0 later=1)" in ln for ln in exp.expectations_census("s").lines)
+
+    def test_an_agent_with_no_terminal_row_is_named(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        assert "AGENT\ta1\tt\tNO_TERMINAL\tdeclared" in exp.expectations_census("s").lines
+
+    def test_a_terminal_without_a_start_is_no_start(self, state):
+        _seed("s", [("REPORTED", "ghost")])
+        assert "AGENT\tghost\t-\tREPORTED\tno-start" in exp.expectations_census("s").lines
+
+    def test_an_expect_with_no_start_is_reported(self, state):
+        """Two DISTINCT dispatches declared, one started.
+
+        The rows carry different dispatch ids deliberately: two
+        byte-identical EXPECT rows are deduped as a double-write
+        (nexus-3h0u6), so they would count as one declaration and this
+        would not fire. Confirmed against bash before fixing the test —
+        the first version of this asserted the wrong thing."""
+        _seed("s", [("EXPECT", "t", "background", "d1"), ("START", "a1", "t"),
+                    ("EXPECT", "t", "background", "d2")])
+        assert "EXPECTED_NO_START\tt" in exp.expectations_census("s").lines
+
+    def test_two_identical_expect_rows_do_NOT_make_an_expected_no_start(self, state):
+        """The inverse, and the reason the test above needs distinct ids:
+        a byte-identical repeat is one declaration, so one START covers it."""
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t"),
+                    ("EXPECT", "t", "background")])
+        assert "EXPECTED_NO_START\tt" not in exp.expectations_census("s").lines
+
+    def test_an_exact_duplicate_row_is_counted_once(self, state):
+        """nexus-3h0u6. A byte-identical repeat is a double-write, not two
+        events."""
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        exp._append(exp.expectations_file("s"), "2026-01-01T00:00:00Z\tSTART\ta1\tt")
+        assert any("start=1" in ln for ln in exp.expectations_census("s").lines)
+
+    def test_code_1_when_the_walk_examined_nothing(self, state):
+        _seed("s", [("EXPECT", "t", "background")])
+        assert exp.expectations_census("s").code == 1
+
+    def test_code_0_on_a_populated_ledger(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        assert exp.expectations_census("s").code == 0
+
+    def test_census_NEVER_returns_2(self, state):
+        """0 and 1 only. The 2 vocabulary belongs to undeclared alone, and
+        conflating them is how a census gets read as an audit."""
+        for rows in ([], [("START", "a1", "t")], [("EXPECT", "t", "background")],
+                     [("EXPECT", "t", "background"), ("START", "a1", "t"),
+                      ("START", "a2", "t")]):
+            session = f"s{len(rows)}{rows!r:.10}".replace(" ", "")[:40]
+            session = "".join(c for c in session if c.isalnum() or c in "-_")
+            _seed(session, rows)
+            assert exp.expectations_census(session).code in (0, 1)
+
+    def test_a_missing_ledger_is_code_0_and_silent(self, state):
+        r = exp.expectations_census("never-seen")
+        assert r.code == 0 and r.lines == []
+
+
+class TestCensusAgreesWithBash:
+    @pytest.mark.parametrize(
+        "rows,label",
+        [
+            ([("EXPECT", "t", "background"), ("START", "a1", "t"), ("REPORTED", "a1")], "clean"),
+            ([("EXPECT", "t", "background"), ("START", "a1", "t"),
+              ("BLOCKED", "a1"), ("REPORTED", "a1")], "blocked-resolved"),
+            ([("EXPECT", "t", "background"), ("START", "a1", "t"),
+              ("BLOCKED", "a1"), ("REPORTED", "a1", "later")], "resolved-later"),
+            ([("EXPECT", "t", "background"), ("START", "a1", "t")], "no-terminal"),
+            ([("REPORTED", "ghost")], "no-start"),
+            ([("EXPECT", "t", "background")], "blindspot"),
+            ([("EXPECT", "t", "background"), ("START", "a1", "t"), ("START", "a2", "t")],
+             "undeclared"),
+            ([("EXPECT", "t", "background"), ("WOULDBLOCK", "a1")], "wouldblock"),
+            ([("EXPECT", "a", "background"), ("EXPECT", "b", "sync"),
+              ("START", "x", "a"), ("START", "y", "b"), ("REPORTED", "x")], "two-types"),
+            ([("EXPECT", "t", "background", "d1"), ("START", "a1", "t"),
+              ("EXPECT", "t", "background", "d2")], "expected-no-start"),
+            ([("EXPECT", "t", "background"), ("START", "a1", "t"),
+              ("EXPECT", "t", "background")], "identical-expect-rows-dedupe"),
+        ],
+    )
+    def test_lines_and_exit_code_match_bash(self, state, rows, label):
+        _seed("sc", rows)
+        mine = exp.expectations_census("sc")
+        theirs_lines, theirs_rc = _bash_census("sc", os.environ["XDG_STATE_HOME"])
+        assert mine.lines == theirs_lines, f"{label}: census lines drifted from bash"
+        assert mine.code == theirs_rc, f"{label}: census exit code drifted from bash"
+
+
+# ── reconcile: the harness's own ground truth ────────────────────────────
+
+def _payload(*tasks) -> str:
+    return json.dumps({"background_tasks": list(tasks)})
+
+
+class TestReconcile:
+    def test_a_started_agent_the_harness_still_tracks_is_clean(self, state):
+        _seed("s", [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}))
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
+
+    def test_an_outstanding_start_the_harness_forgot_is_STRANDED(self, state):
+        """The gap no other surface can see: a hook crash, an OOM kill or a
+        SIGKILL between dispatch and stop leaves a START with no terminal
+        row, indistinguishable from 'still running' from the ledger alone."""
+        _seed("s", [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload())
+        assert r.code == 4
+        assert "STRANDED\ta1\tt" in r.lines
+
+    def test_a_terminated_agent_is_not_outstanding(self, state):
+        _seed("s", [("START", "a1", "t"), ("REPORTED", "a1")])
+        r = exp.expectations_reconcile("s", _payload())
+        assert r.code == 0
+
+    def test_a_harness_task_with_no_start_is_an_undeclared_task(self, state):
+        _seed("s", [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}, {"id": "ghost"}))
+        assert r.code == 2
+        assert "UNDECLARED_TASK\tghost" in r.lines
+
+    def test_stranded_outranks_undeclared(self, state):
+        """4 takes priority over 2: a silent death outranks a bookkeeping
+        gap, and a caller branching on the code must see the worse one."""
+        _seed("s", [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload({"id": "ghost"}))
+        assert r.code == 4
+
+    def test_an_ABSENT_background_tasks_key_reconciles_nothing(self, state):
+        """ABSENT is not an empty list. The harness told us nothing, so
+        there is no ground truth and an outstanding START is NOT stranded —
+        treating absent as empty would strand every live agent."""
+        _seed("s", [("START", "a1", "t")])
+        assert exp.expectations_reconcile("s", json.dumps({})).code == 0
+        assert exp.expectations_reconcile("s", json.dumps({"background_tasks": None})).code == 0
+
+    def test_an_EMPTY_list_is_affirmative_and_does_strand(self, state):
+        """The distinguishing case, and the reason absent must stay its own
+        outcome: here the harness affirmatively reports nothing running."""
+        _seed("s", [("START", "a1", "t")])
+        assert exp.expectations_reconcile("s", json.dumps({"background_tasks": []})).code == 4
+
+    def test_a_junk_payload_never_blocks(self, state):
+        _seed("s", [("START", "a1", "t")])
+        for junk in ("", "not json", "[]", "null", '{"background_tasks": "nope"}'):
+            assert exp.expectations_reconcile("s", junk).code == 0
+
+    def test_a_mixed_population_is_read_by_any_known_id_key(self, state):
+        """Bead .6 measured the live shape: a shell task and a subagent
+        task carry DIFFERENT key sets. The reader tries each candidate."""
+        _seed("s", [("START", "a1", "t"), ("START", "b2", "t")])
+        r = exp.expectations_reconcile(
+            "s", _payload({"id": "a1", "type": "shell"},
+                          {"agent_id": "b2", "type": "subagent"})
+        )
+        assert r.code == 0
+
+    def test_an_unidentifiable_task_still_counts_toward_the_total(self, state):
+        """Dropping it would make an unidentifiable task look like no task."""
+        _seed("s", [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}, {"no": "id"}))
+        summary = [ln for ln in r.lines if ln.startswith("SUMMARY")][0]
+        assert "harness_tasks=2 unidentified=1" in summary
+
+
+class TestReconcileAgreesWithBash:
+    def _bash_reconcile(self, session: str, payload: str, state_home: str):
+        proc = subprocess.run(
+            ["bash", "-c",
+             f'. "{_BASH_LIB}"; expectations_reconcile "{session}" "$1"', "_", payload],
+            capture_output=True, text=True,
+            env={**os.environ, "XDG_STATE_HOME": state_home},
+        )
+        return [ln for ln in proc.stdout.splitlines() if ln], proc.returncode
+
+    @pytest.mark.parametrize(
+        "rows,payload,label",
+        [
+            ([("START", "a1", "t")], _payload({"agent_id": "a1"}), "clean"),
+            ([("START", "a1", "t")], _payload(), "stranded"),
+            ([("START", "a1", "t"), ("REPORTED", "a1")], _payload(), "terminated"),
+            ([("START", "a1", "t")], _payload({"agent_id": "a1"}, {"id": "ghost"}),
+             "undeclared-task"),
+            ([("START", "a1", "t")], _payload({"id": "ghost"}), "stranded-outranks"),
+            ([("START", "a1", "t")], json.dumps({}), "absent"),
+            ([("START", "a1", "t")], json.dumps({"background_tasks": []}), "empty-list"),
+            ([("START", "a1", "t")], _payload({"agent_id": "a1"}, {"no": "id"}),
+             "unidentified"),
+        ],
+    )
+    def test_lines_and_exit_code_match_bash(self, state, rows, payload, label):
+        _seed("sr", rows)
+        mine = exp.expectations_reconcile("sr", payload)
+        theirs_lines, theirs_rc = self._bash_reconcile("sr", payload, os.environ["XDG_STATE_HOME"])
+        assert mine.lines == theirs_lines, f"{label}: reconcile lines drifted from bash"
+        assert mine.code == theirs_rc, f"{label}: reconcile exit code drifted from bash"
+
+
+class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:
+    """A no-ledger result must not be structurally narrower than a
+    populated one, or a consumer reading it unconditionally breaks only
+    when a session happens to have no ledger — the narrowest possible
+    reproduction window. Raised by nexus-c3's reviewers on la5pr, where
+    query()'s empty dict was missing two keys the populated one carried.
+
+    LedgerReport is a frozen dataclass, so the FIELD set cannot diverge.
+    What can is the lines: every populated path appends a SUMMARY, and a
+    caller indexing lines[-1] for it would IndexError on the empty shape.
+    """
+
+    def test_every_reader_returns_the_same_type_on_a_missing_ledger(self, state):
+        for result in (
+            exp.expectations_undeclared("gone"),
+            exp.expectations_census("gone"),
+            exp.expectations_reconcile("gone", _payload()),
+        ):
+            assert isinstance(result, exp.LedgerReport)
+            assert result.lines == []
+            assert isinstance(result.code, int)
+            assert isinstance(result.note, str)
+
+    def test_a_populated_reader_always_ends_with_a_summary_or_blindspot(self, state):
+        """So a consumer CAN rely on the last line when lines is non-empty,
+        which is the guarantee the empty shape deliberately does not make."""
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        for result in (exp.expectations_undeclared("s"), exp.expectations_census("s"),
+                       exp.expectations_reconcile("s", _payload())):
+            assert result.lines, "a populated ledger always produces lines"
+            assert result.lines[-1].startswith(("SUMMARY\t", "BLINDSPOT\t"))

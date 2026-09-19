@@ -43,6 +43,7 @@ every later reader.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -53,11 +54,13 @@ __all__ = [
     "ExpectationsUsageError",
     "expectations_already_blocked",
     "expectations_archive",
+    "expectations_census",
     "expectations_expect",
     "expectations_file",
     "expectations_last_terminal",
     "expectations_mark_blocked",
     "expectations_owes_report",
+    "expectations_reconcile",
     "expectations_start",
     "expectations_sweep",
     "expectations_undeclared",
@@ -684,3 +687,266 @@ def _acquire_owes_lock(lockdir: str) -> bool:
         except OSError:
             return True  # fail open: an unusable lock must not block a stop
     return False
+
+
+def expectations_census(session_id: str) -> LedgerReport:
+    """The scripted retro census (nexus-hybv1) -- never hand-count.
+
+    One ``AGENT`` line per agent that appears anywhere as a START or a
+    terminal, in first-appearance order, carrying its type, its terminal
+    classification and whether its dispatch was declared. Then
+    ``EXPECTED_NO_START`` for every declared name with fewer STARTs than
+    EXPECT rows, a ``ROWS`` tally, a ``CLASSIFIED`` tally and a
+    ``BLINDSPOT`` line.
+
+    Exit codes are 0 and 1 ONLY -- never 2. That vocabulary belongs to
+    ``undeclared`` alone, and conflating them is how a census gets read as
+    an audit. 1 means the walk examined nothing while the ledger declared
+    dispatches.
+
+    A terminal is classified rather than merely recorded, because BLOCKED
+    followed by REPORTED is the success path of the whole guard: the agent
+    was stopped, told why, and came back with its report. That is
+    ``BLOCKED_RESOLVED``, and it is counted separately by whether the
+    report arrived immediately or later.
+    """
+    if not session_id:
+        return LedgerReport()
+    rows = _readable_rows(session_id)
+    if rows is None:
+        return LedgerReport()
+
+    seen_exact: set[str] = set()
+    seen_dispatch: set[str] = set()
+    verb_rows: dict[str, int] = {}
+    expect_names: set[str] = set()
+    expect_rows: dict[str, int] = {}
+    credit: dict[str, int] = {}
+    start_count: dict[str, int] = {}
+    stype: dict[str, str] = {}
+    term: dict[str, str] = {}
+    order: list[str] = []
+    listed: set[str] = set()
+    all_start: set[str] = set()
+    res_immediate = res_later = 0
+
+    for row in rows:
+        exact = "\t".join(row)
+        if exact in seen_exact:  # nexus-3h0u6: exact-duplicate rows
+            continue
+        seen_exact.add(exact)
+        verb = row[1] if len(row) > 1 else ""
+        who = row[2] if len(row) > 2 else ""
+
+        if verb == "EXPECT":
+            dispatch_id = row[4] if len(row) > 4 else ""
+            if dispatch_id and dispatch_id in seen_dispatch:
+                continue
+            if dispatch_id:
+                seen_dispatch.add(dispatch_id)
+
+        verb_rows[verb] = verb_rows.get(verb, 0) + 1
+
+        if verb == "EXPECT":
+            expect_names.add(who)
+            expect_rows[who] = expect_rows.get(who, 0) + 1
+            credit[who] = credit.get(who, 0) + 1
+        elif verb == "START":
+            if who not in all_start:
+                all_start.add(who)
+                stype[who] = row[3] if len(row) > 3 else ""
+                start_count[stype[who]] = start_count.get(stype[who], 0) + 1
+                if who not in listed:
+                    order.append(who)
+                    listed.add(who)
+        elif verb in ("REPORTED", "BLOCKED", "WOULDBLOCK"):
+            if who not in listed:
+                order.append(who)
+                listed.add(who)
+            if verb == "REPORTED":
+                if term.get(who) == "BLOCKED_UNRESOLVED":
+                    term[who] = "BLOCKED_RESOLVED"
+                    if len(row) > 3 and row[3] == "later":
+                        res_later += 1
+                    else:
+                        res_immediate += 1
+                elif term.get(who) != "BLOCKED_RESOLVED":
+                    term[who] = "REPORTED"
+            elif verb == "BLOCKED":
+                term[who] = "BLOCKED_UNRESOLVED"
+            else:
+                term[who] = "WOULDBLOCK"
+
+    lines: list[str] = []
+    cls: dict[str, int] = {}
+    checked = len(all_start)
+    recognized = undeclared = nostart = 0
+
+    for agent_id in order:
+        terminal = term.get(agent_id) or "NO_TERMINAL"
+        agent_type = stype.get(agent_id, "")
+        if not agent_type:
+            lines.append(f"AGENT\t{agent_id}\t-\t{terminal}\tno-start")
+            nostart += 1
+        else:
+            if agent_type in expect_names:
+                recognized += 1
+            if credit.get(agent_type, 0) > 0:
+                credit[agent_type] -= 1
+                declared = "declared"
+            else:
+                declared = "undeclared"
+                undeclared += 1
+            lines.append(f"AGENT\t{agent_id}\t{agent_type}\t{terminal}\t{declared}")
+        cls[terminal] = cls.get(terminal, 0) + 1
+
+    expected_no_start = 0
+    for name in sorted(expect_names):
+        if start_count.get(name, 0) < expect_rows.get(name, 0):
+            lines.append(f"EXPECTED_NO_START\t{name}")
+            expected_no_start += 1
+
+    lines.append(
+        "ROWS\texpect={} start={} reported={} blocked={} wouldblock={}".format(
+            verb_rows.get("EXPECT", 0), verb_rows.get("START", 0),
+            verb_rows.get("REPORTED", 0), verb_rows.get("BLOCKED", 0),
+            verb_rows.get("WOULDBLOCK", 0),
+        )
+    )
+    lines.append(
+        "CLASSIFIED\treported={} blocked_resolved={} (immediate={} later={}) "
+        "blocked_unresolved={} wouldblock={} no_terminal={} undeclared={} "
+        "no_start={} expected_no_start={}".format(
+            cls.get("REPORTED", 0), cls.get("BLOCKED_RESOLVED", 0),
+            res_immediate, res_later, cls.get("BLOCKED_UNRESOLVED", 0),
+            cls.get("WOULDBLOCK", 0), cls.get("NO_TERMINAL", 0),
+            undeclared, nostart, expected_no_start,
+        )
+    )
+    lines.append(
+        f"BLINDSPOT\tchecked={checked} recognized={recognized} "
+        f"unrecognized={checked - recognized}"
+    )
+
+    code = 1 if (checked == 0 and verb_rows.get("EXPECT", 0) > 0) else 0
+    return LedgerReport(lines=lines, code=code)
+
+
+#: The per-task keys the harness has used for a background task's identity.
+#: ``background_tasks``'s shape is documented as NOT YET STABLE and possibly
+#: a mixed population, so the reader tries each in order rather than
+#: assuming one. Bead nexus-q02nx.6 measured the live shape (2026-09-19,
+#: CLI 2.1.278): a list of dicts carrying id/type/status/description, with
+#: ``command`` on a shell task and ``agent_type`` on a subagent one --
+#: genuinely mixed key sets, which is why this list stays permissive.
+_TASK_ID_KEYS = ("agent_id", "id", "task_id", "taskId", "subagent_id")
+
+
+def _harness_task_ids(payload: str) -> list[str] | None:
+    """Identities from the harness's own ``background_tasks``, or None.
+
+    None means ABSENT -- the key is missing or not a list -- which is NOT
+    the same as an empty list and must not be treated as "no tasks
+    running". Absent means the harness told us nothing, so there is no
+    ground truth to reconcile against and the caller returns clean. An
+    empty list means the harness affirmatively reports nothing running,
+    which is what makes an outstanding START stranded.
+
+    An entry with no recognisable identity is kept as "" rather than
+    dropped: it still counts toward the harness's total, and silently
+    discarding it would make an unidentifiable task look like no task.
+    """
+    try:
+        data = json.loads(payload)
+    except Exception:  # noqa: BLE001 — a junk payload must never block a stop
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    tasks = data.get("background_tasks")
+    if not isinstance(tasks, list):
+        return None
+
+    scrub = str.maketrans({"\t": " ", "\n": " ", "\r": " "})
+    identities: list[str] = []
+    for task in tasks:
+        ident = ""
+        if isinstance(task, dict):
+            for key in _TASK_ID_KEYS:
+                value = task.get(key)
+                if value:
+                    ident = str(value)
+                    break
+        elif isinstance(task, str):
+            ident = task
+        identities.append(ident.translate(scrub) if ident else "")
+    return identities
+
+
+def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
+    """Cross-check outstanding STARTs against the harness's own ground truth.
+
+    THE GAP THIS CLOSES: every other consult surface answers "did THIS agent
+    report" from the ledger alone, and none of them can see an agent that
+    never fired SubagentStop at all. A hook crash, an OOM kill or a
+    harness-level SIGKILL between dispatch and stop all leave a START with
+    no terminal row, which from the ledger's point of view is
+    indistinguishable from "still legitimately running". The harness's own
+    background-task list is INDEPENDENT ground truth: a task the harness no
+    longer tracks while the ledger still calls it outstanding is a silent
+    death the ledger alone could never detect.
+
+    Exit codes: 0 clean, 2 undeclared tasks, 4 STRANDED. **4 takes priority
+    over 2** -- a silent death outranks a bookkeeping gap.
+    """
+    if not session_id or not payload:
+        return LedgerReport()
+    rows = _readable_rows(session_id)
+    if rows is None:
+        return LedgerReport()
+
+    identities = _harness_task_ids(payload)
+    if identities is None:
+        return LedgerReport()  # ABSENT: no ground truth, nothing to reconcile
+
+    harness_ids = {i for i in identities if i}
+    unidentified = sum(1 for i in identities if not i)
+
+    order: list[str] = []
+    stype: dict[str, str] = {}
+    terminated: set[str] = set()
+    for row in rows:
+        verb = row[1] if len(row) > 1 else ""
+        who = row[2] if len(row) > 2 else ""
+        if verb == "START" and who not in stype:
+            stype[who] = row[3] if len(row) > 3 else ""
+            order.append(who)
+        elif verb in ("REPORTED", "BLOCKED", "WOULDBLOCK"):
+            terminated.add(who)
+
+    lines: list[str] = []
+    outstanding = stranded = 0
+    for agent_id in order:
+        if agent_id in terminated:
+            continue
+        outstanding += 1
+        if agent_id not in harness_ids:
+            lines.append(f"STRANDED\t{agent_id}\t{stype[agent_id]}")
+            stranded += 1
+
+    undeclared_tasks = 0
+    for ident in sorted(harness_ids):
+        if ident not in stype:
+            lines.append(f"UNDECLARED_TASK\t{ident}")
+            undeclared_tasks += 1
+
+    lines.append(
+        f"SUMMARY\toutstanding={outstanding} harness_tasks={len(harness_ids) + unidentified} "
+        f"unidentified={unidentified} stranded={stranded} "
+        f"undeclared_tasks={undeclared_tasks}"
+    )
+
+    if stranded > 0:
+        return LedgerReport(lines=lines, code=4)
+    if undeclared_tasks > 0:
+        return LedgerReport(lines=lines, code=2)
+    return LedgerReport(lines=lines, code=0)
