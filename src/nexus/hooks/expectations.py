@@ -46,14 +46,27 @@ from __future__ import annotations
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 __all__ = [
     "ExpectationsUsageError",
+    "expectations_already_blocked",
+    "expectations_archive",
     "expectations_expect",
     "expectations_file",
+    "expectations_last_terminal",
+    "expectations_mark_blocked",
     "expectations_start",
+    "expectations_sweep",
+    "expectations_undeclared",
 ]
+
+#: Reap floor for both ledgers and their derived credit slots, in days.
+#: HONEST RESIDUAL, carried from bash: reaping is by mtime, which only
+#: refreshes on WRITE, so a session idle past the floor with a background
+#: dispatch still pending can lose its ledger.
+_REAP_DAYS = 7
 
 #: Verb vocabulary of the append-only TSV. Reproduced exactly; a reader in
 #: the bash library, the e2e twin, or a test fixture may carry any of them.
@@ -247,3 +260,254 @@ def _claim_credit(
         except OSError:  # pragma: no cover — fail open, never block a stop
             return False
     return False
+
+
+def _archive_dir() -> Path:
+    directory = (
+        Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state"))
+        / "nexus"
+        / "orchestration-archive"
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.chmod(0o700)
+    except OSError:  # pragma: no cover
+        pass
+    return directory
+
+
+def _readable_rows(session_id: str) -> list[list[str]] | None:
+    """Every row of a session's ledger, or None if it cannot be read.
+
+    The single fail-open seam for the consult helpers: a missing,
+    unreadable or junk-bearing ledger must never block a stop, so every
+    reader distinguishes "no ledger" (None) from "a ledger with no
+    matching rows" ([]) and none of them raise.
+    """
+    try:
+        file = expectations_file(session_id)
+    except ExpectationsUsageError:
+        return None
+    try:
+        text = Path(file).read_text()
+    except OSError:
+        return None
+    return [line.split("\t") for line in text.splitlines() if line]
+
+
+def expectations_mark_blocked(session_id: str, agent_id: str, cause: str = "") -> None:
+    """Append a BLOCKED row, optionally with a disclosed cause.
+
+    The tab/newline guard is the same one ``expectations_start`` carries
+    and for a sharper reason: a misaligned BLOCKED row would never match
+    :func:`expectations_already_blocked`'s exact-field comparison, which
+    silently defeats block-at-most-once.
+    """
+    if not agent_id:
+        raise ExpectationsUsageError(
+            "expectations_mark_blocked: session_id and agent_id are required"
+        )
+    for value in (agent_id, cause):
+        if "\t" in value or "\n" in value:
+            raise ExpectationsUsageError(
+                "expectations_mark_blocked: tab/newline in agent_id/cause"
+            )
+
+    file = expectations_file(session_id)
+    row = f"{_ts()}\tBLOCKED\t{agent_id}"
+    if cause:
+        row += f"\t{cause}"
+    _append(file, row)
+
+
+def expectations_already_blocked(session_id: str, agent_id: str) -> bool:
+    """True iff a BLOCKED row exists for this exact agent_id.
+
+    A missing file is False -- not blocked yet -- which composes with
+    ``owes_report``'s fail-open into "never block".
+    """
+    if not session_id or not agent_id:
+        return False
+    rows = _readable_rows(session_id)
+    if rows is None:
+        return False
+    return any(len(r) > 2 and r[1] == "BLOCKED" and r[2] == agent_id for r in rows)
+
+
+def expectations_last_terminal(session_id: str, agent_id: str) -> str:
+    """The LAST terminal verb recorded for this agent, or "".
+
+    Terminal means REPORTED, BLOCKED or WOULDBLOCK. Last, not first: an
+    agent can be blocked and then report, and the caller wants where it
+    ended up. Never raises -- an unreadable ledger is "".
+    """
+    if not session_id or not agent_id:
+        return ""
+    rows = _readable_rows(session_id)
+    if rows is None:
+        return ""
+    verb = ""
+    for row in rows:
+        if len(row) > 2 and row[1] in ("REPORTED", "BLOCKED", "WOULDBLOCK") and row[2] == agent_id:
+            verb = row[1]
+    return verb
+
+
+def expectations_archive() -> None:
+    """Copy each ledger into the archive dir, newest-wins. Never fails."""
+    src, dst = _state_dir(), _archive_dir()
+    for path in src.glob("*.expectations"):
+        if not path.is_file():
+            continue
+        target = dst / path.name
+        try:
+            if not target.exists() or path.stat().st_mtime > target.stat().st_mtime:
+                target.write_bytes(path.read_bytes())
+                os.utime(target, (path.stat().st_atime, path.stat().st_mtime))
+        except OSError:  # pragma: no cover — best effort, never fail the caller
+            continue
+
+
+def expectations_sweep() -> None:
+    """Best-effort reap of ledgers and their credit slots past the floor.
+
+    The slots are swept too, and the reason it is safe is RECONCILIATION,
+    not the floor: a ledger's mtime refreshes on every append, so a session
+    active past the floor keeps its ledger while its day-0 slots age out
+    and are deleted. Any deleted slot that still has a backing CONSUMED row
+    is re-created (indices 1..spent) on the next claim, so it cannot become
+    a second spend. Slots above ``spent`` are orphans, and freeing them is
+    the only reclaim that exists.
+
+    An earlier version of the bash comment called deleting a live-ledger
+    slot "impossible", which was false; the reason is stated here because a
+    maintainer who trusted that word could make a change that is NOT safe.
+    """
+    cutoff = time.time() - _REAP_DAYS * 86400
+    directory = _state_dir()
+    for pattern, predicate in (
+        ("*.expectations", Path.is_file),
+        ("*.expectations.credit.*", Path.is_symlink),
+    ):
+        for path in directory.glob(pattern):
+            try:
+                if predicate(path) and path.lstat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:  # pragma: no cover — best effort
+                continue
+
+
+@dataclass(frozen=True)
+class LedgerReport:
+    """A reader's stdout lines plus its exit code.
+
+    The ledger verbs are the only ones in this epic whose CONTRACT is the
+    exit code -- ``undeclared`` 0/1/2/3, ``reconcile`` 0/2/4, ``census``
+    0/1 -- and those codes are quoted verbatim in AGENTS.md, so they are a
+    public API rather than an implementation detail. Carrying them in a
+    value (instead of raising, or returning a bare int) keeps the Python
+    caller able to read the lines AND the code, which is what
+    ``stop_verification_hook``'s eventual port needs.
+
+    ``note`` is stderr, never stdout: it must not land in a hook's decision
+    channel.
+    """
+
+    lines: list[str] = field(default_factory=list)
+    code: int = 0
+    note: str = ""
+
+
+def expectations_undeclared(session_id: str) -> LedgerReport:
+    """The declaration-completeness retro audit (RDR-184 item .16).
+
+    One ``UNDECLARED\t<agent_id>\t<agent_type>`` line per START whose type
+    has no unspent EXPECT credit left. An EXPECT row of EITHER mode supplies
+    credit, so a deliberately-declared sync dispatch stays audit-clean.
+
+    Exit codes, quoted in AGENTS.md: 0 clean, 1 BLINDSPOT, 2 undeclared>0,
+    3 no ledger. **3 is not a pass** -- absence of a ledger is not evidence
+    of cleanliness, which is why it carries a note naming the two
+    explanations and how to tell them apart.
+    """
+    rows = _readable_rows(session_id)
+    if rows is None:
+        return LedgerReport(
+            code=3,
+            note=(
+                f"NOTE — no ledger file for session '{session_id}': either this "
+                "session dispatched no agents (legitimately nothing to audit) or "
+                "the session id is wrong — cross-check with a known-good sid via "
+                "expectations_census; absence is not evidence of cleanliness "
+                "(nexus-8dr2u)"
+            ),
+        )
+
+    order: list[str] = []
+    stype: dict[str, str] = {}
+    expect_types: set[str] = set()
+    credit: dict[str, int] = {}
+    seen_dispatch: set[str] = set()
+    expect_total = 0
+
+    for row in rows:
+        verb = row[1] if len(row) > 1 else ""
+        if verb == "START" and len(row) > 3:
+            agent_id = row[2]
+            if agent_id not in stype:
+                order.append(agent_id)
+                stype[agent_id] = row[3]
+        elif verb == "EXPECT" and len(row) > 2:
+            # Dedupe by dispatch_id. The writing hook takes a BOUNDED lock,
+            # so a double registration that outlasts the budget can append
+            # the same dispatch twice -- and a duplicate EXPECT is not the
+            # harmless nuisance a duplicate START is: it inflates the credit
+            # pool and MASKS an undeclared start. The reader can settle it
+            # unambiguously, so it does.
+            dispatch_id = row[4] if len(row) > 4 else ""
+            if dispatch_id and dispatch_id in seen_dispatch:
+                continue
+            if dispatch_id:
+                seen_dispatch.add(dispatch_id)
+            expect_types.add(row[2])
+            credit[row[2]] = credit.get(row[2], 0) + 1
+            expect_total += 1
+
+    lines: list[str] = []
+    checked = len(order)
+    recognized = 0
+    undeclared = 0
+    for agent_id in order:
+        agent_type = stype[agent_id]
+        # `recognized` is a TALLY, not a gate (nexus-houpu): it records how
+        # many STARTs had an EXPECT row of their type anywhere in the
+        # ledger, which distinguishes an inert dispatch hook from a
+        # partially-missed one. Every START is evaluated either way -- there
+        # is no unrecognised class that skips the credit check.
+        if agent_type in expect_types:
+            recognized += 1
+        if credit.get(agent_type, 0) > 0:
+            credit[agent_type] -= 1
+            continue
+        lines.append(f"UNDECLARED\t{agent_id}\t{agent_type}")
+        undeclared += 1
+
+    lines.append(
+        f"SUMMARY\tchecked={checked} recognized={recognized} "
+        f"unrecognized={checked - recognized} undeclared={undeclared}"
+    )
+
+    # The one false-clean shape left: the ledger declares dispatches and
+    # records no START at all, so the walk examined nothing. Zero UNDECLARED
+    # lines there means "nothing was checkable", never "compliant".
+    if checked == 0 and expect_total > 0:
+        lines.append(
+            f"BLINDSPOT\tledger holds {expect_total} EXPECT row(s) and ZERO START "
+            f"rows - the audit walked nothing, so undeclared={undeclared} is NOT "
+            "evidence of compliance (check the SubagentStart stamp is registered "
+            "and NX_ORCH_STOP_GUARD is not off)"
+        )
+        return LedgerReport(lines=lines, code=1)
+    if undeclared > 0:
+        return LedgerReport(lines=lines, code=2)
+    return LedgerReport(lines=lines, code=0)

@@ -24,6 +24,7 @@ import inspect
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -293,3 +294,275 @@ class TestCreditClaimUnderRealParallelLoad:
         slots = sorted(Path(path.parent).glob(f"{path.name}.credit.t.*"))
         assert len(slots) == 4
         assert len({os.readlink(s) for s in slots}) == 4, "each slot a distinct owner"
+
+
+# ── block-at-most-once, and the terminal-verb read ────────────────────────
+
+class TestBlockedRows:
+    def test_a_blocked_row_is_recorded_and_found(self, state):
+        exp.expectations_mark_blocked("s", "a1")
+        assert exp.expectations_already_blocked("s", "a1") is True
+
+    def test_a_cause_is_carried_when_given(self, state):
+        exp.expectations_mark_blocked("s", "a1", "lock-exhausted")
+        assert _rows(Path(exp.expectations_file("s")))[0][3] == "lock-exhausted"
+
+    def test_a_different_agent_is_not_blocked(self, state):
+        exp.expectations_mark_blocked("s", "a1")
+        assert exp.expectations_already_blocked("s", "a2") is False
+
+    def test_a_missing_ledger_reads_as_not_blocked(self, state):
+        """Fails OPEN. This composes with owes_report's own fail-open into
+        'never block', which is the whole file's failure direction."""
+        assert exp.expectations_already_blocked("never-seen", "a1") is False
+
+    @pytest.mark.parametrize("bad", ["tab\there", "nl\nhere"])
+    def test_a_tab_or_newline_is_refused(self, state, bad):
+        """A misaligned BLOCKED row would never match already_blocked's
+        exact-field compare, silently defeating block-at-most-once."""
+        with pytest.raises(exp.ExpectationsUsageError):
+            exp.expectations_mark_blocked("s", bad)
+        with pytest.raises(exp.ExpectationsUsageError):
+            exp.expectations_mark_blocked("s", "a1", bad)
+
+
+class TestLastTerminal:
+    def test_the_LAST_terminal_verb_wins(self, state):
+        """An agent can be blocked and then report; the caller wants where
+        it ended up, not where it started."""
+        exp.expectations_mark_blocked("s", "a1")
+        exp._append(exp.expectations_file("s"), f"{exp._ts()}\tREPORTED\ta1")
+        assert exp.expectations_last_terminal("s", "a1") == "REPORTED"
+
+    def test_a_non_terminal_row_is_not_reported(self, state):
+        exp.expectations_start("s", "a1", "t")
+        assert exp.expectations_last_terminal("s", "a1") == ""
+
+    def test_a_missing_ledger_is_empty_not_an_error(self, state):
+        assert exp.expectations_last_terminal("never-seen", "a1") == ""
+
+
+# ── archive and sweep ─────────────────────────────────────────────────────
+
+class TestArchiveAndSweep:
+    def test_archive_copies_a_ledger(self, state):
+        exp.expectations_expect("s", "t", "background")
+        exp.expectations_archive()
+        archived = exp._archive_dir() / "s.expectations"
+        assert archived.is_file()
+        assert archived.read_text() == Path(exp.expectations_file("s")).read_text()
+
+    def test_archive_does_not_clobber_a_newer_copy(self, state):
+        exp.expectations_expect("s", "t", "background")
+        exp.expectations_archive()
+        archived = exp._archive_dir() / "s.expectations"
+        archived.write_text("NEWER\n")
+        os.utime(archived, (time.time() + 60, time.time() + 60))
+        exp.expectations_archive()
+        assert archived.read_text() == "NEWER\n"
+
+    def test_sweep_reaps_a_ledger_past_the_floor(self, state):
+        exp.expectations_expect("s", "t", "background")
+        path = Path(exp.expectations_file("s"))
+        old = time.time() - (exp._REAP_DAYS + 1) * 86400
+        os.utime(path, (old, old))
+        exp.expectations_sweep()
+        assert not path.exists()
+
+    def test_sweep_spares_a_fresh_ledger(self, state):
+        exp.expectations_expect("s", "t", "background")
+        exp.expectations_sweep()
+        assert Path(exp.expectations_file("s")).exists()
+
+    def test_sweep_reaps_an_aged_credit_slot(self, state):
+        """The slots live beside the ledger under a longer name, so the
+        ledger's own glob never matched them. Safe because reconciliation
+        re-creates any slot that still has a backing CONSUMED row."""
+        path = Path(exp.expectations_file("s"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        exp._claim_credit(str(path), "t", "a1", credit=1, spent=0, owners=[])
+        slot = Path(f"{path}.credit.t.1")
+        assert slot.is_symlink()
+        old = time.time() - (exp._REAP_DAYS + 1) * 86400
+        os.utime(slot, (old, old), follow_symlinks=False)
+        exp.expectations_sweep()
+        assert not slot.is_symlink()
+
+    def test_sweep_uses_lstat_so_a_dangling_slot_is_still_aged(self, state):
+        """The slot targets are agent identities, not paths, so every slot
+        is a dangling symlink. A sweep that stat()ed through the link would
+        raise or skip every one of them."""
+        path = Path(exp.expectations_file("s"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        exp._claim_credit(str(path), "t", "a1", credit=1, spent=0, owners=[])
+        slot = Path(f"{path}.credit.t.1")
+        assert not slot.exists(), "dangling by design — exists() follows the link"
+        assert slot.is_symlink()
+        exp.expectations_sweep()
+        assert slot.is_symlink(), "fresh, so spared — but it was reachable to stat"
+
+
+# ── undeclared: the retro audit and all four exit codes ───────────────────
+
+def _seed(session: str, rows: list[tuple[str, ...]]) -> None:
+    exp._state_dir()
+    for row in rows:
+        exp._append(exp.expectations_file(session), "\t".join(("2026-01-01T00:00:00Z", *row)))
+
+
+class TestUndeclaredExitCodes:
+    """All four codes, quoted verbatim in AGENTS.md as the caller-facing
+    API: 0 clean, 1 BLINDSPOT, 2 undeclared>0, 3 no ledger."""
+
+    def test_code_0_when_every_start_has_credit(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("UNDECLARED")]
+
+    def test_code_2_when_a_start_has_no_credit(self, state):
+        _seed("s", [("START", "a1", "t")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 2
+        assert "UNDECLARED\ta1\tt" in r.lines
+
+    def test_code_1_blindspot_when_expects_exist_but_no_start_does(self, state):
+        """The one false-clean shape: the audit walked nothing, so
+        undeclared=0 is not evidence of compliance."""
+        _seed("s", [("EXPECT", "t", "background")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 1
+        assert any(ln.startswith("BLINDSPOT\tledger holds 1 EXPECT row(s)") for ln in r.lines)
+
+    def test_code_3_when_there_is_no_ledger_at_all(self, state):
+        """3 is NOT a pass. Absence of a ledger is not evidence of
+        cleanliness, and the note has to say so."""
+        r = exp.expectations_undeclared("never-seen")
+        assert r.code == 3
+        assert r.lines == []
+        assert "absence is not evidence of cleanliness" in r.note
+
+    def test_an_empty_ledger_is_clean_not_a_blindspot(self, state):
+        """checked==0 AND expect_total==0 is a session that dispatched
+        nothing — genuinely clean, distinct from the blindspot shape."""
+        Path(exp.expectations_file("s")).write_text("")
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0
+
+
+class TestUndeclaredCreditAccounting:
+    def test_n_expects_cover_n_starts_of_that_type(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("EXPECT", "t", "background"),
+                    ("START", "a1", "t"), ("START", "a2", "t")])
+        assert exp.expectations_undeclared("s").code == 0
+
+    def test_the_n_plus_first_start_is_undeclared(self, state):
+        _seed("s", [("EXPECT", "t", "background"),
+                    ("START", "a1", "t"), ("START", "a2", "t")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 2
+        assert "UNDECLARED\ta2\tt" in r.lines
+        assert "UNDECLARED\ta1\tt" not in r.lines, "credit is spent in START order"
+
+    def test_a_sync_expect_also_supplies_credit(self, state):
+        """An EXPECT row of EITHER mode counts: a deliberately-declared
+        sync dispatch must stay audit-clean."""
+        _seed("s", [("EXPECT", "t", "sync"), ("START", "a1", "t")])
+        assert exp.expectations_undeclared("s").code == 0
+
+    def test_a_duplicate_dispatch_id_does_not_inflate_the_pool(self, state):
+        """A duplicate EXPECT is not the harmless nuisance a duplicate
+        START is — it inflates credit and MASKS an undeclared start. The
+        writing hook takes a BOUNDED lock, so this really happens."""
+        _seed("s", [("EXPECT", "t", "background", "d1"),
+                    ("EXPECT", "t", "background", "d1"),
+                    ("START", "a1", "t"), ("START", "a2", "t")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 2, "the second START must NOT be covered by a duplicate row"
+        assert "UNDECLARED\ta2\tt" in r.lines
+
+    def test_two_distinct_dispatch_ids_both_count(self, state):
+        _seed("s", [("EXPECT", "t", "background", "d1"),
+                    ("EXPECT", "t", "background", "d2"),
+                    ("START", "a1", "t"), ("START", "a2", "t")])
+        assert exp.expectations_undeclared("s").code == 0
+
+    def test_a_duplicate_start_id_is_counted_once(self, state):
+        _seed("s", [("EXPECT", "t", "background"),
+                    ("START", "a1", "t"), ("START", "a1", "t")])
+        assert exp.expectations_undeclared("s").code == 0
+
+    def test_credit_is_keyed_by_type_not_shared(self, state):
+        _seed("s", [("EXPECT", "t1", "background"), ("START", "a1", "t2")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 2
+        assert "UNDECLARED\ta1\tt2" in r.lines
+
+    def test_the_summary_line_reports_the_tallies(self, state):
+        _seed("s", [("EXPECT", "t", "background"),
+                    ("START", "a1", "t"), ("START", "a2", "other")])
+        summary = [ln for ln in exp.expectations_undeclared("s").lines
+                   if ln.startswith("SUMMARY")][0]
+        assert summary == "SUMMARY\tchecked=2 recognized=1 unrecognized=1 undeclared=1"
+
+
+# ── differential: the port against the still-live bash library ───────────
+
+_BASH_LIB = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "expectations.sh"
+
+
+def _bash_undeclared(session: str, state_home: str) -> tuple[list[str], int]:
+    """Run the REAL bash expectations_undeclared and return (lines, rc)."""
+    proc = subprocess.run(
+        ["bash", "-c", f'. "{_BASH_LIB}"; expectations_undeclared "{session}"'],
+        capture_output=True, text=True,
+        env={**os.environ, "XDG_STATE_HOME": state_home},
+    )
+    return [ln for ln in proc.stdout.splitlines() if ln], proc.returncode
+
+
+class TestPortAgreesWithTheLiveBashLibrary:
+    """Approach item 9 is "move, do not rewrite", and the bash library is
+    still live until bead .14 repoints its consumers — so the two must
+    agree for the whole of Phase 2, and the cheapest proof is to run both.
+
+    This is a stronger oracle than any assertion I could write about the
+    port in isolation: it catches translation drift in the awk logic, the
+    exit codes AND the exact stdout bytes at once, against the
+    implementation whose behaviour is the contract.
+    """
+
+    @pytest.mark.parametrize(
+        "rows,label",
+        [
+            ([("EXPECT", "t", "background"), ("START", "a1", "t")], "clean"),
+            ([("START", "a1", "t")], "undeclared"),
+            ([("EXPECT", "t", "background")], "blindspot"),
+            ([("EXPECT", "t", "background"), ("EXPECT", "t", "background"),
+              ("START", "a1", "t"), ("START", "a2", "t")], "n-of-type"),
+            ([("EXPECT", "t", "background"),
+              ("START", "a1", "t"), ("START", "a2", "t")], "n-plus-one"),
+            ([("EXPECT", "t", "background", "d1"), ("EXPECT", "t", "background", "d1"),
+              ("START", "a1", "t"), ("START", "a2", "t")], "duplicate-dispatch-id"),
+            ([("EXPECT", "t", "sync"), ("START", "a1", "t")], "sync-supplies-credit"),
+            ([("EXPECT", "t1", "background"), ("START", "a1", "t2")], "type-keyed"),
+            ([("EXPECT", "conexus:critic", "background"),
+              ("START", "a1", "conexus:critic")], "colon-qualified-type"),
+            ([("EXPECT", "t", "background"), ("START", "a1", "t"), ("START", "a1", "t")],
+             "duplicate-start-id"),
+        ],
+    )
+    def test_lines_and_exit_code_match_bash(self, state, rows, label):
+        _seed("sdiff", rows)
+        mine = exp.expectations_undeclared("sdiff")
+        theirs_lines, theirs_rc = _bash_undeclared("sdiff", os.environ["XDG_STATE_HOME"])
+        assert mine.lines == theirs_lines, f"{label}: stdout drifted from bash"
+        assert mine.code == theirs_rc, f"{label}: exit code drifted from bash"
+
+    def test_the_no_ledger_case_matches_bash(self, state):
+        """rc 3 with nothing on stdout — the note goes to stderr in both,
+        because a NOTE on stdout would land in a hook's decision channel."""
+        mine = exp.expectations_undeclared("no-such-session")
+        theirs_lines, theirs_rc = _bash_undeclared("no-such-session", os.environ["XDG_STATE_HOME"])
+        assert mine.code == theirs_rc == 3
+        assert mine.lines == theirs_lines == []
