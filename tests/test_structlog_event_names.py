@@ -105,9 +105,22 @@ def _is_logger_receiver(recv: ast.expr) -> bool:
         )
     if isinstance(recv, ast.Call):
         f = recv.func
-        if isinstance(f, ast.Attribute) and f.attr == "get_logger":
+        name = f.attr if isinstance(f, ast.Attribute) else (
+            f.id if isinstance(f, ast.Name) else None
+        )
+        if name == "get_logger":
             return True
-        if isinstance(f, ast.Name) and f.id == "get_logger":
+        # A deferred-logger accessor: ``_logger().warning(...)``, the form
+        # RDR-215 nexus-q02nx.21 introduced when it moved structlog out of
+        # nexus/hooks/__init__'s module scope (a verb dispatch was paying
+        # 60ms for the eager import). Without this branch the scan simply
+        # stopped seeing those sites and the count fell by one, which reads
+        # as a fixed site and is not one.
+        if name is not None and (
+            name in _LOGGER_NAMES
+            or name.endswith("_log")
+            or name.endswith("_logger")
+        ):
             return True
     return False
 
@@ -116,7 +129,7 @@ _SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # Grandfathered prose-message events as of nexus-whh61.3 (AST count over src/).
 # Ratchet DOWN as sites are fixed; never UP (a new prose event must fail CI).
-SNAKE_CASE_EVENT_BASELINE = 37  # 80 -> 78: RDR-188 .9/.19 deleted both prose-style client-rerank log sites; 78 -> 77: nexus-i711w Stage 2 sub-stage A3 deleted the SQLite T2 stores (a prose-style site went with the deleted src); 77 -> 45: RDR-158 P4 Stage 4 (nexus-i711w) deleted db/migrations.py, whose migration-step bodies carried 32 grandfathered prose-style events — LOWERED per this file's own ratchet rule, never bumped up; 45 -> 43: nexus-sghyo (2026-08-06) deleted client-side Voyage embedding code (doc_indexer.py's _embed_with_fallback and related helpers), which carried 2 prose-style log sites; 43 -> 41: RDR-191 Phase 6 (nexus-o8dil.33, 2026-08-15) deleted indexer.py's _prune_deleted_files client-side fallback, which carried 2 prose-style log sites ("skipped chunks without chunk_text_hash", "pruned orphan chunks"); 41 -> 40: nexus-ft04v.26 (RDR-204 Phase 3, resolve_corpus's row-based repoint, landed earlier this same bead before this fix) had introduced 4 new prose-style "resolve_corpus: ..." debug sites using structlog.get_logger() ad hoc instead of the module's own _log; fixed to snake_case events (resolve_corpus_candidate_dropped_no_row, resolve_corpus_candidate_excluded_lifecycle, resolve_corpus_no_collections_matched with a stage= field distinguishing the two call sites that shared one string) on the module's _log instead of adding new prose sites — LOWERED, never bumped up; 40 -> 37: nexus-06aei deleted src/nexus/ripgrep_cache.py, whose three prose-style warnings went with it ("rg not found — skipping ripgrep hybrid search", "rg timed out after %d s — skipping ripgrep results", "rg exited with error") — LOWERED by deletion, not by a fix
+SNAKE_CASE_EVENT_BASELINE = 36  # 80 -> 78: RDR-188 .9/.19 deleted both prose-style client-rerank log sites; 78 -> 77: nexus-i711w Stage 2 sub-stage A3 deleted the SQLite T2 stores (a prose-style site went with the deleted src); 77 -> 45: RDR-158 P4 Stage 4 (nexus-i711w) deleted db/migrations.py, whose migration-step bodies carried 32 grandfathered prose-style events — LOWERED per this file's own ratchet rule, never bumped up; 45 -> 43: nexus-sghyo (2026-08-06) deleted client-side Voyage embedding code (doc_indexer.py's _embed_with_fallback and related helpers), which carried 2 prose-style log sites; 43 -> 41: RDR-191 Phase 6 (nexus-o8dil.33, 2026-08-15) deleted indexer.py's _prune_deleted_files client-side fallback, which carried 2 prose-style log sites ("skipped chunks without chunk_text_hash", "pruned orphan chunks"); 41 -> 40: nexus-ft04v.26 (RDR-204 Phase 3, resolve_corpus's row-based repoint, landed earlier this same bead before this fix) had introduced 4 new prose-style "resolve_corpus: ..." debug sites using structlog.get_logger() ad hoc instead of the module's own _log; fixed to snake_case events (resolve_corpus_candidate_dropped_no_row, resolve_corpus_candidate_excluded_lifecycle, resolve_corpus_no_collections_matched with a stage= field distinguishing the two call sites that shared one string) on the module's _log instead of adding new prose sites — LOWERED, never bumped up; 40 -> 37: nexus-06aei deleted src/nexus/ripgrep_cache.py, whose three prose-style warnings went with it ("rg not found — skipping ripgrep hybrid search", "rg timed out after %d s — skipping ripgrep results", "rg exited with error") — LOWERED by deletion, not by a fix; 37 -> 36: RDR-215 nexus-q02nx.21 fixed hooks/__init__'s "session_end: storage error during flush/expire" to session_end_storage_error with phase=flush_expire. Worth reading with the _is_logger_receiver change in the same commit: that site had become INVISIBLE to this scan, not fixed, because the same bead deferred structlog behind a _logger() accessor and the Call branch only recognised get_logger(). The count had already fallen to 36 on its own. Widening the detector put it back to 37, and this is the genuine fix that takes it to 36 — LOWERED by a fix, after the scan could see it again
 
 
 def _event_is_snake_case(event: str) -> bool:

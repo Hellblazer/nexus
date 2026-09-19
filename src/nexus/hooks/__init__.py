@@ -696,7 +696,7 @@ def session_end_flush() -> str:
         if t1 is not None:
             _t1_clear_if_owned(t1)
     except Exception as exc:  # noqa: BLE001 — session-end boundary: a storage error of ANY class must not crash the host (the SQLite-specific catch went with the substrate, 2026-08-29)
-        _logger().warning("session_end: storage error during flush/expire", error=str(exc))
+        _logger().warning("session_end_storage_error", phase="flush_expire", error=str(exc))
 
     return f"Session ended. Flushed {flushed} scratch entries. {expired.describe(prefix='memory ')}"
 

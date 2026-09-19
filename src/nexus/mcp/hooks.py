@@ -413,10 +413,14 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
                 "is why the port coerces before slicing."
             ),
         },
+        # The "files no issue, remembers nothing" posture is nexus-0dj7e's
+        # ruling: a transient API failure is an infra event, not a finding.
+        # The bead id lives here rather than in the summary, which is a tool
+        # description the model reads (test_mcp_tool_description_lint).
         summary=(
             "observes a StopFailure event and does nothing else — transient "
             "API failures are infra events, so it files no issue and "
-            "remembers nothing (nexus-0dj7e); debug trace only"
+            "remembers nothing; debug trace only"
         ),
     ),
 )
