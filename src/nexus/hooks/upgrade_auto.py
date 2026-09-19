@@ -84,6 +84,18 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
         # nonzero status and fired the same `||`.
         sys.stderr.write(SKEW_GUIDANCE + "\n")
         return HookResult()
+    # NO `timeout=` HERE, AND THAT IS THE DECISION, not an omission. Code
+    # review proposed one, citing `_cycle_storage_service_to_current`'s
+    # `timeout=60` as the house pattern. It is the wrong pattern for this
+    # call. `hooks.json` gives this hook 30 s; Claude Code enforces that on
+    # the `nx-hook` process, and an orphaned `nx upgrade --auto` then RUNS TO
+    # COMPLETION in the background and takes effect at the next session --
+    # which is the accepted shape RDR-143 CA-4 already relies on for the
+    # detached lockstep upgrade ("the new CLI takes effect on the next
+    # session, not the current one"). A `subprocess.run(timeout=...)` would
+    # instead SIGKILL a legitimate in-flight upgrade partway through a ladder
+    # rung. Letting it finish unattended is the better failure, so the
+    # 30 s budget stays where it is and this call does not add a second one.
     if proc.returncode != 0:
         sys.stderr.write(SKEW_GUIDANCE + "\n")
     return HookResult()

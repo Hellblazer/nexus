@@ -162,8 +162,7 @@ mechanize, it matters enough to ship.
   INERT until the next cut: sessions on the pinned tag keep running the
   bash layer, which is still on disk and still correct.
 
-- `conexus/hooks/hooks.json` (the last four shell-form entries), and
-  `conexus/hooks/scripts/_run_python_hook.sh` (deleted):
+- `conexus/hooks/hooks.json` (the last four shell-form entries), `conexus/hooks/scripts/_run_python_hook.sh` (deleted), `conexus/hooks/scripts/routing/README.md`:
   bead: nexus-q02nx.22 — RDR-215 Approach items 6 and 7, the tail of the
   re-declaration. `nx upgrade --auto 2>/dev/null || echo ... >&2` becomes
   `nx-hook upgrade-auto`, `nx self gc >/dev/null 2>&1 || true` becomes
@@ -178,7 +177,16 @@ mechanize, it matters enough to ship.
   `_run_python_hook.sh` is deleted: the interpreter resolution it
   performed is `_interpreter.py`'s since .21, and the launcher's remaining
   callers (the detached lockstep action, the lockstep e2e gate, the
-  RDR-208 MVV container) are repointed in the same change.
+  RDR-208 MVV container) are repointed in the same change. The routing
+  README is prose only: it named the deleted launcher as half of "the
+  framework", which is `_interpreter.py` now.
+  ALL THREE PATHS ARE ON THE BULLET LINE ABOVE, and that is not
+  incidental formatting. `_declared_paths` reads backtick spans from lines
+  matching `^\s*-\s+`, so a path wrapped onto a continuation line is
+  invisible to it. This entry was written that way first and the ledger
+  gate caught it: two declared paths reported as undeclared drift. It is
+  the same shape as the defect the bead itself is about — a checker whose
+  domain is a spelling, and a wrap that leaves it.
   WHEEL FLOOR: the same one as .21's entry directly above, for the same
   reason and with two more verbs on it — `upgrade-auto` and `self-gc` are
   entries in `nexus._hook_runtime.entry.VERB_TABLE`, so a box whose
