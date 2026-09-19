@@ -387,6 +387,7 @@ class TestNonScalarPayloadFields:
                     name="probe",
                     run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
                     fields=("tool_input",),
+                    structured_fields=frozenset({"tool_input"}),
                 ),
             ),
         )
@@ -414,6 +415,7 @@ class TestNonScalarPayloadFields:
                     name="probe",
                     run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
                     fields=("background_tasks",),
+                    structured_fields=frozenset({"background_tasks"}),
                 ),
             ),
         )
@@ -458,3 +460,47 @@ class TestNonScalarPayloadFields:
         _run(mcp.call_tool("hook_probe", {"tool_name": "Bash"}))
 
         assert received == [{"tool_name": "Bash"}]
+
+    def test_an_unstructured_field_keeps_its_string_type_in_the_schema(self):
+        """The widening is per field, not blanket.
+
+        These tools are model-callable and the input schema is what the model
+        sees, so a field that is provably always a string must still say so.
+        A blanket ``Any`` passes every behavioural test in this class while
+        silently erasing that, which is why this asserts on the SCHEMA rather
+        than on a call.
+        """
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: HookResult(),
+                    fields=("tool_name", "tool_input"),
+                    structured_fields=frozenset({"tool_input"}),
+                ),
+            ),
+        )
+
+        props = _run(mcp.list_tools())[0].inputSchema["properties"]
+        assert props["tool_name"].get("anyOf") == [{"type": "string"}, {"type": "null"}], (
+            "a scalar field must keep its string/null type: " f"{props['tool_name']}"
+        )
+        assert "anyOf" not in props["tool_input"], (
+            "a structured field must be unconstrained: " f"{props['tool_input']}"
+        )
+
+    def test_a_structured_value_is_refused_on_a_field_not_marked_structured(self):
+        """The inverse of the widening, and the reason it is opt-in: a field
+        nobody declared structured still rejects a dict, loudly, at the tool
+        boundary rather than reaching run()."""
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (HookToolSpec(name="probe", run=lambda p: HookResult(), fields=("tool_name",)),),
+        )
+
+        with pytest.raises(Exception) as excinfo:
+            _run(mcp.call_tool("hook_probe", {"tool_name": {"not": "a string"}}))
+        assert "string" in str(excinfo.value).lower()

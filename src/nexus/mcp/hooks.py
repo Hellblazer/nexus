@@ -113,6 +113,19 @@ class HookToolSpec:
     generated fallback (see :func:`_field_description`), so this mapping is
     an override for a better description, never a requirement to populate
     every key.
+
+    ``structured_fields`` names the fields that carry a NON-SCALAR payload
+    value, and it is deliberately opt-in per field rather than a blanket
+    widening (bead nexus-9ifls, critique round). Bead nexus-q02nx.6 measured
+    that Claude Code's ``${path}`` substitution delivers ``${tool_input}`` as
+    a ``dict`` and ``${background_tasks}`` as a ``list``, so those fields
+    must accept a structure; but the shapes are a CLOSED, already-enumerated
+    set (T2 ``nexus_rdr/215-hook-contract-map`` records them per script), so
+    typing every field ``Any`` to accommodate two of them throws away real
+    schema information on the rest. These tools are model-callable and the
+    input schema is what the model sees: a field that is provably always a
+    string should say so. Listed fields are typed ``Any``; every other field
+    stays ``str | None``.
     """
 
     name: str
@@ -120,6 +133,7 @@ class HookToolSpec:
     fields: tuple[str, ...] = ()
     field_docs: Mapping[str, str] = field(default_factory=dict)
     summary: str = ""
+    structured_fields: frozenset[str] = frozenset()
 
 
 # One entry per ported hook module (RDR-215 Approach item 4). The first real
@@ -250,23 +264,28 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
             flatten_field_name(payload_field),
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             default=None,
-            # ``Any``, not ``str | None``, and that is a correctness fix rather
-            # than laxness (bead nexus-9ifls). Claude Code builds this map by
-            # ``${path}`` substitution from the hook payload, and bead
-            # nexus-q02nx.6 MEASURED that non-scalar fields arrive as real
-            # structures: ``${tool_input}`` as a ``dict``,
-            # ``${background_tasks}`` as a ``list`` of ``dict``s carrying a
-            # mixed ``shell``/``subagent`` population. Against ``str | None``
-            # pydantic rejects both with ``string_type``, so the first port
-            # declaring such a field (``nexus-q02nx.13`` cross-checks
-            # ``background_tasks`` by definition) would fail validation at the
-            # tool boundary -- and per this module's own contract a raised
-            # exception there renders ``isError=False``, so it would read as
-            # allow rather than as a failure. A hook payload field is
-            # arbitrary JSON; the schema says so. Meaning lives in the
-            # description, and ``nest_payload`` already reassembles structures.
+            # Per-field, not blanket (bead nexus-9ifls). A field the spec
+            # marks structured is typed ``Any`` because bead nexus-q02nx.6
+            # MEASURED that ``${path}`` substitution delivers non-scalars as
+            # real structures -- ``${tool_input}`` a ``dict``,
+            # ``${background_tasks}`` a ``list`` of ``dict``s carrying a mixed
+            # shell/subagent population. Everything else keeps ``str | None``,
+            # because the field shapes are a closed set the contract map
+            # already enumerates and the model reads this schema.
+            #
+            # What a REJECTED argument does, measured rather than assumed
+            # (2026-09-19, CLI 2.1.278): pydantic rejects it during FastMCP's
+            # own argument binding, BEFORE ``_tool`` runs, so ``never_fail``
+            # never sees it and this is NOT the ``isError=False`` path the
+            # module docstring describes for a crash inside ``run()``. It
+            # surfaces as a tool error. For a HOOK that still means the event
+            # is not blocked: a hook tool that raised was logged
+            # ``Hook PreToolUse:Bash (PreToolUse) error: ...`` and the Bash
+            # command ran anyway. So a mistyped field fails OPEN at the event
+            # level while being loud at the tool level -- which is why the
+            # annotation has to be right rather than merely permissive.
             annotation=Annotated[
-                Any,
+                Any if payload_field in spec.structured_fields else str | None,
                 _PydanticField(description=_field_description(spec, payload_field)),
             ],
         )

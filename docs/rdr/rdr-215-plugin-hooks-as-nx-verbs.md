@@ -262,13 +262,23 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   (`src/nexus/mcp/hooks.py`) types EVERY hook-tool field
   `Annotated[str | None, ...]`, and pydantic 2.12.5 rejects both a
   `dict` and a `list` against that with `string_type`. So the transport
-  is proven and the implementation is not: the first port that declares
-  a field carrying `${tool_input}` or `${background_tasks}` will fail
-  validation. The annotation has to widen before or during
-  `nexus-q02nx.10`, `.12` and `.13`, with a test that drives a real
-  `hook_` tool call carrying a `dict` through FastMCP's own validation.
-  Tracked as its own bead; nothing ships broken today because no
-  `hooks.json` entry names a hook tool yet.
+  was proven and the implementation was not: a port declaring a field
+  that carries `${tool_input}` or `${background_tasks}` would have failed
+  validation. FIXED (bead `nexus-9ifls`): `HookToolSpec` now takes
+  `structured_fields`, and only a field listed there is typed `Any` --
+  every other field keeps `str | None`, because the shapes are a closed
+  set the contract map enumerates and the model reads this schema. A
+  blanket widening was tried first and was a pure regression on the one
+  live tool; the wire snapshot is byte-identical to before it.
+  What a rejected argument actually does, measured (2026-09-19, CLI
+  2.1.278) rather than assumed: pydantic rejects it during FastMCP's
+  argument binding, BEFORE the tool body runs, so `never_fail` never sees
+  it and this is not the `isError=False` path. It surfaces as a tool
+  error -- and at the HOOK level the event still is not blocked. A hook
+  tool that raised was logged `Hook PreToolUse:Bash (PreToolUse) error:
+  ...` and the Bash command ran anyway. So a mistyped field is loud at
+  the tool boundary and fail-open at the event, which is the third
+  fail-open path this phase has found.
 - **Verified** (same bead): a hook tool's own invocation is exempt from
   the hook chain, but a MODEL-initiated call to one is not. With a
   `PreToolUse` matcher covering the server's own tools, the hook fired
