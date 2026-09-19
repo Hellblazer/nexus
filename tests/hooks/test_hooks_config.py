@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for ``nexus.hooks._config`` — one resolver for the orchestration
+"""Unit tests for ``nexus._hook_runtime._config`` — one resolver for the orchestration
 stop guard (RDR-215 Phase 1, bead nexus-q02nx.1).
 
 Four bash scripts read ``NX_ORCH_STOP_GUARD`` inline today with no shared
@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from nexus.hooks import _config
+from nexus._hook_runtime import _config
 
 
 def test_unset_defaults_to_block(monkeypatch):

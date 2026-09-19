@@ -15,7 +15,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 
-from nexus.hooks._io import HookResult, permission_decision, stop_decision
+from nexus._hook_runtime._io import HookResult, permission_decision, stop_decision
 from nexus.mcp.hooks import (
     HOOK_TOOLS,
     HookToolSpec,
@@ -162,7 +162,7 @@ class TestRegisterHookTools:
         assert result.content[0].text == ""
 
     def test_a_raised_exception_is_logged(self, monkeypatch):
-        """Patches ``nexus.hooks._io``'s own emitter rather than
+        """Patches ``nexus._hook_runtime._io``'s own emitter rather than
         ``structlog.testing.capture_logs()`` -- this repo's
         ``configure_logging`` installs a level-filtering wrapper_class that
         ``capture_logs()`` does not override (see
@@ -175,7 +175,7 @@ class TestRegisterHookTools:
         writes to stdout, which is the hook's decision channel. ``_emit``
         chooses the sink at call time and imports structlog only if it has one.
         """
-        import nexus.hooks._io as io_mod
+        import nexus._hook_runtime._io as io_mod
 
         emitted = []
         monkeypatch.setattr(

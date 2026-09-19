@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for ``nexus.hooks.entry`` -- the ``nx-hook`` command-tier dispatch
+"""Tests for ``nexus._hook_runtime.entry`` -- the ``nx-hook`` command-tier dispatch
 mechanism (RDR-215 Phase 1, bead nexus-q02nx.2).
 
 These tests exercise the dispatch mechanism itself against the REAL entry
@@ -9,9 +9,9 @@ documented on the module) to register throwaway fixture verbs for the
 duration of one subprocess call, rather than the one real verb
 :data:`VERB_TABLE` carries (``session-start``, nexus-q02nx.5 -- its own
 coverage lives in ``tests/hooks/test_session_start_verb.py``). Every
-scenario spawns ``python -m nexus.hooks.entry <verb>`` -- exactly the
+scenario spawns ``python -m nexus._hook_runtime.entry <verb>`` -- exactly the
 callable the ``nx-hook`` console script's generated stub also calls
-(``nexus.hooks.entry:main``), so this needs no prior
+(``nexus._hook_runtime.entry:main``), so this needs no prior
 ``scripts/reinstall-tool.sh`` run to be meaningful.
 """
 from __future__ import annotations
@@ -24,9 +24,9 @@ import sys
 import textwrap
 from pathlib import Path
 
-from nexus.hooks import entry
+from nexus._hook_runtime import entry
 
-_ENTRY_ARGV = [sys.executable, "-m", "nexus.hooks.entry"]
+_ENTRY_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry"]
 
 
 def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
@@ -85,7 +85,7 @@ _ECHO_VERB = textwrap.dedent(
     import json
 
     def run(payload):
-        from nexus.hooks._io import HookResult
+        from nexus._hook_runtime._io import HookResult
         return HookResult(stdout=json.dumps({"received": payload}))
     """
 )
@@ -171,7 +171,7 @@ def test_a_raising_verb_still_logs_diagnosably_to_stderr(tmp_path: Path) -> None
 _EXIT_CODE_VERB = textwrap.dedent(
     """
     def run(payload):
-        from nexus.hooks._io import HookResult
+        from nexus._hook_runtime._io import HookResult
         return HookResult(exit_code=3)
     """
 )
@@ -216,7 +216,7 @@ _PROBE_VERB = textwrap.dedent(
     )
 
     def run(payload):
-        from nexus.hooks._io import HookResult
+        from nexus._hook_runtime._io import HookResult
         return HookResult(stdout=json.dumps({"modules_before_verb_import": _SNAPSHOT}))
     """
 )
@@ -225,14 +225,18 @@ _PROBE_VERB = textwrap.dedent(
 def test_the_verb_module_loads_before_the_shared_io_and_logging_machinery(tmp_path: Path) -> None:
     """Proves RDR-215 Approach item 2's 'resolves the verb to its module
     lazily': nx-hook imports the TARGET verb's module first and only then
-    wires up nexus.hooks._io / nexus.logging_setup -- so a verb inspecting
-    its own import environment at load time sees neither. Also the closest
-    thing to the RDR's 'imports only os, sys and json before dispatch'
-    claim that is actually reachable given the entry point's own module
-    path (nexus.hooks.entry) forces nexus/hooks/__init__.py first; see the
-    module docstring's own note on that asymmetry. Never nexus.cli or
-    click, in any case -- that is the one claim this test can make
-    unconditionally.
+    wires up nexus._hook_runtime._io -- so a verb inspecting its own import
+    environment at load time sees neither it nor nexus.logging_setup.
+
+    This docstring used to carry a caveat saying the RDR's 'imports only os,
+    sys and json before dispatch' claim was unreachable, because the entry
+    point's own module path forced nexus/hooks/__init__.py first. That was
+    true while the entry point lived at nexus.hooks.entry; nexus-br31l moved
+    it, and nexus/_hook_runtime/__init__.py is a docstring with no imports at
+    all, so nothing is forced any more. The claim is now reachable and this
+    test's assertions below are what hold it: nexus.logging_setup in
+    particular is no longer imported on ANY dispatch, cheap or expensive,
+    because main() stopped configuring logging up front.
     """
     fixtures = _write_fixture_verb(tmp_path, "probe_verb", _PROBE_VERB)
     env = _env(
@@ -245,7 +249,7 @@ def test_the_verb_module_loads_before_the_shared_io_and_logging_machinery(tmp_pa
     modules = json.loads(proc.stdout)["modules_before_verb_import"]
     assert "nexus.cli" not in modules
     assert "click" not in modules
-    assert "nexus.hooks._io" not in modules
+    assert "nexus._hook_runtime._io" not in modules
     assert "nexus.logging_setup" not in modules
 
 

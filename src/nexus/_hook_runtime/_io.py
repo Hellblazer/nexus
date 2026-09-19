@@ -59,21 +59,75 @@ def _emit(level: str, event: str, **fields: object) -> None:
         )
 
         if active_log_file() is None:
-            # No configured sink. A debug line has nowhere safe to go, so it is
-            # dropped rather than risked on stdout; a warning goes to the
-            # stderr-bound logger that never reads global structlog state.
-            if level == "warning":
-                emit_import_time_warning(event, **fields)
-            return
+            # No sink yet. Make one, rather than drop the line.
+            #
+            # This is reached on the command tier, where nothing configures
+            # logging up front any more: nx-hook's main() used to call the
+            # bridge unconditionally before reading stdin, which is what made
+            # every stdlib-only verb pay for structlog (nexus-br31l). Removing
+            # that call alone would have silently retired read_payload's own
+            # parse-failure diagnostics, because main() reads the payload
+            # BEFORE any verb runs, so no verb -- however diligent about
+            # calling configure_hook_logging() itself -- could ever get a sink
+            # in place in time. Measured: hook.log created, 0 bytes, the
+            # malformed-payload line gone. Configuring HERE keeps the cost on
+            # the path that actually logs, which is the point of the whole
+            # deferral.
+            configure_hook_logging()
+            if active_log_file() is None:
+                # Genuinely no sink available (unwritable config dir, or a
+                # logging_setup that declined). A debug line has nowhere safe
+                # to go, so it is dropped rather than risked on stdout; a
+                # warning goes to the stderr-bound logger that never reads
+                # global structlog state.
+                if level == "warning":
+                    emit_import_time_warning(event, **fields)
+                return
         import structlog  # noqa: PLC0415 — deferred; see above
 
         getattr(structlog.get_logger(__name__), level)(event, **fields)
     except Exception:  # noqa: BLE001 — a hook must never fail, least of all on its own logging
         return
 
+
+def configure_hook_logging() -> None:
+    """Point structlog at stderr + ``<config>/logs/hook.log``, for verbs that log.
+
+    :func:`_emit` needs no help: it resolves a sink itself and drops a debug
+    line rather than risk stdout. This exists for the other case -- a verb
+    whose own implementation logs through an ambient
+    ``structlog.get_logger()`` it does not own, which is every verb reaching
+    into :mod:`nexus.hooks` (its module-scope ``_log``). Without a configured
+    sink those lines are not lost to a file, they are written to **stdout** by
+    structlog's default ``PrintLoggerFactory`` -- the hook's decision channel.
+
+    **Call this only from a verb that already pays for structlog anyway.** It
+    imports ``nexus.logging_setup``, which costs about 0.06 s against about
+    0.01 s of interpreter startup, and that was the entire reason nexus-br31l
+    existed: ``nx-hook`` used to call this from its own ``main()`` on every
+    dispatch, so a stdlib-only verb paid the whole ``structlog`` ->
+    ``rich`` -> ``pygments`` chain to set up a sink it would never write to.
+    A verb that does not log must not call this.
+
+    The envelope is safe either way -- :func:`nexus._hook_runtime.entry.main`
+    routes stray stdout to stderr for the whole dispatch -- so a verb that
+    forgets this loses its log file, not its correctness.
+
+    Best-effort: an interpreter missing ``nexus.logging_setup``, or a bug in
+    the logging setup itself, must never turn into a hook failure.
+    """
+    try:
+        from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred; see above
+
+        configure_logging(mode="hook")
+    except Exception:  # noqa: BLE001 — best-effort; must never break the calling hook
+        return
+
+
 __all__ = [
     "HookResult",
     "additional_context",
+    "configure_hook_logging",
     "never_fail",
     "permission_decision",
     "permission_request",

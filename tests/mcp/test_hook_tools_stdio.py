@@ -32,7 +32,7 @@ _BOOTSTRAP = textwrap.dedent(
     """
     import json
 
-    from nexus.hooks._io import HookResult
+    from nexus._hook_runtime._io import HookResult
     from nexus.mcp import core
     from nexus.mcp.hooks import HookToolSpec, register_hook_tools
 

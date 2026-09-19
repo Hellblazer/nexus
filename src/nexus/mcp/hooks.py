@@ -13,7 +13,7 @@ bash script it ports (``conexus/hooks/scripts/auto-approve-nx-mcp.sh``) is
 still what ``hooks.json`` actually wires. Every port after this one plugs
 in with one line: a new :class:`HookToolSpec` appended to :data:`HOOK_TOOLS`,
 naming the ported module's ``run(payload) -> HookResult``
-(``src/nexus/hooks/_io.py``).
+(``src/nexus/_hook_runtime/_io.py``).
 
 **Never registers ``phase_review_close_requires_gate`` here.** That hook is
 the routing framework's one ``fail_closed: true`` rule
@@ -27,8 +27,8 @@ instead, where the process can still write that envelope before it exits.
 or via a future "walk every hook module" sweep.
 
 **The tool boundary.** Each registered tool calls the module's ``run()``
-through :func:`nexus.hooks._io.never_fail` -- the shared swallow primitive
-``_io.py`` documents as the deliberate replacement for bash's missing
+through :func:`nexus._hook_runtime._io.never_fail` -- the shared swallow
+primitive ``_io.py`` documents as the deliberate replacement for bash's missing
 ``set -e``. A crash renders as an empty ``TextContent`` with ``isError=False``,
 the same thing a hook that silently declined to say anything produces; the
 event proceeds exactly as it would past a bash script with no ``set -e``.
@@ -54,10 +54,14 @@ namespaces are independent). :func:`nest_payload` is the exact inverse,
 reassembling the flat tool arguments back into the nested dict shape
 ``run()`` reads on both tiers. Whether Claude Code's own ``${path}``
 substitution reaches a *nested* field faithfully through that ``input`` map
-is the open question bead nexus-q02nx.6 measures -- this module does not
-resolve it, and nothing here depends on the answer: the flatten/nest pair
-is exercised directly, independent of how (or whether) a real
-``hooks.json`` entry populates the flattened arguments.
+was an open question when this module was written; bead nexus-q02nx.6 has
+since measured it (2026-09-19, CLI 2.1.278, macOS and WSL2): substitution
+delivers non-scalar payload fields AS STRUCTURES -- ``${tool_input}``
+arrives as a dict, ``${background_tasks}`` as a list, and an absent key as
+``''``, so absent stays distinguishable from an empty list. Record: T2
+``nexus_rdr/215-phase1-measurements``. Nothing here depended on the answer
+either way: the flatten/nest pair is exercised directly, independent of how
+(or whether) a real ``hooks.json`` entry populates the flattened arguments.
 """
 from __future__ import annotations
 
@@ -70,7 +74,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field as _PydanticField
 
-from nexus.hooks._io import HookResult, never_fail
+from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.hooks.auto_approve import run as _run_auto_approve
 
 __all__ = [

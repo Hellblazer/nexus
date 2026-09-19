@@ -12,7 +12,7 @@ Two things this file must prove, per the bead:
    so the two entries -- ``nx-hook session-start`` and ``nx hook
    session-start`` -- call ``nexus.hooks.session_start`` with identical
    arguments for identical input.
-2. The real, unmocked dispatch path -- ``nexus.hooks.entry`` resolving
+2. The real, unmocked dispatch path -- ``nexus._hook_runtime.entry`` resolving
    ``session-start`` out of its OWN ``VERB_TABLE``, not the test-only
    override -- produces byte-identical stdout to the Click verb for the
    same real JSON payload on stdin.
@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from nexus.hooks import entry
+from nexus._hook_runtime import entry
 
 
 # -- run(): field extraction, mirroring session_start_cmd -------------------
@@ -196,7 +196,7 @@ def test_nx_hook_and_nx_hook_click_verb_produce_identical_bytes_end_to_end(
     env.pop("NX_SESSION_ID", None)
     env.pop("CLAUDE_PLUGIN_ROOT", None)
 
-    nx_hook_proc = _spawn([sys.executable, "-m", "nexus.hooks.entry", "session-start"], env)
+    nx_hook_proc = _spawn([sys.executable, "-m", "nexus._hook_runtime.entry", "session-start"], env)
     assert nx_hook_proc.returncode == 0, nx_hook_proc.stderr
 
     click_proc = _spawn([sys.executable, "-m", "nexus.cli", "hook", "session-start"], env)

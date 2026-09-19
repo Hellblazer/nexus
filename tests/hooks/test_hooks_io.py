@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for ``nexus.hooks._io`` — the shared payload reader, decision
+"""Unit tests for ``nexus._hook_runtime._io`` — the shared payload reader, decision
 envelope writers, and never-fail boundary (RDR-215 Phase 1, bead nexus-q02nx.1).
 
 The envelope assertions are byte-for-byte against the shapes the bash layer
@@ -24,7 +24,7 @@ from structlog.testing import capture_logs
 
 import nexus.logging_setup as logging_setup
 
-from nexus.hooks import _io
+from nexus._hook_runtime import _io
 
 
 class _TTYStream(io.StringIO):
@@ -190,7 +190,7 @@ def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
 
     program = textwrap.dedent(
         """
-        from nexus.hooks import _io
+        from nexus._hook_runtime import _io
 
         def boom():
             raise RuntimeError("hook logic exploded")
@@ -265,7 +265,7 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
     swallowed exception printed a log line onto the decision channel. Measured
     live on 4930cb597 before the fix: `[warning ] hook_boundary_swallowed_
     exception ...` on stdout, from a process that had imported nothing but
-    `nexus.hooks._io`.
+    `nexus._hook_runtime._io`.
 
     This runs in a subprocess because the assertion is about the real file
     descriptor in a process where nothing has called `configure_logging`, which
@@ -275,7 +275,7 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
 
     program = textwrap.dedent(
         """
-        from nexus.hooks import _io
+        from nexus._hook_runtime import _io
 
         def boom():
             raise RuntimeError("crash inside hook logic")
@@ -297,7 +297,7 @@ def test_a_malformed_payload_writes_nothing_to_stdout_when_logging_is_unconfigur
     program = textwrap.dedent(
         """
         import io
-        from nexus.hooks import _io
+        from nexus._hook_runtime import _io
 
         assert _io.read_payload(io.StringIO("{not json")) is None
         assert _io.read_payload(io.StringIO("")) is None

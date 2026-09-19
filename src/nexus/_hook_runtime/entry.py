@@ -19,47 +19,59 @@ Click command, has no group to register into, and never imports
 (``src/nexus/_session_end_launcher.py``), whose own docstring records the
 same race this module is built to avoid on the ``SessionEnd`` side: only
 ``os``, ``sys`` and ``json`` are imported at module scope; everything else
--- ``importlib``, the logging bridge, ``nexus.hooks._io``, and the verb's own
+-- ``importlib``, the logging bridge, ``nexus._hook_runtime._io``, and the verb's own
 module -- is deferred into :func:`main`, so a verb that is never invoked
 never pays for what it would have imported.
 
-One asymmetry from that template is worth naming rather than glossing over,
-and it means the bead's own "stays under 0.042 s" verification target is
-NOT met as measured (nexus-q02nx.2 report, 2026-09-18, installed generation,
-median of 10 runs): ``nx-session-end-launcher`` is
-``nexus._session_end_launcher``, a direct child of the ``nexus`` package,
-whose ``__init__.py`` is a one-line SPDX header. This module is
-``nexus.hooks.entry``, and Python's import system runs
-``nexus/hooks/__init__.py`` before it can reach this file at all, as an
-unavoidable consequence of the entry point RDR-215 names (``"nx-hook =
-nexus.hooks.entry:main"``, Technical Design's "The command tier") -- no
-ordering discipline inside THIS file can change that. Measured: bare
-interpreter + ``import nexus`` is ~0.013 s; + ``import nexus.hooks`` jumps
-to ~0.076 s; + ``import nexus.hooks.entry`` is ~0.075 s (i.e. this module
-adds nothing measurable beyond the forced package import). The jump is not
-``nexus.session`` -- it is ``import structlog`` alone, which costs ~0.073 s
-on its own here (structlog 25.5.0 pinned in ``uv.lock``): its ``__init__``
-unconditionally pulls in ``structlog.dev`` -> ``rich.traceback`` ->
-``pygments`` -> an ``importlib.metadata`` entry-point scan
-(``python -X importtime -c "import structlog"`` shows the breakdown).
-That means the cost is not really about WHERE this module lives; it is
-that ANY real verb dispatch pays it anyway the moment it imports
-``nexus.hooks._io`` (which imports ``structlog`` too), regardless of this
-module's own package nesting. Relocating this file outside ``nexus.hooks``
-would only cheapen the already-fast unknown-verb path, not a real
-dispatch. Both the console-script placement and structlog's own import
-behavior are outside this bead's scope to change; recorded here so a
-future bead does not re-derive it from scratch. The invariant THIS module
-does control, and the one the tests in ``test_nx_hook_entry.py`` actually
-prove: no verb's module is imported until dispatch has resolved which one
-is wanted, ``nexus.cli`` and ``click`` are never imported at all, and the
-shared ``_io``/logging machinery is wired up only once a real verb is
-confirmed -- never merely to discover that one is not.
+**Why this module is not in ``nexus.hooks``.** Python runs a package's
+``__init__`` before it can reach any module inside it, and
+``nexus/hooks/__init__.py`` imports ``structlog`` and ``nexus.session`` at
+module scope. While this file lived there, resolving the console script
+ran all of that first: measured 0.06 s, against 0.01 s for a bare ``import
+nexus`` (nexus-br31l, dev Mac, median of 9 per module). No ordering
+discipline inside THIS file could have avoided it -- which is why the
+fix was to move, not to reorder.
+
+Moving this file alone would not have been enough, and the earlier
+nexus-q02nx.2/.3 critique was right to call that a red herring at the
+time: :func:`main` imports ``never_fail`` and ``read_payload`` on every
+real dispatch, so any genuine verb paid the package ``__init__`` anyway
+through ``_io``. What changed is that ``_io`` and ``_config`` moved out
+with it, into :mod:`nexus._hook_runtime`, whose ``__init__`` is a
+docstring and nothing else. The cheap path is now cheap all the way
+through.
+
+That margin is the whole point, and it is only visible on the cheap
+hooks. ``phase_review_close_requires_gate`` is stdlib-only and costs
+0.03 s end to end as bash on this box -- 0.04 s in bead .2's harness --
+so a port paying 0.06 s to reach
+``never_fail`` would have been a hot-path regression rather than the
+speedup RDR-215 promises. ``session-start`` is the other extreme and is
+deliberately not optimised here: it genuinely needs ``nexus.session``,
+pays for it legitimately, and its own 187-221 ms is mostly real I/O --
+a bounded tuple-surface probe and a stale-MCP-host scan -- against the
+~904 ms ``nx hook session-start`` Click path it replaces (bead
+nexus-q02nx.5, median of 10). Judge this module by the close gate, not
+by ``session-start`` -- but on the right number.
+
+What 0.02 s measures is the dispatch FLOOR -- a synthetic stdlib-only
+verb through the real entry point. That is the figure the close gate's
+COMMON path will pay, the one that runs on every Bash call and exits
+early via ``_lib.allow()``. Its narrow phase-review branch additionally
+imports ``nexus.session`` and shells out to ``bd show``; that cost is
+real, is its own, and stays unmeasured until the port lands.
+
+``tests/hooks/test_hook_runtime_thin.py`` keeps it that way: it asserts
+this package's ``__init__`` imports nothing and that the modules beside
+it import only the standard library at module scope. Without it the
+property rots the first time someone adds a convenient import, and no
+functional test would notice -- the wrong import makes hooks slower,
+never wrong.
 
 **Verb resolution.** :data:`VERB_TABLE` maps a verb name to the dotted
 module path of the object that implements it. Every entry's module defines
 one function, ``run(payload: dict | None) -> HookResult``
-(:class:`nexus.hooks._io.HookResult`) -- the exact function the tool tier's
+(:class:`nexus._hook_runtime._io.HookResult`) -- the exact function the tool tier's
 ``hook_<name>`` tools call too (RDR-215 Approach item 4: "one implementation,
 two entries"). The first real verb, ``session-start`` (nexus-q02nx.5), is
 registered below; it never reaches the tool tier at all, since
@@ -81,7 +93,7 @@ missing verb is neither of those: it is a dispatch failure -- a
 misconfigured ``hooks.json`` entry, or a typo -- and gets its own
 diagnosable failure (a one-line message on stderr, exit 2), not the silent
 "hook chose to do nothing" contract every real verb gets via
-:func:`nexus.hooks._io.never_fail`.
+:func:`nexus._hook_runtime._io.never_fail`.
 """
 from __future__ import annotations
 
@@ -152,44 +164,23 @@ def _is_ledger_verb(verb: str) -> bool:
     return verb in {name for name in raw.split(",") if name}
 
 
-def _configure_hook_logging() -> None:
-    """Bridge structlog to stderr + ``<config>/logs/hook.log`` before any
-    other nexus import can log.
-
-    structlog's default, unconfigured ``PrintLoggerFactory`` writes to
-    **stdout** (confirmed against structlog's own source; see
-    ``nexus.logging_setup.configure_logging``'s docstring for the full
-    history) -- the exact channel a hook's JSON envelope goes out on and
-    Claude Code parses. ``_io.read_payload``'s parse-failure log and
-    ``_io.never_fail``'s crash-swallow log both go through the ambient
-    ``structlog.get_logger()``, so without this bridge a malformed stdin
-    payload or a crashing verb would print a stray log line ahead of (or
-    instead of) the hook's own output. This is the identical defect class
-    ``conexus/hooks/scripts/_hook_logging.py`` documents and fixes for the
-    bash-launched Python hooks (nexus-cnzei.2); this is that fix's
-    equivalent for the command tier. Best-effort: an interpreter missing
-    ``nexus.logging_setup``, or a genuine bug in the logging setup itself,
-    must never turn into a hook failure -- there is nothing useful to
-    report if this call can't run.
-    """
-    try:
-        from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred: only a real dispatch pays this
-
-        configure_logging(mode="hook")
-    except Exception:  # noqa: BLE001 — best-effort; must never break the calling hook
-        pass
-
-
 def main() -> None:
     """Dispatch ``sys.argv[1]`` to its verb's ``run()``.
 
     Deliberately hand-rolled, not Click: the whole reason this console
     script exists beside ``nx`` is to avoid paying for a command framework
-    on every hook event (see the module docstring). Order matters here:
-    the verb's own module is imported FIRST, via ``importlib``, before the
-    shared ``_io``/logging-bridge machinery is wired up -- so a verb module
-    that snapshots its own import environment at load time sees only what
-    was true before that machinery existed, never after.
+    on every hook event (see the module docstring). Order matters here: the
+    verb's own module is imported FIRST, via ``importlib``, before ``_io``
+    -- so a verb module that snapshots its own import environment at load
+    time sees only what was true before the shared machinery existed, never
+    after.
+
+    Nothing here configures logging. A verb that logs through an ambient
+    ``structlog.get_logger()`` calls
+    :func:`nexus._hook_runtime._io.configure_hook_logging` itself, because
+    only it knows whether it needs a sink; doing it here charged every
+    dispatch 0.06 s for one most verbs never use (nexus-br31l). The
+    envelope does not depend on that choice -- see the stdout guard below.
     """
     argv = sys.argv[1:]
     if not argv:
@@ -205,16 +196,60 @@ def main() -> None:
 
     import importlib  # noqa: PLC0415 — deferred: only a real dispatch pays this
 
-    module = importlib.import_module(module_path)
+    # stdout IS the decision channel: Claude Code parses it as the hook's JSON.
+    # Anything else a dispatch writes there corrupts a decision and reads as a
+    # hook malfunction (the nexus D9 defect class). Rather than pre-emptively
+    # configure structlog to prevent one instance of that -- which is what this
+    # module used to do, at 0.06 s per dispatch for a sink most verbs never
+    # write to -- send everything except the envelope to stderr for the whole
+    # dispatch, and keep the real handle here to write the envelope through.
+    #
+    # Two levels, because one is not enough. Rebinding ``sys.stdout`` catches
+    # in-process Python writes: an unconfigured structlog logger, a ``print()``
+    # in a verb, a library's import banner. It does NOT catch a child process,
+    # which inherits the real OS fd 1 and never consults this interpreter's
+    # ``sys`` module -- so a verb shelling out lands straight in the pipe Claude
+    # Code is parsing. No verb does that today (``session-start``'s one
+    # ``subprocess.run`` captures its output), but the Phase 2 ledger verbs
+    # named above are ports of bash scripts that shell out to ``bd`` and
+    # ``git``, which is exactly the shape that would hit it. So fd 1 is
+    # redirected too, and restored in the ``finally``.
+    #
+    # ``fileno()`` raises when stdout is not a real file -- pytest's capture, an
+    # ``io.StringIO`` -- and then the fd half is simply skipped: there is no OS
+    # fd for a child to inherit in that case either, so the Python-level rebind
+    # is the whole guarantee and is sufficient.
+    real_stdout = sys.stdout
+    saved_stdout_fd: int | None = None
+    guarded_fd: int | None = None
+    try:
+        guarded_fd = sys.stdout.fileno()
+        stderr_fd = sys.stderr.fileno()
+    except Exception:  # noqa: BLE001 — not a real fd (captured/StringIO); Python-level rebind still applies
+        guarded_fd = None
+    else:
+        sys.stdout.flush()
+        saved_stdout_fd = os.dup(guarded_fd)
+        os.dup2(stderr_fd, guarded_fd)
 
-    _configure_hook_logging()
-    from nexus.hooks._io import never_fail, read_payload  # noqa: PLC0415 — deferred: only a real dispatch pays this
+    sys.stdout = sys.stderr
+    try:
+        module = importlib.import_module(module_path)
 
-    payload = read_payload(sys.stdin)
-    result = never_fail(lambda: module.run(payload), verb)
+        from nexus._hook_runtime._io import never_fail, read_payload  # noqa: PLC0415 — deferred: only a real dispatch pays this
+
+        payload = read_payload(sys.stdin)
+        result = never_fail(lambda: module.run(payload), verb)
+    finally:
+        sys.stdout = real_stdout
+        if saved_stdout_fd is not None and guarded_fd is not None:
+            sys.stderr.flush()
+            os.dup2(saved_stdout_fd, guarded_fd)
+            os.close(saved_stdout_fd)
 
     if result.stdout is not None:
-        sys.stdout.write(result.stdout + "\n")
+        real_stdout.write(result.stdout + "\n")
+        real_stdout.flush()
 
     sys.exit(result.exit_code if _is_ledger_verb(verb) else 0)
 

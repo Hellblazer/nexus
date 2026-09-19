@@ -235,19 +235,81 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   through `nx` would therefore add about 0.8 s to every PreToolUse and
   PermissionRequest event. *Source: T2 `nexus_rdr/215-research-5`.*
 
+- **Verified** (bead `nexus-q02nx.6`, 2026-09-19, macOS and WSL2, CLI
+  2.1.278): `${path}` substitution into an `mcp_tool` `input` map
+  delivers non-scalar payload fields AS STRUCTURES. `${tool_input}`
+  arrives as a `dict`, `${background_tasks}` on `Stop` as a `list` — not
+  JSON-encoded strings and not unsubstituted literals. An absent key
+  renders as an empty string, so absent is distinguishable from an empty
+  list (`''` against `[]`). The tool tier therefore carries
+  `stop_verification_hook.sh`'s `background_tasks` cross-check intact,
+  and beads `nexus-q02nx.10`, `.12` and `.13` stay on the tool tier.
+  The one limit: `''` is unambiguous only where the field can never
+  legitimately be an empty STRING. *Source: T2
+  `nexus_rdr/215-phase1-measurements`.*
+- **Verified** (same bead): a hook tool's own invocation is exempt from
+  the hook chain, but a MODEL-initiated call to one is not. With a
+  `PreToolUse` matcher covering the server's own tools, the hook fired
+  once on the model's call and its own tool call did not re-trigger it —
+  one dispatch, terminating. So `hook_auto_approve` matching
+  `mcp__plugin_conexus_.*` is benign and needs no recursion guard.
+
 ### Critical Assumptions
 
-- **Assumed**: the `nx-mcp` server is connected by the time the first
-  post-session-start hook fires, on every supported install. The doc
-  says only that `SessionStart` at launch precedes the servers; whether
-  the first `PreToolUse` can race the server's connection is measured in
-  Phase 1. A hook that runs before its server is connected is a
-  non-blocking error, which for the close gate means fail-open.
-- **Assumed**: the installed generation's console scripts are on the
-  PATH Claude Code gives `SessionStart` hooks. The bash layer already
-  assumes this (research-4). Phase 1 measures it on an app-launched macOS
-  Claude Code and in WSL2. A hook that cannot find its generation fails
-  loud.
+- **Verified, and the assumption was stronger than it needed to be**
+  (bead `nexus-q02nx.6`, 2026-09-19, CLI 2.1.278, macOS and WSL2): there
+  is no race. The first model turn does not begin until the session's
+  MCP connection attempt RESOLVES. Measured by delaying the probe
+  server's start rather than racing it: a 15 s delay moved the first
+  `PreToolUse` hook by 15.3 s while the connect-to-hook gap stayed about
+  2 s, and `[engine] turn 1 start` landed 21 ms after
+  `Successfully connected`. On WSL2 the same ordering held at 73 ms.
+  Since every tool-tier event is reached only through a model-initiated
+  tool call, none of them can fire before the servers are available.
+  *Source: T2 `nexus_rdr/215-phase1-measurements`.*
+- **Verified, and it relocates the risk**: the real failure mode is a
+  server that never connects, not one that connects late. At a 35 s
+  start delay the connection hit its 30 s `CONNECT_TIMEOUT`, `turn 1
+  start` followed 33 ms later, and the hook was skipped — fail-open,
+  with the tool call proceeding and nothing user-visible. The only trace
+  is the debug log: `[WARN] Hooks: mcp_tool hook skipped — MCP server
+  '<name>' not connected`. `nx-mcp`'s own stdio `initialize` round-trip
+  is 0.61-0.73 s warm, about 40x under that ceiling; the cold-boot case
+  is not yet measured.
+- **Verified on all three host shapes** (bead `nexus-q02nx.6`,
+  2026-09-19): Claude Code spawns a command hook directly, with no
+  intervening login shell, and hands it its own PATH unmodified.
+  Terminal-launched macOS: `nx-hook` resolves from `~/.local/bin`.
+  WSL2 (Ubuntu 26.04, same CLI 2.1.278): an exec-form `nx-hook` named
+  bare on the PATH resolved and ran, argv intact. App-launched macOS:
+  the desktop app REPAIRS the PATH for the children that run user
+  tooling. Measured on a Finder-launched `/Applications/Claude.app`:
+  the app's own process and its generic node helper carry the bare
+  launchd GUI PATH (`/usr/bin:/bin:/usr/sbin:/sbin`, 4 entries, no
+  `~/.local/bin`), while the MCP-server spawn path and the plugin node
+  helper both carry a 25-entry login-shell PATH in which `nx` and
+  `nx-hook` both resolve. So the command tier is reachable on that
+  shape.
+  One inferential step remains and is stated rather than hidden: an
+  actual Claude Code child of the desktop app was not observed, because
+  starting one needs a Code session opened in the UI. The two spawn
+  paths that WERE measured are the ones that run user tooling, and they
+  agree. If a future defect points here, measure a live Code child
+  directly before trusting this bullet.
+  Bearing the other way: Claude Code itself does NOT repair a minimal
+  PATH. Launched with `/usr/bin:/bin:/usr/sbin:/sbin`, the `SessionStart`
+  hook received exactly that and `nx-hook` was not found. The command
+  tier depends entirely on whoever spawns Claude Code getting this
+  right.
+- **Refuted, and it changes where the fail-loud line can live**: a
+  command hook that cannot be found does NOT fail loud. Claude Code
+  reports `[ERROR] Hook command failed to spawn (SessionStart:startup):
+  Executable not found in $PATH: "nx-hook"` to the debug log only; the
+  session proceeds normally and the user sees nothing. The RDR's
+  "a hook that cannot find its generation fails loud" cannot be
+  implemented inside the verb, because the verb never runs. It has to
+  live somewhere that runs regardless — `nx doctor`, the install, or a
+  declaration that does not depend on PATH resolution.
 - **Verified, with a design consequence** (research-5): an entry through
   the `nx` console script pays about 0.8 s for the CLI's eager imports.
   The one command-tier script this design keeps, `nx-hook`, imports only
@@ -363,9 +425,28 @@ The hook tools are visible in the model's tool list, since MCP has no
 way to hide a tool; the `hook_` prefix and a one-line description saying
 so are the mitigation, and the auto-approve matcher covers them.
 
-**The command tier.** `nx-hook = "nexus.hooks.entry:main"` in
+**The command tier.** `nx-hook = "nexus._hook_runtime.entry:main"` in
 `pyproject.toml`, built like `nx-session-end-launcher`: `os`, `sys` and
-`json` before dispatch, the verb's module after. It reads the payload
+`json` before dispatch, the verb's module after. The entry point and the
+shared payload/decision plumbing live in `nexus._hook_runtime`, a package
+whose `__init__` is a docstring and nothing else, and NOT in
+`nexus.hooks` — Python runs a package's `__init__` before any module
+inside it, and `nexus/hooks/__init__.py` imports `structlog` and
+`nexus.session`, so reaching `_io` from there cost 0.06 s against 0.01 s
+for a bare `import nexus`. Nothing on the dispatch path configures
+logging either; a verb that logs through an ambient logger calls
+`configure_hook_logging()` itself, and `main()` routes stray stdout to
+stderr so the decision channel is safe whether it does or not. A
+stdlib-only verb dispatches end to end in 0.02 s, against 0.03 s for the
+bash close gate measured on the same box the same day (bead .2's harness
+recorded 0.04 s for it; the margin is real either way, but it is one
+hundredth of a second, not two). That 0.02 s is the dispatch FLOOR,
+measured with a synthetic stdlib-only verb through the real entry point,
+and it is what the close gate's COMMON path will pay -- the path that
+runs on every Bash call and exits early via `_lib.allow()`. The narrow
+phase-review branch additionally imports `nexus.session` and shells out
+to `bd show`, which is its own cost and is not measured until the port
+lands (nexus-br31l). It reads the payload
 from stdin (TTY-aware, empty or malformed reads as `None`), calls the
 same `run()`, writes the decision JSON to stdout, and exits 0 for every
 hook verb. Every ledger verb propagates the code `run()` returns instead,
@@ -685,3 +766,14 @@ registration module on the existing server, and one package.
 - 2026-09-18: Gate round 3 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `dd95743fa`; critique `nexus_rdr/215-gate-critique-2026-09-18-r3`.
 - 2026-09-18: Accept dispositions of the round-3 residuals: the four carried from round 2 closed by `dd95743fa` (fix check `nexus_rdr/215-fix-check-dd95743fa`); the four from round 3 fixed in `faa779251`.
 - 2026-09-18: `phase_review_close_requires_gate` carved out of the tool tier to the command tier; the tool tier is 15 of 24 conexus entries, not 16. Raised during bead `nexus-q02nx.1` review; critique `nexus_rdr/critique-impl-nexus-q02nx.1-hooks-package`.
+- 2026-09-19: Phase 1 measurements landed (bead `nexus-q02nx.6`): the
+  MCP connection race is refuted — turn 1 waits for connection
+  resolution — and the risk relocates to a server that never connects,
+  which fails open with only a debug-log warning. `${path}` substitution
+  carries non-scalars as structures, so no bead is re-tiered. A
+  not-found command hook does not fail loud, which moves that
+  requirement out of the verb. The SessionStart PATH is verified on all
+  three host shapes: the macOS desktop app repairs the PATH for the
+  children that run user tooling, so the command tier is reachable
+  there. Record: T2 `nexus_rdr/215-phase1-measurements`.
+- 2026-09-18: The command-tier entry point moves from `nexus.hooks.entry` to `nexus._hook_runtime.entry`, taking `_io` and `_config` with it, and the eager logging bridge in `main()` is replaced by a per-verb call plus a structural stdout guard. Measured: a stdlib-only dispatch falls from 0.06 s to 0.02 s, below the bash close gate re-measured on the same box at 0.03 s (bead .2 recorded 0.04 s in its own harness). Bead `nexus-br31l`.

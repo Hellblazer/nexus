@@ -49,7 +49,7 @@ that bead's job.
 """
 from __future__ import annotations
 
-from nexus.hooks._io import HookResult, permission_decision, permission_request
+from nexus._hook_runtime._io import HookResult, permission_decision, permission_request
 
 #: Explicit full tool names, no wildcards -- carried byte-for-byte from
 #: auto-approve-nx-mcp.sh's case statement (T2 nexus_rdr/215-hook-contract-map
