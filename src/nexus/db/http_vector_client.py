@@ -3097,7 +3097,7 @@ class HttpVectorClient:
         rerank: bool = False,
         rerank_top_k: int | None = None,
         rerank_meta_out: dict | None = None,
-    ) -> list[dict] | dict:
+    ) -> list[dict]:
         """Hybrid lexical+vector search via ``POST /v1/vectors/hybrid-search``
         (RDR-217 P2.1, bead nexus-lqo4p.6).
 
@@ -3136,6 +3136,16 @@ class HttpVectorClient:
         helpers to these rows. Adding them later is mechanical and needs no
         engine change. This is the one Phase 2 choice the RDR's research did
         not settle, recorded here rather than left implicit.
+
+        Returns ``list[dict]``, NOT :meth:`search`'s ``list[dict] | dict``.
+        That union exists there because ``structured=True`` returns the
+        plan-runner dict; with ``structured`` absent here every path returns
+        rows — the no-rerank path returns the bare list, and
+        :func:`_unpack_rerank_envelope` always yields a list. The accepted
+        design carried ``search()``'s annotation verbatim; Sam settled it to
+        the narrow form on 2026-09-19 so no consumer writes dead
+        ``isinstance(result, dict)`` handling against this method. Adding
+        ``structured`` later widens the annotation along with it.
 
         ``rerank`` behaves exactly as it does on :meth:`search`, because both
         routes share one rerank tail server-side

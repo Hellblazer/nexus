@@ -491,10 +491,18 @@ def hybrid_search(
     rerank: bool = False,
     rerank_top_k: int | None = None,
     rerank_meta_out: dict | None = None,
-) -> list[dict] | dict: ...
+) -> list[dict]: ...
 ```
 
 Every field in that signature is Verified (source search). None is Assumed.
+
+**Settled by Sam on 2026-09-19, during P2.1 implementation: the return type is
+`list[dict]`, not `list[dict] | dict`.** This paragraph had carried `search()`'s
+annotation verbatim, and the P2.1 code review established that the `dict` arm is
+unreachable once `structured` is dropped: the no-rerank path returns the bare row
+list, and the rerank path's envelope unpacking always yields a list. The union
+would have invited a consumer to write dead `isinstance(result, dict)` handling.
+Adding `structured` in a later phase widens the annotation along with it.
 
 `search()`'s three remaining keyword-only parameters, `cluster_by`,
 `threshold` and `structured`, are deliberately absent. They are client-local
