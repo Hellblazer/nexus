@@ -52,13 +52,12 @@ original script never read stdin at all (its only external inputs are
 ``PATH`` lookups via ``shutil.which`` and the two version-probe
 subprocesses).
 
-**Not wired into ``hooks.json`` yet** -- the same disclosure
-``session_start_verb.py`` carries. The live ``conexus/hooks/hooks.json``
-still runs ``preflight.py`` directly via ``_run_python_hook.sh``;
-re-declaring that SessionStart entry as an exec-form ``nx-hook preflight``
-call is RDR-215 Approach item 6, a later step in this same bead's epic
-(nexus-q02nx.21/.22). So this verb is reachable and tested, but no
-ordinary session runs it today -- the original script stays wired.
+**Wired since bead ``nexus-q02nx.21``** -- ``conexus/hooks/hooks.json``
+declares this as ``{"command": "nx-hook", "args": ["preflight"]}``, the
+second SessionStart entry, and ``preflight.py`` and the
+``_run_python_hook.sh`` launcher that used to run it are both gone. The
+declaration is INERT until the next plugin cut, because ``marketplace.json``
+pins ``source.ref`` to a release tag -- see ``conexus/PENDING_RELEASE.md``.
 
 **Not a ledger verb.** ``preflight`` never appears in
 ``nexus._hook_runtime.entry.VERB_TABLE`` or ``LEDGER_VERBS``: it has no

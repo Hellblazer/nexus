@@ -75,11 +75,12 @@ Reported rather than silently worked around.
 non-ledger verb is forced to exit 0 by ``entry.main`` regardless of what
 :class:`~nexus._hook_runtime._io.HookResult.exit_code` says.
 
-**Not wired into ``hooks.json`` yet.** The live ``conexus/hooks/hooks.json``
-still runs ``session_start_hook.py`` directly via ``_run_python_hook.sh``;
-re-declaring that entry as an ``nx-hook session-context`` exec-form command
-is RDR-215 Approach item 6, a later bead. This module is reachable and
-tested, but no ordinary session runs it today.
+**Wired since bead ``nexus-q02nx.21``.** ``conexus/hooks/hooks.json``
+declares this as ``{"command": "nx-hook", "args": ["session-context"]}``;
+``session_start_hook.py`` and the ``_run_python_hook.sh`` launcher that used
+to run it are both gone. The declaration is INERT until the next plugin cut,
+because ``marketplace.json`` pins ``source.ref`` to a release tag — see
+``conexus/PENDING_RELEASE.md``, which is the ledger for exactly that gap.
 """
 from __future__ import annotations
 

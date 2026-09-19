@@ -126,6 +126,15 @@ VERB_TABLE: dict[str, str] = {
     "preflight": "nexus.hooks.preflight_verb",
     "session-context": "nexus.hooks.session_context",
     "rdr": "nexus.hooks.rdr_verb",
+    # The two SessionStart entries that carried SHELL LOGIC in their command
+    # string -- `nx upgrade --auto 2>/dev/null || echo ... >&2` and `nx self
+    # gc >/dev/null 2>&1 || true` (bead nexus-q02nx.22, Approach item 6).
+    # Exec form has no shell, so the redirects and the `||` moved into the
+    # verbs. Both still spawn `nx` as a separate process: they reason about
+    # install generations and flip `<tools>/current`, which is not something
+    # to do inside the hook interpreter that is running out of one.
+    "upgrade-auto": "nexus.hooks.upgrade_auto",
+    "self-gc": "nexus.hooks.self_gc",
     # The RDR-184 ledger's operator verbs (bead nexus-q02nx.14). All four
     # resolve to ONE module, which re-reads sys.argv[1] to tell them apart
     # -- they take arguments rather than a hook payload, so they are the

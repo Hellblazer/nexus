@@ -639,9 +639,10 @@ class TestGenerationLayout:
 
 
 class TestInlineLayoutKnowledgeMatchesThePackage:
-    """The hook may run under a BARE python3 (_run_python_hook.sh prefers the
-    installed generation's python since nexus-4ti7e, then probes 3.13, 3.12,
-    then bare) and on those paths CANNOT import nexus, so its layout knowledge
+    """The hook may run under a BARE python3 (_interpreter.reexec_if_needed()
+    prefers the installed generation's python since nexus-4ti7e, then probes
+    3.13, 3.12, then bare — the retired _run_python_hook.sh launcher's own
+    order, in Python) and on those paths CANNOT import nexus, so its layout knowledge
     is duplicated inline by necessity — the bead says so explicitly and forbids
     "fixing" it with an import.
 

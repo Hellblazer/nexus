@@ -60,12 +60,29 @@ Surfaces swept (evidence-scoped, not speculative — see module-level
     in a module the unit suite imports, not an un-run line in a shell
     script nobody executes between releases, which is the whole premise of
     this module (nexus-1e2eh, "release-only procedures rot silently").
-  * ``conexus/hooks/hooks.json`` — every ``command`` string value, however
-    deeply nested (parsed via ``json.loads``, not text-matched). This is the
+  * ``conexus/hooks/hooks.json`` — every entry's ``command`` PLUS its own
+    ``args``, joined back into the line the entry stands for, however deeply
+    nested (parsed via ``json.loads``, not text-matched). This is the
     strongest instance of the class this bead generalises: a SHIPPED
     artifact executing a deleted verb at runtime, on every session start,
     for every plugin user, silenced by ``|| true`` (nexus-i711w Stage 2
     sub-stage B's own incident).
+
+    Two things about this surface changed at RDR-215 bead nexus-q02nx.22 and
+    both had to, together. The file no longer names ``nx`` anywhere: its
+    entries are exec form, so the verb lives in ``args`` and a
+    ``command``-only walk sees a bare ``nx-hook`` with nothing after it
+    (measured against the post-bead file with the pre-bead extractor: ZERO
+    invocations, in a file carrying six). And the verbs it names now belong
+    to a DIFFERENT vocabulary — ``nx-hook``'s flat
+    ``nexus._hook_runtime.entry.VERB_TABLE``, not the Click tree — where an
+    unregistered name exits 2 with a diagnostic on every SessionStart, which
+    is the same incident shape at a different address. So the extractor joins
+    ``args`` (``_extract_hooks_json``) and the resolver routes by tool
+    (``_HOOK_VERB_RE`` / ``_hook_verb_exists``). The alternative on the table
+    was deleting this anchor, on .21's own precedent; it was rejected because
+    the coverage had not become meaningless, only invisible, and an anchor
+    removed for that reason removes the evidence rather than the problem.
   * ``conexus/README.md`` — fenced code blocks (as with skills) PLUS inline
     single-backtick code spans. Unlike a skill's history section (prose
     narration, no backticks), the README's own nexus-i711w incident was an
@@ -159,6 +176,27 @@ _README_FILE = "conexus/README.md"
 #: those start with ``[a-z]`` immediately after the required whitespace.
 _VERB_RE = re.compile(r"\bnx\s+([a-z][a-z0-9-]*)(?:\s+([a-z][a-z0-9-]*))?")
 
+#: ``nx-hook <verb>`` — the SECOND console script this module resolves against
+#: (RDR-215 bead nexus-q02nx.22). ``_VERB_RE`` cannot see these: it requires
+#: whitespace immediately after ``nx``, and ``nx-hook`` has a hyphen there.
+#:
+#: This exists because RDR-215 MOVED the rot risk rather than removing it. The
+#: hooks this module used to watch as ``nx <verb>`` in a shipped manifest are
+#: now ``nx-hook <verb>`` in the same shipped manifest, dispatched through
+#: ``nexus._hook_runtime.entry.VERB_TABLE``; an unregistered verb there exits 2
+#: with a diagnostic on every SessionStart, for every plugin user — the exact
+#: nexus-i711w shape this module's hooks.json surface was added for. Teaching
+#: the extractor the new spelling was chosen over removing the hooks.json
+#: anchor precisely because the anchor's own coverage had not become
+#: meaningless, only invisible. A number that improves after a refactor is two
+#: claims, one about the code and one about the instrument (T2
+#: ``nexus_rdr/215-gates-that-lost-their-domain``).
+#:
+#: Underscores are in the character class, unlike ``_VERB_RE``: the RDR-184
+#: ledger verbs are spelled ``expectations_census`` and friends.
+#: Depth is ONE token — ``nx-hook`` has a flat verb table, no subcommands.
+_HOOK_VERB_RE = re.compile(r"\bnx-hook\s+([a-z][a-z0-9_-]*)")
+
 #: Fenced ```bash / ```sh blocks in a skill markdown file — the only place a
 #: skill PRESCRIBES a runnable command (mirrors
 #: test_engine_release_skill_parity.py's ``_FENCE_RE``).
@@ -185,6 +223,12 @@ _GLOBAL_NOISE_ALLOWLIST: dict[str, str] = {
     "thought": "historical note: 'nx thought' was removed 2026-02-26; the citing scenario is itself skip()-ped",
     "invocation": "prose, e.g. \"every top-level nx invocation is recorded\" — names the audit mechanism, not a verb",
     "is": "prose, e.g. \"the installed nx is ${INSTALLED_VERSION}\" (scripts/reinstall-tool.sh) — a copula, not a verb",
+    "console": (
+        "prose, e.g. \"this generation predates the nx-hook console script\" "
+        "(tests/e2e/post-publish-dispatch-check.sh's _prereq_fail message) — "
+        "the English noun, and the same line's \"nx-hook is not on PATH\" is "
+        "already covered by the \"is\" entry above"
+    ),
 }
 
 #: relative-path -> reason. EVERY nx-verb invocation in the file is exempted.
@@ -253,12 +297,39 @@ class Invocation:
     verb: str  # "tok1" or "tok1 tok2"
     tok1: str
     line: str
+    #: Which console script's vocabulary ``verb`` belongs to: ``"nx"``
+    #: (resolved against the live Click tree) or ``"nx-hook"`` (resolved
+    #: against the live ``VERB_TABLE``). Defaulted so every existing
+    #: construction site stays an ``nx`` invocation without restating it.
+    tool: str = "nx"
 
 
 def _click_tree() -> dict[str, click.Command]:
     from nexus.cli import main  # noqa: PLC0415 — import at call time, not collection time
 
     return dict(main.commands)
+
+
+def _hook_verb_table() -> dict[str, str]:
+    """The LIVE ``nx-hook`` verb table — same discipline as :func:`_click_tree`.
+
+    Imported at call time, never at collection time, and never transcribed into
+    a list here: a hand-maintained copy would be the same rot one level up,
+    which is this module's whole premise.
+    """
+    from nexus._hook_runtime.entry import VERB_TABLE  # noqa: PLC0415 — import at call time
+
+    return dict(VERB_TABLE)
+
+
+def _hook_verb_exists(verb: str, table: dict[str, str]) -> bool:
+    """True if ``nx-hook <verb>`` resolves in the live dispatch table.
+
+    Flat, unlike :func:`_verb_exists`: ``nx-hook`` is a hand-rolled dispatcher
+    over a single dict, deliberately not a Click group, so there is no second
+    level to cap.
+    """
+    return verb in table
 
 
 def _verb_exists(tok1: str, tok2: str | None, tree: dict[str, click.Command]) -> bool:
@@ -300,6 +371,15 @@ def _scan_lines(text: str, *, file_label: str) -> list[Invocation]:
                 continue
             verb = tok1 if tok2 is None else f"{tok1} {tok2}"
             found.append(Invocation(file=file_label, verb=verb, tok1=tok1, line=stripped[:160]))
+        for m in _HOOK_VERB_RE.finditer(raw_line):
+            verb = m.group(1)
+            if verb in _GLOBAL_NOISE_ALLOWLIST:
+                continue
+            found.append(
+                Invocation(
+                    file=file_label, verb=verb, tok1=verb, line=stripped[:160], tool="nx-hook"
+                )
+            )
     return found
 
 
@@ -330,29 +410,56 @@ def _extract_workflow(path: Path) -> list[Invocation]:
 
 
 def _extract_hooks_json(path: Path) -> list[Invocation]:
-    """Every ``command`` string value in the shipped hooks manifest, however
+    """Every executable invocation in the shipped hooks manifest, however
     deeply nested — mirrors the workflow extractor's discipline of scanning
     only what actually EXECUTES (never a ``matcher:``/documentation field).
+
+    **``command`` alone is not the invocation any more.** Every entry named a
+    verb inside its ``command`` STRING until RDR-215; exec form splits it, so
+    ``nx-hook session-start`` is stored as ``{"command": "nx-hook", "args":
+    ["session-start"]}`` and a ``command``-only walk sees the bare word
+    ``nx-hook`` with no verb after it — nothing to match, and the file's
+    extraction count silently goes to zero while every entry in it is still
+    perfectly capable of naming a verb that does not exist.
+
+    So each entry is reassembled into the line it stands for, ``command``
+    followed by its own ``args``, and THAT is what gets scanned. Without this
+    join, :data:`_HOOK_VERB_RE` above would match nothing here and the whole
+    nx-hook half of this module would be green and blind — which is the defect
+    class bead nexus-q02nx.21 found seven instances of and this bead is
+    explicitly watching for.
+    """
+    return _extract_hooks_json_from(path, file_label=str(path.relative_to(REPO_ROOT)))
+
+
+def _extract_hooks_json_from(path: Path, *, file_label: str) -> list[Invocation]:
+    """:func:`_extract_hooks_json`'s body, against an arbitrary path and label.
+
+    Split out so the mutation test can run the REAL extractor over a perturbed
+    COPY of the manifest without writing to the repo — the same reason the
+    Click mutations below mutate a dict rather than a source file. The split is
+    a parameter, not a second copy: there is one walk.
     """
     import json  # noqa: PLC0415 — call-site import, this module's only JSON consumer
 
-    rel = str(path.relative_to(REPO_ROOT))
     data = json.loads(path.read_text(encoding="utf-8"))
-    commands: list[str] = []
+    lines: list[str] = []
 
     def _walk(node: object) -> None:
         if isinstance(node, dict):
+            command = node.get("command")
+            if isinstance(command, str):
+                args = [a for a in (node.get("args") or []) if isinstance(a, str)]
+                lines.append(" ".join([command, *args]))
             for key, value in node.items():
-                if key == "command" and isinstance(value, str):
-                    commands.append(value)
-                else:
+                if key not in ("command", "args"):
                     _walk(value)
         elif isinstance(node, list):
             for item in node:
                 _walk(item)
 
     _walk(data)
-    return _scan_lines("\n".join(commands), file_label=rel)
+    return _scan_lines("\n".join(lines), file_label=file_label)
 
 
 def _extract_readme_md(path: Path) -> list[Invocation]:
@@ -428,12 +535,28 @@ _ANCHOR_MIN_COUNTS: dict[str, int] = {
     # to retarget the anchor to. Removed rather than lowered to 0: an anchor
     # asserting ">= 0 invocations" proves nothing about the extractor, which
     # is the one thing an anchor is for. The remaining 11 anchors still do.
-    # Raised 1 -> 3 at RDR-215 bead nexus-q02nx.21 (measured: 4 invocations
-    # — `nx upgrade`, `nx self install`, `nx self gc`, `nx hook session-start`).
-    # hooks.json is now the ONLY carrier of the shipped-plugin nx-invocation
-    # signal this module watches, so a token floor of 1 is no longer enough:
-    # see the `conexus/hooks/scripts/*.sh` note below for what it replaced.
-    "conexus/hooks/hooks.json": 3,
+    # Raised 1 -> 3 at RDR-215 bead nexus-q02nx.21 (measured then: 4
+    # invocations — `nx upgrade`, `nx self install`, `nx self gc`,
+    # `nx hook session-start`). hooks.json is the ONLY carrier of the
+    # shipped-plugin invocation signal this module watches, so a token floor
+    # of 1 is not enough: see the `conexus/hooks/scripts/*.sh` note below for
+    # what it replaced.
+    #
+    # 3 -> 4 at bead nexus-q02nx.22, and the four invocations it was measured
+    # against are GONE — that bead converted every one of them to `nx-hook`
+    # exec form, which `_VERB_RE` cannot match (hyphen where it needs
+    # whitespace) and which puts the verb in `args` where a `command`-only
+    # walk never looks. Measured with the pre-bead extractor against the
+    # post-bead file: ZERO. The anchor would have caught that, and the
+    # temptation was to answer it by deleting the anchor.
+    #
+    # It was answered the other way instead: `_HOOK_VERB_RE` plus the
+    # command+args join in `_extract_hooks_json`, so the same six entries are
+    # resolved against the live `VERB_TABLE`. Measured after: 6
+    # (`upgrade-auto`, `preflight`, `self-gc`, `session-start`,
+    # `session-context`, `rdr`). Floor set to 4, the same deliberate slack
+    # under the observed count this dict uses everywhere else.
+    "conexus/hooks/hooks.json": 4,
     # REMOVED at RDR-215 bead nexus-q02nx.21: the
     # "conexus/hooks/scripts/subagent-start.sh": 3 anchor. That script (and
     # eleven siblings) were ported into the wheel and deleted, and the whole
@@ -469,8 +592,9 @@ def test_extraction_is_not_vacuous_in_aggregate() -> None:
     total = len(_all_invocations())
     assert total >= 330, (
         f"only {total} nx-invocations extracted across every swept surface — "
-        "the extraction regex likely broke (last known-good baseline: 376, "
-        "post nexus-zmfan widening)"
+        "the extraction regex likely broke (measured 611 at RDR-215 bead "
+        "nexus-q02nx.22, of which 10 are `nx-hook`; the 376 recorded at the "
+        "nexus-zmfan widening was against a smaller tree, not a drop since)"
     )
 
 
@@ -613,19 +737,24 @@ def test_no_release_artifact_names_a_dead_verb() -> None:
          since this is also how a real hit gets waved through.
     """
     tree = _click_tree()
+    hook_table = _hook_verb_table()
     offenders: list[Invocation] = []
     for inv in _all_invocations():
         if inv.file in _RETIRED_SCRIPT_ALLOWLIST:
             continue
         if (inv.file, inv.verb) in _FILE_VERB_ALLOWLIST:
             continue
+        if inv.tool == "nx-hook":
+            if not _hook_verb_exists(inv.verb, hook_table):
+                offenders.append(inv)
+            continue
         tok1, _, tok2 = inv.verb.partition(" ")
         if not _verb_exists(tok1, tok2 or None, tree):
             offenders.append(inv)
 
     assert not offenders, (
-        "release-only artifact(s) name an nx verb the live CLI does not have:\n"
-        + "\n".join(f"  {o.file}: nx {o.verb!r} — {o.line!r}" for o in offenders)
+        "release-only artifact(s) name an nx/nx-hook verb the live CLI does not have:\n"
+        + "\n".join(f"  {o.file}: {o.tool} {o.verb!r} — {o.line!r}" for o in offenders)
         + "\n\nSee this module's docstring / test_no_release_artifact_names_a_dead_verb's "
         "own docstring for the three ways to resolve a hit (fix the artifact, allowlist an "
         "acknowledged tombstone, or allowlist extractor noise)."
@@ -649,6 +778,75 @@ def test_mutation_a_removed_top_level_verb_is_detected() -> None:
     assert not _verb_exists("init", None, mutated), "resolver did not notice the removed verb"
     # Restored view (a fresh call) proves the mutation was local to this test.
     assert _verb_exists("init", None, _click_tree())
+
+
+def test_mutation_a_removed_nx_hook_verb_is_detected() -> None:
+    """The nx-hook resolver's negative case, against the real VERB_TABLE."""
+    table = _hook_verb_table()
+    assert _hook_verb_exists("session-start", table)
+    mutated = dict(table)
+    del mutated["session-start"]
+    assert not _hook_verb_exists("session-start", mutated), (
+        "resolver did not notice the removed nx-hook verb"
+    )
+    assert _hook_verb_exists("session-start", _hook_verb_table())
+
+
+def test_mutation_an_unregistered_hooks_json_verb_is_caught_end_to_end(tmp_path) -> None:
+    """The WHOLE nx-hook path, exercised on a perturbed copy of the manifest.
+
+    The resolver mutation above proves the lookup; this proves everything in
+    front of it — the command+args join, ``_HOOK_VERB_RE``, the tool routing
+    in the guard — by renaming a real verb to one that is not registered and
+    requiring the sweep to say so. Without this, every nx-hook assertion in
+    this module could be green because it examined nothing, which is the
+    failure mode the whole bead is watching for.
+    """
+    import json  # noqa: PLC0415 — mirrors _extract_hooks_json's call-site import
+
+    real = REPO_ROOT / _HOOKS_JSON_FILE
+    data = json.loads(real.read_text(encoding="utf-8"))
+
+    renamed = 0
+
+    def _walk(node: object) -> None:
+        nonlocal renamed
+        if isinstance(node, dict):
+            if node.get("command") == "nx-hook" and isinstance(node.get("args"), list):
+                node["args"] = ["definitely-not-a-registered-verb"]
+                renamed += 1
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(data)
+    assert renamed >= 1, (
+        "no nx-hook entry found in the real hooks.json to perturb — this "
+        "mutation test is no longer exercising anything"
+    )
+
+    perturbed = tmp_path / "hooks.json"
+    perturbed.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+    found = _extract_hooks_json_from(perturbed, file_label=_HOOKS_JSON_FILE)
+    assert len(found) >= renamed, (
+        f"the extractor found {len(found)} invocation(s) in the perturbed "
+        f"manifest, expected at least the {renamed} it rewrote"
+    )
+    table = _hook_verb_table()
+    dead = [i for i in found if i.tool == "nx-hook" and not _hook_verb_exists(i.verb, table)]
+    assert len(dead) == renamed, (
+        f"the sweep flagged {len(dead)} unregistered verb(s), expected {renamed}. "
+        "The extraction or the routing is not reaching hooks.json's exec-form entries."
+    )
+
+    # And the unperturbed file is clean, so the assertion above is a real
+    # discrimination rather than something that fires either way.
+    clean = _extract_hooks_json(real)
+    assert clean, "the real manifest yielded no invocations"
+    assert not [i for i in clean if i.tool == "nx-hook" and not _hook_verb_exists(i.verb, table)]
 
 
 def test_mutation_a_removed_subcommand_is_detected() -> None:

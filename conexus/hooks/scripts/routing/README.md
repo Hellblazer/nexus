@@ -17,7 +17,7 @@ removed at a69bea883 (it silently blocked bash greps on code files) and
 the orphaned script, vendored framework, and registry were deleted at
 nexus-jbt5x, so today only nx ships routing rules.
 
-The framework (`_lib.py` + `_run_python_hook.sh`) is canonical in nx
+The framework (`_lib.py` + `_interpreter.py`) is canonical in nx
 and is vendored into any plugin that ships a routing rule; with no
 vendored copy left, the byte-equality guard (`tests/test_routing_lib_drift.py`)
 went with sn's copy and should return with the next vendoring. See RDR-125 § A2 / A3 for why vendoring is the

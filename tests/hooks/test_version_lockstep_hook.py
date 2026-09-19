@@ -812,8 +812,11 @@ class TestRefDriftGitBudget:
 
 class TestRunsUnderBareInterpreter:
     def test_end_to_end_match_silent(self, plugin_root, tmp_path) -> None:
-        """Invoke the script as a subprocess (mimics _run_python_hook.sh)
-        with a matching marker: expect clean exit 0 and empty stdout."""
+        """Invoke the script as a subprocess (mimics hooks.json's exec-form
+        ``{"command": "python3", "args": [<script>]}`` declaration, which
+        replaced the retired ``_run_python_hook.sh`` launcher at RDR-215 bead
+        nexus-q02nx.21) with a matching marker: expect clean exit 0 and
+        empty stdout."""
         import os
 
         marker = tmp_path / "marker"

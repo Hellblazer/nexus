@@ -127,9 +127,21 @@ import json, sys
 json.dump({"hooks": {
     "SessionStart": [{"matcher": sys.argv[2], "hooks": [
         {"type": "command", "command": "/home/nexus/nxenv/bin/nx hook session-start", "timeout": 10}]}],
+    # RDR-215 nexus-q02nx.22: exec form, matching the real hooks.json --
+    # the retired `_run_python_hook.sh` bash launcher is gone, and the
+    # interpreter resolution it used to perform now runs in Python,
+    # inside mailbox_drain.py itself (_interpreter.reexec_if_needed()).
+    #
+    # BRACED, like the real manifest: the shell-string form this replaced
+    # was expanded by the bash Claude Code ran it under, which takes either
+    # spelling. Exec form has no shell, so whatever expansion happens is
+    # Claude Code's own -- and the one spelling known to work there is the
+    # one conexus/hooks/hooks.json ships. Guessing the other costs a billed
+    # container run to find out.
     "UserPromptSubmit": [{"matcher": "", "hooks": [
         {"type": "command",
-         "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/mailbox_drain.py",
+         "command": "python3",
+         "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"],
          "timeout": 10}]}],
     # The turn-end sentinel (~/git/recording-rig lib/sentinels.sh): the driver
     # waits for a hook signal that the turn ENDED instead of scraping the pane.

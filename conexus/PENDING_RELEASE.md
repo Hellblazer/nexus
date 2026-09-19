@@ -121,7 +121,8 @@ mechanize, it matters enough to ship.
   plugin-resident on bare `python3` (`version_lockstep_hook.py`,
   `mailbox_drain.py`, `subagent_git_write_requires_orchestrator.py`,
   `phase_review_close_requires_gate.py`, `behaviour_census.py`). The four
-  entries naming `nx` are bead nexus-q02nx.22's and are untouched.
+  entries naming `nx` were left for bead nexus-q02nx.22, which has since
+  converted them — see its own entry below.
   THE WHEEL FLOOR, and why this entry is NOT cuttable on its own: every
   one of those fifteen handlers is wheel-resident. The twelve `hook_*`
   tools come from `nexus.mcp.hooks`; `nx-hook` is a console script
@@ -160,6 +161,38 @@ mechanize, it matters enough to ship.
   that does not also ship the wheel.
   INERT until the next cut: sessions on the pinned tag keep running the
   bash layer, which is still on disk and still correct.
+
+- `conexus/hooks/hooks.json` (the last four shell-form entries), and
+  `conexus/hooks/scripts/_run_python_hook.sh` (deleted):
+  bead: nexus-q02nx.22 — RDR-215 Approach items 6 and 7, the tail of the
+  re-declaration. `nx upgrade --auto 2>/dev/null || echo ... >&2` becomes
+  `nx-hook upgrade-auto`, `nx self gc >/dev/null 2>&1 || true` becomes
+  `nx-hook self-gc`, `nx hook session-start` becomes `nx-hook
+  session-start`, and `nx-session-end-launcher` gains an explicit empty
+  `args`. Exec form has no shell, so the two entries that carried
+  redirects and `||` had to put them somewhere: `nexus.hooks.upgrade_auto`
+  and `nexus.hooks.self_gc`, which still spawn `nx` as a separate process
+  — that command installs generations and flips `<tools>/current`, which
+  is not work to do inside the hook interpreter running out of one. After
+  this, no entry in the file names `nx`.
+  `_run_python_hook.sh` is deleted: the interpreter resolution it
+  performed is `_interpreter.py`'s since .21, and the launcher's remaining
+  callers (the detached lockstep action, the lockstep e2e gate, the
+  RDR-208 MVV container) are repointed in the same change.
+  WHEEL FLOOR: the same one as .21's entry directly above, for the same
+  reason and with two more verbs on it — `upgrade-auto` and `self-gc` are
+  entries in `nexus._hook_runtime.entry.VERB_TABLE`, so a box whose
+  conexus predates them has no handler. Not cuttable without the wheel.
+  Worth stating plainly because of WHICH two hooks these are: on an old
+  generation the exec-form `nx-hook upgrade-auto` is simply not found, so
+  the self-upgrade that would have repaired that box is the thing that
+  cannot run. The skew path that still works there is
+  `version_lockstep_hook.py`, which stays plugin-resident and stdlib-only
+  precisely so it runs when the wheel is behind — it nudges and dispatches
+  the detached reinstall. That is now the load-bearing recovery path, not
+  a redundant second one.
+  INERT until the next cut: sessions on the pinned tag keep running the
+  four shell strings and the launcher, both still on disk and correct.
 
 - `conexus/hooks/scripts/behaviour_census.py`:
   bead: nexus-4lnn1 — a new SessionStart hook reporting the PREVIOUS

@@ -39,7 +39,12 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 #: declared, and the second reading is the one to rule out first -- this
 #: bead shipped four separate gates that went quiet exactly that way.
 _MIN_MCP_TOOL_ENTRIES = 13
-_MIN_NX_HOOK_ENTRIES = 3
+#: 3 -> 6 at bead nexus-q02nx.22, which converted the last four shell-form
+#: entries (`nx upgrade --auto ... || echo ...`, `nx self gc ... || true`,
+#: `nx hook session-start`, `nx-session-end-launcher`) to exec form. Three of
+#: those became nx-hook verbs; measured after: upgrade-auto, preflight,
+#: self-gc, session-start, session-context, rdr.
+_MIN_NX_HOOK_ENTRIES = 6
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:

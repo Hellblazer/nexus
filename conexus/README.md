@@ -264,10 +264,10 @@ and only the ledger verbs have one.
 
 | Event | Handler | Purpose |
 |-------|--------|---------|
-| `SessionStart` | `nx upgrade --auto` | Auto-converge the CLI to the plugin's minimum required version |
-| `SessionStart` | `nx self gc` | Reap superseded install generations no live process is holding |
+| `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |
+| `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc`; the shell form's `>/dev/null 2>&1 \|\| true` is the verb's own silence (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
-| `SessionStart` | `nx hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
+| `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
 | `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
 | `SessionStart` | `hooks/scripts/behaviour_census.py` | Report the PREVIOUS session's delegation and deliberation rates against baselines from the user's own trailing sessions (nexus-4lnn1) |

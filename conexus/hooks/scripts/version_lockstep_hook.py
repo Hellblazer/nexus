@@ -65,9 +65,12 @@ remaining plugin(s) for that session (a named, debug-logged skip, not
 a raise, not a partial/garbled result) and detection simply reports
 whatever it resolved before the budget ran out.
 
-Stdlib-only: this runs under whichever interpreter ``_run_python_hook.sh``
-resolves. Since nexus-4ti7e that is the installed generation's python when
-one exists, but a ``uv tool install conexus`` deployment or a box with no
+Stdlib-only: this runs under whichever interpreter
+``_interpreter.reexec_if_needed()`` resolves -- the same order the retired
+``_run_python_hook.sh`` launcher used to walk, now performed in Python
+before this module imports anything past stdlib (see ``_interpreter.py``).
+Since nexus-4ti7e that is the installed generation's python when one
+exists, but a ``uv tool install conexus`` deployment or a box with no
 generation still gets a bare python that cannot import the ``conexus``
 package, so the hook stays stdlib-only (same constraint as
 ``t2_prefix_scan.py`` / ``preflight.py``) -- the ref-drift functions below
@@ -105,10 +108,16 @@ from pathlib import Path
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 
-# Detached action script lives beside this hook; launched via the same
-# interpreter-selection wrapper so it picks a >=3.12 python.
+# Detached action script lives beside this hook. Launched with
+# sys.executable directly, not a fresh interpreter-resolution pass: by the
+# time dispatch_action/dispatch_ref_drift_action run, _interpreter.reexec_
+# if_needed() has already resolved this process's interpreter (module
+# scope, above) and the >=3.12 guard right after it has already passed --
+# so sys.executable is guaranteed to be a working, already-verified >=3.12
+# python here, the same one _run_python_hook.sh would have picked, without
+# a second bash process or a second round of probes. The action needs
+# nothing more: it is stdlib-only itself (no `nexus` import).
 _SCRIPTS_DIR = Path(__file__).resolve().parent
-_LAUNCHER = _SCRIPTS_DIR / "_run_python_hook.sh"
 _ACTION = _SCRIPTS_DIR / "version_lockstep_action.py"
 
 #: The plugins this wheel ships -- same set as
@@ -225,7 +234,7 @@ def dispatch_action(target_version: str) -> None:
     Uses Popen with detached stdio so synchronous SessionStart is never
     blocked. We deliberately do not wait()/communicate().
     """
-    cmd = ["bash", str(_LAUNCHER), str(_ACTION), target_version]
+    cmd = [sys.executable, str(_ACTION), target_version]
     try:
         subprocess.Popen(
             cmd,
@@ -528,7 +537,7 @@ def dispatch_ref_drift_action() -> None:
     line (``src/nexus/plugin_lockstep.py``) is the same instruction a
     manual ``nx upgrade`` already prints on a successful ref-move.
     """
-    cmd = ["bash", str(_LAUNCHER), str(_ACTION), _REF_DRIFT_SENTINEL]
+    cmd = [sys.executable, str(_ACTION), _REF_DRIFT_SENTINEL]
     try:
         subprocess.Popen(
             cmd,

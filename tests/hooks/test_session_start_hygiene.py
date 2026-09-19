@@ -5,8 +5,9 @@
 Surfaces actionable maintenance signals at session start when (and only
 when) something is actionable. Silent when healthy, single-purpose for
 each signal. Stdlib-only so the hook runs under whichever bare
-interpreter ``_run_python_hook.sh`` resolves (same constraint pinned
-by ``test_t2_prefix_scan.py``).
+interpreter ``_interpreter.reexec_if_needed()`` resolves — the successor
+to the retired ``_run_python_hook.sh`` launcher (RDR-215 bead
+nexus-q02nx.21), same constraint, pinned by ``test_t2_prefix_scan.py``.
 """
 from __future__ import annotations
 

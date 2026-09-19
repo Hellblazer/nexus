@@ -140,10 +140,15 @@ NEW_PLUGIN_ROOT="$(python3 -c "import json; print(json.load(open('$SB_REGISTRY')
 [ -f "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" ] || _fail "no lockstep hook under $NEW_PLUGIN_ROOT"
 HOOK_OUT="$WORK/hook.out"
 set +e
+# RDR-215 nexus-q02nx.22: the retired `_run_python_hook.sh` bash launcher
+# is gone; hooks.json declares this hook in exec form
+# (`"command": "python3", "args": [<script>]`), so invoke it that way --
+# this gate now proves the shape production actually runs, not a launcher
+# path production no longer uses.
 env -i HOME="$SB" PATH="$VENV/bin:$PATH" TERM=dumb NX_NO_TELEMETRY=1 \
     NEXUS_CONFIG_DIR="$SB/.config/nexus" CLAUDE_PLUGIN_ROOT="$NEW_PLUGIN_ROOT" \
     NX_LOCKSTEP_MARKER="$SB/.config/nexus/cli_lockstep_marker" NX_LOCKSTEP_LOG="$SB/.config/nexus/lockstep.log" \
-    bash "$NEW_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh" "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" \
+    python3 "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" \
     </dev/null >"$HOOK_OUT" 2>"$WORK/hook.err"
 HRC=$?
 set -e
@@ -229,10 +234,14 @@ MARKER_FOR_HOOK="$SB/.config/nexus/cli_lockstep_marker"
 mkdir -p "$(dirname "$MARKER_FOR_HOOK")"
 printf '%s' "$NEW" >"$MARKER_FOR_HOOK"  # already in CLI-version lockstep -> isolates the ref-drift nudge
 set +e
+# RDR-215 nexus-q02nx.22: same exec-form shape as hooks.json declares
+# (bare `python3`), not the retired `_run_python_hook.sh` launcher -- a
+# shape correction alongside the deletion, so this gate proves what
+# production actually runs rather than a path it no longer uses.
 env -i HOME="$SB" PATH="$VENV/bin:$PATH" TERM=dumb NX_NO_TELEMETRY=1 \
     NEXUS_CONFIG_DIR="$SB/.config/nexus" CLAUDE_PLUGIN_ROOT="$NEW_PLUGIN_ROOT" \
     NX_LOCKSTEP_MARKER="$MARKER_FOR_HOOK" NX_LOCKSTEP_LOG="$SB/.config/nexus/lockstep.log" \
-    bash "$REPO_ROOT/conexus/hooks/scripts/_run_python_hook.sh" "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py" \
+    python3 "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py" \
     </dev/null >"$HOOK_OUT2" 2>"$WORK/hook2.err"
 HRC2=$?
 set -e

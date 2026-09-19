@@ -6,7 +6,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx upgrade --auto 2>/dev/null || echo 'conexus plugin requires conexus >= 4.2.0 — run: nx self install (or uv tool upgrade conexus on an un-migrated box)' >&2",
+            "command": "nx-hook",
+            "args": [
+              "upgrade-auto"
+            ],
             "timeout": 30
           },
           {
@@ -19,12 +22,18 @@
           },
           {
             "type": "command",
-            "command": "nx self gc >/dev/null 2>&1 || true",
+            "command": "nx-hook",
+            "args": [
+              "self-gc"
+            ],
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "nx hook session-start",
+            "command": "nx-hook",
+            "args": [
+              "session-start"
+            ],
             "timeout": 10
           },
           {
@@ -74,6 +83,7 @@
           {
             "type": "command",
             "command": "nx-session-end-launcher",
+            "args": [],
             "timeout": 10
           }
         ]

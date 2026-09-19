@@ -23,16 +23,17 @@ one ``nexus.commands.hook._read_stdin_payload`` implements (both were built
 against the same nexus-rv2x repro) -- so ``run`` here only has to do the
 same field extraction ``session_start_cmd`` performs on the dict it gets.
 
-**Not wired into ``hooks.json`` yet**, the same disclosure
-``auto_approve.py`` carries for the tool tier. The live
-``conexus/hooks/hooks.json`` still runs the shell string
-``nx hook session-start``; re-declaring it as exec-form
-``{"command": "nx-hook", "args": ["session-start"]}`` is RDR-215 Approach
-item 6, beads ``nexus-q02nx.21``/``.22``. So this verb is reachable and
-tested, and bead ``nexus-q02nx.6`` fired it live through a purpose-built
-``hooks.json`` in an isolated HOME, but no ordinary session runs it today.
-Bead ``nexus-3z8vb`` is a blocker on that re-declaration: a ``nx-hook``
-shim that resolves but cannot exec would disable this silently.
+**Wired since bead ``nexus-q02nx.22``**, which completed RDR-215 Approach
+item 6: ``conexus/hooks/hooks.json`` declares this as
+``{"command": "nx-hook", "args": ["session-start"]}``, replacing the shell
+string ``nx hook session-start``. Bead ``nexus-q02nx.6`` had already fired
+it live through a purpose-built ``hooks.json`` in an isolated HOME, and
+``nexus-3z8vb`` -- the blocker on this re-declaration, an ``nx-hook`` shim
+that resolves but cannot exec, which would have disabled this silently --
+is closed. The declaration is INERT until the next plugin cut, because
+``marketplace.json`` pins ``source.ref`` to a release tag; see
+``conexus/PENDING_RELEASE.md``. The ``nx hook session-start`` CLI verb
+itself is untouched and still works.
 
 **Not a ledger verb.** ``session-start`` never appears in
 :data:`nexus._hook_runtime.entry.LEDGER_VERBS`: it has no caller that branches on
