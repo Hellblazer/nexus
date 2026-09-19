@@ -41,9 +41,13 @@ COMMAND_ALLOWLIST: dict[str, str] = {
 
 #: (command path, option) pairs deliberately undocumented.
 OPTION_ALLOWLIST: dict[tuple[str, str], str] = {
-    ("nx catalog init", "--remote"): "retired option kept so old invocations parse",
-    ("nx catalog setup", "--remote"): "retired option kept so old invocations parse",
-    ("nx catalog sync", "--message"): "retired option kept so old invocations parse",
+    # nexus-uks83: the rows for `nx catalog init/setup/sync`'s retired options
+    # are GONE, not moved. Those commands are now `hidden=True`, so the scanner
+    # that feeds this allowlist never reaches their options and the entries were
+    # unreachable -- which is exactly what test_allowlists_carry_no_dead_rows
+    # exists to catch. The options themselves still exist and still parse; they
+    # are simply no longer part of the documented surface. If a later bead
+    # un-hides those verbs, this test goes red again and the rows come back.
 }
 
 
