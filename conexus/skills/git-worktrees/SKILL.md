@@ -91,6 +91,19 @@ revert the source. Never the other way round.
   applied-but-unverified diff is not.
 - Do not move a tree a subagent is still writing to.
 
+### Run verification from the worktree, not from where the shell sits
+
+The shared checkout stays on the integration branch and is therefore
+always a VALID tree — it just is not YOUR tree. A linter, a formatter or
+a scoped test run invoked from there examines files without your edits
+and comes back clean, and nothing about the output says which tree it
+read. This is the easy mistake in this layout precisely because the
+reference checkout is never broken.
+
+Before trusting a verification run, confirm the working directory is the
+worktree holding the change. A green belongs to a TREE, and here the tree
+is chosen by the shell's cwd rather than by anything in the command.
+
 ### Serena differs by how you got there
 
 A session STARTED in a worktree gets its own language server rooted there
@@ -124,5 +137,6 @@ The Agent tool supports `isolation: "worktree"` natively — it creates a tempor
 | Parallel agents | Use `isolation: "worktree"` on Agent tool |
 | Another session shares this checkout | Each session takes its own worktree; the shared one goes reference-only |
 | Relocating a session mid-flight | Verify in the new worktree BEFORE reverting the source |
+| Verifying a change | Run it from the worktree holding the edits, not from the reference checkout |
 
 **Pairs with:** `/conexus:finishing-branch` for merge/PR/cleanup after work is done.
