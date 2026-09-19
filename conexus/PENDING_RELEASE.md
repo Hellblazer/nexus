@@ -296,3 +296,30 @@ halves only have to agree within a single cut.
 - `conexus/hooks/scripts/subagent-stop.sh`:
   bead: nexus-q02nx.21 — DELETED; ported to `nexus.hooks.subagent_stop`, with its two transcript scans in `nexus.hooks.subagent_stop_scans`.
   INERT until the next cut.
+
+- `conexus/agents/code-review-expert.md`:
+  bead: nexus-q02nx.21 — cited `pre_close_verification_hook.sh` by filename
+  as the live close gate. Now names the port, `hook_pre_close_verification`,
+  which is an MCP tool with no command line to run by hand.
+  INERT until the next cut: an agent on the pinned tag reads the old name,
+  and on the pinned tag that name is still correct.
+
+- `conexus/agents/substantive-critic.md`:
+  bead: nexus-q02nx.21 — same citation, same fix.
+  INERT until the next cut.
+
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md`:
+  bead: nexus-q02nx.21 — same citation, same fix. This one matters most of
+  the three: every agent reads it, and it is where the marker-authorship
+  rule lives.
+  INERT until the next cut.
+
+- `conexus/skills/code-review/SKILL.md`:
+  bead: nexus-q02nx.21 — same citation, same fix.
+  INERT until the next cut.
+
+- `conexus/skills/mailbox/SKILL.md`:
+  bead: nexus-q02nx.21 — the two "Claimant id" lines named
+  `subagent-start.sh` as the source of an agent's claimant id. They now name
+  the SubagentStart hook rather than a script that is being deleted.
+  INERT until the next cut.

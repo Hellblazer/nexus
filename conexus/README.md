@@ -92,10 +92,13 @@ conexus/
 │   └── scripts/                       # Plugin-resident hooks and shared helpers.
 │       │                              # Most hooks now live in the conexus WHEEL
 │       │                              # (nexus.hooks.*) — see the table below.
-│       ├── session_start_hook.py      # SessionStart: surface T2 memory, beads, scratch context
-│       ├── rdr_hook.py                # SessionStart: RDR file↔T2 status reconciliation
-│       ├── stop_failure_hook.py       # StopFailure: advisory on session-end failures
+│       ├── behaviour_census.py        # SessionStart: the previous session's delegation
+│       │                              # and deliberation rates
+│       ├── version_lockstep_hook.py   # SessionStart(startup): plugin↔CLI version skew
 │       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
+│       ├── _interpreter.py            # Shared helper: re-exec under an interpreter that
+│       │                              # can serve the hook (3.12 floor, and the
+│       │                              # generation python that can import nexus)
 │       ├── t2_prefix_scan.py          # Shared helper: T2 multi-namespace prefix scan
 │       └── read_verification_config.py # Shared helper: read .nexus.yml verification block
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
@@ -262,10 +265,11 @@ and only the ledger verbs have one.
 | Event | Handler | Purpose |
 |-------|--------|---------|
 | `SessionStart` | `nx upgrade --auto` | Auto-converge the CLI to the plugin's minimum required version |
-| `SessionStart` | `hooks/scripts/preflight.py` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
+| `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
 | `SessionStart` | `nx hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
-| `SessionStart` | `hooks/scripts/session_start_hook.py` | Surface T2 memory, ready beads, and scratch context at session start |
-| `SessionStart` | `hooks/scripts/rdr_hook.py` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
+| `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
+| `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
+| `SessionStart` | `hooks/scripts/behaviour_census.py` | Report the PREVIOUS session's delegation and deliberation rates against baselines from the user's own trailing sessions (nexus-4lnn1) |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |
