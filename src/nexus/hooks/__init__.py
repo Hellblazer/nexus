@@ -7,15 +7,43 @@ import os
 import subprocess
 from pathlib import Path
 
-import structlog
+# NEITHER ``structlog`` NOR ``nexus.session`` IS IMPORTED AT MODULE SCOPE,
+# and that is load-bearing rather than tidy (bead nexus-q02nx.21).
+#
+# Every command-tier hook verb is a submodule of this package
+# (``nexus.hooks.session_start_verb``, ``auto_approve``, ``post_compact``,
+# ``rdr_verb`` and the rest), and Python runs a package's ``__init__``
+# before any submodule. So an eager import here is paid by every verb
+# dispatch whatever the verb itself imports. Measured on the dev Mac, 10
+# runs, median: bare python 14 ms; the spine
+# (``nexus._hook_runtime.entry``) 18 ms; a real verb 78 ms. ``structlog``
+# and ``nexus.session`` cost about 81 ms each, and ``nexus.session`` pulls
+# ``structlog`` itself, so deferring only one recovers nothing.
+#
+# That 78 ms is against the 40 ms ``_run_python_hook.sh`` path the command
+# tier replaces, i.e. the port was a 2x latency REGRESSION on hooks that
+# fire per Bash call. nexus-br31l carved out ``nexus._hook_runtime`` to fix
+# exactly this and fixed only the spine;
+# ``tests/hooks/test_hook_runtime_thin.py::test_a_stdlib_only_verb_dispatch_never_loads_structlog``
+# dispatches a SYNTHETIC verb written into tmp_path, which is not in this
+# package, so it was green throughout and structurally could not see it.
+#
+# Both deferrals are cheap where they land: all nine ``_logger()`` calls
+# below are in ``except`` blocks, and the ``nexus.session`` pair is used
+# only inside ``session_start``.
 
-from nexus.session import (
-    generate_session_id,
-    write_claude_session_id,
-)
 
+def _logger():
+    """The package logger, imported on use.
 
-_log = structlog.get_logger()
+    Same deferral ``nexus._hook_runtime._io`` uses, for the same reason:
+    ``import structlog`` drags ``structlog.dev`` -> ``rich.traceback`` ->
+    ``pygments`` -> an entry-point scan. Called only from error paths, so
+    a healthy dispatch never pays it.
+    """
+    import structlog  # noqa: PLC0415 — deferred; see the comment above
+
+    return structlog.get_logger()
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -92,7 +120,7 @@ def _t1_clear_if_owned(t1) -> None:
         # getMessage()); passing message= as an extra kwarg raises
         # KeyError("Attempt to overwrite 'message' in LogRecord") the
         # moment structlog is stdlib-routed.
-        _log.error(
+        _logger().error(
             "session_end_t1_ownership_check_failed",
             error=str(exc),
             detail=(
@@ -103,7 +131,7 @@ def _t1_clear_if_owned(t1) -> None:
         return
 
     if decision.action == T1RoutingAction.USE_LEASED:
-        _log.warning(
+        _logger().warning(
             "session_end_t1_clear_skipped_leased_scope",
             session_id=decision.session_id,
             detail=(
@@ -126,7 +154,7 @@ def _infer_repo() -> str:
         )
         return Path(result.stdout.strip()).name
     except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
-        _log.debug("infer_repo_git_failed", error=str(exc))
+        _logger().debug("infer_repo_git_failed", error=str(exc))
         return Path.cwd().name
 
 
@@ -191,7 +219,7 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
                 config_dir=config_dir,
             )
     except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a T1-scope convenience feature
-        _log.debug("t1_handoff_marker_write_failed", error=str(exc))
+        _logger().debug("t1_handoff_marker_write_failed", error=str(exc))
 
 
 def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -> None:
@@ -258,7 +286,7 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
             record_clear=(source == "clear" and not inherited),
         )
     except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a mailbox-watch convenience feature
-        _log.debug("tuple_watch_session_marker_write_failed", error=str(exc))
+        _logger().debug("tuple_watch_session_marker_write_failed", error=str(exc))
 
 
 def adopt_session_marker(session_id: str) -> None:
@@ -351,6 +379,11 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     #   2. ``claude_session_id`` from stdin: top-level Claude session.
     #   3. Fresh UUID: fallback for invocations outside Claude Code.
     inherited = os.environ.get("NX_SESSION_ID", "").strip() or None
+    from nexus.session import (  # noqa: PLC0415 — deferred; see the comment at module scope
+        generate_session_id,
+        write_claude_session_id,
+    )
+
     session_id = inherited or claude_session_id or generate_session_id()
 
     if not inherited:
@@ -465,7 +498,7 @@ def _mailbox_arm_block(session_id: str) -> str:
 
         text = arm_block(session_id)
     except Exception as exc:  # noqa: BLE001 — session start must never break on this probe
-        _log.debug("mailbox_arm_block_failed", error=str(exc))
+        _logger().debug("mailbox_arm_block_failed", error=str(exc))
         return ""
     return f"\n\n{text}" if text else ""
 
@@ -488,7 +521,7 @@ def _guidance_imperative_block() -> str:
         from nexus.session_start_guidance import guidance_block  # noqa: PLC0415 — deferred import, only needed on this path
         text = guidance_block()
     except Exception as exc:  # noqa: BLE001 — session start must never break on this probe
-        _log.debug("guidance_imperative_block_failed", error=str(exc))
+        _logger().debug("guidance_imperative_block_failed", error=str(exc))
         return ""
     return f"\n\n{text}" if text else ""
 
@@ -600,7 +633,7 @@ def session_end_flush() -> str:
         try:
             t1 = _open_t1()
         except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
-            _log.warning(
+            _logger().warning(
                 "session_end_flush_t1_unavailable",
                 error=str(exc),
                 detail="flagged scratch entries were not flushed",
@@ -663,7 +696,7 @@ def session_end_flush() -> str:
         if t1 is not None:
             _t1_clear_if_owned(t1)
     except Exception as exc:  # noqa: BLE001 — session-end boundary: a storage error of ANY class must not crash the host (the SQLite-specific catch went with the substrate, 2026-08-29)
-        _log.warning("session_end: storage error during flush/expire", error=str(exc))
+        _logger().warning("session_end: storage error during flush/expire", error=str(exc))
 
     return f"Session ended. Flushed {flushed} scratch entries. {expired.describe(prefix='memory ')}"
 

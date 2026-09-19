@@ -40,6 +40,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus._hook_runtime.entry import VERB_TABLE
+
 _PKG = Path(__file__).resolve().parents[2] / "src" / "nexus" / "_hook_runtime"
 
 #: Modules the cheap path is allowed to pull in beyond the standard library.
@@ -291,3 +293,81 @@ def test_a_swallowed_crash_still_reaches_the_hook_log(tmp_path: Path) -> None:
         f"the crash-swallow diagnostic never reached {log}; contents: {body!r}"
     )
     assert "deliberate crash" in body
+
+
+# ---------------------------------------------------------------------------
+# The same property, over the verbs that actually ship (bead nexus-q02nx.21).
+# ---------------------------------------------------------------------------
+
+
+def test_the_real_verb_modules_import_no_structlog() -> None:
+    """Every module in ``VERB_TABLE``, imported in a fresh interpreter.
+
+    ``test_a_stdlib_only_verb_dispatch_never_loads_structlog`` above is a
+    good check with a blind spot, and this file is the right place to say
+    what it is. That test writes a SYNTHETIC verb into ``tmp_path`` and
+    dispatches it. A verb in ``tmp_path`` is not in the ``nexus.hooks``
+    package, so it never runs ``nexus/hooks/__init__.py`` -- and every verb
+    that really ships IS in that package. The gate proved the spine was
+    thin and was structurally incapable of seeing the verbs.
+
+    What it missed, measured on the dev Mac (10 runs, median): bare python
+    14 ms, the spine 17 ms, a real verb 78 ms, against the 40 ms
+    ``_run_python_hook.sh`` path the command tier replaces. The package
+    ``__init__`` imported ``structlog`` and ``nexus.session`` eagerly and
+    Python runs it before any submodule, so the port was a 2x latency
+    regression on hooks that fire per Bash call. nexus-br31l carved out
+    ``nexus._hook_runtime`` to fix exactly this and fixed only the spine.
+    After deferring both, a real verb costs 29 ms.
+
+    So the rule this encodes is not "check the dispatch path" -- that was
+    already checked. It is that a gate's reference point has to be the
+    thing under test. A synthetic stand-in cannot move when the real
+    subject does.
+    """
+    assert VERB_TABLE, "VERB_TABLE is empty -- this gate would examine nothing"
+
+    modules = sorted(set(VERB_TABLE.values()))
+    probe = (
+        "import sys\n"
+        + "".join(f"import {m}\n" for m in modules)
+        + "heavy = [m for m in ('structlog', 'rich', 'pygments', 'click',\n"
+        "                     'nexus.session', 'nexus.cli') if m in sys.modules]\n"
+        "print(','.join(heavy))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, f"probe failed:\n{proc.stderr}"
+    loaded = proc.stdout.strip()
+    assert loaded == "", (
+        f"importing the {len(modules)} real verb modules pulled in {loaded}. "
+        "Check nexus/hooks/__init__.py first: it runs before every verb in "
+        "that package, so one eager import there is paid by all of them."
+    )
+
+
+def test_the_hooks_package_init_defers_its_two_heavy_imports() -> None:
+    """Names the two, so a re-add has to delete this test and say why.
+
+    The general check above would also catch a re-add, but it would report
+    it as "some verb got heavy". These two are the specific ones that were
+    eager for the whole of Phase 2 and Phase 3, and naming them keeps the
+    history attached to the constraint.
+    """
+    probe = (
+        "import sys, nexus.hooks\n"
+        "print(','.join(m for m in ('structlog', 'nexus.session') "
+        "if m in sys.modules))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "", (
+        f"nexus.hooks re-acquired an eager {proc.stdout.strip()}. All nine "
+        "_logger() call sites in that module are error paths and the "
+        "nexus.session pair is used only in session_start(), so both belong "
+        "behind a deferred import."
+    )
