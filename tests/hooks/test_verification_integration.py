@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Integration tests for the verification hook pipeline."""
+"""Integration tests for the verification hook pipeline.
+
+RDR-215 bead nexus-q02nx.21 deleted ``stop_verification_hook.sh`` and
+``pre_close_verification_hook.sh`` and re-declared their ``hooks.json``
+entries to the ``hook_stop_verification`` / ``hook_pre_close_verification``
+mcp_tools; ``TestStopHookPipeline``/``TestCloseHookPipeline`` below now
+drive the ported ``nexus.hooks.stop_verification`` /
+``nexus.hooks.pre_close_verification`` modules instead.
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -12,9 +21,48 @@ import pytest
 
 HOOKS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 HOOKS_JSON = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
-STOP_HOOK = HOOKS_DIR / "stop_verification_hook.sh"
-CLOSE_HOOK = HOOKS_DIR / "pre_close_verification_hook.sh"
 CONFIG_READER = HOOKS_DIR / "read_verification_config.py"
+
+_STOP_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import stop_verification
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: stop_verification.run(payload), "stop_verification")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+_CLOSE_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import pre_close_verification
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: pre_close_verification.run(payload), "pre_close_verification")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+#: Sentinels for :func:`_run_hook`, replacing the old STOP_HOOK/CLOSE_HOOK
+#: script-path arguments now that both scripts are deleted.
+STOP_HOOK = "stop"
+CLOSE_HOOK = "close"
 
 # Minimal PATH with python3 but without bd/nx. A dedicated symlink-only
 # directory, NOT the parent of `which python3` -- this repo's venv bin/
@@ -34,7 +82,7 @@ _MINIMAL_PATH = f"{_PYTHON3_ISOLATED_DIR}:/usr/bin:/bin"
 
 
 def _run_hook(
-    script: Path,
+    which: str,
     stdin: str,
     *,
     env_overrides: dict[str, str] | None = None,
@@ -45,8 +93,9 @@ def _run_hook(
         "HOME": os.environ.get("HOME", "/tmp"),
         **(env_overrides or {}),
     }
+    driver = _STOP_PY_DRIVER if which == STOP_HOOK else _CLOSE_PY_DRIVER
     return subprocess.run(
-        ["bash", str(script)],
+        [sys.executable, "-c", driver],
         input=stdin,
         capture_output=True,
         text=True,
@@ -143,16 +192,19 @@ class TestHooksJsonStructure:
 
     def test_hooks_json_pretooluse_matcher_is_bash(self) -> None:
         """The pre-close verification hook fires on Bash, whatever position
-        its entry occupies. Keyed on the SCRIPT, not on ``PreToolUse[0]``:
+        its entry occupies. Keyed on the HANDLER, not on ``PreToolUse[0]``:
         PreToolUse now carries a second entry (the Agent-dispatch matcher,
         nexus-qc4p1), and an index-positional assertion says nothing about
-        the hook it is named for once the list has more than one member."""
+        the hook it is named for once the list has more than one member.
+        RDR-215 bead nexus-q02nx.21 re-declared this entry to the
+        ``hook_pre_close_verification`` mcp_tool, so the key is now the
+        tool name rather than a bash command string."""
         data = json.loads(HOOKS_JSON.read_text())
         owners = [
             entry["matcher"]
             for entry in data["hooks"]["PreToolUse"]
             if any(
-                "pre_close_verification_hook.sh" in h.get("command", "")
+                h.get("tool") == "hook_pre_close_verification"
                 for h in entry.get("hooks", [])
             )
         ]
@@ -167,18 +219,45 @@ class TestHooksJsonStructure:
         assert "SubagentStart" in hooks
 
     def test_hooks_json_references_valid_scripts(self) -> None:
-        """All hook commands referencing hooks/scripts/ point to existing files."""
+        """All hook commands referencing hooks/scripts/ point to existing
+        files.
+
+        Checks both command shapes: the plain ``"command": "bash
+        .../hooks/scripts/foo.sh"`` string, and the exec-form
+        ``"command": "python3", "args": [".../hooks/scripts/foo.py", ...]``
+        the four routing/version-lockstep hooks now use
+        (RDR-215 bead nexus-q02nx.21's ``_interpreter.reexec_if_needed()``
+        wiring). A run that checked zero references would prove nothing —
+        every mcp_tool-only hooks.json would pass this vacuously — so this
+        asserts it examined at least one, which is what caught this test
+        going quiet in the first place: the twelve now-deleted bash
+        scripts' re-declaration to mcp_tool left the single-string
+        ``"command"`` branch with nothing left to match.
+        """
         data = json.loads(HOOKS_JSON.read_text())
+        checked = 0
         for event_name, event_hooks in data["hooks"].items():
             for hook_group in event_hooks:
                 for hook in hook_group.get("hooks", []):
+                    candidates: list[str] = []
                     cmd = hook.get("command", "")
                     if "hooks/scripts/" in cmd:
-                        script_name = cmd.split("hooks/scripts/")[-1].split()[0]
+                        candidates.append(cmd.split("hooks/scripts/")[-1].split()[0])
+                    for arg in hook.get("args", []):
+                        if "hooks/scripts/" in arg:
+                            candidates.append(arg.split("hooks/scripts/")[-1])
+                    for script_name in candidates:
+                        checked += 1
                         script_path = HOOKS_DIR / script_name
                         assert script_path.exists(), (
                             f"{event_name} references missing script: {script_path}"
                         )
+        assert checked > 0, (
+            "examined zero hooks/scripts/ references -- either hooks.json "
+            "changed shape again (this test needs a third branch) or "
+            "every hook left that directory entirely; a run that checks "
+            "nothing is not a passing run"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -187,15 +266,12 @@ class TestHooksJsonStructure:
 
 
 class TestScriptPermissions:
-    """Verify all hook scripts exist and are executable."""
-
-    def test_stop_hook_exists_and_executable(self) -> None:
-        assert STOP_HOOK.exists()
-        assert os.access(STOP_HOOK, os.X_OK)
-
-    def test_close_hook_exists_and_executable(self) -> None:
-        assert CLOSE_HOOK.exists()
-        assert os.access(CLOSE_HOOK, os.X_OK)
+    """The stop/close hooks are the ported Python modules now (RDR-215
+    bead nexus-q02nx.21 deleted stop_verification_hook.sh and
+    pre_close_verification_hook.sh); an importable module needs no
+    existence check the way a script path does. What both ports still
+    shell out to -- ``read_verification_config.py`` -- is unchanged and
+    still worth pinning here."""
 
     def test_config_reader_exists(self) -> None:
         assert CONFIG_READER.exists()
