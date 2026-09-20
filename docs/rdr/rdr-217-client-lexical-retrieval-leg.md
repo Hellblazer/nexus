@@ -497,7 +497,12 @@ def hybrid_search(
 Every field in that signature is Verified (source search). None is Assumed.
 
 **Settled by Sam on 2026-09-19, during P2.1 implementation: the return type is
-`list[dict]`, not `list[dict] | dict`.** This paragraph had carried `search()`'s
+`list[dict]`, not `list[dict] | dict`.** Verbatim: "narrow to list[dict]", asked
+and answered when the review surfaced the unreachable arm; recorded with every
+other RDR-217 decision in T2 `nexus_rdr/217-sam-decisions`. That record exists
+because the P2/P4 shipment critique noted this attribution named Sam with no
+citable source, unlike this RDR's others — an attribution without one is
+unfalsifiable later. This paragraph had carried `search()`'s
 annotation verbatim, and the P2.1 code review established that the `dict` arm is
 unreachable once `structured` is dropped: the no-rerank path returns the bare row
 list, and the rerank path's envelope unpacking always yields a list. The union

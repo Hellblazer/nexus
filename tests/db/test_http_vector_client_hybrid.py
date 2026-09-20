@@ -100,9 +100,14 @@ def test_rerank_envelope_unpacked_exactly_as_search_unpacks_it(client, monkeypat
     caught the original wording claiming more than it delivers. Both call
     sites now run the same ``_unpack_rerank_envelope`` function object, so
     there is no copy left to drift and this equality is trivially true for
-    any bug INSIDE that function. The unpacking's own correctness — the
-    retry-after clamp, the stale-engine branch, the missing-flag branch — is
-    pinned by ``tests/db/test_http_vector_client_rerank.py``, not here.
+    any bug INSIDE that function. The unpacking's own correctness is pinned
+    elsewhere, and in TWO files rather than one — corrected again at the P2/P4
+    shipment review, which caught this pointer naming only the first:
+    ``tests/db/test_http_vector_client_rerank.py`` covers the retry-after
+    clamp, the stale-engine branch and the degrade flag when it is PRESENT,
+    while the missing-flag branch (an envelope with no ``rerank_degraded`` key
+    cannot attest rerank ran) is pinned in
+    ``tests/test_znwc2_response_shape_trust.py``. Neither is here.
 
     What this assertion really guards is a FUTURE RE-FORK: someone inlining
     the handling back into one call site and not the other. That is a real
