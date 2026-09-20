@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "rdr": "RDR-217",
   "bead": "nexus-lqo4p.1",
   "created": "2026-09-19",
@@ -22,7 +22,8 @@
     "identifier_and_rare_token": "literal containment",
     "prose": "source-path membership",
     "the_bias_this_carries_and_why_it_is_not_hidden": "For an identifier-shaped query, relevance is DEFINED as 'the chunk contains that identifier'. That favours a lexical gate by construction, because a lexical gate is a literal-containment matcher. It is not circular for the query shape it covers \u2014 when a developer types resolve_active_session_id, the rows they want ARE the rows containing it, so literal containment is the task definition rather than a thumb on the scale. It WOULD be circular as a claim about retrieval generally. The prose queries exist to keep that honest: they use source-path relevance, which no lexical gate is privileged on, and a Phase 1 report that shows a lexical gain on identifiers and none on prose is the expected and interesting result rather than a disappointment.",
-    "what_would_make_this_instrument_wrong": "If the prose queries turned out to also be satisfiable by the engine's lexical gate, the contrast would collapse and every shape would favour the lexical leg. The gate is plainto_tsquery OR trigram word_similarity >= 0.6 over the WHOLE query string, so an exact-substring guard is not sufficient to rule this out \u2014 a query differing from its needle only by a separator clears the trigram threshold. test_prose_queries_are_not_satisfiable_by_literal_containment therefore normalises separators before comparing, which is what caught prose-01's leak; a stem-level collision remains a judgement call the 'why' field has to carry."
+    "what_would_make_this_instrument_wrong": "If the prose queries turned out to also be satisfiable by the engine's lexical gate, the contrast would collapse and every shape would favour the lexical leg. The gate is plainto_tsquery OR trigram word_similarity >= 0.6 over the WHOLE query string, so an exact-substring guard is not sufficient to rule this out \u2014 a query differing from its needle only by a separator clears the trigram threshold. test_prose_queries_are_not_satisfiable_by_literal_containment therefore normalises separators before comparing, which is what caught prose-01's leak; a stem-level collision remains a judgement call the 'why' field has to carry.",
+    "rare_means_rare_in_chunks_not_in_files": "A rare-token slot must hold a token appearing in at most k CHUNKS of the measured corpus, and the first version of this set got that wrong in a way only a real run exposed. Rarity was picked from repo-wide grep counts, which count occurrences across files; the harness scores chunks, and k is the window. Measured over the real corpus (src/nexus + tests, production chunker): quarantine_collection_name 17 chunks, mint_test_tenant 19, against k=10. Both were labelled rare and neither was, so the rare-token shape was not being measured at all. mislabelled_rare_tokens() refused the run; the driver's precheck now applies the same test before embedding rather than after."
   },
   "queries": [
     {
@@ -88,22 +89,22 @@
     {
       "id": "rare-01",
       "shape": "rare_token",
-      "text": "quarantine_collection_name",
+      "text": "_pop_sent_bearer",
       "ground_truth": {
         "kind": "literal_token",
-        "token": "quarantine_collection_name"
+        "token": "_pop_sent_bearer"
       },
-      "why": "Appears in few chunks (7 files). Rare-token recall is where a dense index has the least signal to work with."
+      "why": "REPLACED after the first full run. This slot held quarantine_collection_name, 17 chunks against k=10 \u2014 labelled rare and not rare. This token is in 2 chunks, measured with the production chunker over the real corpus, and carries a leading underscore, which vector tokenisation routinely drops and a literal matcher keeps."
     },
     {
       "id": "rare-02",
       "shape": "rare_token",
-      "text": "mint_test_tenant",
+      "text": "_stash_response_headers",
       "ground_truth": {
         "kind": "literal_token",
-        "token": "mint_test_tenant"
+        "token": "_stash_response_headers"
       },
-      "why": "Moderately rare and semantically opaque: nothing about the surrounding text says 'mint' unless the token itself matches."
+      "why": "REPLACED after the first full run, same reason: this slot held mint_test_tenant at 19 chunks. This token is in 3 chunks. Rare, semantically opaque \u2014 nothing in the surrounding prose says 'stash' unless the token itself matches \u2014 and a compound name, so it tests a different trigram shape from rare-03's single word."
     },
     {
       "id": "rare-03",
@@ -128,12 +129,12 @@
     {
       "id": "prose-02",
       "shape": "prose",
-      "text": "what stops two builds corrupting each other at the same time",
+      "text": "what slows things down when an upstream starts refusing requests",
       "ground_truth": {
         "kind": "source_path_contains",
-        "needle": "build-lease"
+        "needle": "rate_brake"
       },
-      "why": "Contrast case. The relevant file's name shares no token with the query."
+      "why": "Contrast case, RETARGETED after the driver's precheck found its ground truth resolving to nothing. It previously pointed at 'build-lease', which is a shell script: the corpus is Python, so no chunk could ever match and the query measured the corpus rather than the route. Now aimed at rate_brake.py, a real Python target whose filename shares no stem with the query text."
     },
     {
       "id": "prose-03",

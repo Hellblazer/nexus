@@ -41,6 +41,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import sys
 import tempfile
 import time
@@ -50,7 +51,11 @@ import nexus.db.http_vector_client as hvc
 from nexus.chunker import chunk_file
 from nexus.db.limits import QUOTAS, SAFE_CHUNK_BYTES
 from tests._engine_substrate import ensure_engine, mint_test_tenant
-from tests._rdr217_recall_harness import load_query_set, measure
+from tests._rdr217_recall_harness import (
+    load_query_set,
+    measure,
+    resolve_ground_truth,
+)
 
 #: The substrate's real tier-1 embedding token. A guessed width disagrees with
 #: the registered row and the upsert 400s.
@@ -105,6 +110,77 @@ def build_chunks(repo: Path, roots: tuple[str, ...], limit_files: int | None) ->
     _say(f"[corpus] files={len(files)} chunks={len(deduped)} "
          f"(deduped {len(rows) - len(deduped)}, oversize skipped {skipped_oversize})")
     return deduped
+
+
+def sample_corpus(
+    corpus: list[dict], query_set, *, distractors: int, seed_value: int = 217,
+) -> list[dict]:
+    """A SUFFICIENT corpus rather than a realistic one, and the distinction is
+    the point.
+
+    Embedding the whole code corpus took 70 minutes to answer a question about
+    twelve queries. It was disproportionate: what the question needs is that
+    every relevant chunk is present, and that enough irrelevant chunks are
+    present for retrieval to be non-trivial. Realism beyond that buys nothing
+    the number depends on.
+
+    So: keep every chunk any query's ground truth resolves to, then add a
+    deterministic sample of the rest as distractors. Seeded, so the corpus is
+    reproducible and the fingerprint is stable across runs.
+
+    WHAT THIS COSTS IN HONESTY, stated rather than buried: the measurement is
+    then about THIS sample, not about the repository. A precision figure on a
+    corpus of hundreds says less about a developer's real search than one on
+    thirty thousand, because the distractor population is what makes retrieval
+    hard. The report must say so, and it must not be quoted as a repo-wide
+    number.
+    """
+    keep: set[str] = set()
+    for q in query_set.queries:
+        keep |= resolve_ground_truth(q, corpus)
+    relevant = [r for r in corpus if r["id"] in keep]
+    rest = [r for r in corpus if r["id"] not in keep]
+    rng = random.Random(seed_value)
+    picked = rng.sample(rest, min(distractors, len(rest)))
+    sampled = relevant + picked
+    _say(f"[sample] {len(sampled)} chunks = {len(relevant)} relevant "
+         f"+ {len(picked)} distractors (seed={seed_value}, from {len(corpus)})")
+    return sampled
+
+
+def precheck(query_set, corpus: list[dict], k: int) -> None:
+    """Validate the query set against the corpus BEFORE embedding anything.
+
+    THIS EXISTS BECAUSE ITS ABSENCE COST AN HOUR. The first full run embedded
+    all 30,658 chunks — 70 minutes — and only then did
+    ``must_be_interpretable`` refuse to record it, because two queries labelled
+    ``rare_token`` had ground truth above k. Every fact that refusal rested on
+    was computable from the in-memory corpus before the first byte was sent:
+    ground truth is a pure function of the corpus text.
+
+    So the expensive step now runs only after the cheap check that would have
+    invalidated it. Same verdicts, same thresholds, seconds instead of an hour.
+    """
+    problems: list[str] = []
+    for q in query_set.queries:
+        n = len(resolve_ground_truth(q, corpus))
+        if n == 0:
+            problems.append(f"{q.id} ({q.shape}): ground truth resolves to NOTHING")
+        elif q.shape == "rare_token" and n > k:
+            problems.append(
+                f"{q.id} (rare_token): {n} relevant chunks, above k={k} — not "
+                "rare in this corpus, so the rare-token shape would not be "
+                "measured whatever the label says"
+            )
+        _say(f"[precheck] {q.id:<10} {q.shape:<12} relevant={n}")
+    if problems:
+        for line in problems:
+            _say(f"[precheck] REFUSED: {line}")
+        raise SystemExit(
+            "precheck refused the query set against this corpus; fix the set "
+            "rather than embedding 30k chunks to be told the same thing"
+        )
+    _say("[precheck] the query set is answerable and correctly labelled here")
 
 
 def seed(db: hvc.HttpVectorClient, corpus: list[dict]) -> float:
@@ -172,6 +248,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="cap the file set; RECORD IT if used, the number is "
                          "then about that subset")
     ap.add_argument("--json-out", type=Path, default=None)
+    ap.add_argument("--distractors", type=int, default=None,
+                    help="build a SUFFICIENT corpus: every relevant chunk plus "
+                         "this many deterministic distractors. Cheap and "
+                         "reproducible; the number is then about the sample, "
+                         "which the report must say. Omit for the full corpus.")
     args = ap.parse_args(argv)
 
     # ISOLATE THE AMBIENT ENVIRONMENT FIRST, before anything constructs a
@@ -207,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(__file__).resolve().parent.parent
     query_set = load_query_set()
     corpus = build_chunks(repo, ROOTS, args.limit_files)
+    if args.distractors is not None:
+        corpus = sample_corpus(corpus, query_set, distractors=args.distractors)
 
     state = ensure_engine()
     tenant, token = mint_test_tenant(state)
@@ -217,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     _say(f"[engine] {state['base_url']} tenant={tenant}")
 
     db = hvc.HttpVectorClient(tenant=tenant)
+    # Cheap first, expensive second. See precheck's docstring.
+    precheck(query_set, corpus, args.k)
     build_seconds = seed(db, corpus)
     _say(f"[seed] index built in {build_seconds:.1f}s")
 
@@ -224,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     payload: dict = {
         "k": args.k, "collection": COLLECTION, "corpus_chunks": len(corpus),
         "roots": list(ROOTS), "limit_files": args.limit_files,
+        "distractors": args.distractors,
+        "corpus_is_a_sample": args.distractors is not None,
         "index_build_seconds": round(build_seconds, 1),
         "reports": {},
     }

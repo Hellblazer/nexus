@@ -118,7 +118,7 @@ def test_a_chunk_with_no_id_is_skipped_rather_than_scored_as_empty_string():
 
 def test_the_query_set_loads_and_every_query_declares_its_shape_and_reason():
     qs = load_query_set()
-    assert qs.schema_version == 2
+    assert qs.schema_version == 4
     assert qs.corpus_prefixes == ("code__",)
     assert len(qs.queries) >= 10
     for q in qs.queries:
