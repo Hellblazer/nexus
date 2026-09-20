@@ -462,3 +462,59 @@ def test_lease_reuse_never_logs_token_or_credential(tmp_path: Path) -> None:
     rendered = str(captured)
     assert "SUPER-SECRET-TOKEN" not in rendered
     assert "SUPER-SECRET-CREDENTIAL" not in rendered
+
+
+# ── fresh_lease_token: the read-only peek (bead nexus-b5ugt) ────────────────
+#
+# Added alongside the RDR-215 ledger-tuple-projector port: that caller must
+# present a data-token bearer WITHOUT ever risking a mint call (its own
+# credential policy refuses to mint under any circumstance), and without
+# touching the in-process cache -- a completely separate process reads this
+# lease file cold on every invocation. This wraps the SAME ``_read_lease``
+# validation ``has_fresh_lease`` already peeks at (format version, tenant,
+# digest, the 20% near-expiry threshold) rather than a fifth reimplementation.
+
+
+def test_fresh_lease_token_returns_none_when_nothing_is_written(tmp_path: Path) -> None:
+    mgr = _manager(_FakePoster(), _FakeClock(), config_dir=tmp_path, wall_clock=_FakeWallClock())
+    assert mgr.fresh_lease_token(BASE_URL, TENANT) is None
+
+
+def test_fresh_lease_token_returns_the_token_a_sibling_published(tmp_path: Path) -> None:
+    wall = _FakeWallClock()
+    writer_poster = _FakePoster()
+    writer_poster.queue(200, {"data_token": "sibling-tok", "expires_in_seconds": 300})
+    writer = _manager(writer_poster, _FakeClock(), config_dir=tmp_path, wall_clock=wall)
+    writer.bearer_for(BASE_URL, TENANT)
+
+    reader = _manager(_FakePoster(), _FakeClock(), config_dir=tmp_path, wall_clock=wall)
+    assert reader.fresh_lease_token(BASE_URL, TENANT) == "sibling-tok"
+    # A peek: no mint, no cache population on the reader's own instance.
+    assert reader.has_live_token(BASE_URL, TENANT) is False
+    assert writer_poster.calls  # only the writer ever minted
+    assert len(writer_poster.calls) == 1
+
+
+def test_fresh_lease_token_is_none_within_the_near_expiry_threshold(tmp_path: Path) -> None:
+    wall = _FakeWallClock()
+    poster = _FakePoster()
+    # 300s TTL, threshold 20% => 60s margin; advance wall-clock to 250s
+    # remaining, well inside the margin.
+    poster.queue(200, {"data_token": "stale-soon", "expires_in_seconds": 300})
+    writer = _manager(poster, _FakeClock(), config_dir=tmp_path, wall_clock=wall)
+    writer.bearer_for(BASE_URL, TENANT)
+    wall.advance(250.0)
+
+    reader = _manager(_FakePoster(), _FakeClock(), config_dir=tmp_path, wall_clock=wall)
+    assert reader.fresh_lease_token(BASE_URL, TENANT) is None
+
+
+def test_fresh_lease_token_ignores_a_different_tenant(tmp_path: Path) -> None:
+    wall = _FakeWallClock()
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "other-tenant-tok", "expires_in_seconds": 300})
+    writer = _manager(poster, _FakeClock(), config_dir=tmp_path, wall_clock=wall)
+    writer.bearer_for(BASE_URL, "other-tenant")
+
+    reader = _manager(_FakePoster(), _FakeClock(), config_dir=tmp_path, wall_clock=wall)
+    assert reader.fresh_lease_token(BASE_URL, TENANT) is None

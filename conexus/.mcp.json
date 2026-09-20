@@ -10,17 +10,11 @@
   "nexus": {
     "command": "nx-mcp",
     "args": [],
-    "env": {
-      "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
-    },
     "alwaysLoad": true
   },
   "nexus-catalog": {
     "command": "nx-mcp-catalog",
     "args": [],
-    "env": {
-      "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
-    },
     "alwaysLoad": true
   }
 }

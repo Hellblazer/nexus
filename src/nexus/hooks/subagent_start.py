@@ -21,25 +21,29 @@ rely on inheriting a session from its environment -- without forcing it
 from the payload, every ``nx``/``python3`` subprocess spawned below would
 resolve a SIBLING session's machine-wide pointer (or nothing at all).
 :func:`_nx_env` is that forcing point, applied uniformly to every
-subprocess call this hook makes (git, the T2 scan, ``nx catalog
-links-for-file``, ``nx scratch list``) -- mirroring bash's ``export``,
-which affects every child process spawned after it runs, not just the one
-call it sits nearest.
+subprocess call this hook makes (git, ``nx catalog links-for-file``,
+``nx scratch list``) -- mirroring bash's ``export``, which affects every
+child process spawned after it runs, not just the one call it sits
+nearest.
 
-**It resolves ``t2_prefix_scan.py`` off ``$CLAUDE_PLUGIN_ROOT`` alone, with
-NO fallback -- deliberately.** ``pre_close_verification.py``'s
-``_read_config`` and ``stop_verification.py``'s ``_plugin_root`` both add a
-checkout-relative fallback for when the env var is unset. This hook does
-NOT: the original bash never had one either (``"$CLAUDE_PLUGIN_ROOT/hooks/
-scripts/t2_prefix_scan.py"``, no ``:-`` default), so an unset
-``CLAUDE_PLUGIN_ROOT`` silently produces an unresolvable path and the T2
-section is simply omitted -- which is also what
-``TestWorktreeProjectResolution`` in the test file relies on when it sets
-the var to a stub directory to intercept the scan. Adding a fallback here
-would change what an unset var does in a case the original never covered,
-which is exactly the "read the comment, then ignore it anyway" mistake
-recorded in ``pre_close_verification.py``'s own ``_log_override_escape``
-docstring.
+**The T2 memory section no longer shells out (RDR-215 bead nexus-b5ugt).**
+It used to resolve ``t2_prefix_scan.py`` off ``$CLAUDE_PLUGIN_ROOT`` alone
+(with no fallback) and launch it as a ``python3`` subprocess. That path
+carried a live defect: ``conexus/.mcp.json`` sets the MCP server's ``env``
+block to a LITERAL ``"${CLAUDE_PLUGIN_ROOT}"`` string (Claude Code does
+not expand ``${...}`` inside an MCP ``env`` block), so every ``nx-mcp``
+process's ``CLAUDE_PLUGIN_ROOT`` was that unexpanded literal and the
+subprocess path never resolved -- the "## T2 Memory" section was silently
+missing from every dispatched subagent's context. :func:`_t2_memory_section`
+now calls :func:`nexus.hooks.t2_prefix_scan.scan` in-process instead; see
+that module's docstring for the full port and its one deliberate
+behavioural divergence from the plugin-resident mirror it replaces
+(still present on disk -- see below -- but no longer on this call path).
+
+The plugin-resident ``conexus/hooks/scripts/t2_prefix_scan.py`` file
+itself is NOT deleted by this port -- ``mailbox_drain.py`` and the
+``routing/`` guards are still plugin-resident and out of scope here;
+deleting the now-orphaned script is a later bead.
 
 **``SKIP_T2_SCAN`` is genuinely dead in the bash, and stays dead here.**
 The script declares ``SKIP_T2_SCAN=0`` alongside ``SKIP_STORAGE_DOCS`` and
@@ -324,20 +328,27 @@ def _repo_root(env: dict[str, str]) -> str:
         return ""
 
 
-def _t2_memory_section(repo_root: str, env: dict[str, str]) -> str:
+def _t2_memory_section(repo_root: str) -> str:
     """The "## T2 Memory" section, or "" (subagent-start.sh:136-162).
 
-    Resolves ``t2_prefix_scan.py`` off ``CLAUDE_PLUGIN_ROOT`` alone -- see
-    the module docstring for why no fallback is added.
+    Calls :func:`nexus.hooks.t2_prefix_scan.scan` in-process (RDR-215
+    bead nexus-b5ugt) rather than shelling out to the plugin-resident
+    ``t2_prefix_scan.py`` -- see the module docstring above for the
+    ``CLAUDE_PLUGIN_ROOT`` defect this replaces. The import is deferred so
+    ``httpx``/the T2 HTTP client are only paid for when this section
+    actually runs.
     """
     if not repo_root:
         return ""
     project = os.path.basename(repo_root)
     if not project:
         return ""
-    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    scan_script = f"{plugin_root}/hooks/scripts/t2_prefix_scan.py"
-    t2_out = _run_captured(["python3", scan_script, project], env=env, timeout=30)
+    from nexus.hooks.t2_prefix_scan import scan  # noqa: PLC0415 — deferred: see docstring above
+
+    try:
+        t2_out = scan(project)
+    except Exception:  # noqa: BLE001 — best-effort context injection; a scan bug must not break the rest of the hook
+        return ""
     if not t2_out:
         return ""
     return f"## T2 Memory\n{t2_out}\n\n"
@@ -435,7 +446,7 @@ def run(payload: dict | None) -> HookResult:
     if agent_id:
         parts.append(f"Claimant id: {agent_id} — mailbox: mailbox/{agent_id}\n")
 
-    parts.append(_t2_memory_section(repo_root, env))
+    parts.append(_t2_memory_section(repo_root))
     parts.append(_linked_rdrs_section(task_text, env))
 
     parts.append(_RELAY)

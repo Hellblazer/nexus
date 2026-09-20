@@ -14,6 +14,12 @@ that the two ``mcp_tool`` entries are registered exactly once each,
 between ``conexus/hooks/hooks.json`` and ``.claude/settings.json``.
 ``.claude/settings.json`` names this file and test by path in its own
 ``_comment``, so both stay put.
+
+The hooks are looked up by IDENTITY rather than by declaration form
+(``tests/_hook_wiring.py``): ``subagent_stop`` came back to the command
+tier at bead nexus-17i1n, and a check that counts ``mcp_tool`` names
+would have read that as zero registrations and passed — a count of
+nothing, from a test whose whole job is to count.
 """
 from __future__ import annotations
 
@@ -22,21 +28,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The mcp_tool names the two orchestration hooks re-declared to
-#: (nexus-q02nx.21), replacing the bash script filenames this file used
-#: to search for.
+from tests._hook_wiring import events_for  # noqa: E402
+
+#: The two orchestration hooks, by hook name. Each is registered on the
+#: tool tier and one of them is WIRED on the command tier; the lookups
+#: below span both, so this list does not care which.
 _ORCHESTRATION_TOOLS = ("hook_subagent_start_stamp", "hook_subagent_stop")
 
 
 def test_registered_in_plugin_hooks_json() -> None:
-    hooks = json.loads((REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
-    tools = [
-        h.get("tool", "")
-        for entry in hooks["hooks"].get("SubagentStart", [])
-        for h in entry.get("hooks", [])
-    ]
-    assert "hook_subagent_start_stamp" in tools, (
-        "hook_subagent_start_stamp not registered under SubagentStart"
+    assert "SubagentStart" in events_for("subagent_start_stamp"), (
+        "subagent_start_stamp not registered under SubagentStart"
     )
 
 
@@ -77,14 +79,9 @@ def test_orchestration_hooks_are_registered_exactly_once() -> None:
             f"settings copy — the plugin already ships it. Found: {offenders}"
         )
 
-    hooks = json.loads((REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
-    plugin_tools = [
-        h.get("tool", "")
-        for event in hooks["hooks"].values()
-        for entry in event
-        for h in entry.get("hooks", [])
-    ]
     for tool in _ORCHESTRATION_TOOLS:
-        assert sum(t == tool for t in plugin_tools) == 1, (
-            f"{tool} must be registered exactly once in the plugin"
+        wirings = events_for(tool.removeprefix("hook_"))
+        assert len(wirings) == 1, (
+            f"{tool} must be registered exactly once in the plugin; "
+            f"found {len(wirings)} on {wirings}"
         )

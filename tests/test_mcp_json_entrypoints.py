@@ -112,3 +112,78 @@ def test_a_planted_command_mismatch_is_detected() -> None:
         "fixture is degenerate or the two servers are no longer distinct, "
         "either of which would make the equality checks above vacuous"
     )
+
+
+# --------------------------------------------------------------------------
+# env values must be usable as-is (bead nexus-2xso4)
+# --------------------------------------------------------------------------
+
+#: Every .mcp.json this repo ships. sn's is checked too: the defect is a
+#: property of MCP env blocks, not of one plugin, and sn happens to be
+#: clean today only because it declares no env at all.
+_ALL_MCP_JSON = (
+    _REPO_ROOT / "conexus" / ".mcp.json",
+    _REPO_ROOT / "sn" / ".mcp.json",
+)
+
+
+def _declared_env() -> list[tuple[str, str, str, str]]:
+    """(file, server, key, value) for every env entry in every .mcp.json."""
+    out = []
+    for path in _ALL_MCP_JSON:
+        if not path.is_file():
+            continue
+        for server, cfg in json.loads(path.read_text()).items():
+            for key, value in (cfg.get("env") or {}).items():
+                out.append((path.name, server, key, str(value)))
+    return out
+
+
+def test_no_mcp_env_value_is_an_unexpanded_placeholder() -> None:
+    """Claude Code does not expand ``${...}`` inside an MCP env block.
+
+    conexus/.mcp.json set CLAUDE_PLUGIN_ROOT to the literal string
+    ``${CLAUDE_PLUGIN_ROOT}`` for both servers, so every nx-mcp and
+    nx-mcp-catalog process carried that text as the value. Measured
+    2026-09-20 on all six such processes on one box across three
+    repositories, so it was every conexus user, not a local quirk.
+
+    It is worse than leaving the variable unset. A non-empty literal is
+    TRUTHY, so every caller that tested it for truth took the env branch
+    and built a path that can never exist, and the documented unset
+    fallback never ran. Three hooks were silently dead: the session-end
+    verification config read empty so on_stop was false, every dispatched
+    subagent lost its whole T2 Memory section, and the RDR-205 ledger
+    projection wrote nothing for ten days.
+
+    There is no correct value to substitute -- no expansion syntax
+    reaches an MCP env block -- so the rule is simply that a value here
+    must be usable exactly as written.
+    """
+    offenders = [
+        f"{f}: {server}.env.{key} = {value!r}"
+        for f, server, key, value in _declared_env()
+        if "${" in value or value.startswith("$")
+    ]
+    assert not offenders, (
+        "an MCP server env value is an unexpanded placeholder; Claude Code "
+        "passes it through literally, and a non-empty literal is truthy, so "
+        "it reads as a valid value everywhere downstream. Either give a real "
+        "value or drop the entry — an unset variable is strictly better than "
+        f"a fake one. Offenders: {offenders}"
+    )
+
+
+def test_the_placeholder_check_would_have_caught_the_original() -> None:
+    """Non-vacuity, against the exact value that shipped.
+
+    The check above passes trivially once every env block is gone, which
+    is the current state — so on its own it cannot distinguish "no
+    placeholders" from "not looking". This pins the predicate against the
+    literal string conexus/.mcp.json actually carried.
+    """
+    shipped = "${CLAUDE_PLUGIN_ROOT}"
+    assert "${" in shipped, "the predicate no longer matches the historical value"
+    assert not any(
+        "${" in value for _, _, _, value in _declared_env()
+    ), "a placeholder is present again; see the test above"

@@ -38,13 +38,27 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 #: entries were removed or the extractor stopped recognising how they are
 #: declared, and the second reading is the one to rule out first -- this
 #: bead shipped four separate gates that went quiet exactly that way.
-_MIN_MCP_TOOL_ENTRIES = 13
+#:
+#: 13 -> 9 at bead nexus-17i1n, which moved the three verdict-returning
+#: hooks to the command tier in four entries (auto-approve is wired
+#: twice, on PreToolUse and on PermissionRequest). An `mcp_tool` hook
+#: cannot return a verdict, so all three shipped inert in conexus 7.55.0.
+#: This floor moves DOWN for the first time, which is exactly the reading
+#: the paragraph above says to rule out -- so, explicitly: a deliberate
+#: migration off the tier, not an extractor going blind.
+#: nexus.mcp.hooks.DECIDING_HOOKS names the three, and
+#: tests/test_deciding_hooks_are_command_tier.py refuses a hooks.json
+#: that puts any of them back.
+_MIN_MCP_TOOL_ENTRIES = 9
 #: 3 -> 6 at bead nexus-q02nx.22, which converted the last four shell-form
 #: entries (`nx upgrade --auto ... || echo ...`, `nx self gc ... || true`,
 #: `nx hook session-start`, `nx-session-end-launcher`) to exec form. Three of
 #: those became nx-hook verbs; measured after: upgrade-auto, preflight,
 #: self-gc, session-start, session-context, rdr.
-_MIN_NX_HOOK_ENTRIES = 6
+#:
+#: 6 -> 10 at bead nexus-17i1n: the four entries the line above moved off
+#: the tool tier arrive here.
+_MIN_NX_HOOK_ENTRIES = 10
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:

@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 from nexus._hook_runtime._config import stop_guard_mode
-from nexus._hook_runtime._io import HookResult, _emit
+from nexus._hook_runtime._io import HookResult, _emit, structured_field
 from nexus.hooks import expectations as _exp
 
 __all__ = ["run"]
@@ -132,9 +132,11 @@ def run(payload: dict | None) -> HookResult:
         return HookResult()
 
     data = payload or {}
-    tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        tool_input = {}
+    # Contractually an object, but see structured_field: on the tool tier
+    # it can arrive as JSON text, and reading that as "no subagent_type"
+    # silently recorded every dispatch as general-purpose (bead
+    # nexus-17i1n). A wrong type is worse here than a missing row.
+    tool_input = structured_field(data, "tool_input")
 
     session_id = str(data.get("session_id") or "").translate(_SCRUB)
     tool_name = str(data.get("tool_name") or "").translate(_SCRUB)

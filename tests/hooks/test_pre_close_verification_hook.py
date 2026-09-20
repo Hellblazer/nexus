@@ -100,14 +100,35 @@ def _make_payload(
 
 
 @pytest.fixture
-def mock_config_env(tmp_path):
+def mock_config_env(tmp_path_factory):
+    """A real `.nexus.yml` the gate will really read.
+
+    This used to write a FAKE read_verification_config.py under a stub
+    CLAUDE_PLUGIN_ROOT and let the hook spawn it. Bead nexus-b5ugt
+    ported that reader into the wheel, so there is no script to
+    substitute -- and the stub stopped doing anything.
+
+    It did not fail locally, and the reason is worth keeping. The same
+    bead taught the reader to resolve `.nexus.yml` from the git COMMON
+    dir, so a run inside a worktree started finding the primary
+    checkout's real config, with on_close TRUE. That masked the dead
+    fixture completely: the gate was armed by ambient config rather than
+    by anything this file set up. CI has no `.nexus.yml` anywhere, read
+    on_close as false, and every armed test here returned allow. Two of
+    the bead's own changes hiding each other, caught only because CI's
+    environment is poorer than a developer's.
+
+    Hence tmp_path_factory and a fresh directory per call: the config
+    this fixture writes is the ONLY config in play, so the tests say
+    what they mean on any machine.
+    """
     def _make(config: dict) -> dict[str, str]:
-        scripts_dir = tmp_path / "hooks" / "scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        script = scripts_dir / "read_verification_config.py"
-        config_json = json.dumps(config)
-        script.write_text(f"print({repr(config_json)})\n")
-        return {"CLAUDE_PLUGIN_ROOT": str(tmp_path)}
+        project = tmp_path_factory.mktemp("project")
+        body = "verification:\n" + "".join(
+            f"  {k}: {json.dumps(v)}\n" for k, v in config.items()
+        )
+        (project / ".nexus.yml").write_text(body)
+        return {"CLAUDE_PROJECT_DIR": str(project)}
 
     return _make
 
@@ -236,6 +257,7 @@ def _run_hook(
     *,
     path_prefix: str = "",
     env_overrides: dict[str, str] | None = None,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     path = f"{path_prefix}:{_SAFE_PATH}" if path_prefix else _SAFE_PATH
     env = {
@@ -274,6 +296,11 @@ def _run_hook(
         text=True,
         timeout=30,
         env=env,
+        # cwd matters since bead nexus-b5ugt: the config reader resolves
+        # `.nexus.yml` from CLAUDE_PROJECT_DIR, then the cwd, then the
+        # cwd's git COMMON dir. A test that wants NO config must run
+        # somewhere outside a checkout, or it finds the primary's.
+        cwd=cwd,
     )
 
 
@@ -420,12 +447,28 @@ class TestFastNoops:
         result = _run_hook(_make_payload(), env_overrides=env)
         assert _get_decision(json.loads(result.stdout)) == "allow"
 
-    def test_allow_when_config_reader_fails(self) -> None:
+    def test_allow_when_there_is_no_config_anywhere(self, tmp_path) -> None:
+        """No `.nexus.yml` on any candidate path means DEFAULTS, and
+        defaults allow.
+
+        cwd is a bare temp directory, not a git checkout, deliberately:
+        find_project_dir falls through CLAUDE_PROJECT_DIR to the cwd and
+        then to the cwd's git COMMON dir, so running this from inside a
+        worktree would find the primary's real config and silently test
+        the opposite case. That is exactly how this file's armed tests
+        went green locally while failing on CI.
+        """
         result = _run_hook(
             _make_payload(),
-            env_overrides={"CLAUDE_PLUGIN_ROOT": "/nonexistent/path"},
+            env_overrides={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            cwd=str(tmp_path),
         )
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "on_close is not enabled" in _get_context(parsed), (
+            "an unarmed gate must SAY it is unarmed; a bare allow is "
+            "indistinguishable from one that checked and was satisfied"
+        )
 
     def test_graceful_empty_stdin(self) -> None:
         result = _run_hook("")

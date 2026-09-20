@@ -48,7 +48,7 @@ from pathlib import Path
 
 from nexus._hook_runtime._config import stop_guard_mode
 from nexus._hook_runtime._io import HookResult, _emit
-from nexus.hooks._plugin import plugin_root
+from nexus.hooks.verification_config import read_verification_config
 from nexus.hooks import expectations as _exp
 
 __all__ = ["run"]
@@ -82,46 +82,43 @@ def _approve(reason: str = "") -> HookResult:
     return HookResult(stdout=json.dumps({"decision": "approve"}))
 
 
-def _plugin_root() -> Path:
-    """See ``_plugin.plugin_root``; kept as a local name for its callers."""
-    return plugin_root()
-
-
 def _read_config() -> dict:
-    """Run the standalone config reader and parse its JSON.
+    """The verification block, read in-process (bead nexus-b5ugt).
 
-    **This is the one subprocess the port keeps, and it is a considered
-    choice.** The script is deliberately nexus-import-free so a bare
-    ``python3`` hook can run it, it has no importable entry point, and
-    ``tests/hooks/test_stop_verification_hook.py`` SUBSTITUTES a fake one
-    under a temporary ``CLAUDE_PLUGIN_ROOT`` -- so the path, not the
-    module, is the contract.
+    **The spawn this used to do is gone, and its own docstring called
+    the shot.** It said: "Bead .17 moves pre_close_verification_hook.sh,
+    the other consumer, onto this tier; once both are here the reader can
+    become an imported function and this spawn goes with it." Both are
+    here. It went.
 
-    ``runpy`` would remove the spawn but needs ``redirect_stdout``, and
-    that rebinds a process-global ``sys.stdout`` inside an MCP server that
-    is concurrently serving other tools; a neighbouring call's output could
-    land in this buffer or this one's in theirs. That is the same
-    process-global-state-under-concurrency class as the ledger's contention
-    seams, and one spawn is the cheaper mistake to not make.
+    What forced the timing rather than leaving it as tidying: the script
+    was located off ``$CLAUDE_PLUGIN_ROOT``, and an ``mcp_tool`` hook
+    runs inside ``nx-mcp``, which does not get a usable one.
+    ``conexus/.mcp.json`` declares the server env as
+    ``{"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}`` and Claude Code
+    does not expand ``${...}`` in an MCP ``env`` block, so the literal
+    placeholder arrived, the path never resolved, and this returned
+    ``{}`` — on_stop false, the session-end gate silently verifying
+    nothing. Measured 2026-09-20.
 
-    Bead ``.17`` moves ``pre_close_verification_hook.sh``, the other
-    consumer, onto this tier; once both are here the reader can become an
-    imported function and this spawn goes with it.
+    The alternative fix, making the hook locate the script more reliably,
+    is the wrong direction: RDR-215 exists to eliminate the
+    plugin-resident layer so a native Windows client becomes viable, and
+    a repair that keeps the subprocess keeps the thing being eliminated.
 
-    Every failure returns ``{}``, matching the script's ``|| echo '{}'``.
+    ``runpy`` was rejected earlier for rebinding a process-global
+    ``sys.stdout`` inside a concurrently-serving MCP server. That
+    objection dies with the subprocess: an imported function returns a
+    value and touches no global stream.
+
+    Still returns ``{}`` on any failure, matching the script's
+    ``|| echo '{}'`` posture — a config reader that raised would take
+    down the hook that called it.
     """
-    script = _plugin_root() / "hooks" / "scripts" / "read_verification_config.py"
     try:
-        proc = subprocess.run(
-            ["python3", str(script)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        parsed = json.loads(proc.stdout)
+        return read_verification_config()
     except Exception:  # noqa: BLE001 — a hook must never fail; see the module docstring
         return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _reconcile_warning(payload: dict) -> str:

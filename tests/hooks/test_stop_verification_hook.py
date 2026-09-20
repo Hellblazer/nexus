@@ -90,15 +90,28 @@ def _init_git_repo(path: Path) -> None:
 
 @pytest.fixture
 def mock_config_env(tmp_path_factory):
-    plugin_root = tmp_path_factory.mktemp("plugin_root")
-    scripts_dir = plugin_root / "hooks" / "scripts"
-    scripts_dir.mkdir(parents=True)
+    """A real `.nexus.yml` the hook will really read.
 
+    This used to write a FAKE ``read_verification_config.py`` under a
+    stub ``CLAUDE_PLUGIN_ROOT`` and let the hook spawn it. Bead
+    nexus-b5ugt ported that reader into the wheel
+    (``nexus.hooks.verification_config``), so there is no script to
+    substitute and no plugin root to point at -- which was the point:
+    the hook reached a plugin script, an mcp_tool server has no usable
+    ``CLAUDE_PLUGIN_ROOT``, and the config therefore read ``{}`` forever.
+
+    Writing the real file and pointing ``CLAUDE_PROJECT_DIR`` at it is a
+    stronger test than the stub was. The stub asserted that the hook
+    would faithfully relay whatever JSON a script printed; this asserts
+    that the hook reads the user's actual config format.
+    """
     def _make(config: dict) -> dict[str, str]:
-        script = scripts_dir / "read_verification_config.py"
-        config_json = json.dumps(config)
-        script.write_text(f"import json; print({repr(config_json)})\n")
-        return {"CLAUDE_PLUGIN_ROOT": str(plugin_root)}
+        project = tmp_path_factory.mktemp("project")
+        body = "verification:\n" + "".join(
+            f"  {k}: {json.dumps(v)}\n" for k, v in config.items()
+        )
+        (project / ".nexus.yml").write_text(body)
+        return {"CLAUDE_PROJECT_DIR": str(project)}
 
     return _make
 
@@ -131,8 +144,19 @@ class TestStopVerificationHook:
         env = mock_config_env({"on_stop": False})
         assert json.loads(_run_hook(env_overrides=env).stdout)["decision"] == "approve"
 
-    def test_approve_when_config_reader_fails(self) -> None:
-        result = _run_hook(env_overrides={"CLAUDE_PLUGIN_ROOT": "/nonexistent"})
+    def test_approve_when_there_is_no_config_at_all(self, tmp_path) -> None:
+        """No `.nexus.yml` anywhere means DEFAULTS, and defaults approve.
+
+        cwd is a bare temp directory, not a git checkout, on purpose:
+        ``find_project_dir`` falls through CLAUDE_PROJECT_DIR to the cwd
+        and then to the cwd's git COMMON dir, so running this from
+        inside a worktree would find the primary checkout's real config
+        and silently test the opposite case.
+        """
+        result = _run_hook(
+            env_overrides={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+            cwd=tmp_path,
+        )
         assert json.loads(result.stdout)["decision"] == "approve"
 
     def test_never_blocks(self, mock_config_env, dirty_git_repo) -> None:

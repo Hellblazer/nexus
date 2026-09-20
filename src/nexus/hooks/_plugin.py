@@ -52,17 +52,47 @@ def checkout_plugin_root() -> Path:
     return Path(__file__).resolve().parents[3] / "conexus"
 
 
+def _is_unexpanded(value: str) -> bool:
+    """Is *value* a shell/JSON placeholder nobody substituted?
+
+    ``conexus/.mcp.json`` declares the MCP servers' env as
+    ``{"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}``, and Claude Code
+    does NOT expand ``${...}`` inside an MCP server's ``env`` block -- it
+    passes the literal through. Measured 2026-09-20 across every
+    ``nx-mcp`` on this box and in three different repositories, so this
+    is the configuration every conexus user runs, not a local accident.
+
+    That is strictly worse than the variable being unset. A non-empty
+    literal is TRUTHY, so the "env wins" branch below took it and
+    returned ``Path("${CLAUDE_PLUGIN_ROOT}")`` -- a relative path that
+    can never exist -- and the documented unset fallback never ran. Every
+    tool-tier hook that reaches a plugin-resident script then failed
+    silently: the session-end verification config read ``{}`` and so
+    never verified, subagent context lost its whole T2 Memory section,
+    and the RDR-205 ledger projection wrote nothing. Bead nexus-b5ugt.
+
+    Treating it as unset does not FIX those -- the real fix is that
+    nothing in the wheel should need the plugin root at all -- but it
+    turns a silent wrong answer into the branch every caller already
+    documents and handles.
+    """
+    return "${" in value or value.startswith("$")
+
+
 def plugin_root() -> Path:
     """The conexus plugin's root directory.
 
-    ``CLAUDE_PLUGIN_ROOT`` when set, else the dev-checkout layout
-    (``<repo>/conexus``, this file being ``<repo>/src/nexus/hooks/_plugin.py``).
-    The path is not checked for existence: callers differ on what an
-    absent plugin means, and several of them treat it as a no-op rather
-    than an error.
+    ``CLAUDE_PLUGIN_ROOT`` when set to a real value, else the dev-checkout
+    layout (``<repo>/conexus``, this file being
+    ``<repo>/src/nexus/hooks/_plugin.py``). The path is not checked for
+    existence: callers differ on what an absent plugin means, and several
+    of them treat it as a no-op rather than an error.
+
+    An UNEXPANDED placeholder counts as unset -- see :func:`_is_unexpanded`
+    for why that case is real and what it cost.
     """
     root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if root:
+    if root and not _is_unexpanded(root):
         return Path(root)
     return checkout_plugin_root()
 

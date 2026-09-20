@@ -89,12 +89,52 @@ from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
 from nexus.hooks.subagent_stop import run as _run_subagent_stop
 
 __all__ = [
+    "DECIDING_HOOKS",
     "HOOK_TOOLS",
     "HookToolSpec",
     "flatten_field_name",
     "nest_payload",
     "register_hook_tools",
 ]
+
+
+#: Hooks whose whole job is to return a VERDICT -- a PreToolUse
+#: ``permissionDecision``, a PermissionRequest ``behavior``, or a Stop /
+#: SubagentStop ``decision``. They may register here (a verdict is useful
+#: as data, and these tools are how the gate gets exercised in diagnosis),
+#: but ``hooks.json`` must WIRE them on the command tier, because an
+#: ``mcp_tool`` hook cannot decide anything.
+#:
+#: That is a property of the harness, not of this code. Claude Code's
+#: hooks guide names four hook types that carry a decision -- ``prompt``,
+#: ``agent``, ``command`` and ``http`` -- and ``mcp_tool`` is not one of
+#: them; the only posture the guide states for it is "non-blocking error",
+#: and its output is read as context. Measured 2026-09-20 on CLI 2.1.278
+#: against the conexus 7.55.0 pin, which wired all three of these as
+#: ``mcp_tool``: a ``bd close`` naming a bead with NO review-completed
+#: marker was allowed through to ``bd`` and closed it, while the same
+#: payload handed straight to ``pre_close_verification.run()`` returned a
+#: correct, fully-worded deny. The gate was inert for the life of that
+#: release and nothing said so, because a hook that declines to speak and
+#: a hook whose verdict is discarded look identical from outside.
+#:
+#: This is the same hazard ``_NEVER_TOOL_TIER`` already guards for
+#: ``phase_review_close_requires_gate``, one step weaker: that hook must
+#: not REGISTER here at all, because a crash at this boundary reads as
+#: allow and its contract is that a crash still denies. These three may
+#: register; they must not be wired.
+#:
+#: ``tests/test_deciding_hooks_are_command_tier.py`` walks the real
+#: ``hooks.json`` and fails if any name here is wired as an ``mcp_tool``,
+#: and asserts each has a command-tier verb to be wired AS. A new
+#: verdict-returning hook is added here in the same change that writes it.
+DECIDING_HOOKS: frozenset[str] = frozenset(
+    {
+        "pre_close_verification",
+        "subagent_stop",
+        "auto_approve",
+    }
+)
 
 
 @dataclass(frozen=True)

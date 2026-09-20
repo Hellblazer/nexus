@@ -56,6 +56,7 @@ import subprocess
 import time
 
 from nexus._hook_runtime._io import HookResult
+from nexus.hooks._plugin import _is_unexpanded
 
 __all__ = ["run"]
 
@@ -120,6 +121,21 @@ def _bd_verbs(cmd: str) -> dict:
                     inline_override = True
                 i += 1
             rest = tokens[i:]
+            # Skip shell grouping that can precede the command word. A
+            # brace group or a subshell puts `{` or `(` where `bd` would
+            # otherwise be, so `{ bd close nexus-x; }` and
+            # `(bd close nexus-x)` were both invisible to this detector
+            # and closed without a marker. Measured both ways at bead
+            # nexus-17i1n; found by a reviewer looking at a leading-brace
+            # heuristic elsewhere in this file, not by a failing gate.
+            #
+            # Widening a DETECTOR is the safe direction here, unlike the
+            # heredoc limit this function's docstring records: skipping a
+            # grouping token can only make the gate see more closes, never
+            # fewer, so the worst case is a deny that should have been an
+            # allow — loud, and recoverable by the documented override.
+            while rest and rest[0] in ('{', '('):
+                rest = rest[1:]
             if len(rest) >= 2 and rest[0] == 'bd':
                 if rest[1] == 'create':
                     has_create = True
@@ -511,7 +527,32 @@ def run(payload: dict | None) -> HookResult:
     if isinstance(tool_input, dict):
         command = str(tool_input.get("command") or "")
     elif isinstance(tool_input, str):
+        # Two different strings reach this branch and they are NOT
+        # interchangeable. A bare command ("bd close nexus-xxxxx") is
+        # what a direct caller passes, and IS the command. JSON TEXT
+        # holding the whole tool_input object is what an Any-typed
+        # tool-tier parameter accepts, and reading THAT as the command is
+        # how the gate went inert (bead nexus-17i1n): _bd_verbs looks for
+        # a bd verb, finds none inside the JSON quoting, no verb means no
+        # gate, close allowed.
+        #
+        # Default to the raw string and override ONLY on a successful
+        # parse to an object. An earlier version of this branch switched
+        # on a leading "{" instead, which is wrong for a reason a
+        # reviewer caught rather than a test: `{ bd close nexus-x; }` is
+        # a POSIX brace group, a perfectly ordinary command, and it
+        # starts with a brace and is not JSON. That version emptied the
+        # command and allowed the close -- the very failure this change
+        # exists to close, reintroduced in a narrower shape. Parsing is
+        # the actual question; the first character was only ever a proxy
+        # for it.
         command = tool_input
+        try:
+            parsed = json.loads(tool_input)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            command = str(parsed.get("command") or "")
     if not command:
         return _allow()
 
@@ -718,7 +759,25 @@ def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
     from nexus.hooks.stop_verification import _read_config  # noqa: PLC0415 — shared reader
 
     if _read_config().get("on_close") is not True:
-        return _allow()
+        # SAY SO. This was a bare `return _allow()`, and a gate that
+        # declines to gate without a word is indistinguishable from one
+        # that checked and was satisfied — which is the whole failure
+        # class this module has just been through (bead nexus-17i1n).
+        #
+        # It is also not a hypothetical here. `.nexus.yml` is gitignored
+        # by design, so there is one per repo and it lives in the primary
+        # checkout; every session in a worktree read DEFAULTS and took
+        # this branch, silently, from the day the project moved to
+        # one-session-one-worktree (bead nexus-634ye). Resolving the
+        # config across worktrees is that bead's job. Being audible when
+        # the answer is "not gating" is this line's, and the two are
+        # independent — the config could be legitimately off, and a
+        # reader still deserves to know that is why nothing happened.
+        return _allow(
+            "Close gate NOT run: verification.on_close is not enabled in "
+            ".nexus.yml, so no review-completed marker was checked. This is "
+            "an allow by configuration, not by verification."
+        )
 
     ids = _bead_ids(command)
     if not ids:
@@ -836,7 +895,17 @@ def _log_override_escape(ids: list[str], command: str) -> None:
     # is this module's equivalent anchor.
     candidates = []
     root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    if root:
+    # Same guard as plugin_root's, because this reads the variable
+    # DIRECTLY and so never passed through it. conexus/.mcp.json sets the
+    # MCP servers' env to the literal "${CLAUDE_PLUGIN_ROOT}" (Claude Code
+    # does not expand ${...} in an MCP env block), and a non-empty literal
+    # is truthy -- so this appended a candidate that can never exist and
+    # leaned entirely on the checkout fallback below, which is itself
+    # absent once installed. Found sweeping for siblings of nexus-b5ugt
+    # rather than by a failure: this path at least _warns when it finds
+    # nothing, which is why it was less visible than the hooks that
+    # simply went quiet.
+    if root and not _is_unexpanded(root):
         candidates.append(os.path.join(root, "hooks", "scripts", "routing"))
     repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))))

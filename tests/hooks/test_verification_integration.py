@@ -23,6 +23,8 @@ HOOKS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts
 HOOKS_JSON = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
 CONFIG_READER = HOOKS_DIR / "read_verification_config.py"
 
+from tests._hook_wiring import matchers_for  # noqa: E402
+
 _STOP_PY_DRIVER = """
 import json, sys
 from nexus._hook_runtime._io import never_fail
@@ -129,18 +131,28 @@ def _init_git_repo(path: Path) -> None:
 
 @pytest.fixture
 def mock_plugin_root(tmp_path_factory: pytest.TempPathFactory):
-    """Create a mock CLAUDE_PLUGIN_ROOT with a configurable read_verification_config.py."""
-    root = tmp_path_factory.mktemp("plugin")
-    scripts_dir = root / "hooks" / "scripts"
-    scripts_dir.mkdir(parents=True)
+    """A real `.nexus.yml` the hooks will really read.
 
+    Named for what it used to do: write a FAKE
+    ``read_verification_config.py`` under a stub ``CLAUDE_PLUGIN_ROOT``
+    and let the hook spawn it. Bead nexus-b5ugt ported that reader into
+    the wheel, so there is no script to substitute — and no plugin root,
+    which was the defect: an ``mcp_tool`` hook runs inside ``nx-mcp``,
+    which gets the literal ``${CLAUDE_PLUGIN_ROOT}`` from the MCP env
+    block, so the config read ``{}`` and the gate verified nothing.
+
+    Kept under the old name because every call site reads
+    ``mock_plugin_root({"on_stop": True})`` and that still says the true
+    thing: give these hooks this config. Renaming it would churn a dozen
+    call sites to no benefit.
+    """
     def _make(config: dict) -> dict[str, str]:
-        config_json = json.dumps(config)
-        script = scripts_dir / "read_verification_config.py"
-        script.write_text(
-            f"import json; print({repr(config_json)})"
+        project = tmp_path_factory.mktemp("project")
+        body = "verification:\n" + "".join(
+            f"  {k}: {json.dumps(v)}\n" for k, v in config.items()
         )
-        return {"CLAUDE_PLUGIN_ROOT": str(root)}
+        (project / ".nexus.yml").write_text(body)
+        return {"CLAUDE_PROJECT_DIR": str(project)}
 
     return _make
 
@@ -196,18 +208,15 @@ class TestHooksJsonStructure:
         PreToolUse now carries a second entry (the Agent-dispatch matcher,
         nexus-qc4p1), and an index-positional assertion says nothing about
         the hook it is named for once the list has more than one member.
-        RDR-215 bead nexus-q02nx.21 re-declared this entry to the
-        ``hook_pre_close_verification`` mcp_tool, so the key is now the
-        tool name rather than a bash command string."""
-        data = json.loads(HOOKS_JSON.read_text())
-        owners = [
-            entry["matcher"]
-            for entry in data["hooks"]["PreToolUse"]
-            if any(
-                h.get("tool") == "hook_pre_close_verification"
-                for h in entry.get("hooks", [])
-            )
-        ]
+        This assertion has now been rewritten three times for the same
+        reason -- index, then bash command string, then mcp_tool name --
+        each time because the entry moved and the key was written against
+        one declaration FORM. Bead nexus-17i1n moved it again, off the
+        tool tier, because an ``mcp_tool`` hook cannot return a verdict
+        and the gate shipped inert in 7.55.0. So it is keyed on hook
+        IDENTITY across both forms now (``_names_hook``), and a fourth
+        move will not need a fourth rewrite."""
+        owners = matchers_for("pre_close_verification", "PreToolUse")
         assert owners == ["Bash"], owners
 
     def test_hooks_json_existing_hooks_unchanged(self) -> None:

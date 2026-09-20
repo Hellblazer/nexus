@@ -1,0 +1,725 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""RDR-215 bead nexus-b5ugt: the RDR-205 ledger tuple projection, IN-PROCESS.
+
+Ports ``conexus/hooks/scripts/tuple_ledger_project.py`` (and the
+endpoint/credential precedence half of its sibling ``_endpoint_resolve.py``)
+into the wheel so :mod:`nexus.hooks.tuple_projection` can call it directly
+instead of spawning it as a plugin-resident ``python3`` subprocess.
+
+**Why this bead exists.** ``conexus/.mcp.json`` sets the MCP server's env to
+``{"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}``, and Claude Code does not
+expand ``${...}`` inside an MCP ``env`` block -- every ``nx-mcp`` process
+therefore carries that LITERAL, unexpanded string. ``tuple_projection``'s old
+``_projector()`` tried ``Path(root)/hooks/scripts/tuple_ledger_project.py``
+(never a real path under that literal) and then a checkout-relative
+fallback (absent under an installed wheel); both miss, it logged
+``tuple_projection_no_projector``, and every RDR-205 ledger projection since
+has written nothing. Confirmed live in ``~/.config/nexus/logs/mcp.log``.
+
+**Why in-process, not "find the plugin script more reliably."** RDR-215's
+whole point is eliminating the plugin-resident bash/python hook layer so a
+native Windows client becomes viable -- a client with no ``conexus/``
+checkout sibling at all. Making ``_projector()`` smarter about locating a
+plugin file would still assume the file exists somewhere findable; this bead
+removes that assumption instead.
+
+**What changed from the ported script, and why each change is safe:**
+
+- ``_endpoint_resolve.py`` was a stdlib-only, no-``nexus``-import MIRROR of
+  :mod:`nexus.db.service_endpoint`'s resolution precedence -- written only
+  because a plugin script cannot import ``nexus``. Code inside the wheel has
+  no such constraint, so this module calls the REAL primitives directly:
+  :func:`nexus.config.get_credential` for the managed ``service_url`` leg
+  (env ``NX_SERVICE_URL`` first, then the persisted ``config.yml``
+  credential -- exactly :func:`nexus.db.service_endpoint.resolve_service_endpoint`'s
+  own leg 1, sourced from the SAME function rather than a hand-rolled YAML
+  line-scanner), :func:`nexus.db.service_endpoint.discover_lease` for the
+  local-supervisor lease (host/port), and
+  :class:`nexus.daemon.service_registry.LeaseRecord` for parsing +
+  liveness-checking that SAME lease file's raw JSON when its token is needed
+  as a credential fallback (see BEARER PRECEDENCE below). ``config_dir`` is
+  resolved via :func:`nexus.config.nexus_config_dir` throughout -- the SAME
+  resolution :func:`~nexus.db.service_endpoint.discover_lease` and
+  :class:`~nexus.db.data_token.DataTokenManager` use internally, so every
+  leg of this module agrees with the real client on which directory holds
+  the on-disk state, with nothing passed across a subprocess boundary to
+  drift out of sync.
+- The data-token-lease read (BEARER PRECEDENCE's primary leg) goes through
+  :meth:`nexus.db.data_token.DataTokenManager.fresh_lease_token` -- a small
+  PUBLIC peek method added alongside this port (see that method's own
+  docstring) that wraps the manager's already-tested, already-correct
+  ``_read_lease`` validation (format version, tenant match, digest match,
+  the 20% near-expiry threshold) rather than re-implementing a fourth copy
+  of that logic. It never mints and never touches the in-process cache --
+  exactly the read-only contract this fire-and-forget writer requires.
+- The size-limit constants (bead nexus-r7xao) are imported from
+  :mod:`nexus.db.t2.http_tuple_store` -- the Python HTTP client's own
+  module-level copy, single-sourced with the engine's
+  ``dev.nexus.service.db.TupleLimits`` by
+  ``tests/db/test_tuple_size_limits_parity.py`` -- rather than the plugin's
+  fourth stdlib-only mirror (``_tuple_size_limits.py``), which stays behind
+  for the two hook scripts that still cannot import ``nexus``.
+- What did NOT change: the wire shape (``POST /v1/tuples/out`` against the
+  ``ledger/<session_id>`` template), the VERIFY-line dims extraction (bead
+  nexus-cnzei.6 item 2), the schema-fallback retry for a below-floor engine,
+  the per-session log file at
+  ``<state_dir>/nexus/orchestration/<session_id>.tuple-projection.log`` (the
+  only diagnostic surface -- this module's return value is never inspected
+  by any caller beyond "did it raise"), and, verbatim, the BEARER
+  PRECEDENCE policy below. If a fix here cannot reproduce that policy
+  exactly against the real modules, the fix must stop and say so rather
+  than loosen it.
+
+NO HOOK MINTS ANYTHING (RDR-205 "Identity and addressing"). This module
+reads the client library's own cross-process caches -- the ServiceRegistry
+lease and the data-token lease file -- and PRESENTS what it finds. It never
+calls ``/v1/data-tokens/mint``, and it never puts a bearer on a spawned
+process's argv (there is no spawned process any more).
+
+BEARER PRECEDENCE (nexus-g2lln), preserved verbatim: a fresh data-token
+lease is always tried first. On a MANAGED endpoint (``service_url`` resolved
+via :func:`nexus.config.get_credential` -- env or persisted config) that is
+the ONLY accepted credential: a missing/near-expiry data-token lease is a
+SKIP, never a fallback (a wrong-scoped static token would 401 silently on a
+fire-and-forget write with no reader). On a LOCAL SUPERVISOR endpoint --
+resolved by reading the ``storage_service_addr.<uid>`` lease file for
+host/port -- a missing/near-expiry data-token lease falls back to that SAME
+lease record's own ``endpoint.token`` field, exactly the credential the
+real local ``nx``/MCP client itself presents on this box when no
+``mint_token`` is configured. That fallback token is refused (SKIP, reason
+named) if the lease file is not owner-only (group/other read/write/execute
+bits set) -- this project never trusts a same-box bearer off a file another
+local user could read. Nothing in :mod:`nexus.db.service_endpoint` or
+:mod:`nexus.daemon.service_registry` performs that permission check (their
+callers accept a lower bar), so this module still implements it directly --
+see :func:`_read_local_supervisor_token`.
+
+CHECKABLE-REPORT DIMS (bead nexus-cnzei.6 item 2, engine half nexus-d9k5h).
+A ``kind=="report"`` write additionally parses the stopping agent's own
+final hand-back for ``VERIFY:`` lines (the convention in
+``conexus/skills/orchestration/SKILL.md`` "VERIFY Line Convention") and
+fills three optional dims the template declares: ``commit``, ``t2_ref``,
+and ``verify`` (``present``/``absent``, always set for a report).
+``kind=="start"`` never carries these. See :func:`_extract_verify_dims`.
+
+HARD REQUIREMENT (nexus-cnzei.6 item 2): the cloud engine can be older than
+``engine-service-v0.1.118`` (the first tag whose ``ledger.yaml`` declares
+these three dims). Such an engine answers an ``out`` naming an undeclared
+dim with HTTP 400 (``SchemaViolation``); :func:`project` retries once with
+the legacy dims-only body on that exact shape (:func:`_is_undeclared_dim_violation`)
+so the row is written either way, never dropped.
+
+Every failure path -- unresolvable endpoint, no fresh data-token lease,
+transport failure, a non-2xx response -- appends one line to the per-session
+log file and returns normally (never raises). :func:`project` is called
+from a daemon thread (:mod:`nexus.hooks.tuple_projection`); its own return
+value carries no signal, and the log file is the only diagnostic surface.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+__all__ = ["project"]
+
+#: Bound on a single POST round trip -- research 5 measured ~10ms for a
+#: healthy engine; this is a ceiling for a degraded/rate-limiting one, not
+#: a target. Enforced as a bound on the WHOLE call (urlopen's own
+#: ``timeout`` is a PER-SOCKET-OP timeout, reset by every individual
+#: connect/recv -- a server that trickles bytes could otherwise keep the
+#: call alive far past this many seconds), not just passed to urlopen.
+_POST_TIMEOUT_S = 5
+
+_ROUTE = "/v1/tuples/out"
+
+#: The tenant this module's writes are scoped to. Matches every
+#: ``Http*Store``'s ``DEFAULT_TENANT`` -- never a non-default tenant
+#: anywhere this hook's writes correspond to, so a data-token lease minted
+#: for any OTHER tenant must never be presented here even when it is the
+#: freshest lease on disk for the same host.
+_RESOLVED_TENANT = "default"
+
+#: Same 20% refresh/"near-expiry" threshold
+#: :meth:`nexus.db.data_token.DataTokenManager` bakes into its own
+#: ``_read_lease`` -- documented here so the BEARER PRECEDENCE section
+#: above states the real number, not just "whatever the manager does".
+_NEAR_EXPIRY_THRESHOLD = 0.20
+
+_SESSION_ID_RE_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+)
+
+
+class _Skip(Exception):
+    """Any resolution/transport failure -- caught once in :func:`project`,
+    logged, and the call returns normally. Never propagates."""
+
+
+class _SchemaViolation(_Skip):
+    """The engine rejected an ``out`` with HTTP 400. For this module's only
+    variable-shaped payload -- the report dims added by nexus-cnzei.6 --
+    this means an engine older than engine-service-v0.1.118 (nexus-d9k5h)
+    does not yet declare commit/t2_ref/verify as dimensions of the ledger
+    template. Caught exactly once, in :func:`project`'s report path, to
+    retry with the legacy dims-only body; every other raise site (a
+    start-kind 400, or a 400 on a retry that already carries no extra
+    dims) stays a plain :class:`_Skip`."""
+
+
+# ── State-dir / log path (mirrors nexus.hooks.expectations' own layout) ────
+
+
+def _default_state_dir() -> Path:
+    """``${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration`` -- the
+    log file lives beside the session's ``.expectations`` ledger there.
+    Matches :func:`nexus.hooks.expectations._state_dir` exactly."""
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "nexus" / "orchestration"
+
+
+def _valid_session_id(session_id: str) -> bool:
+    """Path-safe charset guard: a traversal-bearing or otherwise unsafe
+    session_id must never be used to build a filesystem path."""
+    if not session_id or len(session_id) > 128:
+        return False
+    if not session_id[0].isalnum():
+        return False
+    return all(c in _SESSION_ID_RE_CHARS for c in session_id)
+
+
+def _log_path(session_id: str) -> Path:
+    return _default_state_dir() / f"{session_id}.tuple-projection.log"
+
+
+def _log_skip(session_id: str, reason: str) -> None:
+    """Best-effort append; a failure to even log is not this module's
+    problem to escalate -- there is no reader waiting on it either way."""
+    if not _valid_session_id(session_id):
+        return
+    try:
+        path = _log_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{ts}\t{reason}\n")
+    except OSError:
+        pass
+
+
+# ── Endpoint + credential resolution ────────────────────────────────────
+
+
+def _resolve_base_url(config_dir: Path) -> tuple[str, bool]:
+    """``(base_url, is_local_supervisor)``, or raise :class:`_Skip`.
+
+    Mirrors :func:`nexus.db.service_endpoint.resolve_service_endpoint`'s
+    precedence, using its own primitives rather than a re-implementation:
+    the managed-cloud ``service_url`` leg (:func:`nexus.config.get_credential`
+    -- env ``NX_SERVICE_URL`` first, then the persisted ``config.yml``
+    credential) is checked BEFORE the local-supervisor legs. The
+    ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` env leg fills either missing
+    field from a live local supervisor lease
+    (:func:`nexus.db.service_endpoint.discover_lease`) before HOST defaults
+    to ``127.0.0.1``; PORT has no such default -- an unresolvable PORT is a
+    loud (well, a named :class:`_Skip`) failure.
+
+    ``is_local_supervisor`` is True ONLY when NEITHER env var was set and
+    the endpoint came purely from the lease file -- naming either field via
+    env is an explicit pin, never treated as "the lease backed this".
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid a heavy import on every call
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred, same reason
+
+    url = (get_credential("service_url") or "").strip().rstrip("/")
+    if url:
+        return url, False
+
+    host_str = os.environ.get("NX_SERVICE_HOST", "").strip()
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    if host_str or port_str:
+        port: int | None = None
+        if port_str:
+            try:
+                port = int(port_str)
+            except ValueError as exc:
+                raise _Skip(f"NX_SERVICE_PORT is not an integer: {port_str!r}") from exc
+        host: str | None = host_str or None
+        if host is None or port is None:
+            lease_url, _lease_token = discover_lease()
+            if lease_url is not None:
+                parsed = urllib.parse.urlsplit(lease_url)
+                if host is None:
+                    host = parsed.hostname
+                if port is None:
+                    port = parsed.port
+        host = host or "127.0.0.1"
+        if port is None:
+            raise _Skip(
+                f"NX_SERVICE_HOST={host_str!r} is set but NX_SERVICE_PORT is "
+                "not, and no live local supervisor lease supplies a port"
+            )
+        return f"http://{host}:{port}", False
+
+    lease_url, _lease_token = discover_lease()
+    if lease_url is not None:
+        return lease_url, True
+
+    raise _Skip(
+        "no service endpoint resolvable: no NX_SERVICE_URL, no persisted "
+        "config.yml service_url, no NX_SERVICE_PORT, and no live local "
+        "supervisor lease"
+    )
+
+
+def _read_local_supervisor_token(config_dir: Path) -> str:
+    """The LOCAL SUPERVISOR's own static token, straight off the
+    ``storage_service_addr.<uid>`` lease record -- or raise :class:`_Skip`
+    naming why.
+
+    Refuses (never trusts) a lease file that is not owner-only: the token
+    it carries authorizes real engine writes, and a group/other-readable
+    lease file means some other local account could have read it too.
+    Neither :func:`nexus.db.service_endpoint.discover_lease` nor
+    :class:`nexus.daemon.service_registry.ServiceRegistry` performs this
+    check (their callers accept a lower bar), so this fire-and-forget
+    writer's higher bar lives here. Liveness itself is delegated to
+    :meth:`~nexus.daemon.service_registry.LeaseRecord.is_fresh` -- the
+    real primitive, not a hand-parsed heartbeat/ttl comparison.
+    """
+    from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred, same reason as above
+
+    path = config_dir / f"storage_service_addr.{os.getuid()}"
+    try:
+        st_result = path.stat()
+    except OSError as exc:
+        raise _Skip(
+            f"local supervisor lease unavailable: cannot stat {path}: {exc}"
+        ) from exc
+    mode = stat.S_IMODE(st_result.st_mode)
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise _Skip(
+            f"local supervisor lease {path} is group/other-accessible "
+            f"(mode {oct(mode)}); refusing to use its token as a bearer"
+        )
+    try:
+        record = LeaseRecord.from_json(path.read_text())
+    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+        raise _Skip(f"local supervisor lease {path} unreadable/malformed: {exc}") from exc
+    if not record.is_fresh(time.time()):
+        raise _Skip(f"local supervisor lease {path} is not live or is stale")
+    token = str(record.endpoint.get("token", "") or "")
+    if not token:
+        raise _Skip(f"local supervisor lease {path} carries no token")
+    return token
+
+
+def _resolve_endpoint_and_token(config_dir: Path) -> tuple[str, str, bool]:
+    """``(base_url, token, is_local_supervisor)`` using nexus-g2lln's
+    policy -- or raise :class:`_Skip`. See the module docstring's BEARER
+    PRECEDENCE section."""
+    from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred, same reason as above
+
+    base_url, is_local_supervisor = _resolve_base_url(config_dir)
+    manager = DataTokenManager(config_dir=config_dir)
+    token = manager.fresh_lease_token(base_url, _RESOLVED_TENANT)
+    if token:
+        return base_url, token, is_local_supervisor
+
+    host = urllib.parse.urlsplit(base_url).netloc or base_url
+    no_lease_msg = (
+        f"no fresh data-token lease for {host} tenant={_RESOLVED_TENANT!r} "
+        f"(missing, wrong host/tenant digest, or within "
+        f"{int(_NEAR_EXPIRY_THRESHOLD * 100)}% of expiry)"
+    )
+    if not is_local_supervisor:
+        raise _Skip(no_lease_msg)
+    try:
+        token = _read_local_supervisor_token(config_dir)
+    except _Skip as local_exc:
+        raise _Skip(f"{no_lease_msg}; {local_exc}") from local_exc
+    return base_url, token, is_local_supervisor
+
+
+# ── Size-limit pre-check (bead nexus-r7xao) ─────────────────────────────
+
+
+def _check_field_size(field: str, value: str | None, limit: int) -> str | None:
+    """Return a SKIP reason string when *value*'s UTF-8 byte length exceeds
+    *limit*, or ``None`` when it is within bounds (including ``value is
+    None``, which is 0 bytes). Never includes *value* itself in the
+    returned reason.
+
+    A reason string, not an exception: an oversized field is one more
+    ``_Skip``-shaped condition on this best-effort, fire-and-forget write
+    path -- never a propagated traceback."""
+    if value is None:
+        return None
+    n = len(value.encode("utf-8"))
+    if n > limit:
+        return f"field '{field}' is {n} bytes, exceeding the limit of {limit} bytes"
+    return None
+
+
+# ── Payload extraction ───────────────────────────────────────────────────
+
+
+def _extract_fields(payload: dict[str, Any] | None) -> tuple[str, str, str, str]:
+    data = payload if isinstance(payload, dict) else {}
+    session_id = str(data.get("session_id") or "")
+    agent_id = str(data.get("agent_id") or "")
+    agent_type = str(data.get("agent_type") or "")
+    # SubagentStop's own field name -- SubagentStart payloads carry no such
+    # field, so this is always "" for kind=="start".
+    transcript_path = str(data.get("agent_transcript_path") or "")
+    return session_id, agent_id, agent_type, transcript_path
+
+
+# ── VERIFY-line extraction (bead nexus-cnzei.6 item 2) ──────────────────────
+
+#: One VERIFY claim per line, in the convention
+#: conexus/skills/orchestration/SKILL.md "VERIFY Line Convention" defines:
+#: ``VERIFY: <claim>``. Leading whitespace tolerated (a claim inside a
+#: bullet or a fenced block); trailing whitespace stripped.
+_VERIFY_LINE_RE = re.compile(r"(?im)^[ \t]*VERIFY:[ \t]*(.+?)[ \t]*$")
+
+#: ``VERIFY: commit=<sha>`` -- a short (7+) or full (40) hex sha. Key
+#: case-insensitive: ``Commit=``/``COMMIT=`` must not silently produce
+#: ``verify=present`` with no ``commit`` dim.
+_COMMIT_VALUE_RE = re.compile(r"^commit=([0-9a-fA-F]{7,40})$", re.IGNORECASE)
+
+#: ``VERIFY: t2=<project>/<title>`` -- a T2 pointer, kept verbatim. Key
+#: case-insensitive, same reasoning as ``_COMMIT_VALUE_RE``.
+_T2_REF_VALUE_RE = re.compile(r"^t2=(\S.*)$", re.IGNORECASE)
+
+
+def _content_blocks(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    msg = entry.get("message")
+    if not isinstance(msg, dict):
+        return []
+    content = msg.get("content")
+    return content if isinstance(content, list) else []
+
+
+def _final_assistant_text(path: Path) -> str:
+    """Text content of the LAST assistant-role transcript entry, its
+    ``"text"`` content blocks concatenated. For a synchronous dispatch this
+    IS the agent's hand-back the caller reads; a background teammate's real
+    report instead lives inside a SendMessage or SubagentHandback tool_use
+    (see :func:`_last_send_message_text`) -- there is no reliable
+    transcript-format signal for which dispatch shape produced a given
+    transcript, so both are searched."""
+    last_text = ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") != "assistant":
+                continue
+            parts = [
+                block["text"]
+                for block in _content_blocks(entry)
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ]
+            if parts:
+                last_text = "\n".join(parts)
+    return last_text
+
+
+def _last_send_message_text(path: Path) -> str:
+    """Text of the LAST assistant report tool_use anywhere in the
+    transcript: a SendMessage's ``"content"`` input field or a
+    SubagentHandback's ``"message"`` field (bead nexus-4xo3k)."""
+    last = ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or ('"SendMessage"' not in line and '"SubagentHandback"' not in line):
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") != "assistant":
+                continue
+            for block in _content_blocks(entry):
+                if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+                    continue
+                field = {"SendMessage": "content", "SubagentHandback": "message"}.get(block.get("name"))
+                if field is None:
+                    continue
+                tool_input = block.get("input")
+                if isinstance(tool_input, dict) and isinstance(tool_input.get(field), str):
+                    last = tool_input[field]
+    return last
+
+
+def _extract_verify_dims(transcript_path: str) -> dict[str, str]:
+    """Parse ``VERIFY:`` lines out of the stopping agent's final report and
+    return the ledger dims they carry. Never raises: a missing, unreadable,
+    or unparseable transcript, or one with no VERIFY lines at all, reads as
+    ``{"verify": "absent"}``. ``verify`` is always present in the return
+    value; ``commit``/``t2_ref`` are present only when a matching line was
+    found (first match wins for each)."""
+    if not transcript_path:
+        return {"verify": "absent"}
+    path = Path(transcript_path)
+    try:
+        if not path.is_file():
+            return {"verify": "absent"}
+        combined = "\n".join(
+            t for t in (_final_assistant_text(path), _last_send_message_text(path)) if t
+        )
+    except OSError:
+        return {"verify": "absent"}
+
+    claims = _VERIFY_LINE_RE.findall(combined)
+    if not claims:
+        return {"verify": "absent"}
+
+    dims: dict[str, str] = {"verify": "present"}
+    for claim in claims:
+        commit_match = _COMMIT_VALUE_RE.match(claim)
+        if commit_match and "commit" not in dims:
+            dims["commit"] = commit_match.group(1)
+            continue
+        t2_match = _T2_REF_VALUE_RE.match(claim)
+        if t2_match and "t2_ref" not in dims:
+            dims["t2_ref"] = t2_match.group(1)
+    return dims
+
+
+# ── Payload + POST ───────────────────────────────────────────────────────
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuses to follow any 3xx: the engine URL is fixed and internal, so
+    a redirect response is never a legitimate "moved" answer -- following
+    one would resend the Authorization header to whatever host the
+    redirect names. The 3xx itself still reaches the caller as
+    ``exc.code`` via the normal ``HTTPError`` path (:func:`_post_via_urllib`
+    below), so it is logged as ``engine returned HTTP 3xx``, never
+    silently swallowed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201, N802
+        raise urllib.error.HTTPError(newurl, code, "redirect refused", headers, fp)
+
+
+def _build_opener(is_local_supervisor: bool) -> urllib.request.OpenerDirector:
+    """A fresh no-redirect opener, no-proxy ONLY for a LOCAL supervisor
+    endpoint: an explicit empty :class:`~urllib.request.ProxyHandler`
+    overrides ``build_opener``'s default of reading
+    ``http_proxy``/``https_proxy`` from the environment -- correct for the
+    ``127.0.0.1``/lease-host leg, a fixed loopback address an ambient
+    proxy setting could never legitimately need to route to, but WRONG for
+    the managed-cloud leg, a genuine internet destination a
+    corporate-proxied box may need proxied to reach at all."""
+    handlers: list[urllib.request.BaseHandler] = [_NoRedirectHandler()]
+    if is_local_supervisor:
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
+
+
+#: The exact ``detail`` shape ``SchemaViolationException``/
+#: ``TupleRepository.validateOutShape`` produce for an UNKNOWN dimension
+#: name specifically (as opposed to any other schema violation), rendered
+#: by ``TupleHandler`` as ``{"error": "SchemaViolation", "detail": "field
+#: '<name>': <reason>"}``.
+_UNDECLARED_DIM_DETAIL_RE = re.compile(r"^field '.+': not a declared dimension for this template$")
+
+
+def _is_undeclared_dim_violation(body: bytes) -> bool:
+    """True iff *body* is the engine's JSON refusal of an undeclared
+    dimension name -- never true for any other 400 shape."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get("error") != "SchemaViolation":
+        return False
+    detail = data.get("detail")
+    return isinstance(detail, str) and _UNDECLARED_DIM_DETAIL_RE.match(detail) is not None
+
+
+def _post_via_urllib(
+    base_url: str, token: str, body: dict[str, Any], *, is_local_supervisor: bool
+) -> None:
+    """POST *body* to ``{base_url}/v1/tuples/out`` via stdlib
+    ``urllib.request``. Raises :class:`_Skip` naming the failure; never
+    raises anything else.
+
+    Never follows a redirect; honours an ambient proxy env var except on a
+    LOCAL supervisor endpoint (:func:`_build_opener`). Bounds the WHOLE
+    call to ``_POST_TIMEOUT_S`` wall-clock time, not just each individual
+    socket operation -- the request runs on a daemon thread and the caller
+    joins it with a deadline; a thread still alive past the deadline is
+    treated as a transport failure and abandoned (daemon=True means it can
+    never block process exit).
+    """
+    payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    url = f"{base_url}{_ROUTE}"
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    outcome: dict[str, Any] = {}
+
+    def _do_post() -> None:
+        try:
+            opener = _build_opener(is_local_supervisor)
+            with opener.open(req, timeout=_POST_TIMEOUT_S) as resp:  # noqa: S310 — fixed internal engine URL, not user input
+                outcome["status"] = resp.status
+        except urllib.error.HTTPError as exc:
+            outcome["status"] = exc.code
+            try:
+                outcome["body"] = exc.read()
+            except OSError:
+                outcome["body"] = b""
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_do_post, daemon=True)
+    thread.start()
+    thread.join(timeout=_POST_TIMEOUT_S)
+    if thread.is_alive():
+        raise _Skip(
+            f"transport failure posting to {url}: exceeded the {_POST_TIMEOUT_S}s "
+            "whole-call deadline"
+        )
+    if "error" in outcome:
+        raise _Skip(f"transport failure posting to {url}: {outcome['error']}") from outcome["error"]
+    status = outcome.get("status")
+    if status is None:
+        raise _Skip(f"transport failure posting to {url}: no response received")
+    if status == 400:
+        error_body: bytes = outcome.get("body") or b""
+        if _is_undeclared_dim_violation(error_body):
+            raise _SchemaViolation(f"engine returned HTTP 400 (undeclared dim) posting to {url}")
+        raise _Skip(f"engine returned HTTP 400 posting to {url}: {error_body[:200]!r}")
+    if not (200 <= status < 300):
+        raise _Skip(f"engine returned HTTP {status} posting to {url}")
+
+
+def project(kind: str, payload: dict[str, Any] | None) -> None:
+    """Project one RDR-205 ``ledger/<session_id>`` tuple write. Never
+    raises; every failure path is logged to the per-session log file and
+    this function returns normally either way.
+
+    *kind* is ``"start"`` or ``"report"`` (:mod:`nexus.hooks.tuple_projection`'s
+    own verb names). *payload* is the hook's own payload dict -- the same
+    shape the ported script used to receive as JSON on stdin, passed
+    directly now that there is no subprocess boundary to serialize across.
+    """
+    if kind not in ("start", "report"):
+        return
+    session_id, agent_id, agent_type, transcript_path = _extract_fields(payload)
+
+    # kind=="report" WITH NO agent_id AT ALL (nexus-aginu): the harness
+    # fires SubagentStop for stops this ledger has no tracked agent for --
+    # measured live at ~250 occurrences per session, every one with a
+    # present, valid session_id. Nothing was ever lost by this: the real
+    # agent's own report, when one exists, is keyed on ITS OWN agent_id
+    # and lands as its own separate invocation. This case projects
+    # NOTHING, silently -- no _log_skip call, unlike every other
+    # incomplete-payload case below, which keeps its diagnostic line.
+    if kind == "report" and not agent_id:
+        return
+
+    # kind=="report" otherwise tolerates a missing agent_type (nexus-0zsmg):
+    # the ledger.yaml template's agent_type dimension is declared WITHOUT
+    # `required: true`, so the engine accepts a blank dimension value.
+    # session_id + agent_id stay mandatory for both kinds.
+    required_fields = (
+        (session_id, agent_id) if kind == "report" else (session_id, agent_id, agent_type)
+    )
+    if not all(required_fields):
+        _log_skip(session_id, f"SKIP kind={kind} incomplete payload fields")
+        return
+
+    from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred to avoid a heavy import on every call
+        _MAX_FIELD_VALUE_BYTES,
+        _MAX_SUBSPACE_BYTES,
+    )
+
+    # Size pre-check (bead nexus-r7xao): mirrors the engine's own per-field
+    # caps. This projection sends no "body" field at all, so only
+    # subspace/keys/dims can ever be oversized.
+    subspace = f"ledger/{session_id}"
+    size_reason = (
+        _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
+        or _check_field_size("keys.agent_id", agent_id, _MAX_FIELD_VALUE_BYTES)
+        or _check_field_size("keys.kind", kind, _MAX_FIELD_VALUE_BYTES)
+        or _check_field_size("dims.agent_type", agent_type, _MAX_FIELD_VALUE_BYTES)
+    )
+    if size_reason is not None:
+        _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} oversized: {size_reason}")
+        return
+
+    # Checkable-report dims (bead nexus-cnzei.6 item 2). Only kind=="report"
+    # has a VERIFY-bearing hand-back to parse.
+    dims: dict[str, str] = {"agent_type": agent_type}
+    if kind == "report":
+        for name, value in _extract_verify_dims(transcript_path).items():
+            oversize = _check_field_size(f"dims.{name}", value, _MAX_FIELD_VALUE_BYTES)
+            if oversize is not None:
+                _log_skip(session_id, f"SKIP dims.{name} oversized, dropping: {oversize}")
+                continue
+            dims[name] = value
+
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, same reason as above
+
+    config_dir = nexus_config_dir()
+    try:
+        base_url, token, is_local_supervisor = _resolve_endpoint_and_token(config_dir)
+        body = {
+            "subspace": subspace,
+            "keys": {"agent_id": agent_id, "kind": kind},
+            "dims": dims,
+        }
+        try:
+            _post_via_urllib(base_url, token, body, is_local_supervisor=is_local_supervisor)
+        except _SchemaViolation:
+            # Below-floor engine (older than engine-service-v0.1.118): it
+            # does not declare commit/t2_ref/verify yet. Retry once with
+            # the legacy dims-only body so the row is written -- never
+            # dropped (nexus-cnzei.6 item 2 HARD REQUIREMENT).
+            if len(dims) <= 1:
+                raise
+            _log_skip(
+                session_id,
+                f"SCHEMA_FALLBACK kind={kind} agent_id={agent_id} "
+                "engine refused new dims, retrying with legacy dims only",
+            )
+            fallback_body = {
+                "subspace": subspace,
+                "keys": {"agent_id": agent_id, "kind": kind},
+                "dims": {"agent_type": agent_type},
+            }
+            _post_via_urllib(base_url, token, fallback_body, is_local_supervisor=is_local_supervisor)
+    except _Skip as exc:
+        _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 — best-effort projection must never propagate
+        _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} unexpected: {exc}")
+        return
