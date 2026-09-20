@@ -834,6 +834,26 @@ class DataTokenManager:
         """
         return self._read_lease(base_url, tenant) is not None
 
+    def fresh_lease_token(self, base_url: str, tenant: str) -> str | None:
+        """The raw bearer from a fresh cross-process lease-file entry for
+        ``(base_url, tenant)``, or ``None`` — a PEEK, never mints, never
+        populates the in-process cache (nexus-9c7t9), and never reads the
+        in-process cache either (unlike :meth:`bearer_for`).
+
+        For a caller that must present a data-token bearer WITHOUT ever
+        risking a mint call — the RDR-205 ledger tuple projector
+        (``nexus.hooks.tuple_ledger_project``, ported from the bead
+        nexus-b5ugt) is fire-and-forget with no reader and no retry, and
+        its credential policy (bead nexus-g2lln) refuses to mint under any
+        circumstance. :meth:`has_fresh_lease` answers the same question as
+        a bool; this returns the token itself so such a caller need not
+        re-read the lease file a second time or duplicate this method's
+        validation (format version, tenant, digest, near-expiry threshold
+        — see :meth:`_read_lease`).
+        """
+        cached = self._read_lease(base_url, tenant)
+        return cached.token if cached is not None else None
+
     def has_live_token(self, base_url: str, tenant: str) -> bool:
         """True when a cached, not-yet-due-for-refresh token already exists
         for ``(base_url, tenant)`` — a PEEK, never triggers a mint.

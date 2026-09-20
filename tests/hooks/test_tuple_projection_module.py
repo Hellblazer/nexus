@@ -1,22 +1,36 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The ported tuple projections (RDR-215 bead nexus-q02nx.20).
+"""The ported tuple projections (RDR-215 bead nexus-q02nx.20, rewired
+in-process at bead nexus-b5ugt).
 
 Bead nexus-q02nx.21 deleted the two bash wrappers
 (``subagent-start-tuple-async.sh``, ``subagent-stop-tuple-async.sh``) and
 ``tests/hooks/test_subagent_tuple_async_wrappers.py`` that drove them; this
 file holds the port to the same properties those wrappers were written to
-guarantee — and names the one they guarantee BETTER than a daemon thread
-can. ``TestTheBackgroundedWriteActuallyLands`` is the one scenario from
-that file with no equivalent above: an end-to-end proof, against a real
-HTTP server, that the detached subprocess still does the work after the
-hook itself has already returned.
+guarantee.
+
+Bead nexus-b5ugt then removed the plugin-script SUBPROCESS entirely:
+``_project`` used to resolve ``conexus/hooks/scripts/tuple_ledger_project.py``
+via ``CLAUDE_PLUGIN_ROOT`` (or a checkout-relative fallback) and spawn it as
+a ``python3`` subprocess. Neither candidate resolves under an installed
+wheel with ``CLAUDE_PLUGIN_ROOT`` set to the LITERAL, unexpanded string
+``${CLAUDE_PLUGIN_ROOT}`` (Claude Code does not expand ``${...}`` in an MCP
+``env`` block) -- which is exactly ``conexus/.mcp.json``'s real, shipped
+value, and is why every RDR-205 ledger projection on a live installed box
+had been silently writing nothing (``tuple_projection_no_projector`` on
+every SubagentStart/SubagentStop). ``_project`` now calls
+:func:`nexus.hooks.tuple_ledger_project.project` directly, in-process --
+there is no plugin script to resolve any more, and every test in this file
+that used to seal or exercise that resolution (``_sealed``,
+``TestAMissingProjectorIsANoOp``, ``TestWhatItSubprocesses``) has gone with
+it. ``TestTheHistoricalDefectIsFixed`` below is the direct regression proof:
+it reproduces the exact env shape that broke on the live box and asserts
+the tuple still lands.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,26 +38,21 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from nexus.hooks import tuple_ledger_project
 from nexus.hooks import tuple_projection as proj
-
-#: The real resolver, captured before any fixture can replace it. The
-#: seal below points ``_projector`` at nothing, and the one test that
-#: must exercise real resolution needs a way back to the original.
-_REAL_PROJECTOR = proj._projector
 
 
 @pytest.fixture(autouse=True)
-def _sealed(monkeypatch):
-    """No test in this file may reach the real projector.
-
-    Pointing ``CLAUDE_PLUGIN_ROOT`` at an empty directory does NOT do
-    that: ``_projector`` falls back to this checkout, finds the real
-    script, and a test that merely forgot to stub ``_project`` would
-    subprocess it against a live tuple space. Scrubbing the env var is
-    not the same as having no projector, so the resolver itself is
-    sealed and each test opens exactly the hole it needs.
-    """
-    monkeypatch.setattr(proj, "_projector", lambda: None)
+def _isolate_state_dir(tmp_path, monkeypatch):
+    """The projector's own per-session log file lives under
+    ``XDG_STATE_HOME`` (see ``tuple_ledger_project._default_state_dir``).
+    Every test in this file that reaches ``_Skip`` -- which, thanks to the
+    repo-wide ``_isolate_config_dir``/``_isolate_service_endpoint_env``
+    autouse fixtures, is the default outcome for any test that does not
+    explicitly wire up an engine + lease -- writes a diagnostic line there.
+    Without this, an unattended suite run would accumulate real files
+    under the developer's own ``~/.local/state/nexus/orchestration/``."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
 def _settle(predicate, timeout: float = 5.0) -> bool:
@@ -96,10 +105,10 @@ class TestItReturnsImmediately:
         "payload", [None, {}, {"agent_id": ""}, {"junk": object()}]
     )
     def test_no_payload_shape_can_raise(self, payload):
-        """``{"junk": object()}`` is the one that matters: the body is
-        JSON-encoded on the hook's own thread, before the spawn, so an
-        unserialisable value would raise INTO the hook rather than into
-        the thread that is allowed to fail."""
+        """``{"junk": object()}`` is the one that matters: with no
+        subprocess boundary any more, the payload dict is passed straight
+        through to the in-process projector -- this proves an odd value in
+        an ignored key still cannot raise into the hook."""
         assert proj.run_start(payload).exit_code == 0
 
 
@@ -107,10 +116,7 @@ class TestTheThread:
     def test_it_is_a_daemon(self, monkeypatch):
         """Deliberate, and strictly WEAKER than the bash: a disowned
         process outlives the hook, a daemon thread dies at interpreter
-        exit. Recorded in the module docstring rather than hidden,
-        because a lost projection is simply lost — the write is
-        idempotent so a retry would be safe, but nothing retries and a
-        stopped agent has no later firing."""
+        exit. Recorded in the module docstring rather than hidden."""
         seen: dict = {}
         real = threading.Thread
 
@@ -135,151 +141,85 @@ class TestTheThread:
         proj.run_stop({"agent_id": "a1"})
         assert _settle(lambda: verbs == ["start", "report"]), verbs
 
-    def test_the_payload_reaches_the_projector_as_json(self, monkeypatch):
-        bodies: list[str] = []
+    def test_the_payload_reaches_the_projector_as_a_dict(self, monkeypatch):
+        """No serialization boundary any more (bead nexus-b5ugt) -- the
+        payload dict is passed straight through to ``_project``, exactly
+        as the hook itself received it, rather than JSON-encoded for a
+        subprocess's stdin."""
+        bodies: list[dict] = []
         monkeypatch.setattr(proj, "_project", lambda _v, b: bodies.append(b))
         proj.run_stop({"agent_id": "a1", "agent_type": "conexus:developer"})
         assert _settle(lambda: len(bodies) == 1), bodies
-        assert json.loads(bodies[0])["agent_id"] == "a1"
+        assert bodies[0] == {"agent_id": "a1", "agent_type": "conexus:developer"}
 
 
-class TestAMissingProjectorIsANoOp:
-    def test_it_warns_rather_than_failing_silently(self, monkeypatch):
-        """The bash's failure mode here was an empty background subshell
-        — silent. This warns, because a projection that never ran is
-        otherwise indistinguishable from one that ran and found nothing
-        to do."""
+class TestTheProjectionCall:
+    """``_project`` no longer spawns a subprocess (bead nexus-b5ugt) -- it
+    calls :func:`nexus.hooks.tuple_ledger_project.project` directly, on its
+    own bounded inner thread (see the module docstring's "ONE PROPERTY
+    PRESERVED" section for why the bound moved here)."""
+
+    def test_project_is_called_with_the_verb_and_the_raw_payload(self, monkeypatch):
+        calls: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            tuple_ledger_project, "project", lambda v, p: calls.append((v, p))
+        )
+        proj._project("report", {"agent_id": "a1"})
+        assert calls == [("report", {"agent_id": "a1"})]
+
+    def test_a_raising_projection_is_logged_and_never_escapes(self, monkeypatch):
+        def _boom(*_a):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(tuple_ledger_project, "project", _boom)
         emitted: list[tuple] = []
         monkeypatch.setattr(
             proj, "_emit", lambda lvl, ev, **kw: emitted.append((lvl, ev, kw))
         )
-        proj._project("start", "{}")
-        assert emitted == [("warning", "tuple_projection_no_projector",
-                            {"verb": "start"})]
+        proj._project("start", {})  # must not raise
+        assert emitted == [("warning", "tuple_projection_failed", {"verb": "start", "error": "boom"})]
 
-    def test_resolution_prefers_the_plugin_root(self, monkeypatch, tmp_path):
-        root = tmp_path / "plug"
-        (root / "hooks" / "scripts").mkdir(parents=True)
-        script = root / "hooks" / "scripts" / "tuple_ledger_project.py"
-        script.write_text("import sys; sys.exit(0)\n")
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
-        assert _REAL_PROJECTOR() == script
-
-    def test_it_falls_back_to_the_checkout(self, monkeypatch, tmp_path):
-        """Two candidates, env var then checkout — the same shape the
-        close gate uses. Asserted against the real resolver, since the
-        seal above replaced it."""
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "absent"))
-        found = _REAL_PROJECTOR()
-        assert found is not None, "the checkout's own projector went missing"
-        assert found.name == "tuple_ledger_project.py"
-        assert found.is_file()
-
-
-class TestWhatItSubprocesses:
-    def test_the_argv_is_the_projector_and_nothing_else(self, monkeypatch, tmp_path):
-        """Pins the argv. This hook's whole job is to run one script
-        with one verb; anything else in that position is a finding."""
-        calls: list[list[str]] = []
-        script = tmp_path / "tuple_ledger_project.py"
-        script.write_text("import sys; sys.exit(0)\n")
-        monkeypatch.setattr(proj, "_projector", lambda: script)
-
-        def _record(argv, **_kw):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
-
-        monkeypatch.setattr(proj.subprocess, "run", _record)
-        proj._project("report", '{"agent_id": "a1"}')
-        assert calls == [["python3", str(script), "report"]]
-
-    def test_the_payload_goes_in_on_stdin(self, monkeypatch, tmp_path):
-        """The projector reads its payload from stdin, as the wrapper
-        piped it. An argv-borne payload would silently project nothing."""
-        seen: dict = {}
-        script = tmp_path / "tuple_ledger_project.py"
-        script.write_text("import sys; sys.exit(0)\n")
-        monkeypatch.setattr(proj, "_projector", lambda: script)
-
-        def _record(argv, **kw):
-            seen.update(kw)
-            return subprocess.CompletedProcess(argv, 0, "", "")
-
-        monkeypatch.setattr(proj.subprocess, "run", _record)
-        proj._project("start", '{"agent_id": "a1"}')
-        assert seen["input"] == '{"agent_id": "a1"}'
-        assert seen["timeout"] == proj._TIMEOUT_S
-
-    @pytest.mark.parametrize(
-        "outcome",
-        [
-            pytest.param("nonzero", id="a failing projector"),
-            pytest.param("raises", id="a projector that cannot be run"),
-        ],
-    )
-    def test_neither_failure_escapes_the_thread(self, monkeypatch, tmp_path, outcome):
-        script = tmp_path / "tuple_ledger_project.py"
-        script.write_text("import sys; sys.exit(1)\n")
-        monkeypatch.setattr(proj, "_projector", lambda: script)
-        emitted: list[str] = []
+    def test_a_wedged_projection_times_out_without_hanging_the_caller(self, monkeypatch):
+        monkeypatch.setattr(proj, "_TIMEOUT_S", 0.05)
+        release = threading.Event()
         monkeypatch.setattr(
-            proj, "_emit", lambda _lvl, ev, **_kw: emitted.append(ev)
+            tuple_ledger_project, "project", lambda *_a: release.wait(timeout=10)
+        )
+        emitted: list[tuple] = []
+        monkeypatch.setattr(
+            proj, "_emit", lambda lvl, ev, **kw: emitted.append((lvl, ev, kw))
         )
 
-        if outcome == "raises":
-            def _boom(*_a, **_kw):
-                raise OSError("no python3")
-            monkeypatch.setattr(proj.subprocess, "run", _boom)
-            expected = "tuple_projection_failed"
-        else:
-            expected = "tuple_projection_nonzero"
+        began = time.monotonic()
+        proj._project("start", {})
+        elapsed = time.monotonic() - began
 
-        proj._project("start", "{}")  # must not raise
-        assert emitted == [expected]
+        assert elapsed < 2.0, (
+            f"_project blocked {elapsed:.2f}s past its own 0.05s timeout -- "
+            "a wedged projection must not hold this thread open indefinitely"
+        )
+        assert emitted == [("warning", "tuple_projection_timeout", {"verb": "start", "timeout_s": 0.05})]
+        release.set()
 
-    def test_a_SUCCESSFUL_projection_says_so(self, monkeypatch, tmp_path):
-        """Both outcomes are logged, not just the bad one (nexus-q02nx.24).
-
-        The module's own docstring says this "adds only a line saying the
-        attempt happened at all, because a thread that dies quietly is
-        harder to notice than a process that was never spawned" -- and
-        the success path emitted nothing, so from the hook log a clean
-        projection and a thread that never started read identically.
-        That is precisely the distinction the line exists to draw, and
-        the failure-only parametrization above could not notice its
-        absence.
-        """
-        script = tmp_path / "tuple_ledger_project.py"
-        script.write_text("import sys; sys.exit(0)\n")
-        monkeypatch.setattr(proj, "_projector", lambda: script)
+    def test_a_successful_projection_says_so(self, monkeypatch):
+        """Both outcomes are logged, not just the bad one (nexus-q02nx.24):
+        with nothing on the success path the log cannot distinguish a
+        clean projection from a thread that never ran."""
+        monkeypatch.setattr(tuple_ledger_project, "project", lambda *_a: None)
         emitted: list[str] = []
         monkeypatch.setattr(proj, "_emit", lambda _lvl, ev, **_kw: emitted.append(ev))
-
-        proj._project("start", "{}")
-        assert emitted == ["tuple_projection_ok"], (
-            f"a clean projection emitted {emitted}; with nothing on the success "
-            f"path the log cannot distinguish it from a thread that never ran"
-        )
+        proj._project("start", {})
+        assert emitted == ["tuple_projection_ok"]
 
 
-class TestTheBackgroundedWriteActuallyLands:
-    """The end-to-end proof, ported from
-    ``tests/hooks/test_subagent_tuple_async_wrappers.py`` (RDR-215 bead
-    nexus-q02nx.21, which deleted the bash wrappers this file's other
-    classes already replace): the thread returns fast, but the real
-    ``tuple_ledger_project.py`` subprocess it spawns must still do the
-    work, confirmed by polling a REAL HTTP server after ``run_start``
-    has already returned. Every other class in this file mocks
-    ``_project``/``_projector``; this one is the one test that must
-    reach the genuine subprocess, so it restores the un-sealed resolver.
-    """
+# ── Mock /v1/tuples/out engine (mirrors tests/hooks/test_tuple_ledger_project.py) ──
 
-    def test_eventually_the_backgrounded_write_actually_lands(
-        self, monkeypatch, tmp_path
-    ):
-        monkeypatch.setattr(proj, "_projector", _REAL_PROJECTOR)
 
-        received: list[dict] = []
+class _MockTupleEngine:
+    def __init__(self, status: int = 200) -> None:
+        self.status = status
+        self.requests: list[dict] = []
+        engine = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, fmt: str, *args: object) -> None:  # noqa: A002
@@ -289,62 +229,158 @@ class TestTheBackgroundedWriteActuallyLands:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length) if length else b""
                 try:
-                    received.append(json.loads(body.decode("utf-8")))
+                    engine.requests.append(json.loads(body.decode("utf-8")))
                 except json.JSONDecodeError:
-                    pass
-                self.send_response(200)
+                    engine.requests.append({})
+                self.send_response(engine.status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b"{}")
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-        try:
-            host, port = server.server_address[:2]
-            base_url = f"http://{host}:{port}"
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
 
-            config_dir = tmp_path / "config"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            digest = hashlib.sha256(
-                f"{urlsplit(base_url).netloc}\x00default".encode("utf-8")
-            ).hexdigest()
-            record = {
-                "format_version": 1,
-                "token": "async-e2e-token",
-                "tenant": "default",
-                "base_url_digest": digest,
-                "expires_at": time.time() + 3600.0,
-                "ttl_seconds": 3600.0,
-                "minted_by_pid": 0,
-            }
-            (config_dir / f"data_token_lease.{digest}").write_text(json.dumps(record))
+    @property
+    def base_url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
 
-            monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
-            monkeypatch.setenv("NX_SERVICE_URL", base_url)
-            monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
-            monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
 
-            began = time.monotonic()
-            result = proj.run_start({
-                "session_id": "sess-async-wrap",
-                "agent_id": "aworkerasyncwrap",
-                "agent_type": "developer",
-            })
-            elapsed = time.monotonic() - began
-            assert result.stdout is None
-            assert elapsed < 1.0, (
-                f"run_start took {elapsed:.2f}s -- must return before the "
-                "background thread's own POST completes"
-            )
 
-            assert _settle(lambda: bool(received), timeout=5.0), (
-                "the backgrounded write never reached the engine within 5s"
-            )
-            assert received[0]["subspace"] == "ledger/sess-async-wrap"
-            assert received[0]["keys"] == {
-                "agent_id": "aworkerasyncwrap", "kind": "start",
-            }
-        finally:
-            server.shutdown()
-            server.server_close()
+@pytest.fixture
+def mock_engine():
+    engines: list[_MockTupleEngine] = []
+
+    def make(status: int = 200) -> _MockTupleEngine:
+        e = _MockTupleEngine(status=status)
+        engines.append(e)
+        return e
+
+    yield make
+    for e in engines:
+        e.close()
+
+
+def _write_fresh_data_token_lease(config_dir, *, base_url: str, token: str) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(
+        f"{urlsplit(base_url).netloc}\x00default".encode("utf-8")
+    ).hexdigest()
+    record = {
+        "format_version": 1,
+        "token": token,
+        "tenant": "default",
+        "base_url_digest": digest,
+        "expires_at": time.time() + 3600.0,
+        "ttl_seconds": 3600.0,
+        "minted_by_pid": 0,
+    }
+    (config_dir / f"data_token_lease.{digest}").write_text(json.dumps(record))
+
+
+class TestTheBackgroundedWriteActuallyLands:
+    """The end-to-end proof, ported from
+    ``tests/hooks/test_subagent_tuple_async_wrappers.py`` (RDR-215 bead
+    nexus-q02nx.21, which deleted the bash wrappers this file's other
+    classes already replace): the thread returns fast, but the projection
+    it starts must still do the work, confirmed by polling a REAL HTTP
+    server after ``run_start`` has already returned.
+
+    Bead nexus-b5ugt removed the subprocess entirely, so there is no
+    resolver left to un-seal here -- this now drives the real, in-process
+    :func:`nexus.hooks.tuple_ledger_project.project` with nothing mocked
+    but the far side of the wire.
+    """
+
+    def test_eventually_the_backgrounded_write_actually_lands(
+        self, monkeypatch, tmp_path, mock_engine
+    ):
+        engine = mock_engine(status=200)
+        config_dir = tmp_path / "config"
+        _write_fresh_data_token_lease(config_dir, base_url=engine.base_url, token="async-e2e-token")
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("NX_SERVICE_URL", engine.base_url)
+
+        began = time.monotonic()
+        result = proj.run_start({
+            "session_id": "sess-async-wrap",
+            "agent_id": "aworkerasyncwrap",
+            "agent_type": "developer",
+        })
+        elapsed = time.monotonic() - began
+        assert result.stdout is None
+        assert elapsed < 1.0, (
+            f"run_start took {elapsed:.2f}s -- must return before the "
+            "background thread's own POST completes"
+        )
+
+        assert _settle(lambda: bool(engine.requests), timeout=5.0), (
+            "the backgrounded write never reached the engine within 5s"
+        )
+        assert engine.requests[0]["subspace"] == "ledger/sess-async-wrap"
+        assert engine.requests[0]["keys"] == {
+            "agent_id": "aworkerasyncwrap", "kind": "start",
+        }
+
+
+class TestTheHistoricalDefectIsFixed:
+    """RDR-215 bead nexus-b5ugt: the live defect this bead fixes,
+    reproduced directly.
+
+    ``conexus/.mcp.json`` sets the MCP server's env to
+    ``{"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}`` and Claude Code
+    does not expand ``${...}`` inside an MCP ``env`` block -- every real
+    ``nx-mcp`` process therefore carries that LITERAL string. The OLD
+    ``_projector()`` tried that literal as a path (never real), then a
+    checkout-relative fallback (absent under any installed wheel); both
+    missed, and every SubagentStart/SubagentStop projection on this box
+    had been silently writing nothing.
+
+    ``monkeypatch.setattr(proj, "checkout_plugin_root", ..., raising=False)``
+    is deliberate: the FIXED module carries no such attribute at all (there
+    is no plugin script left to resolve), so ``raising=False`` lets this
+    same test run unchanged against the fixed code -- where the patch is
+    simply inert -- and against a reverted ``tuple_projection.py``, where
+    it defeats the checkout fallback exactly as the installed-wheel case
+    does, reproducing the historical failure honestly rather than testing
+    that a function was merely called.
+    """
+
+    def test_the_tuple_lands_even_with_the_literal_unexpanded_env_var(
+        self, monkeypatch, tmp_path, mock_engine
+    ):
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "${CLAUDE_PLUGIN_ROOT}")
+        monkeypatch.setattr(
+            proj, "checkout_plugin_root", lambda: tmp_path / "no-such-checkout",
+            raising=False,
+        )
+
+        engine = mock_engine(status=200)
+        config_dir = tmp_path / "config"
+        _write_fresh_data_token_lease(config_dir, base_url=engine.base_url, token="wheel-only-token")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("NX_SERVICE_URL", engine.base_url)
+
+        result = proj.run_start({
+            "session_id": "sess-no-plugin-root",
+            "agent_id": "aworkerwheelonly",
+            "agent_type": "developer",
+        })
+        assert result.stdout is None
+
+        assert _settle(lambda: bool(engine.requests), timeout=5.0), (
+            "the projection never reached the engine even though this "
+            "process carries the ported module in-process -- this is the "
+            "live nexus-b5ugt regression: CLAUDE_PLUGIN_ROOT is the "
+            "literal, unexpanded string every real nx-mcp process carries, "
+            "and no checkout fallback is available either"
+        )
+        assert engine.requests[0]["subspace"] == "ledger/sess-no-plugin-root"
+        assert engine.requests[0]["keys"] == {
+            "agent_id": "aworkerwheelonly", "kind": "start",
+        }
