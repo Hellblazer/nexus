@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "rdr": "RDR-217",
+  "bead": "nexus-lqo4p.1",
+  "created": "2026-09-19",
+
+  "what_this_is": "The query set for RDR-217 Phase 1's recall measurement. A committed artifact rather than an inline list, because P1.4 re-runs the IDENTICAL set against the hybrid route and a comparison across two different sets would be void. No recall number has been taken with it yet; that is P1.2's job, after P1's review.",
+
+  "corpus_scope": {
+    "collection_prefixes": ["code__"],
+    "choice": "file-indexed code collections only",
+    "why": "Note chunk geometry changed on write at 1be4146da (nexus-b2tld): store_put splits a note at 1,689 characters when the model imposes no window, which is every Voyage collection, and the 257 existing notes over 2,000 characters are NOT re-embedded (Sam's decision). A measurement drawing on knowledge__ notes would therefore straddle a write-side change, with pre-change notes each exactly one chunk and post-change notes one or more. Scoping to code__ sidesteps the window constraint entirely rather than managing it, because that change does not touch file-indexed corpora. The second reason is not defensive: identifier-shaped and rare-token queries are what the lexical leg is FOR, and that population lives in code, so the scope the constraint pushes us to is also the scope the hypothesis wants.",
+    "consequence_to_state_in_the_report": "Phase 1's number is therefore about code retrieval. It does NOT license a claim about knowledge notes or prose docs, and Phase 3's surface decision should not be read as validated for those corpora."
+  },
+
+  "ordering": {
+    "choice": "engine order, no client-side re-ranking of any kind",
+    "why": "The harness calls HttpVectorClient.search and HttpVectorClient.hybrid_search directly and consumes the row order the engine returns. It does NOT route through search_engine.search_cross_corpus, does not apply the topic boost, the frecency boost, bibliographic weighting or the per-collection distance threshold. This measures the RETRIEVAL leg, which is the thing the hypothesis is about: whether the relevant chunk comes back at all within k. Ranking quality is a different question and is not what unblocks Phase 3.",
+    "why_this_is_stated_rather_than_left_to_a_lambda": "A sibling instrument got this wrong on 2026-09-19: tests/benchmarks/test_retrieval_drift_gate.py sorted by r.distance after 7b1b49075 moved the topic-boost credit out of that field into r.topic_boost, so the benchmark was blind to the ranking layer by construction and passed at 0.9013 against a 0.9078 baseline while measuring the wrong quantity (fixed in 9c74b3a0b). Not sorting at all is how this harness avoids inheriting that trap: there is no sort key here to fall out of step with a field that moved. If a later phase wants ranking rather than retrieval, it must choose a key deliberately and say so here — max(0.0, distance - topic_boost) is the effective-distance ordering, apply_ranking_boosts is the full reranker."
+  },
+
+  "relevance_model": {
+    "identifier_and_rare_token": "literal containment",
+    "prose": "source-path membership",
+    "the_bias_this_carries_and_why_it_is_not_hidden": "For an identifier-shaped query, relevance is DEFINED as 'the chunk contains that identifier'. That favours a lexical gate by construction, because a lexical gate is a literal-containment matcher. It is not circular for the query shape it covers — when a developer types resolve_active_session_id, the rows they want ARE the rows containing it, so literal containment is the task definition rather than a thumb on the scale. It WOULD be circular as a claim about retrieval generally. The prose queries exist to keep that honest: they use source-path relevance, which no lexical gate is privileged on, and a Phase 1 report that shows a lexical gain on identifiers and none on prose is the expected and interesting result rather than a disappointment.",
+    "what_would_make_this_instrument_wrong": "If the prose queries turned out to also be satisfiable by literal containment, the contrast would collapse and every shape would favour the lexical leg. The harness asserts the shapes are genuinely distinct (see test_prose_queries_are_not_satisfiable_by_literal_containment)."
+  },
+
+  "queries": [
+    {
+      "id": "id-01",
+      "shape": "identifier",
+      "text": "resolve_active_session_id",
+      "ground_truth": {"kind": "literal_token", "token": "resolve_active_session_id"},
+      "why": "A snake_case function name a developer would type verbatim. Widely referenced (25 files at authoring time), so a miss is not explained by sparsity."
+    },
+    {
+      "id": "id-02",
+      "shape": "identifier",
+      "text": "write_with_registration_retry",
+      "ground_truth": {"kind": "literal_token", "token": "write_with_registration_retry"},
+      "why": "Same shape, different subsystem, so a result is not an artifact of one module's vocabulary."
+    },
+    {
+      "id": "id-03",
+      "shape": "identifier",
+      "text": "publish_t1_session_lease",
+      "ground_truth": {"kind": "literal_token", "token": "publish_t1_session_lease"},
+      "why": "Carries a digit inside the token (t1), which `english` stemming and subword vector tokenisation treat differently from a pure-alpha name."
+    },
+    {
+      "id": "id-04",
+      "shape": "identifier",
+      "text": "_effective_distance",
+      "ground_truth": {"kind": "literal_token", "token": "_effective_distance"},
+      "why": "Leading underscore, and rare (3 files). The private-name prefix is a token vector embeddings routinely drop and a literal matcher keeps."
+    },
+    {
+      "id": "id-05",
+      "shape": "identifier",
+      "text": "T1IsolatedLegRetiredError",
+      "ground_truth": {"kind": "literal_token", "token": "T1IsolatedLegRetiredError"},
+      "why": "CamelCase exception name rather than snake_case, so the set does not measure one casing convention only."
+    },
+    {
+      "id": "id-06",
+      "shape": "identifier",
+      "text": "jar_freshness_skip_reason",
+      "ground_truth": {"kind": "literal_token", "token": "jar_freshness_skip_reason"},
+      "why": "A test-infrastructure name. Its surrounding prose is about staleness and skipping, so a vector search has plausible near-misses to be drawn to."
+    },
+
+    {
+      "id": "rare-01",
+      "shape": "rare_token",
+      "text": "quarantine_collection_name",
+      "ground_truth": {"kind": "literal_token", "token": "quarantine_collection_name"},
+      "why": "Appears in few chunks (7 files). Rare-token recall is where a dense index has the least signal to work with."
+    },
+    {
+      "id": "rare-02",
+      "shape": "rare_token",
+      "text": "mint_test_tenant",
+      "ground_truth": {"kind": "literal_token", "token": "mint_test_tenant"},
+      "why": "Moderately rare and semantically opaque: nothing about the surrounding text says 'mint' unless the token itself matches."
+    },
+    {
+      "id": "rare-03",
+      "shape": "rare_token",
+      "text": "pgvector",
+      "ground_truth": {"kind": "literal_token", "token": "pgvector"},
+      "why": "A single rare product token rather than a compound identifier. Tests the gate on a word with no internal separators to help trigram similarity."
+    },
+
+    {
+      "id": "prose-01",
+      "shape": "prose",
+      "text": "how does the client discover which service endpoint to talk to",
+      "ground_truth": {"kind": "source_path_contains", "needle": "service_endpoint"},
+      "why": "Contrast case. Natural-language intent whose answer lives in a file whose name it never says, which is what dense retrieval is good at and a literal gate is not."
+    },
+    {
+      "id": "prose-02",
+      "shape": "prose",
+      "text": "what stops two builds corrupting each other at the same time",
+      "ground_truth": {"kind": "source_path_contains", "needle": "build-lease"},
+      "why": "Contrast case. The relevant file's name shares no token with the query."
+    },
+    {
+      "id": "prose-03",
+      "shape": "prose",
+      "text": "how much can be written in a single request before it is refused",
+      "ground_truth": {"kind": "source_path_contains", "needle": "limits"},
+      "why": "Contrast case, and the one entry this set got WRONG on the first pass. Its text originally read 'where are the limits on how much can be written in one request', which contains its own ground-truth needle verbatim, so the answer was derivable from the query string and a literal matcher would have been privileged on a query whose whole job is to contrast with the identifier shape. test_prose_queries_are_not_satisfiable_by_literal_containment caught it on the first run. The rewritten text names the concept without using the word."
+    }
+  ]
+}
