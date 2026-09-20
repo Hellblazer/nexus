@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.55.1] - 2026-09-20
+
+### Fixed
+
+- **The `bd close` review gate, the subagent-stop block and MCP auto-approve were all inert in 7.55.0.** A Claude Code `hooks.json` entry of `"type": "mcp_tool"` cannot return a verdict — the harness names four hook types that carry a decision (`prompt`, `agent`, `command`, `http`) and `mcp_tool` is not among them. RDR-215 rewired 21 entries across the two tiers and swept these three onto the tool tier with everything else, so each returned a correct verdict that was discarded. They now run as `nx-hook` verbs on the command tier: a console script in the wheel, exec form, no shell and no plugin script, so the fix does not walk back RDR-215's direction. `nexus.mcp.hooks.DECIDING_HOOKS` names the set and a test refuses a `hooks.json` that puts any of them back. (nexus-17i1n)
+
+- **The close gate was silently disabled in every git worktree.** `.nexus.yml` is gitignored by design, so there is one per repo and it lives in the primary checkout; the reader resolved it from the process cwd and every linked worktree got the defaults, both gates off. It now resolves from the git *common* dir — identical for anyone not using worktrees. The `on_close: false` branch also said nothing at all; it now states that an allow is by configuration rather than by verification, because a gate that declines to gate without a word is indistinguishable from one that checked and was satisfied. (nexus-634ye)
+
+- **Three more hooks were dead because an MCP server gets no usable `CLAUDE_PLUGIN_ROOT`.** `conexus/.mcp.json` set it to the literal `${CLAUDE_PLUGIN_ROOT}` — Claude Code does not expand `${...}` in an MCP `env` block — and a non-empty literal is truthy, so callers built a path that can never exist while the documented unset fallback never ran. Consequences: session-end verification read an empty config and verified nothing; every dispatched subagent received context with its whole T2 Memory section missing; and the RDR-205 ledger projection wrote nothing at all, on every SubagentStart and SubagentStop, since v7.41.0. Fixed by porting the three scripts into the wheel (`nexus.hooks.verification_config`, `nexus.hooks.t2_prefix_scan`, `nexus.hooks.tuple_ledger_project`) so nothing needs the plugin root, rather than by teaching the hooks to find it. (nexus-b5ugt)
+
+- The `env` blocks are removed from both server entries in `conexus/.mcp.json`. There is no correct value to put there, and a new lint walks both plugins' `.mcp.json` refusing any env value that is an unexpanded placeholder. (nexus-2xso4)
+
+- `_bd_verbs` did not see a `bd close` inside a brace group or a subshell, so `{ bd close nexus-x; }` closed without a review marker on either payload path. (nexus-17i1n)
+
+### Changed
+
+- `nx-hook` gains three verbs: `pre-close-verification`, `subagent-stop`, `auto-approve`. All three remain registered as MCP tools as well — the verdict is useful as data — but `hooks.json` wires the command tier.
+- `DataTokenManager.fresh_lease_token()`: a read-only peek at an existing data-token lease that never mints and never touches the in-process cache.
+
+### Engine
+
+- Pinned engine identity unchanged: `engine-service-v0.1.129`.
+
 ## [7.55.0] - 2026-09-20
 
 Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129)),

@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.55.1] - 2026-09-20
+
+Three plugin-surface changes go live with this release, all of them fixes to
+hooks that were shipped and inert:
+
+- `hooks.json`: the three DECIDING hooks move off the `mcp_tool` tier onto
+  `nx-hook` verbs (`pre-close-verification`, `subagent-stop`, `auto-approve`,
+  the last wired twice). An `mcp_tool` hook cannot return a verdict, so the
+  `bd close` review gate, the subagent-stop block and MCP auto-approve were
+  all inert for the life of 7.55.0.
+- `.mcp.json`: the `env` blocks are gone. They set `CLAUDE_PLUGIN_ROOT` to the
+  literal `${CLAUDE_PLUGIN_ROOT}`, which Claude Code does not expand, and a
+  non-empty literal is truthy — so three more hooks silently found nothing
+  where they looked.
+- `hooks/scripts/read_verification_config.py`: no longer spawned by the wheel.
+  The reader is `nexus.hooks.verification_config` now; the script stays on
+  disk only because the plugin-resident layer is not fully retired.
+
 All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
