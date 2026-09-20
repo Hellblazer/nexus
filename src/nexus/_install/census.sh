@@ -41,132 +41,61 @@ NX_LAYOUT_HOME="$_nx_census_here"
 # shellcheck source=src/nexus/_install/layout.sh
 . "$_nx_census_here/layout.sh"
 
-# One process snapshot, cached for the life of the shell that sourced this.
-# $1 optional: "refresh" to retake it.
-_nx_ps_snapshot() {
-    if [ "${1-}" = "refresh" ] || [ -z "${_NX_PS_SNAPSHOT+set}" ]; then
-        _NX_PS_SNAPSHOT="$(ps axww -o pid=,command= 2>/dev/null)"
+# ── THE DISPATCH ─────────────────────────────────────────────────────────────
+# The logic is in census_core.py beside this file. What follows dispatches to
+# it and states nothing itself; tests/test_install_census_twins_agree.py is
+# what says so.
+#
+# THE SNAPSHOT IS WHY THE BOUNDARY SITS WHERE IT DOES. nx_census_report is ONE
+# core call that runs the whole per-generation loop inside one process, so `ps`
+# still runs exactly once per census. Dispatching per generation instead would
+# start a fresh process each time and take a fresh snapshot with it, which is
+# the single-view guarantee quietly becoming false -- the same bug this file
+# already fixed once by testing argument COUNT rather than the snapshot's
+# value, since a census with no holders has an empty and therefore falsy one.
+#
+# A caller that holds its own snapshot sends it on STDIN. Not argv and not the
+# environment: `ps axww -o pid=,command=` on a busy box runs to hundreds of
+# kilobytes and both have a hard size limit. The `-` argument, not the
+# emptiness of what arrives, is what says a snapshot was supplied.
+
+_nx_census_core() {
+    if [ -z "${NX_LAYOUT_HOME-}" ]; then
+        echo "nexus: NX_LAYOUT_HOME is unset; census.sh dispatches to" \
+             "census_core.py beside it and a sourced file cannot find its own" \
+             "directory under POSIX sh." >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
     fi
-    printf '%s\n' "$_NX_PS_SNAPSHOT"
+    if [ ! -f "$NX_LAYOUT_HOME/census_core.py" ]; then
+        echo "nexus: no census_core.py in NX_LAYOUT_HOME=$NX_LAYOUT_HOME." \
+             "It ships beside census.sh; an install with one and not the other" \
+             "is incomplete." >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
+    fi
+    python3 "$NX_LAYOUT_HOME/census_core.py" "$@"
+}
+
+# One process snapshot. Kept for callers that attribute several generations
+# from one view; see the header on why that matters.
+# $1 optional: "refresh", accepted and ignored — the core holds no cache, so
+# every call is already a fresh snapshot and there is nothing to invalidate.
+_nx_ps_snapshot() {
+    _nx_census_core ps_snapshot
 }
 
 # PIDs of live processes running from $1, one per line, empty if none.
-#
-# Attribution is on the GENERATION path, never the shim path. A shim resolves
-# `current` and execs the real binary, so a live holder's argv names its own
-# generation; something naming only the shim has not resolved one and must not
-# pin a tree it is not running from — GC would otherwise keep a generation
-# alive on the strength of a wrapper.
-#
 # $1 generation dir (absolute).  $2 optional pre-taken snapshot.
 nx_generation_holder_pids() {
-    case ${1-} in
-        /*) ;;
-        *)
-            echo "nexus: generation must be an absolute path, got '${1-}'" >&2
-            return "$NX_LAYOUT_USAGE_EXIT"
-            ;;
-    esac
-
-    # A generation entry MAY be a symlink rather than a real directory --
-    # .7's legacy pseudo-generation, registered by nx_register_legacy_generation
-    # to point OUTSIDE tools/ at a uv-managed tree this project does not own.
-    # A live holder's argv names the REAL path it exec'd from, never our
-    # ledger pointer, so attribution must grep for the resolved target. One
-    # level of readlink is enough: everything that registers a pseudo-
-    # generation writes a direct absolute symlink, never a chain.
-    _nx_hp_match="$1"
-    if [ -L "$1" ]; then
-        _nx_hp_resolved="$(readlink "$1")"
-        [ -n "$_nx_hp_resolved" ] && _nx_hp_match="$_nx_hp_resolved"
-    fi
-
-    # NORMALISE A TRAILING SLASH -- on the argument and on a resolved ledger
-    # target alike, which is why this sits after the readlink and not in the
-    # case above. The match below appends '/' as a path boundary, so a value
-    # that already ends in one builds '<gen>//': a pattern no ps line can ever
-    # contain, so a held tree reports ZERO holders and rule (c) waves the reap
-    # through. Neither call site can produce it today -- both pass a value from
-    # "$root"/"$prefix"* glob expansion, which bash never suffixes with '/' --
-    # and that is exactly the reason to normalise here rather than note it: an
-    # unreachable false negative in the under-reporting direction is a landmine
-    # waiting for a third caller. Found by the RG-B re-review of nexus-qzawu.
-    while [ "${_nx_hp_match%/}" != "$_nx_hp_match" ]; do
-        _nx_hp_match="${_nx_hp_match%/}"
-    done
-    if [ -z "$_nx_hp_match" ]; then
-        # "/" normalises to empty, and an empty match would make the boundary
-        # pattern "/" -- every process on the machine a holder of everything.
-        echo "nexus: refusing to census the filesystem root as a generation" >&2
-        return "$NX_LAYOUT_USAGE_EXIT"
-    fi
-
-    # PROVIDED-BUT-EMPTY is not the same as NOT PROVIDED, and testing the value
-    # conflates them: a snapshot with no matching processes is empty, so the
-    # falsy check re-took one PER GENERATION -- ps ran N+1 times for one census
-    # and the single-view guarantee above was quietly false. Test the ARGUMENT
-    # COUNT, which is the thing actually being asked about.
     if [ $# -ge 2 ]; then
-        _nx_hp_snapshot="$2"
+        printf '%s\n' "$2" | _nx_census_core holder_pids "${1-}" -
     else
-        _nx_hp_snapshot="$(_nx_ps_snapshot)"
+        _nx_census_core holder_pids "${1-}" </dev/null
     fi
-
-    # ATTRIBUTION IS STRUCTURAL, NEVER A DENYLIST ON ARGV TEXT. What stood here
-    # was inherited from live_venv_processes(): a grep -v dropping any line with
-    # the word "grep" in it, to shed the self-match that `ps ax | grep <pattern>`
-    # produced. It dropped real holders too -- `nx search grep` censused as zero
-    # holders, so GC's rule (c) reaped the tree that process was running from
-    # (nexus-qzawu; nexus-q3xrx reached without any symlink trickery). It is the
-    # nexus-xk7g2 pathology once more: a guard naming known-bad strings instead
-    # of accepting only what is provably right.
-    #
-    # Two structural properties replace it, and neither can drop a real holder.
-    # The pattern travels in the ENVIRONMENT rather than argv -- `ps -eo command`
-    # reports argv, so this pipeline cannot appear in its own snapshot and there
-    # is nothing left to exclude. And the match demands a trailing '/', so a
-    # generation cannot borrow the holders of its same-second stamp-collision
-    # sibling (install_generation.sh creates gen-<stamp> and gen-<stamp>a by
-    # design).
-    #
-    # A process that merely NAMES a path inside the tree without running from it
-    # is still counted. That is a deliberate choice of failure direction, not an
-    # oversight: narrowing to argv[0] would end the over-attribution and buy
-    # under-reporting instead, and under-reporting is what deletes a tree
-    # somebody is still running from. Retaining a tree nobody holds costs disk
-    # until the next pass. Pinned by
-    # test_a_process_merely_naming_a_path_inside_a_generation_counts_as_a_holder.
-    printf '%s\n' "$_nx_hp_snapshot" \
-        | NX_HP_MATCH="$_nx_hp_match" \
-          awk 'index($0, ENVIRON["NX_HP_MATCH"] "/") { print $1 }' \
-        || true
 }
 
 # One line per generation: its path and how many live processes hold it.
 # Informational; always exits 0 when it can read the tools directory.
 # $1 optional tools root.
 nx_census_report() {
-    _nx_cr_root="$(nx_root "${1-}")" || return "$NX_LAYOUT_USAGE_EXIT"
-    [ -d "$_nx_cr_root" ] || return 0
-
-    # Taken once, passed down. See the header.
-    _nx_cr_snapshot="$(_nx_ps_snapshot refresh)"
-
-    for _nx_cr_gen in "$_nx_cr_root"/"$NX_GENERATION_PREFIX"*; do
-        # Only gen-* directories. ~/.local/share/nexus/ also holds chroma/ and
-        # fastembed_cache/, which are documented user data; enumerating past
-        # the prefix is how a sweep turns into a data-loss bug (.6 scopes the
-        # same way).
-        [ -d "$_nx_cr_gen" ] || continue
-
-        _nx_cr_pids="$(nx_generation_holder_pids "$_nx_cr_gen" "$_nx_cr_snapshot")"
-        if [ -n "$_nx_cr_pids" ]; then
-            _nx_cr_count="$(printf '%s\n' "$_nx_cr_pids" | grep -c .)"
-        else
-            _nx_cr_count=0
-        fi
-        printf '%s holders=%s %s\n' \
-            "$_nx_cr_gen" "$_nx_cr_count" "$(printf '%s' "$_nx_cr_pids" | tr '\n' ',' | sed 's/,$//')"
-    done
-    return 0
+    _nx_census_core report "${1-}" </dev/null
 }
