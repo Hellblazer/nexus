@@ -44,7 +44,7 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 ```
 
 1. Confirm the pinned engine tag is (a) cloud-DEPLOYED and (b) cloud-GATED (recall + hybrid parity, xr7.8.9-style) — read the authoritative bead + conexus bus, **not memory** (cross-repo gate state goes stale fast: 2026-06-26 a `luxe6` condition had been cleared a week earlier than memory implied).
-2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — bump `REQUIRED_ENGINE_VERSION` to it IN THIS release (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump), gate the release battery against that engine, and arm the deploy relay to fire at client-tag push, parallel with the PyPI publish (paired-release choreography; passive bus: the relay itself goes through Hal, never autonomous). The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary, and it is never blocked by client-release preconditions either — those gate the DEPLOY, and pairing satisfies them the instant the client tag exists.
+2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — bump `REQUIRED_ENGINE_VERSION` to it IN THIS release (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump), gate the release battery against that engine, and arm the deploy relay to fire at client-tag push, parallel with the PyPI publish (paired-release choreography; send the relay to the conexus instance DIRECTLY — tuple mailbox or cross-session `SendMessage`, both reach it — and never frame the cross-instance deploy as autonomous: a relay carries the tag, the gate evidence and what changed, never authorization. See `engine-release` SKILL.md's deploy section, which retired the older "the bus is passive, surface the relay to Hal" wording by name on 2026-09-16 for reading as "you cannot talk to conexus", which is false and cost a round trip). The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary, and it is never blocked by client-release preconditions either — those gate the DEPLOY, and pairing satisfies them the instant the client tag exists.
 3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI is advisory and does not block auto-merge, so verify), then the **human** pushes `engine-service-vX.Y.Z`.
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
@@ -106,7 +106,7 @@ UNVERIFIED (a dependency such as Docker was absent; "could not check" is never
 "fine").
 
 Covered: engine-release-floor, wire-contract ledger (`--ledger-only`, which is
-MERGE-BLOCKING on every PR to main, not just at tag time), remediation-commits,
+MERGE-BLOCKING on every PR to main, not just at tag time),
 surfaces + both `source.ref` fields + the emptied ledger, the ci-evidence
 required-context drift tests run with `-m ""` so the integration-marked live
 check actually executes, the `--package-upgrade` staleness predicate evaluated
@@ -143,13 +143,15 @@ that rest on a default, and each one is named in the ship record.
 
 **`fresh-install-mvv.sh` — the virgin-journey gate (nexus-nolqs, 2026-07-21).**
 Every other E2E gate starts from a POPULATED install and tests the upgrade
-axis; the unit suite pins the SQLite opt-out backend — which is how the
-f1itv/e9ru2/kmo9h/r5f3c/9xfx5 fresh-box defect class shipped through the full
-release process unseen. This gate builds the wheel under test, then on a
+axis; the unit suite THEN pinned the SQLite opt-out backend — since retired at
+RDR-158, and today the suite pins the engine substrate instead — which is how
+the f1itv/e9ru2/kmo9h/r5f3c/9xfx5 fresh-box defect class shipped through the
+full release process unseen. The virgin journey is still covered by no unit
+test, which is why this gate exists. It builds the wheel under test, then on a
 scrubbed-env virgin HOME: local init (engine sha256+sig-verified, portable PG,
 bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG
 registration asserted, semantic search returns both sentinels, doctor with
-zero ✗ / zero ⚠ / warnings checked against the script's allowlist. Must end
+zero ✗ and warnings checked against the script's allowlist. Must end
 `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`.
 `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the 416MB model download across
 runs. Every new fresh-box warning is a decision: fix it or allowlist it in
