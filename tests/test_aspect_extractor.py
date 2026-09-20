@@ -1097,6 +1097,93 @@ class TestBatchExtraction:
         # /p2.pdf is fine
         assert records[1].problem_formulation == "P2"
 
+    def test_batch_records_carry_the_same_source_uri_the_single_doc_path_mints(
+        self, monkeypatch,
+    ) -> None:
+        """A batch-extracted row must carry ``source_uri``, like a single-doc one.
+
+        ``document_aspects.source_uri`` is the key the ``aspect_sql``
+        operators look a row up by: ``operator_filter`` / ``operator_groupby``
+        / ``operator_confidence_aggregate`` re-derive it with ``uri_for`` and
+        send the URI list to the engine. A row stored without one can never
+        match, and the operator reports that miss as ``"does not match"`` — a
+        content verdict, not an error — so the row is silently absent from
+        every analytic answer rather than loudly missing.
+
+        Measured on this box 2026-09-20, before the fix: 481 of 658 aspect
+        rows across the 24 knowledge collections carried an empty
+        ``source_uri``, and a controlled probe (same collection, same field,
+        criterion ``WSL2``) returned only the rows that happened to have one,
+        reporting two rows whose ``problem_formulation`` begins "How to
+        reliably keep a WSL2 distro alive" as not matching ``WSL2``.
+
+        The gap was the happy path alone: ``_build_record_from_entry``'s
+        schema-failure branch returns ``_empty_record``, which DID mint the
+        URI, so a batch whose entries all validated produced URI-less rows
+        while a batch that failed validation produced attributed ones.
+        """
+        from nexus.aspect_extractor import extract_aspects_batch
+        from nexus.aspect_readers import uri_for
+
+        def fake_run(args, **kwargs):
+            inner = json.dumps({
+                "papers": [
+                    {
+                        "source_path": "/p1.pdf",
+                        "problem_formulation": "P1",
+                        "proposed_method": "M1",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R1",
+                        "extras": {},
+                        "confidence": 0.9,
+                    },
+                ],
+            })
+            return _make_completed(_wrap_inner(inner))
+
+        monkeypatch.setattr("nexus.aspect_extractor._run_claude_isolated", fake_run)
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/p1.pdf", "content 1"),
+        ])
+
+        expected = uri_for("knowledge__delos", "/p1.pdf")
+        assert expected, "fixture precondition: uri_for must mint a URI here"
+        assert records[0].source_uri == expected
+
+    def test_every_aspect_record_builder_mints_a_source_uri(self) -> None:
+        """Class guard: no builder in this module may omit ``source_uri``.
+
+        The defect above was one construction site out of three forgetting a
+        single kwarg, and nothing structural objected. This walks the module's
+        AST for every ``AspectRecord(...)`` construction and requires the
+        kwarg to be present, so the next builder added here cannot reintroduce
+        the class silently.
+        """
+        import ast
+        import inspect
+
+        import nexus.aspect_extractor as mod
+
+        tree = ast.parse(inspect.getsource(mod))
+        sites = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "AspectRecord"
+        ]
+        assert sites, "non-vacuity: found no AspectRecord construction to check"
+
+        missing = [
+            node.lineno for node in sites
+            if "source_uri" not in {kw.arg for kw in node.keywords}
+        ]
+        assert not missing, (
+            f"AspectRecord built without source_uri at {mod.__file__} "
+            f"line(s) {missing}; every builder must mint it via uri_for, or "
+            f"the row is invisible to the aspect_sql operators"
+        )
+
     def test_batch_empty_content_uri_read_fail_yields_extract_fail(
         self, monkeypatch,
     ) -> None:

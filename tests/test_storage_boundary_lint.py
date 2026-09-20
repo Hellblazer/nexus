@@ -617,7 +617,13 @@ def test_dual_population_baseline_locked():
     # without a live document can no longer exist, so the census/sweep
     # have nothing left to count); 25 since RDR-201 P1.4 (nexus-j9z30.4):
     # `nx rdr set-status` reads the accept gate from T2, a second
-    # short-lived construction in commands/rdr.py beside the preamble's).
+    # short-lived construction in commands/rdr.py beside the preamble's);
+    # 26 since nexus-vnz3d (Sam decision 2026-09-20): `nx enrich
+    # aspects-backfill-uri`, a third construction in enrich.py, repairing
+    # the rows the batch aspect builder wrote with an empty source_uri --
+    # the key the aspect_sql operators match byte-equal, so those rows
+    # matched nothing and the miss surfaced as "does not match" rather than
+    # as an error (481 of 2232 rows, all in knowledge__ collections).
     assert result.t2database_constructions == sum(
         T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
     ), (
@@ -625,7 +631,7 @@ def test_dual_population_baseline_locked():
         f"{result.t2database_constructions} != allowlist sum "
         f"{sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values())}"
     )
-    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 25
+    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 26
 
 
 def test_named_allowlists_point_at_live_files():

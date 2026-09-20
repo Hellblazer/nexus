@@ -2533,3 +2533,138 @@ def aspects_list_cmd(
         click.echo(f"    problem: {problem}{'...' if r.problem_formulation and len(r.problem_formulation) > 80 else ''}")
         click.echo(f"    method:  {method}{'...' if r.proposed_method and len(r.proposed_method) > 80 else ''}")
         click.echo("")
+
+
+@enrich.command(name="aspects-backfill-uri")
+@click.option(
+    "--collection", default="",
+    help="Repair one collection. Default: every collection holding aspect rows.",
+)
+@click.option(
+    "--apply", is_flag=True,
+    help="Perform the repair (default: dry-run report only).",
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit JSON instead of the human-readable report.",
+)
+def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> None:
+    """Fill in a missing ``source_uri`` on existing aspect rows.
+
+    ``document_aspects.source_uri`` is the key the ``aspect_sql`` operators
+    look a row up by — ``operator_filter`` / ``operator_groupby`` /
+    ``operator_confidence_aggregate`` re-derive it with ``uri_for`` and match
+    it byte-equal in the engine. A row stored without one matches nothing, and
+    the operator reports that miss as "does not match": a content verdict, not
+    an error, so the row is silently absent from analytic answers rather than
+    loudly missing.
+
+    The rows were written by the batch aspect builder before it minted the URI
+    (fixed in ``_build_record_from_entry``). This repairs the ones already
+    stored. It changes ONLY ``source_uri``, and only where it is empty, so a
+    second run is a no-op.
+
+    Nothing is written without ``--apply``. The per-collection census prints
+    either way, so the number is explained rather than eyeballed.
+    """
+    from nexus.aspect_uri_repair import plan_source_uri_backfill  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only until --apply
+        if collection:
+            collections = [collection]
+        else:
+            collections = sorted({
+                c["name"] if isinstance(c, dict) else str(c)
+                for c in _aspect_bearing_collections(db)
+            })
+
+        per_collection: list[dict] = []
+        applied = 0
+        rejected: list[tuple[str, str]] = []
+        for coll in collections:
+            rows = db.document_aspects.list_by_collection(coll)
+            plan = plan_source_uri_backfill(rows)
+            per_collection.append({
+                "collection": coll,
+                "total": plan.total,
+                "already_attributed": plan.already_attributed,
+                "repairable": len(plan.updates),
+                "refused": len(plan.refusals),
+                "refusals": [
+                    {"source_path": r.source_path, "reason": reason}
+                    for r, reason in plan.refusals
+                ],
+            })
+            if not apply:
+                continue
+            for repaired, _new_uri in plan.updates:
+                # upsert returns False when the engine's confidence gate drops
+                # the write. The planner already refuses those, so a False here
+                # is a surprise worth reporting rather than counting as done.
+                if db.document_aspects.upsert(repaired):
+                    applied += 1
+                else:
+                    rejected.append((coll, repaired.source_path))
+
+        report = {
+            "apply": apply,
+            "collections": per_collection,
+            "total_rows": sum(c["total"] for c in per_collection),
+            "total_repairable": sum(c["repairable"] for c in per_collection),
+            "total_refused": sum(c["refused"] for c in per_collection),
+            "applied": applied,
+            "rejected_by_store": [
+                {"collection": c, "source_path": p} for c, p in rejected
+            ],
+        }
+
+    if as_json:
+        click.echo(json.dumps(report, indent=2, default=str))
+        return
+
+    for c in per_collection:
+        if not (c["repairable"] or c["refused"]):
+            continue
+        click.echo(
+            f"  {c['collection']}: {c['repairable']} repairable, "
+            f"{c['refused']} refused, {c['already_attributed']} already attributed "
+            f"(of {c['total']})"
+        )
+        for r in c["refusals"][:5]:
+            click.echo(f"      REFUSED {r['source_path'][:24]}: {r['reason']}")
+        if len(c["refusals"]) > 5:
+            click.echo(f"      … {len(c['refusals']) - 5} more refusal(s) (--json for all)")
+
+    click.echo(
+        f"Rows: {report['total_rows']}, repairable: {report['total_repairable']}, "
+        f"refused: {report['total_refused']}"
+    )
+    if apply:
+        click.echo(f"Applied: {applied}")
+        for c, p in rejected:
+            click.echo(f"  REJECTED BY STORE {c} {p[:24]}")
+    elif report["total_repairable"]:
+        click.echo("Dry run — re-run with --apply to write.")
+
+
+def _aspect_bearing_collections(db) -> list[str]:
+    """Collection names that hold at least one aspect row.
+
+    Derived from the catalog's collection projection rather than a distinct
+    scan of ``document_aspects``: the store exposes no such verb, and a
+    per-collection list is what the planner consumes anyway.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    cat = make_catalog_reader()
+    if cat is None:
+        raise click.ClickException(
+            "Catalog is empty. Index or store documents first."
+        )
+    names = {
+        d.physical_collection for d in cat.all_documents()
+        if getattr(d, "physical_collection", "")
+    }
+    return sorted(names)

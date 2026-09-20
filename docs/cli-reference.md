@@ -710,6 +710,28 @@ Companion to `aspects-show` at the collection level (preview / audit shape) inst
 | `--missing` | Flip output: list catalog rows with NO aspect record, keyed by `file_path or title` (the gap-fill's key), plus any orphaned aspect rows no current entry claims |
 | `--json` | Emit JSON array instead of human-readable form |
 
+### nx enrich aspects-backfill-uri
+
+Fill in a missing `source_uri` on existing aspect rows. Dry-run by default.
+
+```
+nx enrich aspects-backfill-uri
+nx enrich aspects-backfill-uri --collection knowledge__delos__voyage-context-3__v1
+nx enrich aspects-backfill-uri --apply
+```
+
+`document_aspects.source_uri` is the key the `aspect_sql` operators look a row up by: `operator_filter`, `operator_groupby` and `operator_confidence_aggregate` re-derive it with `aspect_readers.uri_for` and the engine matches it byte-equal. A row stored **without** one matches nothing — and the operator reports that miss as `"does not match"`, a content verdict rather than an error, so the row is silently absent from analytic answers instead of loudly missing.
+
+The affected rows were written by the batch aspect builder (`_build_record_from_entry`) while it omitted the `source_uri` kwarg both single-doc builders passed. Only its happy path was affected — its schema-failure branch returned `_empty_record`, which did mint the URI — which is why affected collections are mixed rather than uniformly empty. Measured before the writer fix: 481 of 2232 aspect rows, all of them in `knowledge__` collections (481 of the 658 rows those collections held), with 0 refusals.
+
+Changes only `source_uri`, and only where it is empty, so a second run is a no-op. Rows are refused rather than repaired when `uri_for` mints nothing (an empty `source_path`, or a relative one in a file-routed collection with no `repo_root` — it never guesses), when `confidence` is below the engine's upsert gate of 0.3 or absent (the write would be dropped silently), or when `doc_id` is blank (`upsert` refuses an unattributable row). The per-collection census prints with or without `--apply`.
+
+| Flag | Description |
+|------|-------------|
+| `--collection NAME` | Repair one collection (default: every collection holding aspect rows) |
+| `--apply` | Perform the repair (default: dry-run report only) |
+| `--json` | Emit JSON instead of the human-readable report |
+
 ### nx enrich list
 
 ```
