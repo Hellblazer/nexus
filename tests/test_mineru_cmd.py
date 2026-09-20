@@ -212,6 +212,28 @@ class TestMineruStop:
 
 # ── nx mineru status ─────────────────────────────────────────────────────────
 
+#: The MinerU server's REAL ``/health`` payload, captured verbatim from a
+#: running server (3.1.11, 2026-09-20). The task counters are named
+#: ``processing_tasks`` / ``queued_tasks`` — NOT ``active_tasks``. The
+#: previous fixture here invented ``active_tasks``, so this test stayed green
+#: for as long as ``nx mineru status`` printed a literal ``?`` in place of
+#: every count. A fixture is only evidence about production when it is the
+#: shape production actually serves.
+_REAL_HEALTH_PAYLOAD = {
+    "status": "healthy",
+    "version": "3.1.11",
+    "protocol_version": 1,
+    "queued_tasks": 2,
+    "processing_tasks": 1,
+    "completed_tasks": 5,
+    "failed_tasks": 0,
+    "max_concurrent_requests": 1,
+    "processing_window_size": 8,
+    "task_retention_seconds": 300,
+    "task_cleanup_interval_seconds": 300,
+}
+
+
 class TestMineruStatus:
     @pytest.mark.parametrize("setup,status_code,expect_text", [
         ("healthy", 200, "healthy|running"),
@@ -225,9 +247,43 @@ class TestMineruStatus:
             _write_pid(pid_file)
             resp = MagicMock(); resp.status_code = status_code
             if status_code == 200:
-                resp.json.return_value = {"status": "ok", "active_tasks": 0, "completed_tasks": 5}
+                resp.json.return_value = dict(_REAL_HEALTH_PAYLOAD)
             with patch("nexus.commands.mineru.os.kill"), \
                  patch("nexus.commands.mineru.httpx.get", return_value=resp):
                 result = runner.invoke(main, ["mineru", "status"])
         assert result.exit_code == 0
         assert any(t in result.output.lower() for t in expect_text.split("|"))
+
+    def test_status_reports_the_servers_real_counters(self, runner, pid_file):
+        """The counts come from the keys the server actually serves.
+
+        Pins the rendered numbers against ``_REAL_HEALTH_PAYLOAD``, and pins
+        the absence of ``?`` — the placeholder every count degraded to while
+        the renderer read a key no server ever sends.
+        """
+        _write_pid(pid_file)
+        resp = MagicMock(); resp.status_code = 200
+        resp.json.return_value = dict(_REAL_HEALTH_PAYLOAD)
+        with patch("nexus.commands.mineru.os.kill"), \
+             patch("nexus.commands.mineru.httpx.get", return_value=resp):
+            result = runner.invoke(main, ["mineru", "status"])
+        assert result.exit_code == 0
+        assert "?" not in result.output
+        assert "Processing: 1" in result.output
+        assert "Queued: 2" in result.output
+        assert "Completed: 5" in result.output
+
+    def test_status_degrades_to_placeholder_on_an_older_server(self, runner, pid_file):
+        """A server that serves none of these keys prints ``?``, not ``0``.
+
+        The distinction is the point: ``0`` would assert a count this
+        command never received.
+        """
+        _write_pid(pid_file)
+        resp = MagicMock(); resp.status_code = 200
+        resp.json.return_value = {"status": "healthy"}
+        with patch("nexus.commands.mineru.os.kill"), \
+             patch("nexus.commands.mineru.httpx.get", return_value=resp):
+            result = runner.invoke(main, ["mineru", "status"])
+        assert result.exit_code == 0
+        assert "Processing: ?" in result.output

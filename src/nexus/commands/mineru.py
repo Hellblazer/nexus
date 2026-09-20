@@ -289,12 +289,22 @@ def status() -> None:
         resp = httpx.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
-            active = data.get("active_tasks", "?")
+            # The server's /health serves ``processing_tasks`` / ``queued_tasks``
+            # / ``completed_tasks``. This read ``active_tasks``, a key no
+            # MinerU server has ever sent, so every count rendered as the
+            # literal ``?`` placeholder — including mid-parse, which is the one
+            # moment the command is worth running. The test fixture invented the
+            # same key, so the suite stayed green throughout.
+            #
+            # ``?`` is kept as the fallback rather than 0: a server that did not
+            # report a count has not reported zero.
+            processing = data.get("processing_tasks", "?")
+            queued = data.get("queued_tasks", "?")
             completed = data.get("completed_tasks", "?")
             click.echo(
                 f"MinerU server running and healthy (PID {pid}, port {port})\n"
-                f"  Active tasks: {active}\n"
-                f"  Completed tasks: {completed}"
+                f"  Processing: {processing}   Queued: {queued}   "
+                f"Completed: {completed}"
             )
         else:
             click.echo(
