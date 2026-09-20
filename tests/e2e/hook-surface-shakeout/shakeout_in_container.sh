@@ -161,11 +161,16 @@ if [ -n "${SHAKEOUT_PROBE:-}" ]; then
     say "probe: one turn done, collecting every candidate evidence surface"
     collect
     echo "  files with any content under the run dir:"
-    find "$RUN" "$HOME_DIR/.claude" "$HOME_DIR/.config/nexus" -type f -size +0 2>/dev/null \
-        | head -40 | while read -r f; do printf '    %-64s %s\n' "$f" "$(wc -c < "$f")"; done
+    # awk, not head, on both listings below: display-only, and under pipefail
+    # head's pipe close would SIGPIPE the producer and fail the probe. awk
+    # bounds the output and still drains the stream.
+    find "$RUN" "$HOME_DIR/.claude" "$HOME_DIR/.config/nexus" -type f -size +0 \
+        2>/dev/null | awk 'NR<=40' \
+        | while read -r f; do printf '    %-64s %s\n' "$f" "$(wc -c < "$f")"; done
     echo "  any hook_ or nx-hook mention, by file:"
-    grep -rlE 'hook_[a-z_]+|nx-hook' "$RUN" "$HOME_DIR/.claude" "$HOME_DIR/.config/nexus" 2>/dev/null \
-        | head -20 | sed 's/^/    /'
+    grep -rlE 'hook_[a-z_]+|nx-hook' "$RUN" "$HOME_DIR/.claude" \
+        "$HOME_DIR/.config/nexus" 2>/dev/null | awk 'NR<=20' \
+        | sed 's/^/    /'
     echo "PROBE COMPLETE"
     exit 0
 fi

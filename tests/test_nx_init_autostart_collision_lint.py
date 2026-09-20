@@ -81,6 +81,12 @@ CONTAINER_ALLOWLIST: dict[str, int] = {
     "tests/e2e/migration-rehearsal/rehearse_stranded.sh": 3,
     "tests/e2e/migration-rehearsal/rehearse_cold.sh": 1,
     "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": 1,
+    # Runs only inside the RDR-215 hook-surface shakeout image (Dockerfile
+    # ENTRYPOINT), on a virgin HOME with no production install to collide
+    # with: the whole point of that harness is a box where nothing is
+    # registered yet. Autostart is wanted there -- the hooks under test
+    # reach the engine.
+    "tests/e2e/hook-surface-shakeout/shakeout_in_container.sh": 1,
 }
 
 _DIRECTIVE = (

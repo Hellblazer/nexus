@@ -235,7 +235,11 @@ docker run --rm \
 rc=$?
 set -e
 echo "[run] artifacts:"
-find "$ART" -type f 2>/dev/null | head -40 | while read -r f; do
+# awk, not head: this listing is display-only, and under pipefail `head`
+# closing the pipe SIGPIPEs find, so a cosmetic listing would fail a run
+# whose real work had already succeeded. awk bounds the output while still
+# reading to EOF, so nothing is killed and no exemption is needed.
+find "$ART" -type f 2>/dev/null | awk 'NR<=40' | while read -r f; do
     printf '  %-60s %s bytes\n' "${f#$ART/}" "$(wc -c < "$f")"
 done
 exit $rc
