@@ -4,6 +4,37 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.55.0] - 2026-09-20
+
+Paired engine: engine-service-v0.1.129, unchanged from 7.54.0. No engine cut.
+
+The pin advance IS this release for the plugin: Claude Code loads it from the
+tag `marketplace.json` pins, so all 35 ledger entries below have been on
+`develop` and inert in every session until now.
+
+The big one is RDR-215: the bash hook layer is gone. Twelve bash hook scripts
+and the shell launcher are deleted, 25 of 25 `hooks.json` entries across both
+tiers are re-declared in exec form, and the `expectations_*` ledger moved out
+of a sourced bash library into `nexus.hooks.expectations` as `nx-hook` verbs.
+A hook that was a shell script wrapping a Python script is now the Python
+entry point, declared directly.
+
+Also live with this tag:
+
+- `conexus/skills/architecture/SKILL.md` distinguishes `--lexical` from
+  `--hybrid`. It recommends `--hybrid` for discovery in three places, and the
+  two flags now have similar-sounding names and different jobs — `--hybrid`
+  re-ranks vector results by git frecency, `--lexical` adds exact-text hits
+  and changes which rows come back. Without the distinction stated where
+  agents read it, the two meanings drift apart in exactly the guidance used to
+  choose between them.
+- `conexus/skills/git-worktrees/SKILL.md` gains the one-session-one-worktree
+  case, which it previously omitted entirely.
+- `conexus/hooks/scripts/tuple_ledger_project.py` and the mailbox drain,
+  behaviour census, version lockstep and routing guards are all re-declared or
+  corrected; see `conexus/PENDING_RELEASE.md` in the release commit for the
+  per-file reasons.
+
 ## [7.54.0] - 2026-09-19
 
 Paired engine: engine-service-v0.1.129, unchanged from 7.53.0. No engine cut.
