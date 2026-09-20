@@ -20,6 +20,7 @@ from nexus.formatters import (
 from nexus.scoring import round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.search_engine import (
+    LexicalLegUnavailableError,
     SearchDiagnostics,
     apply_file_diversity_cap,
     apply_ranking_boosts,
@@ -426,6 +427,13 @@ def search_cmd(
 
     try:
         results = _retrieve(query)
+    except LexicalLegUnavailableError as exc:
+        # RDR-217 P3 (review finding): --lexical refuses rather than falling
+        # back, and a refusal the user reads as a Python traceback is not the
+        # clean, remedy-naming error that decision called for. Not a
+        # VectorServiceError subclass on purpose — this is a capability
+        # refusal, not a service failure — so it needs its own handler here.
+        raise click.ClickException(str(exc)) from exc
     except VectorServiceError as exc:
         # nexus-pebfx.8: every targeted collection was unservable — show the
         # service's error body cleanly instead of a raw traceback.

@@ -29,6 +29,7 @@ import inspect
 
 import pytest
 
+from nexus.db.http_vector_client import VectorServiceError
 from nexus.mcp import core
 
 from nexus.search_engine import LexicalLegUnavailableError, search_cross_corpus
@@ -198,10 +199,155 @@ def test_the_mcp_page_cache_key_includes_lexical():
 
 
 def test_the_mcp_search_tool_declares_the_parameter_with_a_description():
-    """The tool-description lint is lint-marked, so a bare `lexical: bool` with
-    no Field description reds the lint bucket rather than `pytest -n auto`.
-    This puts the same check in the default loop.
+    """The WIRE-FACING tool's parameter carries a Field description.
+
+    CORRECTED after the P3 critique caught this as the sixth instance of this
+    epic's own cited failure class. It previously inspected
+    ``_search_render``'s signature and claimed to guard the
+    ``Field(description=...)`` lint — but ``_search_render`` is the internal
+    business-logic function and carries no ``Annotated``/``Field`` metadata at
+    all, so the assertion could not fail for the reason its name gave. It
+    checked a signature and claimed to check a schema.
+
+    The Field annotations live on the registered MCP tool. Read the SOURCE of
+    the wire-facing declaration, which is where the lint reads them from too.
     """
+    src = inspect.getsource(core)
+    decl = src[src.index("    lexical: Annotated[bool, Field("):]
+    decl = decl[:decl.index(")] = ")]
+    assert "description=" in decl, (
+        "the wire-facing `lexical` parameter has no Field description; the "
+        "lint-marked tests/test_mcp_tool_description_lint.py would red the lint "
+        "bucket, which `pytest -n auto` does not run"
+    )
+    assert "ADD" in decl, "the description must say the leg is additive"
+    assert "Refuses" in decl, "the description must say it refuses rather than degrades"
+
+
+def test_the_render_parameter_is_off_by_default():
+    """Separate from the schema check above, because they are different claims
+    about different objects — conflating them is what made the original test
+    unable to fail for its stated reason."""
     sig = inspect.signature(core._search_render)
     assert "lexical" in sig.parameters
     assert sig.parameters["lexical"].default is False, "must be off by default"
+
+
+# ── the three P3-review ship-blockers, each with a test that fails without
+# its fix ────────────────────────────────────────────────────────────────────
+
+
+def test_a_lexical_leg_failure_does_not_discard_the_vector_rows_silently():
+    """P3 review CRITICAL 1. The two legs shared one try/except, so a transient
+    hybrid-only failure reported "all collections failed" — throwing away a
+    vector search that had already succeeded, and on a multi-collection batch
+    feeding the per-collection fallback that can memoize a collection as
+    permanently poisoned over a blip in a route the caller merely asked to ALSO
+    consult.
+
+    It still fails LOUD (returning vector-only rows for a --lexical request is
+    the silent outcome the design forbids), but it must fail as a LEXICAL
+    failure, naming that leg and saying the vector search itself was fine.
+    """
+    class _LexBlows(_LexicalBackend):
+        def hybrid_search(self, *a, **kw):
+            raise VectorServiceError("hybrid route had a blip", code=503)
+
+    backend = _LexBlows(
+        vector_rows=[{"id": "v1", "content": "a", "distance": 0.2, "collection": _COLL}],
+    )
+    with pytest.raises(LexicalLegUnavailableError) as exc:
+        search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+
+    msg = str(exc.value)
+    assert "lexical leg failed" in msg, "the failure must name the lexical leg"
+    assert "vector search itself succeeded" in msg, (
+        "the message must say the vector leg was fine, or a reader will chase "
+        "the wrong cause"
+    )
+
+
+def test_the_exemption_survives_a_row_both_legs_returned():
+    """P3 review IMPORTANT 3, and the routine case rather than the edge.
+
+    ``per_k`` deliberately over-fetches past the threshold, so a lexical hit is
+    OFTEN already in the vector leg's raw pool. The first implementation
+    stamped a marker on lexical-only rows and kept the vector copy on a tie, so
+    exactly those rows lost the marker and got threshold-dropped — the
+    exemption worked only for rows the vector leg missed entirely.
+
+    Provenance is tracked in a set now, so a row BOTH legs returned is still a
+    lexical hit and still exempt.
+    """
+    row = {"id": "both", "content": "a", "distance": 0.92, "collection": _COLL}
+    backend = _LexicalBackend(vector_rows=[dict(row)], lexical_rows=[dict(row)])
+
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+
+    assert "both" in {r.id for r in rows}, (
+        "a row returned by BOTH legs was dropped by the vector threshold; the "
+        "exemption is keyed on which copy survived dedup rather than on whether "
+        "the lexical leg matched it"
+    )
+
+
+def test_no_internal_provenance_marker_reaches_a_result_row():
+    """P3 review IMPORTANT 4. The marker rode ``r.metadata`` into
+    ``nx search --json`` output via format_json's ``**r.metadata`` spread — an
+    undocumented public field. Tracking provenance in a set instead means there
+    is nothing to leak, and this asserts the absence rather than trusting it.
+    """
+    backend = _LexicalBackend(
+        vector_rows=[{"id": "v1", "content": "a", "distance": 0.20, "collection": _COLL}],
+        lexical_rows=[{"id": "L1", "content": "b", "distance": 0.30, "collection": _COLL}],
+    )
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+
+    for r in rows:
+        assert "_lexical_only" not in r.metadata, (
+            f"{r.id} carries the internal provenance marker in metadata, which "
+            "format_json spreads into --json output"
+        )
+
+
+def test_the_lexical_leg_is_reranked_whenever_the_vector_leg_is():
+    """P3 critique CRITICAL 1, the defect that made the feature not work.
+
+    ``search_cmd.py`` puts rows carrying a ``rerank_score`` FIRST and truncates
+    at n. A lexical row that was never scored lands in the unscored tail and is
+    dropped — in the DEFAULT invocation, which is exactly where Phase 1
+    measured the rare-token win. The union was real and invisible.
+
+    Both routes share one rerank tail server-side, so the two legs' scores are
+    on the same scale and the rows can be ordered against each other honestly.
+    This asserts the lexical call actually requests it.
+    """
+    class _RecordingRerank(_LexicalBackend):
+        supports_server_rerank = True
+
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.hybrid_kwargs: list[dict] = []
+
+        def search(self, query, collection_names, n_results=10, where=None, **kw):
+            rows = super().search(query, collection_names, n_results, where, **kw)
+            if kw.get("rerank") and kw.get("rerank_meta_out") is not None:
+                kw["rerank_meta_out"].update({"degraded": False})
+            return rows
+
+        def hybrid_search(self, query, collection_names, n_results=10, where=None, **kw):
+            self.hybrid_kwargs.append(dict(kw))
+            return list(self._lex)
+
+    backend = _RecordingRerank(
+        vector_rows=[{"id": "v1", "content": "a", "distance": 0.2, "collection": _COLL}],
+        lexical_rows=[{"id": "L1", "content": "b", "distance": 0.3, "collection": _COLL}],
+    )
+    search_cross_corpus("q", [_COLL], n_results=5, t3=backend,
+                        lexical=True, rerank=True)
+
+    assert backend.hybrid_kwargs, "the lexical leg was never called"
+    assert backend.hybrid_kwargs[0].get("rerank") is True, (
+        "the lexical leg was not reranked while the vector leg was, so its rows "
+        "carry no rerank_score and search_cmd.py truncates them away"
+    )

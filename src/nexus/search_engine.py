@@ -789,6 +789,9 @@ def search_cross_corpus(
         # service quota.
         per_k = min(_desired_candidate_count(cols, n_results), QUOTAS.MAX_QUERY_RESULTS)
         rerank_meta: dict = {}
+        #: Chunk ids the lexical leg returned, whether or not the vector leg
+        #: also returned them. Read by the threshold filter below.
+        lexical_ids: set[str] = set()
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
@@ -797,16 +800,67 @@ def search_cross_corpus(
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where)
             if lexical:
                 # ADDITIVE: the lexical rows join the vector rows rather than
-                # replacing them. Deduplicated by chunk id, vector row winning
-                # on a tie so its distance and metadata are the ones reported;
-                # a lexical-only row is stamped _lexical_only so the threshold
-                # filter below can exempt it.
-                lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
-                                           where=effective_where)
+                # replacing them, deduplicated by chunk id with the vector row
+                # winning a tie so its distance and metadata are the ones
+                # reported.
+                #
+                # ITS OWN try/except, NOT the vector leg's (P3 review CRITICAL
+                # 1): sharing one handler meant a transient hybrid-only failure
+                # discarded the already-successful vector rows — reported as
+                # "all 1 collections failed" on a single collection, and on a
+                # multi-collection batch it fed the per-collection fallback,
+                # which can memoize a collection as permanently poisoned over a
+                # blip in a route the user merely asked to ALSO consult.
+                #
+                # It still fails LOUD rather than degrading: returning
+                # vector-only rows for a --lexical request is the silent
+                # outcome the whole design forbids. What changes is that the
+                # failure now names the lexical leg as the cause and never
+                # poisons the collection.
+                try:
+                    # RERANKED WHENEVER THE VECTOR LEG IS (P3 critique CRITICAL
+                    # 1). Without this the union is defeated by the CLI's own
+                    # ordering: search_cmd.py puts rows carrying a rerank_score
+                    # FIRST and truncates at n, and a lexical row that was never
+                    # scored lands in the unscored tail and is dropped — in the
+                    # default invocation, which is exactly where Phase 1
+                    # measured the rare-token win. Both routes share one rerank
+                    # tail server-side (VectorHandler#sendSearchResult), so the
+                    # two legs' scores are on the same scale by construction and
+                    # the rows can be ordered against each other honestly.
+                    if server_rerank:
+                        lex_meta: dict = {}
+                        lex_raw = t3.hybrid_search(
+                            query, cols, n_results=per_k, where=effective_where,
+                            rerank=True, rerank_meta_out=lex_meta,
+                        )
+                        # A degrade on EITHER leg is a degrade for this batch;
+                        # merged rather than overwritten so the vector leg's
+                        # state cannot be masked by the lexical leg's success.
+                        if lex_meta.get("degraded"):
+                            rerank_meta.update(lex_meta)
+                    else:
+                        lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
+                                                   where=effective_where)
+                except VectorServiceError as lex_exc:
+                    raise LexicalLegUnavailableError(
+                        f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
+                        "rather than returning vector-only rows, which would look "
+                        "like an answer while the leg you asked for never ran. The "
+                        "vector search itself succeeded, so retrying without "
+                        "--lexical will return results."
+                    ) from lex_exc
+                # Provenance is tracked in a SET, never stamped on the row
+                # (review IMPORTANT 3 and 4). Stamping had two defects: a row
+                # BOTH legs returned kept the vector copy and so lost the
+                # marker, silently forfeiting the exemption for the common case
+                # where per_k's over-fetch already pulled it in; and the marker
+                # rode r.metadata into `nx search --json` output as a public
+                # field nobody documented.
+                lexical_ids.update(r.get("id") for r in lex_raw if r.get("id"))
                 seen_ids = {r.get("id") for r in raw}
-                added = [dict(r, _lexical_only=True) for r in lex_raw
-                         if r.get("id") not in seen_ids]
-                raw = list(raw) + added
+                raw = list(raw) + [r for r in lex_raw
+                                   if r.get("id") not in seen_ids]
         except VectorServiceError as exc:
             # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
             # unservable collection in the batch (embedding-space mismatch,
@@ -895,7 +949,7 @@ def search_cross_corpus(
                 # a vector threshold to a lexically-matched row would drop
                 # precisely what the leg exists to find.
                 if (threshold is not None and distance > threshold
-                        and not r.get("_lexical_only")):
+                        and r.get("id") not in lexical_ids):
                     dropped += 1
                     if min_dropped_distance is None or distance < min_dropped_distance:
                         min_dropped_distance = distance
