@@ -238,8 +238,16 @@ docker build -q -t "$IMAGE" "$STAGE" > "$STAGE/docker-build.log" 2>&1 \
 # ended with --rm and took their logs with them, so working out why the census
 # saw nothing would have needed another billed session to reproduce what had
 # already been written to disk once.
-ART="${NX_SHAKEOUT_ARTIFACTS:-${TMPDIR:-/tmp}/hook-shakeout-$SHA.artifacts}"
-rm -rf "$ART"; mkdir -p "$ART"; chmod 777 "$ART"
+# ARTIFACTS ARE KEYED PER RUN, not per sha, and this is not tidiness. Keyed on
+# the sha alone, two runs of the SAME commit shared a directory and the second
+# `rm -rf` destroyed the first's evidence. That is exactly what happened to the
+# delay-15 rung of the nexus-veh77 race measurement: the delay-0 control
+# overwrote it, and the load-bearing timestamps survived only as a
+# transcription in a write-up that presented them as verifiable. A harness
+# that erases its own findings between rungs cannot support a ladder.
+_RUNTAG="$(date -u +%Y%m%dT%H%M%SZ)${SHAKEOUT_RACE_DELAY:+-delay${SHAKEOUT_RACE_DELAY}}${SHAKEOUT_PROBE:+-probe}"
+ART="${NX_SHAKEOUT_ARTIFACTS:-${TMPDIR:-/tmp}/hook-shakeout-$SHA-$_RUNTAG.artifacts}"
+mkdir -p "$ART"; chmod 777 "$ART"
 
 echo "[run] real Claude Code sessions, plugin from $SHA"
 echo "[run] artifacts -> $ART"
