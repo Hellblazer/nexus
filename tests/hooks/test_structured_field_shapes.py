@@ -138,20 +138,55 @@ class TestTheThreeHooksAgreeAcrossShapes:
             "text — the 7.55.0 defect"
         )
 
-    def test_a_bare_command_string_is_still_read_as_the_command(self, unmarked_t1) -> None:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bd close nexus-99xyz --reason probe",
+            # A POSIX brace group. Starts with "{", is an ordinary
+            # command, and is not JSON. An earlier version of the fix
+            # switched on that first character and emptied the command
+            # here, allowing the close — the defect this change exists
+            # to close, reintroduced narrowly. Caught in review rather
+            # than by a test, so it gets a test.
+            "{ bd close nexus-99xyz --reason probe; }",
+            "  bd close nexus-99xyz --reason probe",
+            "cd /tmp && bd close nexus-99xyz --reason probe",
+        ],
+    )
+    def test_a_bare_command_string_is_still_read_as_the_command(
+        self, unmarked_t1, command: str
+    ) -> None:
         """The deliberate direct-caller path, kept. Only JSON text was the bug."""
-        command = "bd close nexus-99xyz --reason probe"
         bare = run({"session_id": "s", "tool_name": "Bash", "tool_input": command})
-        assert _decision(bare) == "deny"
+        assert _decision(bare) == "deny", (
+            f"the close gate did not see the bd verb in {command!r}"
+        )
 
-    def test_the_gate_still_fails_open_when_t1_cannot_be_reached(self) -> None:
-        """No fixture here, deliberately: this is the unarmed case.
+    def test_the_gate_fails_open_when_t1_cannot_be_reached(self, monkeypatch) -> None:
+        """Unreachable T1 allows rather than blocking every close.
 
-        It is also what made the two tests above vacuous before the
-        fixture existed, so it is worth holding as a fact rather than
-        leaving as an accident — the gate allows rather than blocking
-        every close when it cannot check.
+        The unreachability is STUBBED. An earlier version of this test
+        just passed a nonsense session id and asserted allow, which was
+        wrong twice over: `_nx_env` sets NX_T1_ALLOW_SHARED_FALLBACK=1
+        precisely because a detached hook has no lease, so a bogus id
+        falls through to the shared CLI identity — which on a developer
+        box is reachable, and the test then measured that box rather
+        than the branch it named. It passed only because a different
+        fail-open (on_close false, from a worktree with no `.nexus.yml`)
+        was masking it, and it started failing the moment that was
+        fixed. Two accidents cancelling is not a test.
         """
+        monkeypatch.setattr(stop_mod, "_read_config", lambda: {"on_close": True})
+        monkeypatch.setattr(
+            mod,
+            "_coverage",
+            lambda ids: {
+                "t1_reachable": False,
+                "status": {i: "uncertain" for i in ids},
+                "deadline_seconds": 3.5,
+                "seen_names": [],
+            },
+        )
         command = "bd close nexus-99xyz --reason probe"
         assert (
             _decision(run({"session_id": "s", "tool_name": "Bash", "tool_input": {"command": command}}))

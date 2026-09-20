@@ -48,8 +48,26 @@ mechanize, it matters enough to ship.
   7.55.0 is the release that broke it, so a `bd close` naming a bead
   with no review-completed marker passes unchecked until the pin
   advances. Merging the fix changes nothing for anyone until then.
-  Two other causes of the same silence are NOT addressed here:
-  `.nexus.yml` is untracked and resolved from cwd, so `on_close` is
-  false in every worktree (bead nexus-634ye, awaiting Sam's call), and
-  an unreachable T1 fails open by design. Advancing the pin fixes one
-  of the three.
+
+- `conexus/hooks/scripts/read_verification_config.py`:
+  bead: nexus-634ye — the same gate had a SECOND, independent off-switch,
+  and the fix above does not touch it. `.nexus.yml` is gitignored by
+  design (`docs/configuration.md`: "It is gitignored by default"), so
+  there is one per repo and it sits in the primary checkout; the reader
+  resolved it from the process cwd, so every linked worktree got DEFAULTS
+  — `on_close: false`, gate off — from the day this project moved to
+  one-session-one-worktree. It now resolves from the git COMMON dir, so
+  every worktree finds the primary's file, which is the same reasoning
+  the engine build lease and the stamped-jar cache already use.
+  INERT until the next cut, like everything else here.
+
+  **Read those two entries together before concluding what a cut buys.**
+  The gate needs BOTH to be live: the first makes the harness listen to
+  the verdict, the second makes the gate armed enough to have one. Either
+  alone leaves it silent, and the two fail identically, which is how one
+  hid behind the other during this investigation. A third path, an
+  unreachable T1, also allows — but that one was always loud (it stamps
+  the ids `unverified` and says so) and is a deliberate fail-open, not a
+  defect. The `on_close: false` path is now loud too, in the wheel rather
+  than in the plugin, so a session on an old pin with a new wheel will at
+  least be told why nothing was checked.

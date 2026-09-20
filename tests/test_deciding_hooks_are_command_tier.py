@@ -148,6 +148,25 @@ _EVENTS_WHERE_A_VERDICT_MATTERS = frozenset(
 _EMITTER_CALLS = frozenset({"permission_decision", "permission_request", "stop_decision"})
 _VERDICT_KEYS = frozenset({"permissionDecision", "decision", "behavior"})
 
+#: Stands in for a verdict this reader cannot evaluate statically — a
+#: variable, a named constant, an f-string. It is treated as non-neutral
+#: on purpose, so an unreadable verdict forces the hook into
+#: DECIDING_HOOKS rather than being counted as no verdict at all. A
+#: reader that answers "nothing to see" when it cannot see is the exact
+#: shape of the defect this module exists to catch.
+_NEEDS_MANUAL_CLASSIFICATION = "deny"
+
+#: The Claude Code release the tier rule was read and measured against.
+#: This module asserts a fact about a FILE in order to enforce a fact
+#: about the HARNESS, and only the first half is checked here. If a
+#: later CLI lets `mcp_tool` carry a verdict, or changes which events
+#: read one, these tests keep enforcing a rule that has stopped being
+#: true and nothing says so. Re-read the hooks guide when this is far
+#: behind the CLI in use; `tests/hooks/test_deciding_verbs_end_to_end.py`
+#: is the nearest thing to a behavioural check and it still only proves
+#: the command tier works, never that the tool tier does not.
+_VERIFIED_AGAINST_CLI = "2.1.278"  # 2026-09-20
+
 #: ``allow`` is neutral on most events and NOT neutral on these two,
 #: where it skips a permission prompt the user would otherwise see. That
 #: is why ``auto_approve`` counts and ``divergence_language_guard`` does
@@ -209,7 +228,10 @@ def test_every_registered_hook_whose_verdict_matters_is_declared_deciding() -> N
     assert not undeclared, (
         f"these hooks return a verdict on an event that reads one, but are not "
         f"in DECIDING_HOOKS, so nothing stops hooks.json wiring them as an "
-        f"mcp_tool where the verdict is discarded: {sorted(undeclared)}"
+        f"mcp_tool where the verdict is discarded: {sorted(undeclared)}. "
+        f"(The tier rule was read and measured against Claude Code CLI "
+        f"{_VERIFIED_AGAINST_CLI}; if that is far behind the CLI in use, "
+        f"re-read the hooks guide before assuming this rule still holds.)"
     )
 
 
@@ -251,9 +273,25 @@ def _verdicts_emitted(path: Path) -> set[str]:
             fn = node.func
             name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
             if name in _EMITTER_CALLS:
-                for arg in node.args:
+                # Positional AND keyword. Every call site today passes
+                # the verdict positionally, so reading only node.args
+                # happened to work — and a future
+                # stop_decision(decision="block") would have been
+                # invisible to a test whose entire job is catching a
+                # silently-missing verdict. Found in review, not by a
+                # failure, which is the same way this whole class hides.
+                for arg in (*node.args, *(kw.value for kw in node.keywords)):
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                         found.add(arg.value)
+                    elif not isinstance(arg, ast.Constant):
+                        # A verdict this reader CANNOT evaluate — a name,
+                        # a constant referenced by name, an f-string.
+                        # Returning nothing for it would be the silent
+                        # gap this whole module exists to prevent, one
+                        # level up, so it is surfaced as a value that
+                        # forces the hook into DECIDING_HOOKS and makes
+                        # a human classify it.
+                        found.add(_NEEDS_MANUAL_CLASSIFICATION)
         elif isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values):
                 if (
