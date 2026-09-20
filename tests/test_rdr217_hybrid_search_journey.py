@@ -221,9 +221,23 @@ def test_the_text_gate_is_live_and_an_empty_result_is_the_gate_not_a_dead_route(
     # disjoint. That is precisely the population the gate excludes.
     semantic_only = "figure out which conversation is presently leased"
 
+    # SELF-SUFFICIENCY, added after the P2/P4 shipment review found this test
+    # passing against a hybrid_search mutated to always return []. It asserted
+    # only that the vector route retrieves and that the gated call is empty,
+    # which is equally true of a DEAD route — the aliveness evidence lived in a
+    # sibling test in this file, so the discrimination this test claims to make
+    # depended on a neighbour it never named. A control that needs a neighbour
+    # is not a control. The live-route call is therefore inline, and this test
+    # now reds on its own against a dead route.
+    alive = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5)
     gated = db.hybrid_search(semantic_only, [_COLLECTION], n_results=5)
     vector = db.search(semantic_only, [_COLLECTION], n_results=5)
 
+    assert alive, (
+        "control failed: the hybrid route returned nothing for a query whose "
+        "literal tokens the corpus carries, so it is dead or misrouted and the "
+        "empty result below says nothing about the text gate"
+    )
     assert vector, (
         "control failed: the vector route found nothing either, so this test "
         "proves nothing about the text gate — the corpus or the tenant is wrong"
