@@ -35,6 +35,9 @@
 # never existed at any instant.
 
 _nx_census_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# layout.sh dispatches to layout_core.py beside it, and a sourced file
+# cannot find its own directory under POSIX sh. We already know it.
+NX_LAYOUT_HOME="$_nx_census_here"
 # shellcheck source=src/nexus/_install/layout.sh
 . "$_nx_census_here/layout.sh"
 
@@ -143,7 +146,7 @@ nx_generation_holder_pids() {
 # Informational; always exits 0 when it can read the tools directory.
 # $1 optional tools root.
 nx_census_report() {
-    _nx_cr_root="$(_nx_root "${1-}")" || return "$NX_LAYOUT_USAGE_EXIT"
+    _nx_cr_root="$(nx_root "${1-}")" || return "$NX_LAYOUT_USAGE_EXIT"
     [ -d "$_nx_cr_root" ] || return 0
 
     # Taken once, passed down. See the header.

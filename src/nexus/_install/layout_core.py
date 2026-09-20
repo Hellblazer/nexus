@@ -510,6 +510,37 @@ def _require_component(label: str, value: str) -> str:
     return value
 
 
+def source_kind(spec: str) -> str:
+    """Which KIND of source *spec* names, decided by SHAPE alone.
+
+    The Python twin of ``nx_source_kind``, and until the collapse this rule had
+    NO Python statement and therefore no pin -- the one layout rule with a
+    recorded incident behind it and nothing watching it.
+
+    This is the one place that question is answered, because it used to be
+    answered in two. The generation builder classified by shape while
+    ``scripts/reinstall-tool.sh``'s divergent-source guard classified by
+    whether ``$SOURCE/pyproject.toml`` existed. They agree on ``.`` and on
+    ``conexus`` and disagree on a bare name that happens to match a directory
+    in the caller's cwd -- and the guard only fires when it concludes
+    "registry", so the disagreement SKIPPED the refusal that stops a PyPI
+    install from wiping a dev checkout's unreleased modules (nexus-pk9yt; the
+    incident is nexus-q3xrx #2).
+
+    Shape, never existence: a bare distribution name is a registry source
+    wherever you happen to be standing. Existence is still worth checking, but
+    it answers "can I read this", not "what kind of thing is it".
+
+    The shell half states this as a ``case`` whose directory arm is
+    ``.|..|/*|./*|../*|"~"/*|*/*``. Every one of those patterns except ``.``
+    and ``..`` requires a slash, so the rule below is that case statement with
+    the redundancy removed, and
+    ``test_both_halves_classify_every_source_shape_alike`` is what says so
+    rather than this comment.
+    """
+    return "directory" if spec in (".", "..") or "/" in spec else "registry"
+
+
 def _root(tools: Path | None) -> Path:
     return tools if tools is not None else tools_dir()
 
@@ -827,3 +858,181 @@ def read_receipt(generation: Path) -> Receipt:
     except OSError as exc:
         raise LayoutError(f"no receipt at {path}: {exc}") from exc
     return Receipt.from_json(text)
+
+
+# ---------------------------------------------------------------------------
+# The command-line face, for layout.sh
+#
+# layout.sh dispatches its behavioural functions here rather than restating
+# them, which is what removes the second implementation. The calling contract
+# is layout.sh's own, unchanged, because its callers depend on it:
+#
+#   - a result goes to STDOUT and nothing else does, so that a caller can
+#     safely write ``dir=$(nx_tools_dir) || exit 1``
+#   - a refusal prints to STDERR, prints NOTHING to stdout, and exits
+#     LAYOUT_USAGE_EXIT. A refusal that also emits a path is how a caller ends
+#     up installing into it
+#   - an unexpected failure is still a refusal, not a traceback on stdout
+#
+# Argument shapes match the shell functions one for one, positionally, so that
+# the dispatchers in layout.sh are a single line each with no reordering. An
+# omitted optional argument arrives as the empty string, exactly as ``"${2-}"``
+# delivers it, and is read as "not supplied".
+# ---------------------------------------------------------------------------
+
+
+def _opt_path(raw: str) -> Path | None:
+    """An optional trailing tools-root argument, in shell's terms.
+
+    ``nx_current_link "${1-}"`` passes an empty string when the caller gave
+    nothing, and the shell half reads that as "resolve one for me". ``Path("")``
+    is ``Path(".")``, so passing it straight through would silently root the
+    layout at the caller's CWD -- the same hazard ``_resolve_dir`` refuses an
+    empty override for.
+    """
+    return Path(raw) if raw else None
+
+
+def _cli_source_kind(spec: str) -> str:
+    return source_kind(spec)
+
+
+def _cli_tools_dir() -> str:
+    return str(tools_dir())
+
+
+def _cli_bin_dir() -> str:
+    return str(bin_dir())
+
+
+def _cli_generation_dir(stamp: str, tools: str = "") -> str:
+    return str(generation_dir(stamp, tools=_opt_path(tools)))
+
+
+def _cli_current_link(tools: str = "") -> str:
+    return str(current_link(tools=_opt_path(tools)))
+
+
+def _cli_previous_link(tools: str = "") -> str:
+    return str(previous_link(tools=_opt_path(tools)))
+
+
+def _cli_root(tools: str = "") -> str:
+    return str(_root(_opt_path(tools)))
+
+
+def _cli_receipt_path(generation: str) -> str:
+    return str(receipt_path(Path(generation)))
+
+
+def _cli_render_shim(command: str, tools: str = "") -> str:
+    return render_shim(command, tools=_opt_path(tools)).rstrip("\n")
+
+
+def _cli_build_spec(base: str, extras: str = "", version: str = "") -> str:
+    return build_spec(base, _split_extras(extras), version)
+
+
+def _cli_render_receipt(
+    version: str,
+    spec: str,
+    kind: str,
+    source: str,
+    extras: str,
+    python: str,
+    base_interpreter: str,
+    created_at: str,
+) -> str:
+    """The receipt, rendered by the same code that reads it.
+
+    The shell half hand-escaped JSON and refused a value carrying a control
+    character, because it could not represent one. :meth:`Receipt.to_json`
+    escapes correctly by construction, so that refusal is no longer forced by
+    the escaper -- but it is KEPT, deliberately. A newline in a generation path
+    or a created-at stamp is a sign something is wrong upstream, every caller
+    has been refused it since the shell half was written, and quietly starting
+    to accept it would be a behaviour change nobody asked for.
+    """
+    for label, value in (
+        ("version", version), ("spec", spec), ("source", source),
+        ("extras", extras), ("python", python),
+        ("base_interpreter", base_interpreter), ("created_at", created_at),
+    ):
+        if any(ch.isprintable() is False and ch != " " for ch in value):
+            raise LayoutError(
+                f"receipt values must not contain control characters, {label} does"
+            )
+    return Receipt(
+        version=version,
+        spec=spec,
+        source_kind=kind,
+        source=source,
+        python=python,
+        base_interpreter=base_interpreter,
+        created_at=created_at,
+        extras=_split_extras(extras),
+    ).to_json().rstrip("\n")
+
+
+def _split_extras(raw: str) -> list[str]:
+    """A comma-separated extras list as the shell half passes it.
+
+    Empty entries are dropped rather than becoming an empty extra, which is
+    what ``grep -v '^$'`` did on the shell side: ``"local,,voyage"`` and a
+    trailing comma both arrive from string concatenation upstream.
+    """
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+#: The verbs ``layout.sh`` dispatches, mapped to their implementations. The
+#: names are the shell function names minus the ``nx_`` prefix, so that a
+#: reader can match a dispatcher to its verb without a lookup table.
+_VERBS = {
+    "source_kind": _cli_source_kind,
+    "tools_dir": _cli_tools_dir,
+    "bin_dir": _cli_bin_dir,
+    "generation_dir": _cli_generation_dir,
+    "current_link": _cli_current_link,
+    "previous_link": _cli_previous_link,
+    "root": _cli_root,
+    "receipt_path": _cli_receipt_path,
+    "render_shim": _cli_render_shim,
+    "build_spec": _cli_build_spec,
+    "render_receipt": _cli_render_receipt,
+}
+
+
+def main(argv: list[str]) -> int:
+    """Run one verb. Returns the process exit status.
+
+    Every failure path returns :data:`LAYOUT_USAGE_EXIT` and writes nothing to
+    stdout, including a wrong arity and an unknown verb -- those reach a user
+    as a shell script that mis-called us, which is a usage error, and the
+    alternative is a Python traceback arriving where a caller expected a path.
+    """
+    if not argv:
+        sys.stderr.write("nexus: layout_core: no verb given\n")
+        return LAYOUT_USAGE_EXIT
+    verb, args = argv[0], argv[1:]
+    fn = _VERBS.get(verb)
+    if fn is None:
+        known = ", ".join(sorted(_VERBS))
+        sys.stderr.write(f"nexus: layout_core: unknown verb {verb!r}; known: {known}\n")
+        return LAYOUT_USAGE_EXIT
+    try:
+        rendered = fn(*args)
+    except LayoutError as exc:
+        sys.stderr.write(f"nexus: {exc}\n")
+        return LAYOUT_USAGE_EXIT
+    except TypeError as exc:
+        # Arity. Raised by the call above, never from inside a verb: the verbs
+        # are typed and take only strings, so a TypeError here is layout.sh
+        # passing the wrong number of arguments.
+        sys.stderr.write(f"nexus: layout_core: bad arguments to {verb}: {exc}\n")
+        return LAYOUT_USAGE_EXIT
+    sys.stdout.write(rendered + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

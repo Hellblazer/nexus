@@ -273,6 +273,7 @@ def test_the_shim_resolves_the_pointer_before_exec_rather_than_through_it() -> N
     leaving the rest of the module green."""
     rendered = subprocess.run(
         ["bash", "-c",
+         f'NX_LAYOUT_HOME="{_INSTALL}"; '
          f'. "{_INSTALL}/layout.sh"; nx_render_shim {_DIST} /nx-tools-probe'],
         capture_output=True, text=True, timeout=60,
     )

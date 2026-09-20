@@ -42,6 +42,9 @@
 set -euo pipefail
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# layout.sh dispatches to layout_core.py beside it, and a sourced file
+# cannot find its own directory under POSIX sh. We already know it.
+NX_LAYOUT_HOME="$_here"
 # shellcheck source=src/nexus/_install/layout.sh
 . "$_here/layout.sh"
 

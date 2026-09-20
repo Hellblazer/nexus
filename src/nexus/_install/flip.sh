@@ -39,6 +39,9 @@
 # would go somewhere the operator did not ask for.
 
 _nx_flip_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# layout.sh dispatches to layout_core.py beside it, and a sourced file
+# cannot find its own directory under POSIX sh. We already know it.
+NX_LAYOUT_HOME="$_nx_flip_here"
 # shellcheck source=src/nexus/_install/layout.sh
 . "$_nx_flip_here/layout.sh"
 

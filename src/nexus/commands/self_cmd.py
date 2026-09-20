@@ -541,6 +541,9 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
     Returns the statement's stdout."""
     r = subprocess.run(  # noqa: S603 — fixed argv, no shell interpolation of user input
         ["bash", "-c",
+         # layout.sh dispatches to layout_core.py beside it and cannot find its
+         # own directory when sourced; the sourcing script names it.
+         f'NX_LAYOUT_HOME="{install_dir}"; '
          f'. "{install_dir}/layout.sh"; . "{install_dir}/flip.sh"; '
          f'. "{install_dir}/shims.sh"; . "{install_dir}/census.sh"; '
          f'. "{install_dir}/gc.sh"; . "{install_dir}/legacy.sh"; {snippet}'],

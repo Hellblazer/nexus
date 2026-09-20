@@ -101,7 +101,7 @@ nx_gc_generations() {
         return "$NX_LAYOUT_USAGE_EXIT"
     fi
 
-    _nx_gc_root="$(_nx_root "$_nx_gc_root_arg")" || return "$NX_LAYOUT_USAGE_EXIT"
+    _nx_gc_root="$(nx_root "$_nx_gc_root_arg")" || return "$NX_LAYOUT_USAGE_EXIT"
     [ -d "$_nx_gc_root" ] || return 0
 
     _nx_gc_protected_list="$(_nx_gc_protected "$_nx_gc_root")"

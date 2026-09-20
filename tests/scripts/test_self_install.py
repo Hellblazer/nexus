@@ -339,6 +339,10 @@ def test_the_packaged_machinery_is_resolvable(bed) -> None:
     d = packaged_install_dir()
     assert (d / "install_generation.sh").is_file(), f"not shipped: {d}"
     assert (d / "layout.sh").is_file()
+    # layout.sh is a DISPATCHER now: without layout_core.py beside it every
+    # layout call refuses, so shipping one without the other ships an
+    # installer that cannot resolve a single path.
+    assert (d / "layout_core.py").is_file(), f"layout_core.py not shipped: {d}"
 
 
 def test_it_refuses_clearly_from_a_dev_checkout(bed, monkeypatch, tmp_path) -> None:
@@ -531,3 +535,65 @@ def test_the_migration_machinery_also_ships_in_the_wheel() -> None:
     d = packaged_install_dir()
     assert (d / "migrate_legacy.sh").is_file(), f"not shipped: {d}"
     assert (d / "legacy.sh").is_file(), f"not shipped: {d}"
+
+
+def test_no_packaging_rule_can_drop_a_file_from_the_install_directory() -> None:
+    """The ship list, checked where the check can actually be true.
+
+    Two tests above pin a HAND-WRITTEN subset of the files the wheel must
+    carry, and each was added after a file turned out not to be pinned:
+    install_generation.sh and layout.sh first, then migrate_legacy.sh and
+    legacy.sh once the converge path started exec'ing them. The collapse added
+    layout_core.py and broke three more hand-kept lists of the same shape
+    elsewhere in the tree. A list that has been wrong every time it was
+    extended wants replacing with something derived.
+
+    The obvious derivation does not work, and saying why is the point of this
+    docstring. Comparing ``packaged_install_dir()`` against
+    ``src/nexus/_install`` is TAUTOLOGICAL in a dev checkout: they are the same
+    directory, so the comparison passes for a file the wheel would never ship.
+    Measured -- written that way first, and adding an unshipped sibling did not
+    turn it red. The two tests above have that same shape and are equally
+    silent here; they earn their keep in the fresh-install MVV, where
+    ``packaged_install_dir()`` resolves into site-packages.
+
+    What IS checkable from a checkout is the packaging RULE. Hatch is told
+    ``packages = ["src/nexus"]``, which sweeps the directory wholesale, so the
+    only way a sibling fails to ship is an exclude rule that matches it. That
+    is a real hazard -- the exclude list exists and has an entry already -- and
+    it is a fact about a file in this repo, which is why this test can be
+    honest about it.
+
+    The runtime check, against a genuinely installed wheel, is
+    ``tests/e2e/lib/generation_install_probe.py``.
+    """
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    config = tomllib.loads((root / "pyproject.toml").read_text())
+    wheel = config["tool"]["hatch"]["build"]["targets"]["wheel"]
+
+    assert wheel["packages"] == ["src/nexus"], (
+        f"the wheel no longer sweeps src/nexus wholesale ({wheel['packages']}), "
+        f"so this test's reasoning about exclude rules no longer holds"
+    )
+
+    install_files = sorted(
+        p.relative_to(root).as_posix()
+        for p in (root / "src" / "nexus" / "_install").iterdir()
+        if p.is_file() and not p.name.startswith(".") and p.suffix != ".pyc"
+    )
+    # Non-vacuity: a mis-rooted glob would make the loop below check nothing.
+    assert len(install_files) >= 8, f"only found {install_files} -- wrong root?"
+
+    excludes = wheel.get("exclude", [])
+    shadowed = [
+        f for f in install_files
+        for rule in excludes
+        if f == rule or f.startswith(rule.rstrip("/") + "/")
+    ]
+    assert not shadowed, (
+        f"the wheel's exclude rules {excludes} drop {shadowed} from the "
+        f"install directory. Every file there is reachable from the install "
+        f"path at runtime, and the failure appears only after release."
+    )

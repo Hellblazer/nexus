@@ -156,8 +156,9 @@ def test_the_control_the_prefix_builder_wrote_a_dot(bed) -> None:
     crippled_dir = tools.parent / "crippled-install"
     crippled_dir.mkdir()
     # The script sources "$_here/layout.sh" and hands "$_here/overrides.txt"
-    # to uv (nexus-heykz); both ride along, only the absolutizing block is cut.
-    for sibling in ("layout.sh", "overrides.txt"):
+    # to uv (nexus-heykz), and layout.sh dispatches to "$_here/layout_core.py";
+    # all three ride along, only the absolutizing block is cut.
+    for sibling in ("layout.sh", "layout_core.py", "overrides.txt"):
         (crippled_dir / sibling).write_text((_INSTALLER.parent / sibling).read_text())
     crippled = crippled_dir / "install_generation.sh"
     crippled.write_text(pre_fix)
