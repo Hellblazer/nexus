@@ -253,6 +253,7 @@ nexus-16zx
 nexus-16zx.1
 nexus-1714
 nexus-1714.1
+nexus-17i1n
 nexus-17wf
 nexus-17yg
 nexus-17yxc
@@ -540,6 +541,7 @@ nexus-2wvl
 nexus-2x3qy
 nexus-2xg1q
 nexus-2xjge
+nexus-2xso4
 nexus-2xu6t
 nexus-2xx
 nexus-2xx.1
@@ -1143,6 +1145,7 @@ nexus-61x6
 nexus-623af
 nexus-62a3p
 nexus-62wt7
+nexus-634ye
 nexus-63ga1
 nexus-640
 nexus-640.1
@@ -1175,6 +1178,7 @@ nexus-6cn
 nexus-6d0ye
 nexus-6dan
 nexus-6dfkn
+nexus-6doho
 nexus-6drnh
 nexus-6e6u1
 nexus-6ee5i
@@ -1955,6 +1959,7 @@ nexus-afnht
 nexus-afnht.1
 nexus-afudo
 nexus-afudo.1
+nexus-agctp
 nexus-aginu
 nexus-aginu.1
 nexus-agsq7
@@ -2072,6 +2077,7 @@ nexus-b50zw
 nexus-b563
 nexus-b5ezj
 nexus-b5mh
+nexus-b5ugt
 nexus-b6enc
 nexus-b6enc.1
 nexus-b6qlf
@@ -2105,6 +2111,7 @@ nexus-bamvf.1
 nexus-bawvu
 nexus-bawvu.1
 nexus-bb5c8
+nexus-bb6n2
 nexus-bbriq
 nexus-bbriq.1
 nexus-bbt
