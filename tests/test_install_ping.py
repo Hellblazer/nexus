@@ -22,6 +22,15 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("NX_NO_TELEMETRY", raising=False)
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
     monkeypatch.chdir(tmp_path)  # no per-repo .nexus.yml leaks in
+    # THE DEV-CHECKOUT GUARD IS ANSWERED "no" FOR EVERY TEST USING THIS
+    # FIXTURE, because the suite itself runs from a dev checkout and the guard
+    # would otherwise short-circuit every env, config, throttle and wire test
+    # below into "off" -- they would all pass while testing nothing they name.
+    # The guard's own behaviour is tested in the dev-checkout section, where it
+    # is NOT patched, and where the first assertion is that the real function
+    # returns True for this very process. Patch the name on the module under
+    # test, not is_dev_checkout_process itself: install_ping is what decides.
+    monkeypatch.setattr(ip, "running_from_dev_checkout", lambda: False)
     return tmp_path
 
 
@@ -177,3 +186,98 @@ def test_nx_telemetry_off_status_on(cfg: Path) -> None:
     assert r.invoke(main, ["telemetry", "on"]).exit_code == 0
     out = r.invoke(main, ["telemetry", "status"])
     assert "install ping: on (default)" in out.output
+
+
+# ── the dev-checkout guard (nexus-6doho) ───────────────────────────────────
+#
+# NOT covered by the `cfg` fixture, which answers the guard "no" so the tests
+# above can test what they name. These ask the real question.
+
+
+def test_this_very_process_is_recognised_as_a_dev_checkout() -> None:
+    """THE non-vacuity assert, and the reason the rest of this section means
+    something.
+
+    Every test below shows the ping is suppressed when the guard says "dev
+    checkout". That is worth nothing unless the guard actually says so
+    somewhere real -- a guard wired to a predicate that is never true in
+    practice is untested code that reads as protection. The test suite runs
+    out of the checkout, so the process making this assertion is itself the
+    case the guard exists to catch. Same shape as
+    scripts/check_release_workflow_shape.py phase (a), which asserts
+    is_dev_checkout_process() is True for the process doing the asserting.
+
+    If this fails, the guard has stopped recognising a checkout and every
+    other test in this section has gone vacuous without going red.
+    """
+    assert ip.running_from_dev_checkout() is True
+
+
+def test_a_dev_checkout_does_not_ping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The measured case: this box, install_id 2da3bd8a, pinging production
+    daily from a checkout and counted as a user."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("NX_NO_TELEMETRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "dev checkout"}
+    assert ip.ping_in_background() is None
+
+
+def test_a_dev_checkout_sends_nothing_over_the_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receiver: type[_Recorder]
+) -> None:
+    """The guard is checked before the request, not after it. A suppression
+    that still opened the connection would still be a row somewhere."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("NX_NO_TELEMETRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    assert ip.ping_if_due() is False
+    assert receiver.bodies == [], f"a dev checkout reached the beacon: {receiver.bodies}"
+    assert not (tmp_path / ip.LAST_PING_FILENAME).exists(), (
+        "a suppressed ping marked itself as sent, which would also suppress "
+        "the NEXT one from a real install sharing this config dir"
+    )
+
+
+def test_the_guard_does_not_suppress_an_installed_copy(
+    cfg: Path, receiver: type[_Recorder]
+) -> None:
+    """The other direction, which is the one that matters commercially: the
+    guard must not turn the beacon off for real users. `cfg` answers the
+    guard "no", which is what an installed copy reports."""
+    assert ip.telemetry_enabled() is True
+    assert ip.ping_if_due() is True
+    assert len(receiver.bodies) == 1
+
+
+def test_the_env_var_still_wins_inside_a_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The env opt-out is checked FIRST, so its reported source stays the env
+    var rather than becoming "dev checkout". A harness that sets the flag and
+    is told something else about why it is off has been given a misleading
+    answer about its own configuration."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("NX_NO_TELEMETRY", "1")
+    monkeypatch.chdir(tmp_path)
+
+    assert ip.telemetry_status() == {
+        "enabled": False, "source": f"env {ip.NO_TELEMETRY_ENV}=1",
+    }
+
+
+def test_an_undecidable_check_counts_as_not_a_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stated as a test because the direction is a judgement call and the
+    wrong one is invisible: falling the other way would silently disable the
+    beacon for every real user the moment that import broke, and an
+    under-count is not visible in the data the way an over-count is."""
+    import nexus.db.service_endpoint as se
+
+    def boom() -> bool:
+        raise RuntimeError("cannot decide")
+
+    monkeypatch.setattr(se, "is_dev_checkout_process", boom)
+    assert ip.running_from_dev_checkout() is False

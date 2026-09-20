@@ -9,6 +9,7 @@ no hostname, no paths, no collection names.
 Opt-out, default on. Any of these disables it:
 
 * ``NX_NO_TELEMETRY=1`` (any non-empty value other than ``0``)
+* running out of a dev checkout (see :func:`running_from_dev_checkout`)
 * ``telemetry.enabled: false`` in ``~/.config/nexus/config.yml``
   (``nx telemetry off``)
 
@@ -53,10 +54,56 @@ INSTALL_ID_FILENAME = "install_id"
 LAST_PING_FILENAME = "install_ping.last"
 
 
+def running_from_dev_checkout() -> bool:
+    """Whether this process's ``nexus`` resolves from a development checkout.
+
+    A development box is not an install, and counting one as a user is not a
+    rounding error: MEASURED on this machine 2026-09-20, install_id
+    2da3bd8a, mode cloud, darwin/arm64, pinging the production beacon daily
+    for however long it had been doing so. The id is STABLE, which makes it
+    harder to see rather than easier -- a burst of fresh ids looks like a
+    harness, while one steady id looks exactly like a real user, because by
+    the beacon's own definition it is one.
+
+    The env opt-out alone cannot cover this. It is a per-harness allowlist:
+    it catches the sandboxes somebody remembered to annotate and nothing
+    else, and it needs a new entry every time a gate is added. This asks the
+    general question once, in the one place the answer matters.
+
+    The answer already exists in the tree and the ping simply never asked
+    for it: ``nexus.db.service_endpoint.is_dev_checkout_process`` is the
+    nexus-a2qhz guard that stops a dev session writing to production stores.
+    Same question about the same process, one caller short.
+
+    A FAILURE TO DECIDE COUNTS AS "NOT A CHECKOUT", deliberately. Falling the
+    other way would silently disable telemetry for every real user the moment
+    that import broke, and a beacon that quietly reports nothing is worse than
+    one that over-reports by one machine -- the over-count is visible in the
+    data, the under-count is not.
+
+    It does NOT cover the container arms, and is not meant to: those run a
+    ``uv tool``-installed WHEEL and are therefore not a checkout by
+    construction, which is the same reason the nexus-a2qhz guard is inert
+    inside the rehearsal containers. ``NX_NO_TELEMETRY`` remains required
+    there. The guard is the general case; the env var is the exception.
+    """
+    try:
+        from nexus.db.service_endpoint import (  # noqa: PLC0415 — startup cost, and see above
+            is_dev_checkout_process,
+        )
+
+        return bool(is_dev_checkout_process())
+    except Exception as exc:  # noqa: BLE001 — see "a failure to decide" above
+        _log.debug("install_ping_dev_checkout_check_failed", error=str(exc))
+        return False
+
+
 def telemetry_enabled() -> bool:
-    """Opt-out check: env first, then the config key."""
+    """Opt-out check: env first, then the dev checkout, then the config key."""
     env = os.environ.get(NO_TELEMETRY_ENV, "").strip()
     if env and env != "0":
+        return False
+    if running_from_dev_checkout():
         return False
     return _config_enabled()
 
@@ -66,6 +113,8 @@ def telemetry_status() -> dict[str, Any]:
     env = os.environ.get(NO_TELEMETRY_ENV, "").strip()
     if env and env != "0":
         return {"enabled": False, "source": f"env {NO_TELEMETRY_ENV}={env}"}
+    if running_from_dev_checkout():
+        return {"enabled": False, "source": "dev checkout"}
     if not _config_enabled():
         return {"enabled": False, "source": "config telemetry.enabled"}
     return {"enabled": True, "source": "default"}
