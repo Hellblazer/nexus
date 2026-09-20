@@ -281,9 +281,20 @@ def test_a_caller_supplied_snapshot_crosses_on_stdin_not_argv(tmp_path: Path) ->
     snapshot = f"4242 {gen}/bin/nx serve\n{filler}\n"
     assert len(snapshot) > 600_000, f"filler too small to prove the point: {len(snapshot)}"
 
+    # The snapshot reaches BASH through a file, because handing it to bash in
+    # argv is the very thing this test says must not happen. Linux caps a
+    # SINGLE argument at MAX_ARG_STRLEN (128 KiB) however much of ARG_MAX is
+    # free, so the harness raised E2BIG on CI while passing on macOS, where one
+    # argument may run to the whole budget. The shell function still takes the
+    # snapshot as "$2": that is a function argument, in-process, and never an
+    # exec. What this pins is the exec BELOW it.
+    snapfile = tmp_path / "snapshot"
+    snapfile.write_text(snapshot)
+
     r = subprocess.run(
-        ["bash", "-c", f'. "{_CENSUS_SH}"; nx_generation_holder_pids "$1" "$2"',
-         "_", str(gen), snapshot],
+        ["bash", "-c",
+         f'. "{_CENSUS_SH}"; nx_generation_holder_pids "$1" "$(cat "$2")"',
+         "_", str(gen), str(snapfile)],
         capture_output=True, text=True,
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)},
     )
