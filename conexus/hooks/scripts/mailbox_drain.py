@@ -86,6 +86,14 @@ else:
     import fcntl
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
+# `python3`, so PATH decides the interpreter. Put back the resolution
+# `_run_python_hook.sh` used to perform, before anything that needs 3.12
+# or `nexus` is imported. See _interpreter.py for what is at stake.
+import _interpreter  # noqa: E402 -- must follow the sys.path insert
+
+_interpreter.reexec_if_needed()
+
 import _endpoint_resolve as _ep  # noqa: E402
 import _tuple_size_limits as _sz  # noqa: E402
 

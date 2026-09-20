@@ -6,6 +6,98 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.55.0] - 2026-09-20
+
+Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129)),
+unchanged from 7.54.0. No engine cut: pin and cloud are both at v0.1.129 with
+no `service/src/main` drift.
+
+Two epics land here. RDR-217 gives the client a lexical retrieval leg it never
+had, and RDR-215 finishes retiring the bash hook layer.
+
+### Added
+
+- **`nx search --lexical`, and the `lexical` parameter on the MCP `search`
+  tool (RDR-217).** The engine has stored a full-text (`tsvector`) and a
+  trigram index for every chunk since RDR-155 P3, and no client could read
+  either: `nx search` was vector-only. `--lexical` ADDS exact-text hits to the
+  vector results rather than replacing them.
+
+  Measured on this repo's own code before the surface was designed: on
+  rare-token queries, precision@10 goes from 0.167 to 0.698, and one query
+  (`word_similarity_threshold`, present in two chunks) scored 0.000 precision
+  AND 0.000 recall on the vector path — invisible to semantic search
+  entirely. On identifier queries the vector path was already good (0.867) and
+  the gain is small, so the honest claim is narrow: this helps where an exact,
+  low-frequency token is what you have.
+
+  It is ADDITIVE and cannot be a default, because the hybrid route gates on
+  text before ranking: it returned zero rows for every prose query in the
+  measurement. Selecting it instead of the vector leg would hand a
+  natural-language question an empty result. Lexical hits are exempt from the
+  per-collection distance threshold — a lexically-matched row whose vector
+  distance is large is exactly the row worth having — and the flag REFUSES on
+  a backend without the route rather than silently returning vector-only rows.
+
+  `--hybrid` is unrelated and unchanged: it re-ranks vector results by git
+  frecency and never changes which rows come back. The docs now say so at
+  every site that recommends either.
+
+- `HttpVectorClient.hybrid_search`, the first caller in this repository of
+  `POST /v1/vectors/hybrid-search` — an endpoint with a production consumer
+  and, until now, no caller in the repo that builds it. That gap is what
+  BUG-0148 shipped through, and closing it is an argument for RDR-217 that
+  does not depend on retrieval getting better.
+
+### Changed
+
+- **The bash hook layer is retired (RDR-215).** Plugin hooks are MCP tools and
+  exec-form verbs; the twelve bash hook scripts and the shell launcher are
+  deleted, and 25 of 25 `hooks.json` entries across both plugin tiers are
+  re-declared. The `expectations_*` ledger moved from a sourced bash library
+  into `nexus.hooks.expectations`, reachable as `nx-hook` verbs.
+
+### Fixed
+
+- Test harness containers no longer register as fresh installs. Every
+  throwaway install on a virgin HOME mints a new `install_id` and pings the
+  anonymous install counter; 18 of them reached production across two release
+  nights and tripled the active-install figure with this project's own
+  testing. Every `docker run` under `tests/e2e` now forwards
+  `NX_NO_TELEMETRY=1` — `-e` is the only channel in, since a container does
+  not inherit the host environment — and the lint that checks this, which
+  previously named one hardcoded file, now scans them all.
+
+- The retrieval drift gate ranked by raw `distance` after the topic boost
+  moved into its own field, so it was blind to the ranking layer while passing
+  inside its threshold band. Re-pinning reproduced the original baseline
+  exactly, which is the evidence it measures the right quantity again.
+
+- `nx store list` groups document listings by the catalog manifest rather than
+  by chunk hash, so a document whose chunks share text is listed once.
+
+- A stored note whose embedding model imposes no token window is split on
+  write and rejoined on read (nexus-b2tld). Notes written before this change
+  are unaffected and are not re-embedded.
+
+- `nx search` reports an honest raw distance alongside the score that actually
+  ordered the row, instead of folding the topic boost into the distance
+  (nexus-la5pr). `--hybrid`'s frecency blend is unchanged.
+
+- The client-side ripgrep path is deleted and its orphaned line caches are
+  reaped (nexus-06aei). It was off by default, effectively never ran, and its
+  caches silently truncated.
+
+- A generation install prunes a shim it no longer owns (nexus-3z8vb).
+
+### Removed
+
+- The twelve bash hook scripts and the shell hook launcher (RDR-215). If you
+  referenced `conexus/hooks/scripts/*.sh` directly, those paths are gone; the
+  behaviour lives in `nexus.hooks` as `nx-hook` verbs and MCP tools.
+
+- The client-side ripgrep search path (nexus-06aei), as above.
+
 ## [7.54.0] - 2026-09-19
 
 Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129)),

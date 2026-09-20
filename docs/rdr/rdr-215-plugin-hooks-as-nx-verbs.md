@@ -2,7 +2,8 @@
 title: "Plugin Hooks as nx Verbs: Retire the Bash Hook Layer"
 id: RDR-215
 type: Technical Debt
-status: accepted
+status: closed
+closed_date: 2026-09-19
 priority: medium
 author: Sam
 reviewed-by: self
@@ -235,19 +236,145 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   through `nx` would therefore add about 0.8 s to every PreToolUse and
   PermissionRequest event. *Source: T2 `nexus_rdr/215-research-5`.*
 
+- **Verified** (bead `nexus-q02nx.6`, 2026-09-19, macOS and WSL2, CLI
+  2.1.278): `${path}` substitution into an `mcp_tool` `input` map
+  delivers non-scalar payload fields AS STRUCTURES. `${tool_input}`
+  arrives as a `dict`, `${background_tasks}` on `Stop` as a `list` — not
+  JSON-encoded strings and not unsubstituted literals. An absent key
+  renders as an empty string, so absent is distinguishable from an empty
+  list (`''` against `[]`). The tool tier therefore carries
+  `stop_verification_hook.sh`'s `background_tasks` cross-check intact,
+  and beads `nexus-q02nx.10`, `.12` and `.13` stay on the tool tier.
+  The determining case was measured, not assumed: a populated MIXED
+  population survives intact. A `Stop` event carrying one `type: shell`
+  task (keys `id/type/status/description/command`) and one
+  `type: subagent` task (`agent_type` in place of `command`) arrived as
+  a `list` of two `dict`s with both key sets and every value intact,
+  including a `command` containing `$i`, quotes and semicolons. So
+  `expectations.sh`'s documented "mixed population, field names not yet
+  stable" concern is answered for transport.
+  Two limits: `''` is unambiguous only where the field can never
+  legitimately be an empty STRING; and the empty-list case (`[]`) alone
+  would NOT have shown this, so do not cite it as the evidence.
+  *Source: T2 `nexus_rdr/215-phase1-measurements`.*
+- **Verified, and it is a landmine for the ports** (same bead): Claude
+  Code delivers those structures, but the tool tier's own registration
+  schema cannot currently accept them. `_make_tool_function`
+  (`src/nexus/mcp/hooks.py`) types EVERY hook-tool field
+  `Annotated[str | None, ...]`, and pydantic 2.12.5 rejects both a
+  `dict` and a `list` against that with `string_type`. So the transport
+  was proven and the implementation was not: a port declaring a field
+  that carries `${tool_input}` or `${background_tasks}` would have failed
+  validation. FIXED (bead `nexus-9ifls`): `HookToolSpec` now takes
+  `structured_fields`, and only a field listed there is typed `Any` --
+  every other field keeps `str | None`, because the shapes are a closed
+  set the contract map enumerates and the model reads this schema. A
+  blanket widening was tried first and was a pure regression on the one
+  live tool; the wire snapshot is byte-identical to before it.
+  What a rejected argument actually does, measured (2026-09-19, CLI
+  2.1.278) rather than assumed: pydantic rejects it during FastMCP's
+  argument binding, BEFORE the tool body runs, so `never_fail` never sees
+  it and this is not the `isError=False` path. It surfaces as a tool
+  error -- and at the HOOK level the event still is not blocked. A hook
+  tool that raised was logged `Hook PreToolUse:Bash (PreToolUse) error:
+  ...` and the Bash command ran anyway. So a mistyped field is loud at
+  the tool boundary and fail-open at the event, which is the third
+  fail-open path this phase has found.
+- **Verified** (same bead): a hook tool's own invocation is exempt from
+  the hook chain, but a MODEL-initiated call to one is not. With a
+  `PreToolUse` matcher covering the server's own tools, the hook fired
+  once on the model's call and its own tool call did not re-trigger it —
+  one dispatch, terminating. So `hook_auto_approve` matching
+  `mcp__plugin_conexus_.*` is benign and needs no recursion guard.
+  Scoped to the topology tested: ONE hook tool whose own matcher covers
+  it. Phases 2 and 3 register roughly fourteen `hook_*` tools against
+  that same matcher; if the exemption proves per-invocation rather than
+  blanket, re-check with two registered at once.
+
 ### Critical Assumptions
 
-- **Assumed**: the `nx-mcp` server is connected by the time the first
-  post-session-start hook fires, on every supported install. The doc
-  says only that `SessionStart` at launch precedes the servers; whether
-  the first `PreToolUse` can race the server's connection is measured in
-  Phase 1. A hook that runs before its server is connected is a
-  non-blocking error, which for the close gate means fail-open.
-- **Assumed**: the installed generation's console scripts are on the
-  PATH Claude Code gives `SessionStart` hooks. The bash layer already
-  assumes this (research-4). Phase 1 measures it on an app-launched macOS
-  Claude Code and in WSL2. A hook that cannot find its generation fails
-  loud.
+- **Verified, and the assumption was stronger than it needed to be**
+  (bead `nexus-q02nx.6`, 2026-09-19, CLI 2.1.278, macOS and WSL2): there
+  is no race. The first model turn does not begin until the session's
+  MCP connection attempt RESOLVES. Measured by delaying the probe
+  server's start rather than racing it: a 15 s delay moved the first
+  `PreToolUse` hook by 15.3 s while the connect-to-hook gap stayed about
+  2 s, and `[engine] turn 1 start` landed 21 ms after
+  `Successfully connected`. On WSL2 the same ordering held at 73 ms.
+  Since every tool-tier event is reached only through a model-initiated
+  tool call, none of them can fire before the servers are available.
+  **Measured under headless `claude -p` only** (`cc_entrypoint=sdk-cli`,
+  `nonInteractive=true`), on both host shapes. Interactive ordering is
+  NOT established here, and interactive is what users actually run — a
+  human can submit input the instant a prompt appears, which a scripted
+  invocation does not exercise. Before Phase 2 relies on "no command-tier
+  twin is needed for any event", run the same delay ladder interactively.
+  **THIS WAS NEVER RUN, and Phases 2 through 4 relied on the conclusion
+  anyway** -- the shipped manifest carries 13 `mcp_tool` entries with no
+  command-tier fallback for any of them. Found by the isolated close
+  critique, not during implementation, and tracked as bead `nexus-veh77`
+  (P1) against the plugin cut or client release that activates this
+  manifest for real users, NOT against a develop push: fail-open is the
+  posture here, so a race silently skips the hook, and
+  `conexus/PENDING_RELEASE.md` already gates the release on the wheel
+  floor. The hooks that would silently skip include the bd-close gate and
+  the RDR-184 EXPECT writer.
+  The barrier is more than a timing correlation: at the 35 s point the
+  server was still sleeping when the 30 s timeout fired, and turn 1
+  started 33 ms after the TIMEOUT resolved rather than after the server
+  became ready, so turn 1 waits on the connection ATTEMPT's resolution
+  and not merely on a freed event loop. That discriminates a real
+  barrier from scheduling starvation — for this launch mode.
+  *Source: T2 `nexus_rdr/215-phase1-measurements`.*
+- **Verified, and it relocates the risk**: the real failure mode is a
+  server that never connects, not one that connects late. At a 35 s
+  start delay the connection hit its 30 s `CONNECT_TIMEOUT`, `turn 1
+  start` followed 33 ms later, and the hook was skipped — fail-open,
+  with the tool call proceeding and nothing user-visible. The only trace
+  is the debug log: `[WARN] Hooks: mcp_tool hook skipped — MCP server
+  '<name>' not connected`. `nx-mcp`'s own stdio `initialize` round-trip
+  is 0.61-0.73 s warm, about 40x under that ceiling; the cold-boot case
+  is not yet measured.
+- **Verified on two host shapes, and on a third by inference** (bead
+  `nexus-q02nx.6`,
+  2026-09-19): Claude Code spawns a command hook directly, with no
+  intervening login shell, and hands it its own PATH unmodified.
+  Terminal-launched macOS: `nx-hook` resolves from `~/.local/bin`.
+  WSL2 (Ubuntu 26.04, same CLI 2.1.278): an exec-form `nx-hook` named
+  bare on the PATH resolved and ran, argv intact — with a STAND-IN
+  executable of that name, not the real console script. A full conexus
+  install fails on that distro (`uv tool install conexus` needs
+  `x86_64-linux-gnu-g++` to build `fasttext-predict` via `mineru`), so
+  WSL2 proves PATH resolution of an exec-form hook, not the real verb
+  end to end. App-launched macOS:
+  the desktop app REPAIRS the PATH for the children that run user
+  tooling. Measured on a Finder-launched `/Applications/Claude.app`:
+  the app's own process and its generic node helper carry the bare
+  launchd GUI PATH (`/usr/bin:/bin:/usr/sbin:/sbin`, 4 entries, no
+  `~/.local/bin`), while the MCP-server spawn path and the plugin node
+  helper both carry a 25-entry login-shell PATH in which `nx` and
+  `nx-hook` both resolve. So the command tier is reachable on that
+  shape.
+  One inferential step remains and is stated rather than hidden: an
+  actual Claude Code child of the desktop app was not observed, because
+  starting one needs a Code session opened in the UI. The two spawn
+  paths that WERE measured are the ones that run user tooling, and they
+  agree. If a future defect points here, measure a live Code child
+  directly before trusting this bullet.
+  Bearing the other way: Claude Code itself does NOT repair a minimal
+  PATH. Launched with `/usr/bin:/bin:/usr/sbin:/sbin`, the `SessionStart`
+  hook received exactly that and `nx-hook` was not found. The command
+  tier depends entirely on whoever spawns Claude Code getting this
+  right.
+- **Refuted, and it changes where the fail-loud line can live**: a
+  command hook that cannot be found does NOT fail loud. Claude Code
+  reports `[ERROR] Hook command failed to spawn (SessionStart:startup):
+  Executable not found in $PATH: "nx-hook"` to the debug log only; the
+  session proceeds normally and the user sees nothing. The RDR's
+  "a hook that cannot find its generation fails loud" cannot be
+  implemented inside the verb, because the verb never runs. It has to
+  live somewhere that runs regardless — `nx doctor`, the install, or a
+  declaration that does not depend on PATH resolution.
 - **Verified, with a design consequence** (research-5): an entry through
   the `nx` console script pays about 0.8 s for the CLI's eager imports.
   The one command-tier script this design keeps, `nx-hook`, imports only
@@ -264,8 +391,15 @@ no shell, no PATH, no interpreter to find, and the hook runs in the
 process that already imports `nexus`. The `SessionStart` group, which
 fires before the servers exist, and the version-lockstep hook, which must
 work on a wheel older than the plugin, are command hooks in exec form.
-All logic lives in `src/nexus/hooks/`; both tiers call the same
-functions.
+The hook logic lives in `src/nexus/hooks/`; the shared dispatch
+plumbing it is called through — `_io.py`, `_config.py` and the command
+tier's `entry.py` — lives in `src/nexus/_hook_runtime/`, a package whose
+`__init__` is a docstring and nothing else. The split is not cosmetic:
+Python runs a package's `__init__` before any module inside it, and
+`nexus/hooks/__init__.py` imports `nexus.session` and structlog, so a
+stdlib-only verb reached through `nexus.hooks` paid 0.06 s before doing
+anything (bead `nexus-br31l`; see § Technical Design). Both tiers still
+call the same functions.
 
 ### Approach
 
@@ -276,8 +410,13 @@ functions.
    "tool": "hook_<name>", "input": {...}}`. The `input` map names the
    payload fields the hook reads (the contract map lists them per script)
    as `${session_id}`, `${tool_input.command}` and so on. The tool returns
-   the same decision JSON the script wrote to stdout. That is 15 of the 24
-   conexus entries. One `PreToolUse` entry is excluded:
+   the same decision JSON the script wrote to stdout. That is 13 of the 25
+   conexus entries as shipped -- this sentence said "15 of the 24" when
+   written and both halves moved: `behaviour_census.py` arrived from
+   nexus-4lnn1 and took the count to 25, and two more entries stayed on
+   the command tier than this item anticipated. See the 2026-09-19
+   Revision History entry; the excluded set is three, not one.
+   THE FIRST EXCLUSION, known when this was written:
    `phase_review_close_requires_gate` is the routing framework's only
    `fail_closed: true` rule (`routing/registry.yaml`), and its contract is
    that a crash still emits a deny envelope (`routing/_lib.py`'s
@@ -287,6 +426,16 @@ functions.
    server that is down would read as allow and a phase could close without
    its gate. It takes the command tier instead, where the process can still
    write the deny envelope before it exits.
+   THE OTHER TWO, discovered during the port: `mailbox_drain.py`
+   (`UserPromptSubmit`) and `routing/subagent_git_write_requires_orchestrator.py`
+   (`PreToolUse`) both reach `_endpoint_resolve.py` -- the first directly,
+   the second through `routing/_lib.py` -- and that module cannot leave
+   `conexus/hooks/scripts/` while `t2_prefix_scan.py` and
+   `tuple_ledger_project.py` import it and neither is ported by this
+   epic. Moving them would mean a second copy of a 449-line resolver
+   beside `nexus.db.service_endpoint`, which Approach item 9 forbids as a
+   rewrite. Unlike the first exclusion this one is not about fail-closed
+   semantics; it is a dependency the tier split cannot cross.
 2. **The command tier.** Six of the seven `SessionStart` entries (the
    seventh is item 3) become command hooks in exec form on `nx-hook`, a
    new console script beside
@@ -359,18 +508,56 @@ daemon thread started inside the server, which replaces the double-fork,
 and the Stop hook's `nx catalog sync`, synchronous in the script today
 (line 94), moves to a daemon thread as well so a git push never holds
 the server; that is a deliberate change, listed under Failure Modes.
+**CORRECTED 2026-09-19: it was DELETED, not threaded.** The command has
+raised `ClickException` unconditionally since conexus 7.0.0 and the
+substrate it synced was retired at RDR-158 P4, so threading it would have
+moved dead code off the synchronous path. `src/nexus/hooks/stop_verification.py`
+carries the deviation in its own docstring under "DEVIATION, STATED".
 The hook tools are visible in the model's tool list, since MCP has no
 way to hide a tool; the `hook_` prefix and a one-line description saying
 so are the mitigation, and the auto-approve matcher covers them.
 
-**The command tier.** `nx-hook = "nexus.hooks.entry:main"` in
+**The command tier.** `nx-hook = "nexus._hook_runtime.entry:main"` in
 `pyproject.toml`, built like `nx-session-end-launcher`: `os`, `sys` and
-`json` before dispatch, the verb's module after. It reads the payload
+`json` before dispatch, the verb's module after. The entry point and the
+shared payload/decision plumbing live in `nexus._hook_runtime`, a package
+whose `__init__` is a docstring and nothing else, and NOT in
+`nexus.hooks` — Python runs a package's `__init__` before any module
+inside it, and `nexus/hooks/__init__.py` imports `structlog` and
+`nexus.session`, so reaching `_io` from there cost 0.06 s against 0.01 s
+for a bare `import nexus`. Nothing on the dispatch path configures
+logging either; a verb that logs through an ambient logger calls
+`configure_hook_logging()` itself, and `main()` routes stray stdout to
+stderr so the decision channel is safe whether it does or not. A
+stdlib-only verb dispatches end to end in 0.02 s, against 0.03 s for the
+bash close gate measured on the same box the same day (bead .2's harness
+recorded 0.04 s for it; the margin is real either way, but it is one
+hundredth of a second, not two). That 0.02 s is the dispatch FLOOR,
+measured with a synthetic stdlib-only verb through the real entry point,
+and it is what the close gate's COMMON path will pay -- the path that
+runs on every Bash call and exits early via `_lib.allow()`. The narrow
+phase-review branch additionally imports `nexus.session` and shells out
+to `bd show`, which is its own cost and is not measured until the port
+lands (nexus-br31l). It reads the payload
 from stdin (TTY-aware, empty or malformed reads as `None`), calls the
 same `run()`, writes the decision JSON to stdout, and exits 0 for every
 hook verb. Every ledger verb propagates the code `run()` returns instead,
 so a caller that branches on it keeps working; Contracts, below, carries
-the codes. `nx hook` keeps its Click verbs for a human at a terminal; no
+the codes.
+
+**A THIRD CASE: a ledger verb that CRASHED exits a reserved 70**
+(sysexits `EX_SOFTWARE`; Sam's ruling 2026-09-19, bead
+`nexus-q02nx.9`). A ledger verb's exit code IS its contract, so a crash
+must not wear a vocabulary value. Measured before the fix: a ledger verb
+that raised exited 0, indistinguishable from a clean `reconcile`, which
+bead `.13` reads as "nothing stranded" — a silent miss in the subsystem
+built to catch silent misses. `never_fail` now marks the swallow
+(`HookResult.crashed`) and the entry point maps it. Reserved rather than
+folded into `undeclared`'s 3 ("no ledger file, nothing checkable"),
+because "I could not tell you" is not "there was nothing to tell", and
+folding them loses the distinction exactly when someone is diagnosing a
+flapping audit. Non-ledger verbs are unchanged and still exit 0: for
+them a crash IS the hook choosing to say nothing, which is failing open. `nx hook` keeps its Click verbs for a human at a terminal; no
 `hooks.json` entry names it.
 
 **Package.** `src/nexus/hooks/` (the existing `nexus.hooks` module that
@@ -383,11 +570,16 @@ use), and the never-fail boundary. `_config.py` resolves
 
 **Contracts.** The contract map (T2 `215-hook-contract-map`) lists each
 script's stdin fields, stdout shapes and exit codes; the port reproduces
-each byte for byte and the retargeted test asserts them. Two are quoted
+each byte for byte and the retargeted test asserts them. ONE is quoted
 outside the tests: the ledger verbs' codes (0 clean, 1 BLINDSPOT, 2
 undeclared, 3 no ledger for `undeclared`; 0, 2, 4 for `reconcile`) in
-AGENTS.md and the orchestration skill, and the close gate's deny text in
-19 files. `census` returns 1 on the same blind-spot shape, quoted in the
+AGENTS.md and the orchestration skill. The close gate's deny text is the
+opposite case and an earlier draft of this section had it backwards:
+before the port exactly ONE file on disk carried the literal remedy block
+-- the script itself. Scarcity is the hazard, not ubiquity. A text living
+in twenty places cannot be quietly reworded; one living in a single place
+can, and then the ten-odd documents describing the gate drift from what
+it says with nothing to disagree with them. That is why it is pinned. `census` returns 1 on the same blind-spot shape, quoted in the
 orchestration skill and asserted by value in
 `tests/e2e/lib/expectations_test.sh` and
 `tests/hooks/test_subagent_stop_hook.py`. `expect` and `start` return 2
@@ -413,8 +605,15 @@ one of two shapes. Tool tier: `type` is `mcp_tool`, `server` is
 `plugin:conexus:nexus`, `tool` starts with `hook_` and names a registered
 tool, and the event is not `SessionStart`. Command tier: the entry has an
 `args` key, `command` is exactly one of `nx-hook`,
-`nx-session-end-launcher`, or `python3` whose sole `args` element ends in
-`version_lockstep_hook.py`, and no `command` or `args` element equals
+`nx-session-end-launcher`, or `python3` whose sole `args` element is one
+of FIVE plugin-resident scripts -- `version_lockstep_hook.py`,
+`mailbox_drain.py`, `behaviour_census.py`,
+`routing/phase_review_close_requires_gate.py` and
+`routing/subagent_git_write_requires_orchestrator.py`, pinned by name as
+`PLUGIN_RESIDENT_SCRIPTS` in `tests/test_hooks_json_shape_lint.py`
+(CORRECTED 2026-09-19: this paragraph named only the lockstep, which was
+true when written and became false when bead .21's tier resolution
+settled the other four) -- and no `command` or `args` element equals
 `bash`, `sh` or `nx` or ends in `.sh`; matching is whole-string, so
 `nx-hook` is not `nx`. A `SessionStart` entry must be command tier. For
 the sn `hooks.json`: every entry has `args`, `command` is exactly
@@ -494,15 +693,26 @@ that client or shell out to `nx` for every call.
   measures the first `PreToolUse` after launch on macOS and WSL2; if it
   can race the connection, that event's entry gets a command-tier twin
   until the server is up.
-- **`nx-hook` not on the `SessionStart` PATH.** Mitigation: measured in
-  Phase 1 on an app-launched macOS Claude Code and in WSL2; the verb
-  prints one line naming the fix when it cannot find its generation.
+- **`nx-hook` not on the `SessionStart` PATH.** Measured in Phase 1 on
+  all three host shapes, and the PATH itself is fine (see § Critical
+  Assumptions). The mitigation as written here is REFUTED and no
+  replacement has been built: a command hook that cannot be found does
+  not fail loud, so "the verb prints one line naming the fix" is
+  structurally impossible — the verb never runs. Claude Code logs
+  `Executable not found in $PATH` to the debug log only and the session
+  proceeds silently. OPEN: the fail-loud line has to live somewhere that
+  runs regardless — `nx doctor`, the installer, or a declaration that
+  does not depend on PATH resolution. Bead `nexus-3z8vb` closed the
+  related case where the shim exists but its target does not.
 - **A port changes a refusal text or exit code another file quotes.**
   Mitigation: the retargeted test asserts the exact bytes; a grep for the
   quoted strings runs before each script is deleted.
 - **A hook tool blocks the server.** Mitigation: hook tools do no more
   than the script did, and the one long call, the Stop hook's
   `nx catalog sync`, moves off the synchronous path into a daemon thread.
+  CORRECTED 2026-09-19: deleted rather than threaded -- see Technical
+  Design. The mitigation holds more strongly than planned, since the call
+  is gone rather than relocated.
 
 ### Failure Modes
 
@@ -526,8 +736,20 @@ No implementation starts before this RDR is accepted.
 Two first ports: `auto-approve-nx-mcp.sh` as `hook_auto_approve` on
 `nx-mcp` declared as an `mcp_tool` hook, and `nx hook session-start` as
 `nx-hook session-start` in exec form. Both pass their retargeted tests,
-and both fire in a real Claude Code session on macOS and inside a WSL2
-distro, with the timing of the first `PreToolUse` after launch recorded.
+and both fired in a real Claude Code session on macOS, with the timing of
+the first `PreToolUse` after launch recorded.
+
+**What that does and does not mean.** Neither port is wired into the live
+`conexus/hooks/hooks.json`, and nothing in Phase 1 touches that file — the
+re-declaration is Approach item 6, deliberately Phase 3 (beads
+`nexus-q02nx.21`/`.22`). So what fired live was the real port reached
+through a purpose-built `hooks.json` in an isolated HOME, which proves the
+DISPATCH MECHANISM and the tier's contracts; it is not the same as a
+hooks.json-triggered event in a normal session reaching the ported module,
+which stays open until Phase 3. On WSL2 the mechanism was proven with a
+probe server and a stand-in executable rather than with nexus's own
+package, which does not install on that distro (see § Critical
+Assumptions).
 
 ### Phase 1: Shape
 
@@ -549,8 +771,17 @@ distro, with the timing of the first `PreToolUse` after launch recorded.
    (`pre_close_verification_hook.sh`, `stop_verification_hook.sh`,
    `subagent-start-stamp.sh`, `divergence-language-guard.sh`,
    `post_compact_hook.sh`, the two async wrappers).
-5. The eight Python hooks: `mailbox_drain.py`, `stop_failure_hook.py`
-   and the two routing hooks re-declared as tools; `preflight.py`,
+5. The eight Python hooks: `stop_failure_hook.py` re-declared as a tool.
+   `mailbox_drain.py` and the two routing hooks were named here as tools
+   too and did NOT move -- all three reach `_endpoint_resolve.py`
+   (directly, or via `routing/_lib.py`), which cannot leave
+   `conexus/hooks/scripts/` while `t2_prefix_scan.py` and
+   `tuple_ledger_project.py` import it and neither is ported by this
+   epic. Making them wheel-resident would mean a second copy of a
+   449-line resolver beside `nexus.db.service_endpoint`, which Approach
+   item 9 forbids as a rewrite. They stay exec-form `python3`; full
+   reasoning in T2 `nexus_rdr/215-tier-resolution-bead-21`. Then
+   `preflight.py`,
    `session_start_hook.py` and `rdr_hook.py` re-declared on `nx-hook`;
    `version_lockstep_hook.py` re-declared as exec-form `python3` with its
    dispatch lines rewritten (Approach item 3). The four shell-form `nx`
@@ -568,6 +799,13 @@ distro, with the timing of the first `PreToolUse` after launch recorded.
 - Every ported hook keeps its test, retargeted at the tool or the verb
   with the same payload and the same expected output.
 - One stdio integration test drives a real `nx-mcp` for one hook tool.
+  MET IN SHAPE ONLY UNTIL 2026-09-19: the test drove a synthetic
+  `hook_stdio_probe` whose own summary read "never a real hook",
+  authored correctly at bead .3 before any hook was ported and never
+  revisited after bead .4 ported the first. Twelve real `hook_*` tools
+  shipped and the number ever proven reachable over the wire was ZERO,
+  for the whole epic, while this line read as satisfied. Closed by bead
+  .31 / commit `4842e0c12`, which registers the real `HOOK_TOOLS` tuple.
 - The lint test of Technical Design, both shapes, whole-string matching.
 - The expectations module gets unit tests for every verb's exit codes
   against fixture ledgers: `undeclared`'s 0, 1, 2 and 3, `reconcile`'s
@@ -684,4 +922,124 @@ registration module on the existing server, and one package.
 - 2026-09-18: Design amended to two tiers (research-9): `mcp_tool` hooks on `nx-mcp` for every event after session start, `nx-hook` command hooks for `SessionStart`, the lockstep hook on stdlib `python3`.
 - 2026-09-18: Gate round 3 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `dd95743fa`; critique `nexus_rdr/215-gate-critique-2026-09-18-r3`.
 - 2026-09-18: Accept dispositions of the round-3 residuals: the four carried from round 2 closed by `dd95743fa` (fix check `nexus_rdr/215-fix-check-dd95743fa`); the four from round 3 fixed in `faa779251`.
-- 2026-09-18: `phase_review_close_requires_gate` carved out of the tool tier to the command tier; the tool tier is 15 of 24 conexus entries, not 16. Raised during bead `nexus-q02nx.1` review; critique `nexus_rdr/critique-impl-nexus-q02nx.1-hooks-package`.
+- 2026-09-18: `phase_review_close_requires_gate` carved out of the tool tier to the command tier; the tool tier is 15 of 24 conexus entries, not 16. SUPERSEDED 2026-09-19, see the bead `nexus-q02nx.25` entry below: the measured tool tier is 13. Raised during bead `nexus-q02nx.1` review; critique `nexus_rdr/critique-impl-nexus-q02nx.1-hooks-package`.
+- 2026-09-19: Phase 1 measurements landed (bead `nexus-q02nx.6`): the
+  MCP connection race is refuted — turn 1 waits for connection
+  resolution — and the risk relocates to a server that never connects,
+  which fails open with only a debug-log warning. `${path}` substitution
+  carries non-scalars as structures, so no bead is re-tiered. A
+  not-found command hook does not fail loud, which moves that
+  requirement out of the verb. The SessionStart PATH is verified on all
+  three host shapes: the macOS desktop app repairs the PATH for the
+  children that run user tooling, so the command tier is reachable
+  there. Record: T2 `nexus_rdr/215-phase1-measurements`.
+- 2026-09-18: The command-tier entry point moves from `nexus.hooks.entry` to `nexus._hook_runtime.entry`, taking `_io` and `_config` with it, and the eager logging bridge in `main()` is replaced by a per-verb call plus a structural stdout guard. Measured: a stdlib-only dispatch falls from 0.06 s to 0.02 s, below the bash close gate re-measured on the same box at 0.03 s (bead .2 recorded 0.04 s in its own harness). Bead `nexus-br31l`.
+- 2026-09-19: Contracts amended with a third exit case (Sam's ruling): a
+  ledger verb that crashed exits a reserved 70 rather than 0, so a caller
+  branching on the 0/1/2/3/4 vocabularies can tell "the audit could not
+  run" from a real verdict. Found and measured during bead
+  `nexus-q02nx.9`; non-ledger verbs unchanged.
+- 2026-09-19: Bead `nexus-q02nx.12` found the first port had dropped both
+  of `expectations_owes_report`'s operator-facing stderr diagnostics --
+  the lock-exhaustion line and the credit-slot-orphan line. The cause
+  still rode the ledger's 4th field, so an auditor could recover it, but
+  the person watching an agent get blocked had nothing telling a
+  precautionary block from a verified one. Restored through `_emit`,
+  which never touches stdout. Caught by the retargeted SubagentStop
+  suite, whose five pinned substrings are the only reason it was
+  visible; a port checked against the decision table alone would have
+  passed. This is the measured answer to the Phase 2 question of whether
+  "move, do not rewrite" needs the old tests carried across before the
+  script goes: it does.
+- 2026-09-19: The two SubagentStop scans become `subagent_stop_scans`
+  functions rather than sibling scripts. The `nexus-2gcqk` heredoc-pipe
+  constraint that forced them out of the script does not apply to an
+  import, and removing their two `python3` spawns is the concrete form
+  the timing mitigation takes for this hook. `test_subagent_stop_hook.py`
+  still drives the port through a CHILD process, because three of its
+  test families set per-call environment and run six racers concurrently
+  and `os.environ` is process-global; the no-spawn claim is therefore
+  asserted separately and in-process, in
+  `tests/hooks/test_subagent_stop_module.py`.
+- 2026-09-19: Sequencing correction found starting bead
+  `nexus-q02nx.14`. Deleting `conexus/hooks/scripts/expectations.sh` moves
+  from `.14` (Phase 2) to `.21` (Phase 3), to land in the same change that
+  re-declares the `hooks.json` entries. All four live entries still run
+  bash scripts that source it, so the deletion would have preceded the
+  re-declaration and removed the library from the production
+  implementation, and the guard would have gone quiet with almost nothing
+  to see. The exact breakdown, re-verified at the bead .16 critique after
+  this entry first got it wrong: FOUR wired entries source it --
+  SubagentStart/`subagent-start-stamp.sh` and
+  SubagentStop/`subagent-stop.sh` as bare `|| exit 0`,
+  PreToolUse/`agent-dispatch-expect.sh` with one stderr line then exit 0,
+  and Stop/`stop_verification_hook.sh` unguarded, degrading silently via
+  its own `command -v expectations_reconcile` check. So two of the four
+  are wholly silent, one says one line, one drops a feature without
+  saying anything. (`subagent-start.sh` does NOT source it and never has,
+  despite this RDR's Approach naming it at line 719 as a script to port
+  "since they source it" -- that line is wrong and no
+  `subagent_start.py` was ever written.) `.14` already forbade this in
+  its own words -- "nothing is deleted while a consumer still sources
+  it" -- but its three enumerated consumer classes are test scripts,
+  Python tests and prose, and the production bash hooks are a fourth the
+  enumeration missed. `.14` DELETES the `tests/e2e/lib/` copy and keeps
+  the PLUGIN copy; an earlier version of this entry stated that
+  backwards.
+- 2026-09-19: Two claims in this document were measured false during the
+  Phase 3 review and corrected in place (bead `nexus-q02nx.25`;
+  critique `nexus_rdr/215-bead25-critique-findings-2026-09-19`). (a) The
+  TOOL TIER IS 13, not the 15 the 2026-09-18 entry above records:
+  `mailbox_drain.py` and `routing/subagent_git_write_requires_orchestrator.py`
+  were both named for the tool tier and both stayed command tier, for the
+  `_endpoint_resolve.py` reason now written into phase item 5. Counted
+  from the shipped manifest: 13 `mcp_tool` and 12 `command` entries, 25
+  total (24 of them this epic's; `behaviour_census.py` arrived from
+  nexus-4lnn1). The resolution had existed in T2 since 2026-09-19 and
+  never reached this document. THE SWEEP FOR THIS NUMBER FOUND THREE OF
+  ITS FOUR SITES: Contracts, phase item 5 and this history were corrected
+  in `d4e744e81`, and Approach item 1 was missed and corrected separately
+  after the Phase 4 critique found it (bead `nexus-q02nx.30`). Recorded
+  because it is the datum, not the embarrassment: the fix pass for a
+  wrong number did not begin by grepping for the number. (b) The
+  Contracts section said the close
+  gate's deny text was quoted in 19 files. It was quoted in ONE -- the
+  script -- measured by `git grep` at `213f4515d`, and the scarcity is
+  the argument for pinning it, so the claim was not merely wrong but
+  backwards. Both were found by implementation and fixed elsewhere
+  first; the standing lesson for this epic's close is to sweep the
+  document for "verified false, fixed in code or T2, RDR text unchanged".
+- 2026-09-19: Phase 3 code review (bead `nexus-q02nx.24`) returned one
+  Critical and two Significant, all three fixed with tests that failed
+  first. The close gate's override path had collapsed the bash's two id
+  sets into one, stamping covered beads `overridden` and naming them in
+  the escape log and allow text; `_bead_ids` carried two flag tables and
+  the port expanded only the shlex one, so `--reason-file` and `-r`
+  values leaked into the harvest on the malformed-quoting fallback (both
+  tables are now derived from one constant); and the bead `.20` daemon
+  thread logged only failure, so a clean projection and a thread that
+  never started were the same absence in the hook log.
+- 2026-09-19: Closed. All 31 beads and the epic closed; four gates green
+  (unit 20787/0, lint 1273, local-service-gate 597, plugin-lockstep
+  PASSED). The isolated close critique returned `partial` on one finding
+  worth recording here rather than only in T2: the Critical Assumptions
+  precondition above -- run the delay ladder INTERACTIVELY before Phase 2
+  relies on "no command-tier twin is needed" -- was never met, and unlike
+  every other open item in this epic it was absent from both closure
+  records. Now bead `nexus-veh77`. The instructive part is WHERE it hid:
+  the closure records tracked everything DISCOVERED during implementation
+  and were blind to a constraint WRITTEN DOWN before it started, and both
+  were assembled by the session that did the work. The critique that
+  found it is the one the rdr-close skill deliberately gives no session
+  context, reading only this document and the repo.
+- 2026-09-19: Round-2 close critique found THREE more instances of this
+  document's own standing lesson -- verified false, fixed in code, RDR
+  text unchanged -- and the point is that the sweep had already been run
+  twice (beads .25 and .30) and was not run a third time. All three are
+  corrected in place above: the Lint paragraph named one plugin-resident
+  python3 script where five shipped; Technical Design and Risks both said
+  `nx catalog sync` moves to a daemon thread where it was deleted; and the
+  Test Plan's stdio line read as satisfied for the epic's whole life while
+  the test drove a placeholder. None required a code change -- the code
+  was already correct in every case, which is exactly what makes this
+  class survive: nothing fails, so nothing asks.

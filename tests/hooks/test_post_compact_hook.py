@@ -1,12 +1,18 @@
-"""Tests for the PostCompact hook script."""
+"""Tests for the PostCompact hook, ``nexus.hooks.post_compact``.
+
+RDR-215 bead nexus-q02nx.19 ported this hook from
+``conexus/hooks/scripts/post_compact_hook.sh``; bead .21 re-declared its
+``hooks.json`` entry to the ``hook_post_compact`` mcp_tool, so the bash
+script no longer runs in production and this file drives the Python
+module only (nexus-q02nx.21).
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
-
-SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "post_compact_hook.sh"
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
@@ -17,6 +23,27 @@ STDIN_PAYLOAD = json.dumps({
     "trigger": "manual",
     "compact_summary": "Summary of compacted conversation.",
 })
+
+
+#: A child process, not an in-process call: these tests vary PATH and the
+#: environment per case, and ``os.environ`` is process-global.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import post_compact as _hook
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: _hook.run(payload), "post_compact")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
 
 
 def _run_hook(
@@ -30,7 +57,7 @@ def _run_hook(
         **(env_overrides or {}),
     }
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,
@@ -41,10 +68,6 @@ def _run_hook(
 
 class TestPostCompactHook:
     """PostCompact hook script tests."""
-
-    def test_script_exists_and_is_executable(self) -> None:
-        assert SCRIPT.exists(), f"Script not found: {SCRIPT}"
-        assert os.access(SCRIPT, os.X_OK), f"Script not executable: {SCRIPT}"
 
     def test_exits_zero(self) -> None:
         result = _run_hook()

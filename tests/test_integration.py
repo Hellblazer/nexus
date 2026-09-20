@@ -217,7 +217,6 @@ def test_doctor_runs_and_reports(runner):
     assert result.exit_code in (0, 1)
     output = result.output.lower()
     assert "t3 mode" in output
-    assert "ripgrep" in output or "rg" in output
     assert "git" in output
 
 

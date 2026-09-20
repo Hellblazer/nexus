@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for ``nexus.hooks._io`` — the shared payload reader, decision
+"""Unit tests for ``nexus._hook_runtime._io`` — the shared payload reader, decision
 envelope writers, and never-fail boundary (RDR-215 Phase 1, bead nexus-q02nx.1).
 
 The envelope assertions are byte-for-byte against the shapes the bash layer
@@ -24,7 +24,7 @@ from structlog.testing import capture_logs
 
 import nexus.logging_setup as logging_setup
 
-from nexus.hooks import _io
+from nexus._hook_runtime import _io
 
 
 class _TTYStream(io.StringIO):
@@ -112,7 +112,8 @@ def test_permission_decision_escapes_embedded_quotes_and_newlines():
 # -- additional_context (the SubagentStart form, no permissionDecision) --------
 
 def test_additional_context_envelope():
-    """subagent-start.sh:32 and sn/mcp-inject.sh's EXIT-trap envelope."""
+    """The EXIT-trap envelope both SubagentStart hooks used before RDR-215
+    ported them to Python (subagent-start.sh:32, sn/mcp-inject.sh)."""
     assert _io.additional_context("SubagentStart", "body text") == (
         '{"hookSpecificOutput": {"hookEventName": "SubagentStart", '
         '"additionalContext": "body text"}}'
@@ -169,13 +170,24 @@ def test_never_fail_returns_the_wrapped_result_untouched():
 def test_never_fail_swallows_an_exception_into_a_silent_zero_result():
     """The bash layer sets no ``set -e`` by design; Python needs this explicitly.
 
-    A crashing hook must look exactly like a hook that decided to say nothing.
+    A crashing hook must look exactly like a hook that decided to say
+    nothing — ON THE WIRE. stdout is None and the exit code is 0, which is
+    the whole fail-open contract and is unchanged.
+
+    It is no longer indistinguishable IN THE VALUE: ``crashed`` marks the
+    swallow so that the one caller for whom an exit code is a contract —
+    a ledger verb, whose 0/1/2/3/4 a script branches on — can tell a crash
+    from a clean verdict. Nothing else reads the flag, and non-ledger verbs
+    still exit 0 (bead nexus-q02nx.9, Sam's ruling 2026-09-19).
     """
 
     def boom() -> _io.HookResult:
         raise RuntimeError("hook logic exploded")
 
-    assert _io.never_fail(boom, "demo") == _io.HookResult(stdout=None, exit_code=0)
+    result = _io.never_fail(boom, "demo")
+    assert result.stdout is None, "the decision channel stays silent"
+    assert result.exit_code == 0, "fail-open is unchanged"
+    assert result.crashed is True, "but the swallow is now marked"
 
 
 def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
@@ -190,7 +202,7 @@ def test_never_fail_logs_the_swallowed_exception_to_stderr_when_unconfigured():
 
     program = textwrap.dedent(
         """
-        from nexus.hooks import _io
+        from nexus._hook_runtime import _io
 
         def boom():
             raise RuntimeError("hook logic exploded")
@@ -265,7 +277,7 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
     swallowed exception printed a log line onto the decision channel. Measured
     live on 4930cb597 before the fix: `[warning ] hook_boundary_swallowed_
     exception ...` on stdout, from a process that had imported nothing but
-    `nexus.hooks._io`.
+    `nexus._hook_runtime._io`.
 
     This runs in a subprocess because the assertion is about the real file
     descriptor in a process where nothing has called `configure_logging`, which
@@ -275,13 +287,13 @@ def test_a_swallowed_crash_writes_nothing_to_stdout_when_logging_is_unconfigured
 
     program = textwrap.dedent(
         """
-        from nexus.hooks import _io
+        from nexus._hook_runtime import _io
 
         def boom():
             raise RuntimeError("crash inside hook logic")
 
         result = _io.never_fail(boom, "stdout_guard")
-        assert result == _io.HookResult(), result
+        assert result == _io.HookResult(crashed=True), result
         """
     )
     proc = subprocess.run(
@@ -297,7 +309,7 @@ def test_a_malformed_payload_writes_nothing_to_stdout_when_logging_is_unconfigur
     program = textwrap.dedent(
         """
         import io
-        from nexus.hooks import _io
+        from nexus._hook_runtime import _io
 
         assert _io.read_payload(io.StringIO("{not json")) is None
         assert _io.read_payload(io.StringIO("")) is None
@@ -308,3 +320,49 @@ def test_a_malformed_payload_writes_nothing_to_stdout_when_logging_is_unconfigur
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", f"hook logging leaked onto the decision channel: {proc.stdout!r}"
+
+
+class TestWrappedCancellationPassesThrough:
+    """A cancellation must propagate even when it arrives inside a group.
+
+    52919bb20 made a bare ``asyncio.CancelledError`` pass through
+    ``never_fail``, because swallowing one breaks the caller's own timeout
+    rather than the hook's. ``asyncio.TaskGroup`` (3.11+) raises a
+    ``BaseExceptionGroup`` instead, and ``isinstance(group, CancelledError)``
+    is False however many cancellations the group carries — so the bare check
+    alone swallowed exactly the signal it existed to let through. The tool
+    tier calls ``run()`` from async handlers and Phase 2 ports two async
+    projectors, so a group is a real shape here.
+    """
+
+    def test_a_group_carrying_a_cancellation_is_re_raised(self):
+        group = BaseExceptionGroup("tg", [asyncio.CancelledError()])
+
+        def _body():
+            raise group
+
+        with pytest.raises(BaseExceptionGroup):
+            _io.never_fail(_body, "probe")
+
+    def test_a_group_carrying_no_cancellation_is_still_swallowed(self):
+        """The widening must not turn every group into an escape hatch: a
+        group of ordinary errors is still a crash the hook swallows."""
+        group = BaseExceptionGroup("tg", [ValueError("boom"), KeyError("k")])
+
+        def _body():
+            raise group
+
+        assert _io.never_fail(_body, "probe") == _io.HookResult(crashed=True)
+
+    def test_a_nested_group_carrying_a_cancellation_is_re_raised(self):
+        """TaskGroups nest, so the check has to look through the tree rather
+        than only at the top level — which is what subgroup() does and a
+        plain any(isinstance(...)) over .exceptions would not."""
+        inner = BaseExceptionGroup("inner", [asyncio.CancelledError()])
+        outer = BaseExceptionGroup("outer", [inner])
+
+        def _body():
+            raise outer
+
+        with pytest.raises(BaseExceptionGroup):
+            _io.never_fail(_body, "probe")

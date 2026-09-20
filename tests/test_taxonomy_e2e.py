@@ -374,10 +374,16 @@ class TestFullPipelineEphemeral:
             assert child_docs == all_docs_before, "Split lost documents"
             assert len(db.taxonomy.get_topic_doc_ids(t1["id"])) == 0
 
-    def test_topic_boost_reduces_distance(
+    def test_topic_boost_credits_same_topic_results(
         self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
-        """apply_topic_boost reduces distance for same-topic results."""
+        """apply_topic_boost credits same-topic results, leaving distance alone.
+
+        It used to subtract from ``distance`` directly. The credit now lands on
+        ``topic_boost`` and ``apply_hybrid_scoring`` folds it into its own local
+        effective distance, so ranking is unchanged and the reported distance is
+        the one the vector store returned (nexus-la5pr).
+        """
         from nexus.scoring import _TOPIC_SAME_BOOST, apply_topic_boost
 
         doc_ids, texts = _build_corpus()
@@ -404,12 +410,11 @@ class TestFullPipelineEphemeral:
             original_distances = [r.distance for r in results]
             apply_topic_boost(results, assignments)
 
-            # At least some results should have reduced distance
-            boosted = sum(
-                1 for orig, r in zip(original_distances, results)
-                if r.distance < orig
-            )
-            assert boosted >= 2, f"Expected >=2 boosted results, got {boosted}"
+            # At least some results should have earned credit ...
+            boosted = sum(1 for r in results if r.topic_boost > 0)
+            assert boosted >= 2, f"Expected >=2 credited results, got {boosted}"
+            # ... and none of them had its reported distance touched.
+            assert [r.distance for r in results] == original_distances
 
             # Boost amount should be exactly _TOPIC_SAME_BOOST for same-topic pairs
             for orig, r in zip(original_distances, results):

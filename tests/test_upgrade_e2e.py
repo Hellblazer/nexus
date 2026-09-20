@@ -77,13 +77,19 @@ class TestSC8HooksJson:
             for h in data["hooks"]["SessionStart"]
             if "startup" in h["matcher"]
         )
-        assert startup_hooks[0]["command"].startswith("nx upgrade --auto")
+        # Exec form since RDR-215 bead nexus-q02nx.22 -- see the twin of
+        # this assertion in tests/test_phase5_integration.py for why the
+        # old `.startswith("nx upgrade --auto")` had to go.
+        assert startup_hooks[0]["command"] == "nx-hook"
+        assert startup_hooks[0]["args"] == ["upgrade-auto"]
         assert startup_hooks[0]["timeout"] == 30
 
     def test_pretooluse_bash_timeout_is_short(self) -> None:
         """PreToolUse Bash timeout must stay short.
 
-        ``pre_close_verification_hook.sh`` is advisory (read stdin, JSON
+        The pre-close gate (``nexus.hooks.pre_close_verification``, wired as
+        the ``hook_pre_close_verification`` MCP tool) is advisory (read
+        stdin, JSON
         out, exit 0); the body completes in <100 ms. A long timeout is a
         footgun: a future bug or filesystem stall would block every
         ``Bash`` tool call by that ceiling. Pinning low so any drift

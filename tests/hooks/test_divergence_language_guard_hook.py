@@ -1,18 +1,20 @@
-"""Tests for the divergence-language-guard hook script's session_id export (nexus-7o1zh)."""
+"""Tests for the divergence-language-guard hook's session_id export
+(nexus-7o1zh), ``nexus.hooks.divergence_language_guard``.
+
+RDR-215 bead nexus-q02nx.19 ported this hook from
+``conexus/hooks/scripts/divergence-language-guard.sh``; bead .21
+re-declared its ``hooks.json`` entry to the
+``hook_divergence_language_guard`` mcp_tool, so the bash script no longer
+runs in production and this file drives the Python module only
+(nexus-q02nx.21).
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
-
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "divergence-language-guard.sh"
-)
 
 
 def _make_payload(session_id: str | None, file_path: str) -> str:
@@ -26,6 +28,27 @@ def _make_payload(session_id: str | None, file_path: str) -> str:
     return json.dumps(body)
 
 
+#: A child process, not an in-process call: these tests vary PATH and the
+#: environment per case, and ``os.environ`` is process-global.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import divergence_language_guard as _hook
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: _hook.run(payload), "divergence_language_guard")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+
 def _run_hook(
     stdin: str,
     *,
@@ -37,7 +60,7 @@ def _run_hook(
         **(env_overrides or {}),
     }
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,

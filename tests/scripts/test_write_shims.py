@@ -403,3 +403,178 @@ def test_a_shim_uv_symlinked_over_is_repaired_by_rewriting(env) -> None:
     assert str(gen) not in body, (
         "the repaired shim baked a generation path instead of the current pointer"
     )
+
+
+# ── pruning a shim the new generation no longer owns (nexus-3z8vb) ────────
+
+
+def test_a_shim_for_a_departed_console_script_is_pruned(env) -> None:
+    """The real nexus-3z8vb failure, reproduced end to end.
+
+    Generation A ships nx-hook; B (the released 7.54.0, cut while that
+    console script was deferred) does not. Writing B's shims must remove the
+    shim A left, because it resolves `current` and then execs a path that is
+    gone.
+    """
+    tools, bin_dir = env
+    gen_a = _make_gen(tools, "A", entry_points=["nx", "nx-hook"])
+    gen_b = _make_gen(tools, "B", entry_points=["nx"])
+    (tools / "current").symlink_to(gen_a)
+
+    _sh(f'nx_write_shims "{gen_a}"', tools, bin_dir)
+    assert (bin_dir / "nx-hook").is_file(), "precondition: A must shim nx-hook"
+    # The bug is invisible to a presence probe, so assert the pre-state the
+    # way the operator's tooling would see it -- it looks healthy here.
+    assert os.access(bin_dir / "nx-hook", os.X_OK)
+
+    tmp = tools / ".current.tmp"
+    tmp.symlink_to(gen_b)
+    os.replace(tmp, tools / "current")
+    res = _sh(f'nx_write_shims "{gen_b}"', tools, bin_dir)
+
+    assert res.returncode == 0, res.stderr
+    assert not (bin_dir / "nx-hook").exists(), (
+        "a shim whose program this generation does not ship must be removed, "
+        "not left to fail at exec"
+    )
+    assert (bin_dir / "nx").is_file(), "the surviving script keeps its shim"
+    assert "nx-hook" in res.stderr, "the operator is told which shim went"
+
+
+def test_pruning_never_touches_a_file_nexus_did_not_write(env) -> None:
+    """The bin dir holds tools nexus does not own. Identification is by
+    CONTENT, not by 'any name we did not just write' -- the same exclusion
+    discipline F1/nexus-xk7g2 forced on the writer."""
+    tools, bin_dir = env
+    gen = _make_gen(tools, "A", entry_points=["nx"])
+    (tools / "current").symlink_to(gen)
+
+    foreign = bin_dir / "some-other-tool"
+    foreign.write_text("#!/bin/sh\necho not-ours\n")
+    foreign.chmod(0o755)
+
+    _sh(f'nx_write_shims "{gen}"', tools, bin_dir)
+
+    assert foreign.is_file(), "a foreign binary must survive the prune"
+    assert foreign.read_text() == "#!/bin/sh\necho not-ours\n"
+
+
+def test_pruning_leaves_another_installs_shims_alone(env, tmp_path) -> None:
+    """Two nexus roots can share one bin dir. A shim is pruned only when it
+    names OUR pointer, so the other install's shims are not collateral."""
+    tools, bin_dir = env
+    gen = _make_gen(tools, "A", entry_points=["nx"])
+    (tools / "current").symlink_to(gen)
+
+    other_tools = tmp_path / "other-tools"
+    other_gen = _make_gen(other_tools, "X", entry_points=["nx", "other-cmd"])
+    (other_tools / "current").symlink_to(other_gen)
+    _sh(f'nx_write_shims "{other_gen}"', other_tools, bin_dir)
+    assert (bin_dir / "other-cmd").is_file()
+
+    _sh(f'nx_write_shims "{gen}"', tools, bin_dir)
+
+    assert (bin_dir / "other-cmd").is_file(), (
+        "our prune must not remove a shim belonging to a different nexus root"
+    )
+
+
+def test_pruning_is_idempotent(env) -> None:
+    """A second run finds nothing to prune and still succeeds quietly."""
+    tools, bin_dir = env
+    gen_a = _make_gen(tools, "A", entry_points=["nx", "nx-hook"])
+    gen_b = _make_gen(tools, "B", entry_points=["nx"])
+    (tools / "current").symlink_to(gen_a)
+    _sh(f'nx_write_shims "{gen_a}"', tools, bin_dir)
+
+    tmp = tools / ".current.tmp"
+    tmp.symlink_to(gen_b)
+    os.replace(tmp, tools / "current")
+    _sh(f'nx_write_shims "{gen_b}"', tools, bin_dir)
+    second = _sh(f'nx_write_shims "{gen_b}"', tools, bin_dir)
+
+    assert second.returncode == 0, second.stderr
+    assert "removed stale shim" not in second.stderr
+
+
+def test_prune_uses_the_owned_set_not_merely_what_exists_in_bin(env) -> None:
+    """The prune must ask "did we write this?", not "is there a file of that
+    name in the generation".
+
+    Those diverge for any name excluded by NX_NEVER_SHIM or refused by the
+    layout allowlist: the generation's bin legitimately holds `uv`, so a
+    file-exists test keeps a nexus-authored shim at that name forever, while
+    the writer never writes one. install_layout.owned_shim_names is the
+    authority -- (declared | DEPENDENCY_SCRIPTS) - NEVER_SHIM, restricted to
+    what exists -- and the shell prune has to agree with it or the twins
+    drift. nx doctor walks only the owned set, so nothing else would catch a
+    shim stranded this way.
+
+    Reachable today only by planting the shim, which is what this does; it
+    becomes reachable for real the first time a name moves into NEVER_SHIM.
+    """
+    tools, bin_dir = env
+    gen = _make_gen(tools, "A", entry_points=["nx"], bin_extras=["uv"])
+    (tools / "current").symlink_to(gen)
+    _sh(f'nx_write_shims "{gen}"', tools, bin_dir)
+
+    # A nexus-authored shim at a NEVER_SHIM name, carrying our marker and our
+    # pointer -- indistinguishable from one an older release wrote.
+    planted = bin_dir / "uv"
+    planted.write_text(
+        "#!/bin/sh\n"
+        "# Generated by nexus. Rewritten on every install; edits are lost.\n"
+        f'NX_GEN="$(readlink "{tools}/current")"\n'
+        'exec "$NX_GEN/bin/uv" "$@"\n'
+    )
+    planted.chmod(0o755)
+    assert (gen / "bin" / "uv").exists(), "precondition: the generation does ship a uv"
+
+    res = _sh(f'nx_write_shims "{gen}"', tools, bin_dir)
+
+    assert res.returncode == 0, res.stderr
+    assert not planted.exists(), (
+        "a nexus shim at a name the writer never writes is stale and must be "
+        "pruned, even though the generation has a file of that name"
+    )
+    assert (bin_dir / "nx").is_file(), "the genuinely owned shim survives"
+
+
+def test_an_unremovable_stale_shim_does_not_fail_the_whole_install(env, tmp_path) -> None:
+    """The write phase has already succeeded and `current` may already point
+    at this generation, so one unremovable file must not turn into a failed
+    `nx self install` (self_cmd's _sh raises on a non-zero return).
+
+    The failure is injected by shadowing `rm` on PATH rather than by sealing
+    the bin dir: sealing it breaks the WRITE phase too, which tests something
+    else entirely and passes for the wrong reason. `rm` is used only by the
+    prune, so shadowing it isolates exactly the path under test.
+    """
+    tools, bin_dir = env
+    gen_a = _make_gen(tools, "A", entry_points=["nx", "nx-hook"])
+    gen_b = _make_gen(tools, "B", entry_points=["nx"])
+    (tools / "current").symlink_to(gen_a)
+    _sh(f'nx_write_shims "{gen_a}"', tools, bin_dir)
+    assert (bin_dir / "nx-hook").is_file(), "precondition: A shims nx-hook"
+
+    tmp = tools / ".current.tmp"
+    tmp.symlink_to(gen_b)
+    os.replace(tmp, tools / "current")
+
+    shadow = tmp_path / "shadow-bin"
+    shadow.mkdir()
+    failing_rm = shadow / "rm"
+    failing_rm.write_text("#!/bin/sh\nexit 1\n")
+    failing_rm.chmod(0o755)
+
+    res = _sh(
+        f'nx_write_shims "{gen_b}"', tools, bin_dir,
+        {"PATH": f"{shadow}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
+    )
+
+    assert res.returncode == 0, (
+        "a stale shim that cannot be removed must not fail the install: "
+        f"rc={res.returncode} stderr={res.stderr}"
+    )
+    assert "could not remove stale shim" in res.stderr, "the operator is told"
+    assert (bin_dir / "nx-hook").exists(), "it really was not removed"

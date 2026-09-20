@@ -452,55 +452,21 @@ def test_format_plain_with_context_zero_equals_format_plain() -> None:
     assert format_plain([r]) == format_plain_with_context([r], lines_after=0)
 
 
-# ── --hybrid flag triggers ripgrep ──────────────────────────────────────────
 
 
-def test_hybrid_flag_triggers_ripgrep(runner: CliRunner, cloud_env, tmp_path) -> None:
-    cache_file = tmp_path / "myrepo-abcd1234.cache"
-    cache_file.write_text("/repo/main.py:1:hello world\n")
-    mock_t3 = _mock_t3(["code__myrepo-abcd1234"])
-    rg_calls: list[int] = []
+def test_hybrid_flag_still_returns_results(runner: CliRunner, cloud_env, tmp_path) -> None:
+    """--hybrid survives the ripgrep removal as the frecency-blend switch.
 
-    def fake_rg(query, cache_path, *, n_results=50, fixed_strings=True, timeout=10):
-        rg_calls.append(1)
-        return []
-
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
-         patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
-         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
-         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
-         patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_rg):
-        result = runner.invoke(main, ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"])
-    assert result.exit_code == 0, result.output
-    assert len(rg_calls) >= 1
-
-
-def test_hybrid_results_include_rg_hits(runner: CliRunner, cloud_env, tmp_path) -> None:
-    cache_file = tmp_path / "myrepo-abcd1234.cache"
-    cache_file.write_text("/repo/main.py:1:hello world\n")
-    mock_t3 = _mock_t3(["code__myrepo-abcd1234"])
-    rg_hit = {
-        "file_path": "/repo/main.py", "line_number": 1,
-        "line_content": "hello world", "frecency_score": 0.5,
-    }
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
-         patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
-         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
-         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
-         patch("nexus.commands.search_cmd.search_ripgrep", return_value=[rg_hit]):
-        result = runner.invoke(main, ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"])
-    assert result.exit_code == 0, result.output
-    assert "/repo/main.py" in result.output
-
-
-def test_hybrid_without_cache_files_still_works(runner: CliRunner, cloud_env, tmp_path) -> None:
+    This was "works when there are no ripgrep cache files", a scenario that
+    no longer exists (nexus-06aei). What is still worth asserting is that the
+    flag is accepted and does not suppress results.
+    """
     semantic_result = _make_result(
         "sem1", "semantic content", collection="code__myrepo",
         metadata={"source_path": "file.py", "line_start": 1},
     )
     mock_t3 = _mock_t3(["code__myrepo"])
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
-         patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[semantic_result]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(main, ["search", "query", "--hybrid", "--corpus", "code", "--no-rerank"])

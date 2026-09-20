@@ -93,6 +93,17 @@ def is_linked_worktree(cwd: str | pathlib.Path) -> bool:
 
 
 def is_serena_write_tool(tool_name: str) -> bool:
+    """Whether *tool_name* is a Serena tool that writes through the server's root.
+
+    The isinstance check is not defensive noise: ``tool_name`` comes out of a
+    hook payload that this process did not build, and ``{"tool_name": 123}``
+    is valid JSON. Without it that raises ``AttributeError`` here. The
+    outcome was never unsafe — the crash reached a boundary and nothing was
+    approved — but it cost a traceback where a non-string simply is not a
+    write tool. Found by adversarial review of RDR-215 bead nexus-q02nx.23.
+    """
+    if not isinstance(tool_name, str):
+        return False
     return tool_name.startswith(SERENA_PREFIX) and tool_name[len(SERENA_PREFIX):] in SERENA_WRITE_TOOLS
 
 

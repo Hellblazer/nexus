@@ -116,6 +116,7 @@ echo ""
 # The user types 'claude --dangerously-skip-permissions' themselves, giving
 # a better interactive terminal experience for pasting the OAuth code.
 docker run -it --rm \
+    -e NX_NO_TELEMETRY=1 \
     --name nexus-e2e-auth \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     -v "$AUTH_DIR":/home/node/.claude \

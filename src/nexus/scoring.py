@@ -18,8 +18,6 @@ _EPSILON = 1e-9
 # search_engine.apply_ranking_boosts() is accepted-but-unused vestige, kept
 # only so TuningConfig.file_size_threshold and existing callers keep
 # working unchanged.
-RG_FLOOR_SCORE = 0.5
-
 # Default scoring weights (kept as module constants for backward compatibility).
 # Override by passing explicit weights to hybrid_score() / apply_hybrid_scoring().
 _VECTOR_WEIGHT: float = 0.7
@@ -110,7 +108,7 @@ def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float
     actually spans more than one embedding model.
 
     Returns ``{collection_name: factor}`` covering every distinct
-    non-``rg__cache`` collection in *results*. When every collection
+    collection in *results*. When every collection
     resolves to the SAME model (the local-mode default, and any single-
     corpus cloud-mode search), every factor is exactly ``1.0`` — a true
     no-op, not a prefix-derived reshuffle. Only when two or more distinct
@@ -127,7 +125,7 @@ def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float
             model_by_collection[collection] = model
         return model
 
-    collections = {r.collection for r in results if r.collection != "rg__cache"}
+    collections = {r.collection for r in results}
     models = {_model_for(c) for c in collections}
 
     if len(models) <= 1:
@@ -166,6 +164,38 @@ def hybrid_score(
     Pass explicit weights from TuningConfig to override.
     """
     return vector_weight * vector_norm + frecency_weight * frecency_norm
+
+
+def _effective_distance(
+    r: SearchResult, calibration_factors: dict[str, float],
+) -> float:
+    """The distance this result is RANKED by, which is not the one reported.
+
+    Reproduces what ``apply_topic_boost`` used to do in place, in the same
+    order: clamp the topic credit off the raw distance at zero, then apply
+    the per-collection calibration factor. Keeping it in one function used by
+    both the window and the per-result score is what makes "the ranking did
+    not change" checkable rather than asserted — the two used to be separate
+    copies of the same expression.
+
+    ONE DELIBERATE DIVERGENCE, because the equivalence is not total and
+    saying it is would be false. The old code clamped only results
+    ``apply_topic_boost`` actually touched; an untouched result's distance
+    reached calibration unclamped. This clamps EVERY result. The two differ
+    only for a NEGATIVE raw distance with no credit — float noise near a
+    perfect cosine match, since ``1 - similarity`` can dip a hair below zero
+    in float32. Measured: with distances ``{-0.001, 0.0, 0.5}`` and no
+    boosts, the old form ranked the noise strictly ahead of the genuine
+    zero-distance match; this ties them.
+
+    Tying is the better answer and is why the divergence is kept rather than
+    papered over. A distance below zero is not a better match than a perfect
+    one, it is measurement error, and letting it win was an accident of
+    where the clamp happened to sit. The alternative — clamping only when
+    ``topic_boost`` is non-zero — would preserve the old behaviour exactly by
+    preserving a bug.
+    """
+    return max(0.0, r.distance - r.topic_boost) * calibration_factors.get(r.collection, 1.0)
 
 
 def apply_hybrid_scoring(
@@ -274,9 +304,6 @@ def apply_hybrid_scoring(
     if hybrid and not has_code:
         _log.warning("--hybrid has no effect — no code corpus in scope")
 
-    # Exclude rg__cache from normalization window — distance=0.0 from ripgrep
-    # hits distorts the min-max range for real vector distances.
-    #
     # nexus-tox2m: ONE pooled window across every result, computed over
     # CALIBRATED distances — see this function's docstring "Normalization
     # window" section. calibration_factors resolves to 1.0 everywhere when
@@ -284,10 +311,7 @@ def apply_hybrid_scoring(
     # _resolve_calibration_factors docstring — this is the local-mode
     # no-op gate).
     calibration_factors = _resolve_calibration_factors(results)
-    distances = [
-        r.distance * calibration_factors.get(r.collection, 1.0)
-        for r in results if r.collection != "rg__cache"
-    ]
+    distances = [_effective_distance(r, calibration_factors) for r in results]
     frecencies = [
         r.metadata.get("frecency_score", 0.0)
         for r in results
@@ -295,9 +319,6 @@ def apply_hybrid_scoring(
     ]
 
     for r in results:
-        if r.collection == "rg__cache":
-            r.hybrid_score = RG_FLOOR_SCORE
-            continue
         # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0.
         # A single-element window normalizes to 1.0 ("trivially the maximum" —
         # min_max_normalize's own contract, pinned in test_min_max_normalize);
@@ -305,7 +326,7 @@ def apply_hybrid_scoring(
         # score for the only result there is to score. Treat "nothing to
         # compare against" (0 or 1 elements) uniformly as the best match
         # (nexus-yrc7q #8).
-        calibrated = r.distance * calibration_factors.get(r.collection, 1.0)
+        calibrated = _effective_distance(r, calibration_factors)
         v_norm = 1.0 if len(distances) <= 1 else 1.0 - min_max_normalize(calibrated, distances)
         if hybrid:
             # nexus-tox2m follow-on: apply vector_weight to EVERY result
@@ -489,9 +510,18 @@ def apply_topic_boost(
 ) -> list[SearchResult]:
     """Boost results that share or are linked by topic.
 
-    Reduces ``distance`` (lower = better) rather than modifying
-    ``hybrid_score``, because ``hybrid_score`` is populated later
-    by the reranker and would be overwritten.
+    Accumulates credit on :attr:`~nexus.types.SearchResult.topic_boost`, in
+    distance units (lower = better), and does NOT touch ``distance``.
+
+    It used to subtract straight from ``distance``, for a good reason —
+    ``hybrid_score`` is computed later by the reranker and would overwrite
+    anything written there. The cost was hidden: ``distance`` is the one
+    absolute number a consumer can judge a hit by, and on the search path it
+    silently carried up to 0.15 of relevance engineering while every surface
+    reported it as the raw vector distance (nexus-la5pr). ``apply_hybrid_scoring``
+    now subtracts this credit when it computes its own local effective
+    distance, so the ranking is unchanged to the last bit and the reported
+    number is the one that was measured.
 
     For each result with a topic assignment:
     - If another result in the set shares the SAME topic: -_TOPIC_SAME_BOOST distance
@@ -527,7 +557,7 @@ def apply_topic_boost(
         # Same-topic boost: at least one other result in the same topic
         same_topic_peers = topic_to_indices.get(tid, [])
         if len(same_topic_peers) > 1:
-            r.distance = max(0.0, r.distance - _TOPIC_SAME_BOOST)
+            r.topic_boost += _TOPIC_SAME_BOOST
 
         # Linked-topic boost: at least one result in a linked topic
         has_linked = False
@@ -538,7 +568,7 @@ def apply_topic_boost(
                 has_linked = True
                 break
         if has_linked:
-            r.distance = max(0.0, r.distance - _TOPIC_LINKED_BOOST)
+            r.topic_boost += _TOPIC_LINKED_BOOST
 
     return results
 

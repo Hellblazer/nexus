@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the Stop verification hook script.
+"""Tests for the Stop verification hook, ``nexus.hooks.stop_verification``.
 
 The Stop hook is advisory-only — it warns about uncommitted changes and open
 beads but never blocks. Hard enforcement is the PreToolUse close gate's job.
+
+RDR-215 bead nexus-q02nx.13 ported this hook from
+``conexus/hooks/scripts/stop_verification_hook.sh``; bead .21 re-declared its
+``hooks.json`` entry to the ``hook_stop_verification`` mcp_tool, so the bash
+script no longer runs in production and this file drives the Python module
+only (nexus-q02nx.21).
 """
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
-
-SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "stop_verification_hook.sh"
 
 _MINIMAL_PATH = "/usr/bin:/bin"
 
@@ -24,6 +29,30 @@ def _make_payload(stop_hook_active: bool = False) -> str:
         "hook_event_name": "Stop",
         "stop_hook_active": stop_hook_active,
     })
+
+
+#: A child process, not an in-process call: these tests vary ``cwd`` and the
+#: environment per case, and the hook reads both at call time. Driving it in
+#: process would mean ``os.chdir`` and ``os.environ`` mutation, which are
+#: process-global -- the same hazard that made the ledger's contention seams
+#: environment variables rather than an in-process seam.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import stop_verification
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: stop_verification.run(payload), "stop_verification")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
 
 
 def _run_hook(
@@ -40,11 +69,11 @@ def _run_hook(
     if not stdin:
         stdin = _make_payload()
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
         env=env,
         cwd=cwd,
     )
@@ -89,10 +118,6 @@ def dirty_git_repo(tmp_path):
 
 class TestStopVerificationHook:
     """Stop verification hook — advisory only, never blocks."""
-
-    def test_script_exists_and_is_executable(self) -> None:
-        assert SCRIPT.exists()
-        assert os.access(SCRIPT, os.X_OK)
 
     def test_exits_zero_always(self) -> None:
         assert _run_hook().returncode == 0

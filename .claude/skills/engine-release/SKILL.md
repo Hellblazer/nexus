@@ -370,8 +370,12 @@ pass, and Step 6.1 is what gates the paired client release.
 
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
-Releaser is **human** by default (AI preps + validates); the human pushes the
-tag, OR the AI pushes it when the human explicitly authorizes that cut.
+Releaser is **human, every time** (AI preps + validates; the human pushes the
+tag). Not "human by default": that wording drifted in here and widened an
+absolute rule into one with a self-assessed exception, since the AI is the
+party deciding whether it heard an authorization. AGENTS.md § Engine-service
+release says "The human pushes the tag" with no carve-out, and the user-level
+CLAUDE.md § Releases says "Releaser is human, every time."
 
 ```bash
 git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit> must be on origin

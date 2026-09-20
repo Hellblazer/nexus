@@ -197,26 +197,26 @@ def test_context_single_line() -> None:
 # ── _find_matching_lines ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("chunk,query,rg_lines,start,expected", [
-    ("def foo():\n    return 42\n    pass", "return", [], 0, [1]),
-    ("import os\nimport sys\nprint(os.path)\nprint(sys.argv)", "os sys", [], 0, [0, 1]),
-    ("class MyClass:\n    CONSTANT = True", "myclass constant", [], 0, [0, 1]),
-    ("line zero\nline one\nline two\nline three", "zero", [12], 10, [2]),
-    ("alpha\nbeta\ngamma", "xyznotfound", [], 0, [0]),
-    ("", "query", [], 0, [0]),
+@pytest.mark.parametrize("chunk,query,expected", [
+    ("def foo():\n    return 42\n    pass", "return", [1]),
+    ("import os\nimport sys\nprint(os.path)\nprint(sys.argv)", "os sys", [0, 1]),
+    ("class MyClass:\n    CONSTANT = True", "myclass constant", [0, 1]),
+    # Keyword match is now the FIRST lane, not the second. The rg lane that
+    # used to precede it (absolute line numbers carried from a ripgrep hit,
+    # translated to chunk-relative) is gone with the ripgrep path itself
+    # (nexus-06aei), so the signature lost rg_matched_lines and
+    # chunk_line_start along with it.
+    ("line zero\nline one\nline two\nline three", "two", [2]),
+    ("alpha\nbeta\ngamma", "xyznotfound", [0]),
+    ("", "query", [0]),
 ])
-def test_find_matching_lines(chunk, query, rg_lines, start, expected) -> None:
-    result = _find_matching_lines(chunk, query, rg_matched_lines=rg_lines or None, chunk_line_start=start or 0)
+def test_find_matching_lines(chunk, query, expected) -> None:
+    result = _find_matching_lines(chunk, query)
     if len(expected) == 1:
         assert result == expected
     else:
         for e in expected:
             assert e in result
-
-
-def test_find_matching_lines_rg_out_of_range_falls_back() -> None:
-    result = _find_matching_lines("line zero\nline one", "zero", rg_matched_lines=[50], chunk_line_start=10)
-    assert result == [0]
 
 
 # ── _extract_context ────────────────────────────────────────────────────────
@@ -307,14 +307,6 @@ def test_context_with_query_and_before() -> None:
     assert any(":105:" in ln for ln in lines)
     assert any(":106:" in ln for ln in lines)
     assert any(":107:" in ln for ln in lines)
-
-
-def test_context_with_rg_matched_lines() -> None:
-    content = "\n".join(f"line {i}" for i in range(10))
-    r = _result(content=content, line_start=10, rg_matched_lines=[15])
-    lines = format_plain_with_context([r], lines_after=1, query="nomatch")
-    assert any(":15:" in ln for ln in lines)
-    assert any(":16:" in ln for ln in lines)
 
 
 @pytest.mark.parametrize("query,lines_after,expected_len,first_line", [

@@ -15,7 +15,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 
-from nexus.hooks._io import HookResult
+from nexus._hook_runtime._io import HookResult, permission_decision, stop_decision
 from nexus.mcp.hooks import (
     HOOK_TOOLS,
     HookToolSpec,
@@ -162,7 +162,7 @@ class TestRegisterHookTools:
         assert result.content[0].text == ""
 
     def test_a_raised_exception_is_logged(self, monkeypatch):
-        """Patches ``nexus.hooks._io``'s own emitter rather than
+        """Patches ``nexus._hook_runtime._io``'s own emitter rather than
         ``structlog.testing.capture_logs()`` -- this repo's
         ``configure_logging`` installs a level-filtering wrapper_class that
         ``capture_logs()`` does not override (see
@@ -175,7 +175,7 @@ class TestRegisterHookTools:
         writes to stdout, which is the hook's decision channel. ``_emit``
         chooses the sink at call time and imports structlog only if it has one.
         """
-        import nexus.hooks._io as io_mod
+        import nexus._hook_runtime._io as io_mod
 
         emitted = []
         monkeypatch.setattr(
@@ -260,14 +260,247 @@ class TestPhaseReviewCloseNeverOnThisTier:
         assert "phase_review_close_requires_gate" not in {spec.name for spec in HOOK_TOOLS}
 
 
-# ── no accidental tools on the live server ────────────────────────────────
+# ── the live server registers exactly the ported hooks, no more ──────────
 
-def test_the_live_nx_mcp_server_gains_no_hook_tools_yet():
-    """HOOK_TOOLS is empty in this bead, so nexus.mcp.core's unconditional
-    registration call must add zero tools to the live server -- the
-    tool-count/description-lint pins this bead's AUDIT RESIDUAL flags stay
-    green with no doc update required."""
+def test_the_live_nx_mcp_server_registers_exactly_the_ported_hook_tools():
+    """HOOK_TOOLS carries one entry per ported hook module (bead
+    nexus-q02nx.4 is the first: hook_auto_approve). nexus.mcp.core's
+    unconditional registration call must add exactly those hook_<name>
+    tools to the live server, no more and no fewer -- the tool-count/
+    description-lint docs (docs/mcp-servers.md, this module's own module
+    docstring) must track that count, which is why this test asserts the
+    exact set rather than merely "not empty"."""
     from nexus.mcp.core import mcp as core_mcp
+    from nexus.mcp.hooks import HOOK_TOOLS
 
-    names = [t.name for t in core_mcp._tool_manager.list_tools()]
-    assert not any(name.startswith("hook_") for name in names)
+    hook_names = {t.name for t in core_mcp._tool_manager.list_tools() if t.name.startswith("hook_")}
+    assert hook_names == {f"hook_{spec.name}" for spec in HOOK_TOOLS}
+
+
+# ── the deny path ─────────────────────────────────────────────────────────
+
+class TestToolTierCarriesADeny:
+    """The tool tier's DENY path, which neither MVV port exercises.
+
+    ``hook_auto_approve`` (bead .4) only ever allows or stays silent, and
+    ``session_start_verb`` (bead .5) emits no decision at all, so the two ports
+    that exist prove the allow and silent paths and the fail-open-on-crash
+    path — and nothing about a hook that deliberately refuses.
+
+    That gap matters because bead nexus-q02nx.17 ports
+    ``pre_close_verification_hook.sh``, an active allow|deny gate whose refusal
+    text 19 files quote, onto this same mechanism. It would be the first hook
+    to find out whether a deny survives the tool boundary intact. These tests
+    establish it now, on the mechanism, rather than discovering it there.
+    """
+
+    def test_a_deny_envelope_reaches_the_caller_byte_for_byte(self):
+        deny = permission_decision(
+            "PreToolUse",
+            "deny",
+            permission_decision_reason="blocked by the gate",
+            reason="blocked by the gate",
+            system_message="run the gate first",
+        )
+
+        mcp = _fresh_mcp()
+        register_hook_tools(mcp, (HookToolSpec(name="gate", run=lambda p: HookResult(stdout=deny)),))
+
+        result = _run(mcp.call_tool("hook_gate", {}))
+
+        # isError stays False: a deny is a DECISION the event carries, not a
+        # tool failure. Signalling it as an error would make a refusal
+        # indistinguishable from a crash, which on this tier means allow.
+        assert result.isError is False
+        assert result.content[0].text == deny
+
+    def test_a_stop_tier_block_reaches_the_caller_byte_for_byte(self):
+        """The other refusal shape: the top-level ``decision`` form the Stop
+        and SubagentStop hooks use, which is not a hookSpecificOutput envelope.
+        """
+        block = stop_decision("block", reason="owes a report")
+
+        mcp = _fresh_mcp()
+        register_hook_tools(mcp, (HookToolSpec(name="stopper", run=lambda p: HookResult(stdout=block)),))
+
+        result = _run(mcp.call_tool("hook_stopper", {}))
+
+        assert result.isError is False
+        assert result.content[0].text == block
+
+    def test_a_deny_is_distinguishable_from_a_crash(self):
+        """The property bead .17 actually depends on.
+
+        A crash returns empty text, which the event reads as "no opinion" and
+        therefore proceeds — the deliberate fail-open this tier is built on. A
+        deny returns its envelope. If those two were ever the same bytes, a
+        crashing gate would look exactly like a passing one.
+        """
+        deny = permission_decision("PreToolUse", "deny", reason="refused")
+
+        def _boom(payload):
+            raise RuntimeError("gate exploded")
+
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(name="denier", run=lambda p: HookResult(stdout=deny)),
+                HookToolSpec(name="crasher", run=_boom),
+            ),
+        )
+
+        denied = _run(mcp.call_tool("hook_denier", {}))
+        crashed = _run(mcp.call_tool("hook_crasher", {}))
+
+        assert denied.content[0].text == deny
+        assert crashed.content[0].text == ""
+        assert denied.content[0].text != crashed.content[0].text
+
+
+# ── non-scalar payload fields (bead nexus-9ifls) ──────────────────────────
+
+class TestNonScalarPayloadFields:
+    """A hook-tool field must accept what ``${path}`` substitution delivers.
+
+    Bead nexus-q02nx.6 measured, against a real Claude Code 2.1.278, that
+    substitution hands an ``mcp_tool`` hook REAL STRUCTURES rather than
+    JSON-encoded strings: ``${tool_input}`` arrives as a ``dict`` and
+    ``${background_tasks}`` as a ``list`` of ``dict``s carrying a mixed
+    ``type: shell`` / ``type: subagent`` population with different key sets.
+
+    These drive FastMCP's ACTUAL argument validation through the server's own
+    in-process dispatch, so they fail against the ``str | None`` annotation
+    the tier shipped with -- which is the point. Reverting
+    ``_make_tool_function``'s annotation to ``str | None`` must turn both
+    ``test_a_dict_...`` and ``test_a_list_...`` red; if it does not, they are
+    not testing validation.
+    """
+
+    def test_a_dict_valued_field_reaches_run_intact(self):
+        received: list[dict | None] = []
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
+                    fields=("tool_input",),
+                    structured_fields=frozenset({"tool_input"}),
+                ),
+            ),
+        )
+
+        tool_input = {"command": "echo hi", "description": "Echo a test string"}
+        _run(mcp.call_tool("hook_probe", {"tool_input": tool_input}))
+
+        assert received == [{"tool_input": tool_input}]
+
+    def test_a_list_valued_field_survives_a_mixed_population(self):
+        """The shape nexus-q02nx.13 cross-checks: heterogeneous key sets.
+
+        An EMPTY list would pass even a stringly schema's coercion in some
+        pydantic configurations and proves nothing about structure, so this
+        deliberately carries two entries whose keys DIFFER -- ``shell`` has
+        ``command`` where ``subagent`` has ``agent_type`` -- exactly as
+        measured from a real ``Stop`` event.
+        """
+        received: list[dict | None] = []
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
+                    fields=("background_tasks",),
+                    structured_fields=frozenset({"background_tasks"}),
+                ),
+            ),
+        )
+
+        background_tasks = [
+            {
+                "id": "bm72q9d6v",
+                "type": "shell",
+                "status": "running",
+                "description": "Sleep for 45 seconds in background",
+                "command": "sleep 45",
+            },
+            {
+                "id": "a1ea45d8d324ca24a",
+                "type": "subagent",
+                "status": "running",
+                "description": "Count to ten slowly",
+                "agent_type": "general-purpose",
+            },
+        ]
+        _run(mcp.call_tool("hook_probe", {"background_tasks": background_tasks}))
+
+        assert received == [{"background_tasks": background_tasks}]
+        assert received[0]["background_tasks"][0]["command"] == "sleep 45"
+        assert received[0]["background_tasks"][1]["agent_type"] == "general-purpose"
+
+    def test_a_scalar_field_still_works(self):
+        """Widening to ``Any`` must not regress the ordinary scalar case."""
+        received: list[dict | None] = []
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: (received.append(p), HookResult(stdout="{}"))[1],
+                    fields=("tool_name",),
+                ),
+            ),
+        )
+
+        _run(mcp.call_tool("hook_probe", {"tool_name": "Bash"}))
+
+        assert received == [{"tool_name": "Bash"}]
+
+    def test_an_unstructured_field_keeps_its_string_type_in_the_schema(self):
+        """The widening is per field, not blanket.
+
+        These tools are model-callable and the input schema is what the model
+        sees, so a field that is provably always a string must still say so.
+        A blanket ``Any`` passes every behavioural test in this class while
+        silently erasing that, which is why this asserts on the SCHEMA rather
+        than on a call.
+        """
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (
+                HookToolSpec(
+                    name="probe",
+                    run=lambda p: HookResult(),
+                    fields=("tool_name", "tool_input"),
+                    structured_fields=frozenset({"tool_input"}),
+                ),
+            ),
+        )
+
+        props = _run(mcp.list_tools())[0].inputSchema["properties"]
+        assert props["tool_name"].get("anyOf") == [{"type": "string"}, {"type": "null"}], (
+            "a scalar field must keep its string/null type: " f"{props['tool_name']}"
+        )
+        assert "anyOf" not in props["tool_input"], (
+            "a structured field must be unconstrained: " f"{props['tool_input']}"
+        )
+
+    def test_a_structured_value_is_refused_on_a_field_not_marked_structured(self):
+        """The inverse of the widening, and the reason it is opt-in: a field
+        nobody declared structured still rejects a dict, loudly, at the tool
+        boundary rather than reaching run()."""
+        mcp = _fresh_mcp()
+        register_hook_tools(
+            mcp,
+            (HookToolSpec(name="probe", run=lambda p: HookResult(), fields=("tool_name",)),),
+        )
+
+        with pytest.raises(Exception) as excinfo:
+            _run(mcp.call_tool("hook_probe", {"tool_name": {"not": "a string"}}))
+        assert "string" in str(excinfo.value).lower()

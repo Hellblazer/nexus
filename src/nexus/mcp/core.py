@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-52 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+64 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -46,9 +46,9 @@ from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
 # RDR-215 Approach items 1 and 4: the tool-tier registration mechanism for
-# ported Claude Code hooks. HOOK_TOOLS is empty until the first port
-# (bead nexus-q02nx.4) -- this call registers nothing on the live server
-# today. See nexus/mcp/hooks.py's module docstring for the full contract.
+# ported Claude Code hooks. HOOK_TOOLS carries one entry per port, starting
+# with hook_auto_approve (bead nexus-q02nx.4). See nexus/mcp/hooks.py's
+# module docstring for the full contract.
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
@@ -1907,9 +1907,8 @@ else:  # pragma: no cover — future SDK restructure
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
-# RDR-215: register any ported hook_<name> tool-tier tools. HOOK_TOOLS is
-# empty until bead nexus-q02nx.4 lands its first port, so this call
-# currently registers zero tools -- see nexus/mcp/hooks.py.
+# RDR-215: register any ported hook_<name> tool-tier tools -- see
+# nexus/mcp/hooks.py for the registration table (HOOK_TOOLS).
 _register_hook_tools(mcp)
 
 _DEFAULT_PAGE_SIZE = 10
@@ -2259,13 +2258,13 @@ def _structured_no_results(diagnostics: list, *, base: str = "No results.") -> d
     consolidate" on a topic whose two nearest entries had been dropped at 0.629
     and 0.645, and which a plain prose ``search`` returned.
 
-    Additive only. The six original keys keep their exact shape and meaning, so
+    Additive only. The seven populated-branch keys keep their exact shape and meaning, so
     existing consumers are unaffected; the new keys are present on zero-hit
     payloads for callers that want to discriminate.
     """
     worst = diagnostics[0].worst_offender() if diagnostics else None
     out: dict = {
-        "ids": [], "tumblers": [], "distances": [],
+        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
         "collections": [], "chunk_collections": [], "chunk_text_hash": [],
         "no_results_reason": _no_results_message(diagnostics, base=base),
         # A caller must not have to parse prose to branch on this.
@@ -2296,6 +2295,7 @@ def _search_render(
     topic: str = "",
     structured: bool = False,
     threshold: float | None = None,
+    lexical: bool = False,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
 
@@ -2325,9 +2325,12 @@ def _search_render(
     each cluster's own internal ordering), full stop — the hybrid/bib boost
     is still computed but its reordering is fully discarded to keep same-
     cluster results contiguous for the text renderer, so in this mode the
-    boost has NO effect on what the caller sees, in either text or
-    ``structured=True`` output (``hybrid_score`` is not surfaced there
-    either). Use ``cluster_by=""`` when boosted ranking matters.
+    boost's REORDERING has no effect on what the caller sees, in either
+    text or ``structured=True`` output. The scores themselves ARE visible as
+    of nexus-la5pr — ``hybrid_scores`` in the structured dict, ``s=`` in the
+    text render — so in this mode a caller can see a page whose order does
+    not follow them, which is the point of this paragraph. Use
+    ``cluster_by=""`` when boosted ranking matters.
 
     File diversity (nexus-0bmhd, 2026-09-01): a text render (``structured=
     False``) caps display to at most 2 chunks per file
@@ -2391,9 +2394,14 @@ def _search_render(
         # the uncached path would render.
         need = offset + limit
         fetch_n = need + limit * _PAGE_LOOKAHEAD_PAGES
+        # ``lexical`` MUST be in this tuple. It changes WHICH rows are
+        # retrieved, so a lexical call that reused a vector-only page would be
+        # served silently-wrong results inside the 120s TTL — and the wrapper
+        # calls _search_render twice, so it is reachable within one request.
+        # Found by the RDR-217 enrichment pass before the parameter existed.
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold,
+            topic or "", threshold, lexical,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -2419,6 +2427,7 @@ def _search_render(
                     taxonomy=_t2_db.taxonomy,
                     topic=topic or None,
                     threshold_override=threshold,
+                    lexical=lexical,
                     telemetry=_t2_db.telemetry,
                     diagnostics_out=diag,
                 )
@@ -2506,6 +2515,16 @@ def _search_render(
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
+                # The page is ORDERED by hybrid_score, so withholding it left
+                # the consumer reading one number and being served another
+                # (nexus-la5pr). The two answer different questions and both
+                # are needed: distance is absolute and comparable across
+                # queries, hybrid_score is min-max normalised WITHIN this
+                # result window, so the best of two poor hits scores 1.0 and
+                # so does a lone poor one. A caller wanting a relevance floor
+                # has to read distance; a caller wanting to know why this row
+                # is above that one has to read hybrid_score.
+                "hybrid_scores": [float(r.hybrid_score) for r in page],
                 "collections": list({r.collection for r in page}),
                 "chunk_collections": [r.collection for r in page],
                 "chunk_text_hash": [
@@ -2536,7 +2555,12 @@ def _search_render(
                 r.metadata.get("_display_path")
                 or r.metadata.get("source_path", "")
             )
-            dist = f"{r.distance:.4f}"
+            # Both numbers, because the order comes from the second one.
+            # `d=` is the raw vector distance (absolute, lower is better);
+            # `s=` is the hybrid score this page was sorted by (relative to
+            # this window, higher is better). Printing only `d=` while
+            # sorting by `s=` is what nexus-la5pr was filed about.
+            dist = f"d={r.distance:.4f} s={r.hybrid_score:.3f}"
             label = title or source or r.id
             # RDR-169 Phase B fix round 1 (reference-only chunks, content=None):
             # coerced to "" at the SearchResult boundary (search_engine.py), but
@@ -2657,8 +2681,9 @@ def search(
     )] = "",
     structured: Annotated[bool, Field(
         description=(
-            "Return the {ids, tumblers, distances, collections} dict instead of the "
-            "human-readable string; the plan runner uses this so $stepN.ids resolves."
+            "Return the {ids, tumblers, distances, hybrid_scores, collections, "
+            "chunk_collections, chunk_text_hash} dict instead of the human-readable "
+            "string; the plan runner uses this so $stepN.ids resolves."
         ),
     )] = False,
     threshold: Annotated[float | None, Field(
@@ -2668,6 +2693,20 @@ def search(
             "None (default) uses per-corpus config thresholds."
         ),
     )] = None,
+    lexical: Annotated[bool, Field(
+        description=(
+            "Also search the engine's exact-text indexes (full-text + trigram) "
+            "and ADD those hits to the vector results, rather than replacing "
+            "them. Use for a rare identifier or exact token a semantic search "
+            "misses: measured 0.167 -> 0.698 precision@10 on rare tokens, with "
+            "one token invisible to vector search entirely. Lexical hits are "
+            "exempt from the distance threshold, since a lexically-matched row "
+            "whose vector distance is large is exactly the target. Refuses on a "
+            "backend without the route rather than silently returning "
+            "vector-only rows. Unrelated to the CLI's --hybrid, which only "
+            "re-ranks."
+        ),
+    )] = False,
 ) -> "str | dict | CallToolResult":
     """Semantic search across T3 chunks; returns matching text fragments, not whole documents.
 
@@ -2677,10 +2716,14 @@ def search(
     an extracted aspect field, or graph neighbours, respectively.
 
     Returns a ranked, human-readable list of chunks by default, or, when
-    `structured=True`, `{ids, tumblers, distances, collections,
+    `structured=True`, `{ids, tumblers, distances, hybrid_scores, collections,
     chunk_collections, chunk_text_hash, truncated, truncated_chars, text}`:
-    `truncated`/`truncated_chars` say whether the text rendering cut the
-    page and by how much, and `text` is that rendering.
+    `distances` is the raw vector distance (absolute, lower is better),
+    `hybrid_scores` is what the page was SORTED by (min-max normalised within
+    this result window, higher is better, so the best of two poor hits scores
+    1.0 and so does a lone poor one -- read `distances` for a relevance
+    floor). `truncated`/`truncated_chars` say whether the text rendering cut
+    the page and by how much, and `text` is that rendering.
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
@@ -2694,7 +2737,7 @@ def search(
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
-        threshold=threshold,
+        threshold=threshold, lexical=lexical,
     )
     if structured or not isinstance(result, str):
         # structured=True, or an error string that already reads like one —
@@ -2705,11 +2748,11 @@ def search(
     data = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=True,
-        threshold=threshold,
+        threshold=threshold, lexical=lexical,
     )
     empty_shape = {
-        "ids": [], "tumblers": [], "distances": [], "collections": [],
-        "chunk_collections": [], "chunk_text_hash": [],
+        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],
+        "collections": [], "chunk_collections": [], "chunk_text_hash": [],
     }
     structured_content = {
         **(data if isinstance(data, dict) else empty_shape),
@@ -4035,7 +4078,16 @@ def query(
                 if structured:
                     empty_result: dict = {
                         "ids": [], "tumblers": [], "distances": [],
+                        "hybrid_scores": [],
                         "collections": [], "chunk_collections": [],
+                        # also_in/also_in_ids were missing here while the
+                        # populated dict below carries them: a zero-hit call
+                        # returned a NARROWER shape than a populated one, so a
+                        # consumer reading them unconditionally got a KeyError
+                        # only when a query happened to match nothing. Same
+                        # class as the hybrid_scores line above, found while
+                        # adding it (nexus-la5pr).
+                        "also_in": [], "also_in_ids": [],
                         "chunk_text_hash": [],
                     }
                     if seed_scope is not None:
@@ -4057,6 +4109,15 @@ def query(
                     "ids": tumblers_svc,
                     "tumblers": tumblers_svc,
                     "distances": _reported_distances(rows),
+                    # Present and EMPTY, deliberately. This path reads rows
+                    # straight from the service and never runs
+                    # apply_hybrid_scoring, so there is no hybrid score to
+                    # report -- these rows are ordered by distance alone.
+                    # Emitting [] rather than omitting the key keeps one
+                    # shape across both query paths, so a consumer can read
+                    # it unconditionally; emitting zeros would be inventing
+                    # a score that was never computed.
+                    "hybrid_scores": [],
                     # sorted distinct across rows
                     "collections": sorted({r.get("collection", "") for r in rows}),
                     # per-row aligned (RDR-086 / review #7)
@@ -4209,7 +4270,11 @@ def query(
             if structured:
                 empty_result: dict = {
                     "ids": [], "tumblers": [], "distances": [],
+                    "hybrid_scores": [],
                     "collections": [], "chunk_collections": [],
+                    # See the sibling empty shape above: also_in/also_in_ids
+                    # were absent here too (nexus-la5pr).
+                    "also_in": [], "also_in_ids": [],
                     "chunk_text_hash": [],
                 }
                 if graph_batch_info is not None:
@@ -4235,6 +4300,13 @@ def query(
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
+                # This page came out of apply_ranking_boosts, which sorts
+                # descending by hybrid_score -- so a structured caller was
+                # being handed an order it could not explain from the one
+                # number it got (nexus-la5pr). This is the machine path
+                # nx_answer's plan runner consumes, which is exactly the
+                # audience that cannot squint at a text render instead.
+                "hybrid_scores": [float(r.hybrid_score) for r in page],
                 # H1 (nexus-rzqto): sorted for deterministic ordering across
                 # local and service modes.
                 "collections": sorted({r.collection for r in page}),
@@ -4394,7 +4466,12 @@ def query(
         lines.append(_READER_INSTRUCTION_LINE())
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
-            dist = f"{d['distance']:.4f}"
+            # `sorted_docs` is ordered by hybrid_score (see the sort above),
+            # and both numbers were already sitting in this dict -- one
+            # printed, one discarded. `d=` is the raw vector distance
+            # (absolute, lower is better); `s=` is what the order came from
+            # (relative to this result window, higher is better). nexus-la5pr.
+            dist = f"d={d['distance']:.4f} s={d['hybrid_score']:.3f}"
             title = d["title"][:70]
             header_parts = [f"[{dist}] {title}"]
             # Bibliographic metadata
@@ -5568,44 +5645,69 @@ def store_list(
 
 
 def _store_list_docs(t3, col_name: str, total: int) -> str:
-    """Document-level view: deduplicate chunks by content_hash.
+    """Document-level view: group chunks by the catalog manifest.
 
-    Per-doc chunk count is derived from the dedup pass — entries written by
+    The grouping itself is
+    :func:`nexus.catalog.store_hook.manifest_doc_index`, shared with
+    ``commands/store.py``'s ``_list_documents`` — see there for why grouping
+    by each chunk row's own ``content_hash`` was wrong, and for the two
+    independent copies of that mistake this replaces.
+
+    Per-doc chunk count is derived from the grouping — entries written by
     ``store_put`` don't set a ``chunk_count`` metadata field (only the PDF
     indexer does), so reading it from metadata produced ``?`` for everything.
     The page-count column is omitted entirely when no document carries it,
     rather than showing ``?p`` for non-PDF entries.
+
+    Fail-open: when the catalog cannot be read, the per-chunk grouping is
+    still printed, with a line saying the view is degraded.
     """
+    from nexus.catalog.store_hook import manifest_doc_index  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+    by_chash, doc_titles, doc_heads, degraded = manifest_doc_index(col_name)
     seen: dict[str, dict] = {}
-    chunks_by_hash: dict[str, int] = {}
+    chunks_by_key: dict[str, int] = {}
     offset = 0
     while offset < total:
         entries = t3.list_store(col_name, limit=300, offset=offset)
         if not entries:
             break
         for e in entries:
-            h = e.get("content_hash", e.get("id", ""))
-            if h not in seen:
-                seen[h] = e
-            chunks_by_hash[h] = chunks_by_hash.get(h, 0) + 1
+            chash = e.get("id", "")
+            h = e.get("content_hash", chash)
+            key = by_chash.get(chash) or h
+            if key not in seen:
+                seen[key] = e
+            chunks_by_key[key] = chunks_by_key.get(key, 0) + 1
         offset += 300
 
     if not seen:
         return f"No documents in {col_name}."
 
-    docs = sorted(seen.items(), key=lambda kv: kv[1].get("title") or "")
+    docs = sorted(
+        seen.items(),
+        key=lambda kv: doc_titles.get(kv[0]) or kv[1].get("title") or "",
+    )
     # page_count is not in ALLOWED_TOP_LEVEL — dropped by normalize() so
     # the read always returned empty; removed in nexus-59j0. nexus-1oguj
     # later promoted extraction_method to canonical, but this compact
     # list table wasn't extended to show it (store_get's single-document
     # display is; see there for the per-chunk value).
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
-    for i, (h, d) in enumerate(docs, 1):
+    if degraded:
+        lines.append(
+            f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
+            "A split note appears as one row per piece."
+        )
+    for i, (key, d) in enumerate(docs, 1):
         # The full content-hash (RDR-180) is the doc_id that store_get
         # accepts. Surfaced whole so the list -> get flow round-trips.
-        doc_id = d.get("id") or h
-        title = (d.get("title") or "untitled")[:50]
-        chunks = chunks_by_hash.get(h, "?")
+        # For a manifested document the manifest's head chash is used, so
+        # the handle does not depend on which piece the listing reached
+        # first; store_get resolves any chunk of a split note to the whole.
+        doc_id = doc_heads.get(key) or d.get("id") or key
+        title = (doc_titles.get(key) or d.get("title") or "untitled")[:50]
+        chunks = chunks_by_key.get(key, "?")
         indexed = (d.get("indexed_at") or "")[:10]
         lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {indexed}")
     return _cap_text_result("\n".join(lines), "store_list")

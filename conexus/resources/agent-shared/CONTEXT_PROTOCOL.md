@@ -79,7 +79,7 @@ Tags are comma-separated. Combine with domain tags: `failed-approach,auth,retry`
 ### RESERVED — never write `review-completed`
 
 `review-completed` is not a note tag. It is the token
-`pre_close_verification_hook.sh` reads to decide whether a bead may close, and
+the pre-close gate (`hook_pre_close_verification`) reads to decide whether a bead may close, and
 it matches by SUBSTRING over T1 tags/content and T2 title/content. Any entry
 carrying that token plus a bead id IS that bead's review coverage, whatever the
 entry meant to say.

@@ -3,15 +3,21 @@
 """RDR-205 Phase 2 Step 3 (bead nexus-em75s.11): the async projection body
 for the two ``ledger/<session_id>`` tuple writes.
 
-Invoked ONLY from inside ``subagent-start-tuple-async.sh`` /
-``subagent-stop-tuple-async.sh`` — never directly from ``hooks.json`` (so
-it is not subject to the Python-hook ``_run_python_hook.sh`` routing rule,
-which governs only commands ``hooks.json`` invokes itself; see
-``subagent-stop-scan.py`` for the identical precedent of a bash hook
-shelling to a stdlib sibling ``.py``). Those two wrapper scripts are the
-``async: true`` entries beside ``subagent-start.sh``/``subagent-start-
-stamp.sh`` and ``subagent-stop.sh`` in ``hooks.json`` — this module does
-the actual work after the wrapper has already detached and returned.
+Invoked ONLY as a subprocess of ``nexus.hooks.tuple_projection``'s
+``run_start`` / ``run_stop`` — never directly from ``hooks.json``. Those
+two are registered as the ``hook_subagent_start_tuple`` and
+``hook_subagent_stop_tuple`` MCP tools, siblings of the subagent-start
+and subagent-stop entries rather than children of them, so a failure in
+the main hook still leaves the projection to run.
+
+RDR-215 bead nexus-q02nx.20 ported the detachment and .21 deleted the
+bash: the wrappers this module used to be invoked from,
+``subagent-start-tuple-async.sh`` and ``subagent-stop-tuple-async.sh``,
+disowned a background subshell, where the port uses a daemon thread.
+``tuple_projection``'s own docstring records what that costs. This module
+is unchanged by either: it stays plugin content, stdlib-only, and a
+subprocess, because importing it would invert the epic's dependency
+direction.
 
 NO HOOK MINTS ANYTHING (RDR-205 "Identity and addressing"). This module
 reads the client library's own cross-process caches --
@@ -182,17 +188,28 @@ class _SchemaViolation(_Skip):
 
 
 def _default_state_dir() -> Path:
-    """Mirrors ``expectations.sh``'s ``_expectations_dir``:
+    """Mirrors ``nexus.hooks.expectations._state_dir``:
     ``${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration`` -- the
-    log file lives beside the session's ``.expectations`` ledger there."""
+    log file lives beside the session's ``.expectations`` ledger there.
+
+    STILL MIRRORED, NOT IMPORTED, and that is forced rather than chosen
+    (RDR-215 bead nexus-q02nx.14). This file is invoked by a bare
+    ``python3`` from a detached bash wrapper and is stdlib-only BY
+    CONTRACT -- see the module docstring -- so ``nexus`` is not on its
+    path to import from. Bead nexus-q02nx.20 moves this work into the
+    server as a daemon thread; the import belongs there, and the mirror
+    should go in the same change."""
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(base) / "nexus" / "orchestration"
 
 
 def _valid_session_id(session_id: str) -> bool:
-    """Mirrors ``expectations_file``'s path-safe charset guard: a
-    traversal-bearing or otherwise unsafe session_id must never be used to
-    build a filesystem path."""
+    """Mirrors ``nexus.hooks.expectations.expectations_file``'s path-safe
+    charset guard: a traversal-bearing or otherwise unsafe session_id must
+    never be used to build a filesystem path. Mirrored for the same
+    stdlib-only reason as ``_default_state_dir`` above; two
+    implementations of one rule, and the pair should collapse at bead
+    nexus-q02nx.20."""
     if not session_id or len(session_id) > 128:
         return False
     if not (session_id[0].isalnum()):

@@ -77,16 +77,16 @@ def test_format_fatal_fail():
 def test_format_fix_suggestions():
     results = [
         HealthResult(
-            label="ripgrep",
+            label="git",
             ok=False,
             detail="not found",
-            fix_suggestions=["brew install ripgrep", "apt install ripgrep"],
+            fix_suggestions=["brew install git", "apt install git"],
             fatal=True,
         ),
     ]
     output, failed = format_health_for_cli(results, local_mode=False)
-    assert "    Fix: brew install ripgrep" in output
-    assert "         apt install ripgrep" in output
+    assert "    Fix: brew install git" in output
+    assert "         apt install git" in output
     assert failed is True
 
 

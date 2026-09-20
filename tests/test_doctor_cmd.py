@@ -398,41 +398,6 @@ def test_doctor_partial_credentials_informational(runner, mock_reg):
 
 # ── Missing tools ───────────────────────────────────────────────────────────
 
-def _which_missing(name):
-    """which side-effect that only hides rg."""
-    return None if name == "rg" else f"/usr/bin/{name}"
-
-
-def test_doctor_missing_rg(runner, mock_reg):
-    """nexus-9xfx5 (fresh-install MVV finding #3): rg is an optional system
-    accelerator pip can never provide — its absence renders like an
-    uninstalled git hook (✓ + detail + install hints), NOT a failed doctor.
-    Exit 0: a virgin box without ripgrep is healthy, just degraded."""
-    result = _invoke(runner, mock_reg, which=_which_missing)
-    assert result.exit_code == 0
-    assert "not installed" in result.output
-    assert "hybrid search disabled" in result.output
-    assert "brew install ripgrep" in result.output
-
-
-def test_doctor_missing_rg_shows_platform_hints(runner, mock_reg):
-    result = _invoke(runner, mock_reg, which=lambda _: None)
-    assert "brew install ripgrep" in result.output
-    assert "apt install ripgrep" in result.output
-    assert "BurntSushi/ripgrep" in result.output
-
-
-def test_doctor_missing_rg_includes_winget_hint(runner, mock_reg):
-    """nexus-njmg (GH #622): the Fix-line block for ripgrep must
-    include a Windows winget command. Operators on Windows had no
-    actionable install line and had to leave the terminal to figure
-    out the path manually. ``--scope user`` is mandatory to avoid
-    UAC-prompt failures during unattended install.
-    """
-    result = _invoke(runner, mock_reg, which=lambda _: None)
-    assert "winget install --id BurntSushi.ripgrep.MSVC" in result.output
-    assert "--scope user" in result.output
-
 
 def test_doctor_missing_git_includes_winget_hint(runner, mock_reg):
     """nexus-njmg: git Fix-line must include winget."""

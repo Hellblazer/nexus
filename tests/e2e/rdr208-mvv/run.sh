@@ -127,9 +127,21 @@ import json, sys
 json.dump({"hooks": {
     "SessionStart": [{"matcher": sys.argv[2], "hooks": [
         {"type": "command", "command": "/home/nexus/nxenv/bin/nx hook session-start", "timeout": 10}]}],
+    # RDR-215 nexus-q02nx.22: exec form, matching the real hooks.json --
+    # the retired `_run_python_hook.sh` bash launcher is gone, and the
+    # interpreter resolution it used to perform now runs in Python,
+    # inside mailbox_drain.py itself (_interpreter.reexec_if_needed()).
+    #
+    # BRACED, like the real manifest: the shell-string form this replaced
+    # was expanded by the bash Claude Code ran it under, which takes either
+    # spelling. Exec form has no shell, so whatever expansion happens is
+    # Claude Code's own -- and the one spelling known to work there is the
+    # one conexus/hooks/hooks.json ships. Guessing the other costs a billed
+    # container run to find out.
     "UserPromptSubmit": [{"matcher": "", "hooks": [
         {"type": "command",
-         "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/mailbox_drain.py",
+         "command": "python3",
+         "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"],
          "timeout": 10}]}],
     # The turn-end sentinel (~/git/recording-rig lib/sentinels.sh): the driver
     # waits for a hook signal that the turn ENDED instead of scraping the pane.
@@ -172,7 +184,13 @@ rm -rf "$ART"
 mkdir -p "$ART"
 chmod 777 "$ART"
 set +e
+# nexus-6doho: this container installs onto a virgin HOME, which mints a
+# fresh install_id, so each run registers as a new install in
+# nexus.install_pings. `-e` is the only channel into the container —
+# exporting the opt-out here would not reach it, because docker run does
+# not inherit the host environment.
 docker run --rm -v "$ART:/home/nexus/artifacts" -e MVV_ARTIFACTS=/home/nexus/artifacts \
+    -e NX_NO_TELEMETRY=1 \
     -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
     -v "$STAGE/claude.json":/home/nexus/seed/claude.json:ro \
     -e EXPECT_BRANCH_FIX="$EXPECT" -e MVV_LABEL="$LABEL" "$IMAGE" 2>&1 | tee "$LOG"

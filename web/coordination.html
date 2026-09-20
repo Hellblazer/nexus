@@ -188,7 +188,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <tr><td>directory</td><td>The part of the tuple space that maps each name to the session id that holds it.</td></tr>
 <tr><td>ledger</td><td>The part of the tuple space where hooks record that an agent started and that it reported. Any session can read it.</td></tr>
 <tr><td>dispatch file</td><td>A local file for each session, outside the tuple space. Hooks add a row when an agent is expected, when it starts, and when it reports.</td></tr>
-<tr><td>census</td><td>The <code>expectations_census</code> report. It compares the agents a session expected with the agents that started and the agents that reported.</td></tr>
+<tr><td>census</td><td>The <code>nx-hook expectations_census</code> report. It compares the agents a session expected with the agents that started and the agents that reported.</td></tr>
 <tr><td>hook</td><td>A script that Claude Code runs at a fixed point: session start, each prompt, and agent start and stop.</td></tr>
 <tr><td>drain hook</td><td>The hook that runs at each prompt. It takes and acks whatever is still waiting and shows it to Claude, whether or not the channel delivered it first.</td></tr>
 <tr><td>SendMessage</td><td>The Claude Code tool that sends a message to an agent by name or to a live session.</td></tr>
@@ -313,8 +313,7 @@ Start one agent for each <span class="ph">&lt;MODULE&gt;</span>, and check that 
 <details class="gloss out"><summary>What the agent sees when it starts</summary><pre class="out">Claimant id: <b>a4873be6337bcac8c</b> — mailbox: <b>mailbox/a4873be6337bcac8c</b></pre></details>
 
 <div class="see">To check the agents of a session</div>
-<div class="cmd"><pre>source <span class="ph">&lt;CONEXUS PLUGIN DIR&gt;</span>/hooks/scripts/expectations.sh
-expectations_census <span class="ph">&lt;SESSION-ID&gt;</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>nx-hook expectations_census <span class="ph">&lt;SESSION-ID&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <details class="gloss out"><summary>What you see</summary><pre class="out">…
 ROWS        expect=<b>28</b> start=<b>28</b> reported=<b>28</b> …
 …</pre></details>

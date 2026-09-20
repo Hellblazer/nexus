@@ -128,6 +128,10 @@ RDR_ALLOWLIST: dict[str, str] = {
     "115": "scrapped 2026-05-19 with the RDR-110-119 arc (docs/rdr/README.md)",
     "116": "draft on archive/develop-2026-05-19 only, never merged; scrapped 2026-05-19 with the RDR-110-119 arc, cited as history by rdr-205",
     "117": "scrapped 2026-05-19 with the RDR-110-119 arc (docs/rdr/README.md)",
+    "216": "drafted, gated BLOCKED, then abandoned 2026-09-19 without landing "
+           "(Sam's decision); measurements survive in T2 nexus_rdr/216-research-1..19. "
+           "Cited by rdr-217 as the baseline it must NOT reuse, and noted as an unused "
+           "number in docs/rdr/README.md",
     "326": "arcaneum's RDR-326, cited as such in rdr-090",
     "651": "conexus's RDR-651, cited as such in rdr-170",
 }

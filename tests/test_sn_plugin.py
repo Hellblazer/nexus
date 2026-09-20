@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Structural and functional tests for the sn (Serena + Context7) plugin."""
 import json
+import os
 import re
 import subprocess
 import sys
@@ -15,6 +16,8 @@ REPO_ROOT = Path(__file__).parent.parent
 SN_DIR = REPO_ROOT / "sn"
 MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+SUBAGENT_START = SN_DIR / "hooks" / "scripts" / "subagent_start.py"
+SESSION_START = SN_DIR / "hooks" / "scripts" / "session_start.py"
 
 
 # ── Plugin structure ─────────────────────────────────────────────────────────
@@ -41,9 +44,18 @@ class TestSnPluginStructure:
         assert "SubagentStart" in data["hooks"]
         hooks = data["hooks"]["SubagentStart"]
         assert len(hooks) >= 1
-        # Hook must reference mcp-inject.sh
-        commands = [h["command"] for entry in hooks for h in entry["hooks"]]
-        assert any("mcp-inject.sh" in c for c in commands)
+        # Exec form (RDR-215 bead nexus-q02nx.23): ``command`` is the
+        # interpreter and the script is an ``args`` entry, so a
+        # ``command``-only walk sees the bare word ``python3`` and matches
+        # nothing while the entry still names whatever it likes. Join both,
+        # the same reassembly ``_extract_hooks_json`` does in
+        # tests/test_release_artifact_verb_rot.py.
+        lines = [
+            " ".join([h["command"], *h.get("args", [])])
+            for entry in hooks
+            for h in entry["hooks"]
+        ]
+        assert any(ln.startswith("python3 ") and ln.endswith("/subagent_start.py") for ln in lines), lines
 
     def test_mcp_json_exists(self) -> None:
         assert (SN_DIR / ".mcp.json").exists()
@@ -51,10 +63,52 @@ class TestSnPluginStructure:
     def test_readme_exists(self) -> None:
         assert (SN_DIR / "README.md").exists()
 
-    def test_hook_script_exists_and_executable(self) -> None:
-        script = SN_DIR / "hooks" / "scripts" / "mcp-inject.sh"
-        assert script.exists()
-        assert script.stat().st_mode & 0o111, "mcp-inject.sh must be executable"
+    def test_every_hook_script_named_by_hooks_json_exists(self) -> None:
+        """Exec form runs ``python3 <path>``, so the +x bit the bash wrappers
+        needed is no longer part of the contract — asserting it would be a
+        check whose domain no longer contains the claim. What still has to
+        hold is that every path the manifest names is a file that is there.
+        Resolved against SN_DIR, which is what ``$CLAUDE_PLUGIN_ROOT``
+        expands to for an installed sn.
+        """
+        data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
+        named = [
+            arg
+            for hooks in data["hooks"].values()
+            for entry in hooks
+            for h in entry["hooks"]
+            for arg in h.get("args", [])
+        ]
+        assert len(named) == 4, f"expected 4 exec-form script paths, got {named}"
+        for arg in named:
+            # Both spellings, and NOT as a filter — as a strip. Filtering on
+            # one spelling first was the gap: every deleted bash wrapper used
+            # the unbraced `$CLAUDE_PLUGIN_ROOT`, so a future entry pasted
+            # from an old example would drop out of `named` while the count
+            # still read 4 against the braced entries already here, and its
+            # script would go unchecked. That is tally instance 1's shape
+            # (an extractor that knew one spelling) mirrored rather than
+            # removed. Anything unrecognised fails loudly below.
+            for prefix in ("${CLAUDE_PLUGIN_ROOT}/", "$CLAUDE_PLUGIN_ROOT/"):
+                if arg.startswith(prefix):
+                    rel = arg[len(prefix):]
+                    break
+            else:
+                pytest.fail(f"hooks.json arg {arg!r} names no recognised plugin-root spelling")
+            assert (SN_DIR / rel).is_file(), f"hooks.json names {arg}, which does not exist"
+
+    def test_no_hook_entry_spawns_bash(self) -> None:
+        """RDR-215: the sn bash wrapper layer is gone. A re-introduced
+        ``bash ...`` entry is the regression this pins."""
+        data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
+        commands = [
+            h["command"]
+            for hooks in data["hooks"].values()
+            for entry in hooks
+            for h in entry["hooks"]
+            if "command" in h
+        ]
+        assert commands and set(commands) == {"python3"}, commands
 
 
 # ── MCP configuration ────────────────────────────────────────────────────────
@@ -168,7 +222,7 @@ class TestSnMarketplace:
 
 
 class TestSnHookOutput:
-    """mcp-inject.sh must produce expected guidance sections.
+    """subagent_start.py must produce expected guidance sections.
 
     The hook emits a JSON envelope; ``hook_output`` returns the unwrapped
     additionalContext so the legacy substring assertions keep working
@@ -178,12 +232,12 @@ class TestSnHookOutput:
 
     @pytest.fixture(scope="class")
     def hook_envelope(self) -> str:
-        script = SN_DIR / "hooks" / "scripts" / "mcp-inject.sh"
         result = subprocess.run(
-            ["bash", str(script)],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(REPO_ROOT),  # so git rev-parse works
+            [sys.executable, str(SUBAGENT_START)],
+            input="", capture_output=True, text=True, timeout=10,
+            cwd=str(REPO_ROOT),
         )
+        assert result.returncode == 0, result.stderr
         return result.stdout
 
     @pytest.fixture(scope="class")
@@ -196,7 +250,11 @@ class TestSnHookOutput:
 
         Plain stdout was the prior shape; the JSON envelope is the
         documented schema and prevents silent drop on parser tightening.
-        Mirrors conexus/hooks/scripts/subagent-start.sh (commit 68854ca).
+        Mirrors the conexus SubagentStart hook, which emitted this envelope
+        as conexus/hooks/scripts/subagent-start.sh at commit 68854ca and
+        emits it from nexus.hooks.subagent_start since RDR-215 bead
+        nexus-q02nx.21 ported and deleted that script. sn's own half moved
+        from mcp-inject.sh to subagent_start.py at bead nexus-q02nx.23.
         """
         envelope = json.loads(hook_envelope)
         assert "hookSpecificOutput" in envelope
@@ -265,10 +323,10 @@ class TestSnHookOutput:
 
     def test_injects_both_sections_regardless_of_task_text(self) -> None:
         """nexus-jbt5x: the former task-text heuristic dropped Serena for 'investigate'/'dependency' briefs."""
-        script = SN_DIR / "hooks" / "scripts" / "mcp-inject.sh"
         payload = json.dumps({"task": "investigate the dependency migration and audit the package"})
         result = subprocess.run(
-            ["bash", str(script)], input=payload, capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT)
+            [sys.executable, str(SUBAGENT_START)], input=payload,
+            capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT),
         )
         body = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "## Serena MCP" in body
@@ -283,7 +341,7 @@ from worktree_guard import SERENA_WRITE_TOOLS, is_linked_worktree, is_serena_wri
 
 AUTO_APPROVE = SN_DIR / "hooks" / "scripts" / "auto_approve_sn_mcp.py"
 SNAPSHOT = SN_DIR / "hooks" / "scripts" / "serena-tools.txt"
-INJECT = SN_DIR / "hooks" / "scripts" / "mcp-inject.sh"
+INJECT = SUBAGENT_START
 
 
 def _make_repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
@@ -314,7 +372,8 @@ def _run_auto_approve(payload: dict) -> dict | None:
 
 def _run_inject(payload: dict) -> str:
     result = subprocess.run(
-        ["bash", str(INJECT)], input=json.dumps(payload), capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT)
+        [sys.executable, str(INJECT)], input=json.dumps(payload),
+        capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT),
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
@@ -474,3 +533,251 @@ class TestWorktreeDeveloperExample:
         readme = (SN_DIR / "README.md").read_text()
         assert "examples/worktree-developer.md" in readme
         assert "mcp__serena-wt__*" in readme
+
+
+# ── SessionStart port (RDR-215 bead nexus-q02nx.23) ──────────────────────────
+
+
+class TestSnSessionStart:
+    """``session_start.py`` replaces ``session-start.sh``.
+
+    The bash it replaces was the one script in the whole hook set whose exit
+    code was not unconditionally 0: a bare ``cat`` with no ``2>/dev/null``
+    and no fallback, so a missing ``session-start-section.md`` failed the
+    event and printed to stderr. The port keeps the plain-text stdout shape
+    (SessionStart takes stdout as context; this hook never emitted JSON) and
+    adds the error boundary every other script in the set already had.
+    """
+
+    def _run(self, *, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SESSION_START)],
+            input="", capture_output=True, text=True, timeout=10,
+            cwd=str(cwd or REPO_ROOT), env=env,
+        )
+
+    def test_emits_the_session_start_section_verbatim(self) -> None:
+        result = self._run()
+        assert result.returncode == 0, result.stderr
+        expected = (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_text()
+        assert result.stdout == expected
+
+    def test_output_is_plain_text_not_a_json_envelope(self) -> None:
+        """Move, do not rewrite: the bash emitted the markdown bare, and a
+        SessionStart hook's stdout is taken as context as-is. Wrapping it in
+        ``hookSpecificOutput`` here would be a rewrite, not a port."""
+        out = self._run().stdout
+        assert out.lstrip().startswith("##"), out[:80]
+        with pytest.raises(ValueError):
+            json.loads(out)
+
+    def test_missing_section_file_is_survivable(self, tmp_path: Path) -> None:
+        """The defect the port fixes. A copy of the script with no sibling
+        section file must still exit 0 and emit nothing on stdout, and must
+        say on stderr that it did — logged, not silently swallowed.
+
+        ``_hook_boundary.py`` is copied across with it deliberately: it is
+        imported at module level, so a copy without it fails at import,
+        before any boundary exists to catch anything, and this test would
+        pass on the wrong crash. A missing boundary module is a broken
+        install, which is not what is under test here — a missing SECTION
+        file is."""
+        scripts = SESSION_START.parent
+        orphan = tmp_path / SESSION_START.name
+        orphan.write_text(SESSION_START.read_text())
+        (tmp_path / "_hook_boundary.py").write_text((scripts / "_hook_boundary.py").read_text())
+        assert not (tmp_path / "session-start-section.md").exists()
+        result = subprocess.run(
+            [sys.executable, str(orphan)], input="",
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+        assert result.stderr.strip(), "a missing section file must be logged, not swallowed silently"
+
+    def test_hooks_json_wires_it_on_sessionstart(self) -> None:
+        data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
+        lines = [
+            " ".join([h["command"], *h.get("args", [])])
+            for entry in data["hooks"]["SessionStart"]
+            for h in entry["hooks"]
+        ]
+        assert any(ln.startswith("python3 ") and ln.endswith("/session_start.py") for ln in lines), lines
+
+
+class TestSnHookErrorBoundary:
+    """Every sn hook script survives its own crash (RDR-215).
+
+    ``auto-approve-sn-mcp.sh`` ended in an unconditional ``exit 0`` that hid
+    a Python crash completely — the wrapper is gone, so the boundary has to
+    be in the Python or a crash becomes the event's problem.
+
+    Read the two halves below as a pair. ``test_the_boundary_swallows_and_logs``
+    proves the MECHANISM catches anything;
+    ``test_each_script_routes_its_entry_point_through_the_boundary`` proves
+    every script's ``__main__`` is WIRED to it. Together those entail that
+    any exception ``main()`` raises is caught, for every script, which is
+    the actual claim — and each is falsifiable on its own.
+    """
+
+    SCRIPTS = (
+        SN_DIR / "hooks" / "scripts" / "auto_approve_sn_mcp.py",
+        SUBAGENT_START,
+        SESSION_START,
+    )
+
+    #: The two scripts whose ``main()`` reads stdin. ``session_start.py`` does
+    #: not read it at all, so a stdin fixture is inert there — its own
+    #: boundary entry is proven by test_missing_section_file_is_survivable.
+    STDIN_READERS = (SN_DIR / "hooks" / "scripts" / "auto_approve_sn_mcp.py", SUBAGENT_START)
+
+    @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
+    def test_malformed_json_stdin_is_handled_without_reaching_the_boundary(self, script: Path) -> None:
+        """Payload robustness, NOT a boundary test — and the distinction was
+        a finding, not a nicety. This case was written as proof that "every
+        sn hook script survives its own crash"; measured, it never enters
+        the boundary for any of the three. ``decide()`` and
+        ``cwd_from_payload()`` already catch ``json.loads`` failures,
+        ``_in_worktree`` catches its own, and ``session_start.py`` does not
+        read stdin. The property is still worth pinning; the claim was
+        wrong. That makes it the fourth instance of this epic's own tally
+        class authored inside a fix round.
+        """
+        result = subprocess.run(
+            [sys.executable, str(script)], input="}{not json at all",
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "crashed, event continues" not in result.stderr, (
+            "this case now reaches the boundary, so it is no longer the "
+            "payload-robustness proof it claims to be — split it"
+        )
+
+    @pytest.mark.parametrize("script", STDIN_READERS, ids=lambda p: p.name)
+    def test_an_undecodable_payload_reaches_the_boundary_and_is_survived(self, script: Path) -> None:
+        """A per-script boundary entry that depends on no defect.
+
+        Invalid UTF-8 on stdin raises ``UnicodeDecodeError`` inside
+        ``sys.stdin.read()``, before any of the script's own guards, so this
+        genuinely exercises ``guard``'s except branch for each script rather
+        than passing on code that never crashed.
+
+        ``PYTHONIOENCODING`` IS THE POINT OF THIS TEST, not boilerplate.
+        Whether that read is strict is AMBIENT: Python picks stdin's error
+        handler from the locale, so a UTF-8 locale decodes strictly and
+        raises, while under ``LC_ALL=C`` PEP 538/540 coercion gives
+        ``surrogateescape`` and the same bytes decode without complaint.
+        The first version of this test set nothing and passed on macOS,
+        where the ambient locale is UTF-8, then RED CI, where it is not --
+        measured both ways afterwards: under ``LC_ALL=C`` the hook returned
+        a full 4285-byte envelope and never entered the boundary. Pinning
+        the encoding makes the precondition a statement rather than an
+        assumption about whoever runs it. The strict case is a real
+        configuration, not a contrived one: it is the default on the box
+        this plugin is developed on.
+        """
+        result = subprocess.run(
+            [sys.executable, str(script)], input=b"\xff\xfe",
+            capture_output=True, timeout=10,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == b"", "a crashed hook must emit nothing, not half an envelope"
+        assert b"crashed, event continues" in result.stderr, (
+            "the boundary was not entered, so this proves nothing about it"
+        )
+
+    def test_the_boundary_swallows_and_logs(self, capsys: pytest.CaptureFixture) -> None:
+        """Non-vacuity for the boundary itself. Without this, a boundary
+        that is never entered passes the garbage-stdin cases above just as
+        well as one that works."""
+        sys.path.insert(0, str(SN_DIR / "hooks" / "scripts"))
+        import _hook_boundary  # noqa: PLC0415 — bundled sibling, not a package import
+
+        def boom() -> int:
+            raise RuntimeError("forced")
+
+        assert _hook_boundary.guard(boom, "probe") == 0
+        err = capsys.readouterr().err
+        assert "probe" in err and "RuntimeError" in err, err
+
+    @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
+    def test_each_script_routes_its_entry_point_through_the_boundary(self, script: Path) -> None:
+        """The wiring half: the boundary existing proves nothing if a script
+        calls ``main()`` directly at ``__main__``."""
+        src = script.read_text()
+        tail = src.split('if __name__ == "__main__":')[-1]
+        assert "_hook_boundary.guard(" in tail or "guard(" in tail, tail
+
+
+class TestBrokenWorktreeGuardSibling:
+    """A broken ``worktree_guard.py`` degrades in one script and refuses in the other.
+
+    The old `mcp-inject.sh` ran detection in its own subprocess under
+    ``2>/dev/null``, so nothing it could do reached the ``cat`` calls after
+    it. Importing it at module scope put it ahead of the boundary; measured
+    on the first version of this port, a sibling that raises at import took
+    the WHOLE envelope (rc=1, empty stdout) where the bash had exited 0 with
+    both universal sections. Found by code review, by execution.
+    """
+
+    BROKEN = "this is not valid python(\n"
+
+    def _install(self, tmp_path: Path, script: Path) -> Path:
+        """*script* plus its real siblings, but with a worktree_guard that cannot import."""
+        src = script.parent
+        for name in (script.name, "_hook_boundary.py", "serena-section.md",
+                     "context7-section.md", "worktree-section.md", "serena-tools.txt"):
+            if (src / name).exists():
+                (tmp_path / name).write_text((src / name).read_text())
+        (tmp_path / "worktree_guard.py").write_text(self.BROKEN)
+        return tmp_path / script.name
+
+    def test_subagent_start_still_delivers_the_universal_sections(self, tmp_path: Path) -> None:
+        target = self._install(tmp_path, SUBAGENT_START)
+        result = subprocess.run(
+            [sys.executable, str(target)], input=json.dumps({"cwd": str(tmp_path)}),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        body = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## Serena MCP" in body and "## Context7 MCP" in body
+        assert "worktree_guard unavailable" in result.stderr
+
+    def test_auto_approve_refuses_rather_than_unguarding(self, tmp_path: Path) -> None:
+        """The opposite call, deliberately. Degrading here would approve a
+        Serena WRITE from a worktree — the incident the guard exists for —
+        so an unimportable guard must stop the allowlist, not bypass it."""
+        target = self._install(tmp_path, AUTO_APPROVE)
+        result = subprocess.run(
+            [sys.executable, str(target)],
+            input=json.dumps({"hook_event_name": "PreToolUse",
+                              "tool_name": "mcp__plugin_sn_serena__replace_in_files"}),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.stdout.strip() == "", "an unguarded allowlist must not emit an allow"
+
+
+class TestNonStringToolName:
+    """``{"tool_name": 123}`` is valid JSON a hook payload can carry.
+
+    Found by adversarial review of this bead. Before the isinstance guard it
+    raised ``AttributeError`` in ``is_serena_write_tool``. The outcome was
+    never unsafe — the crash reached the boundary, nothing was approved —
+    but a non-string is simply not a write tool, and the traceback was
+    noise standing in for an answer.
+    """
+
+    @pytest.mark.parametrize("bad", [123, None, ["x"], {"a": 1}, 1.5, True])
+    def test_is_serena_write_tool_answers_rather_than_raising(self, bad: object) -> None:
+        assert is_serena_write_tool(bad) is False  # type: ignore[arg-type]
+
+    def test_the_hook_decides_without_entering_the_boundary(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(AUTO_APPROVE), str(SNAPSHOT)],
+            input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": 123}),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "", "a non-string tool name must not be approved"
+        assert "crashed, event continues" not in result.stderr, result.stderr

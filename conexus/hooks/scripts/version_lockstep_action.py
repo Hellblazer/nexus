@@ -46,9 +46,18 @@ per session while it keeps failing, so the ``remedy=`` field each
 failure outcome now carries is genuinely "logged once with the remedy",
 not repeated noise.
 
-Stdlib-only (bare interpreter via ``_run_python_hook.sh``; the conexus
-package is not importable here). No structlog under bare interp -> the
-NX_HOOK_DEBUG stderr convention.
+Stdlib-only; the conexus package is not importable here. No structlog
+under a bare interpreter -> the NX_HOOK_DEBUG stderr convention.
+
+The interpreter is inherited, not resolved. ``version_lockstep_hook.py``
+spawns this script with its OWN ``sys.executable`` (RDR-215 bead
+nexus-q02nx.22, which deleted the ``_run_python_hook.sh`` launcher that
+used to resolve one per dispatch). That is safe without a second probe
+because the hook calls ``_interpreter.reexec_if_needed()`` at module
+scope and then exits on ``sys.version_info < (3, 12)`` immediately after,
+so nothing in it reaches a dispatch under an unvetted interpreter -- on
+every path, including the one where resolution fails and
+``reexec_if_needed()`` returns having changed nothing.
 """
 from __future__ import annotations
 
@@ -188,8 +197,10 @@ def log_event(event: str, **fields: str) -> None:
 
 #: The generation root's env override and default, DUPLICATED FROM
 #: ``nexus.install_layout`` by necessity: this hook runs under a bare python3
-#: (``_run_python_hook.sh`` probes python3.13, python3.12, then bare python3)
-#: and cannot import the conexus package -- the same constraint that already
+#: (whatever ``_interpreter.reexec_if_needed()`` resolved for the lockstep
+#: hook that spawned it -- the generation python, else python3.13 / python3.12
+#: by name, else bare) and cannot import the conexus package -- the same
+#: constraint that already
 #: forces ``uv_receipt_present`` to be inline rather than shared.
 #:
 #: Duplication that cannot be removed can still be PINNED.

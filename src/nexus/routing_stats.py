@@ -276,13 +276,32 @@ def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
             return None
         rules: set[str] = set()
 
+        def _consider(text: str) -> None:
+            if "/routing/" not in text:
+                return
+            stem = text.rsplit("/", 1)[-1]
+            if stem.endswith(".py"):
+                rules.add(stem[:-3])
+
         def _walk(node: Any) -> None:
             if isinstance(node, dict):
                 cmd = node.get("command")
-                if isinstance(cmd, str) and "/routing/" in cmd:
-                    stem = cmd.rsplit("/", 1)[-1]
-                    if stem.endswith(".py"):
-                        rules.add(stem[:-3])
+                if isinstance(cmd, str):
+                    _consider(cmd)
+                # EXEC FORM PUTS THE SCRIPT IN `args`, NOT IN `command`.
+                # This was `command`-only until RDR-215 bead nexus-q02nx.22.
+                # Bead .21 (9b1081514) had re-declared both routing rules from
+                # `"command": "<launcher> <script>"` to `{"command": "python3",
+                # "args": ["<script>"]}`, which left this walk reading the bare
+                # word "python3" and finding nothing: measured on that tree,
+                # registered_rules(conexus/hooks/hooks.json) returned the EMPTY
+                # SET and `nx hook routing-stats` reported every live rule as
+                # "(unregistered)". No test caught it, because every test built
+                # its own fixture in the form this function already understood
+                # -- see test_registered_rules_sees_the_REAL_shipped_manifest.
+                for arg in node.get("args") or []:
+                    if isinstance(arg, str):
+                        _consider(arg)
                 for v in node.values():
                     _walk(v)
             elif isinstance(node, list):

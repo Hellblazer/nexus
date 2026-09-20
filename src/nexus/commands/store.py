@@ -407,15 +407,33 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
 
 
 def _list_documents(db: T3Database, col_name: str) -> None:
-    """List unique documents (deduplicated by content_hash) in a collection."""
+    """List documents in a collection, grouped by the catalog manifest.
+
+    Grouping is :func:`nexus.catalog.store_hook.manifest_doc_index`, shared
+    with the MCP ``store_list(docs=True)`` view, which carried an independent
+    copy of the same mistake this replaces: both grouped by each chunk row's
+    own ``content_hash``, on the premise that a ``store_put`` note is one
+    chunk. Note splitting (nexus-spujb, nexus-b2tld) falsified it, and a
+    split note then listed as one row per piece under a repeated title.
+
+    Chunk count is likewise derived from the grouping. It used to read a
+    ``chunk_count`` metadata field that only the PDF indexer ever sets, so
+    every ``store_put`` note printed ``?`` — the MCP side fixed that half
+    alone, and the two displays disagreed.
+    """
     try:
         total_chunks = db.collection_info(col_name)["count"]
     except Exception:  # noqa: BLE001 — collection-open failure (incl. KeyError) surfaced to user via click.echo, returns
         click.echo(f"Collection not found: {col_name}")
         return
 
-    # Page through all chunks to collect unique documents
-    seen: dict[str, dict] = {}  # content_hash → metadata
+    from nexus.catalog.store_hook import manifest_doc_index  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+    by_chash, doc_titles, doc_heads, degraded = manifest_doc_index(col_name)
+
+    # Page through all chunks, grouping each under its document.
+    seen: dict[str, dict] = {}  # grouping key → a representative chunk
+    chunks_by_key: dict[str, int] = {}
     offset = 0
     batch = 300
     while offset < total_chunks:
@@ -423,25 +441,35 @@ def _list_documents(db: T3Database, col_name: str) -> None:
         if not entries:
             break
         for e in entries:
-            h = e.get("content_hash", e.get("id", ""))
-            if h not in seen:
-                seen[h] = e
+            chash = e.get("id", "")
+            key = by_chash.get(chash) or e.get("content_hash", chash)
+            if key not in seen:
+                seen[key] = e
+            chunks_by_key[key] = chunks_by_key.get(key, 0) + 1
         offset += batch
 
     if not seen:
         click.echo(f"No documents in {col_name}.")
         return
 
-    docs = sorted(seen.values(), key=lambda d: d.get("title") or "")
+    docs = sorted(
+        seen.items(),
+        key=lambda kv: doc_titles.get(kv[0]) or kv[1].get("title") or "",
+    )
     click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} chunks)\n")
+    if degraded:
+        click.echo(
+            f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
+            "A split note appears as one row per piece.\n"
+        )
     # page_count is not in ALLOWED_TOP_LEVEL — normalize() drops it so the
     # read always returned empty; removed in nexus-59j0. nexus-1oguj later
     # promoted extraction_method to canonical, but this compact list table
     # wasn't extended to show it (`nx store get` displays the per-chunk
     # value — see its display path).
-    for i, d in enumerate(docs, 1):
-        title = (d.get("title") or "untitled")[:60]
-        chunks = d.get("chunk_count", "?")
+    for i, (key, d) in enumerate(docs, 1):
+        title = (doc_titles.get(key) or d.get("title") or "untitled")[:60]
+        chunks = chunks_by_key.get(key, "?")
         indexed = (d.get("indexed_at") or "")[:10]
         click.echo(f"  {i:3d}. {title:<60}  {chunks:>4} chunks  {indexed}")
 

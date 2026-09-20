@@ -47,7 +47,7 @@ def test_min_max_normalize_all_equal_returns_zero():
         # Ripgrep exact-match: vector_norm=1.0 before weighted sum.
         (1.0, 0.6, 0.7 * 1.0 + 0.3 * 0.6),
     ],
-    ids=["weighted_mix", "zero_frecency", "ripgrep_exact_vector_norm_one"],
+    ids=["weighted_mix", "zero_frecency", "exact_match_vector_norm_one"],
 )
 def test_hybrid_score_weights(vector_norm: float, frecency_norm: float, expected: float):
     """hybrid_score = 0.7 * vector_norm + 0.3 * frecency_norm."""

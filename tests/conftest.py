@@ -860,15 +860,35 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 def _is_allowlisted_config_dir_path(rel_path: str) -> bool:
     if rel_path.startswith(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES):
         return True
-    # The repo index cache ``<basename>-<hash>.cache`` at the config root
-    # (src/nexus/indexer.py:4036) is rewritten by the same post-commit-hook
-    # ``nx index repo`` run as ``index.log`` / ``logs/index-*`` / ``locks/``
-    # above; its name carries a per-checkout hash, so a prefix cannot name
-    # it. Observed 2026-08-21 as ``MODIFIED nexus-571b8edd.cache`` during the
-    # .p1f battery's lint stage, coinciding with an orchestrator commit. Root
-    # level only -- a ``*.cache`` anywhere deeper is still reported -- and a
-    # TEST leaking a repo cache here is the class the fixture-cache-leak
-    # guard (nexus-nifd) polices separately.
+    # ``<basename>-<hash>.cache`` at the config root: the ripgrep line
+    # caches. NOTHING WRITES THESE ANY MORE -- nexus-06aei deleted both the
+    # indexer call that built them and the module that read them -- so the
+    # original reason for this entry is gone. It was allowlisted because a
+    # post-commit-hook ``nx index repo`` rewrote them mid-run, the same way
+    # ``index.log`` / ``logs/index-*`` / ``locks/`` above still do (observed
+    # 2026-08-21 as ``MODIFIED nexus-571b8edd.cache`` during the .p1f
+    # battery's lint stage, coinciding with an orchestrator commit).
+    #
+    # Kept, with the reason REPLACED rather than the entry deleted: the one
+    # remaining legitimate change to these paths is their REMOVAL by the
+    # garbage sweep's ``ripgrep_cache`` class, which reaps every one of them
+    # on the first ``nx doctor`` that runs against a real config dir still
+    # holding them. Failing a gate run on that would be reporting the
+    # cleanup as the mess. An ADD is now impossible rather than merely
+    # unexpected, so nothing is being waved through -- the entry covers the
+    # path, hence MODIFIED and REMOVED alike, and the MODIFIED case can no
+    # longer occur at all.
+    #
+    # EXPIRY, which is the part worth stating because the entry's previous
+    # justification outlived the code it named: the sweep is one-time PER
+    # BOX, not globally. This box's 64 caches go on its next doctor run;
+    # qwentescence, CI runners and fresh containers each carry their own
+    # until they sweep. Delete this entry when no box can still hold a
+    # pre-2da7be464 cache -- not after seeing one clean box.
+    #
+    # Root level only -- a ``*.cache`` anywhere deeper is still reported --
+    # and a TEST leaking a repo cache here is the class the fixture-cache-
+    # leak guard (nexus-nifd) polices separately.
     if "/" not in rel_path and rel_path.endswith(".cache"):
         return True
     # ServiceRegistry per-scope election flocks, `{tier}_elect.{scope}.lock`

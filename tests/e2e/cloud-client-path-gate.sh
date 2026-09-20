@@ -65,9 +65,10 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      NX_TUPLE_TEMPLATE_DIR in production is a red gate, not a silent
 #      second template source.
 #   G  RDR-205 ledger tuple projector hook drive (nexus-g2lln pre-tag
-#      proof, bead nexus-cbo4a): drives THIS CHECKOUT's real
-#      conexus/hooks/scripts/subagent-{start,stop}-tuple-async.sh wrapper
-#      scripts with a synthetic SubagentStart/SubagentStop payload against
+#      proof, bead nexus-cbo4a): drives nexus.hooks.tuple_projection
+#      (run_start/run_stop, the port of the two deleted
+#      subagent-{start,stop}-tuple-async.sh wrappers) against THIS
+#      CHECKOUT's real projector with a synthetic payload against
 #      this box's live cloud config, then polls ledger/<sid> for the two
 #      tuples they are supposed to write. Closes the blind spot every
 #      tuple_ledger_project.py unit test hides (each one hand-writes the
@@ -411,11 +412,15 @@ PY
 # tests/hooks/test_tuple_ledger_project.py hand-writes the data-token lease
 # the projector reads, which is exactly why nexus-0zsmg (the projector dead
 # on every cloud-mode box -- no endpoint resolution for the managed
-# service_url leg) shipped through 7.41.0 unnoticed. This drives THIS
-# CHECKOUT's own conexus/hooks/scripts/subagent-{start,stop}-tuple-
-# async.sh -- the wheel does not ship them (only conexus/plans/ travels
-# into the Python package; the plugin runs these from the repo/plugin
-# install, never from site-packages) -- against THIS BOX's real cloud
+# service_url leg) shipped through 7.41.0 unnoticed. This drives the
+# wheel's nexus.hooks.tuple_projection (which replaced the two
+# subagent-{start,stop}-tuple-async.sh wrappers at RDR-215 bead
+# nexus-q02nx.21) against THIS CHECKOUT's own
+# conexus/hooks/scripts/tuple_ledger_project.py -- the wheel does not
+# ship that projector (only conexus/plans/ travels into the Python
+# package; the plugin supplies it from the repo/plugin install, never
+# from site-packages), which is why CLAUDE_PLUGIN_ROOT is exported for
+# the drive -- against THIS BOX's real cloud
 # config and live engine, with a synthetic payload for a fresh
 # ledger/<random-uuid> subspace, then polls for the two tuples they are
 # supposed to write. The nexus-0zsmg endpoint fix is already on this tree
@@ -445,14 +450,50 @@ HOOK_SID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 HOOK_AGENT="cloudgate-hook-probe"
 HOOK_LOG="$HOME/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
 
-printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | bash "$REPO_ROOT/conexus/hooks/scripts/subagent-start-tuple-async.sh"
-printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | bash "$REPO_ROOT/conexus/hooks/scripts/subagent-stop-tuple-async.sh"
+# Drives nexus.hooks.tuple_projection, the port of the two
+# subagent-{start,stop}-tuple-async.sh wrappers (RDR-215 bead
+# nexus-q02nx.20; the bash was deleted at bead nexus-q02nx.21). Same
+# subject, same projector: CLAUDE_PLUGIN_ROOT is exported so
+# _projector() resolves THIS CHECKOUT's own
+# conexus/hooks/scripts/tuple_ledger_project.py, which is the file the
+# deleted wrappers ran as their sibling and which this epic does NOT
+# port (it stays plugin-resident, stdlib-only, by contract).
+#
+# THE JOIN IS LOAD-BEARING, and is the one shape change the port forces.
+# The bash detached a disowned subshell that outlived the hook; the port
+# uses a DAEMON thread, which dies at interpreter exit (tuple_projection's
+# own docstring records this as a real durability regression). So a drive
+# that just calls run_start() and exits starts the POST and then kills it
+# -- the poll below would wait 30s for something that was never sent and
+# this leg would report a false FAIL. Joining the tuple-projection-*
+# thread is what makes the drive equivalent to the bash's detachment.
+_drive_projection() {
+    # $1 = "start"|"stop"; stdin = the JSON payload.
+    HOOK_VERB="$1" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
+    uv run python - <<'PY'
+import json, os, sys, threading
+from nexus.hooks.tuple_projection import run_start, run_stop
+payload = json.loads(sys.stdin.read())
+(run_start if os.environ["HOOK_VERB"] == "start" else run_stop)(payload)
+# _TIMEOUT_S on the projector subprocess is 120s; join past it so a
+# wedged projector is reported as wedged rather than silently truncated.
+for t in threading.enumerate():
+    if t.name.startswith("tuple-projection-"):
+        t.join(timeout=150)
+        if t.is_alive():
+            print(f"  WARNING: {t.name} still running after 150s", file=sys.stderr)
+PY
+}
 
-# Both wrappers detach a background subshell and return in milliseconds
-# (see their own headers) -- the actual resolve+POST can take up to the
-# projector's 5s per-call timeout, so poll rather than assume completion.
+printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
+    "$HOOK_SID" "$HOOK_AGENT" | _drive_projection start
+printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}' \
+    "$HOOK_SID" "$HOOK_AGENT" | _drive_projection stop
+
+# The join above means the POST has normally already completed by here --
+# but poll anyway rather than assume: the join has its own timeout, and a
+# projector that gave up early writes its reason to the log this loop
+# also watches.
 HOOK_DEADLINE=$(( $(date +%s) + 30 ))
 HOOK_TOTAL=0
 HOOK_STATS=""

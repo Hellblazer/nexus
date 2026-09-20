@@ -20,6 +20,12 @@ failure; measured converged on a live session) and a durable marker must
 not satisfy a close in a session that performed no review. The old
 dual-source acceptance fixtures survive INVERTED as retirement pins; the
 `fake_nx` memory stub survives to prove memory is never consulted.
+
+RDR-215 bead nexus-q02nx.17 ported this hook from
+``conexus/hooks/scripts/pre_close_verification_hook.sh``; bead .21
+re-declared its ``hooks.json`` entry to the ``hook_pre_close_verification``
+mcp_tool, so the bash script no longer runs in production and this file
+drives the Python module only (nexus-q02nx.21).
 """
 from __future__ import annotations
 
@@ -34,14 +40,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "pre_close_verification_hook.sh"
-)
 
 # A dedicated directory holding ONLY a `python3` symlink -- NOT the parent
 # directory of the resolved interpreter. This repo's venv bin/ (where
@@ -207,6 +205,32 @@ def fake_bd(tmp_path):
     return _make
 
 
+#: A CHILD PROCESS, not an in-process call, for the same reason as the
+#: SubagentStop port: this file varies PATH and the environment per call
+#: (a fake ``nx`` via ``path_prefix``, ``CLAUDE_PLUGIN_ROOT`` and
+#: ``NX_CLOSE_GATE_DEADLINE_SECONDS`` via ``env_overrides``), and
+#: ``os.environ`` is process-global. Driving the port in process would
+#: mean mutating it per test, which is the hazard that made the ledger's
+#: contention seams environment variables in the first place.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import pre_close_verification
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: pre_close_verification.run(payload), "pre_close_verification")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+
 def _run_hook(
     stdin: str,
     *,
@@ -244,7 +268,7 @@ def _run_hook(
     if "NX_REVIEW_GATE_OVERRIDE" not in (env_overrides or {}):
         env.pop("NX_REVIEW_GATE_OVERRIDE", None)
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,
@@ -372,10 +396,6 @@ class TestRunHookIsolatesRoutingLog:
 
 
 class TestFastNoops:
-    def test_script_exists_and_is_executable(self) -> None:
-        assert SCRIPT.exists()
-        assert os.access(SCRIPT, os.X_OK)
-
     def test_exits_zero_always(self) -> None:
         assert _run_hook(_make_payload()).returncode == 0
 

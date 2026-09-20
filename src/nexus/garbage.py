@@ -2,7 +2,8 @@
 
 Sam, 2026-09-05, after a by-hand census found 706 stale mint-lock files,
 38 MB of rotated crash logs, 508 MB of pre-PG SQLite relics, a 37 GB
-pre-migration archive, 61 orphaned catalog links and 880 tombstoned
+pre-migration archive, 1.8 GB of ripgrep line caches whose reader was
+later deleted, 61 orphaned catalog links and 880 tombstoned
 documents with 1,503 stranded chunks, none of it reported anywhere: "come
 up with a small tight plan to stop doing that". This module is that plan's
 third item. Every class of litter this repo has produced gets a row here,
@@ -57,6 +58,17 @@ TRASH_MAX_AGE_DAYS: int = 1
 
 _ROTATED_LOG_RE = re.compile(r"\.log\.\d+$")
 _OPERATOR_LOG_RE = re.compile(r"^operator-(timeout|budget)-.*\.log$")
+#: A ``<repo-basename>-<8 hex>.cache`` file at the top of the config dir:
+#: a ripgrep line cache, left behind by the path deleted at nexus-06aei.
+#: No age gate, unlike every other class here, and that is deliberate --
+#: the other classes are age-gated because a fresh one may still be worth
+#: reading, while nothing in this generation CAN read one of these: the
+#: module that wrote and parsed them is gone. An older side-by-side
+#: generation still holding that module loses an opt-in, default-off
+#: search leg until its next full index, which is a far smaller cost than
+#: leaving 1.8 GB (the measured figure on the author's box, 64 files)
+#: orphaned on every install forever.
+_RG_CACHE_RE = re.compile(r"^.+-[0-9a-f]{8}\.cache$")
 _MINT_LOCK_PREFIX = "t1_mint_"
 _MINT_LOCK_SUFFIX = ".lock"
 _LEASE_PREFIX = "t1_session_lease."
@@ -109,6 +121,9 @@ def sweep_local_garbage(config_dir: Path, *, now: float | None = None) -> SweepR
     * ``mint_lock``: ``t1_mint_<session>.lock`` older than
       :data:`MINT_LOCK_MAX_AGE_DAYS` whose session has no lease file. A
       lock with a live lease is never touched, whatever its age.
+    * ``ripgrep_cache``: ``<repo>-<8 hex>.cache``, the line caches of the
+      search path deleted at nexus-06aei. Age-gated by nothing, since
+      nothing can read them any more -- see :data:`_RG_CACHE_RE`.
 
     Never raises on a single file: a failed unlink lands in
     ``report.failed`` and the sweep continues.
@@ -129,6 +144,10 @@ def sweep_local_garbage(config_dir: Path, *, now: float | None = None) -> SweepR
             elif _OPERATOR_LOG_RE.match(path.name):
                 if _older_than(path, OPERATOR_LOG_MAX_AGE_DAYS, now=now):
                     _unlink(path, "operator_log", report)
+
+    for path in sorted(config_dir.glob("*.cache")):
+        if path.is_file() and _RG_CACHE_RE.match(path.name):
+            _unlink(path, "ripgrep_cache", report)
 
     live_sessions = {
         p.name[len(_LEASE_PREFIX):]

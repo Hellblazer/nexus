@@ -7,10 +7,10 @@
 # SubagentStart and PreToolUse carry the WORKTREE cwd for such an agent; this
 # scenario proves the two sn hook scripts act on it:
 #
-#   1. SubagentStart: sn/hooks/scripts/mcp-inject.sh (wired directly from
+#   1. SubagentStart: sn/hooks/scripts/subagent_start.py (wired directly from
 #      settings.json through a tee wrapper, so its raw envelope is logged)
 #      emits the "Worktree isolation" section.
-#   2. PreToolUse: sn/hooks/scripts/auto-approve-sn-mcp.sh DENIES
+#   2. PreToolUse: sn/hooks/scripts/auto_approve_sn_mcp.py DENIES
 #      mcp__plugin_sn_serena__replace_in_files. The Serena stand-in is
 #      fixtures/stub_serena_server.py registered under the server name
 #      plugin_sn_serena (so the tool names match the real prefix) — proof of
@@ -27,7 +27,7 @@ INJECT_LOG="$TEST_HOME/sn_inject_envelope.log"
 : > "$INJECT_LOG"; : > "$STUB_LOG"
 cat > "$TEST_HOME/.claude/sn_inject_tee.sh" <<BASH_EOF
 #!/usr/bin/env bash
-out="\$(bash "$REPO_ROOT/sn/hooks/scripts/mcp-inject.sh")"
+out="\$(python3 "$REPO_ROOT/sn/hooks/scripts/subagent_start.py")"
 printf '%s\n' "\$out" >> "$INJECT_LOG"
 printf '%s\n' "\$out"
 BASH_EOF
@@ -42,7 +42,7 @@ cat > "$TEST_HOME/.claude/settings.json" <<SETTINGS_EOF
       { "matcher": "", "hooks": [{ "type": "command", "command": "bash $TEST_HOME/.claude/sn_inject_tee.sh", "timeout": 10 }] }
     ],
     "PreToolUse": [
-      { "matcher": "mcp__plugin_sn_serena__.*", "hooks": [{ "type": "command", "command": "bash $REPO_ROOT/sn/hooks/scripts/auto-approve-sn-mcp.sh", "timeout": 10 }] }
+      { "matcher": "mcp__plugin_sn_serena__.*", "hooks": [{ "type": "command", "command": "python3 $REPO_ROOT/sn/hooks/scripts/auto_approve_sn_mcp.py", "timeout": 10 }] }
     ]
   }
 }
@@ -93,7 +93,7 @@ for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
         ok = True
 sys.exit(0 if ok else 1)
 PY
-then pass "mcp-inject.sh emitted the worktree section first for the worktree subagent (envelope logged)"
+then pass "subagent_start.py emitted the worktree section first for the worktree subagent (envelope logged)"
 else fail "no logged SubagentStart envelope carries the worktree section"; sed 's/^/    | /' "$INJECT_LOG" | cut -c1-200 | head -5
 fi
 

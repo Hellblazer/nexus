@@ -1304,30 +1304,6 @@ def _check_t3_cloud() -> list[HealthResult]:
 def _check_tools() -> list[HealthResult]:
     results: list[HealthResult] = []
 
-    # ripgrep
-    rg_path = shutil.which("rg")
-    # nexus-9xfx5 (fresh-install MVV finding #3): rg is an OPTIONAL system
-    # accelerator that `pip install conexus` can never provide — its absence
-    # is a degradation (hybrid search off), not a broken install. Render it
-    # like an uninstalled git hook: ✓ with the detail + install suggestions,
-    # never a red ✗ / non-zero doctor exit on a virgin box.
-    r = HealthResult(
-        label="ripgrep   (rg)",
-        ok=True,
-        detail=rg_path or "not installed — hybrid search disabled (optional)",
-        fatal=False,
-    )
-    if not rg_path:
-        # nexus-njmg (GH #622): winget --scope user avoids UAC-prompt
-        # failures during unattended install on Windows.
-        r.fix_suggestions = [
-            "brew install ripgrep                                          (macOS)",
-            "apt install ripgrep                                           (Ubuntu/Debian)",
-            "winget install --id BurntSushi.ripgrep.MSVC --scope user      (Windows)",
-            "https://github.com/BurntSushi/ripgrep#installation",
-        ]
-    results.append(r)
-
     # git
     git_path = shutil.which("git")
     r = HealthResult(
@@ -2276,8 +2252,10 @@ def _check_garbage() -> list[HealthResult]:
     """The garbage sweep (:mod:`nexus.garbage`, Sam 2026-09-05).
 
     Local litter (stale mint locks, rotated logs past 14 days, operator
-    dispatch dumps past 7) is reaped here on every run, the same way the
-    T1 lease and handoff-marker reapers above behave. Catalog litter
+    dispatch dumps past 7, and orphaned ripgrep line caches at any age
+    since nexus-06aei deleted the code that read them) is reaped here on
+    every run, the same way the T1 lease and handoff-marker reapers above
+    behave. Catalog litter
     (orphaned links, tombstones past the one-day window) is COUNTED here
     and reclaimed only by ``nx doctor --fix``, since each reclaim is an
     engine write. A non-zero catalog count is a warning that names the

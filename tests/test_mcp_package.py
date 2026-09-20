@@ -65,6 +65,26 @@ def test_core_registered_tools():
         # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time name
         # resolution over the RDR-208 session directory.
         "mailbox_send",
+        # RDR-215 Phase 2: the tool-tier hook ports, registered via
+        # nexus.mcp.hooks.HOOK_TOOLS. A new one lands in SEVEN hand-kept
+        # places -- HOOK_TOOLS, auto_approve's _ALLOWED_HOOK_TOOLS, the
+        # wire snapshot, this set, and THREE separate counts
+        # (docs/mcp-servers.md's table row, its section heading, and
+        # core.py's own module docstring). The last four are exactly the
+        # ones a hooks-only test run cannot see: measured on 7c7eebbd4,
+        # which was green locally and red on both CI shards.
+        "hook_auto_approve",              # bead .4
+        "hook_agent_dispatch_expect",     # bead .10
+        "hook_subagent_start_stamp",      # bead .11
+        "hook_subagent_stop",             # bead .12
+        "hook_stop_verification",         # bead .13
+        "hook_pre_close_verification",   # bead .17
+        "hook_subagent_start",            # bead .18
+        "hook_post_compact",              # bead .19
+        "hook_divergence_language_guard", # bead .19
+        "hook_subagent_start_tuple",      # bead .20
+        "hook_subagent_stop_tuple",       # bead .20
+        "hook_stop_failure",              # bead .21
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
@@ -149,7 +169,7 @@ def test_no_registered_mcp_tool_is_backed_by_a_private_function():
     (as _file_path_matches did) is exactly the failure mode this catches,
     mechanically, for every current and future tool on both servers — not
     just the one instance found by hand. Non-vacuity: the tool counts are
-    asserted well above the current registry (52 core / 10 catalog) so a
+    asserted well above the current registry (53 core / 10 catalog) so a
     collection regression (e.g. an import error silently emptying the
     registry) fails loud rather than passing on an empty set.
     """

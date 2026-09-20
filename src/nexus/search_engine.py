@@ -23,7 +23,22 @@ __all__ = [
     "SearchDiagnostics",
     "apply_ranking_boosts",
     "apply_file_diversity_cap",
+    "LexicalLegUnavailableError",
 ]
+
+
+class LexicalLegUnavailableError(RuntimeError):
+    """``--lexical`` was asked of a backend with no hybrid-search route.
+
+    RDR-217 P3. Raised rather than degraded, by Sam's decision of 2026-09-19:
+    the lexical leg is never a silent default and never a silent absence. The
+    duck-typed ``t3`` in :func:`search_cross_corpus` spans ``HttpVectorClient``
+    (which has the route) and ``T3Database`` (which does not), and the failure
+    this prevents is the quiet one — vector-only rows returned for a lexical
+    request look entirely plausible. Phase 1 measured the cost: the vector leg
+    scores 0.167 precision@10 on rare tokens against the lexical leg's 0.698,
+    and missed one query entirely.
+    """
 
 
 @dataclass
@@ -567,6 +582,7 @@ def search_cross_corpus(
     telemetry: Any | None = None,
     rerank: bool = False,
     rerank_meta_out: dict[str, dict] | None = None,
+    lexical: bool = False,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -718,6 +734,30 @@ def search_cross_corpus(
     # RDR-188: only a capability-marked backend is asked to rerank.
     server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
 
+    # RDR-217 P3: the lexical leg, ADDITIVE. Phase 1 measured why it cannot be
+    # a mode-swap: the hybrid route returned ZERO rows for every prose query
+    # (it gates on text before the vector ranks anything), so selecting it
+    # instead of the vector leg hands a natural-language question an empty
+    # result. Union keeps every row the vector leg returns today and adds the
+    # rare-token wins on top — measured 0.167 -> 0.698 precision@10 on rare
+    # tokens, with one query the vector leg could not see at all.
+    #
+    # REFUSE rather than fall back on a backend without the leg (Sam,
+    # 2026-09-19). A silent fall-back returns plausible rows — the
+    # 0.167-precision vector window — with nothing telling the caller the leg
+    # they asked for never ran. Same capability-marker shape as rerank above,
+    # and gated HERE rather than in search_cmd.py so the MCP surface inherits
+    # it for free.
+    if lexical and not getattr(t3, "supports_hybrid_search", False):
+        raise LexicalLegUnavailableError(
+            f"--lexical needs the engine's hybrid-search route and this backend "
+            f"({type(t3).__name__}) does not have it. Refusing rather than "
+            "falling back to vector-only search, which would return plausible "
+            "rows without the lexical leg you asked for. Remedy: use the "
+            "service-backed store (`nx daemon service start`), or drop "
+            "--lexical."
+        )
+
     def _search_batch(cols: list[str]) -> list[dict]:
         """Search one embedding-model-homogeneous batch of collections in a
         single combined ``/v1/vectors/search`` call, returning one result
@@ -749,12 +789,78 @@ def search_cross_corpus(
         # service quota.
         per_k = min(_desired_candidate_count(cols, n_results), QUOTAS.MAX_QUERY_RESULTS)
         rerank_meta: dict = {}
+        #: Chunk ids the lexical leg returned, whether or not the vector leg
+        #: also returned them. Read by the threshold filter below.
+        lexical_ids: set[str] = set()
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
                                 rerank=True, rerank_meta_out=rerank_meta)
             else:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where)
+            if lexical:
+                # ADDITIVE: the lexical rows join the vector rows rather than
+                # replacing them, deduplicated by chunk id with the vector row
+                # winning a tie so its distance and metadata are the ones
+                # reported.
+                #
+                # ITS OWN try/except, NOT the vector leg's (P3 review CRITICAL
+                # 1): sharing one handler meant a transient hybrid-only failure
+                # discarded the already-successful vector rows — reported as
+                # "all 1 collections failed" on a single collection, and on a
+                # multi-collection batch it fed the per-collection fallback,
+                # which can memoize a collection as permanently poisoned over a
+                # blip in a route the user merely asked to ALSO consult.
+                #
+                # It still fails LOUD rather than degrading: returning
+                # vector-only rows for a --lexical request is the silent
+                # outcome the whole design forbids. What changes is that the
+                # failure now names the lexical leg as the cause and never
+                # poisons the collection.
+                try:
+                    # RERANKED WHENEVER THE VECTOR LEG IS (P3 critique CRITICAL
+                    # 1). Without this the union is defeated by the CLI's own
+                    # ordering: search_cmd.py puts rows carrying a rerank_score
+                    # FIRST and truncates at n, and a lexical row that was never
+                    # scored lands in the unscored tail and is dropped — in the
+                    # default invocation, which is exactly where Phase 1
+                    # measured the rare-token win. Both routes share one rerank
+                    # tail server-side (VectorHandler#sendSearchResult), so the
+                    # two legs' scores are on the same scale by construction and
+                    # the rows can be ordered against each other honestly.
+                    if server_rerank:
+                        lex_meta: dict = {}
+                        lex_raw = t3.hybrid_search(
+                            query, cols, n_results=per_k, where=effective_where,
+                            rerank=True, rerank_meta_out=lex_meta,
+                        )
+                        # A degrade on EITHER leg is a degrade for this batch;
+                        # merged rather than overwritten so the vector leg's
+                        # state cannot be masked by the lexical leg's success.
+                        if lex_meta.get("degraded"):
+                            rerank_meta.update(lex_meta)
+                    else:
+                        lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
+                                                   where=effective_where)
+                except VectorServiceError as lex_exc:
+                    raise LexicalLegUnavailableError(
+                        f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
+                        "rather than returning vector-only rows, which would look "
+                        "like an answer while the leg you asked for never ran. The "
+                        "vector search itself succeeded, so retrying without "
+                        "--lexical will return results."
+                    ) from lex_exc
+                # Provenance is tracked in a SET, never stamped on the row
+                # (review IMPORTANT 3 and 4). Stamping had two defects: a row
+                # BOTH legs returned kept the vector copy and so lost the
+                # marker, silently forfeiting the exemption for the common case
+                # where per_k's over-fetch already pulled it in; and the marker
+                # rode r.metadata into `nx search --json` output as a public
+                # field nobody documented.
+                lexical_ids.update(r.get("id") for r in lex_raw if r.get("id"))
+                seen_ids = {r.get("id") for r in raw}
+                raw = list(raw) + [r for r in lex_raw
+                                   if r.get("id") not in seen_ids]
         except VectorServiceError as exc:
             # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
             # unservable collection in the batch (embedding-space mismatch,
@@ -834,7 +940,16 @@ def search_cross_corpus(
                 # catalog-param branch) never call it -- see
                 # apply_ranking_boosts' docstring. Thresholds apply to raw
                 # distance here, before any of that.
-                if threshold is not None and distance > threshold:
+                # RDR-217 P3, settled by Sam 2026-09-19: a LEXICAL row is
+                # EXEMPT from the per-collection distance threshold. The
+                # threshold is calibrated on vector distance, and a lexical hit
+                # whose vector distance exceeds it IS the target row — Phase 1's
+                # word_similarity_threshold query is exactly that case, scoring
+                # 0.000 precision AND 0.000 recall on the vector leg. Applying
+                # a vector threshold to a lexically-matched row would drop
+                # precisely what the leg exists to find.
+                if (threshold is not None and distance > threshold
+                        and r.get("id") not in lexical_ids):
                     dropped += 1
                     if min_dropped_distance is None or distance < min_dropped_distance:
                         min_dropped_distance = distance
@@ -1100,6 +1215,22 @@ def search_cross_corpus(
 
     # Topic boost (RDR-070, nexus-aym) — applied AFTER grouping so
     # distance-based group ordering is not contaminated by the boost.
+    #
+    # Three sites above rebuild SearchResult objects rather than mutating
+    # them (_flag_contradictions, _apply_clustering, _apply_topic_grouping).
+    # All three now copy `topic_boost` forward, so this call's position is a
+    # preference rather than a load-bearing dependency.
+    #
+    # It did not used to be. Until the nexus-la5pr review round, none of the
+    # three forwarded the field and the whole arrangement was safe ONLY
+    # because they all ran before this call while the field sat at its 0.0
+    # default -- a comment saying "do not reorder" was the entire guard.
+    # That is the same failure shape this bead just removed from `distance`:
+    # a defaulted field fails quieter than a missing one, so moving this
+    # call earlier would have silently dropped the credit with no exception
+    # and no wrong type, just unboosted ranking. Forwarding the field costs
+    # three lines and converts the hazard into an ordinary data flow, which
+    # is worth more than a comment nobody reads at the moment they reorder.
     if _topic_assignments and all_results:
         try:
             from nexus.scoring import apply_topic_boost  # noqa: PLC0415 — branch-local; only when topic assignments present
@@ -1464,7 +1595,7 @@ def _flag_contradictions(
             out.append(SearchResult(
                 id=r.id, content=r.content or "", distance=r.distance,
                 collection=r.collection, metadata=meta,
-                hybrid_score=r.hybrid_score,
+                hybrid_score=r.hybrid_score, topic_boost=r.topic_boost,
             ))
         else:
             out.append(r)
@@ -1563,7 +1694,7 @@ def _apply_clustering(
     result_dicts = [
         {"id": r.id, "content": r.content, "distance": r.distance,
          "collection": r.collection, "metadata": dict(r.metadata),
-         "hybrid_score": r.hybrid_score}
+         "hybrid_score": r.hybrid_score, "topic_boost": r.topic_boost}
         for r in results
     ]
 
@@ -1583,6 +1714,7 @@ def _apply_clustering(
                 collection=rd["collection"],
                 metadata=meta,
                 hybrid_score=rd.get("hybrid_score", 0.0),
+                topic_boost=rd.get("topic_boost", 0.0),
             ))
     return out
 
@@ -1621,7 +1753,7 @@ def _apply_topic_grouping(
             out.append(SearchResult(
                 id=r.id, content=r.content or "", distance=r.distance,
                 collection=r.collection, metadata=meta,
-                hybrid_score=r.hybrid_score,
+                hybrid_score=r.hybrid_score, topic_boost=r.topic_boost,
             ))
 
     # Unassigned at the end, sorted by distance

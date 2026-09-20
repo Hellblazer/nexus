@@ -145,16 +145,41 @@ def test_script_exists():
     assert HOOK_SCRIPT.exists()
 
 
+def _declared_paths(hooks: dict, event: str) -> list[str]:
+    """Every script path the *event*'s entries name, from either form.
+
+    RDR-215 nexus-q02nx.21 moved the script out of the ``command`` string
+    and into ``args``, and left some entries as ``mcp_tool`` with no
+    ``command`` key at all. A reader that indexes ``h["command"]``
+    KeyErrors on those; one that uses ``.get`` sees only ``"python3"``.
+    Asserting on the full path is also strictly stronger than the
+    filename substring these tests used to match: the rewrite declared
+    this script at ``hooks/scripts/<name>.py`` when it lives in
+    ``hooks/scripts/routing/``, which a substring match cannot see and a
+    path match can.
+    """
+    out = []
+    for entry in hooks["hooks"].get(event, []):
+        for h in entry.get("hooks", []):
+            if not isinstance(h, dict):
+                continue
+            out.append(h.get("command", ""))
+            out.extend(a for a in h.get("args", []) if isinstance(a, str))
+    return out
+
+
 def test_registered_in_hooks_json():
     hooks = json.loads(
         (PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text()
     )
-    commands = [
-        h["command"]
-        for entry in hooks["hooks"]["PreToolUse"]
-        for h in entry.get("hooks", [])
-    ]
-    assert any("subagent_git_write_requires_orchestrator.py" in c for c in commands)
+    declared = _declared_paths(hooks, "PreToolUse")
+    assert any(
+        p.endswith("hooks/scripts/routing/subagent_git_write_requires_orchestrator.py")
+        for p in declared
+    ), (
+        "subagent_git_write_requires_orchestrator.py must be registered at its "
+        f"real path, hooks/scripts/routing/. Declared: {declared}"
+    )
 
 
 def test_registered_in_registry_yaml():

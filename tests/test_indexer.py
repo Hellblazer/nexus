@@ -140,7 +140,6 @@ def _reg(override=None):
 def _patches(db, *, cfg=None, extra=None):
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
-        "nexus.ripgrep_cache.build_cache": {},
         "nexus.indexer._git_metadata": {"return_value": {}},
         "nexus.config.load_config": {"return_value": cfg or _DEFAULT_CONFIG},
         "nexus.config.get_credential": {"return_value": "fake-key"},
@@ -258,7 +257,6 @@ def test_run_index_raises_credentials_missing_without_credentials(tmp_path, monk
     # (code__repo/docs__repo) re-route through _repo_collection_or_legacy
     # BEFORE the credentials check; keep it on the no-catalog synth path.
     with patch("nexus.frecency.batch_frecency", return_value={}), \
-         patch("nexus.ripgrep_cache.build_cache"), \
          patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.db.make_t3") as mt3:
@@ -267,32 +265,6 @@ def test_run_index_raises_credentials_missing_without_credentials(tmp_path, monk
 
 
 # ── Cache path collision ────────────────────────────────────────────────────
-
-def test_cache_path_includes_repo_hash(tmp_path, monkeypatch):
-    from nexus.indexer import _run_index
-    a, b = tmp_path / "myproject", tmp_path / "other" / "myproject"
-    a.mkdir(); b.mkdir(parents=True)
-    seen: list[Path] = []
-    reg = _reg({"collection": "code__myproject", "code_collection": "code__myproject",
-                "docs_collection": "docs__myproject"})
-    monkeypatch.setenv("NX_LOCAL", "0")
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    # nexus-sghyo (2026-08-06): non-service mode must be forced explicitly now
-    # (ambient default is service mode, which no longer raises CredentialsMissingError
-    # for a missing Voyage credential — the client does not embed at all).
-    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
-
-    with patch("nexus.frecency.batch_frecency", return_value={}), \
-         patch("nexus.ripgrep_cache.build_cache", side_effect=lambda r, cp, s: seen.append(cp)), \
-         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
-        with pytest.raises(CredentialsMissingError): _run_index(a, reg)
-        with pytest.raises(CredentialsMissingError): _run_index(b, reg)
-    assert len(seen) == 2 and seen[0].name != seen[1].name
-
-
-# ── Hidden file filter ──────────────────────────────────────────────────────
 
 def test_run_index_skips_hidden_files(tmp_path, monkeypatch):
     from nexus.indexer import _run_index
@@ -307,12 +279,30 @@ def test_run_index_skips_hidden_files(tmp_path, monkeypatch):
     # for a missing Voyage credential — the client does not embed at all).
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
 
+    # This asserts the WALKER's filtering, and used to observe it through the
+    # ripgrep cache builder's file list. That builder is gone (nexus-06aei),
+    # so it observes classify_file instead — every file the walker keeps is
+    # classified, and a hidden one never gets that far. The subject of the
+    # test is unchanged; only the seam moved.
+    # NOTE the patch target: indexer.py imports classify_file function-locally
+    # from nexus.classifier, so patching nexus.indexer.classify_file binds
+    # nothing and the test would pass having observed an empty list. Hence the
+    # `assert seen` below — it is the non-vacuity guard for exactly that.
+    import nexus.classifier as nexus_classifier
+
     seen: list[Path] = []
+    real_classify = nexus_classifier.classify_file
+
+    def _record(path, **kw):
+        seen.append(path)
+        return real_classify(path, **kw)
+
     with patch("nexus.frecency.batch_frecency", return_value={}), \
-         patch("nexus.ripgrep_cache.build_cache", side_effect=lambda r, cp, s: seen.extend(f for _, f in s)), \
+         patch("nexus.classifier.classify_file", side_effect=_record), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
          patch("nexus.config.load_config", return_value=_DEFAULT_CONFIG):
         with pytest.raises(CredentialsMissingError): _run_index(repo, reg)
+    assert seen, "classify_file was never reached — the seam moved again"
     assert all(".git" not in str(p) for p in seen)
     assert any("main.py" in str(p) for p in seen)
 

@@ -133,6 +133,7 @@ if [ "$MODE" = container ]; then
     # (container run 4; on tmpfs all 354 changesets walk in under a second).
     # The uv cache volume and the artifacts dir are mounted beneath it.
     docker run --rm --init \
+    -e NX_NO_TELEMETRY=1 \
         --tmpfs /home/nexus:exec,uid=1000,gid=1000,size=16g \
         -v "$SOURCE_REPO:/src:ro" \
         -v "$HOST_ARTIFACTS:/home/nexus/artifacts" \

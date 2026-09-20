@@ -444,14 +444,30 @@ def _run_benchmark_boosted(client, taxonomy, chash_to_doc) -> dict:
         # Mirrors the production `search` MCP tool's default (non-clustered)
         # call: link_boost off (no catalog seeded here), cluster_by=None so
         # ordering is driven purely by distance — including whatever the
-        # topic boost did to it — then an explicit final sort by distance,
-        # exactly the step mcp/core.py takes after search_cross_corpus
-        # returns for a non-clustered request.
+        # topic boost did to it. NOT a copy of mcp/core.py's own reranking —
+        # that routes through apply_ranking_boosts, which also pulls in
+        # frecency and bibliographic-quality weighting, out of scope for a
+        # gate that exists to isolate the boost LAYER. What this reproduces
+        # is the EFFECTIVE-DISTANCE ordering scoring._effective_distance
+        # computes (nexus-la5pr, commit 7b1b49075): since 7b1b49075, the
+        # topic boost is reported separately as `topic_boost` rather than
+        # folded into `distance`, so ranking on raw `distance` alone is
+        # blind to it by construction — sort on `distance - topic_boost`
+        # (clamped at zero, the same clamp _effective_distance applies) to
+        # see what the boost actually did to the order.
+        # The calibration multiply _effective_distance also applies is left
+        # off, and it is INERT here rather than merely out of scope: this
+        # benchmark runs against the single collection `_COLLECTION`, so
+        # `calibration_factors.get(r.collection, 1.0)` resolves to ONE
+        # positive factor for every row, and scaling every key by the same
+        # positive constant cannot change their order. Saying only "out of
+        # scope" would leave a reader wondering whether the omission hides
+        # something.
         rows = search_cross_corpus(
             q["query"], [_COLLECTION], n_results=_K, t3=client,
             taxonomy=taxonomy, link_boost=False, cluster_by=None,
         )
-        rows.sort(key=lambda r: r.distance)
+        rows.sort(key=lambda r: max(0.0, r.distance - r.topic_boost))
         rows = rows[:_K]
         relevances = [
             judgments.get(chash_to_doc.get(r.id, ""), 0) for r in rows

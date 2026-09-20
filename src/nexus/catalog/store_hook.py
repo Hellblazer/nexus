@@ -21,7 +21,7 @@ import httpx
 import structlog
 
 from nexus.aspect_readers import uri_for
-from nexus.embed_window import has_small_window, window_for_model
+from nexus.embed_window import window_for_model
 
 _log = structlog.get_logger(__name__)
 
@@ -62,21 +62,58 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     return doc_id, [metadata]
 
 
-def note_pieces(content: str, collection: str) -> list[str]:
-    """The chunks a stored note is written as (nexus-spujb).
+#: Character cap a stored note is split at when its model imposes no window
+#: (nexus-b2tld). CHARACTERS, deliberately, not tokens: Voyage exposes no
+#: tokenizer to this client, so any token figure here would be characters
+#: divided by an assumed ratio and then labelled as a measurement.
+#:
+#: 1,689 matches :mod:`nexus.md_chunker`'s effective ceiling, which is the only
+#: chunk geometry in this repo with a measured retrieval number attached: over
+#: the 320 files of ``docs/rdr`` it yields a 1,126-character median and 84 to 92
+#: percent deep-band recall at 5. Matching a measured geometry is a smaller
+#: claim than inventing a smaller one from another project's sweep. A note at
+#: the population median of 3,921 characters becomes two or three pieces.
+NOTE_SPLIT_CHARS = 1689
 
-    ``[content]`` unless the collection's embedding model reads fewer tokens
-    than the note holds (bge-base reads 512); then pieces that each fit the
-    model's window, with ``"".join(pieces) == content``. A Voyage collection
-    never splits. The byte quota is :func:`raise_if_oversized`'s, unchanged.
+
+def note_pieces(content: str, collection: str) -> list[str]:
+    """The chunks a stored note is written as (nexus-spujb, nexus-b2tld).
+
+    ``"".join(pieces) == content`` always: :func:`note_manifest_metadata`
+    derives each piece's span by accumulating ``len(piece)`` with no gaps, and
+    :func:`store_get` reassembles by position, so a splitter that added or
+    dropped a character would misreport every span after the first. That rules
+    out the markdown chunker here, which prepends a section heading to each
+    chunk and overlaps neighbours.
+
+    Two reasons a note splits, and they compose:
+
+    * its model reads fewer tokens than the note holds (bge-base reads 512),
+      the original nexus-spujb case, split by the model's real token window;
+    * its model imposes no window at all (voyage-context-3 reads 32,000, above
+      the 12,288-byte chunk cap, so nothing can exceed it), in which case the
+      note used to be stored WHOLE however long it was. One vector then had to
+      represent every topic the note covered, and search could find the note
+      but not the part of it. Measured 2026-09-19: 309 of 310 single-chunk
+      knowledge documents were notes, median 3,921 characters, and on four
+      near-identical notes the owning part ranked first in only 2 of 4 probes,
+      with one fact verbatim in a note failing to return it at all. Such a
+      note now splits at :data:`NOTE_SPLIT_CHARS`.
+
+    The byte quota is :func:`raise_if_oversized`'s, unchanged.
     """
-    from nexus.chunker import split_text_to_token_window  # noqa: PLC0415 — deferred, heavy import graph
+    from nexus.chunker import split_text_to_char_cap, split_text_to_token_window  # noqa: PLC0415 — deferred, heavy import graph
     from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred to avoid import cycle
 
     # Calibrated: the plain resolver reads a legacy two-segment local
     # collection as Voyage (nexus-mc1l1), which would leave it unsplit.
     window = window_for_model(embedding_model_for_collection_calibrated(collection))
-    if window is None or window.fits(content):
+    if window is None:
+        # No window to fit: split for retrieval granularity instead.
+        if len(content) <= NOTE_SPLIT_CHARS:
+            return [content]
+        return split_text_to_char_cap(content, NOTE_SPLIT_CHARS)
+    if window.fits(content):
         return [content]
     return split_text_to_token_window(content, window)
 
@@ -153,19 +190,96 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
     return written
 
 
+def manifest_doc_index(
+    collection: str,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], str]:
+    """``(chash -> tumbler, tumbler -> title, tumbler -> head chash, reason)``
+    for every manifested document in *collection*.
+
+    The grouping a document-level listing needs. The ``document_chunks``
+    manifest is the authoritative document-to-chunk map — RDR-108 Phase 3
+    (nexus-bdag) dropped the chunk-level ``doc_id`` / ``chunk_index`` /
+    ``chunk_count`` mirrors precisely so read paths would consult it — and
+    both listing surfaces instead grouped by each chunk row's own
+    ``content_hash``, on the premise that a ``store_put`` note is always one
+    chunk. Note splitting (nexus-spujb, nexus-b2tld) falsified that: a long
+    note is several pieces, each with its own content hash, under ONE
+    document. Both then showed a split note as one row per piece, sharing a
+    title, which is indistinguishable from duplicate copies and was read as
+    exactly that on 2026-09-19.
+
+    Lives here rather than beside either caller because there were already
+    two independent copies of the broken grouping (``mcp/core.py``'s
+    ``_store_list_docs`` and ``commands/store.py``'s ``_list_documents``) and
+    a third would be the same bug waiting to be fixed once more.
+
+    *reason* is empty on success and names the failure otherwise, so a caller
+    can say its listing is degraded rather than silently under-grouping
+    (nexus-39upx hazard 4: a skip is never silent). Two catalog round trips
+    for the whole collection: one ``list_by_collection``, one batched
+    ``get_manifests``. A document with no manifest rows contributes nothing
+    and its chunks fall through to per-chunk keying at the call site — which
+    is right for both a manifest-less note (live by design, the
+    ``catalog-003-soft-delete.xml`` ``live_chunks`` contract) and a
+    superseded chunk no sweep has reaped.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+
+    reader = None
+    try:
+        reader = make_catalog_reader()
+        if reader is None:
+            return {}, {}, {}, "no catalog reader"
+        entries = list(reader.list_by_collection(collection) or [])
+        titles = {
+            str(t): (getattr(e, "title", "") or "")
+            for e in entries
+            if (t := getattr(e, "tumbler", ""))
+        }
+        manifests = reader.get_manifests(list(titles)) if titles else {}
+        by_chash: dict[str, str] = {}
+        heads: dict[str, str] = {}
+        for tumbler, rows in (manifests or {}).items():
+            ordered = sorted(rows, key=lambda r: r.position)
+            if not ordered:
+                continue
+            heads[str(tumbler)] = ordered[0].chash
+            for row in ordered:
+                by_chash[row.chash] = str(tumbler)
+        return by_chash, titles, heads, ""
+    except Exception as exc:  # noqa: BLE001 — a degraded listing is reported, never raised
+        return {}, {}, {}, f"catalog unreadable ({exc.__class__.__name__})"
+    finally:
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup
+                pass
+
+
 def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str, str, int] | None:
     """``(first chunk id, full text, chunk count)`` when *chunk_ids* are
-    chunks of ONE split note, else ``None`` (nexus-spujb).
+    chunks of ONE split note, else ``None`` (nexus-spujb, nexus-b2tld).
 
     One id resolves to the note it belongs to; several ids (a title lookup)
-    resolve only when all of them belong to one note. Only a collection
-    whose model has a small token window can hold a split note, so any other
-    collection returns ``None`` with no catalog round trip. A note missing
-    any of its chunks returns ``None``, never a partial text.
-    """
-    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred to avoid import cycle
+    resolve only when all of them belong to one note. A note missing any of
+    its chunks returns ``None``, never a partial text.
 
-    if not chunk_ids or not has_small_window(embedding_model_for_collection_calibrated(collection)):
+    nexus-b2tld: this used to short-circuit on
+    ``has_small_window(...)`` before any catalog round trip, on the premise
+    that "only a collection whose model has a small token window can hold a
+    split note". :func:`note_pieces` splitting a WINDOWLESS collection for
+    retrieval granularity made that premise false, and the short-circuit
+    then declined to join pieces that were written and manifested correctly
+    — :func:`store_get` fell back to the first piece alone, with no
+    ``Chunks:`` line and no error. Measured against the live cloud store on
+    2026-09-19: a 2,064-character note read back as 1,621 characters.
+
+    The manifest is now the only authority: ``len(chashes) < 2`` below is
+    the honest test of whether a document is split, and it costs one catalog
+    round trip per read that the short-circuit used to save.
+    """
+    if not chunk_ids:
         return None
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
 

@@ -138,12 +138,13 @@ nx index repo .
 nx search "how does authentication work"
 nx search "retry logic" --corpus code   # corpus = which collection group to search (code, docs, knowledge, ...)
 nx search "API changelog" --corpus docs
-nx search "database pool" --hybrid       # semantic + keyword matching
+nx search "database pool" --hybrid       # semantic, re-ranked by git frecency
+nx search "resolve_active_session_id" --lexical   # semantic + exact-text hits
 ```
 
 Topics are discovered and labeled automatically after indexing. Search results are grouped and boosted by topic. Check `nx taxonomy status` to see the topic map for each collection.
 
-Common flags: `-n 20` (result count), `--json`, `--files` (paths only), `-c` (show matched text). `--hybrid` requires [ripgrep](https://github.com/BurntSushi/ripgrep).
+Common flags: `-n 20` (result count), `--json`, `--files` (paths only), `-c` (show matched text). `--hybrid` blends git frecency into the RANKING for code corpora; `--lexical` ADDS exact-text hits to the results, which is what finds a rare identifier a semantic search misses. Different jobs despite the similar-sounding names.
 
 ### Upgrade local embedding quality (optional)
 

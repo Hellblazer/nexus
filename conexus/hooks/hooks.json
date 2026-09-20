@@ -6,33 +6,59 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx upgrade --auto 2>/dev/null || echo 'conexus plugin requires conexus >= 4.2.0 — run: nx self install (or uv tool upgrade conexus on an un-migrated box)' >&2",
+            "command": "nx-hook",
+            "args": [
+              "upgrade-auto"
+            ],
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/preflight.py",
+            "command": "nx-hook",
+            "args": [
+              "preflight"
+            ],
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "nx self gc >/dev/null 2>&1 || true",
+            "command": "nx-hook",
+            "args": [
+              "self-gc"
+            ],
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "nx hook session-start",
+            "command": "nx-hook",
+            "args": [
+              "session-start"
+            ],
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py",
+            "command": "nx-hook",
+            "args": [
+              "session-context"
+            ],
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/rdr_hook.py",
+            "command": "nx-hook",
+            "args": [
+              "rdr"
+            ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py"
+            ],
+            "timeout": 5
           }
         ]
       },
@@ -41,7 +67,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"
+            ],
             "timeout": 5
           }
         ]
@@ -54,6 +83,7 @@
           {
             "type": "command",
             "command": "nx-session-end-launcher",
+            "args": [],
             "timeout": 10
           }
         ]
@@ -65,8 +95,12 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/post_compact_hook.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_post_compact",
+            "input": {
+              "session_id": "${session_id}"
+            },
             "timeout": 10
           }
         ]
@@ -77,8 +111,13 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/stop_failure_hook.py",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_stop_failure",
+            "input": {
+              "error": "${error}",
+              "error_details": "${error_details}"
+            },
             "timeout": 5
           }
         ]
@@ -89,20 +128,39 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_subagent_start",
+            "input": {
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}",
+              "task": "${task}"
+            },
             "timeout": 10
           },
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start-stamp.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_subagent_start_stamp",
+            "input": {
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}"
+            },
             "timeout": 10
           },
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start-tuple-async.sh",
-            "timeout": 10,
-            "async": true
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_subagent_start_tuple",
+            "input": {
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}",
+              "task": "${task}"
+            },
+            "timeout": 10
           }
         ]
       }
@@ -112,15 +170,28 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-stop.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_subagent_stop",
+            "input": {
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}",
+              "agent_transcript_path": "${agent_transcript_path}",
+              "stop_hook_active": "${stop_hook_active}"
+            },
             "timeout": 10
           },
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-stop-tuple-async.sh",
-            "timeout": 10,
-            "async": true
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_subagent_stop_tuple",
+            "input": {
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}",
+              "agent_type": "${agent_type}"
+            },
+            "timeout": 10
           }
         ]
       }
@@ -130,8 +201,12 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/stop_verification_hook.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_stop_verification",
+            "input": {
+              "session_id": "${session_id}"
+            },
             "timeout": 180
           }
         ]
@@ -142,18 +217,30 @@
         "matcher": "Bash",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/pre_close_verification_hook.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_pre_close_verification",
+            "input": {
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}"
+            },
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py"
+            ],
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/routing/phase_review_close_requires_gate.py",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/phase_review_close_requires_gate.py"
+            ],
             "timeout": 5
           }
         ]
@@ -162,8 +249,15 @@
         "matcher": "Agent|Task",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/agent-dispatch-expect.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_agent_dispatch_expect",
+            "input": {
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "tool_use_id": "${tool_use_id}",
+              "tool_input": "${tool_input}"
+            },
             "timeout": 10
           }
         ]
@@ -172,8 +266,13 @@
         "matcher": "mcp__plugin_conexus_.*",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/auto-approve-nx-mcp.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_auto_approve",
+            "input": {
+              "tool_name": "${tool_name}",
+              "hook_event_name": "${hook_event_name}"
+            },
             "timeout": 5
           }
         ]
@@ -184,8 +283,14 @@
         "matcher": "Write|Edit",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/divergence-language-guard.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_divergence_language_guard",
+            "input": {
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}"
+            },
             "timeout": 10
           }
         ]
@@ -196,8 +301,13 @@
         "matcher": "mcp__plugin_conexus_.*",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/auto-approve-nx-mcp.sh",
+            "type": "mcp_tool",
+            "server": "plugin:conexus:nexus",
+            "tool": "hook_auto_approve",
+            "input": {
+              "tool_name": "${tool_name}",
+              "hook_event_name": "${hook_event_name}"
+            },
             "timeout": 5
           }
         ]
@@ -209,7 +319,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/mailbox_drain.py",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"
+            ],
             "timeout": 10
           }
         ]

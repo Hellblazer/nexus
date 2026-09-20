@@ -1746,6 +1746,93 @@ def _warn_skipped_collections(route: str, requested: list[str]) -> None:
     )
 
 
+def _unpack_rerank_envelope(results: Any, rerank_meta_out: dict | None) -> Any:
+    """Turn a rerank response into rows, writing the degrade state into
+    ``rerank_meta_out`` (RDR-188, bead nexus-9o6y2.8).
+
+    Shared by :meth:`HttpVectorClient.search` and
+    :meth:`HttpVectorClient.hybrid_search`: the two routes share ONE rerank
+    tail server-side (``VectorHandler#sendSearchResult``), so the envelope
+    both receive is byte-identical, and identical client-side handling is
+    what that requires. Extracted at RDR-217 P2.1 (bead nexus-lqo4p.6)
+    rather than copied into the second caller, because a copy is free to
+    drift from it silently and nothing would fail when it did.
+
+    Call it only when ``rerank`` was requested — with rerank off the
+    payload is the bare row list and no unwrapping applies.
+    """
+    if isinstance(results, dict) and "results" in results:
+        if "rerank_degraded" in results:
+            retry_after = results.get("rerank_retry_after_seconds")
+            meta = {
+                "degraded": bool(results.get("rerank_degraded")),
+                "error": results.get("rerank_error"),
+                "model": results.get("rerank_model"),
+                "retry_after_seconds": retry_after,
+            }
+            if retry_after is not None:
+                # nexus-n75jg (1vpal critic finding 2): a rate-
+                # limit-caused rerank degrade now carries a
+                # STRUCTURED retry_after (the engine's RerankStage
+                # emits it only for an UpstreamRateLimitedException
+                # degrade — never for any other degrade cause).
+                # Feed the shared rate brake so every OTHER writer
+                # in this process paces itself, exactly as a
+                # 429+Retry-After from a vector/manifest write
+                # would (nexus.retry's brake.trip call sites).
+                # This never retries the search itself — the
+                # server already served a 200 with distance-order
+                # rows; the brake trip is purely a signal for
+                # OTHER callers sharing this process.
+                # Clamped through the same parser every other
+                # trip() call site uses: the engine forwards
+                # Voyage's Retry-After unbounded above, and
+                # trip() only floors, so an absurd or non-numeric
+                # value must never stall every writer in the
+                # process (n75jg review). Unparseable: warn, no trip.
+                from nexus.rate_brake import get_brake, parse_retry_after  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+                clamped = parse_retry_after({"Retry-After": str(retry_after)})
+                if clamped is None:
+                    _log.warning(
+                        "rerank_retry_after_unparseable",
+                        value=retry_after, source="rerank",
+                    )
+                else:
+                    meta["retry_after_seconds"] = clamped
+                    get_brake().trip(clamped, source="rerank")
+        else:
+            # nexus-znwc2: an object envelope WITHOUT the degrade flag
+            # cannot attest rerank ran. The engine's RerankStage emits
+            # rerank_degraded unconditionally in the rerank envelope,
+            # so absence means a field-stripping middleman (the
+            # /version-stub class) — absence-of-flag is NOT success.
+            meta = {
+                "degraded": True,
+                "error": (
+                    "rerank envelope carried no rerank_degraded flag "
+                    "(field-stripping middleman?) — cannot attest the "
+                    "server reranked; treating results as "
+                    "distance-ordered"
+                ),
+                "retry_after_seconds": None,
+            }
+        results = results["results"]
+    else:
+        meta = {
+            "degraded": True,
+            "stale_engine": True,
+            "error": (
+                "engine predates server-side rerank; `nx upgrade` "
+                "converges the local engine (managed cloud: server "
+                "upgrade pending)"
+            ),
+            "retry_after_seconds": None,
+        }
+    if rerank_meta_out is not None:
+        rerank_meta_out.update(meta)
+    return results
+
+
 class VectorServiceError(RuntimeError):
     """Raised when the vector service returns an error.
 
@@ -2815,6 +2902,17 @@ class HttpVectorClient:
     #: never asked to rerank.
     supports_server_rerank: bool = True
 
+    #: RDR-217 P3: this backend reaches the engine's lexical indexes via
+    #: ``POST /v1/vectors/hybrid-search``. Capability marker in the same
+    #: two-site shape as ``supports_server_rerank`` above, read by
+    #: ``search_engine.search_cross_corpus``. ``T3Database`` deliberately does
+    #: NOT define it: it has no hybrid route, and per Sam's decision of
+    #: 2026-09-19 ``--lexical`` REFUSES on a backend without the leg rather
+    #: than falling back to vector. Phase 1 gave that posture a reason — a
+    #: silent fall-back would return the 0.167-precision vector window on a
+    #: rare-token query with nothing saying the requested leg never ran.
+    supports_hybrid_search: bool = True
+
     #: Memoized GET /version ``embedding_mode`` (class-level default so
     #: partially-constructed test instances still resolve; successful probes
     #: shadow it per-instance). RDR-188 P3.2 (nexus-9o6y2.14).
@@ -2974,75 +3072,7 @@ class HttpVectorClient:
         # RerankStage object envelope.
 
         if rerank:
-            if isinstance(results, dict) and "results" in results:
-                if "rerank_degraded" in results:
-                    retry_after = results.get("rerank_retry_after_seconds")
-                    meta = {
-                        "degraded": bool(results.get("rerank_degraded")),
-                        "error": results.get("rerank_error"),
-                        "model": results.get("rerank_model"),
-                        "retry_after_seconds": retry_after,
-                    }
-                    if retry_after is not None:
-                        # nexus-n75jg (1vpal critic finding 2): a rate-
-                        # limit-caused rerank degrade now carries a
-                        # STRUCTURED retry_after (the engine's RerankStage
-                        # emits it only for an UpstreamRateLimitedException
-                        # degrade — never for any other degrade cause).
-                        # Feed the shared rate brake so every OTHER writer
-                        # in this process paces itself, exactly as a
-                        # 429+Retry-After from a vector/manifest write
-                        # would (nexus.retry's brake.trip call sites).
-                        # This never retries the search itself — the
-                        # server already served a 200 with distance-order
-                        # rows; the brake trip is purely a signal for
-                        # OTHER callers sharing this process.
-                        # Clamped through the same parser every other
-                        # trip() call site uses: the engine forwards
-                        # Voyage's Retry-After unbounded above, and
-                        # trip() only floors, so an absurd or non-numeric
-                        # value must never stall every writer in the
-                        # process (n75jg review). Unparseable: warn, no trip.
-                        from nexus.rate_brake import get_brake, parse_retry_after  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
-                        clamped = parse_retry_after({"Retry-After": str(retry_after)})
-                        if clamped is None:
-                            _log.warning(
-                                "rerank_retry_after_unparseable",
-                                value=retry_after, source="rerank",
-                            )
-                        else:
-                            meta["retry_after_seconds"] = clamped
-                            get_brake().trip(clamped, source="rerank")
-                else:
-                    # nexus-znwc2: an object envelope WITHOUT the degrade flag
-                    # cannot attest rerank ran. The engine's RerankStage emits
-                    # rerank_degraded unconditionally in the rerank envelope,
-                    # so absence means a field-stripping middleman (the
-                    # /version-stub class) — absence-of-flag is NOT success.
-                    meta = {
-                        "degraded": True,
-                        "error": (
-                            "rerank envelope carried no rerank_degraded flag "
-                            "(field-stripping middleman?) — cannot attest the "
-                            "server reranked; treating results as "
-                            "distance-ordered"
-                        ),
-                        "retry_after_seconds": None,
-                    }
-                results = results["results"]
-            else:
-                meta = {
-                    "degraded": True,
-                    "stale_engine": True,
-                    "error": (
-                        "engine predates server-side rerank; `nx upgrade` "
-                        "converges the local engine (managed cloud: server "
-                        "upgrade pending)"
-                    ),
-                    "retry_after_seconds": None,
-                }
-            if rerank_meta_out is not None:
-                rerank_meta_out.update(meta)
+            results = _unpack_rerank_envelope(results, rerank_meta_out)
 
         if structured:
             # Return the plan-runner compatible structured form.
@@ -3065,6 +3095,114 @@ class HttpVectorClient:
                 "distances":   distances,
                 "collections": [r.get("collection", "") for r in results],
             }
+        return results
+
+    def hybrid_search(
+        self,
+        query: str,
+        collection_names: list[str],
+        n_results: int = 10,
+        where: dict | None = None,
+        *,
+        include_source_uri: bool = False,
+        rerank: bool = False,
+        rerank_top_k: int | None = None,
+        rerank_meta_out: dict | None = None,
+    ) -> list[dict]:
+        """Hybrid lexical+vector search via ``POST /v1/vectors/hybrid-search``
+        (RDR-217 P2.1, bead nexus-lqo4p.6).
+
+        The engine has stored two lexical indexes per chunk since RDR-155 P3 —
+        a ``tsvector`` FTS column and a ``pg_trgm`` trigram index — and this
+        route is the only way to read either. Until this method existed its
+        only caller was the cloud deployment, so the route had a production
+        consumer and no caller in the repository that builds it; that gap is
+        what BUG-0148 shipped through.
+
+        **This route is NOT a superset of** :meth:`search`. A text gate runs
+        first and the vector distance only ranks what survives it, so a row
+        with no text signal never appears however close its vector, and zero
+        text candidates returns an empty list with no silent vector fallback
+        (``PgVectorRepository.java:1140``). It therefore cannot be a silent
+        default for anything: the user-visible surface is additive or an
+        explicit mode, and nothing calls this by default.
+
+        Rows are the same flat shape :meth:`search` returns — ``id``,
+        ``content``, ``collection``, ``distance``, ``metadata``, ``retention``
+        — declared byte-identically by ``plain_search_<dim>`` and by both
+        branches behind this route. The live route selects NO fusion
+        component: no ``ts_rank``, no trigram score, no RRF score, only cosine
+        distance. There is no score field to read.
+
+        Unlike :meth:`search`, a row here never carries ``content: null``: the
+        text gate excludes reference-only chunks by construction, since
+        ``chunk_tsv`` and ``word_similarity`` are both NULL/false for NULL
+        content (the note at :meth:`search`'s docstring, written before any
+        method for this route existed).
+
+        ``cluster_by``, ``threshold`` and ``structured`` are deliberately
+        absent. All three are client-local post-retrieval processing that
+        never reaches the wire, so carrying them here would duplicate helpers
+        rather than extend the route; a caller who wants them applies the same
+        helpers to these rows. Adding them later is mechanical and needs no
+        engine change. This is the one Phase 2 choice the RDR's research did
+        not settle, recorded here rather than left implicit.
+
+        Returns ``list[dict]``, NOT :meth:`search`'s ``list[dict] | dict``.
+        That union exists there because ``structured=True`` returns the
+        plan-runner dict; with ``structured`` absent here every path returns
+        rows — the no-rerank path returns the bare list, and
+        :func:`_unpack_rerank_envelope` always yields a list. The accepted
+        design carried ``search()``'s annotation verbatim; Sam settled it to
+        the narrow form on 2026-09-19 so no consumer writes dead
+        ``isinstance(result, dict)`` handling against this method. Adding
+        ``structured`` later widens the annotation along with it.
+
+        ``rerank`` behaves exactly as it does on :meth:`search`, because both
+        routes share one rerank tail server-side
+        (``VectorHandler#sendSearchResult``) and the envelope that returns is
+        byte-identical — see :func:`_unpack_rerank_envelope`, which both
+        callers share for that reason.
+        """
+        body: dict[str, Any] = {
+            "query": query,
+            "collections": collection_names,
+            "n_results": n_results,
+        }
+        if where:
+            body["where"] = where
+        if include_source_uri:
+            body["include_source_uri"] = True
+        if rerank:
+            body["rerank"] = True
+            if rerank_top_k is not None:
+                body["rerank_top_k"] = rerank_top_k
+            # Same shared brake as search()'s rerank path, and for the same
+            # reason: the reranker is the one upstream the brake trips on, and
+            # a per-collection fan-out would otherwise keep hitting a
+            # rate-limited reranker while the brake was tripped. wait() is a
+            # no-op unless a trip is in force, so an untripped process pays
+            # nothing. Before the POST, never after.
+            from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+            get_brake().wait()
+
+        # The module-global _post, exactly as search() calls it at the
+        # equivalent line. Bead .7's wire test and bead .10's planted
+        # BUG-0148 fixture both intercept THIS seam; reaching the network any
+        # other way would leave both passing over behaviour they no longer
+        # reach.
+        results = _post("/v1/vectors/hybrid-search", body, tenant=self._tenant)
+        # Immediately after the POST and before any other network call on this
+        # thread: the skipped-collections capture is a thread-local pop, not a
+        # peek, so omitting this call here would also leak a stale
+        # X-Nexus-Skipped-Collections into the NEXT call on this thread. The
+        # route label is this method's own, so the warning names the route the
+        # caller actually asked for.
+        _warn_skipped_collections("hybrid_search", collection_names)
+
+        if rerank:
+            results = _unpack_rerank_envelope(results, rerank_meta_out)
+
         return results
 
     def search_metadata_scoped(

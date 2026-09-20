@@ -78,6 +78,35 @@ class TestLocalSweep:
         assert young.exists(), "inside the one-day window is kept"
         assert report.removed == {"mint_lock": [stale.name]}
 
+    def test_orphaned_ripgrep_caches_go_at_any_age_and_only_at_the_top_level(
+        self, tmp_path: Path
+    ) -> None:
+        """nexus-06aei: the line caches outlived the code that read them.
+
+        No age gate on this class, so the test pins the ABSENCE of one by
+        making the surviving file the fresh one and the reaped files span
+        zero to a year. An age-gated implementation keeps `today` and fails
+        here; that is the point of stamping it at 0 days.
+        """
+        today = _touch(tmp_path / "nexus-c49c5dc3.cache", age_days=0)
+        ancient = _touch(tmp_path / "arcaneum-2ad2825c.cache", age_days=365)
+        hyphenated = _touch(tmp_path / "benchidx-07041125-w1-96eb7849.cache", age_days=3)
+        # Shape misses: no 8-hex suffix, and a nested file the glob must not reach.
+        not_a_cache = _touch(tmp_path / "repos.cache", age_days=400)
+        wrong_hash = _touch(tmp_path / "thing-nothex1.cache", age_days=400)
+        nested = _touch(tmp_path / "logs" / "deep-c49c5dc3.cache", age_days=400)
+
+        report = sweep_local_garbage(tmp_path, now=NOW)
+
+        assert not today.exists(), "no age gate: a cache written today is still unreadable"
+        assert not ancient.exists() and not hyphenated.exists()
+        assert not_a_cache.exists(), "a .cache with no -<8hex> suffix is not ours"
+        assert wrong_hash.exists(), "the suffix must be hex"
+        assert nested.exists(), "the sweep is top-level; logs/ is the log classes' business"
+        assert sorted(report.removed["ripgrep_cache"]) == sorted(
+            [today.name, ancient.name, hyphenated.name]
+        )
+
     def test_a_failed_unlink_is_reported_not_raised(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         stale = _touch(tmp_path / "t1_mint_dead.lock", age_days=5)
         real_unlink = Path.unlink

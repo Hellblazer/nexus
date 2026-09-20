@@ -8,24 +8,65 @@ BEFORE the sweep, and never able to fail the hook it runs on.
 from __future__ import annotations
 
 import os
-import subprocess
+import shutil
 import textwrap
 from pathlib import Path
 
 import pytest
 
+from nexus.hooks import expectations
+
 REPO = Path(__file__).resolve().parents[2]
-LIB = REPO / "tests" / "e2e" / "lib" / "expectations.sh"
-PLUGIN_LIB = REPO / "conexus" / "hooks" / "scripts" / "expectations.sh"
-SUBAGENT_STOP = REPO / "conexus" / "hooks" / "scripts" / "subagent-stop.sh"
+#: The SubagentStop hook that must call archive before sweep. Ported to
+#: Python at RDR-215 bead nexus-q02nx.17 (``src/nexus/hooks/subagent_stop.py``);
+#: the bash original is no longer wired in hooks.json (SubagentStop
+#: dispatches to the ``hook_subagent_stop`` mcp_tool) and is retired at
+#: bead nexus-q02nx.21 along with the shell ledger library it sourced --
+#: this constant follows the wiring, not the file that used to carry it.
+SUBAGENT_STOP = REPO / "src" / "nexus" / "hooks" / "subagent_stop.py"
 
 
-def _bash(script: str, state: Path) -> subprocess.CompletedProcess:
-    env = dict(os.environ, XDG_STATE_HOME=str(state), HOME=str(state / "home"))
-    return subprocess.run(
-        ["bash", "-c", f"source {LIB}\n{textwrap.dedent(script)}"],
-        capture_output=True, text=True, env=env,
-    )
+class _Result:
+    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = ""
+
+
+class _UnsupportedVerb(Exception):
+    """A test passed a verb name this helper does not dispatch."""
+
+
+def _run(script: str, state: Path) -> _Result:
+    """Run one or more ledger verbs against ``nexus.hooks.expectations``.
+
+    ``script`` is one or more bare verb names (``expectations_archive``,
+    ``expectations_sweep``), one per line -- the composite two-verb form
+    drives the archive-before-sweep ordering tests below. Verb-by-verb
+    dispatch (rather than matching the whole script against one name)
+    matters here: a composite script run as a single lookup would match
+    nothing and silently do nothing, which the bead .9 critique found
+    happening under the retired bash-differential setup.
+    """
+    verbs = [line.strip() for line in textwrap.dedent(script).splitlines() if line.strip()]
+    supported = {
+        "expectations_archive": expectations.expectations_archive,
+        "expectations_sweep": expectations.expectations_sweep,
+    }
+    unsupported = [v for v in verbs if v not in supported]
+    if unsupported:
+        raise _UnsupportedVerb(f"{unsupported!r} is not a ledger verb this helper knows.")
+    prior = os.environ.get("XDG_STATE_HOME")
+    os.environ["XDG_STATE_HOME"] = str(state)
+    try:
+        for verb in verbs:
+            supported[verb]()
+    finally:
+        if prior is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = prior
+    return _Result()
 
 
 @pytest.fixture
@@ -47,7 +88,7 @@ def _archive(state: Path) -> Path:
 class TestArchiveLeg:
     def test_copies_live_ledgers_into_the_archive(self, state):
         (_live(state) / "s1.expectations").write_text("a\tSTART\tid1\tconexus:developer\n")
-        proc = _bash("expectations_archive", state)
+        proc = _run("expectations_archive", state)
         assert proc.returncode == 0, proc.stderr
         assert (_archive(state) / "s1.expectations").read_text() == (
             "a\tSTART\tid1\tconexus:developer\n"
@@ -56,11 +97,11 @@ class TestArchiveLeg:
     def test_second_run_adds_new_files_without_duplicating_or_mutating(self, state):
         first = _live(state) / "s1.expectations"
         first.write_text("row1\n")
-        _bash("expectations_archive", state)
+        _run("expectations_archive", state)
         before = (_archive(state) / "s1.expectations").stat()
 
         (_live(state) / "s2.expectations").write_text("row2\n")
-        proc = _bash("expectations_archive", state)
+        proc = _run("expectations_archive", state)
         assert proc.returncode == 0
 
         names = sorted(p.name for p in _archive(state).glob("*.expectations"))
@@ -73,11 +114,11 @@ class TestArchiveLeg:
         # the first snapshot and lose every row written afterwards.
         live = _live(state) / "s1.expectations"
         live.write_text("row1\n")
-        _bash("expectations_archive", state)
+        _run("expectations_archive", state)
 
         live.write_text("row1\nrow2\n")
         os.utime(live, (live.stat().st_atime + 10, live.stat().st_mtime + 10))
-        _bash("expectations_archive", state)
+        _run("expectations_archive", state)
 
         assert (_archive(state) / "s1.expectations").read_text() == "row1\nrow2\n"
 
@@ -86,14 +127,13 @@ class TestArchiveLeg:
         (_archive(state)).mkdir(parents=True, exist_ok=True)
         (_archive(state) / "gone.expectations").write_text("historical\n")
         (_live(state) / "s1.expectations").write_text("row\n")
-        _bash("expectations_archive", state)
+        _run("expectations_archive", state)
         assert (_archive(state) / "gone.expectations").read_text() == "historical\n"
 
     def test_survives_an_empty_and_a_missing_live_dir(self, state):
-        assert _bash("expectations_archive", state).returncode == 0
-        import shutil
+        assert _run("expectations_archive", state).returncode == 0
         shutil.rmtree(_live(state))
-        assert _bash("expectations_archive", state).returncode == 0
+        assert _run("expectations_archive", state).returncode == 0
 
 
 class TestArchiveWinsTheRaceWithSweep:
@@ -105,7 +145,7 @@ class TestArchiveWinsTheRaceWithSweep:
         old = stale.stat().st_mtime - (9 * 86400)
         os.utime(stale, (old, old))
 
-        proc = _bash("expectations_archive\nexpectations_sweep", state)
+        proc = _run("expectations_archive\nexpectations_sweep", state)
         assert proc.returncode == 0
         assert not stale.exists(), "fixture bug: sweep did not reap the stale ledger"
         assert (_archive(state) / "old.expectations").exists(), (
@@ -120,23 +160,18 @@ class TestArchiveWinsTheRaceWithSweep:
         old = stale.stat().st_mtime - (9 * 86400)
         os.utime(stale, (old, old))
 
-        _bash("expectations_sweep\nexpectations_archive", state)
+        _run("expectations_sweep\nexpectations_archive", state)
         assert not (_archive(state) / "old.expectations").exists()
 
     def test_subagent_stop_calls_archive_before_sweep(self):
+        # Re-pointed at the Python port (bead nexus-q02nx.21): the bash
+        # trigger this used to read is no longer wired into hooks.json and
+        # is retired along with the shell ledger library. The ordering
+        # guarantee itself is unchanged -- src/nexus/hooks/subagent_stop.py
+        # carries forward the same nexus-4bqre.1 comment and the same two
+        # calls.
         body = SUBAGENT_STOP.read_text()
-        assert "expectations_archive" in body, "the trigger is not wired at all"
-        assert body.index("expectations_archive") < body.index("\nexpectations_sweep"), (
-            "archive must precede sweep in subagent-stop.sh"
-        )
-
-
-class TestBothLibraryCopiesStayIdentical:
-    """CLAUDE.md: edit tests/e2e/lib/expectations.sh, copy it over, never the reverse."""
-
-    def test_plugin_copy_is_byte_identical(self):
-        assert LIB.read_bytes() == PLUGIN_LIB.read_bytes()
-
-    def test_both_copies_define_the_archive_function(self):
-        for path in (LIB, PLUGIN_LIB):
-            assert "expectations_archive()" in path.read_text(), path
+        assert "_exp.expectations_archive()" in body, "the trigger is not wired at all"
+        assert body.index("_exp.expectations_archive()") < body.index(
+            "_exp.expectations_sweep()"
+        ), "archive must precede sweep in nexus.hooks.subagent_stop"

@@ -2,12 +2,19 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The gate's evidence is never written by a party the gate is checking.
 
-nexus-e3mak. ``pre_close_verification_hook.sh`` decides whether a bead may close
-by looking for the token ``review-completed`` plus the bead id, matched by
-SUBSTRING across T1 tags/content and T2 title/content (see ``_t1_covers`` /
-``_t2_covers``). It cannot tell coverage from a progress report, and it has no
-author field to consult: ``nx scratch list`` prints tags and a truncated content
-line, nothing about who wrote the entry.
+nexus-e3mak. The pre-close gate decides whether a bead may close by looking for
+the token ``review-completed`` plus the bead id, matched by SUBSTRING across T1
+scratch tags and content (see ``_t1_covers``). It cannot tell coverage from a
+progress report, and it has no author field to consult: ``nx scratch list``
+prints tags and a truncated content line, nothing about who wrote the entry.
+
+The gate is ``nexus.hooks.pre_close_verification``, wired as the
+``hook_pre_close_verification`` MCP tool. It was
+``conexus/hooks/scripts/pre_close_verification_hook.sh`` when this module was
+written; RDR-215 bead nexus-q02nx.21 deleted that script and this module's
+anchor was re-pointed at the port. (T2 markers were dropped separately at
+nexus-fgekf -- an attestation must come from the closing session, not a durable
+store -- so the substring match is T1-only now, and there is no ``_t2_covers``.)
 
 So the invariant has to hold on the WRITE side, and the write side is agent
 guidance. On 2026-08-26 a dispatched code-review-expert finished reviewer 1 of a
@@ -37,7 +44,7 @@ _GATE_REVIEWERS = (
     REPO_ROOT / "conexus" / "agents" / "code-review-expert.md",
     REPO_ROOT / "conexus" / "agents" / "substantive-critic.md",
 )
-_HOOK = REPO_ROOT / "conexus" / "hooks" / "scripts" / "pre_close_verification_hook.sh"
+_HOOK = REPO_ROOT / "src" / "nexus" / "hooks" / "pre_close_verification.py"
 
 pytestmark = pytest.mark.lint
 
@@ -51,6 +58,17 @@ def test_the_hook_still_matches_the_token_this_guidance_is_about() -> None:
     assert "review-completed" in text, (
         "the pre-close hook no longer mentions 'review-completed' — either the "
         "gate's token changed (retarget this whole module) or the gate is gone"
+    )
+    # The token must be in the MATCHING code, not merely narrated in the
+    # module docstring. Reading the whole file would keep passing if the
+    # gate stopped keying on the token and only the prose remembered it —
+    # which is precisely the vacuity this non-vacuity control exists to
+    # rule out.
+    assert "'review-completed' not in tags" in text, (
+        "the pre-close gate no longer FILTERS T1 entries on the "
+        "'review-completed' tag; the token survives only as prose, so every "
+        "assertion below now guards nothing. Retarget this module at "
+        "whatever the gate keys on instead."
     )
 
 

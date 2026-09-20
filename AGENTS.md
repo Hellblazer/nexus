@@ -109,20 +109,18 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **`develop` release boundary LIFTED 2026-06-29** — release-blocker bead `nexus-luxe6` closed; conexus 6.0.0 (the migration-capable release) published from develop, and `develop` is releasable again. **RDR-155 P4b (the FINAL Chroma deletion) SHIPPED 2026-07-25** — the dependency is dropped (absent from `uv.lock`), `guided_upgrade_cmd.py`/`migrate_cmd.py` are deleted outright, and `nx guided-upgrade` no longer exists. Pre-PG installs redirect through a two-hop path: pin to the last migration-capable release, `conexus==6.18.1`, where `nx guided-upgrade` still runs (Chroma → PG17+pgvector, copy-not-move), then upgrade normally from there. Frozen Chroma directories left on disk are relics: nothing reads them and there is no path back to that era (Hal, 2026-08-29). Authoritative record: T2 `nexus/release-boundary-since-p4a` (updated).
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via a PR-gated release branch (nexus-mkj6u) — there are NO direct-to-`main` commits at all (`docs/contributing.md` § Release Process). The plugin no longer ships a review-coverage push gate (deleted 2026-08-22, Sam's decision: self-attested, one true positive against denying correct pushes, and `develop` is already PR-gated to `main` with required checks so unreviewed code ships to nobody) — push-to-main protection and the `git add` wildcard redirect remain Hal's user-level hook (`~/.claude/hooks/nexus-git-policy.py`), personal workflow policy rather than a plugin behavior other conexus users inherit.
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
-- **Push `develop` only through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6): it refuses unless `origin/develop..develop` equals the commits you name, so a peer's unpushed commits in the shared checkout never ride your push (four times on 2026-09-07). `NX_PUSH_SOURCE=HEAD` from a detached worktree pushes your commits without touching the local branch. Never `git commit --amend` in the primary checkout; the user-level hook denies it when HEAD is not this session's commit. See `docs/contributing.md` § Git Workflow.
+- **Push `develop` only through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6): it refuses unless `origin/develop..develop` equals the commits you name, so a peer's unpushed commits in the shared checkout never ride your push (four times on 2026-09-07). `NX_PUSH_SOURCE=HEAD` from a detached worktree pushes your commits without touching the local branch. Never `git commit --amend` in the primary checkout; the user-level hook denies it when HEAD is not this session's commit. See `docs/contributing.md` § Git Workflow. **Sessions no longer work in the shared primary at all** (§ Worktrees below), so this guard now fires rarely rather than routinely — it stays because it is the mechanical check, not because the shared-tree workflow it was written for is still the practice.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
 - **Closed vocabularies (RDR status, and future ones) are CHECKED TABLES, not prose — see [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md) § RDR lifecycle for the full story.** `src/nexus/tables/` (packaged, checked at load time); `docs/tables/` for repo-only tables (the release-choreography table both release gates resolve).
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
-- **`expectations_*` is a SOURCED SHELL LIB, not a tool and not an `nx` verb.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared`) is bash. Searching the MCP tool registry for it returns nothing **by design**, and `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h).
+- **`expectations_*` is an `nx-hook` VERB, not an MCP tool.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared` / `expectations_reconcile`) moved from a sourced bash library to `nexus.hooks.expectations` at RDR-215 bead nexus-q02nx.14. Searching the MCP tool registry for it still returns nothing **by design** — the answer IS the exit code and an MCP tool has none, so these are command tier only; `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h).
   ```bash
-  source tests/e2e/lib/expectations.sh                    # in this checkout
-  source ~/.claude/plugins/marketplaces/*/conexus/hooks/scripts/expectations.sh   # anywhere else
-  expectations_census "$SESSION_ID"      # retro counts — NEVER hand-count (nexus-hybv1)
-  expectations_undeclared "$SESSION_ID"  # rc: 0 clean, 1 BLINDSPOT (EXPECT rows present but zero STARTs walked — the audit examined nothing, not a pass; nexus-houpu), 2 undeclared>0 deficit (nexus-suuja), 3 no ledger file for this session — nothing checkable, not evidence of cleanliness (nexus-ahl9v)
+  nx-hook expectations_census "$SESSION_ID"      # retro counts — NEVER hand-count (nexus-hybv1)
+  nx-hook expectations_undeclared "$SESSION_ID"  # rc: 0 clean, 1 BLINDSPOT (EXPECT rows present but zero STARTs walked — the audit examined nothing, not a pass; nexus-houpu), 2 undeclared>0 deficit (nexus-suuja), 3 no ledger file for this session — nothing checkable, not evidence of cleanliness (nexus-ahl9v)
   ```
-  The two copies are kept byte-identical by `tests/hooks/test_subagent_stop_hook.py`; edit `tests/e2e/lib/expectations.sh` and copy it over, never the reverse.
-  **The EXPECT row is MECHANIZED and LIVE** (nexus-qc4p1, shipped at the 7.0.0 plugin pin; verified 2026-08-02: 70/70 recognized, 0 undeclared): a PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`. **Do NOT hand-write EXPECT rows** — the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. Hand-call `expectations_expect` ONLY for a dispatch the hook cannot see, keyed on the **subagent type verbatim, colon included** — never an invented name (the Agent tool has no `name` parameter; nexus-nu7fo). `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable — two 2026-07 sessions concluded the ledger was unavailable and skipped it, and it was available both times.
+  No `source` step, and nothing to keep in sync. **`nx-hook` needs a conexus generation at or past the wheel that declares it** — it is a console script, so an older installed generation simply has no `nx-hook` shim and the command is not found (measured 2026-09-19 on this box: `~/.local/bin/` had `nx`, `nx-mcp`, `nx-mcp-catalog` and `nx-session-end-launcher`, no `nx-hook`; `scripts/reinstall-tool.sh` writes it, and a fresh install always carries it). In a dev checkout, `uv run nx-hook ...` works regardless. The plugin's bash copy still exists and is still what the wired `hooks.json` entries run; bead nexus-q02nx.21 deletes it in the same change that re-points those entries, never before (deleting it first would strip the library from the four live hooks that source it: two go wholly silent on a bare `|| exit 0`, one prints a single stderr line, and the Stop hook drops its reconcile check without saying anything).
+  **The EXPECT row is MECHANIZED and LIVE** (nexus-qc4p1, shipped at the 7.0.0 plugin pin; verified 2026-08-02: 70/70 recognized, 0 undeclared): a PreToolUse hook on the Agent tool writes it from the dispatch's own `subagent_type` + `run_in_background`. **Do NOT hand-write EXPECT rows** — the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. Hand-call `nx-hook expectations_expect` ONLY for a dispatch the hook cannot see, keyed on the **subagent type verbatim, colon included** — never an invented name (the Agent tool has no `name` parameter; nexus-nu7fo). `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable — two 2026-07 sessions concluded the ledger was unavailable and skipped it, and it was available both times.
 - **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh [required-sha]` as their FIRST action and stop on any `PREFLIGHT_FAIL` line.** The harness cuts `isolation:worktree` worktrees from the DEFAULT branch's tip, not the session's current branch, so a fresh worktree can be silently stale relative to `develop` by construction (nexus-5kwkf); the script also refuses outright if the agent turns out to be in the shared primary checkout, not a worktree at all. `required-sha` is optional — when omitted it defaults to local `develop` if that branch exists, else `origin/develop`, else refuses (`PREFLIGHT_FAIL_BAD_SHA`); local is checked first because this project's own batched-push workflow routinely runs local `develop` ahead of `origin/develop`. It recovers a stale-but-clean worktree via `git merge --ff-only`; a dirty or diverged worktree is refused untouched. The conexus SubagentStart hook injects this instruction for `isolation:worktree` dispatches once the plugin ships it (`conexus/PENDING_RELEASE.md`); until then this bullet is the delivery path.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
@@ -244,87 +242,158 @@ Build or test the engine through `scripts/mvnw-leased.sh` (never a bare `./mvnw`
 
 ### Cutting a release (version bump + tag-push to PyPI)
 
-**Engine-freshness gate (step 0 — BEFORE the numbered steps).** There is ONE engine-version number, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — not two. `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independent literal — bumping `REQUIRED_ENGINE_VERSION` moves the release's engine identity AND the fresh-install pin together, by construction. (Prior to 2026-07-12 these were two separately hand-typed constants that silently drifted apart — pinned at v0.1.36 while the floor had already moved to a verified, cloud-deployed v0.1.39 — the identical failure class `nexus-b6qlf` already unified once before for a different pair of constants; see `engine_version.py`'s docstring.)
+**The `release` skill is the authority and the executable checklist.** Invoke it
+(`/conexus:release`, or `Skill` on `release`); this section is a pointer, not a
+parallel copy. `docs/contributing.md#release-process` is the long form for
+rollback and one-time setup.
 
-This is a BLOCKING command, not a prose eyeball-check (nexus-i5c2u — the eyeball version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34):
+The authority used to run the other way and the two drifted, which is why it was
+inverted (2026-09-20). Measured on 2026-09-19: this file recorded the
+remediation-commit gate as RETIRED while the skill listed it as a live preflight
+leg 57 lines after carrying that retirement inside an HTML comment; the skill's
+`git add` block ended in a trailing backslash that swallowed its own
+`git commit`, so it staged files and never committed; the skill described a
+SQLite backend deleted at RDR-158 in the present tense; and "the human pushes
+the tag" had widened in the skill into "human by default, OR the AI pushes it
+when authorized". Two copies of a procedure decay until the stale one wins an
+argument, and a reader had no way to tell which was current.
+
+What did NOT move, and why this is not a mechanical rule: § Engine-service
+release ABOVE is not a pointer and should not become one. It is not a summary
+of its skill — it is the incident archive that skill defers to, and the
+`engine-release` skill's own back-references name this file as the authority on
+wording conflicts. A pointer cannot win a wording conflict.
+
+**Step 0 stays here because other sections cite it.** The engine-freshness gate
+is BLOCKING and is a command, not a prose eyeball-check (nexus-i5c2u):
 
 ```bash
 uv run python scripts/check_engine_release_floor.py
 ```
 
-If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh `engine-service` tag via the `engine-release` skill (see "Engine-service release" above), bump `REQUIRED_ENGINE_VERSION` to that tag's version (this alone also moves `PINNED_SERVICE_TAG`), gate the release battery against that engine, and pair the deploy with THIS release (deploy relay fires at client-tag push, parallel with the PyPI publish — paired-release choreography, Hal directive 2026-08-02). For a paired release carrying a non-additive wire change, cloud-behind pre-tag is the EXPECTED state (deploy fires at tag push): re-run the gate with `--paired-deploy engine-service-vX.Y.Z` naming the exact tag this release pairs with (nexus-k1c08). For a paired release whose wire-ledger `## Unshipped` entries all lead with `[additive]`, prefer deploying the engine BEFORE the client tag instead (nexus-1emxn refinement, § Engine-service release above) — the bare gate then simply passes with nothing to except. The flag accepts a below-floor cloud solely where the named tag independently verifies as (a) a published, non-draft GH release with assets, (b) exactly equal to `REQUIRED_ENGINE_VERSION`, and (c) the newest published `engine-service-v*` tag — any miss stays red with a named reason, never a silent pass. Post-tag, re-run the gate WITHOUT the flag as the deploy-window VERIFY — with `--record-deploy-from-gate-report <conexus checkout>/deploy` (or `NX_GATE_REPORT_DIR` set), which also writes the `deployed-engine-version` tracker from conexus's STEP-6 report once that gate has reported green (nexus-nx3l5; a bare verify with neither exits 3, and `--no-record-deploy "<reason>"` is the explicit opt-out for a box without the reports); escalate loudly if it is still behind. `git log <pinned-engine-tag>..HEAD -- service/` remains useful supplementary context for judging whether recent `service/` work is cloud-relevant, but the script above — not the eyeball — is the actual gate. Shipping the PyPI release on a stale, un-cloud-validated engine is exactly the gap this gate closes.
+Non-zero means STOP. It fails in both directions — a cloud behind the pinned
+identity, and a gated engine tag that was never pinned — and the remedy differs
+per direction. The skill's Step 0 carries both, the `--paired-deploy` form for a
+paired release (nexus-k1c08), and the post-tag verify obligation. `ONE engine
+identity per release` and the `REQUIRED_ENGINE_VERSION` -> `PINNED_SERVICE_TAG`
+derivation are stated in § Engine-service release above.
 
-`release.yml`'s own copy of this step (unattended, no human to type `--paired-deploy <tag>`) runs `--paired-deploy-auto` instead of bare (nexus-gc9ir, after v7.10.0's publish red'd on the exact expected pre-deploy paired-release state) — it derives the candidate tag from `REQUIRED_ENGINE_VERSION` itself and only engages paired acceptance when the cloud is confirmed below floor. The pre-tag human invocation above stays the explicit `--paired-deploy` form.
+## Worktrees: one session, one worktree (2026-09-19)
 
-**Remediation-commit gate — RETIRED.** RETIRED 2026-08-24 (nexus-2zmfw). The remediation-commit gate and its committed bead snapshot are gone. It gated nothing — 0 of 428 non-closed beads named a required commit — while asserting a repo-wide invariant from ONE developer's local clone, dumped and committed by hand. It could report confident green over a view that never matched reality, and its staleness check keyed on max(updated_at) across every bead (closed included), so it failed a release on wall-clock rather than on content. It blocked v7.16.2 for exactly that reason. The real requirement it stood for — sequence a remediation behind a commit — is a bead-authoring convention, not a release gate.
+**Every session works in its own worktree on its own branch. The shared
+primary checkout is not edited.** Agreed by the three sessions sharing this
+box after a day in which every coordination failure traced to one cause: a
+commit that nearly carried a peer's uncommitted draft, `PUSH_REFUSED_FOREIGN`
+in both directions, a deadlock where a fix could not reach origin because a
+peer's unpushed commit was its ancestor, subagent briefs restricted to named
+files purely because the tree was shared, and a branch pointer nobody could
+reconcile while anyone's tree was dirty. In separate worktrees these are not
+things to avoid carefully; they are impossible.
 
-A green here proves only that no requirement was present in the snapshot the
-releaser took — not that none was missed. The snapshot is one developer's
-clone (see `docs/contributing.md` § Step 0b KNOWN LIMITATION, nexus-2zmfw).
+1. **Site worktrees as siblings**: `../nexus-wt/<session>`, branch
+   `feature/<bead-id>-<slug>`.
 
-1. **Run the full release test battery.** Step 0 is the pin sweep: `scripts/pins-preflight.sh` (about four minutes: lint bucket, the non-lint pin tests, wire-contract pairing, ruff on src, continuing past failures) so every stale ratchet, ledger, parity pin and reference-rot surfaces in ONE report before the first hour-long gate, instead of one per gate run (2026-09-06: the pattern was "expected fail, bump the pin, rerun for an hour, find the next one"). Then run the whole battery to completion collecting reds; fix once; rerun only the reds.
-   `tests/e2e/release-battery.sh` (nexus-mfage fix B) runs the whole gate group below in ONE invocation: leg 0 builds every artifact once (`tests/e2e/migration-rehearsal/build-artifacts.sh`: wheel, stamped dev jar, linux native candidate, plus a manifest keyed on the working tree's identity) and runs the pin sweep; then every gate runs in one parallel group (`--max-parallel`, default 4), each consuming the artifacts by manifest (`run.sh --artifacts`, `NX_GATE_ARTIFACTS`, `NEXUS_SANDBOX_HOME`), each in its own log with its verdict line captured verbatim and timed; the throughput-baselined shakeout leg runs alone afterwards. Reds never stop it; one table at the end; a leg with no verdict line is MISSING, never passed. Consumers refuse artifacts whose manifest tree identity is not this checkout's, so a dirtied tree rebuilds rather than reusing (nexus-mbeke). The serial commands below remain the per-leg reference and are what the driver runs.
-   ```bash
-   tests/e2e/release-battery.sh                              # the whole battery, parallel, ~30 min on this box
-   scripts/pins-preflight.sh                                 # step 0: every cheap pin at once
-   uv run pytest -n auto && uv run pytest -m lint            # unit suite and the lint bucket (two runs)
-   tests/e2e/local-service-gate.sh                           # integration incl. the local-service functional gate
-   tests/e2e/migration-rehearsal/run.sh --package-upgrade    # ONE-engine convergence MVV (nexus-cfgo9)
-   tests/e2e/migration-rehearsal/run.sh --candidate-migration # REQUIRED when the tree carries a changeset: --package-upgrade and fresh-install-mvv both converge to the PINNED engine, so only this leg walks the tree's own changesets over a populated existing store (nexus-z0ylb)
-   ```
-   All must pass. Bare `uv run pytest -m integration` is not enough on its own — the local-service round-trip family self-provisions inside `local-service-gate.sh` and otherwise skip-gates silently on an absent service (the 74/516 ambient-degradation class the gate was built to end). Integration is excluded from CI — this battery is your last line of defense before tag-push.
-1b. **Run the fresh-install MVV.** `./tests/e2e/fresh-install-mvv.sh` (nexus-nolqs). The VIRGIN-journey gate — every other E2E gate tests the upgrade axis from a populated install. The unit suite then pinned the SQLite opt-out backend (since retired at RDR-158), which is how the 2026-07-21 fresh-box defect class (f1itv/e9ru2/kmo9h/r5f3c/9xfx5) shipped unseen; today the suite pins the engine substrate instead, and the MVV still covers the virgin journey no unit test walks. Builds the wheel under test, then on a scrubbed-env virgin HOME: local init (engine + portable PG + bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG registration asserted (not just T3 chunks), semantic search returns both, doctor with zero ✗ and warnings checked against the allowlist, and — leg 9 of 10 (nexus-utpuw.19) — a generation install on that same virgin HOME. That last leg is the only fresh-journey coverage of the `<tools>/gen-<stamp>` + shim path, and the only proof the built WHEEL actually ships `nexus/_install/*.sh`: every other test of `packaged_install_dir()` runs against an editable checkout, where that path exists because the repo does. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`. **This is the pre-tag LOCAL WHEEL layer only** — it resolves dependencies from this checkout's `uv.lock`/wheel metadata, not PyPI, so it cannot reproduce a defect that lives in dependency RESOLUTION (nexus-l2ku5: `mcp>=1.0` unbounded resolved `mcp` 2.0.0 fresh from PyPI on a `uv tool install`, killing both MCP servers for 4 days while every gate — this one included — ran pinned to the dev venv and saw nothing). `./tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]` (nexus-796zn) installs the PUBLISHED artifact via `uv tool install conexus[==X.Y.Z]` in the identical scrubbed sandbox (never touches the live `~/.local/share/uv`/`~/.local/bin`) and is the POST-publish SHAKEDOWN layer (T2 `nexus/shakedown-playbook` §2 S1) — there is nothing on PyPI yet to install at pre-tag time, so it does not belong in this numbered step; run it after a tag publishes.
-1c. **Run the generation-flip live-holder gate.** `bash tests/e2e/gen-flip-live-holder.sh` (~30s, nexus-utpuw.17). Required for any change touching `src/nexus/_install/**`, `src/nexus/install_layout.py`, `src/nexus/install_census.py`, or anything else in the shim / flip / GC machinery. Builds TWO real conexus generations from this checkout, spawns an actual `nx-mcp` holder THROUGH the shim, flips `current` underneath it, and asserts the live process still answers a real MCP tools/call from its ORIGINAL generation while a fresh spawn lands in the new one and GC refuses to reap the held tree. Hermetic by construction (`env -i`, virgin HOME, its own `NEXUS_CONFIG_DIR`) and it ASSERTS its own seal — an unscrubbed nx-mcp was measured answering a real `search` out of the OPERATOR'S live collections, so a call that SUCCEEDS here fails the gate. Must end `GEN-FLIP LIVE-HOLDER PASSED`. The fast-loop half of the pair is `tests/scripts/test_generation_flip_live_holder.py` (nexus-utpuw.16), which runs on every `pytest -n auto` against a fixture package; this one guards the ARTIFACT — real console scripts, real dependency graph, the real certifi path whose failure was the concrete nexus-q3xrx symptom (95 cacert tracebacks). Nothing else in the fast gates exercises shim/current/GC at all.
-2. **Audit docs against changes since last tag.** `git log --oneline v<prev>..HEAD` then check `docs/cli-reference.md`, `docs/architecture.md`, `README.md` for user-visible drift.
-3. **Bump version in all seven version surfaces AND both `source.ref` fields** (CI enforces parity — see `docs/contributing.md` § Release Process step 7 for the canonical list):
-   - `pyproject.toml` — `version = "X.Y.Z"`
-   - `mcpb/pyproject.toml` — `version` (plus its `conexus[local]>=X.Y.Z` dependency pin; `tests/test_plugin_structure.py::test_mcpb_pins_conexus_local_extra` enforces the pin tracks the version)
-   - `mcpb/manifest.json` — `version` (`tests/test_plugin_structure.py::test_mcpb_manifest_version_matches_pyproject`)
-   - `.claude-plugin/marketplace.json` — both `version` fields AND both `plugins[].source.ref` fields (must be `"vX.Y.Z"` — the tag form). The `source.ref` is what decouples installed users from main HEAD: plugins are fetched from the pinned tag, not from whatever main currently is. CI test `TestMarketplaceVersion::test_marketplace_source_ref_matches_pyproject` enforces this.
-   - `conexus/.claude-plugin/plugin.json` — `version`
-   - `sn/.claude-plugin/plugin.json` — `version`
-   - `conexus/PENDING_RELEASE.md` — cleared (`tests/test_plugin_release_drift_ledger.py` fails on a stale entry)
-4. **Update changelogs.** Add a new section to `CHANGELOG.md` and `conexus/CHANGELOG.md` with the date and the changes since last release.
-5. **Refresh `uv.lock`.** Run `uv sync` — the lock file MUST be committed.
-6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`. The reinstall this drives is genuinely isolated (fixed 2026-07-01, `137d2688`) — it runs cleanly with live Claude Code sessions/MCP servers active. There is no longer any live-holder refusal to hit: installs are side-by-side generations, so holders keep running from their own tree and converge at their next spawn (nexus-utpuw.8). `--force` and `--cycle-daemons` no longer exist. The step ordering still matters for ISOLATION though — the sandbox `HOME` must be activated *before* the reinstall runs, because the generation root resolves off `$HOME` (`nx_tools_dir`, recomputed per call for exactly this reason). Get that wrong and the sandbox writes into the live install.
-6c. **Run sandbox shakedown.** `./tests/e2e/release-sandbox.sh shakedown` (~5-10 min warm cache, +10-15 min cold). Required on every release — this is the ONLY gate that exercises MinerU end-to-end through the production `nx index pdf` path (step 3b of 11), and the slow-marked `test_mineru_path_preserves_formulas` pytest test is not part of any default or scheduled run (nexus-6xkdu). All four indexing steps (2, 3a, 3b, 4) can now fail the run (the `|| true` that made them theatre was removed at nexus-6xkdu); the run ends with an explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on any failure. Steps 2/11 and 4/11 (and the shakeout's Phase C) are also timed against a committed per-corpus throughput baseline (`tests/e2e/migration-rehearsal/lib/index-throughput-baselines.tsv`, 2x ceiling, nexus-98zsp): a missing baseline is recorded and reported as SOFT, never a pass, so commit the row it prints; a red there is an embed-throughput regression of the engine or client, the class v0.1.99 shipped through every other gate.
-7. **Commit on a release branch + PR to main** (nexus-mkj6u: replaces direct-to-main convention).
-   Base on **develop** (a release promotes develop to main — hot rule above; a main-based
-   branch releases main's stale tree), then pre-merge `origin/main` to resolve the
-   release-only conflicts on the branch (a conflicting release PR gets NO CI checks —
-   release skill Step 7).
-   ```
-   git checkout develop && git pull && git checkout -b release/vX.Y.Z
-   git merge origin/main
-   <bump all manifests, refresh uv.lock, update CHANGELOGs>
-   git commit -m "chore(release): conexus X.Y.Z"
-   git push -u origin release/vX.Y.Z
-   gh pr create --base main --title "release: conexus X.Y.Z"
-   ```
-   Wait for CI green. Then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA for the optional `source.sha` pin in Step 8a).
+2. **The primary KEEPS `develop` checked out** and is the reference
+   checkout. Not detached: git refuses to check out a branch that is
+   already checked out elsewhere, so the primary holding `develop` makes
+   rule 1 self-enforcing at zero discipline.
 
-   The plugin's push-gated review-coverage check (formerly
-   `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`,
-   nexus-4av2n) was deleted 2026-08-22 (Sam's decision) — pushes are no
-   longer gated by it, including `git push -u origin release/vX.Y.Z` and
-   tag pushes at Step 8.
-8. **Tag the merge commit IMMEDIATELY after PR lands.**
-   ```
-   git checkout main && git pull
-   git tag -a vX.Y.Z -m "conexus X.Y.Z" $(git rev-parse HEAD)
-   git push origin vX.Y.Z
-   ```
-   Tag-push triggers the Release workflow → PyPI auto-publish via OIDC. Order matters: marketplace.json's `source.ref` points at `vX.Y.Z`, which must exist on origin before any user runs `/plugin install`. Push commit (via PR merge), then push tag, in tight succession.
-8b. **Back-merge `main` into `develop` (MANDATORY, zero-change releases included).**
-   ```
-   git checkout develop && git pull
-   git merge origin/main --no-edit   # trivially clean right after a release
-   scripts/git-push-develop.sh HEAD   # the merge commit vouches for what it merged in (nexus-9wxu6)
-   ```
-   Skipping this is how develop drifts behind the release-only commits and the next release branch conflicts (2026-07-23 incident; `docs/contributing.md` step 11b).
-9. **Reinstall locally.** `scripts/reinstall-tool.sh && nx --version` — `pyproject.toml` is bumped, but the shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until the reinstall flips `current` every new spawn lands in the old generation (and existing holders keep running from theirs afterwards).
+3. **In the primary: no edits, no commits, no staging, no branch
+   switches.** Build and test output (`.venv/`, `service/target/`,
+   `__pycache__`, coverage) is expected and fine. "Read-only" would be
+   false the first time someone runs a suite there, and a rule that is
+   false on first contact becomes advisory.
 
-Full checklist with rollback / one-time setup steps lives in [`docs/contributing.md` § Release Process](docs/contributing.md#release-process).
+4. **The release battery runs IN THE PRIMARY.** It keys artifacts on the
+   working tree's identity and refuses artifacts whose manifest identity is
+   not this checkout's (nexus-mbeke), so rotating worktrees would rebuild
+   the wheel, jar and native candidate every time. The engine build does
+   NOT need the primary: the lease lives in the git common dir and the jar
+   cache is keyed on `service/` content, so any worktree gets a copy.
+
+5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Scoped runs
+   are unaffected. This rule exists because worktrees DESTROY an accidental
+   serialisation: three sessions in one tree cannot comfortably run three
+   suites at once, so they take turns without agreeing to. Three worktrees
+   make three concurrent `pytest -n auto` runs easy, and that exhausts the
+   machine-wide SysV shared-memory budget — each xdist worker boots its own
+   Postgres substrate holding a segment against `kern.sysv.shmmni`
+   (nexus-6qp25). The build lease does not cover this; it is a separate
+   budget.
+
+6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST
+   SUBSTRATE-BACKED TEST.** `service/target/` is untracked build output, so
+   a fresh worktree has no service jar and every substrate-backed test
+   errors at setup. The fix is seconds rather than a nine-minute rebuild
+   because the cache key is on `service/` CONTENT and lives in the git
+   common dir, so every worktree on the box shares one build.
+
+   **This produces the SAME SYMPTOM as rule 5's exhaustion** — thousands of
+   setup errors that read as catastrophic breakage. Two causes, one
+   symptom. Check `ipcs -m` first because it is one command; if segments
+   are clear, it is the jar. Measured 2026-09-19: 20673 setup errors in a
+   fresh worktree, zero shared-memory segments, missing jar.
+
+7. **Before pushing, `gh run list --limit 1`.** Ask whether a verdict
+   someone is waiting on is in flight — not whether the slot is free.
+   Worktrees split the tree; CI remains one shared resource with one queue,
+   and a push destroys a running verdict.
+
+8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...`
+   from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`
+   in; `git -C` does not cover it. Direct to `develop` per the project
+   rule; the feature branch is a local name that never reaches origin.
+
+9. **Whoever pushes to `develop` fast-forwards the primary in the same
+   breath.** `cd` to the primary and `git merge --ff-only origin/develop`.
+   Rule 2 makes the primary the reference checkout — the one place to read
+   what is on `develop` without a fetch dance — and nothing kept it
+   current, so it silently stopped doing that job. Found 2026-09-19 twelve
+   commits behind: `nx rdr preamble` run there omitted an RDR that had
+   been on `develop` for hours, because the tool reads the RDR directory
+   relative to cwd and returned a confident, complete-looking, stale list.
+
+   Attach it to the push rather than to a schedule or a habit, because the
+   push is the event that creates the staleness and is already a thing
+   someone does deliberately. If the primary is dirty, do NOT force it:
+   a dirty primary is a rule-3 violation someone is mid-way through, and
+   clobbering it is worse than a stale read. Say so on the bus instead.
+
+   Same failure shape, for the same reason, one layer up: a stale checkout
+   and a glob that matches nothing both answer confidently with a wrong
+   maximum. `conexus/skills/rdr-create/SKILL.md` Step 2 told sessions to
+   hand-scan for `[0-9][0-9][0-9]-*.md`, which matches none of this repo's
+   `rdr-NNN-*.md` files, so a session following it literally found no
+   maximum, fell through to the step's "start at 001" clause, and would
+   have collided with RDR-001. Fetching fixes neither; each needs its own
+   fix.
+
+10. **Never hand-run `nx index repo` from a worktree.** The post-commit hook
+   already refuses worktree indexing by construction (nexus-ws67k, comparing
+   `--git-dir` to `--git-common-dir`), but the guard lives in the HOOK and
+   not in the command, so a hand-run bypasses it entirely.
+
+11. **Serena differs between a session STARTED in a worktree and one that
+    RELOCATED into it.** A session started there gets its own server rooted
+    at the worktree via `--project-from-cwd` and keeps symbol editing. A
+    session that relocates mid-flight keeps the server rooted at the
+    primary, so it must use Edit/Write with absolute worktree paths and not
+    Serena write tools.
+
+**Moving an in-flight session.** Cherry-pick or apply into the new worktree
+FIRST and verify there, and only then revert the primary — never the
+reverse. Two methods, and the right one depends on the starting state:
+uncommitted work moves with `git diff origin/develop -- <paths>` then
+`git apply` in the worktree (checking that diff-vs-origin and diff-vs-HEAD
+are identical first, which is what proves the paths rebase cleanly BEFORE
+anything moves); work that is already committed is cherry-picked, because a
+commit is recoverable where an applied-but-unverified diff is not.
+
+**A note on reading long runs.** Preconditions are warned at the TOP of a
+run (the stale-jar banner above is one). Whether such a warning reaches you
+depends on how much output follows it, which inverts against its value: the
+longer and more expensive the run, the further the warning sits from the
+tail. `head` as well as `tail`, or grep the warning shape.
 
 ## Task tracking
 

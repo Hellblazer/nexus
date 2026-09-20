@@ -133,7 +133,7 @@ You have access to and will actively leverage:
   - mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true -- enumerate all documents (RDR-103: collections are `<content_type>__<owner>__<embedding_model>__v<n>`)
   - mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="title", tags="tags" -- store findings (the bare prefix is auto-promoted to a conformant 4-segment name)
 - **nx code index**: Semantic code search across indexed repositories
-  - mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 -- hybrid semantic + ripgrep
+  - mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 -- hybrid semantic + git frecency
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 -- repo-specific
 - **T2 memory**: For accessing previous research and contextual information
   - mcp__plugin_conexus_nexus__memory_get(project="{project}", title="{filename}" -- read

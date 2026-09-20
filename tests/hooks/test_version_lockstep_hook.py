@@ -244,6 +244,23 @@ class TestDispatchIsNonBlocking:
         flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
         assert "9.9.9" in flat
         assert "version_lockstep_action.py" in flat
+        # AND THE INTERPRETER, which the flattened-substring checks above
+        # cannot see. RDR-215 bead nexus-q02nx.22 changed this argv from
+        # ["bash", <_run_python_hook.sh>, <action>, ...] to
+        # [sys.executable, <action>, ...] and deleted that launcher. Code
+        # review found that both assertions above pass on EITHER shape, so a
+        # revert to a command naming a file that no longer exists would have
+        # been green -- the dispatch would fail at runtime with ENOENT and
+        # nothing here would say so. argv[0] is the whole change; assert it.
+        argv = list(calls["args"])
+        assert argv[0] == sys.executable, (
+            f"the detached action must be spawned with this process's own "
+            f"already-vetted interpreter, not a launcher; got {argv[0]!r}"
+        )
+        assert "bash" not in argv[0]
+        assert not any("_run_python_hook" in str(a) for a in argv), (
+            f"the deleted bash launcher is back in the dispatch argv: {argv!r}"
+        )
 
 
 class TestPluginChannelInstallSilence:
@@ -607,6 +624,23 @@ class TestDispatchRefDriftActionIsNonBlocking:
         flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
         assert mod._REF_DRIFT_SENTINEL in flat
         assert "version_lockstep_action.py" in flat
+        # AND THE INTERPRETER, which the flattened-substring checks above
+        # cannot see. RDR-215 bead nexus-q02nx.22 changed this argv from
+        # ["bash", <_run_python_hook.sh>, <action>, ...] to
+        # [sys.executable, <action>, ...] and deleted that launcher. Code
+        # review found that both assertions above pass on EITHER shape, so a
+        # revert to a command naming a file that no longer exists would have
+        # been green -- the dispatch would fail at runtime with ENOENT and
+        # nothing here would say so. argv[0] is the whole change; assert it.
+        argv = list(calls["args"])
+        assert argv[0] == sys.executable, (
+            f"the detached action must be spawned with this process's own "
+            f"already-vetted interpreter, not a launcher; got {argv[0]!r}"
+        )
+        assert "bash" not in argv[0]
+        assert not any("_run_python_hook" in str(a) for a in argv), (
+            f"the deleted bash launcher is back in the dispatch argv: {argv!r}"
+        )
 
 
 def _clock(readings: list[float]):
@@ -812,8 +846,11 @@ class TestRefDriftGitBudget:
 
 class TestRunsUnderBareInterpreter:
     def test_end_to_end_match_silent(self, plugin_root, tmp_path) -> None:
-        """Invoke the script as a subprocess (mimics _run_python_hook.sh)
-        with a matching marker: expect clean exit 0 and empty stdout."""
+        """Invoke the script as a subprocess (mimics hooks.json's exec-form
+        ``{"command": "python3", "args": [<script>]}`` declaration, which
+        replaced the retired ``_run_python_hook.sh`` launcher at RDR-215 bead
+        nexus-q02nx.21) with a matching marker: expect clean exit 0 and
+        empty stdout."""
         import os
 
         marker = tmp_path / "marker"

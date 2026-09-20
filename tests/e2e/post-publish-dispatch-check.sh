@@ -14,7 +14,7 @@
 # session itself dispatches one trivial agent FIRST, then this script runs
 # against that session's id):
 #   (a) the TSV expectations ledger has >=1 START row and >=1 REPORTED row
-#       (tests/e2e/lib/expectations.sh -- the always-on half of RDR-184).
+#       (nx-hook expectations_* -- the always-on half of RDR-184).
 #   (b) the tuple-space subspace ledger/<sid> (read-only, via the
 #       INSTALLED `nx tuple stats` / `nx tuple rd`, cloud or local) holds
 #       >=1 kind=start and >=1 kind=report tuple whose agent_id matches a
@@ -26,7 +26,7 @@
 #       project.py's _log_skip) carries no line newer than the newest TSV
 #       START row. A SKIP after our dispatch's START is the projector
 #       failing on OUR OWN traffic, not stale history from an earlier run.
-#   (d) `expectations_census` (tests/e2e/lib/expectations.sh) ends its
+#   (d) `nx-hook expectations_census` ends its
 #       space-backed report on SPACE_PRESENT for this session -- never
 #       SPACE_FALLBACK (the space could not be consulted at all) or
 #       SPACE_BLINDSPOT (consulted, saw nothing under ledger/ at all).
@@ -62,8 +62,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/expectations.sh
-source "$SCRIPT_DIR/lib/expectations.sh"
+# NOTHING IS SOURCED ANY MORE (RDR-215 bead nexus-q02nx.21, which deleted
+# the plugin copy of expectations.sh this used to source). Bead .14 left
+# the decision here, naming the two uses: `expectations_census`, which
+# has an `nx-hook` verb, and `expectations_file`, which does not.
+#
+#   census       -> `nx-hook expectations_census` (the ported verb).
+#   expectations_file -> computed inline below.
+#
+# Computing the path inline rather than adding a verb for it is the right
+# trade for THIS script specifically: it is a post-publish check that
+# runs against an INSTALLED box with no checkout, so every dependency it
+# takes has to be reachable from `nx`/`nx-hook` alone. The path is a pure
+# function of XDG_STATE_HOME and the session id, this script already
+# derives STATE_DIR that exact way for LOG_FILE two lines down, and the
+# charset guard below is the same regex nexus.hooks.expectations
+# (_SESSION_ID_RE) and the deleted bash both used -- it is the guard that
+# matters, not the concatenation, and it is reproduced verbatim.
 
 _prereq_fail() {
     echo "POST-PUBLISH DISPATCH CHECK FAILED (prerequisite absent): $*" >&2
@@ -78,17 +93,28 @@ fi
 if ! command -v nx >/dev/null 2>&1; then
     _prereq_fail "PATH has no nx -- install/activate the plugin's nx CLI before running this check"
 fi
-
-TSV_FILE=""
-if ! TSV_FILE="$(expectations_file "$SID" 2>&1)"; then
-    _prereq_fail "invalid session_id '$SID': $TSV_FILE"
+# `nx-hook` is a separate console script from the same wheel, and an older
+# installed generation simply does not have it (AGENTS.md § hot rules).
+# Check (d) runs `nx-hook expectations_census`, so a missing shim is a
+# prerequisite absence, not a dispatch finding.
+if ! command -v nx-hook >/dev/null 2>&1; then
+    _prereq_fail "nx-hook is not on PATH, though nx is -- this generation predates the nx-hook console script; reinstall/activate a current conexus generation before running this check"
 fi
-if [[ ! -r "$TSV_FILE" ]]; then
-    _prereq_fail "no ledger file for session '$SID' at $TSV_FILE -- dispatch at least one real agent in a live session with this session id, wait for its SubagentStop, then re-run this check"
+
+# The per-session ledger path, formerly expectations_file(). Same charset
+# guard as nexus.hooks.expectations._SESSION_ID_RE: it is what keeps a
+# session id like '../../evil' from writing outside the state dir.
+if [[ ! "$SID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
+    _prereq_fail "invalid session_id '$SID' (path-safe charset only)"
 fi
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration"
+TSV_FILE="$STATE_DIR/$SID.expectations"
 LOG_FILE="$STATE_DIR/$SID.tuple-projection.log"
+
+if [[ ! -r "$TSV_FILE" ]]; then
+    _prereq_fail "no ledger file for session '$SID' at $TSV_FILE -- dispatch at least one real agent in a live session with this session id, wait for its SubagentStop, then re-run this check"
+fi
 
 VIOLATIONS=0
 _miss() {
@@ -99,7 +125,8 @@ _miss() {
 # _run_capture VAR_OUT VAR_RC -- cmd args...  -- run a command WITHOUT
 # letting `set -e` abort the script on a non-zero exit; stdout+stderr are
 # combined into VAR_OUT, the exit code into VAR_RC. Works for both real
-# external commands and sourced bash functions (expectations_census).
+# external commands and (formerly) sourced bash functions; since RDR-215
+# bead nexus-q02nx.21 every caller here is an external command.
 _run_capture() {
     local __out_var="$1" __rc_var="$2"
     shift 2
@@ -238,7 +265,7 @@ if [[ "$LOG_NEWER_COUNT" -gt 0 ]]; then
 fi
 
 # ── (d) expectations_census ends on SPACE_PRESENT, never FALLBACK/BLINDSPOT
-_run_capture CENSUS_OUT CENSUS_RC -- expectations_census "$SID"
+_run_capture CENSUS_OUT CENSUS_RC -- nx-hook expectations_census "$SID"
 HAS_SPACE_PRESENT=0
 HAS_SPACE_BAD=0
 LAST_SPACE_LINE=""

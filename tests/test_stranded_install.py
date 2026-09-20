@@ -329,11 +329,11 @@ class TestWiring:
     #: with a hard pre-fork budget invariant (near-zero cost before
     #: os.fork(), see its module docstring) — it is a shutdown path, not a
     #: user-facing entry surface; the CLI/MCP/doctor wirings cover the box.
-    #: nexus.hooks.entry (RDR-215, nexus-q02nx.2): the nx-hook command-tier
+    #: nexus._hook_runtime.entry (RDR-215, nexus-q02nx.2): the nx-hook command-tier
     #: hook dispatcher, spawned by Claude Code's own hooks.json, never by a
     #: person — the CLI/MCP/doctor wirings the other three entry points
     #: cover are the surfaces a person actually starts a session through.
-    _CENSUS_EXEMPT = {"nexus._session_end_launcher", "nexus.hooks.entry"}
+    _CENSUS_EXEMPT = {"nexus._session_end_launcher", "nexus._hook_runtime.entry"}
 
     def test_every_console_script_entry_is_wired(self) -> None:
         """Census derived from ``pyproject.toml`` ``[project.scripts]`` — the

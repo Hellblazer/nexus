@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario 18 — REAL-WORLD: install sn plugin from this repo into TEST_HOME,
-# dispatch a subagent, and probe for content that ONLY mcp-inject.sh injects.
+# dispatch a subagent, and probe for content that ONLY subagent_start.py injects.
 #
 # The hook emits sn/hooks/scripts/serena-section.md and context7-section.md.
 # We probe for two phrases that appear ONLY in those files (not in MCP tool
@@ -10,7 +10,7 @@
 #   - "fetch current docs"   (context7-section.md)
 #
 # VALIDITY NOTE (reworked 2026-05-31): the probe previously asked the subagent
-# to quote a sentence mentioning "resolve-library-id". But mcp-inject.sh skips
+# to quote a sentence mentioning "resolve-library-id". But subagent_start.py skips
 # the Serena section when the agent task text contains "library" (a token-
 # saving heuristic), and the word "library" inside "resolve-library-id" tripped
 # it — so Serena was legitimately omitted and the test failed for a reason that
@@ -21,12 +21,12 @@
 # inject-both default. The test now isolates exactly what it claims to test:
 # does the JSON envelope deliver BOTH sections to a real subagent.
 #
-# The fix in nexus-t5q2 wraps mcp-inject.sh stdout in the documented
+# The fix in nexus-t5q2 wraps the SubagentStart stdout in the documented
 # Claude Code SubagentStart JSON envelope. Pre-fix the hook used plain
 # stdout, which the harness drops on tightened parser builds. This
 # scenario passes only if BOTH phrases reach the dispatched subagent.
 
-scenario "18 real_sn_subagent: does sn's mcp-inject.sh deliver Serena+Context7 to a real subagent?"
+scenario "18 real_sn_subagent: does sn's subagent_start.py deliver Serena+Context7 to a real subagent?"
 
 # Install sn plugin into TEST_HOME, pointing at the working-tree source so
 # we exercise the in-tree fix (not the cached published version).
@@ -59,11 +59,11 @@ claude_start
 # end of its reply. This is more reliable than polling on spinner words
 # (the harness's lib.sh spinner regex doesn't include the current "Sautéed"
 # state), and it lets us know when the subagent has actually returned.
-# Probe wording deliberately avoids every mcp-inject.sh SKIP keyword so the task
+# Probe wording deliberately avoids every subagent_start.py SKIP keyword so the task
 # lands in the inject-both default (see VALIDITY NOTE above). We ask for fixed
 # CONFIRMATION TOKENS rather than verbatim quotes: a binary "emit TOKEN if the
 # text is present" is far more robust than asking the model to reproduce a
-# sentence (which it paraphrases or omits, the prior false-fail). mcp-inject.sh
+# sentence (which it paraphrases or omits, the prior false-fail). subagent_start.py
 # is independently verified to emit both sections for a neutral task via a direct
 # pipe test, so this scenario isolates the remaining question: does CC deliver
 # the SubagentStart JSON envelope into the subagent's context end-to-end.

@@ -1,0 +1,341 @@
+{
+  "k": 10,
+  "collection": "code__rdr217-baseline__bge-base-en-v15-768__v1",
+  "corpus_chunks": 719,
+  "roots": [
+    "src/nexus",
+    "tests"
+  ],
+  "limit_files": null,
+  "distractors": 400,
+  "corpus_is_a_sample": true,
+  "index_build_seconds": 92.6,
+  "reports": {
+    "vector": {
+      "corpus_fingerprint": "719:7ddad811b694c7dfc9dde6b665822aa5",
+      "macro_precision": 0.5083333333333333,
+      "macro_recall": 0.40473597376395976,
+      "per_shape": {
+        "identifier": {
+          "precision": 0.8666666666666667,
+          "recall": 0.42876835992778023
+        },
+        "prose": {
+          "precision": 0.13333333333333333,
+          "recall": 0.09474050853361198
+        },
+        "rare_token": {
+          "precision": 0.16666666666666666,
+          "recall": 0.6666666666666666
+        }
+      },
+      "per_query": [
+        {
+          "query_id": "id-01",
+          "shape": "identifier",
+          "relevant": 66,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.15151515151515152,
+          "recall_ceiling": 0.15151515151515152,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "id-02",
+          "shape": "identifier",
+          "relevant": 46,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.21739130434782608,
+          "recall_ceiling": 0.21739130434782608,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "id-03",
+          "shape": "identifier",
+          "relevant": 48,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.20833333333333334,
+          "recall_ceiling": 0.20833333333333334,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "id-04",
+          "shape": "identifier",
+          "relevant": 7,
+          "retrieved": 10,
+          "hits": 7,
+          "precision": 0.7,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "id-05",
+          "shape": "identifier",
+          "relevant": 8,
+          "retrieved": 10,
+          "hits": 5,
+          "precision": 0.5,
+          "recall": 0.625,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "id-06",
+          "shape": "identifier",
+          "relevant": 27,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.37037037037037035,
+          "recall_ceiling": 0.37037037037037035,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "rare-01",
+          "shape": "rare_token",
+          "relevant": 2,
+          "retrieved": 10,
+          "hits": 2,
+          "precision": 0.2,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "rare-02",
+          "shape": "rare_token",
+          "relevant": 3,
+          "retrieved": 10,
+          "hits": 3,
+          "precision": 0.3,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "rare-03",
+          "shape": "rare_token",
+          "relevant": 2,
+          "retrieved": 10,
+          "hits": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "prose-01",
+          "shape": "prose",
+          "relevant": 87,
+          "retrieved": 10,
+          "hits": 1,
+          "precision": 0.1,
+          "recall": 0.011494252873563218,
+          "recall_ceiling": 0.11494252873563218,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "prose-02",
+          "shape": "prose",
+          "relevant": 17,
+          "retrieved": 10,
+          "hits": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "recall_ceiling": 0.5882352941176471,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "prose-03",
+          "shape": "prose",
+          "relevant": 11,
+          "retrieved": 10,
+          "hits": 3,
+          "precision": 0.3,
+          "recall": 0.2727272727272727,
+          "recall_ceiling": 0.9090909090909091,
+          "recall_is_capped": true
+        }
+      ],
+      "unanswerable": [],
+      "capped": [
+        "id-01",
+        "id-02",
+        "id-03",
+        "id-06",
+        "prose-01",
+        "prose-02",
+        "prose-03"
+      ]
+    },
+    "hybrid": {
+      "corpus_fingerprint": "719:7ddad811b694c7dfc9dde6b665822aa5",
+      "macro_precision": 0.873236331569665,
+      "macro_recall": 0.49563417996389014,
+      "per_shape": {
+        "identifier": {
+          "precision": 0.9606481481481483,
+          "recall": 0.49126835992778023
+        },
+        "prose": {
+          "precision": null,
+          "recall": 0.0
+        },
+        "rare_token": {
+          "precision": 0.6984126984126985,
+          "recall": 1.0
+        }
+      },
+      "per_query": [
+        {
+          "query_id": "id-01",
+          "shape": "identifier",
+          "relevant": 66,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.15151515151515152,
+          "recall_ceiling": 0.15151515151515152,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "id-02",
+          "shape": "identifier",
+          "relevant": 46,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.21739130434782608,
+          "recall_ceiling": 0.21739130434782608,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "id-03",
+          "shape": "identifier",
+          "relevant": 48,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.20833333333333334,
+          "recall_ceiling": 0.20833333333333334,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "id-04",
+          "shape": "identifier",
+          "relevant": 7,
+          "retrieved": 8,
+          "hits": 7,
+          "precision": 0.875,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "id-05",
+          "shape": "identifier",
+          "relevant": 8,
+          "retrieved": 9,
+          "hits": 8,
+          "precision": 0.8888888888888888,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "id-06",
+          "shape": "identifier",
+          "relevant": 27,
+          "retrieved": 10,
+          "hits": 10,
+          "precision": 1.0,
+          "recall": 0.37037037037037035,
+          "recall_ceiling": 0.37037037037037035,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "rare-01",
+          "shape": "rare_token",
+          "relevant": 2,
+          "retrieved": 2,
+          "hits": 2,
+          "precision": 1.0,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "rare-02",
+          "shape": "rare_token",
+          "relevant": 3,
+          "retrieved": 7,
+          "hits": 3,
+          "precision": 0.42857142857142855,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "rare-03",
+          "shape": "rare_token",
+          "relevant": 2,
+          "retrieved": 3,
+          "hits": 2,
+          "precision": 0.6666666666666666,
+          "recall": 1.0,
+          "recall_ceiling": 1.0,
+          "recall_is_capped": false
+        },
+        {
+          "query_id": "prose-01",
+          "shape": "prose",
+          "relevant": 87,
+          "retrieved": 0,
+          "hits": 0,
+          "precision": null,
+          "recall": 0.0,
+          "recall_ceiling": 0.11494252873563218,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "prose-02",
+          "shape": "prose",
+          "relevant": 17,
+          "retrieved": 0,
+          "hits": 0,
+          "precision": null,
+          "recall": 0.0,
+          "recall_ceiling": 0.5882352941176471,
+          "recall_is_capped": true
+        },
+        {
+          "query_id": "prose-03",
+          "shape": "prose",
+          "relevant": 11,
+          "retrieved": 0,
+          "hits": 0,
+          "precision": null,
+          "recall": 0.0,
+          "recall_ceiling": 0.9090909090909091,
+          "recall_is_capped": true
+        }
+      ],
+      "unanswerable": [],
+      "capped": [
+        "id-01",
+        "id-02",
+        "id-03",
+        "id-06",
+        "prose-01",
+        "prose-02",
+        "prose-03"
+      ]
+    }
+  }
+}

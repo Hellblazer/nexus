@@ -1,18 +1,21 @@
-"""Tests for the SubagentStart hook script's session_id export (nexus-7o1zh)."""
+"""Tests for the SubagentStart hook's session_id export (nexus-7o1zh),
+``nexus.hooks.subagent_start``.
+
+RDR-215 bead nexus-q02nx.18 ported this hook from
+``conexus/hooks/scripts/subagent-start.sh``; bead .21 re-declared its
+``hooks.json`` entry to the ``hook_subagent_start`` mcp_tool, so the bash
+script no longer runs in production and this file drives the Python
+module only (nexus-q02nx.21).
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "subagent-start.sh"
-)
+import nexus.hooks.subagent_start as _subagent_start_mod
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
@@ -20,6 +23,29 @@ STDIN_PAYLOAD = json.dumps({
     "task": "general research task",
     "prompt": "look into something",
 })
+
+
+#: Drives the ported module in a CHILD PROCESS, exactly as
+#: test_subagent_stop_hook.py's own driver does — a real process with a real
+#: environment, since several tests here vary env (and cwd) per call and
+#: ``os.environ``/the process cwd are process-global.
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import subagent_start
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: subagent_start.run(payload), "subagent_start")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
 
 
 def _run_hook(
@@ -34,7 +60,7 @@ def _run_hook(
         **(env_overrides or {}),
     }
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,
@@ -45,10 +71,6 @@ def _run_hook(
 
 
 class TestSubagentStartHook:
-    def test_script_exists_and_is_executable(self) -> None:
-        assert SCRIPT.exists(), f"Script not found: {SCRIPT}"
-        assert os.access(SCRIPT, os.X_OK), f"Script not executable: {SCRIPT}"
-
     def test_exits_zero(self) -> None:
         result = _run_hook()
         assert result.returncode == 0
@@ -81,19 +103,6 @@ class TestSubagentStartHook:
         assert "NEVER git add/commit" in ctx
         assert "orchestrator commits pathspec-limited" in ctx
 
-    def test_heredoc_bodies_respect_deadlock_ceiling(self) -> None:
-        """The file's own rule: heredoc bodies stay under 500 bytes (bash
-        5.3.x pipe deadlock). Guard the NEW ORCH heredoc mechanically;
-        pre-existing PHASE_GATE (540 bytes) is grandfathered until its
-        owner trims it."""
-        import re
-
-        src = SCRIPT.read_text()
-        m = re.search(r"cat <<'ORCH'\n(.*?)\nORCH\n", src, re.S)
-        assert m is not None, "ORCH heredoc missing from subagent-start.sh"
-        assert len(m.group(1).encode()) < 500
-
-
 class TestClaimantIdInjection:
     """RDR-205 "Identity and addressing" (bead nexus-em75s.11): this is the
     ONE line subagent-start.sh adds beyond its existing injection -- the
@@ -125,16 +134,18 @@ class TestClaimantIdInjection:
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "Claimant id:" not in ctx
 
-    def test_script_does_no_network_io(self) -> None:
+    def test_module_does_no_network_io(self) -> None:
         """RDR-205: "It does no network I/O." A crude but effective source
         scan -- no curl/wget/socket/urllib/requests token anywhere in the
-        script. The actual tuple write lives in the separate async hook
-        entries (subagent-start-tuple-async.sh), never here.
+        module. The actual tuple write lives in the separate hook
+        (``hook_subagent_start_tuple`` / ``nexus.hooks.tuple_projection``),
+        never here. Re-pointed at the Python module (nexus-q02nx.21): the
+        bash script this used to scan no longer runs in production.
         """
-        src = SCRIPT.read_text()
+        src = Path(_subagent_start_mod.__file__).read_text()
         for forbidden in ("curl ", "wget ", "urllib", "socket.", "requests."):
             assert forbidden not in src, (
-                f"subagent-start.sh must perform no network I/O; found {forbidden!r}"
+                f"nexus.hooks.subagent_start must perform no network I/O; found {forbidden!r}"
             )
 
 

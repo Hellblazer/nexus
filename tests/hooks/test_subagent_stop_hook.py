@@ -20,9 +20,6 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop.sh"
-PLUGIN_EXPECTATIONS = REPO_ROOT / "conexus" / "hooks" / "scripts" / "expectations.sh"
-REFERENCE_EXPECTATIONS = REPO_ROOT / "tests" / "e2e" / "lib" / "expectations.sh"
 
 SESSION = "sess-testorch"
 NAME = "worker-a"
@@ -120,6 +117,44 @@ _HOOK_TIMEOUT = 30
 _HOOK_TIMEOUT_MANY_SPAWNS = 300
 
 
+#: Drives ``nexus.hooks.subagent_stop`` in a CHILD PROCESS rather than
+#: in-process, and that is a deliberate choice with a cost. In-process
+#: would match the tool tier exactly, but three families of test here set
+#: ``NX_EXPECT_LOCK_TRIES`` per call and run six racers concurrently
+#: through a thread pool -- ``os.environ`` is process-global and
+#: ``contextlib.redirect_stderr`` rebinds a process-global ``sys.stderr``,
+#: so six in-process racers would overwrite each other's environment and
+#: misattribute each other's diagnostics. The concurrency in those tests is
+#: the point of them (nexus-plycy, nexus-ols6a), so the harness spawns a
+#: real process with a real environment and a real stderr per call instead.
+#:
+#: The no-spawn claim RDR-215 bead nexus-q02nx.12's port actually makes is
+#: therefore NOT evidenced by this file. It is asserted in-process, against
+#: a large transcript, in ``tests/hooks/test_subagent_stop_module.py``.
+#: (Until bead .21, this file also drove the plugin's bash-side hook
+#: script as a second, bash-side ``impl`` param -- every assertion here
+#: ran as a differential against the still-wired script. That script is
+#: deleted at .21, so the Python driver below is now the only
+#: implementation.)
+_PY_DRIVER = """
+import json, sys
+from nexus._hook_runtime._io import never_fail
+from nexus.hooks import subagent_stop
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw) if raw.strip() else None
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = None
+result = never_fail(lambda: subagent_stop.run(payload), "subagent_stop")
+if result.stdout is not None:
+    sys.stdout.write(result.stdout + "\\n")
+sys.exit(result.exit_code)
+"""
+
+
 def _run_hook(
     stdin: str,
     tmp_path: Path,
@@ -138,7 +173,7 @@ def _run_hook(
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["bash", str(SCRIPT)],
+        [sys.executable, "-c", _PY_DRIVER],
         input=stdin,
         capture_output=True,
         text=True,
@@ -646,7 +681,7 @@ class TestBlockMode:
             "NX_EXPECT_APPEND_DELAY_S": "10",
         }
         victim = subprocess.Popen(
-            ["bash", str(SCRIPT)],
+            [sys.executable, "-c", _PY_DRIVER],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1255,109 +1290,117 @@ class TestObserveMode:
         assert "\tWOULDBLOCK\t" not in content
 
 
-def _run_undeclared(tmp_path: Path, session_id: str = SESSION) -> subprocess.CompletedProcess[str]:
-    """Source the reference lib directly and invoke expectations_undeclared,
-    propagating its own exit code as the subprocess's returncode (not the
-    trailing `echo`'s) so tests can assert on rc precisely."""
-    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
-    script = (
-        f'source "{REFERENCE_EXPECTATIONS}"; '
-        f'expectations_undeclared "{session_id}"; rc=$?; echo "RC=$rc"; exit $rc'
-    )
-    return subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, timeout=30, env=env
-    )
+class TestFreePassRemovedInPythonPort:
+    """Mutation-gate target for mutations_qc4p1.sh M5, repointed at the
+    Python port (RDR-215 bead nexus-q02nx.14): a START whose type carries
+    NO EXPECT row anywhere in the ledger must be named UNDECLARED, never
+    silently skipped -- the pre-houpu free pass. Same scenario as
+    TestNamedBackgroundDispatchAt2_1_251's
+    test_named_background_dispatch_undeclared_without_expect_row /
+    test_census_names_a_start_whose_type_was_never_declared below -- kept
+    as a separate, minimal repro rather than folded into that class,
+    which is scoped to the CC 2.1.251 opaque-id shape specifically. Both
+    now call ``nexus.hooks.expectations`` directly (RDR-215 bead
+    nexus-q02nx.21: ``expectations.sh``, the bash side ``_run_undeclared``/
+    ``_run_census`` used to source, is deleted)."""
 
+    OPAQUE_ID = "aeb1c1b56623244ae"
+    SUBAGENT_TYPE = "general-purpose"
 
-class TestUndeclaredExitCodes:
-    """nexus-suuja/nexus-ahl9v/nexus-houpu: expectations_undeclared's rc
-    contract is four-way: 0 = clean, 1 = BLINDSPOT (EXPECT rows present but
-    ZERO STARTs walked — an audit that examined nothing is not a pass),
-    2 = undeclared>0, a real declaration-completeness deficit that was once
-    rc-invisible (same exit 0 as clean), 3 = no ledger file for this session
-    — also once rc-invisible (nexus-ahl9v: a mistyped session id audited as
-    rc=0).
+    def test_undeclared_names_a_start_with_no_expect_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        from nexus.hooks.expectations import expectations_undeclared
 
-    Every agent_id below is the CC 2.1.251 shape: an opaque ``a<hex>``
-    handle carrying no dispatch name. The retired ``a<type>-<hash>``
-    encoding is not exercised anywhere, because the payload no longer
-    produces it (nexus-houpu)."""
-
-    def test_rc_zero_when_clean(self, tmp_path: Path) -> None:
-        agent_type = "worker-clean"
-        _expect_row(tmp_path, name=agent_type, mode="background")
-        f = _expectations_file(tmp_path)
-        with f.open("a") as fh:
-            fh.write(f"2026-08-03T00:00:00Z\tSTART\taeb1c1b56623244ae\t{agent_type}\n")
-        proc = _run_undeclared(tmp_path)
-        assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "undeclared=0" in proc.stdout
-
-    def test_rc_one_blindspot_when_no_starts_walked(self, tmp_path: Path) -> None:
-        """The one false-clean shape left once every START is evaluated: a
-        ledger that DECLARED dispatches and recorded no START at all (an
-        unregistered or inert SubagentStart stamp). Reporting undeclared=0
-        there means 'nothing was checkable', never 'compliant'.
-
-        This replaces test_rc_one_blindspot_when_nothing_recognized, whose
-        fixture — one START with no EXPECT row of its type — is now the
-        rc=2 deficit case below, not a blind spot: the audit sees that
-        dispatch and names it."""
         f = _expectations_file(tmp_path)
         f.parent.mkdir(parents=True, exist_ok=True)
         with f.open("a") as fh:
-            fh.write("2026-08-03T00:00:00Z\tEXPECT\tworker-declared\tbackground\tt1\n")
-        proc = _run_undeclared(tmp_path)
-        assert proc.returncode == 1, proc.stdout + proc.stderr
-        assert "BLINDSPOT" in proc.stdout
-        assert "checked=0" in proc.stdout
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+            )
+        report = expectations_undeclared(SESSION)
+        assert report.code == 2, report.lines
+        assert f"UNDECLARED\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}" in report.lines
+        assert not any(line.startswith("BLINDSPOT") for line in report.lines), (
+            "a START the audit walked and named is not a blind spot"
+        )
 
-    def test_rc_two_when_undeclared_deficit(self, tmp_path: Path) -> None:
-        agent_type = "worker-undeclared"
-        agent_id = "a9f8e7d6c5b4a3021"
+    def test_census_names_a_start_with_no_expect_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        from nexus.hooks.expectations import expectations_census
+
         f = _expectations_file(tmp_path)
         f.parent.mkdir(parents=True, exist_ok=True)
-        # A START row with NO EXPECT row of its type -> a genuine undeclared
-        # deficit, named per dispatch rather than disclosed in aggregate.
         with f.open("a") as fh:
-            fh.write(f"2026-08-03T00:00:00Z\tSTART\t{agent_id}\t{agent_type}\n")
-        proc = _run_undeclared(tmp_path)
-        assert proc.returncode == 2, proc.stdout + proc.stderr
-        assert f"UNDECLARED\t{agent_id}\t{agent_type}" in proc.stdout
-        assert "undeclared=1" in proc.stdout
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+            )
+        report = expectations_census(SESSION)
+        assert report.code == 0, report.lines
+        assert (
+            f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tNO_TERMINAL\tundeclared"
+            in report.lines
+        )
 
-    def test_rc_three_when_no_ledger_file(self, tmp_path: Path) -> None:
-        """nexus-ahl9v: a session with no ledger file at all (e.g. a
-        mistyped session id) must not audit as rc=0 clean -- it must be
-        distinguishable via a dedicated rc plus a stderr NOTE. No
-        expectations file is created for this session at all (unlike the
-        other cases in this class, which write one)."""
-        proc = _run_undeclared(tmp_path, session_id="no-such-session-ever")
-        assert proc.returncode == 3, proc.stdout + proc.stderr
-        assert "NOTE" in proc.stderr
-        assert "no-such-session-ever" in proc.stderr
+
+#: nexus-suuja/nexus-ahl9v/nexus-houpu's four-way rc contract (0 clean,
+#: 1 BLINDSPOT, 2 undeclared>0, 3 no ledger) is pinned exhaustively against
+#: the pure Python port in ``tests/hooks/test_expectations_module.py``'s
+#: own ``TestUndeclaredExitCodes`` -- that coverage does not repeat here.
+#: What DOES stay local to this file is the CC 2.1.251 opaque-id shape
+#: (below), because it is a scenario about THIS hook's payload morphology,
+#: not about the ledger's accounting rules in the abstract.
+
+
+def _run_undeclared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_id: str = SESSION
+) -> subprocess.CompletedProcess[str]:
+    """Call the ported ``expectations_undeclared`` directly and fake up a
+    CompletedProcess-shaped result, so the callers below (built against
+    the retired bash differential) need no other change beyond threading
+    ``monkeypatch`` through. RDR-215 bead nexus-q02nx.21: ``expectations.sh``
+    -- the bash lib this used to source -- is deleted; ``nexus.hooks.
+    expectations`` (bead .9) is the only implementation left."""
+    from nexus.hooks.expectations import expectations_undeclared
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    report = expectations_undeclared(session_id)
+    stdout = "".join(line + "\n" for line in report.lines)
+    return subprocess.CompletedProcess(args=[], returncode=report.code, stdout=stdout, stderr=report.note)
 
 
 def _run_census(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     session_id: str = SESSION,
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Source the reference lib directly and invoke expectations_census,
-    propagating its own exit code as the subprocess's returncode.
+    """Call the ported ``expectations_census`` directly and fake up a
+    CompletedProcess-shaped result. RDR-215 bead nexus-q02nx.21:
+    ``expectations.sh`` is deleted; ``nexus.hooks.expectations`` (bead .9)
+    is the only implementation left, and its SPACE_*/VERIFY_* logic
+    (nexus-em75s.19, nexus-cnzei.6) is otherwise UNTESTED anywhere else in
+    the suite -- ``test_expectations_module.py`` explicitly excludes those
+    lines from its own census assertions.
 
-    ``env_overrides`` (nexus-em75s.19) merges on top of the base env —
-    used by the space-backed tests below to prepend a fake ``nx`` onto
-    PATH and/or thread NX_SERVICE_URL/TOKEN through to the subprocess.
+    ``env_overrides`` (nexus-em75s.19) is applied via ``monkeypatch.setenv``
+    -- used by the space-backed tests below to prepend a fake ``nx`` onto
+    PATH and/or thread NX_SERVICE_URL/TOKEN through to
+    ``expectations_census``'s own ``nx tuple ...`` subprocess calls, which
+    inherit the real process environment exactly as the bash-sourced call
+    did.
     """
-    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), **(env_overrides or {})}
-    script = (
-        f'source "{REFERENCE_EXPECTATIONS}"; '
-        f'expectations_census "{session_id}"; rc=$?; echo "RC=$rc"; exit $rc'
-    )
-    return subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, timeout=30, env=env
-    )
+    from nexus.hooks.expectations import expectations_census
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    for k, v in (env_overrides or {}).items():
+        monkeypatch.setenv(k, v)
+    report = expectations_census(session_id)
+    stdout = "".join(line + "\n" for line in report.lines)
+    return subprocess.CompletedProcess(args=[], returncode=report.code, stdout=stdout, stderr=report.note)
 
 
 def _fake_nx_dir(tmp_path: Path) -> Path:
@@ -1391,7 +1434,9 @@ class TestNamedBackgroundDispatchAt2_1_251:
     OPAQUE_ID = "aeb1c1b56623244ae"
     SUBAGENT_TYPE = "general-purpose"
 
-    def test_named_background_dispatch_is_recognised_by_type(self, tmp_path: Path) -> None:
+    def test_named_background_dispatch_is_recognised_by_type(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The EXPECT row the PreToolUse hook writes carries the
         subagent_type; the START row carries the same string as agent_type.
         That pairing must clear the audit even though the agent_id shares
@@ -1406,13 +1451,13 @@ class TestNamedBackgroundDispatchAt2_1_251:
         # cannot be derived from the type, and the type cannot be derived
         # from the id.
         assert self.SUBAGENT_TYPE not in self.OPAQUE_ID
-        proc = _run_undeclared(tmp_path)
+        proc = _run_undeclared(tmp_path, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "checked=1 recognized=1 unrecognized=0 undeclared=0" in proc.stdout
         assert "UNDECLARED" not in proc.stdout
 
     def test_named_background_dispatch_undeclared_without_expect_row(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No EXPECT row of that type => the declaration hook did not see
         this dispatch. Named as a deficit, per dispatch — the free pass the
@@ -1423,14 +1468,16 @@ class TestNamedBackgroundDispatchAt2_1_251:
             fh.write(
                 f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
             )
-        proc = _run_undeclared(tmp_path)
+        proc = _run_undeclared(tmp_path, monkeypatch)
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert f"UNDECLARED\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}" in proc.stdout
         assert "BLINDSPOT" not in proc.stdout, (
             "a START the audit walked and named is not a blind spot"
         )
 
-    def test_blindspot_only_when_no_starts_at_all(self, tmp_path: Path) -> None:
+    def test_blindspot_only_when_no_starts_at_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """rc=1 is reserved for the audit having walked nothing. One START
         of an undeclared type is rc=2 (above); the SAME ledger with the
         START removed is rc=1."""
@@ -1440,12 +1487,14 @@ class TestNamedBackgroundDispatchAt2_1_251:
             fh.write(
                 f"2026-08-29T00:00:00Z\tEXPECT\t{self.SUBAGENT_TYPE}\tbackground\ttu1\n"
             )
-        proc = _run_undeclared(tmp_path)
+        proc = _run_undeclared(tmp_path, monkeypatch)
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "BLINDSPOT" in proc.stdout
         assert "checked=0" in proc.stdout
 
-    def test_census_lists_opaque_id_with_real_type(self, tmp_path: Path) -> None:
+    def test_census_lists_opaque_id_with_real_type(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The census per-agent view prints the opaque id against its real
         agent_type and a declared/undeclared verdict. Two same-type STARTs
         against one EXPECT row: first declared, second undeclared
@@ -1459,7 +1508,7 @@ class TestNamedBackgroundDispatchAt2_1_251:
                 f"2026-08-29T00:00:05Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
                 f"2026-08-29T00:00:06Z\tSTART\t{second_id}\t{self.SUBAGENT_TYPE}\n"
             )
-        proc = _run_census(tmp_path)
+        proc = _run_census(tmp_path, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert (
             f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tNO_TERMINAL\tdeclared"
@@ -1471,7 +1520,9 @@ class TestNamedBackgroundDispatchAt2_1_251:
         )
         assert "BLINDSPOT\tchecked=2 recognized=2 unrecognized=0" in proc.stdout
 
-    def test_census_names_a_start_whose_type_was_never_declared(self, tmp_path: Path) -> None:
+    def test_census_names_a_start_whose_type_was_never_declared(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A START with no EXPECT row of its type is listed as undeclared
         in the per-agent view and counted in CLASSIFIED — and the census
         exits 0: it is the REPORT, the rc=2 deficit verdict belongs to
@@ -1483,7 +1534,7 @@ class TestNamedBackgroundDispatchAt2_1_251:
             fh.write(
                 f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
             )
-        proc = _run_census(tmp_path)
+        proc = _run_census(tmp_path, monkeypatch)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert (
             f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tNO_TERMINAL\tundeclared"
@@ -1492,7 +1543,9 @@ class TestNamedBackgroundDispatchAt2_1_251:
         assert "undeclared=1" in proc.stdout
         assert "BLINDSPOT\tchecked=1 recognized=0 unrecognized=1" in proc.stdout
 
-    def test_census_blindspot_only_when_no_starts_at_all(self, tmp_path: Path) -> None:
+    def test_census_blindspot_only_when_no_starts_at_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The census and expectations_undeclared share ONE blind-spot rule:
         EXPECT rows present, zero STARTs walked => rc=1 on both. The same
         ledger with a START added is rc=0 here (above) and rc=2 there."""
@@ -1502,13 +1555,13 @@ class TestNamedBackgroundDispatchAt2_1_251:
             fh.write(
                 f"2026-08-29T00:00:00Z\tEXPECT\t{self.SUBAGENT_TYPE}\tbackground\ttu1\n"
             )
-        proc = _run_census(tmp_path)
+        proc = _run_census(tmp_path, monkeypatch)
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "BLINDSPOT\tchecked=0 recognized=0 unrecognized=0" in proc.stdout
-        assert _run_undeclared(tmp_path).returncode == 1
+        assert _run_undeclared(tmp_path, monkeypatch).returncode == 1
 
     def test_census_no_start_label_reserved_for_ids_without_a_start_row(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Before nexus-houpu, an unrecognised START that carried a terminal
         verb was relabelled name='-' declaration='no-start' — misreporting a
@@ -1522,7 +1575,7 @@ class TestNamedBackgroundDispatchAt2_1_251:
                 f"2026-08-29T00:00:10Z\tBLOCKED\t{self.OPAQUE_ID}\n"
                 "2026-08-29T00:00:20Z\tBLOCKED\ta0000ghostid00000\n"
             )
-        proc = _run_census(tmp_path)
+        proc = _run_census(tmp_path, monkeypatch)
         assert (
             f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tBLOCKED_UNRESOLVED\tundeclared"
             in proc.stdout
@@ -1578,7 +1631,9 @@ class TestCensusSpaceBacked:
     def _path_env(self, fake_bin: Path) -> dict[str, str]:
         return {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
 
-    def test_no_nx_binary_names_a_fallback_reason(self, tmp_path: Path) -> None:
+    def test_no_nx_binary_names_a_fallback_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """No ``nx`` on PATH at all: SPACE_FALLBACK names it, and the
         pre-existing TSV rc is unaffected -- 'the rc taxonomy holds' means
         this extension never overrides the file-only verdict."""
@@ -1587,12 +1642,16 @@ class TestCensusSpaceBacked:
         f = _expectations_file(tmp_path, self.SID)
         with f.open("a") as fh:
             fh.write(f"2026-09-01T00:00:05Z\tREPORTED\t{self.AGENT}\t{self.TYPE}\n")
-        proc = _run_census(tmp_path, self.SID, env_overrides={"PATH": "/usr/bin:/bin"})
+        proc = _run_census(
+            tmp_path, monkeypatch, self.SID, env_overrides={"PATH": "/usr/bin:/bin"}
+        )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "SPACE_FALLBACK\treason=PATH has no nx" in proc.stdout
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
 
-    def test_multiline_cli_error_stays_one_space_line(self, tmp_path: Path) -> None:
+    def test_multiline_cli_error_stays_one_space_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An ``nx`` whose ``tuple`` verb fails with a MULTI-LINE error (a
         Click usage block, which is exactly what every installed client
         older than the tuple CLI prints) still yields ONE SPACE_FALLBACK
@@ -1620,7 +1679,7 @@ class TestCensusSpaceBacked:
         )
         shim.chmod(0o755)
         proc = _run_census(
-            tmp_path, self.SID,
+            tmp_path, monkeypatch, self.SID,
             env_overrides={"PATH": f"{old_bin}{os.pathsep}/usr/bin:/bin"},
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -1636,7 +1695,9 @@ class TestCensusSpaceBacked:
         assert "No such command 'tuple'" in verify_lines[0]
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
 
-    def test_engine_unreachable_names_the_real_failure(self, tmp_path: Path) -> None:
+    def test_engine_unreachable_names_the_real_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """``nx`` present, engine not: the reason names the actual
         resolution failure, not a placeholder string.
 
@@ -1651,7 +1712,7 @@ class TestCensusSpaceBacked:
         fake_bin = _fake_nx_dir(tmp_path)
         self._write_ledger_row(tmp_path, self.SID)
         proc = _run_census(
-            tmp_path, self.SID,
+            tmp_path, monkeypatch, self.SID,
             env_overrides={
                 **self._path_env(fake_bin),
                 "NEXUS_CONFIG_DIR": str(tmp_path / "cfg-empty"),
@@ -1664,7 +1725,7 @@ class TestCensusSpaceBacked:
         assert "ServiceEndpointUnresolvableError" in proc.stdout
 
     def test_present_reports_age_against_the_tsv(
-        self, tmp_path: Path, t2_service_env: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str,
     ) -> None:
         """A subspace present in the space, matching the TSV row for row
         within the retention window, is reported present with an age
@@ -1675,7 +1736,7 @@ class TestCensusSpaceBacked:
         self._tuple_out(
             fake_bin, f"ledger/{sid}", agent_id=self.AGENT, kind="start", agent_type=self.TYPE,
         )
-        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        proc = _run_census(tmp_path, monkeypatch, sid, env_overrides=self._path_env(fake_bin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert f"SPACE_PRESENT\tsubspace=ledger/{sid} total=1" in proc.stdout
         assert "SPACE_AGE\t" in proc.stdout
@@ -1685,7 +1746,7 @@ class TestCensusSpaceBacked:
         assert "SPACE_OUTSIDE_WINDOW" not in proc.stdout
 
     def test_absent_within_retention_is_never_ran(
-        self, tmp_path: Path, t2_service_env: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str,
     ) -> None:
         """Absent from the space, session younger than the 90-day
         retention: the projection should still be visible and is not --
@@ -1700,14 +1761,14 @@ class TestCensusSpaceBacked:
             fake_bin, "ledger/space-decoy-sess-a",
             agent_id="decoy-a", kind="start", agent_type=self.TYPE,
         )
-        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        proc = _run_census(tmp_path, monkeypatch, sid, env_overrides=self._path_env(fake_bin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert f"SPACE_NEVER_RAN\tsubspace=ledger/{sid}" in proc.stdout
         assert "SPACE_OUTSIDE_WINDOW" not in proc.stdout
         assert "SPACE_BLINDSPOT" not in proc.stdout
 
     def test_absent_past_retention_is_outside_the_window(
-        self, tmp_path: Path, t2_service_env: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str,
     ) -> None:
         """Absent from the space, session OLDER than the 90-day retention:
         the engine's own sweep would have purged it on schedule regardless
@@ -1722,14 +1783,14 @@ class TestCensusSpaceBacked:
             fake_bin, "ledger/space-decoy-sess-b",
             agent_id="decoy-b", kind="start", agent_type=self.TYPE,
         )
-        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        proc = _run_census(tmp_path, monkeypatch, sid, env_overrides=self._path_env(fake_bin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert f"SPACE_OUTSIDE_WINDOW\tsubspace=ledger/{sid}" in proc.stdout
         assert "SPACE_NEVER_RAN" not in proc.stdout
         assert "SPACE_BLINDSPOT" not in proc.stdout
 
     def test_zero_subspaces_is_a_blindspot_not_a_pass(
-        self, tmp_path: Path, t2_service_env: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str,
     ) -> None:
         """A fresh tenant with literally nothing under `ledger/` must not
         be silently read as 'every session outside the window' or 'every
@@ -1739,22 +1800,25 @@ class TestCensusSpaceBacked:
         fake_bin = _fake_nx_dir(tmp_path)
         sid = self.SID
         self._write_ledger_row(tmp_path, sid)
-        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        proc = _run_census(tmp_path, monkeypatch, sid, env_overrides=self._path_env(fake_bin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "SPACE_BLINDSPOT\treason=" in proc.stdout
         assert "SPACE_NEVER_RAN" not in proc.stdout
         assert "SPACE_OUTSIDE_WINDOW" not in proc.stdout
 
-    def test_wedged_nx_is_bounded_by_a_wall_clock_deadline(self, tmp_path: Path) -> None:
+    def test_wedged_nx_is_bounded_by_a_wall_clock_deadline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """nexus-zn9op (production half): a hung/slow `nx tuple list` must
         never hang the whole census. No GNU `timeout` dependency (absent on
-        macOS) -- the bound is a portable background-and-poll idiom inside
-        expectations.sh. A stub `nx` that sleeps well past the (overridden,
-        short) bound proves the kill actually fires: the census call
-        returns close to the bound, not anywhere near the stub's real sleep
-        time, and reports SPACE_FALLBACK with the named reason so the
-        census stays non-vacuous rather than silently omitting the space
-        read."""
+        macOS) -- the bound is a portable background-and-poll idiom, ported
+        from the shell's own background-and-poll idiom in
+        ``_run_nx_bounded``. A stub `nx` that sleeps well past the
+        (overridden, short) bound proves the kill actually fires: the
+        census call returns close to the bound, not anywhere near the
+        stub's real sleep time, and reports SPACE_FALLBACK with the named
+        reason so the census stays non-vacuous rather than silently
+        omitting the space read."""
         self._write_ledger_row(tmp_path, self.SID)
         slow_bin = tmp_path / "slow-nx-bin"
         slow_bin.mkdir()
@@ -1764,7 +1828,7 @@ class TestCensusSpaceBacked:
         bound_s = 1
         start = time.monotonic()
         proc = _run_census(
-            tmp_path, self.SID,
+            tmp_path, monkeypatch, self.SID,
             env_overrides={
                 **self._path_env(slow_bin),
                 "NX_EXPECT_CENSUS_NX_TIMEOUT_S": str(bound_s),
@@ -1830,13 +1894,19 @@ class TestCensusVerifyAbsent:
     def _path_env(self, fake_bin: Path) -> dict[str, str]:
         return {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
 
-    def test_no_nx_binary_names_a_fallback_reason(self, tmp_path: Path) -> None:
+    def test_no_nx_binary_names_a_fallback_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self._write_ledger_row(tmp_path, self.SID)
-        proc = _run_census(tmp_path, self.SID, env_overrides={"PATH": "/usr/bin:/bin"})
+        proc = _run_census(
+            tmp_path, monkeypatch, self.SID, env_overrides={"PATH": "/usr/bin:/bin"}
+        )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "VERIFY_FALLBACK\treason=PATH has no nx" in proc.stdout
 
-    def test_engine_without_verify_dim_is_unverifiable_not_a_count(self, tmp_path: Path) -> None:
+    def test_engine_without_verify_dim_is_unverifiable_not_a_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A below-floor engine's registry (no ``verify`` in the ledger
         template's declared dimensions): UNVERIFIABLE, never a
         fabricated count -- the exact false-positive class critic
@@ -1863,13 +1933,13 @@ class TestCensusVerifyAbsent:
         )
         shim.chmod(0o755)
         self._write_ledger_row(tmp_path, self.SID)
-        proc = _run_census(tmp_path, self.SID, env_overrides=self._path_env(fake_bin))
+        proc = _run_census(tmp_path, monkeypatch, self.SID, env_overrides=self._path_env(fake_bin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "VERIFY_UNVERIFIABLE\treason=" in proc.stdout
         assert "VERIFY_ABSENT_COUNT" not in proc.stdout
 
     def test_engine_with_verify_dim_counts_absent_rows(
-        self, tmp_path: Path, t2_service_env: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str,
     ) -> None:
         """A floor-crossed engine (this worktree's real dev jar already
         declares ``verify`` -- nexus-d9k5h): the census counts rows whose
@@ -1890,13 +1960,15 @@ class TestCensusVerifyAbsent:
             fake_bin, f"ledger/{sid}", agent_id="agent-missing", kind="report",
             dims={"agent_type": "developer"},
         )
-        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        proc = _run_census(tmp_path, monkeypatch, sid, env_overrides=self._path_env(fake_bin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "VERIFY_ABSENT_COUNT\tn=2" in proc.stdout
         assert "VERIFY_UNVERIFIABLE" not in proc.stdout
         assert "VERIFY_FALLBACK" not in proc.stdout
 
-    def test_all_present_counts_zero(self, tmp_path: Path, t2_service_env: str) -> None:
+    def test_all_present_counts_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str
+    ) -> None:
         fake_bin = _fake_nx_dir(tmp_path)
         sid = "verify-allpresent-sess"
         self._write_ledger_row(tmp_path, sid)
@@ -1904,11 +1976,13 @@ class TestCensusVerifyAbsent:
             fake_bin, f"ledger/{sid}", agent_id="agent-1", kind="report",
             dims={"agent_type": "developer", "verify": "present"},
         )
-        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        proc = _run_census(tmp_path, monkeypatch, sid, env_overrides=self._path_env(fake_bin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "VERIFY_ABSENT_COUNT\tn=0" in proc.stdout
 
-    def test_never_affects_the_overall_exit_code(self, tmp_path: Path) -> None:
+    def test_never_affects_the_overall_exit_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The new VERIFY_* line is a report, not a verdict -- confirms
         expectations_census's own rc contract (documented in its own
         header, unchanged by this fix round) is unaffected even when
@@ -1919,38 +1993,43 @@ class TestCensusVerifyAbsent:
         with f.open("a") as fh:
             fh.write("2026-09-01T00:00:00Z\tSTART\tagent-x\tgeneral-purpose\n")
             fh.write("2026-09-01T00:00:05Z\tREPORTED\tagent-x\n")
-        proc = _run_census(tmp_path, self.SID, env_overrides={"PATH": "/usr/bin:/bin"})
+        proc = _run_census(
+            tmp_path, monkeypatch, self.SID, env_overrides={"PATH": "/usr/bin:/bin"}
+        )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "VERIFY_FALLBACK" in proc.stdout
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
 
 
 class TestPluginWiring:
-    def test_shellib_parity_with_reference(self) -> None:
-        """The plugin ships a COPY of the reference shellib (plugin surface
-        rides a release; tests/e2e/lib is the reference implementation +
-        test bed). Byte-identity is the drift tripwire — same pattern as the
-        version-lockstep manifests."""
-        assert PLUGIN_EXPECTATIONS.exists(), "plugin copy of expectations.sh missing"
-        assert PLUGIN_EXPECTATIONS.read_bytes() == REFERENCE_EXPECTATIONS.read_bytes(), (
-            "conexus/hooks/scripts/expectations.sh has drifted from "
-            "tests/e2e/lib/expectations.sh — edit the reference, then copy it over"
-        )
+    # test_shellib_parity_with_reference REMOVED (RDR-215 bead
+    # nexus-q02nx.14): tests/e2e/lib/expectations.sh, the reference this
+    # compared the plugin copy against, is deleted -- a byte-parity test
+    # with one side gone either errors on a missing file or passes
+    # vacuously, and vacuous is worse.
+    #
+    # test_script_is_bash_clean REMOVED (RDR-215 bead nexus-q02nx.21): the
+    # plugin's bash-side hook script is deleted in this same bead, once
+    # hooks.json no longer runs it -- a syntax check on a file that no
+    # longer exists asserts nothing about production.
 
     def test_registered_in_hooks_json(self) -> None:
+        """Naming is not wiring: assert the SubagentStop entry actually
+        invokes the ported hook. RDR-215 bead nexus-q02nx.21 re-points this
+        from the retired ``subagent-stop.sh`` command entry to the
+        ``hook_subagent_stop`` MCP tool hooks.json now wires it through."""
         hooks = json.loads((REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
         subagent_stop = hooks["hooks"].get("SubagentStop", [])
-        commands = [
-            h["command"]
+        mcp_tools = [
+            h
             for entry in subagent_stop
             for h in entry.get("hooks", [])
+            if h.get("type") == "mcp_tool"
         ]
-        assert any("subagent-stop.sh" in c for c in commands), (
-            "subagent-stop.sh not registered under SubagentStop in hooks.json"
+        assert any(
+            h.get("server") == "plugin:conexus:nexus" and h.get("tool") == "hook_subagent_stop"
+            for h in mcp_tools
+        ), (
+            "hook_subagent_stop not registered as an mcp_tool under "
+            f"SubagentStop in hooks.json (found: {mcp_tools!r})"
         )
-
-    def test_script_is_bash_clean(self) -> None:
-        proc = subprocess.run(
-            ["bash", "-n", str(SCRIPT)], capture_output=True, text=True, timeout=10
-        )
-        assert proc.returncode == 0, proc.stderr

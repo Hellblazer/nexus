@@ -63,11 +63,27 @@ chmod +x "$TEST_HOME/.claude/capture_sid.sh"
 
 # The two real ledger hooks are wired here, not just the logging one: 27b's
 # recognition assert is about what the SHIPPED hooks record, and a scenario
-# that reimplemented their write path would prove nothing about them.
-# XDG_STATE_HOME is pinned explicitly so the ledger lands somewhere the
-# assert below can read without depending on the hook's inherited HOME.
-DISPATCH_EXPECT_HOOK="env XDG_STATE_HOME=$LEDGER_STATE bash $REPO_ROOT/conexus/hooks/scripts/agent-dispatch-expect.sh"
-START_STAMP_HOOK="env XDG_STATE_HOME=$LEDGER_STATE bash $REPO_ROOT/conexus/hooks/scripts/subagent-start-stamp.sh"
+# that reimplemented their write path would prove nothing about them. That
+# still holds after RDR-215 bead nexus-q02nx.21 deleted the two bash
+# scripts: drive_hook.sh IMPORTS the production modules
+# (nexus.hooks.agent_dispatch_expect / .subagent_start_stamp) rather than
+# reimplementing them, so the rows this leg reads are written by the
+# shipped code.
+#
+# WHAT CHANGED, AND WHAT IT COSTS. Production dispatches these as
+# `type: mcp_tool` entries (hook_agent_dispatch_expect /
+# hook_subagent_start_stamp in conexus/hooks/hooks.json), not as
+# `type: command`. This scenario keeps the command form because it needs
+# the per-hook `env XDG_STATE_HOME=...` pin below -- an mcp_tool entry has
+# no per-hook env, so the ledger would land wherever the MCP server's
+# environment put it and the assert could not find it. So this leg proves
+# the shipped WRITE PATH, as it always did, and does not prove the shipped
+# TRANSPORT, which it never did either (it hand-writes settings.json
+# rather than loading conexus's hooks.json). Proving the mcp_tool
+# transport needs a `type: mcp_tool` entry against a real server, the way
+# scenario 03 does.
+DISPATCH_EXPECT_HOOK="env XDG_STATE_HOME=$LEDGER_STATE $REPO_ROOT/tests/e2e/lib/drive_hook.sh agent_dispatch_expect"
+START_STAMP_HOOK="env XDG_STATE_HOME=$LEDGER_STATE $REPO_ROOT/tests/e2e/lib/drive_hook.sh subagent_start_stamp"
 
 cat > "$TEST_HOME/.claude/settings.json" <<EOF
 {
@@ -76,13 +92,13 @@ cat > "$TEST_HOME/.claude/settings.json" <<EOF
   "hooks": {
     "PreToolUse": [
       { "matcher": "Agent|Task",
-        "hooks": [{ "type": "command", "command": "$DISPATCH_EXPECT_HOOK", "timeout": 10 }] }
+        "hooks": [{ "type": "command", "command": "$DISPATCH_EXPECT_HOOK", "timeout": 40 }] }
     ],
     "SubagentStart": [
       { "matcher": "",
         "hooks": [
           { "type": "command", "command": "bash $TEST_HOME/.claude/log_start_event.sh SUBAGENT_START", "timeout": 10 },
-          { "type": "command", "command": "$START_STAMP_HOOK", "timeout": 10 }
+          { "type": "command", "command": "$START_STAMP_HOOK", "timeout": 40 }
         ] }
     ],
     "SessionStart": [
@@ -192,7 +208,7 @@ if [[ -z "$B_SID" ]]; then
 else
     census_out="$(
         XDG_STATE_HOME="$LEDGER_STATE" bash -c \
-            "source '$REPO_ROOT/tests/e2e/lib/expectations.sh'; expectations_census '$B_SID'" \
+            "nx-hook expectations_census '$B_SID'" \
             2>/dev/null || true
     )"
     if grep -q 'BLINDSPOT	checked=1 recognized=1 unrecognized=0' <<<"$census_out"; then

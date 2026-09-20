@@ -33,6 +33,15 @@ import sys
 from typing import Any
 
 # Hook framework lives next to this script.
+# RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
+# `python3`, so PATH decides the interpreter. Put back the resolution
+# `_run_python_hook.sh` used to perform, before anything that needs 3.12
+# or `nexus` is imported. See _interpreter.py for what is at stake.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _interpreter  # noqa: E402 -- must follow the sys.path insert
+
+_interpreter.reexec_if_needed()
+
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
