@@ -32,6 +32,8 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from nexus.commands.store import _list_documents
+
 
 def _make_stub_t3():
     """Stub T3Database for CLI helpers — deterministic doc_id, no chroma."""
@@ -449,3 +451,82 @@ class TestDriftGuard:
                 )
                 return
         pytest.fail("put_cmd not found in commands/store.py")
+
+
+class TestListDocumentsGroupsByTheManifest:
+    """``nx store list --docs`` groups chunks by the catalog manifest.
+
+    It carried its own copy of the grouping the MCP ``store_list(docs=True)``
+    view had, and the same mistake in it: both keyed on each chunk row's own
+    ``content_hash``, on the premise that a ``store_put`` note is always one
+    chunk. Note splitting (nexus-spujb, nexus-b2tld) falsified that, so a
+    split note listed as one row per piece under a repeated title. Both now
+    call ``nexus.catalog.store_hook.manifest_doc_index``.
+    """
+
+    @staticmethod
+    def _db(rows):
+        class _StubDB:
+            def collection_info(self, _col):
+                return {"count": len(rows)}
+
+            def list_store(self, _col, limit=300, offset=0):
+                return rows[offset:offset + limit]
+
+        return _StubDB()
+
+    def test_a_split_note_is_one_row_with_its_real_chunk_count(self, monkeypatch, capsys):
+        rows = [
+            {"id": "aaa", "content_hash": "h1", "title": "split note", "indexed_at": "2026-09-19"},
+            {"id": "bbb", "content_hash": "h2", "title": "split note", "indexed_at": "2026-09-19"},
+            {"id": "ccc", "content_hash": "h3", "title": "standalone", "indexed_at": "2026-09-19"},
+        ]
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.manifest_doc_index",
+            lambda _col: ({"aaa": "1.2.3", "bbb": "1.2.3"}, {"1.2.3": "split note"}, {"1.2.3": "aaa"}, ""),
+        )
+
+        _list_documents(self._db(rows), "knowledge__subject__m__v1")
+        out = capsys.readouterr().out
+
+        # Two documents from three chunks: the manifested pair collapses.
+        assert "(2 documents, 3 chunks)" in out, out
+        split_rows = [ln for ln in out.splitlines() if "split note" in ln]
+        assert len(split_rows) == 1, f"split note listed {len(split_rows)} times:\n{out}"
+        assert "2 chunks" in split_rows[0], split_rows[0]
+        # The unmanifested chunk keeps its own row — a manifest-less note is
+        # live by design, and a superseded one must stay visible to be found.
+        assert len([ln for ln in out.splitlines() if "standalone" in ln]) == 1, out
+
+    def test_chunk_count_is_derived_not_read_from_metadata(self, monkeypatch, capsys):
+        """A ``store_put`` note carries no ``chunk_count`` field, so reading it
+        printed ``?``. The MCP view fixed that half alone and the two displays
+        disagreed; the count is derived from the grouping on both now."""
+        rows = [{"id": "aaa", "content_hash": "h1", "title": "a note", "indexed_at": "2026-09-19"}]
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.manifest_doc_index",
+            lambda _col: ({}, {}, {}, ""),
+        )
+
+        _list_documents(self._db(rows), "knowledge__subject__m__v1")
+        out = capsys.readouterr().out
+
+        assert "?" not in out, out
+        assert "1 chunks" in out, out
+
+    def test_a_degraded_grouping_says_so(self, monkeypatch, capsys):
+        """Without the catalog the manifest is unavailable and the view falls
+        back to the pre-fix per-chunk grouping. It still prints — a listing
+        beats an error — but never silently (nexus-39upx hazard 4)."""
+        rows = [{"id": "aaa", "content_hash": "h1", "title": "a note", "indexed_at": "2026-09-19"}]
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.manifest_doc_index",
+            lambda _col: ({}, {}, {}, "catalog unreadable (RuntimeError)"),
+        )
+
+        _list_documents(self._db(rows), "knowledge__subject__m__v1")
+        out = capsys.readouterr().out
+
+        assert "grouped by chunk, not by manifest" in out, out
+        assert "catalog unreadable (RuntimeError)" in out, out
+        assert "a note" in out, out

@@ -5645,44 +5645,69 @@ def store_list(
 
 
 def _store_list_docs(t3, col_name: str, total: int) -> str:
-    """Document-level view: deduplicate chunks by content_hash.
+    """Document-level view: group chunks by the catalog manifest.
 
-    Per-doc chunk count is derived from the dedup pass — entries written by
+    The grouping itself is
+    :func:`nexus.catalog.store_hook.manifest_doc_index`, shared with
+    ``commands/store.py``'s ``_list_documents`` — see there for why grouping
+    by each chunk row's own ``content_hash`` was wrong, and for the two
+    independent copies of that mistake this replaces.
+
+    Per-doc chunk count is derived from the grouping — entries written by
     ``store_put`` don't set a ``chunk_count`` metadata field (only the PDF
     indexer does), so reading it from metadata produced ``?`` for everything.
     The page-count column is omitted entirely when no document carries it,
     rather than showing ``?p`` for non-PDF entries.
+
+    Fail-open: when the catalog cannot be read, the per-chunk grouping is
+    still printed, with a line saying the view is degraded.
     """
+    from nexus.catalog.store_hook import manifest_doc_index  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+    by_chash, doc_titles, doc_heads, degraded = manifest_doc_index(col_name)
     seen: dict[str, dict] = {}
-    chunks_by_hash: dict[str, int] = {}
+    chunks_by_key: dict[str, int] = {}
     offset = 0
     while offset < total:
         entries = t3.list_store(col_name, limit=300, offset=offset)
         if not entries:
             break
         for e in entries:
-            h = e.get("content_hash", e.get("id", ""))
-            if h not in seen:
-                seen[h] = e
-            chunks_by_hash[h] = chunks_by_hash.get(h, 0) + 1
+            chash = e.get("id", "")
+            h = e.get("content_hash", chash)
+            key = by_chash.get(chash) or h
+            if key not in seen:
+                seen[key] = e
+            chunks_by_key[key] = chunks_by_key.get(key, 0) + 1
         offset += 300
 
     if not seen:
         return f"No documents in {col_name}."
 
-    docs = sorted(seen.items(), key=lambda kv: kv[1].get("title") or "")
+    docs = sorted(
+        seen.items(),
+        key=lambda kv: doc_titles.get(kv[0]) or kv[1].get("title") or "",
+    )
     # page_count is not in ALLOWED_TOP_LEVEL — dropped by normalize() so
     # the read always returned empty; removed in nexus-59j0. nexus-1oguj
     # later promoted extraction_method to canonical, but this compact
     # list table wasn't extended to show it (store_get's single-document
     # display is; see there for the per-chunk value).
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
-    for i, (h, d) in enumerate(docs, 1):
+    if degraded:
+        lines.append(
+            f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
+            "A split note appears as one row per piece."
+        )
+    for i, (key, d) in enumerate(docs, 1):
         # The full content-hash (RDR-180) is the doc_id that store_get
         # accepts. Surfaced whole so the list -> get flow round-trips.
-        doc_id = d.get("id") or h
-        title = (d.get("title") or "untitled")[:50]
-        chunks = chunks_by_hash.get(h, "?")
+        # For a manifested document the manifest's head chash is used, so
+        # the handle does not depend on which piece the listing reached
+        # first; store_get resolves any chunk of a split note to the whole.
+        doc_id = doc_heads.get(key) or d.get("id") or key
+        title = (doc_titles.get(key) or d.get("title") or "untitled")[:50]
+        chunks = chunks_by_key.get(key, "?")
         indexed = (d.get("indexed_at") or "")[:10]
         lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {indexed}")
     return _cap_text_result("\n".join(lines), "store_list")

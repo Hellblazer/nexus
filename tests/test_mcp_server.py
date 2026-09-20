@@ -9,6 +9,7 @@ All tests use injected clients -- no API keys or network required.
 from __future__ import annotations
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
+import hashlib
 import json
 import os
 import re
@@ -237,21 +238,30 @@ def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> No
     matching REAL ``nexus.chunks`` row, which the fake T3 client can never
     provide.
 
-    Computes the exact ``(collection, chash)`` ``store_put`` will use via
-    the SAME production helpers it calls internally
-    (``t3_collection_name`` / ``single_chunk_manifest_metadata``), then
-    seeds a real stub chunk — idiom 1/2 of the collateral sweep. Nothing
-    under test reads this row's content; every assertion in this file
-    reads back through ``store_get`` / ``search`` / the fake ``t3`` client,
-    never this real one.
+    Computes the exact ``(collection, chash)`` pairs ``store_put`` will use
+    via the SAME production helpers it calls internally
+    (``t3_collection_name`` / ``note_pieces``), then seeds a real stub chunk
+    for each — idiom 1/2 of the collateral sweep. Nothing under test reads
+    these rows' content; every assertion in this file reads back through
+    ``store_get`` / ``search`` / the fake ``t3`` client, never these real
+    ones.
+
+    Seeds EVERY piece, not just the first: a note longer than the
+    collection model's token window is written as several chunks
+    (nexus-spujb), each its own manifest row and so each its own FK. The
+    single-chunk form assumed here before missed those and the manifest
+    write 409'd on the second piece.
     """
-    from nexus.catalog.store_hook import single_chunk_manifest_metadata
+    from nexus.catalog.store_hook import note_pieces
     from nexus.corpus import t3_collection_name
     from nexus.mcp_infra import get_t3
 
     col_name = t3_collection_name(collection, t3=get_t3())
-    chash, _ = single_chunk_manifest_metadata(content)
-    seed_manifest_chunks(col_name, [chash])
+    chashes = [
+        hashlib.sha256(piece.encode()).hexdigest()
+        for piece in note_pieces(content, col_name)
+    ]
+    seed_manifest_chunks(col_name, chashes)
 
 
 def _put_id(content: str, collection: str = "fixture-subject", title: str = "t") -> str:
@@ -727,6 +737,81 @@ def test_store_list_docs_chunk_count_numeric(t3):
     assert "?" not in result.split("\n")[1] if "\n" in result else True
     # A 1-chunk doc should report `1 chunks` (or `1 chunk`)
     assert "1 chunks" in result
+
+
+def _docs_rows_for(result: str, title: str) -> list[str]:
+    return [line for line in result.splitlines() if title in line]
+
+
+def test_store_list_docs_groups_a_split_note_as_one_document(t3, local_mode_write):
+    """A note long enough to split is ONE document, not one row per piece.
+
+    ``_store_list_docs`` grouped by each chunk row's ``content_hash``, on the
+    premise that a ``store_put`` note is always one chunk. Note splitting
+    (nexus-spujb, nexus-b2tld) falsified that: the pieces carry different
+    content hashes under one catalog document, so a nine-piece note rendered
+    as nine documents of "1 chunks" sharing a title. On 2026-09-19 that was
+    read as nine duplicate copies and triggered a duplicate hunt over a
+    correctly-stored note.
+    """
+    # Long enough to exceed the collection model's token window (so it
+    # splits), short enough to stay under the 16 KB document quota.
+    long_note = " ".join(
+        f"Sentence {i} concerns quorum intersection under partition."
+        for i in range(60)
+    )
+    _seed_for_store_put(long_note)
+    store_put(content=long_note, collection="fixture-subject", title="split-note-test")
+
+    result = store_list(collection="fixture-subject", docs=True)
+    rows = _docs_rows_for(result, "split-note-test")
+    assert len(rows) == 1, f"split note rendered as {len(rows)} documents:\n{result}"
+
+    # Non-vacuity: this asserts the note ACTUALLY split. If it reports one
+    # chunk the fixture no longer builds the condition the test names, and a
+    # per-chunk grouping would pass it for the wrong reason.
+    count = re.search(r"(\d+) chunks", rows[0])
+    assert count is not None, rows[0]
+    assert int(count.group(1)) > 1, (
+        f"note did not split, so this test proves nothing about grouping: {rows[0]}"
+    )
+
+
+def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mode_write):
+    """A chunk with no manifest row is never merged into a neighbour.
+
+    That covers a manifest-less note (live by design — the ``live_chunks``
+    contract) and a superseded chunk no sweep has reaped. Both must stay
+    visible and separate; merging them away would hide exactly the rows an
+    orphan hunt needs to see.
+    """
+    store_put(content="first standalone note", collection="fixture-subject", title="solo-a")
+    store_put(content="second standalone note", collection="fixture-subject", title="solo-b")
+
+    result = store_list(collection="fixture-subject", docs=True)
+    assert len(_docs_rows_for(result, "solo-a")) == 1
+    assert len(_docs_rows_for(result, "solo-b")) == 1
+
+
+def test_store_list_docs_says_so_when_the_catalog_cannot_be_read(t3, local_mode_write, monkeypatch):
+    """A degraded grouping is announced, never silent (nexus-39upx hazard 4).
+
+    Without the catalog the manifest is unavailable, so the view falls back
+    to per-chunk grouping — which is the pre-fix behaviour and is wrong for
+    split notes. It still prints, because a listing is more useful than an
+    error, but the caller is told what it is looking at.
+    """
+    store_put(content="anything at all", collection="fixture-subject", title="degraded-test")
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader", _boom, raising=True,
+    )
+    result = store_list(collection="fixture-subject", docs=True)
+    assert "grouped by chunk, not by manifest" in result
+    assert "degraded-test" in result
 
 
 # ── Memory ───────────────────────────────────────────────────────────────────

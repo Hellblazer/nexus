@@ -190,6 +190,73 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
     return written
 
 
+def manifest_doc_index(
+    collection: str,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], str]:
+    """``(chash -> tumbler, tumbler -> title, tumbler -> head chash, reason)``
+    for every manifested document in *collection*.
+
+    The grouping a document-level listing needs. The ``document_chunks``
+    manifest is the authoritative document-to-chunk map — RDR-108 Phase 3
+    (nexus-bdag) dropped the chunk-level ``doc_id`` / ``chunk_index`` /
+    ``chunk_count`` mirrors precisely so read paths would consult it — and
+    both listing surfaces instead grouped by each chunk row's own
+    ``content_hash``, on the premise that a ``store_put`` note is always one
+    chunk. Note splitting (nexus-spujb, nexus-b2tld) falsified that: a long
+    note is several pieces, each with its own content hash, under ONE
+    document. Both then showed a split note as one row per piece, sharing a
+    title, which is indistinguishable from duplicate copies and was read as
+    exactly that on 2026-09-19.
+
+    Lives here rather than beside either caller because there were already
+    two independent copies of the broken grouping (``mcp/core.py``'s
+    ``_store_list_docs`` and ``commands/store.py``'s ``_list_documents``) and
+    a third would be the same bug waiting to be fixed once more.
+
+    *reason* is empty on success and names the failure otherwise, so a caller
+    can say its listing is degraded rather than silently under-grouping
+    (nexus-39upx hazard 4: a skip is never silent). Two catalog round trips
+    for the whole collection: one ``list_by_collection``, one batched
+    ``get_manifests``. A document with no manifest rows contributes nothing
+    and its chunks fall through to per-chunk keying at the call site — which
+    is right for both a manifest-less note (live by design, the
+    ``catalog-003-soft-delete.xml`` ``live_chunks`` contract) and a
+    superseded chunk no sweep has reaped.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+
+    reader = None
+    try:
+        reader = make_catalog_reader()
+        if reader is None:
+            return {}, {}, {}, "no catalog reader"
+        entries = list(reader.list_by_collection(collection) or [])
+        titles = {
+            str(t): (getattr(e, "title", "") or "")
+            for e in entries
+            if (t := getattr(e, "tumbler", ""))
+        }
+        manifests = reader.get_manifests(list(titles)) if titles else {}
+        by_chash: dict[str, str] = {}
+        heads: dict[str, str] = {}
+        for tumbler, rows in (manifests or {}).items():
+            ordered = sorted(rows, key=lambda r: r.position)
+            if not ordered:
+                continue
+            heads[str(tumbler)] = ordered[0].chash
+            for row in ordered:
+                by_chash[row.chash] = str(tumbler)
+        return by_chash, titles, heads, ""
+    except Exception as exc:  # noqa: BLE001 — a degraded listing is reported, never raised
+        return {}, {}, {}, f"catalog unreadable ({exc.__class__.__name__})"
+    finally:
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup
+                pass
+
+
 def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str, str, int] | None:
     """``(first chunk id, full text, chunk count)`` when *chunk_ids* are
     chunks of ONE split note, else ``None`` (nexus-spujb, nexus-b2tld).
