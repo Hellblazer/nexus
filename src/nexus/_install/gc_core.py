@@ -72,22 +72,46 @@ _CENSUS: object | None = None
 
 
 def _sibling(name: str):
-    """Load ``<name>.py`` from this file's own directory.
+    """A neighbour module in ``_install/``, as ONE object per process.
 
-    By path, never by name, for the reason ``census_core._sibling_layout``
-    gives: a bare import resolves only when this directory is on ``sys.path``,
-    and the try-the-package-first shape would hand a script run the INSTALLED
-    module rather than the adjacent one. During an install those are different
-    files by construction.
+    Two worlds, and the rule differs between them:
+
+    * Imported as part of the package, ``__package__`` is ``nexus._install``
+      and the package sibling IS the adjacent file, so it is imported
+      normally. That keeps ONE module object per process, which matters for
+      more than tidiness: ``LayoutError`` must be one class or
+      ``except InstallLayoutError`` stops catching errors raised in here, and
+      a test patching ``nexus._install.layout_core`` must reach this caller.
+    * Run as a script at bootstrap there is no package, so the file is loaded
+      by path under a stable key and REUSED from ``sys.modules`` on the next
+      ask.
+
+    Measured before the sys.modules check existed: gc_core loaded its own
+    layout_core, census_core loaded another under the same key and clobbered
+    it, and three distinct layout_core objects coexisted with three distinct
+    LayoutError classes. Pinned by
+    ``tests/test_install_cores_share_one_module_identity.py``.
     """
-    import importlib.util  # noqa: PLC0415 -- first call only
+    if __package__:
+        from importlib import import_module  # noqa: PLC0415 -- package world only
+
+        return import_module(f"{__package__}.{name}")
+
+    key = f"_nx_install_{name}"
+    cached = sys.modules.get(key)
+    if cached is not None:
+        return cached
+
+    import importlib.util  # noqa: PLC0415 -- bootstrap path only
 
     path = Path(__file__).resolve().parent / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"_nx_{name}", path)
+    spec = importlib.util.spec_from_file_location(key, path)
     if spec is None or spec.loader is None:  # pragma: no cover -- unreachable
         raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    # Registered BEFORE exec, so a sibling that reaches back mid-import finds
+    # the partially-built module rather than starting a second load of it.
+    sys.modules[key] = module
     spec.loader.exec_module(module)
     return module
 

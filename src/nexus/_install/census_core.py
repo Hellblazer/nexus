@@ -52,42 +52,63 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 _LAYOUT: object | None = None
 
 
-def _sibling_layout():
-    """``layout_core.py`` beside this file, in both worlds this module runs in.
+def _sibling(name: str):
+    """A neighbour module in ``_install/``, as ONE object per process.
 
-    Loaded BY PATH rather than by name, deliberately. ``import layout_core``
-    resolves only when this file's directory is on ``sys.path``, which is true
-    when census.sh runs it as a script and false when the installed world
-    imports it as ``nexus._install.census_core``. And the obvious two-branch
-    version -- try the package, fall back to the bare name -- would, on a box
-    that HAS nexus installed, hand a script run the INSTALLED layout_core
-    rather than the one sitting next to it. During an install those are
-    different files by construction: the whole point of the generation layout
-    is that the new tree is not the running one.
+    Two worlds, and the rule differs between them:
 
-    Cached, because ``generation_match_pairs`` reaches for it once per call and
-    the census loop calls that per generation.
+    * Imported as part of the package, ``__package__`` is ``nexus._install``
+      and the package sibling IS the adjacent file, so it is imported
+      normally. That keeps ONE module object per process, which matters for
+      more than tidiness: ``LayoutError`` must be one class or
+      ``except InstallLayoutError`` stops catching errors raised in here, and
+      a test patching ``nexus._install.layout_core`` must reach this caller.
+    * Run as a script at bootstrap there is no package, so the file is loaded
+      by path under a stable key and REUSED from ``sys.modules`` on the next
+      ask.
+
+    Measured before the sys.modules check existed: gc_core loaded its own
+    layout_core, census_core loaded another under the same key and clobbered
+    it, and three distinct layout_core objects coexisted with three distinct
+    LayoutError classes. Pinned by
+    ``tests/test_install_cores_share_one_module_identity.py``.
     """
+    if __package__:
+        from importlib import import_module  # noqa: PLC0415 -- package world only
+
+        return import_module(f"{__package__}.{name}")
+
+    key = f"_nx_install_{name}"
+    cached = sys.modules.get(key)
+    if cached is not None:
+        return cached
+
+    import importlib.util  # noqa: PLC0415 -- bootstrap path only
+
+    path = Path(__file__).resolve().parent / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(key, path)
+    if spec is None or spec.loader is None:  # pragma: no cover -- unreachable
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered BEFORE exec, so a sibling that reaches back mid-import finds
+    # the partially-built module rather than starting a second load of it.
+    sys.modules[key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _sibling_layout():
+    """``layout_core``, cached. Reached once per ``generation_match_pairs``
+    call and the census loop calls that per generation."""
     global _LAYOUT
     if _LAYOUT is None:
-        import importlib.util  # noqa: PLC0415 -- only needed on the first call
-        import sys  # noqa: PLC0415 -- same
-
-        path = Path(__file__).resolve().parent / "layout_core.py"
-        spec = importlib.util.spec_from_file_location("_nx_layout_core", path)
-        if spec is None or spec.loader is None:  # pragma: no cover -- unreachable
-            raise ImportError(f"cannot load {path}")
-        module = importlib.util.module_from_spec(spec)
-        # Registered before exec: dataclasses resolves a field's type through
-        # sys.modules[cls.__module__], and layout_core's Receipt is a dataclass.
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        _LAYOUT = module
+        _LAYOUT = _sibling("layout_core")
     return _LAYOUT
 
 

@@ -179,6 +179,16 @@ class TestRegisteredMineruOutsideGeneration:
             "nexus.upgrade_finish._current_generation",
             return_value=_P(current) if current else None,
         ), patch(
+            # BOTH the core and the facade, because upgrade_finish reaches
+            # the census two ways. It calls generation_match_prefixes (:504),
+            # which calls generation_match_pairs inside the CORE's namespace
+            # where a facade rebinding cannot reach it; and it calls
+            # generation_match_pairs through the facade attribute directly
+            # (:604). Patching only the facade left the first path returning
+            # real answers about this machine, so the generation row vanished
+            # and only the mineru row survived. Caught by CI, not locally.
+            "nexus._install.census_core.generation_match_pairs", return_value=pairs,
+        ), patch(
             "nexus.install_census.generation_match_pairs", return_value=pairs,
         ), patch(
             "nexus._mineru_pid.read_pid_file", return_value=pid_info,

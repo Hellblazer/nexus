@@ -69,9 +69,42 @@ def test_self_install_registers_the_legacy_tree_on_the_generation_path() -> None
 
 
 def test_the_census_enumerates_legacy_candidates() -> None:
-    text = _text("src/nexus/install_census.py")
+    # Reads the CORE. The census twin collapsed, so install_census.py is a
+    # re-export with no function bodies in it and the slice below found no
+    # "def generation_match_pairs" to start at. This pin is about a call site
+    # surviving, and the call site moved with the code.
+    text = _text("src/nexus/_install/census_core.py")
     body = text[text.index("def generation_match_pairs"):text.index("def legacy_tree_candidates")]
     assert "legacy_tree_candidates(tools=tools)" in body
+
+
+def test_the_install_facades_stay_pure_re_exports() -> None:
+    """Non-vacuity for the pin above, and a signpost for the next reader.
+
+    install_census.py and install_layout.py exist only to re-export their
+    cores under the names the installed world imports. Every source-text pin
+    and every monkeypatch in this repo therefore has to name the CORE, not the
+    facade -- and a facade that grew a function body would make that advice
+    silently wrong for the one that grew it.
+
+    Measured the hard way: a test patching nexus.install_census.generation_
+    match_pairs kept passing locally and failed on CI, because
+    generation_match_prefixes calls it inside the core's namespace where a
+    facade rebinding cannot reach.
+    """
+    import ast
+
+    for facade in ("src/nexus/install_census.py", "src/nexus/install_layout.py"):
+        tree = ast.parse(_text(facade))
+        defs = [
+            node.name for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        assert not defs, (
+            f"{facade} defines {defs}; it is meant to be a pure re-export of its "
+            f"core. Source-text pins and monkeypatches target the core, and a "
+            f"body here makes that guidance wrong without anything failing."
+        )
 
 
 def test_doctor_holders_row_asks_for_the_legacy_tree() -> None:
