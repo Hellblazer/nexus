@@ -36,7 +36,7 @@ import time as _time
 from pathlib import Path
 
 from nexus._hook_runtime._io import HookResult
-from nexus.hooks import session_context
+from nexus.hooks import session_context, t2_prefix_scan
 
 # -- Access to the still-wired script, for differential assertions ----------
 # Same sys.path-injection pattern as tests/hooks/test_session_start_hygiene.py
@@ -281,10 +281,18 @@ class TestRunComposition:
                 return "/repo/myproject"
             if args[0] == "bd":
                 return "○ nexus-abc123 ● P1 [bug] a ready bead"
-            # the t2_prefix_scan.py subprocess invocation
-            return "  fixture-t2-entry — a snippet"
+            return ""
 
         monkeypatch.setattr(session_context, "run_command", _fake_run_command)
+        # The T2 body arrives in-process now (bead nexus-b5ugt), not from
+        # a subprocess, so it is stubbed where it is actually called.
+        scanned: list[str] = []
+
+        def _fake_scan(project: str) -> str:
+            scanned.append(project)
+            return "  fixture-t2-entry — a snippet"
+
+        monkeypatch.setattr(t2_prefix_scan, "scan", _fake_scan)
 
         result = session_context.run(None)
         assert result.stdout is not None
@@ -295,11 +303,15 @@ class TestRunComposition:
         assert "fixture-t2-entry" in result.stdout
         assert "a ready bead" in result.stdout
 
-        # The T2 subprocess call used sys.executable + the resolved sibling
-        # script path (not a bare "python3" / "nx" invocation).
-        t2_call = next(c for c in calls if c[0] == sys.executable)
-        assert t2_call[1].endswith(str(Path("hooks") / "scripts" / "t2_prefix_scan.py"))
-        assert t2_call[2] == "myproject"
+        # The T2 body came from scan(), called with the project name the
+        # hook derived from git. This replaces an assertion on the old
+        # subprocess argv (sys.executable + the resolved sibling script);
+        # bead nexus-b5ugt removed the subprocess, and the claim worth
+        # keeping was always which project got scanned, not how.
+        assert scanned == ["myproject"]
+        assert not [c for c in calls if c and c[0] == sys.executable], (
+            "session_context spawned a python subprocess for T2 again"
+        )
 
     def test_nx_not_found_skips_t2_memory_but_not_capabilities(
         self, monkeypatch, tmp_path: Path
@@ -319,58 +331,73 @@ class TestRunComposition:
 # -- _plugin_root(): the one unavoidable deviation from a literal carry -----
 
 
-class TestPluginRootResolution:
-    def test_env_var_wins_when_set(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "plugin"))
-        assert session_context._plugin_root() == tmp_path / "plugin"
+class TestTheT2SectionIsProducedInProcess:
+    """The T2 Memory section reaches run()'s output, without a subprocess.
 
-    def test_dev_checkout_fallback_finds_the_real_sibling_script(self, monkeypatch) -> None:
-        """No CLAUDE_PLUGIN_ROOT: the fallback must resolve to THIS repo's
-        real conexus/hooks/scripts/, where t2_prefix_scan.py still lives
-        (that file's own move is a separate bead's scope). This is the
-        exact defect a literal ``Path(__file__).parent`` carry would have
-        introduced silently -- run_command swallows FileNotFoundError into
-        None, so a broken path would produce no error, just no T2 memory
-        context, ever."""
-        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-        scan_script = session_context._plugin_root() / "hooks" / "scripts" / "t2_prefix_scan.py"
-        assert scan_script.is_file(), (
-            f"{scan_script} does not exist -- _plugin_root()'s dev-checkout "
-            "fallback no longer finds the sibling script"
-        )
+    This replaces TestPluginRootResolution, which pinned three facts
+    about LOCATING conexus/hooks/scripts/t2_prefix_scan.py: that the env
+    var won, that the dev-checkout fallback found the real sibling, and
+    that the plumbing reached a real subprocess. Bead nexus-b5ugt
+    removed the thing all three described -- session_context calls
+    nexus.hooks.t2_prefix_scan.scan() in-process and resolves no plugin
+    path at all, so _plugin_root has no callers and is gone.
 
-    def test_claude_plugin_root_reaches_a_real_subprocess_call(
+    Deleting them outright would have dropped the one claim worth
+    keeping: that the section actually arrives, carrying the project
+    name. run_command swallows a failure into None, so a broken T2 path
+    produces no error and no section, forever -- which is exactly how
+    the defect this bead fixes stayed invisible. That claim is kept
+    here, against the seam that exists now.
+    """
+
+    def test_the_section_arrives_carrying_the_project_name(
         self, monkeypatch, tmp_path: Path
     ) -> None:
-        """End-to-end through a REAL subprocess.run call (not mocked run_command),
-        with a fake sibling script standing in for t2_prefix_scan.py -- proves
-        the plumbing (args, cwd, CLAUDE_PLUGIN_ROOT resolution) without any
-        live T2 substrate dependency."""
-        plugin_root = tmp_path / "plugin"
-        scripts_dir = plugin_root / "hooks" / "scripts"
-        scripts_dir.mkdir(parents=True)
-        fake_scan = scripts_dir / "t2_prefix_scan.py"
-        fake_scan.write_text(
-            "import sys\n"
-            "print(f'## T2 Memory (Active Project) FAKE for {sys.argv[1]}')\n"
-        )
-
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        # Real git call, pinned to THIS process's own cwd so it and the
-        # test's own verification git call agree on the toplevel:
-        # this worktree IS a real repo, so `git rev-parse --show-toplevel`
-        # succeeds for real.
-        test_cwd = os.getcwd()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", test_cwd)
-        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "nx")
 
-        real_toplevel = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True, cwd=test_cwd,
-        ).stdout.strip()
-        project_name = Path(real_toplevel).name
+        # A repo this test OWNS, rather than whatever checkout pytest
+        # happens to run from. The first draft took the project name from
+        # `git rev-parse --show-toplevel` in the ambient cwd, which made
+        # the test silently dependent on being run from inside a git
+        # repository -- it failed the moment the suite was run from a
+        # scratch directory to reproduce CI's environment. The hook's job
+        # is to derive the name from the repo it is pointed at; the test
+        # should point it at one.
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "nx")
+        project_name = "myproject"
+
+        seen: list[str] = []
+
+        def _fake_scan(project: str) -> str:
+            seen.append(project)
+            return f"## T2 Memory (Active Project) FAKE for {project}"
+
+        monkeypatch.setattr(t2_prefix_scan, "scan", _fake_scan)
 
         result = session_context.run(None)
         assert result.stdout is not None
         assert f"FAKE for {project_name}" in result.stdout
+        assert seen == [project_name], (
+            f"scan() was called with {seen}, not the repo name the hook "
+            f"derived from git"
+        )
+
+    def test_the_hook_resolves_no_plugin_path_at_all(self) -> None:
+        """The property that made the three old tests unnecessary.
+
+        Asserted on the module attribute, not on its source text: the
+        first draft of this grepped for "_plugin_root" and matched a
+        stale docstring reference, which is the same grep-cannot-tell-an
+        -identifier-from-a-sentence error this bead had just fixed in
+        test_plugin_sibling_resolution's own scan.
+        """
+        assert not hasattr(session_context, "_plugin_root"), (
+            "session_context resolves a plugin path again; if that is "
+            "deliberate, put it back in test_plugin_sibling_resolution's "
+            "RESOLVERS so the env-var contract is pinned for it"
+        )
+

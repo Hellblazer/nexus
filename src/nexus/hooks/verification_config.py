@@ -91,7 +91,7 @@ def _git_common_root(start: Path) -> Path | None:
     Keying per-repo state on the common dir rather than the checkout is
     what this codebase already does for the two other things that must be
     one-per-repo across worktrees — the engine build lease and the
-    stamped-jar cache both live in the git common dir for this reason.
+    cached service jar both live in the git common dir for this reason.
     """
     try:
         out = subprocess.run(

@@ -55,7 +55,9 @@ RESOLVERS: list[tuple[str, str]] = [
     # stop_verification was here until bead nexus-b5ugt ported
     # read_verification_config.py into the wheel. It no longer reaches
     # the plugin, so there is nothing left for this gate to check.
-    ("nexus.hooks.session_context", "_plugin_root"),
+    # session_context left at bead nexus-b5ugt too: it was the SECOND
+    # caller of the plugin's t2_prefix_scan.py, missed when the first was
+    # ported, and porting it emptied its _plugin_root of callers.
     ("nexus.hooks._plugin", "plugin_root"),
 ]
 

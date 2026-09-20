@@ -42,7 +42,8 @@ than silently folded in:
    (``read_verification_config.py``, bead nexus-q02nx.13/.17): resolve the
    plugin root via ``CLAUDE_PLUGIN_ROOT`` (falling back to the dev-checkout
    layout for a from-source run), and reach the still-plugin-only sibling
-   through it. See :func:`_plugin_root` below.
+   through it. Gone as of bead nexus-b5ugt: the T2 section calls
+   ``nexus.hooks.t2_prefix_scan`` in-process and no path is resolved.
 
 **Payload is unused.** The script never reads stdin at all -- it resolves
 everything from ``CLAUDE_PROJECT_DIR``/``os.getcwd()`` and local
@@ -91,7 +92,6 @@ import sys
 from pathlib import Path
 
 from nexus._hook_runtime._io import HookResult
-from nexus.hooks._plugin import plugin_root
 
 __all__ = ["run"]
 
@@ -207,21 +207,6 @@ def _build_capabilities_block() -> list[str]:
     ]
 
 
-def _plugin_root() -> Path:
-    """Resolve the conexus plugin's root directory.
-
-    ``CLAUDE_PLUGIN_ROOT`` first -- set by Claude Code for every plugin
-    hook invocation, real or dispatched through ``nx-hook`` -- falling back
-    to the dev-checkout layout (this file lives at
-    ``<repo>/src/nexus/hooks/session_context.py``; the plugin root is
-    ``<repo>/conexus``) for a from-source run with no plugin host in the
-    picture. Mirrors ``stop_verification.py``'s ``_plugin_root()``
-    (bead nexus-q02nx.13/.17), the established precedent for a ported hook
-    that still needs a not-yet-ported plugin-only sibling script.
-    """
-    return plugin_root()
-
-
 def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script never reads stdin; payload is unused, matching it
     """Run the SessionStart T2/beads/capabilities/knowledge-map hook.
 
@@ -232,6 +217,9 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script neve
     ``print()``/``sys.exit(0)``, and the sibling-script path resolution via
     :func:`_plugin_root` in place of ``Path(__file__).parent`` (this
     module's parent directory no longer holds ``t2_prefix_scan.py``).
+    The second of those is gone as of bead nexus-b5ugt: the T2 section
+    calls ``nexus.hooks.t2_prefix_scan`` in-process, so this hook resolves
+    no plugin path at all and ``_plugin_root`` went with it.
     """
     project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
     cwd = str(project_dir)
@@ -246,12 +234,19 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script neve
             project_name = Path(toplevel).name
 
         if project_name:
-            # Use t2_prefix_scan to surface all namespaces (bare, _rdr, etc.)
-            scan_script = _plugin_root() / "hooks" / "scripts" / "t2_prefix_scan.py"
-            memory_output = run_command(
-                [sys.executable, str(scan_script), project_name],
-                timeout=NX_TIMEOUT, cwd=cwd
-            )
+            # In-process, like subagent_start's own T2 section (bead
+            # nexus-b5ugt). This was the SECOND consumer of the plugin's
+            # t2_prefix_scan.py and it was missed when the first was
+            # ported -- found by asking what else still executes a plugin
+            # script, not by a failure, because this hook runs on the
+            # command tier where Claude Code sets CLAUDE_PLUGIN_ROOT
+            # correctly, so the subprocess actually worked here. Porting
+            # it anyway: leaving one caller on the script keeps the
+            # script alive, and a plugin-resident script is the thing
+            # RDR-215 is removing.
+            from nexus.hooks.t2_prefix_scan import scan  # noqa: PLC0415 — deferred: only a real T2 section pays the import
+
+            memory_output = scan(project_name)
             if memory_output:
                 output_lines.append("## T2 Memory (Active Project)")
                 output_lines.append(memory_output)
