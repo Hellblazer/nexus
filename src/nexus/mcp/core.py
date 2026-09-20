@@ -2295,6 +2295,7 @@ def _search_render(
     topic: str = "",
     structured: bool = False,
     threshold: float | None = None,
+    lexical: bool = False,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
 
@@ -2393,9 +2394,14 @@ def _search_render(
         # the uncached path would render.
         need = offset + limit
         fetch_n = need + limit * _PAGE_LOOKAHEAD_PAGES
+        # ``lexical`` MUST be in this tuple. It changes WHICH rows are
+        # retrieved, so a lexical call that reused a vector-only page would be
+        # served silently-wrong results inside the 120s TTL — and the wrapper
+        # calls _search_render twice, so it is reachable within one request.
+        # Found by the RDR-217 enrichment pass before the parameter existed.
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold,
+            topic or "", threshold, lexical,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -2421,6 +2427,7 @@ def _search_render(
                     taxonomy=_t2_db.taxonomy,
                     topic=topic or None,
                     threshold_override=threshold,
+                    lexical=lexical,
                     telemetry=_t2_db.telemetry,
                     diagnostics_out=diag,
                 )
@@ -2686,6 +2693,20 @@ def search(
             "None (default) uses per-corpus config thresholds."
         ),
     )] = None,
+    lexical: Annotated[bool, Field(
+        description=(
+            "Also search the engine's exact-text indexes (full-text + trigram) "
+            "and ADD those hits to the vector results, rather than replacing "
+            "them. Use for a rare identifier or exact token a semantic search "
+            "misses: measured 0.167 -> 0.698 precision@10 on rare tokens, with "
+            "one token invisible to vector search entirely. Lexical hits are "
+            "exempt from the distance threshold, since a lexically-matched row "
+            "whose vector distance is large is exactly the target. Refuses on a "
+            "backend without the route rather than silently returning "
+            "vector-only rows. Unrelated to the CLI's --hybrid, which only "
+            "re-ranks."
+        ),
+    )] = False,
 ) -> "str | dict | CallToolResult":
     """Semantic search across T3 chunks; returns matching text fragments, not whole documents.
 
@@ -2716,7 +2737,7 @@ def search(
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
-        threshold=threshold,
+        threshold=threshold, lexical=lexical,
     )
     if structured or not isinstance(result, str):
         # structured=True, or an error string that already reads like one —
@@ -2727,7 +2748,7 @@ def search(
     data = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=True,
-        threshold=threshold,
+        threshold=threshold, lexical=lexical,
     )
     empty_shape = {
         "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [],

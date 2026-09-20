@@ -23,7 +23,22 @@ __all__ = [
     "SearchDiagnostics",
     "apply_ranking_boosts",
     "apply_file_diversity_cap",
+    "LexicalLegUnavailableError",
 ]
+
+
+class LexicalLegUnavailableError(RuntimeError):
+    """``--lexical`` was asked of a backend with no hybrid-search route.
+
+    RDR-217 P3. Raised rather than degraded, by Sam's decision of 2026-09-19:
+    the lexical leg is never a silent default and never a silent absence. The
+    duck-typed ``t3`` in :func:`search_cross_corpus` spans ``HttpVectorClient``
+    (which has the route) and ``T3Database`` (which does not), and the failure
+    this prevents is the quiet one — vector-only rows returned for a lexical
+    request look entirely plausible. Phase 1 measured the cost: the vector leg
+    scores 0.167 precision@10 on rare tokens against the lexical leg's 0.698,
+    and missed one query entirely.
+    """
 
 
 @dataclass
@@ -567,6 +582,7 @@ def search_cross_corpus(
     telemetry: Any | None = None,
     rerank: bool = False,
     rerank_meta_out: dict[str, dict] | None = None,
+    lexical: bool = False,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
@@ -718,6 +734,30 @@ def search_cross_corpus(
     # RDR-188: only a capability-marked backend is asked to rerank.
     server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
 
+    # RDR-217 P3: the lexical leg, ADDITIVE. Phase 1 measured why it cannot be
+    # a mode-swap: the hybrid route returned ZERO rows for every prose query
+    # (it gates on text before the vector ranks anything), so selecting it
+    # instead of the vector leg hands a natural-language question an empty
+    # result. Union keeps every row the vector leg returns today and adds the
+    # rare-token wins on top — measured 0.167 -> 0.698 precision@10 on rare
+    # tokens, with one query the vector leg could not see at all.
+    #
+    # REFUSE rather than fall back on a backend without the leg (Sam,
+    # 2026-09-19). A silent fall-back returns plausible rows — the
+    # 0.167-precision vector window — with nothing telling the caller the leg
+    # they asked for never ran. Same capability-marker shape as rerank above,
+    # and gated HERE rather than in search_cmd.py so the MCP surface inherits
+    # it for free.
+    if lexical and not getattr(t3, "supports_hybrid_search", False):
+        raise LexicalLegUnavailableError(
+            f"--lexical needs the engine's hybrid-search route and this backend "
+            f"({type(t3).__name__}) does not have it. Refusing rather than "
+            "falling back to vector-only search, which would return plausible "
+            "rows without the lexical leg you asked for. Remedy: use the "
+            "service-backed store (`nx daemon service start`), or drop "
+            "--lexical."
+        )
+
     def _search_batch(cols: list[str]) -> list[dict]:
         """Search one embedding-model-homogeneous batch of collections in a
         single combined ``/v1/vectors/search`` call, returning one result
@@ -755,6 +795,18 @@ def search_cross_corpus(
                                 rerank=True, rerank_meta_out=rerank_meta)
             else:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where)
+            if lexical:
+                # ADDITIVE: the lexical rows join the vector rows rather than
+                # replacing them. Deduplicated by chunk id, vector row winning
+                # on a tie so its distance and metadata are the ones reported;
+                # a lexical-only row is stamped _lexical_only so the threshold
+                # filter below can exempt it.
+                lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
+                                           where=effective_where)
+                seen_ids = {r.get("id") for r in raw}
+                added = [dict(r, _lexical_only=True) for r in lex_raw
+                         if r.get("id") not in seen_ids]
+                raw = list(raw) + added
         except VectorServiceError as exc:
             # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
             # unservable collection in the batch (embedding-space mismatch,
@@ -834,7 +886,16 @@ def search_cross_corpus(
                 # catalog-param branch) never call it -- see
                 # apply_ranking_boosts' docstring. Thresholds apply to raw
                 # distance here, before any of that.
-                if threshold is not None and distance > threshold:
+                # RDR-217 P3, settled by Sam 2026-09-19: a LEXICAL row is
+                # EXEMPT from the per-collection distance threshold. The
+                # threshold is calibrated on vector distance, and a lexical hit
+                # whose vector distance exceeds it IS the target row — Phase 1's
+                # word_similarity_threshold query is exactly that case, scoring
+                # 0.000 precision AND 0.000 recall on the vector leg. Applying
+                # a vector threshold to a lexically-matched row would drop
+                # precisely what the leg exists to find.
+                if (threshold is not None and distance > threshold
+                        and not r.get("_lexical_only")):
                     dropped += 1
                     if min_dropped_distance is None or distance < min_dropped_distance:
                         min_dropped_distance = distance

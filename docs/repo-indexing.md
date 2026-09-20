@@ -293,6 +293,7 @@ nx search "query" --corpus code                    # search code collections onl
 nx search "query" --corpus docs                    # search prose collections only
 nx search "query" --corpus code --corpus docs      # both, merged via reranker
 nx search "query" --corpus code --hybrid           # semantic + frecency blend
+nx search "some_exact_name" --corpus code --lexical  # semantic + exact-text hits (adds rows; --hybrid only re-ranks)
 nx search "query" --corpus code --hybrid --no-rerank  # hybrid without cross-corpus reranking
 ```
 

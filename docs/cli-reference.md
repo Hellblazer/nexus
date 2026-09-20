@@ -12,6 +12,7 @@ Semantic search across T3 knowledge collections. For how `nx search` relates to 
 
 ```
 nx search "authentication middleware" --corpus code --hybrid --n 20
+nx search "resolve_active_session_id" --corpus code --lexical
 ```
 
 | Flag | Description |
@@ -21,6 +22,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
 | `--repo NAME_OR_TUMBLER` | Scope to one registered owner's collections, by owner name or dotted tumbler (repeatable). Replaces the default `--corpus` prefixes; combines with an explicit `--corpus` (GH #1527) |
 | `--hybrid` | Blend git frecency into the ranking for code corpora (0.7*vector + 0.3*frecency). Until nexus-06aei this also merged ripgrep keyword hits from a local line cache; that half is gone and the flag is now the frecency switch alone |
+| `--lexical` | Also search the engine's exact-text indexes (PostgreSQL full-text + trigram) and ADD those hits to the vector results. Finds a rare identifier or exact token a semantic search misses; measured 0.167 -> 0.698 precision@10 on rare tokens (RDR-217 Phase 1). Lexical hits are exempt from the distance threshold. Refuses on a backend without the route rather than silently returning vector-only rows |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead). Reranking runs SERVER-side (RDR-188): the engine scores candidates (Voyage rerank-2.5, or the local ms-marco cross-encoder without a Voyage key); a degraded rerank is reported on stderr and results fall back to distance order |
 | `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Range operators (`>=`, `<=`, `>`, `<`) auto-coerce an unambiguous numeric literal to a number for ANY field (numeric compare; JSON-string metadata values will not match a numeric operand); quote the value (`--where "created>='2026-01-01'"`) to force an ordered-STRING compare (correct for ISO dates; beware `'9' > '10'` lexically). Equality/`!=` coerce only the known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`). Example: `--where bib_year>=2024 --where section_type!=references`. Repeating the same key with `=` for two DIFFERENT values (`--where k=a --where k=b`) is a caller error, not an OR — no record can equal both — and raises loudly instead of silently keeping the last value; scope "any of several exact values" as two queries unioned client-side (single-key `$in` tracked as nexus-4gzc8; see [PDF Extraction Backends](#pdf-extraction-backends) for a worked `extraction_method` example) |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |

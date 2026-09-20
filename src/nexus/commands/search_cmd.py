@@ -114,7 +114,15 @@ def _maybe_emit_silent_zero_note(
               help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,
               help="Blend git frecency into the score for code corpora "
-                   "(0.7*vector + 0.3*frecency)")
+                   "(0.7*vector + 0.3*frecency). Re-RANKS vector results; "
+                   "does not change WHICH rows are retrieved. Not related to "
+                   "--lexical.")
+@click.option("--lexical", is_flag=True, default=False,
+              help="Also search the engine's exact-text indexes (full-text + "
+                   "trigram) and ADD those hits to the vector results. Finds "
+                   "rare identifiers a vector search misses; refuses on a "
+                   "backend without the route rather than silently falling "
+                   "back. Unrelated to --hybrid, which only re-ranks.")
 @click.option("--no-rerank", "no_rerank", is_flag=True, default=False,
               help="Disable cross-corpus reranking (use round-robin instead)")
 @click.option("--vimgrep", is_flag=True, default=False,
@@ -163,6 +171,7 @@ def search_cmd(
     repos: tuple[str, ...],
     n: int,
     hybrid: bool,
+    lexical: bool,
     no_rerank: bool,
     vimgrep: bool,
     json_out: bool,
@@ -411,6 +420,7 @@ def search_cmd(
                 telemetry=_t2.telemetry,
                 rerank=want_server_rerank,
                 rerank_meta_out=rerank_meta,
+                lexical=lexical,
             )
         return raw
 

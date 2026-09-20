@@ -2902,6 +2902,17 @@ class HttpVectorClient:
     #: never asked to rerank.
     supports_server_rerank: bool = True
 
+    #: RDR-217 P3: this backend reaches the engine's lexical indexes via
+    #: ``POST /v1/vectors/hybrid-search``. Capability marker in the same
+    #: two-site shape as ``supports_server_rerank`` above, read by
+    #: ``search_engine.search_cross_corpus``. ``T3Database`` deliberately does
+    #: NOT define it: it has no hybrid route, and per Sam's decision of
+    #: 2026-09-19 ``--lexical`` REFUSES on a backend without the leg rather
+    #: than falling back to vector. Phase 1 gave that posture a reason — a
+    #: silent fall-back would return the 0.167-precision vector window on a
+    #: rare-token query with nothing saying the requested leg never ran.
+    supports_hybrid_search: bool = True
+
     #: Memoized GET /version ``embedding_mode`` (class-level default so
     #: partially-constructed test instances still resolve; successful probes
     #: shadow it per-instance). RDR-188 P3.2 (nexus-9o6y2.14).

@@ -103,10 +103,24 @@ mechanize, it matters enough to ship.
   prose only and carry no tool, hook or command surface change — that is a
   statement about THESE edits, not a claim that every mention of `--hybrid`
   in the plugin was swept. `conexus/skills/architecture/SKILL.md` still
-  recommends `nx search --hybrid` for discovery in three places and is
-  deliberately unchanged: it is still true (the flag exists and still blends
-  frecency), just narrower than when written.
+  recommends `nx search --hybrid` for discovery in three places and was
+  deliberately unchanged AT THE TIME: it was still true (the flag exists and
+  still blends frecency), just narrower than when written. RDR-217 has since
+  edited that file for a different reason — see its own entry below — so this
+  paragraph's "deliberately unchanged" no longer describes the file.
   bead: nexus-06aei
+
+- `conexus/skills/architecture/SKILL.md`:
+  bead: nexus-lqo4p.16 — RDR-217 adds `nx search --lexical`, and the two flags
+  have similar-sounding names for different jobs: `--hybrid` RE-RANKS vector
+  results by git frecency and never changes which rows come back, while
+  `--lexical` ADDS hits from the engine's exact-text indexes and does. This
+  skill recommends `--hybrid` for discovery in three places, so without a
+  distinction stated at the moment the second flag lands, the two meanings
+  drift apart in exactly the guidance agents read to choose between them.
+  Adds one paragraph naming the difference and when to reach for each.
+  Measured basis for the recommendation: 0.167 -> 0.698 precision@10 on
+  rare tokens (RDR-217 Phase 1).
 
 - `conexus/hooks/scripts/stop_verification_hook.sh`: deleted the Check-2
   catalog-sync block, which was dead at three independent levels. Its guard
