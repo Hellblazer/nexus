@@ -45,25 +45,40 @@ _nx_gc_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=src/nexus/_install/census.sh
 . "$_nx_gc_here/census.sh"
 
-# $1 tools root. Prints protected absolute generation paths, one per line.
-_nx_gc_protected() {
-    _nx_gp_root="$1"
-    for _nx_gp_link in "$NX_CURRENT_LINK_NAME" "$NX_PREVIOUS_LINK_NAME"; do
-        if [ -L "$_nx_gp_root/$_nx_gp_link" ]; then
-            _nx_gp_target="$(readlink "$_nx_gp_root/$_nx_gp_link")"
-            [ -n "$_nx_gp_target" ] && printf '%s\n' "$_nx_gp_target"
-        fi
-    done
+# ── THE DISPATCH ─────────────────────────────────────────────────────────────
+# The rules above are implemented in gc_core.py beside this file, and nothing
+# below restates them. tests/test_install_gc_twins_agree.py is what says so.
+#
+# The whole sweep is ONE core call. Not a decision per generation dispatched
+# from here, for two reasons that both matter more for gc than anywhere else in
+# this directory. The census must take one `ps` for the entire pass, exactly as
+# .5 requires, and a call per generation would take one each. And the four
+# never-delete rules are evaluated against a single view of the tree: deciding
+# one generation at a time across separate processes means the tree can change
+# underneath the sweep between decisions, which for the only code here that
+# DELETES is the difference between a reap and a data-loss report.
+
+_nx_gc_core() {
+    if [ -z "${NX_LAYOUT_HOME-}" ]; then
+        echo "nexus: NX_LAYOUT_HOME is unset; gc.sh dispatches to gc_core.py" \
+             "beside it and a sourced file cannot find its own directory under" \
+             "POSIX sh." >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
+    fi
+    if [ ! -f "$NX_LAYOUT_HOME/gc_core.py" ]; then
+        echo "nexus: no gc_core.py in NX_LAYOUT_HOME=$NX_LAYOUT_HOME." \
+             "It ships beside gc.sh; an install with one and not the other is" \
+             "incomplete." >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
+    fi
+    python3 "$NX_LAYOUT_HOME/gc_core.py" "$@" </dev/null
 }
 
-# Reap generations outside the keep window that no rule protects.
-#
-#   --keep N        retain the newest N complete generations (default 3)
-#   --self <dir>    the generation running this installer (rule d)
-#   --dry-run       report exactly what would go, delete nothing
-#   $1 optional trailing tools root
 #: Minutes a receipt-less gen-* tree is presumed to be a build in progress.
-#: A generation build takes minutes; an hour is well past any of them.
+#: A generation build takes minutes; an hour is well past any of them. Exported
+#: rather than passed, because the core reads them from the environment: they
+#: are operator knobs, and threading them through argv would mean every caller
+#: of nx_gc_generations had to know about them to leave them alone.
 NX_GC_BUILD_GRACE_MINUTES="${NX_GC_BUILD_GRACE_MINUTES:-60}"
 #: Minutes a receipt-less tree carrying the builder's claim marker
 #: ($NX_BUILDING_MARKER_NAME, written the instant the directory exists) is
@@ -72,174 +87,14 @@ NX_GC_BUILD_GRACE_MINUTES="${NX_GC_BUILD_GRACE_MINUTES:-60}"
 #: tree. Six hours is past any build; a crashed one is reaped after that.
 NX_GC_BUILD_CLAIM_MINUTES="${NX_GC_BUILD_CLAIM_MINUTES:-360}"
 
+# Reap generations outside the keep window that no rule protects.
+#
+#   --keep N        retain the newest N complete generations (default 3)
+#   --self <dir>    the generation running this installer (rule d)
+#   --dry-run       report exactly what would go, delete nothing
+#   $1 optional trailing tools root
 nx_gc_generations() {
-    _nx_gc_keep=3
-    _nx_gc_self=""
-    _nx_gc_dry=0
-    _nx_gc_root_arg=""
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --keep)    _nx_gc_keep="${2-}"; shift 2 ;;
-            --self)    _nx_gc_self="${2-}"; shift 2 ;;
-            --dry-run) _nx_gc_dry=1;        shift ;;
-            *)         _nx_gc_root_arg="$1"; shift ;;
-        esac
-    done
-
-    case "$_nx_gc_keep" in
-        ''|*[!0-9]*)
-            echo "nexus: --keep must be a non-negative integer, got '$_nx_gc_keep'" >&2
-            return "$NX_LAYOUT_USAGE_EXIT"
-            ;;
-    esac
-    if [ "$_nx_gc_keep" -lt 1 ]; then
-        # --keep 0 means "retain nothing", leaving only the four rules between
-        # the operator and an install with no fallback at all. Almost certainly
-        # a mistake, and refusing costs one message.
-        echo "nexus: --keep 0 would retain no generations; refusing" >&2
-        return "$NX_LAYOUT_USAGE_EXIT"
-    fi
-
-    _nx_gc_root="$(nx_root "$_nx_gc_root_arg")" || return "$NX_LAYOUT_USAGE_EXIT"
-    [ -d "$_nx_gc_root" ] || return 0
-
-    _nx_gc_protected_list="$(_nx_gc_protected "$_nx_gc_root")"
-    [ -n "$_nx_gc_self" ] && _nx_gc_protected_list="$_nx_gc_protected_list
-$_nx_gc_self"
-
-    # One census for the whole pass, for the same reason .5 takes one snapshot:
-    # a per-generation re-read could reap against a state that never existed.
-    _nx_gc_snapshot="$(_nx_ps_snapshot refresh)"
-
-    # Complete generations, newest last. Stamps sort chronologically by .2's
-    # construction, so lexical order IS creation order — the property .2 pins.
-    _nx_gc_complete=""
-    for _nx_gc_dir in "$_nx_gc_root"/"$NX_GENERATION_PREFIX"*; do
-        [ -d "$_nx_gc_dir" ] || continue
-        if [ -f "$_nx_gc_dir/$NX_RECEIPT_NAME" ]; then
-            _nx_gc_complete="$_nx_gc_complete$_nx_gc_dir
-"
-        fi
-    done
-    _nx_gc_complete="$(printf '%s' "$_nx_gc_complete" | grep -c . 2>/dev/null || true)"
-
-    _nx_gc_index=0
-    _nx_gc_total="$_nx_gc_complete"
-
-    for _nx_gc_dir in "$_nx_gc_root"/"$NX_GENERATION_PREFIX"*; do
-        [ -d "$_nx_gc_dir" ] || continue
-
-        if [ -f "$_nx_gc_dir/$NX_RECEIPT_NAME" ]; then
-            _nx_gc_index=$((_nx_gc_index + 1))
-            # Inside the keep window: the newest N complete generations.
-            if [ $((_nx_gc_total - _nx_gc_index)) -lt "$_nx_gc_keep" ]; then
-                continue
-            fi
-        elif [ ! -L "$_nx_gc_dir" ] && {
-                [ -n "$(find "$_nx_gc_dir" -mmin "-$NX_GC_BUILD_GRACE_MINUTES" -print -quit 2>/dev/null)" ] ||
-                [ -n "$(find "$_nx_gc_dir/$NX_BUILDING_MARKER_NAME" -maxdepth 0 -mmin "-$NX_GC_BUILD_CLAIM_MINUTES" -print 2>/dev/null)" ]
-            }; then
-            # A receipt-less tree that something wrote to within the grace
-            # window is a BUILD IN PROGRESS, not wreckage (review of
-            # nexus-xn84f): install_generation.sh writes the receipt last,
-            # and its `uv venv`/pip argv names the bare directory, which the
-            # holder census does not match. With the reap on every
-            # session's SessionStart hook, another session's install is the
-            # normal case, not the edge. Wreckage is what is still
-            # receipt-less after the window.
-            printf 'kept %s: build in progress (receipt-less; written within %s min or claimed within %s min)\n' "$_nx_gc_dir" "$NX_GC_BUILD_GRACE_MINUTES" "$NX_GC_BUILD_CLAIM_MINUTES"
-            continue
-        fi
-        # A receipt-less directory falls through here deliberately: reapable,
-        # and never counted toward the keep window.
-
-        # Rules (a), (b), (d).
-        _nx_gc_is_protected=0
-        for _nx_gc_p in $_nx_gc_protected_list; do
-            [ -n "$_nx_gc_p" ] || continue
-            if [ "$_nx_gc_p" = "$_nx_gc_dir" ]; then
-                _nx_gc_is_protected=1
-                break
-            fi
-        done
-        [ "$_nx_gc_is_protected" -eq 1 ] && continue
-
-        # Rule (c). Say so on stdout (nexus-xn84f): a held tree outside the
-        # keep window is 1.7 GB the operator cannot see go, and a reap that
-        # only reports what it deleted let a box grow one generation per
-        # upgrade for as long as its sessions lived.
-        _nx_gc_holders="$(nx_generation_holder_pids "$_nx_gc_dir" "$_nx_gc_snapshot")"
-        if [ -n "$_nx_gc_holders" ]; then
-            printf 'kept %s: held by %s\n' "$_nx_gc_dir" "$(printf '%s' "$_nx_gc_holders" | tr '\n' ' ' | sed 's/ *$//')"
-            continue
-        fi
-
-        if [ "$_nx_gc_dry" -eq 1 ]; then
-            printf 'would reap %s\n' "$_nx_gc_dir"
-        else
-            if [ -L "$_nx_gc_dir" ]; then
-                # SCOPING GUARD. Following a gen-* symlink is the ONLY way this
-                # sweep can delete anything outside the tools root, so it is
-                # fenced twice rather than trusted.
-                #
-                # Measured before this guard existed: a `gen-rogue` symlink
-                # pointing at an unrelated directory caused `rm -rf` of that
-                # directory. The only check was that the target was not
-                # literally "/" — one value out of infinitely many dangerous
-                # ones, which is the shape of a guard that reads as protection
-                # without being any.
-                #
-                # (1) Only the reserved ledger name may be a symlink at all.
-                # (2) Its target must look like the uv-managed venv it claims
-                #     to be — a directory carrying pyvenv.cfg. A wrong target
-                #     (a home directory, a checkout) has none, so the pointer
-                #     is unlinked and the tree is left alone. Failing that way
-                #     leaves litter; failing the other way deletes data.
-                if [ "${_nx_gc_dir##*/}" != "$NX_GENERATION_PREFIX$NX_LEGACY_GENERATION_NAME" ]; then
-                    echo "nexus: refusing to reap through an unrecognised generation symlink: $_nx_gc_dir" >&2
-                    continue
-                fi
-                # A pseudo-generation (.7's legacy uv-tool bridge): this
-                # entry is only our LEDGER pointer, never the tree itself.
-                # `rm -rf` on a symlink unlinks the pointer and leaves its
-                # target untouched -- exactly backwards for a reap, whose
-                # entire job here is deleting the legacy tree. Resolve one
-                # level (registration only ever writes a direct absolute
-                # symlink, never a chain) and remove both: the real tree,
-                # then the now-dangling pointer.
-                _nx_gc_real="$(readlink "$_nx_gc_dir")"
-                case "$_nx_gc_real" in
-                    /*) ;;
-                    *)
-                        echo "nexus: ledger target is not an absolute path, refusing: '$_nx_gc_real'" >&2
-                        continue
-                        ;;
-                esac
-                if [ ! -d "$_nx_gc_real" ] || [ ! -f "$_nx_gc_real/pyvenv.cfg" ]; then
-                    echo "nexus: ledger target is not a venv, unlinking the pointer only: $_nx_gc_real" >&2
-                    rm -f -- "$_nx_gc_dir"
-                    printf 'reaped %s\n' "$_nx_gc_dir"
-                    continue
-                fi
-                rm -rf -- "$_nx_gc_real"
-                rm -f -- "$_nx_gc_dir"
-                # Reaping the tree IS what closes uv's door: measured against
-                # uv 0.8 (2026-08-28), with the venv gone `uv tool list` says
-                # "No tools installed" and `uv tool upgrade conexus` REFUSES
-                # ("not installed") rather than rebuilding. Never advise
-                # `uv tool uninstall` here -- also measured: it deletes a
-                # nexus-owned regular-file shim sitting at its bin path.
-                echo "nexus: reaped the legacy uv tree $_nx_gc_real; uv no longer lists it and 'uv tool upgrade conexus' will now refuse rather than rebuild it" >&2
-            else
-                # -rf on the directory itself, never through a pointer: the
-                # pointers live in this same directory, and following one
-                # would empty the generation it names rather than removing a
-                # link.
-                rm -rf -- "$_nx_gc_dir"
-            fi
-            printf 'reaped %s\n' "$_nx_gc_dir"
-        fi
-    done
-    return 0
+    NX_GC_BUILD_GRACE_MINUTES="$NX_GC_BUILD_GRACE_MINUTES" \
+    NX_GC_BUILD_CLAIM_MINUTES="$NX_GC_BUILD_CLAIM_MINUTES" \
+        _nx_gc_core "$@"
 }
