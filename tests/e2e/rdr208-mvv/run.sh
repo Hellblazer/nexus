@@ -184,7 +184,13 @@ rm -rf "$ART"
 mkdir -p "$ART"
 chmod 777 "$ART"
 set +e
+# nexus-6doho: this container installs onto a virgin HOME, which mints a
+# fresh install_id, so each run registers as a new install in
+# nexus.install_pings. `-e` is the only channel into the container —
+# exporting the opt-out here would not reach it, because docker run does
+# not inherit the host environment.
 docker run --rm -v "$ART:/home/nexus/artifacts" -e MVV_ARTIFACTS=/home/nexus/artifacts \
+    -e NX_NO_TELEMETRY=1 \
     -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
     -v "$STAGE/claude.json":/home/nexus/seed/claude.json:ro \
     -e EXPECT_BRANCH_FIX="$EXPECT" -e MVV_LABEL="$LABEL" "$IMAGE" 2>&1 | tee "$LOG"

@@ -252,7 +252,18 @@ mkdir -p "$ART"; chmod 777 "$ART"
 echo "[run] real Claude Code sessions, plugin from $SHA"
 echo "[run] artifacts -> $ART"
 set +e
+# nexus-6doho: every install inside this container is a throwaway on a virgin
+# HOME, and a virgin HOME mints a NEW install_id, so each run registers as a
+# fresh install in nexus.install_pings — 18 of them reached production across
+# two release nights and tripled the active-install headline with Sam's own
+# testing. `-e` is the only channel into the container: exporting this in the
+# launching shell does nothing, because docker run does not inherit the host's
+# environment. Same fix and reasoning as migration-rehearsal/run.sh:1065-1069
+# (nexus-h5olw). The comment lives ABOVE the command, not inside it: a `#` line
+# within a backslash-continued command ENDS that command, and `bash -n` calls
+# the result valid because it is — it just runs `-e` as its own command.
 docker run --rm \
+    -e NX_NO_TELEMETRY=1 \
     -v "$STAGE/.claude-credentials.json:/creds/.credentials.json:ro" \
     -v "$ART:/artifacts" \
     -e SHAKEOUT_SHA="$SHA" \
