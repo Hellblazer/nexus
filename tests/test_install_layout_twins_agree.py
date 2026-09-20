@@ -22,11 +22,15 @@ WHAT THIS FILE PINS NOW, in three kinds, because they are not equally strong:
 
 1. STILL GENUINELY TWO STATEMENTS, still drift tests. The twelve ``NX_*``
    constants in layout.sh (kept as shell literals so that sourcing needs no
-   python3 -- gc.sh and census.sh read constants and call nothing), the
-   receipt field list, ``NX_NEVER_SHIM`` and ``NX_DEPENDENCY_SCRIPTS`` in
-   shims.sh, and the declared-scripts query in install_generation.sh. The
-   constant check carries its own coverage assert that PARSES layout.sh, so a
-   new constant cannot arrive without a twin.
+   python3 -- gc.sh and census.sh read constants and call nothing) and the
+   receipt field list. The constant check carries its own coverage assert that
+   PARSES layout.sh, so a new constant cannot arrive without a twin.
+
+   ``NX_NEVER_SHIM``, ``NX_DEPENDENCY_SCRIPTS`` and the declared-scripts query
+   WERE in this kind, as shell literals in shims.sh. They are not any more:
+   shims.sh dispatches to shims_core, which asks layout_core, so each is stated
+   once. What is pinned instead is that the shell cannot regrow a copy --
+   ``test_the_shell_no_longer_states_the_shim_sets_at_all``.
 
 2. WIRING, not drift. Everything that runs a shell function and compares it to
    the Python function now compares the core against itself, since the shell
@@ -506,71 +510,68 @@ def test_both_halves_build_the_same_spec(
     assert shell == python
 
 
-def test_both_halves_name_the_same_never_shim_set() -> None:
-    """``NEVER_SHIM`` / ``NX_NEVER_SHIM``: the names that live in a venv's
-    ``bin/`` and are never shimmed into the shared bin dir.
+def test_the_shell_no_longer_states_the_shim_sets_at_all() -> None:
+    """NEVER_SHIM, DEPENDENCY_SCRIPTS and the declared-scripts query were each
+    stated TWICE -- once in ``layout_core`` and once as a shell literal in
+    ``shims.sh`` -- and three tests here compared the copies. The shell copies
+    are gone: ``shims.sh`` dispatches to ``shims_core``, which asks
+    ``layout_core`` directly, so there is one statement of each fact and
+    nothing left to compare.
 
-    It became a twin because a consumer needed it. ``nx doctor``'s
-    generation-layout check derives "the names nexus owns" from
-    ``<current>/bin`` in order to notice uv reclaiming a shim — and
-    ``~/.local/bin`` is SHARED, so without subtracting this set a stray
-    ``python`` symlink from pyenv, asdf or homebrew reads as evidence that uv
-    took our shims and hard-fails a healthy install (RG-C, nexus-utpuw.11).
+    What replaces those comparisons is this: the shell must not regrow a second
+    copy. A reintroduced ``NX_NEVER_SHIM=`` or an inlined
+    ``importlib.metadata`` query in shims.sh is the drift itself, arriving
+    before anything has drifted, and it is invisible to every other test --
+    a second copy that happens to AGREE today passes all of them.
 
-    Two copies of that set drifting apart would put the shim WRITER and the
-    shim CHECKER in disagreement about what nexus owns, and the check would
-    then be wrong in whichever direction the drift went: crying wolf, or going
-    quiet on a real reclaim.
+    Comments are stripped before matching, because shims.sh's header discusses
+    these names while explaining why it no longer states them: grep cannot tell
+    an identifier from a sentence about one.
     """
-    import subprocess
-
-    from nexus.install_layout import NEVER_SHIM
-
     shims_sh = _SHELL_LAYOUT.parent / "shims.sh"
-    r = subprocess.run(
-        ["bash", "-c", f'. "{shims_sh}"; printf "%s" "$NX_NEVER_SHIM"'],
-        capture_output=True, text=True, timeout=60,
+    code = "\n".join(
+        line for line in shims_sh.read_text().splitlines()
+        if not line.lstrip().startswith("#")
     )
-    assert r.returncode == 0, r.stderr
-    shell_set = frozenset(r.stdout.split())
+    for regrown in ("NX_NEVER_SHIM", "NX_DEPENDENCY_SCRIPTS", "importlib", "entry_points"):
+        assert regrown not in code, (
+            f"shims.sh states {regrown!r} again; the shim sets and the "
+            "declared-scripts query live in layout_core alone, and a second "
+            "copy that agrees today is exactly how the first drift started"
+        )
 
-    assert shell_set == NEVER_SHIM, (
-        f"the halves disagree on what is never shimmed:\n"
-        f"  shell-only:  {sorted(shell_set - NEVER_SHIM)}\n"
-        f"  python-only: {sorted(NEVER_SHIM - shell_set)}"
+
+def test_the_writer_and_the_checker_share_one_owned_set_rule() -> None:
+    """The rule itself, pinned where it now lives.
+
+    ``owned_shim_names`` (what ``nx doctor`` and ``self_cmd``'s reclaim repair
+    walk) and ``shims_core.write_shims`` (what actually writes and prunes) must
+    agree about which names nexus owns. They agree by CONSTRUCTION now -- both
+    call ``owned_from_declared`` -- and this is what says so, so that a future
+    edit giving either one its own rule fails here rather than in the field.
+
+    Before the collapse they did not agree. shims.sh recomputed the owned set
+    inline in its prune loop without the name allowlist, so a hostile declared
+    name that existed in bin/ was OWNED by the pruner and kept forever, while
+    the writer refused to write it and doctor never looked at it.
+    """
+    import inspect
+
+    from nexus._install import layout_core, shims_core
+
+    owned_src = inspect.getsource(layout_core.owned_shim_names)
+    assert "owned_from_declared" in owned_src, (
+        "owned_shim_names restates the rule instead of calling it"
     )
-
-
-def _shell_word_list(var: str) -> frozenset[str]:
-    """The space-separated value of ``var="..."`` in the shell shim writer."""
-    text = (_SHELL_LAYOUT.parent / "shims.sh").read_text()
-    match = re.search(rf'^{var}="([^"]*)"', text, flags=re.M)
-    assert match, f"{var} not found in shims.sh"
-    return frozenset(match.group(1).split())
-
-
-def test_both_halves_agree_on_the_dependency_scripts() -> None:
-    """DEPENDENCY_SCRIPTS is the Python twin of NX_DEPENDENCY_SCRIPTS: the
-    owned-shim set doctor and the takeover repair derive (GH #1487,
-    nexus-50hm9) must be the set nx_write_shims writes, or a reclaimed
-    dependency shim goes unreported on one side."""
-    assert install_layout.DEPENDENCY_SCRIPTS == _shell_word_list("NX_DEPENDENCY_SCRIPTS")
-
-
-def _code_lines(text: str) -> list[str]:
-    return [ln.rstrip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
-
-
-def test_both_halves_run_the_same_declared_scripts_query() -> None:
-    """The Python half asks a generation which console scripts it declares
-    with the SAME interpreter snippet the shell writer's _nx_declared_scripts
-    runs (GH #1487, nexus-50hm9): doctor and the takeover repair must derive
-    the owned set exactly as nx_write_shims does, or the two halves disagree
-    about which shims exist. Compared line-for-line ignoring comments."""
-    shell = (_SHELL_LAYOUT.parent / "shims.sh").read_text()
-    match = re.search(r"_nx_declared_scripts\(\) \{.*?-c '\n(.*?)\n' \"\$2\"", shell, flags=re.S)
-    assert match, "_nx_declared_scripts's inline python not found in shims.sh"
-    assert _code_lines(match.group(1)) == _code_lines(install_layout._DECLARED_SCRIPTS_QUERY)
+    write_src = inspect.getsource(shims_core.write_shims)
+    assert "owned_from_declared" in write_src, (
+        "write_shims derives its own owned set instead of calling the shared rule"
+    )
+    prune_src = inspect.getsource(shims_core._prune)
+    assert "DEPENDENCY_SCRIPTS" not in prune_src and "NEVER_SHIM" not in prune_src, (
+        "the prune is recomputing the owned set; it must be handed the one the "
+        "writer used, which is the divergence this collapse removed"
+    )
 
 
 # ===========================================================================

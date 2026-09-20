@@ -39,6 +39,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install import shims_core
+
 _REPO = Path(__file__).resolve().parents[2]
 _SHIMS = _REPO / "src" / "nexus" / "_install" / "shims.sh"
 
@@ -540,15 +542,23 @@ def test_prune_uses_the_owned_set_not_merely_what_exists_in_bin(env) -> None:
     assert (bin_dir / "nx").is_file(), "the genuinely owned shim survives"
 
 
-def test_an_unremovable_stale_shim_does_not_fail_the_whole_install(env, tmp_path) -> None:
+def test_an_unremovable_stale_shim_does_not_fail_the_whole_install(env, monkeypatch) -> None:
     """The write phase has already succeeded and `current` may already point
     at this generation, so one unremovable file must not turn into a failed
     `nx self install` (self_cmd's _sh raises on a non-zero return).
 
-    The failure is injected by shadowing `rm` on PATH rather than by sealing
-    the bin dir: sealing it breaks the WRITE phase too, which tests something
-    else entirely and passes for the wrong reason. `rm` is used only by the
-    prune, so shadowing it isolates exactly the path under test.
+    THE INJECTION MECHANISM HAD TO BE PORTED, not just the assertion. This test
+    used to shadow `rm` on PATH, which isolated the prune exactly, because the
+    prune was the only thing that ran `rm`. The deleter is now
+    `shims_core._prune` calling `Path.unlink`, so a shadowed `rm` injects
+    nothing and the file is removed -- the test would have gone on passing for
+    the removal message while asserting nothing about the branch it names.
+
+    Sealing the bin dir is still the wrong injection for the same reason as
+    before: it breaks the WRITE phase too. There is no portable way to make one
+    file unremovable as a non-root user (macOS `chflags uchg` has no Linux
+    equivalent short of CAP_LINUX_IMMUTABLE), so the failure is injected where
+    the deletion now lives, at the same isolation the shadowed `rm` gave.
     """
     tools, bin_dir = env
     gen_a = _make_gen(tools, "A", entry_points=["nx", "nx-hook"])
@@ -561,20 +571,45 @@ def test_an_unremovable_stale_shim_does_not_fail_the_whole_install(env, tmp_path
     tmp.symlink_to(gen_b)
     os.replace(tmp, tools / "current")
 
-    shadow = tmp_path / "shadow-bin"
-    shadow.mkdir()
-    failing_rm = shadow / "rm"
-    failing_rm.write_text("#!/bin/sh\nexit 1\n")
-    failing_rm.chmod(0o755)
+    real_unlink = Path.unlink
 
-    res = _sh(
-        f'nx_write_shims "{gen_b}"', tools, bin_dir,
-        {"PATH": f"{shadow}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
-    )
+    def refuse(self, *args, **kwargs):
+        if self.name == "nx-hook":
+            raise OSError(1, "Operation not permitted")
+        return real_unlink(self, *args, **kwargs)
 
-    assert res.returncode == 0, (
-        "a stale shim that cannot be removed must not fail the install: "
-        f"rc={res.returncode} stderr={res.stderr}"
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    diagnostics = shims_core.write_shims(gen_b, bin_dir)
+
+    assert any("could not remove stale shim" in line for line in diagnostics), (
+        f"the operator is told: {diagnostics}"
     )
-    assert "could not remove stale shim" in res.stderr, "the operator is told"
     assert (bin_dir / "nx-hook").exists(), "it really was not removed"
+    assert (bin_dir / "nx").is_file(), "the write phase still completed"
+
+
+def test_the_unremovable_branch_is_reached_through_the_shell_too(env) -> None:
+    """The companion to the above: the SHELL path returns 0 when the prune
+    reports something, so `nx self install` survives it. Injecting the failure
+    itself cannot cross the subprocess boundary, so this pins the half that
+    can -- a prune that produced a diagnostic still exits 0.
+    """
+    tools, bin_dir = env
+    gen_a = _make_gen(tools, "A", entry_points=["nx", "nx-hook"])
+    gen_b = _make_gen(tools, "B", entry_points=["nx"])
+    (tools / "current").symlink_to(gen_a)
+    _sh(f'nx_write_shims "{gen_a}"', tools, bin_dir)
+
+    tmp = tools / ".current.tmp"
+    tmp.symlink_to(gen_b)
+    os.replace(tmp, tools / "current")
+
+    res = _sh(f'nx_write_shims "{gen_b}"', tools, bin_dir)
+
+    assert res.returncode == 0, f"rc={res.returncode} stderr={res.stderr}"
+    assert "removed stale shim" in res.stderr, "the operator is told"
+    assert res.stdout == "", (
+        "the dispatch's stdout is reserved for results; a diagnostic there is "
+        f"how a caller ends up installing into it: {res.stdout!r}"
+    )

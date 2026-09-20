@@ -116,8 +116,10 @@ GENERATION_PREFIX = "gen-"
 LEGACY_GENERATION_NAME = "legacy-uv-tool"
 
 #: Names that live in a venv's ``bin/`` but are NEVER shimmed into the shared
-#: bin dir. The Python twin of ``NX_NEVER_SHIM`` in ``_install/shims.sh``,
-#: pinned by ``tests/test_install_layout_twins_agree.py``.
+#: bin dir. THE only statement of this set: ``shims.sh`` carried a twin
+#: ``NX_NEVER_SHIM`` until the writer collapsed into ``shims_core``, which asks
+#: here. ``tests/test_install_layout_twins_agree.py`` now pins that the shell
+#: does not regrow one.
 #:
 #: This exists because ``~/.local/bin`` is SHARED. pyenv, asdf and homebrew all
 #: leave a ``python`` symlink there, so anything deriving "the names nexus owns"
@@ -131,14 +133,16 @@ NEVER_SHIM = frozenset({
 
 #: Console scripts of DEPENDENCIES that nexus shims although the ``conexus``
 #: distribution's own metadata does not declare them (uv does not link them
-#: either). The Python twin of ``NX_DEPENDENCY_SCRIPTS`` in
-#: ``_install/shims.sh``, pinned by ``tests/test_install_layout_twins_agree.py``.
+#: either). THE only statement of this set, for the same reason and with the
+#: same pin as :data:`NEVER_SHIM` above.
 DEPENDENCY_SCRIPTS = frozenset({"mineru", "mineru-api"})
 
-#: The query the shell installer's ``_nx_declared_scripts`` runs, verbatim:
-#: ask the generation's OWN interpreter which console scripts the installed
+#: Ask the generation's OWN interpreter which console scripts the installed
 #: distribution declares. Exit 3 on a lookup failure so "declares nothing" and
-#: "could not ask" never collapse into the same empty answer (RG-A).
+#: "could not ask" never collapse into the same empty answer (RG-A) -- a
+#: dist-name mismatch must not silently unshim every one of the project's own
+#: console scripts. ``shims.sh`` ran a verbatim copy of this inside
+#: ``_nx_declared_scripts`` until the writer collapsed into ``shims_core``.
 _DECLARED_SCRIPTS_QUERY = """\
 import sys
 try:
@@ -152,7 +156,9 @@ for ep in eps:
         print(ep.name)
 """
 
-def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozenset[str]:
+def declared_console_scripts_detail(
+    generation: Path, dist: str = "conexus"
+) -> tuple[frozenset[str], tuple[str, ...]]:
     """The console scripts *generation*'s installed *dist* declares.
 
     This is THE set of names nexus owns in the shared bin dir: exactly what
@@ -194,17 +200,24 @@ def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozens
             f"(exit {proc.returncode}): {proc.stderr.strip() or 'no diagnostic'}"
         )
     names: set[str] = set()
+    refused: list[str] = []
     for line in proc.stdout.splitlines():
         name = line.strip()
         if not name:
             continue
         if not _COMPONENT_RE.match(name):
-            # Said out loud, not dropped on the floor: a declared script the
-            # shim template would refuse is a fact about the install.
-            _warn(
-                "declared_console_script_refused",
-                generation=str(generation), dist=dist, name=name,
-            )
+            # COLLECTED, never logged from in here. A declared script the shim
+            # template would refuse is a fact about the install and must be
+            # said out loud -- but WHERE it is said is the caller's to choose,
+            # and one caller cannot choose stdout. shims_core runs as a
+            # DISPATCH whose stdout is reserved for results, and _warn routes
+            # to structlog whenever structlog imports, which in an installed
+            # venv prints to stdout. Measured: the refusal landed on the
+            # dispatch's stdout, the one place the layout contract forbids
+            # ("a diagnostic on stdout is how a caller ends up installing into
+            # it"). So the refusals come back as data and each caller places
+            # them: declared_console_scripts warns, shims_core writes stderr.
+            refused.append(name)
             continue
         names.add(name)
     if not names:
@@ -213,21 +226,56 @@ def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozens
             "distribution-name mismatch, not an empty product; refusing to derive "
             "the owned shim set from a directory listing instead"
         )
-    return frozenset(names) - NEVER_SHIM
+    return frozenset(names) - NEVER_SHIM, tuple(refused)
+
+
+def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozenset[str]:
+    """:func:`declared_console_scripts_detail`'s accepted set, with each refused
+    name said out loud through the warning stream.
+
+    The form for IN-PROCESS callers -- ``nx doctor``, ``self_cmd`` -- where
+    structlog is configured and a warning belongs in the same structured stream
+    as everything else. A dispatch must use the detail form and place the
+    refusals itself; see the comment at the refusal site.
+    """
+    names, refused = declared_console_scripts_detail(generation, dist)
+    for name in refused:
+        _warn(
+            "declared_console_script_refused",
+            generation=str(generation), dist=dist, name=name,
+        )
+    return names
+
+
+def owned_from_declared(declared: frozenset[str], generation: Path) -> frozenset[str]:
+    """The owned shim set, given an ALREADY-FETCHED declared set.
+
+    Split out so that the writer and this module cannot hold two copies of the
+    rule. ``shims_core.write_shims`` fetches :func:`declared_console_scripts`
+    once -- it needs the set anyway, and each call runs the generation's own
+    interpreter -- and derives both its write list and its prune's owned set
+    from here. Before the split, ``shims.sh`` recomputed the rule inline in its
+    prune loop and the two disagreed on hostile names; see
+    ``shims_core``'s module docstring for the measurement.
+    """
+    candidates = (declared | DEPENDENCY_SCRIPTS) - NEVER_SHIM
+    return frozenset(name for name in candidates if (generation / "bin" / name).exists())
 
 
 def owned_shim_names(generation: Path, dist: str = "conexus") -> frozenset[str]:
-    """The shim names ``nx_write_shims`` WRITES for *generation* -- the exact
-    set nexus owns in the shared bin dir, derived the way the writer derives
-    it: the distribution's declared console scripts plus
-    :data:`DEPENDENCY_SCRIPTS`, minus :data:`NEVER_SHIM`, restricted to names
-    that actually exist in the generation's ``bin/`` (a declared-but-not-built
-    entry point -- an optional extra -- gets no shim, so a foreign symlink at
-    that name in the bin dir is not ours either). Propagates
-    :class:`LayoutError` from :func:`declared_console_scripts`.
+    """The shim names the writer WRITES for *generation* -- the exact set nexus
+    owns in the shared bin dir, derived the way the writer derives it: the
+    distribution's declared console scripts plus :data:`DEPENDENCY_SCRIPTS`,
+    minus :data:`NEVER_SHIM`, restricted to names that actually exist in the
+    generation's ``bin/`` (a declared-but-not-built entry point -- an optional
+    extra -- gets no shim, so a foreign symlink at that name in the bin dir is
+    not ours either). Propagates :class:`LayoutError` from
+    :func:`declared_console_scripts`.
+
+    The rule itself is :func:`owned_from_declared`, which the writer calls with
+    the same declared set, so the two cannot drift apart.
     """
-    candidates = (declared_console_scripts(generation, dist) | DEPENDENCY_SCRIPTS) - NEVER_SHIM
-    return frozenset(name for name in candidates if (generation / "bin" / name).exists())
+    return owned_from_declared(declared_console_scripts(generation, dist), generation)
 
 
 def reclaimed_shims(generation: Path, bin_dir: Path) -> list[str]:

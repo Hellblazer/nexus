@@ -29,12 +29,13 @@ _INSTALL = Path(__file__).resolve().parents[1] / "src" / "nexus" / "_install"
 
 
 def test_the_package_world_shares_one_layout_core() -> None:
-    from nexus._install import census_core, gc_core
+    from nexus._install import census_core, gc_core, shims_core
     from nexus._install import layout_core as package_layout
 
     assert gc_core._layout() is package_layout
     assert census_core._sibling_layout() is package_layout
     assert gc_core._census() is census_core
+    assert shims_core._layout() is package_layout
 
 
 def test_the_package_world_shares_one_error_class() -> None:
@@ -54,11 +55,15 @@ import sys, runpy
 sys.modules["nexus"] = None
 sys.path.insert(0, {str(_INSTALL)!r})
 gc = runpy.run_path({str(_INSTALL / "gc_core.py")!r}, run_name="gc_probe")
+shims = runpy.run_path({str(_INSTALL / "shims_core.py")!r}, run_name="shims_probe")
 layout_via_gc = gc["_layout"]()
 census_via_gc = gc["_census"]()
 layout_via_census = census_via_gc._sibling_layout()
+layout_via_shims = shims["_layout"]()
 assert layout_via_gc is layout_via_census, "two layout_core objects at bootstrap"
+assert layout_via_gc is layout_via_shims, "shims_core loaded its own layout_core"
 assert layout_via_gc.LayoutError is layout_via_census.LayoutError
+assert layout_via_gc.LayoutError is layout_via_shims.LayoutError
 print("OK")
 '''
     r = subprocess.run(
@@ -72,9 +77,12 @@ print("OK")
 def test_every_core_agrees_on_the_usage_exit() -> None:
     """Each core restates EX_USAGE rather than importing it, so a refusal never
     depends on a sibling loading. Restating is the duplication this arc
-    removes, so the three are pinned equal."""
+    removes, so the four are pinned equal."""
     from nexus._install.census_core import CENSUS_USAGE_EXIT
     from nexus._install.gc_core import GC_USAGE_EXIT
     from nexus._install.layout_core import LAYOUT_USAGE_EXIT
+    from nexus._install.shims_core import SHIMS_USAGE_EXIT
 
-    assert LAYOUT_USAGE_EXIT == CENSUS_USAGE_EXIT == GC_USAGE_EXIT == 64
+    assert (
+        LAYOUT_USAGE_EXIT == CENSUS_USAGE_EXIT == GC_USAGE_EXIT == SHIMS_USAGE_EXIT == 64
+    )
