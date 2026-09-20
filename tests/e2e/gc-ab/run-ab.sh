@@ -73,6 +73,7 @@ build_variant() { # gc-name
   # the host, around the docker invocation, not inside the container.
   build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build "--gc=${gc}"
   docker run --rm --entrypoint bash \
+    -e NX_NO_TELEMETRY=1 \
     --add-host=host.docker.internal:host-gateway \
     -v "$PWD":/src -w /src/service \
     -v /var/run/docker.sock:/var/run/docker.sock \
@@ -95,6 +96,7 @@ measure_variant() { # gc-name
   docker network rm "$net" >/dev/null 2>&1 || true
   docker network create "$net" >/dev/null
   docker run -d --name "$pg" --network "$net" \
+    -e NX_NO_TELEMETRY=1 \
     -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus -e POSTGRES_PASSWORD=nexus \
     pgvector/pgvector:pg17 >/dev/null
   until docker exec "$pg" pg_isready -U nexus >/dev/null 2>&1; do sleep 1; done
@@ -103,6 +105,7 @@ measure_variant() { # gc-name
   local port
   port=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
   docker run -d --name "$svc" --network "$net" -p "${port}:8080" \
+    -e NX_NO_TELEMETRY=1 \
     -v "$PWD/$OUT/$gc":/svc:ro \
     -e NX_DB_URL="jdbc:postgresql://${pg}:5432/nexus" \
     -e NX_DB_USER=nexus -e NX_DB_PASS=nexus \

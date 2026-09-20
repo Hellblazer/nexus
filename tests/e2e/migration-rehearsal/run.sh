@@ -723,6 +723,7 @@ elif [ "$DO_BUILD" = 1 ]; then
       build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build migration-rehearsal
     fi
     docker run --rm --entrypoint bash \
+    -e NX_NO_TELEMETRY=1 \
       --add-host=host.docker.internal:host-gateway \
       -v "$PWD":/src -w /src/service \
       -v /var/run/docker.sock:/var/run/docker.sock \

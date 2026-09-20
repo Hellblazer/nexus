@@ -119,6 +119,7 @@ if [ "$WITH_NATIVE" = 1 ]; then
   [ "$(( vm_mib * 70 / 100 ))" -lt 5632 ] && NATIVE_MAXHEAP=5632m
   rm -f service/target/nexus-service
   docker run --rm --entrypoint bash \
+    -e NX_NO_TELEMETRY=1 \
     --add-host=host.docker.internal:host-gateway \
     -v "$PWD":/src -w /src/service \
     -v /var/run/docker.sock:/var/run/docker.sock \
