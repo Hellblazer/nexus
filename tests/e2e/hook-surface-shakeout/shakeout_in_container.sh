@@ -106,7 +106,12 @@ say "launch: real Claude Code, plugin from ${SHAKEOUT_SHA:-?}, ALL hooks live"
 # 'plugin:conexus:nexus' not connected", with the session continuing anyway.
 # rdr208-mvv can use --mcp-config because the two hooks it tests are
 # command-tier and never name a server. This one cannot.
-CMD="export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --dangerously-skip-permissions --plugin-dir $PLUGIN"
+# --debug-file, not bare --debug: bead .6 measured that --debug alone puts
+# nothing on stderr and the hook outcome lines -- "Successfully connected",
+# "[engine] turn 1 start", "CONNECT_TIMEOUT", "mcp_tool hook skipped" --
+# exist only in that file. Four runs of this harness scraped the pane
+# instead, which is why the first census could see nothing.
+CMD="export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --debug-file $RUN/debug.log --dangerously-skip-permissions --plugin-dir $PLUGIN"
 T kill-server 2>/dev/null
 T new-session -d -s S -x 240 -y 50 || { echo "tmux failed"; exit 1; }
 T pipe-pane -t S -o "cat >> $RUN/pane.log"
@@ -149,6 +154,31 @@ sid_from_sentinel() {
     done
     return 1
 }
+
+# RACE MODE (nexus-veh77): the interactive half of bead .6's M1. That bead
+# measured the connection race under headless `claude -p` ONLY and the RDR says
+# so, naming interactive as still to run: a human can submit the instant a
+# prompt appears, which a scripted invocation never exercises. Here the server
+# is delayed by SHAKEOUT_RACE_DELAY and the prompt goes in as soon as the input
+# box renders, so the question is whether a tool-tier event can precede its
+# server.
+if [ -n "${SHAKEOUT_RACE_DELAY:-}" ]; then
+    say "race: submitting immediately, server delayed ${SHAKEOUT_RACE_DELAY}s"
+    # A Bash turn, because PreToolUse:Bash carries hook_pre_close_verification,
+    # a TOOL-TIER entry -- the thing that cannot run before its server.
+    printf 'Run exactly this bash command and nothing else: echo RACEPROBE' | T load-buffer -
+    T paste-buffer -t S
+    T send-keys -t S Enter
+    wait_for 240 turn_ended_since "$(turn_stamp)" || true
+    sleep 5
+    say "race markers, in the order Claude Code logged them"
+    grep -aoE 'Successfully connected|CONNECT_TIMEOUT|\[engine\] turn 1 start|mcp_tool hook skipped|not connected' \
+        "$RUN/debug.log" 2>/dev/null | awk 'NR<=40' | sed 's/^/    /' \
+        || echo "    (no markers found in debug.log)"
+    collect
+    echo "RACE PROBE COMPLETE (delay=${SHAKEOUT_RACE_DELAY}s)"
+    exit 0
+fi
 
 # --- the turns, each aimed at one event -----------------------------------
 say "warmup: load the deferred nexus tools"

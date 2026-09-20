@@ -104,12 +104,17 @@ cp -R "$ROOT/conexus/hooks/scripts" "$STAGE/plugin/hooks/scripts"
 # naming the tool, whether or not the handler says anything. Teeing that is
 # the server-side roster without changing the wheel under test to measure it.
 python3 - "$ROOT/conexus/.mcp.json" "$STAGE/plugin/.mcp.json" <<'PY'
-import json, sys
+import json, os, sys
 d = json.load(open(sys.argv[1]))
 d.pop("sequential-thinking", None)   # shells to npx; no node in this image
 if "nexus" in d:
     d["nexus"]["command"] = "/home/nexus/mcp_tee.sh"
     d["nexus"]["args"] = []
+    # Claude Code spawns this server itself, so the delay must travel in the
+    # server's own env here; the container's environment does not reach it.
+    delay = os.environ.get("SHAKEOUT_RACE_DELAY", "")
+    if delay:
+        d["nexus"].setdefault("env", {})["NX_MCP_START_DELAY"] = delay
 json.dump(d, open(sys.argv[2], "w"), indent=2)
 print(f"[stage] plugin .mcp.json: {', '.join(sorted(d))} (nexus via tee)")
 PY
@@ -119,6 +124,19 @@ cat > "$STAGE/mcp_tee.sh" <<'SH'
 # Every JSON-RPC frame Claude Code sends nx-mcp, appended verbatim, then
 # passed through untouched. The tool tier's roster comes from here because a
 # `mcp_tool` hook that returns no output leaves no transcript record at all.
+#
+# NX_MCP_START_DELAY is bead .6's delay ladder (nexus-veh77), moved onto the
+# real server. Delaying the SERVER keeps the question honest -- "can a turn
+# outrun its server" -- where delaying the client would only measure the
+# harness. .6 measured this headlessly and the RDR says in so many words that
+# interactive was never run.
+if [ -n "${NX_MCP_START_DELAY:-}" ]; then
+    printf '{"event":"start_delay_begin","delay_s":%s,"ts":%s}\n' \
+        "$NX_MCP_START_DELAY" "$(date +%s.%N)" >> /home/nexus/run/race.jsonl
+    sleep "$NX_MCP_START_DELAY"
+    printf '{"event":"start_delay_elapsed","delay_s":%s,"ts":%s}\n' \
+        "$NX_MCP_START_DELAY" "$(date +%s.%N)" >> /home/nexus/run/race.jsonl
+fi
 exec tee -a /home/nexus/run/mcp-stdin.jsonl | /home/nexus/nxenv/bin/nx-mcp
 SH
 chmod +x "$STAGE/mcp_tee.sh"
@@ -231,6 +249,7 @@ docker run --rm \
     -v "$ART:/artifacts" \
     -e SHAKEOUT_SHA="$SHA" \
     -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}" \
+    -e SHAKEOUT_RACE_DELAY="${SHAKEOUT_RACE_DELAY:-}" \
     "$IMAGE"
 rc=$?
 set -e
