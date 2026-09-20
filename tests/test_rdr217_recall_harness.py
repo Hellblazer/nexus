@@ -19,14 +19,20 @@ import pytest
 from tests._rdr217_recall_harness import (
     GROUND_TRUTH_KINDS,
     SHAPES,
+    CorpusContractError,
     Query,
+    QueryResult,
     QuerySet,
     RecallReport,
-    QueryResult,
+    UninterpretableMeasurement,
+    corpus_fingerprint,
     load_query_set,
     measure,
+    precision_at_k,
     recall_at_k,
+    recall_ceiling,
     resolve_ground_truth,
+    validate_corpus,
 )
 
 
@@ -112,7 +118,7 @@ def test_a_chunk_with_no_id_is_skipped_rather_than_scored_as_empty_string():
 
 def test_the_query_set_loads_and_every_query_declares_its_shape_and_reason():
     qs = load_query_set()
-    assert qs.schema_version == 1
+    assert qs.schema_version == 2
     assert qs.corpus_prefixes == ("code__",)
     assert len(qs.queries) >= 10
     for q in qs.queries:
@@ -152,11 +158,27 @@ def test_prose_queries_are_not_satisfiable_by_literal_containment():
     qs = load_query_set()
     prose = [q for q in qs.queries if q.shape == "prose"]
     assert prose
+
+    def _flatten(s: str) -> str:
+        """Separators removed. The engine's gate is plainto_tsquery OR trigram
+        word_similarity >= 0.6 over the WHOLE query string, so a query
+        differing from its needle only by an underscore-versus-space clears
+        that threshold — an exact-substring check cannot see it. This is the
+        leak the Phase 1 review found in prose-01, whose text said "service
+        endpoint" against a needle of "service_endpoint"."""
+        return s.lower().replace("_", "").replace("-", "").replace(" ", "")
+
     for q in prose:
         assert q.ground_truth_value.lower() not in q.text.lower(), (
             f"{q.id}: the query text contains its own ground-truth needle "
-            f"{q.ground_truth_value!r}, so a literal matcher is privileged on "
-            "it and it no longer contrasts with the identifier shape"
+            f"{q.ground_truth_value!r} verbatim"
+        )
+        assert _flatten(q.ground_truth_value) not in _flatten(q.text), (
+            f"{q.id}: with separators normalised, the query text still contains "
+            f"its own ground-truth needle {q.ground_truth_value!r}. The engine's "
+            "trigram leg would clear 0.6 on that, so the lexical leg is "
+            "privileged on a query whose entire job is to contrast with the "
+            "identifier shape"
         )
 
 
@@ -190,6 +212,15 @@ def test_the_artifact_records_the_two_choices_the_bead_requires():
     assert "no client-side re-ranking" in ordering["choice"]
     assert "7b1b49075" in ordering["why_this_is_stated_rather_than_left_to_a_lambda"]
     assert raw["relevance_model"]["the_bias_this_carries_and_why_it_is_not_hidden"]
+    # The metric correction the Phase 1 review forced, and the fact that it IS
+    # a deviation from the RDR's Phase 1 text, both recorded rather than tacit.
+    metric = raw["metric"]
+    assert metric["primary"] == "precision@k"
+    assert "ceiling" in metric["why_not_recall_as_primary"].lower()
+    assert "phase 1 text says recall" in metric["this_is_a_recorded_deviation"].lower()
+    # Two known truncation traps that would silently shrink the denominator.
+    assert "300" in scope["completeness_contract"]
+    assert "4000" in scope["completeness_contract"]
 
 
 # ── measure(), wired to a fake retriever so no number is taken ───────────────
@@ -252,11 +283,16 @@ def test_macro_recall_averages_per_query_not_per_hit():
     shape. Built by hand rather than through measure() so the arithmetic is the
     only thing under test.
     """
-    report = RecallReport(route="vector", k=10, collections=("code__x",), per_query=(
-        QueryResult("a", "identifier", relevant=10, retrieved=10, hits=10, recall=1.0),
-        QueryResult("b", "identifier", relevant=1, retrieved=10, hits=0, recall=0.0),
-        QueryResult("c", "prose", relevant=2, retrieved=10, hits=1, recall=0.5),
-    ))
+    report = RecallReport(
+        route="vector", k=10, collections=("code__x",),
+        corpus_fingerprint="13:abc", corpus_size=13, per_query=(
+            QueryResult("a", "identifier", relevant=10, retrieved=10, hits=10,
+                        precision=1.0, recall=1.0, recall_ceiling=1.0),
+            QueryResult("b", "identifier", relevant=1, retrieved=10, hits=0,
+                        precision=0.0, recall=0.0, recall_ceiling=1.0),
+            QueryResult("c", "prose", relevant=2, retrieved=10, hits=1,
+                        precision=0.1, recall=0.5, recall_ceiling=1.0),
+        ))
 
     assert report.macro_recall("identifier") == 0.5   # (1.0 + 0.0) / 2
     assert report.macro_recall("prose") == 0.5
@@ -293,3 +329,149 @@ def test_load_query_set_refuses_an_empty_ground_truth(tmp_path):
     }))
     with pytest.raises(ValueError, match="empty ground truth"):
         load_query_set(bad)
+
+
+# ── the metric correction, and the guards the Phase 1 review added ───────────
+
+
+def test_precision_is_bounded_at_one_however_large_the_ground_truth():
+    """THE WHOLE POINT OF THE CORRECTION. Ten hits out of ten returned is a
+    perfect window whether the corpus holds 10 relevant chunks or 700, so a
+    route cannot be punished for the size of the ground truth.
+    """
+    retrieved = [f"c{i}" for i in range(10)]
+    relevant_small = set(retrieved)
+    relevant_huge = relevant_small | {f"x{i}" for i in range(690)}
+
+    assert precision_at_k(retrieved, relevant_small, k=10) == 1.0
+    assert precision_at_k(retrieved, relevant_huge, k=10) == 1.0
+    # ...while recall@10 over the same two, which is why it cannot be primary.
+    assert recall_at_k(retrieved, relevant_small, k=10) == 1.0
+    assert round(recall_at_k(retrieved, relevant_huge, k=10), 4) == 0.0143
+
+
+def test_precision_over_an_empty_window_is_undefined_not_zero():
+    """0.0 would report "the route returned junk" for "the route returned
+    nothing" — opposite diagnoses."""
+    assert precision_at_k([], {"a"}, k=10) is None
+
+
+def test_the_recall_ceiling_announces_a_capped_query():
+    """A capped recall figure is not wrong, it is incomparable with an uncapped
+    one, so it has to announce itself rather than read as a poor result."""
+    assert recall_ceiling({"a", "b"}, k=10) == 1.0
+    assert recall_ceiling({f"c{i}" for i in range(50)}, k=10) == 0.2
+    assert recall_ceiling(set(), k=10) is None
+
+    uncapped = QueryResult("a", "identifier", 2, 10, 2, 1.0, 1.0, 1.0)
+    capped = QueryResult("b", "identifier", 50, 10, 10, 1.0, 0.2, 0.2)
+    assert uncapped.recall_is_capped is False
+    assert capped.recall_is_capped is True
+
+
+def test_a_mostly_unanswerable_report_refuses_to_be_read_as_a_measurement():
+    """Bead .2 code-review finding 1: nothing stopped a run where most queries
+    were unanswerable from reporting a healthy average over the remainder. The
+    recording step calls this, so the refusal is mechanical rather than a
+    comment asking someone to look.
+    """
+    report = RecallReport(
+        route="vector", k=10, collections=("code__x",),
+        corpus_fingerprint="3:abc", corpus_size=3, per_query=(
+            QueryResult("a", "identifier", 0, 10, 0, 0.0, None, None),
+            QueryResult("b", "identifier", 0, 10, 0, 0.0, None, None),
+            QueryResult("c", "prose", 2, 10, 2, 0.2, 1.0, 1.0),
+        ))
+    assert report.macro_recall() == 1.0  # the flattering remnant average
+    with pytest.raises(UninterpretableMeasurement, match="unanswerable"):
+        report.must_be_interpretable()
+
+
+def test_an_interpretable_report_passes_the_same_check():
+    """Non-vacuity for the guard above: it must not refuse everything."""
+    report = RecallReport(
+        route="vector", k=10, collections=("code__x",),
+        corpus_fingerprint="2:abc", corpus_size=2, per_query=(
+            QueryResult("a", "identifier", 2, 10, 2, 0.2, 1.0, 1.0),
+            QueryResult("b", "prose", 2, 10, 1, 0.1, 0.5, 1.0),
+        ))
+    report.must_be_interpretable()
+
+
+def test_the_corpus_contract_is_enforced_not_documented():
+    """Bead .2 code-review finding 2: P1.2's corpus builder does not exist yet,
+    so a shape mismatch would have resolved ground truth to nothing and
+    reported every query as unanswerable."""
+    with pytest.raises(CorpusContractError, match="empty"):
+        validate_corpus([])
+    with pytest.raises(CorpusContractError, match="carry no id"):
+        validate_corpus([{"content": "x"}, {"content": "y"}, {"content": "z"}])
+    validate_corpus([{"id": "c1", "content": "x"}])
+    validate_corpus([{"chunk_text_hash": "c1", "content": "x"}])
+
+
+def test_the_corpus_fingerprint_distinguishes_two_different_corpora():
+    """Bead .2 code-review finding 3: comparability between the before- and
+    after-measurement rested on caller discipline with nothing to check
+    afterwards. Two reports with different fingerprints were not measured
+    against the same corpus, whatever their prose claims."""
+    a = [{"id": "c1"}, {"id": "c2"}]
+    assert corpus_fingerprint(a) == corpus_fingerprint(list(reversed(a)))
+    assert corpus_fingerprint(a) != corpus_fingerprint([{"id": "c1"}])
+    assert corpus_fingerprint(a).startswith("2:")
+
+
+def test_measure_stamps_the_fingerprint_and_keeps_hits_consistent():
+    """Finding 4: the hit count was computed twice. One computation now feeds
+    hits, precision and recall, so they cannot desync."""
+    corpus = [{"id": "c1", "content": "tok here"}, {"id": "c2", "content": "no"}]
+    report = measure(_FakeClient([{"id": "c1"}, {"id": "c2"}]), _one_query_set(),
+                     ["code__x"], corpus, route="vector", k=10)
+
+    r = report.per_query[0]
+    assert report.corpus_fingerprint == corpus_fingerprint(corpus)
+    assert report.corpus_size == 2
+    assert (r.hits, r.relevant, r.retrieved) == (1, 1, 2)
+    assert r.precision == 0.5 and r.recall == 1.0
+
+
+def test_measure_refuses_a_corpus_that_breaks_the_contract():
+    with pytest.raises(CorpusContractError):
+        measure(_FakeClient([]), _one_query_set(), ["code__x"], [],
+                route="vector", k=10)
+
+
+def test_a_rare_token_label_is_checked_against_the_corpus_not_trusted():
+    """The hole my own non-vacuity plant found in my own fix.
+
+    Restoring "pgvector" (681 literal occurrences) into the rare-token slot
+    tripped NOTHING, because a shape label is prose in the artifact and no
+    load-time check can see rarity — rarity is a property of the corpus. So the
+    check lives where the corpus is known. A token with more than k relevant
+    chunks is not rare by any reading, and leaving it in means the rare-token
+    shape is not measured at all while appearing to be.
+    """
+    report = RecallReport(
+        route="vector", k=10, collections=("code__x",),
+        corpus_fingerprint="700:abc", corpus_size=700, per_query=(
+            QueryResult("rare-03", "rare_token", relevant=213, retrieved=10, hits=10,
+                        precision=1.0, recall=0.047, recall_ceiling=0.047),
+            QueryResult("id-01", "identifier", relevant=2, retrieved=10, hits=2,
+                        precision=0.2, recall=1.0, recall_ceiling=1.0),
+        ))
+
+    assert report.mislabelled_rare_tokens() == ("rare-03",)
+    with pytest.raises(UninterpretableMeasurement, match="rare_token"):
+        report.must_be_interpretable()
+
+
+def test_a_genuinely_rare_token_passes_that_check():
+    """Non-vacuity for the guard above."""
+    report = RecallReport(
+        route="vector", k=10, collections=("code__x",),
+        corpus_fingerprint="700:abc", corpus_size=700, per_query=(
+            QueryResult("rare-03", "rare_token", relevant=1, retrieved=10, hits=1,
+                        precision=0.1, recall=1.0, recall_ceiling=1.0),
+        ))
+    assert report.mislabelled_rare_tokens() == ()
+    report.must_be_interpretable()
