@@ -56,6 +56,7 @@ import subprocess
 import time
 
 from nexus._hook_runtime._io import HookResult
+from nexus.hooks._plugin import _is_unexpanded
 
 __all__ = ["run"]
 
@@ -894,7 +895,17 @@ def _log_override_escape(ids: list[str], command: str) -> None:
     # is this module's equivalent anchor.
     candidates = []
     root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    if root:
+    # Same guard as plugin_root's, because this reads the variable
+    # DIRECTLY and so never passed through it. conexus/.mcp.json sets the
+    # MCP servers' env to the literal "${CLAUDE_PLUGIN_ROOT}" (Claude Code
+    # does not expand ${...} in an MCP env block), and a non-empty literal
+    # is truthy -- so this appended a candidate that can never exist and
+    # leaned entirely on the checkout fallback below, which is itself
+    # absent once installed. Found sweeping for siblings of nexus-b5ugt
+    # rather than by a failure: this path at least _warns when it finds
+    # nothing, which is why it was less visible than the hooks that
+    # simply went quiet.
+    if root and not _is_unexpanded(root):
         candidates.append(os.path.join(root, "hooks", "scripts", "routing"))
     repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))))

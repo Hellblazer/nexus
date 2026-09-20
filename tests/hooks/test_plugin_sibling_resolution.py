@@ -17,9 +17,25 @@ That shipped once (``divergence_language_guard``, nexus-q02nx.21
 critique). Three sibling modules had it right and one did not, and
 nothing compared them, so this is a gate over the CLASS rather than a
 regression test for the one instance.
+
+**THIS FILE IS MEANT TO SHRINK TO NOTHING.** Honouring the variable is
+the best a module can do while it still reaches the plugin; not reaching
+it at all is better, and is what RDR-215 is for. So an entry LEAVING
+``RESOLVERS`` because its module was ported into the wheel is a win, not
+a gap -- ``stop_verification`` left that way at bead nexus-b5ugt, which
+moved ``read_verification_config.py`` into ``nexus.hooks.verification_
+config``. When the list empties, delete the file and say why.
+
+That distinction matters because the two look identical from here: a
+module that stopped reaching the plugin and a module that stopped being
+scanned both just disappear from the parametrization.
+``test_the_resolver_list_covers_what_reaches_the_plugin`` is what tells
+them apart -- it rescans the package, so a module that still reaches the
+plugin cannot leave quietly.
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import os
 import re
@@ -36,7 +52,9 @@ HOOKS_SRC = REPO_ROOT / "src" / "nexus" / "hooks"
 #: gate for the same reason the others do.
 RESOLVERS: list[tuple[str, str]] = [
     ("nexus.hooks.divergence_language_guard", "_scan_script"),
-    ("nexus.hooks.stop_verification", "_plugin_root"),
+    # stop_verification was here until bead nexus-b5ugt ported
+    # read_verification_config.py into the wheel. It no longer reaches
+    # the plugin, so there is nothing left for this gate to check.
     ("nexus.hooks.session_context", "_plugin_root"),
     ("nexus.hooks._plugin", "plugin_root"),
 ]
@@ -55,14 +73,67 @@ _RESOLUTION_SHAPES = (
 )
 
 
+def _code_only(source: str) -> str:
+    """*source* with docstrings and comments removed.
+
+    The scan below asks whether a module RESOLVES a plugin path. Prose
+    that merely names ``CLAUDE_PLUGIN_ROOT`` is not that, and after bead
+    nexus-b5ugt it is common: four modules were ported into the wheel
+    precisely so they would stop reaching the plugin, and each one's
+    docstring explains the defect it fixes by naming the variable.
+
+    Scanning raw text put all four into ``known_ok``, which is the wrong
+    place for them -- ``known_ok`` means "reaches the plugin, and that is
+    accepted", and these do not reach it at all. Left that way the
+    exemption list grows every time a module is fixed, until the gate
+    exempts everything it was built to check. Same failure the verdict
+    scanner in tests/test_deciding_hooks_are_command_tier.py has: a
+    substring match cannot tell an identifier from a sentence.
+    """
+    tree = ast.parse(source)
+    spans: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str) and node.end_lineno is not None:
+                spans.append((node.lineno, node.end_lineno))
+    dropped = {n for start, end in spans for n in range(start, end + 1)}
+    lines = [
+        "" if i in dropped else line.split("#", 1)[0]
+        for i, line in enumerate(source.splitlines(), start=1)
+    ]
+    return "\n".join(lines)
+
+
 def _modules_reaching_the_plugin() -> set[str]:
-    """Every hooks module whose source RESOLVES a path into the plugin."""
+    """Every hooks module whose CODE resolves a path into the plugin."""
     found = set()
     for path in HOOKS_SRC.glob("*.py"):
-        text = path.read_text()
+        text = _code_only(path.read_text())
         if any(rx.search(text) for rx in _RESOLUTION_SHAPES):
             found.add(f"nexus.hooks.{path.stem}")
     return found
+
+
+def test_the_scan_reads_code_not_prose() -> None:
+    """Non-vacuity for :func:`_code_only`, and the reason it exists.
+
+    A module whose only mention of the variable is in its docstring must
+    not register as reaching the plugin. Asserted against a real module
+    rather than a synthetic string, because the synthetic version would
+    be written with the same assumption the scan makes.
+    """
+    ported = HOOKS_SRC / "verification_config.py"
+    assert ported.is_file(), "the ported config reader is gone; rewrite this test"
+    raw = ported.read_text()
+    assert "CLAUDE_PLUGIN_ROOT" in raw, (
+        "verification_config no longer names the variable even in prose, so "
+        "this guard cannot detect a prose-only match any more"
+    )
+    assert "CLAUDE_PLUGIN_ROOT" not in _code_only(raw), (
+        "the code-only view still contains the variable, so either the module "
+        "really does resolve a plugin path now, or _code_only stopped working"
+    )
+    assert "nexus.hooks.verification_config" not in _modules_reaching_the_plugin()
 
 
 @pytest.mark.parametrize("module_name,attr", RESOLVERS, ids=[m for m, _ in RESOLVERS])
@@ -130,15 +201,20 @@ def test_the_resolver_list_covers_what_reaches_the_plugin() -> None:
     assert reaching, "no hooks module mentions the plugin; the scan went blind"
     unlisted = reaching - listed
     known_ok = {
-        # Env-only by design, no fallback: the bash it ports had no `:-`
-        # default either, and its own docstring carries the reasoning.
-        "nexus.hooks.subagent_start",
-        # Resolves a candidate LIST (env, then checkout) and returns the
-        # first that exists, rather than a single path; covered by
-        # tests/hooks/test_tuple_projection_module.py.
-        "nexus.hooks.tuple_projection",
-        # Reaches read_verification_config.py through stop_verification's
-        # _plugin_root, which this file does pin.
+        # Genuinely reaches the plugin, and correctly: it resolves the
+        # routing/ guards, which are still plugin-resident and out of
+        # scope for bead nexus-b5ugt. It honours the env var (with the
+        # unexpanded-placeholder guard) and falls back to the checkout,
+        # but through its own inline candidate list rather than a single
+        # accessor, so there is no callable for RESOLVERS to pin.
+        #
+        # This set held six entries mid-merge, five of them modules that
+        # had just been ported into the wheel and named CLAUDE_PLUGIN_ROOT
+        # only in a docstring explaining the defect they fixed. Exempting
+        # those was backwards -- known_ok means "reaches the plugin, and
+        # that is accepted" -- and would have grown the list every time a
+        # module was fixed. _code_only fixed the scan instead, and five of
+        # the six stopped matching.
         "nexus.hooks.pre_close_verification",
     }
     surprises = unlisted - known_ok
