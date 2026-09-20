@@ -49,6 +49,24 @@ mechanize, it matters enough to ship.
   with no review-completed marker passes unchecked until the pin
   advances. Merging the fix changes nothing for anyone until then.
 
+- `conexus/.mcp.json`:
+  bead: nexus-2xso4 — the `env` block on both the nexus and
+  nexus-catalog servers set `CLAUDE_PLUGIN_ROOT` to the literal string
+  `${CLAUDE_PLUGIN_ROOT}`. Claude Code does not expand `${...}` inside
+  an MCP server's `env`, so every `nx-mcp` process carried that text as
+  the value — measured on all six such processes on one box across
+  three repositories, so every conexus user. Worse than unset: a
+  non-empty literal is truthy, so callers took the env branch and built
+  a path that cannot exist while the documented unset fallback never
+  ran. The block is deleted; there is no correct value to substitute,
+  and the sibling sn plugin has always shipped without one.
+  INERT until the next cut, but harmless to wait for: the hooks this
+  broke were fixed by porting them into the wheel, and the surviving
+  in-server reader goes through `plugin_root()`, which now rejects the
+  literal and falls back to the checkout. So deleting the block changes
+  no behaviour today — it removes the trap for the next thing that
+  reads that variable.
+
 - `conexus/hooks/scripts/read_verification_config.py`:
   bead: nexus-634ye — the same gate had a SECOND, independent off-switch,
   and the fix above does not touch it. `.nexus.yml` is gitignored by
