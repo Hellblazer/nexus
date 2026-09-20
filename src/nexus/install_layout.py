@@ -40,10 +40,12 @@ from nexus._install.layout_core import (
     # off THIS module to compare it against the one layout.sh runs verbatim.
     _DECLARED_SCRIPTS_QUERY,
     BIN_DIR_ENV,
+    BUILDING_MARKER_NAME,
     CURRENT_LINK_NAME,
     DEPENDENCY_SCRIPTS,
     GENERATION_PREFIX,
     INSTALLER_SCHEMA,
+    LAYOUT_USAGE_EXIT,
     LEGACY_GENERATION_NAME,
     NEVER_SHIM,
     PREVIOUS_LINK_NAME,
@@ -81,10 +83,12 @@ InstallLayoutError = LayoutError
 
 __all__ = [
     "BIN_DIR_ENV",
+    "BUILDING_MARKER_NAME",
     "CURRENT_LINK_NAME",
     "DEPENDENCY_SCRIPTS",
     "GENERATION_PREFIX",
     "INSTALLER_SCHEMA",
+    "LAYOUT_USAGE_EXIT",
     "LEGACY_GENERATION_NAME",
     "NEVER_SHIM",
     "PREVIOUS_LINK_NAME",

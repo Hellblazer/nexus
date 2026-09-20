@@ -157,6 +157,79 @@ def test_both_halves_render_a_byte_identical_shim(
         assert shell == python, f"the {command} shim differs between the halves"
 
 
+#: Every ``NX_*`` constant ``layout.sh`` defines, mapped to the core attribute
+#: that must carry the same value. EXHAUSTIVE by assertion, not by hand: the
+#: test below parses layout.sh for its own constant definitions and fails if
+#: this table does not cover every one of them. Two of these -- the build-claim
+#: marker and the usage exit -- had NO Python twin until the collapse, so they
+#: were the two layout names that could have drifted with nothing to notice.
+_CONSTANT_TWINS = {
+    "NX_GENERATION_PREFIX": "GENERATION_PREFIX",
+    "NX_CURRENT_LINK_NAME": "CURRENT_LINK_NAME",
+    "NX_PREVIOUS_LINK_NAME": "PREVIOUS_LINK_NAME",
+    "NX_LEGACY_GENERATION_NAME": "LEGACY_GENERATION_NAME",
+    "NX_RECEIPT_NAME": "RECEIPT_NAME",
+    "NX_BUILDING_MARKER_NAME": "BUILDING_MARKER_NAME",
+    "NX_RECEIPT_SCHEMA": "RECEIPT_SCHEMA",
+    "NX_INSTALLER_SCHEMA": "INSTALLER_SCHEMA",
+    "NX_SHIM_NO_CURRENT_EXIT": "SHIM_NO_CURRENT_EXIT",
+    "NX_LAYOUT_USAGE_EXIT": "LAYOUT_USAGE_EXIT",
+    "NX_SOURCE_KINDS": "SOURCE_KINDS",
+    # NX_RECEIPT_FIELDS has no constant twin by design -- the Python side
+    # derives it from the dataclass, which
+    # test_both_halves_name_the_same_receipt_fields already pins.
+    "NX_RECEIPT_FIELDS": None,
+}
+
+
+def _shell_constant_names() -> set[str]:
+    """The ``NX_*`` constants layout.sh assigns at its own top level.
+
+    Parsed from assignments rather than grepped for the token, because the
+    file MENTIONS most of these names in comments explaining them -- a grep
+    would count a sentence as a definition and the coverage assert below
+    would pass while covering nothing.
+    """
+    pattern = re.compile(r"^(NX_[A-Z0-9_]+)=", re.MULTILINE)
+    return set(pattern.findall(_SHELL_LAYOUT.read_text()))
+
+
+def test_the_constant_table_covers_every_shell_constant() -> None:
+    """Non-vacuity for the test below: a value-by-value comparison proves
+    nothing about a constant the table forgot to list."""
+    uncovered = _shell_constant_names() - set(_CONSTANT_TWINS)
+    assert not uncovered, (
+        f"layout.sh defines {sorted(uncovered)}, which _CONSTANT_TWINS does not "
+        f"list. Add the Python twin to nexus._install.layout_core and map it "
+        f"here, or map it to None with the reason, as NX_RECEIPT_FIELDS is."
+    )
+
+
+@pytest.mark.parametrize(
+    "shell_name", sorted(name for name, py in _CONSTANT_TWINS.items() if py)
+)
+def test_both_halves_carry_the_same_constant(shell_name: str, tmp_path: Path) -> None:
+    """Every named layout constant, compared by VALUE across the two halves.
+
+    A constant is the cheapest thing to let drift and the hardest to notice
+    when it does: nothing crashes, an install simply writes ``.nx-building``
+    where a reaper looks for something else and the tree is collected out from
+    under a live build.
+    """
+    attr = _CONSTANT_TWINS[shell_name]
+    shell = _shell_says(f'printf "%s" "${shell_name}"', {"HOME": str(tmp_path / "home")})
+    python = getattr(install_layout, attr)
+
+    if isinstance(python, tuple):  # SOURCE_KINDS: a shell word list
+        assert shell.split() == list(python), (
+            f"{shell_name} and {attr} disagree: {shell.split()} vs {list(python)}"
+        )
+    else:
+        assert shell == str(python), (
+            f"{shell_name} and {attr} disagree: {shell!r} vs {str(python)!r}"
+        )
+
+
 def test_both_halves_name_the_same_receipt_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

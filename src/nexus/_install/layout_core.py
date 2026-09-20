@@ -279,6 +279,29 @@ _DEFAULT_BIN_SUBPATH = (".local", "bin")
 #: tell "no current generation" from a command that merely failed.
 SHIM_NO_CURRENT_EXIT = 70
 
+#: EX_USAGE from sysexits.h: the status every refusal in the shell half exits
+#: with. Named here so the core can speak the same status when it is run as a
+#: script, and so the two cannot drift -- a refusal that came back as a plain
+#: 1 would be indistinguishable from an ordinary failure to a caller writing
+#: ``dir=$(nx_tools_dir) || exit 1``.
+LAYOUT_USAGE_EXIT = 64
+
+#: ``<tools>/gen-<stamp>/.nx-building``, written by ``install_generation.sh``
+#: the instant the directory exists and left in place. The Python twin of
+#: ``NX_BUILDING_MARKER_NAME``.
+#:
+#: This is NOT the completion marker -- the RECEIPT is, and
+#: :func:`list_generations` reads it. This is the BUILD CLAIM, the thing that
+#: distinguishes "a builder is working here" from "a build died and left
+#: wreckage": ``gc.sh`` keeps a receipt-less tree whose marker is younger than
+#: its claim window, because a slow resolve or download writes nothing into
+#: the tree for minutes at a time (nexus-xn84f).
+#:
+#: It had no Python twin and therefore no pin, which made it the one layout
+#: name the twins test could not have caught drifting. Naming it here is what
+#: lets ``tests/test_install_layout_twins_agree.py`` cover all of them.
+BUILDING_MARKER_NAME = ".nx-building"
+
 
 def _warn(event: str, **fields: object) -> None:
     """Say something out loud without requiring nexus, or structlog, to exist.
