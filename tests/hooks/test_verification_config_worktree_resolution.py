@@ -172,3 +172,79 @@ def test_a_project_dir_without_a_config_does_not_shadow_the_repos(
     empty.mkdir()
     config = _read_config_from(worktree, env={"CLAUDE_PROJECT_DIR": str(empty)})
     assert config["on_close"] is True
+
+
+def test_the_config_is_read_with_no_plugin_and_an_unexpanded_root(monkeypatch) -> None:
+    """The nexus-b5ugt defect, under the only condition that shows it.
+
+    Two things had to be true at once and a dev checkout supplies
+    neither for free.
+
+    (1) ``conexus/.mcp.json`` declares the MCP servers' env as
+    ``{"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}`` and Claude Code
+    does not expand ``${...}`` in an MCP ``env`` block, so every nx-mcp
+    process carries that literal. Measured on every nx-mcp on the dev
+    box, in three separate repositories.
+
+    (2) The checkout-relative fallback misses. Installed, this module
+    lives in site-packages and the anchor lands in the interpreter's lib
+    directory; in a checkout it lands on the real ``conexus/`` and
+    rescues the lookup.
+
+    The first draft of this test asserted only (1) and PASSED against
+    the unfixed code — verified by reverting both files and watching it
+    stay green — because (2) is false in the tree the suite runs in. A
+    test of a two-condition defect that supplies one condition measures
+    the checkout, not the code. ``checkout_plugin_root`` is stubbed to a
+    path that does not exist, which is exactly what being installed
+    means here.
+    """
+    from nexus.hooks import _plugin
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "${CLAUDE_PLUGIN_ROOT}")
+    monkeypatch.setattr(
+        _plugin, "checkout_plugin_root", lambda: Path("/nonexistent/not-a-checkout")
+    )
+
+    from nexus.hooks.stop_verification import _read_config
+
+    config = _read_config()
+    assert config, (
+        "the verification config came back empty with no reachable plugin — "
+        "this is the shape in which on_stop read false and the session-end "
+        "gate verified nothing"
+    )
+    assert "on_stop" in config and "on_close" in config
+
+
+def test_a_diagnostic_never_lands_on_stdout(tmp_path) -> None:
+    """stdout is the hook decision channel, and this module logs.
+
+    Caught by a real failure while writing the port: a module-level
+    structlog logger writes to stdout by default, so the
+    ``verification_config_absent`` debug line landed ahead of the JSON
+    envelope and the decision would not parse. Pinned by value because
+    the correct behaviour and the broken one differ only in which
+    stream a line went to, which no assertion about the return value
+    can see.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json;from nexus._hook_runtime._io import never_fail;"
+            "from nexus.hooks import stop_verification;"
+            "r=never_fail(lambda: stop_verification.run({'session_id':'x'}), 's');"
+            "print(r.stdout)",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    # Every line of stdout must be the envelope, nothing else.
+    for line in proc.stdout.splitlines():
+        if line.strip():
+            json.loads(line)
