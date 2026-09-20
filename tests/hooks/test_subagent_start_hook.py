@@ -14,8 +14,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import nexus.hooks.subagent_start as _subagent_start_mod
+from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
@@ -244,6 +246,106 @@ class TestNoMachineWideActiveBeadLine:
         assert "nexus-somepeer" not in ctx
 
 
+def _make_t2_memory_handler(
+    token: str, seen_prefixes: list[str], entries: list[dict[str, str]],
+) -> type[FakeT2HandlerBase]:
+    """A fake T2 engine serving exactly the two GET routes
+    ``nexus.hooks.t2_prefix_scan.scan`` calls (via ``HttpMemoryStore``),
+    recording every ``prefix`` value ``/v1/memory/projects`` was called
+    with in *seen_prefixes*."""
+
+    class _Handler(FakeT2HandlerBase):
+        TOKEN = token
+
+        def do_GET(self) -> None:
+            if not self._check_auth():
+                return
+            path = urlparse(self.path).path
+            params = self._params()
+            if path == "/v1/memory/projects":
+                prefix = params.get("prefix", "")
+                seen_prefixes.append(prefix)
+                self._send(200, [{"project": prefix, "last_updated": "2026-01-01T00:00:00Z"}])
+            elif path == "/v1/memory/all":
+                self._send(200, entries)
+            else:
+                self._send(404, {"error": "not found"})
+
+    return _Handler
+
+
+def _service_env_overrides(url: str, token: str) -> dict[str, str]:
+    """``NX_SERVICE_HOST``/``PORT``/``TOKEN`` env overrides pointing a
+    subprocess's ``resolve_service_endpoint()`` at *url*, the fake T2
+    engine.
+
+    ``NX_SERVICE_URL`` is blanked deliberately: it is leg 1 of
+    ``resolve_service_endpoint()``'s resolution order and this suite's
+    own autouse ``t2_service_env``/``_pin_t2_substrate`` fixture chain
+    sets it (ambient, real) to the suite's OWN hermetic engine substrate
+    for every test regardless of marker -- without clearing it here, that
+    real ambient endpoint wins over the host/port leg below and the
+    subprocess talks to the wrong (real) engine instead of this test's
+    fake one.
+    """
+    host_port = url.split("://", 1)[1]
+    host, port = host_port.rsplit(":", 1)
+    return {
+        "NX_SERVICE_URL": "",
+        "NX_SERVICE_HOST": host,
+        "NX_SERVICE_PORT": port,
+        "NX_SERVICE_TOKEN": token,
+    }
+
+
+class TestT2MemorySectionInProcess:
+    """RDR-215 bead nexus-b5ugt: the "## T2 Memory" section is produced
+    IN-PROCESS (``nexus.hooks.t2_prefix_scan.scan``, called from
+    ``_t2_memory_section``) against the real T2 HTTP client, never by
+    shelling out to a ``$CLAUDE_PLUGIN_ROOT``-resolved subprocess.
+
+    Non-vacuity: this test FAILS against the pre-fix ``_t2_memory_section``
+    (which built ``f"{plugin_root}/hooks/scripts/t2_prefix_scan.py"`` from
+    ``os.environ.get("CLAUDE_PLUGIN_ROOT", "")``). This test never sets
+    ``CLAUDE_PLUGIN_ROOT`` — exactly the live production shape, since
+    ``conexus/.mcp.json`` sets it to the LITERAL, unexpanded string
+    ``"${CLAUDE_PLUGIN_ROOT}"`` rather than a real path — so the old code
+    resolved an unreachable script path, silently produced no T2 output,
+    and this assertion failed regardless of how reachable the fake engine
+    below was. Verified: reverting only ``_t2_memory_section`` (`git show
+    HEAD -- src/nexus/hooks/subagent_start.py`'s pre-fix version) and
+    rerunning this test fails on ``assert "## T2 Memory" in ctx``.
+    """
+
+    def test_t2_memory_section_renders_from_real_engine(self, tmp_path) -> None:
+        seen_prefixes: list[str] = []
+        handler_cls = _make_t2_memory_handler(
+            "test-bearer-t2section", seen_prefixes,
+            [{"title": "T2-SCAN-MARKER", "content": "marker body line"}],
+        )
+
+        repo = tmp_path / "in-process-project"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "-q", "--allow-empty", "-m", "init"],
+            check=True,
+        )
+
+        with fake_http_server(handler_cls) as url:
+            result = _run_hook(
+                env_overrides=_service_env_overrides(url, "test-bearer-t2section"),
+                cwd=str(repo),
+            )
+
+        assert result.returncode == 0, result.stderr
+        assert seen_prefixes == ["in-process-project"], seen_prefixes
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## T2 Memory" in ctx
+        assert "T2-SCAN-MARKER" in ctx
+
+
 class TestWorktreeProjectResolution:
     """nexus-cnzei.2 (S6): `--show-toplevel` resolves to the WORKTREE root
     for a worktree-isolated dispatch, so its basename was the worktree's
@@ -253,7 +355,13 @@ class TestWorktreeProjectResolution:
     to an unrelated global cache. `--git-common-dir` resolves to the same
     shared .git directory from either the primary checkout or any linked
     worktree, so its parent directory names the actual project the same
-    way from both."""
+    way from both.
+
+    RDR-215 bead nexus-b5ugt: the T2 scan is now in-process
+    (``nexus.hooks.t2_prefix_scan.scan``), so the interception point is a
+    fake T2 engine reached via ``NX_SERVICE_HOST``/``PORT``/``TOKEN`` env,
+    not a stubbed ``$CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py``
+    script (that interception point no longer exists on this call path)."""
 
     def test_t2_scan_uses_main_repo_name_not_worktree_dir_name(
         self, tmp_path,
@@ -272,27 +380,20 @@ class TestWorktreeProjectResolution:
             check=True,
         )
 
-        # Stub CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py: record the
-        # PROJECT argument it was called with, print a marker so the "## T2
-        # Memory" section actually renders.
-        plugin_root = tmp_path / "plugin_root"
-        scan_dir = plugin_root / "hooks" / "scripts"
-        scan_dir.mkdir(parents=True)
-        call_log = tmp_path / "scan_calls.log"
-        (scan_dir / "t2_prefix_scan.py").write_text(
-            "import sys\n"
-            f"open({str(call_log)!r}, 'a').write(sys.argv[1] + chr(10))\n"
-            "print('T2-SCAN-MARKER')\n"
+        seen_prefixes: list[str] = []
+        handler_cls = _make_t2_memory_handler(
+            "test-bearer-worktree", seen_prefixes,
+            [{"title": "T2-SCAN-MARKER", "content": "marker body line"}],
         )
 
-        result = _run_hook(
-            env_overrides={"CLAUDE_PLUGIN_ROOT": str(plugin_root)},
-            cwd=str(worktree_dir),
-        )
+        with fake_http_server(handler_cls) as url:
+            result = _run_hook(
+                env_overrides=_service_env_overrides(url, "test-bearer-worktree"),
+                cwd=str(worktree_dir),
+            )
         assert result.returncode == 0, result.stderr
-        logged = call_log.read_text().strip() if call_log.exists() else ""
-        assert logged == "the-real-project", (
-            f"t2_prefix_scan.py was called with PROJECT={logged!r}, "
+        assert seen_prefixes == ["the-real-project"], (
+            f"the T2 scan was called with prefix={seen_prefixes!r}, "
             f"expected the MAIN repo's name, not the worktree dir's"
         )
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
