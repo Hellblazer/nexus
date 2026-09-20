@@ -167,7 +167,13 @@ if [ -n "${SHAKEOUT_PROBE:-}" ]; then
     find "$RUN" "$HOME_DIR/.claude" "$HOME_DIR/.config/nexus" -type f -size +0 \
         2>/dev/null | awk 'NR<=40' \
         | while read -r f; do printf '    %-64s %s\n' "$f" "$(wc -c < "$f")"; done
-    echo "  any hook_ or nx-hook mention, by file:"
+    # Phrased to avoid the literal "nx-hook <word>": the release-artifact
+    # verb-rot extractor reads that shape as an invocation, so prose naming
+    # the tool followed by any noun is indistinguishable from calling a verb
+    # of that name. It flagged "nx-hook 'mention'" here. Fixed in the
+    # artifact rather than allowlisted as extractor noise -- an allowlist
+    # entry is permanent and this sentence is not load-bearing.
+    echo "  files mentioning a hook handler name:"
     grep -rlE 'hook_[a-z_]+|nx-hook' "$RUN" "$HOME_DIR/.claude" \
         "$HOME_DIR/.config/nexus" 2>/dev/null | awk 'NR<=20' \
         | sed 's/^/    /'
