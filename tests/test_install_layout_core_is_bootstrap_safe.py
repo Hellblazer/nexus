@@ -23,6 +23,7 @@ process by the time any test runs, so an in-process check would find it in
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -162,3 +163,75 @@ def test_a_subclass_would_have_been_wrong() -> None:
         raise AssertionError("unreachable: the core raises the base, not a subclass")
     except install_layout.InstallLayoutError:
         pass
+
+
+def _run_cli_with_nexus_unavailable(argv: list[str], home: Path) -> subprocess.CompletedProcess[str]:
+    """Run the core AS A SCRIPT, the way layout.sh runs it, with nexus gone.
+
+    ``runpy`` with ``run_name="__main__"`` so the ``if __name__ == "__main__"``
+    block executes: importing the module and calling ``main()`` by hand would
+    skip the one line that turns a return value into an exit status, which is
+    the line layout.sh's ``|| return`` depends on.
+
+    Portable by construction rather than by finding a second interpreter on the
+    box. A foreign ``python3`` that genuinely cannot import nexus is the more
+    faithful world and was verified by hand, but whether one exists is a fact
+    about the machine, and a test that quietly stops running on a box without
+    one is worse than a slightly synthetic one that always does.
+    """
+    program = f'''
+import sys, runpy
+sys.modules["nexus"] = None
+sys.modules["nexus.errors"] = None
+sys.argv = ["layout_core.py"] + {argv!r}
+runpy.run_path({str(_CORE)!r}, run_name="__main__")
+'''
+    return subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True, text=True, check=False,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home)},
+    )
+
+
+def test_the_cli_answers_with_nexus_unavailable(tmp_path: Path) -> None:
+    """The bootstrap path end to end: layout.sh runs this as a script, and at
+    that moment there is no nexus to import. Everything else in this file
+    tests the module; this tests the thing layout.sh actually invokes."""
+    r = _run_cli_with_nexus_unavailable(["tools_dir"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == str(tmp_path / ".local" / "share" / "nexus" / "tools")
+
+    r = _run_cli_with_nexus_unavailable(
+        ["build_spec", "conexus", "local,voyage", "7.55.1"], tmp_path
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "conexus[local,voyage]==7.55.1"
+
+
+def test_the_cli_refuses_with_the_usage_status_and_an_empty_stdout(tmp_path: Path) -> None:
+    """layout.sh's calling contract, which the core has to honour or every
+    consumer's ``dir=$(nx_tools_dir) || exit 1`` breaks.
+
+    stdout must be EMPTY on a refusal. A refusal that also emits a path is how
+    a caller ends up installing into it, and at bootstrap there is no structlog
+    and no traceback handler to make the mistake visible.
+    """
+    from nexus.install_layout import LAYOUT_USAGE_EXIT
+
+    for argv in (
+        ["generation_dir", "../escape"],      # a refused component
+        ["render_shim", "nx$(touch PWNED)"],  # a refused shim name
+        ["receipt_path", "relative/path"],    # a refused relative generation
+        ["no_such_verb"],                     # layout.sh calling us wrongly
+        ["render_shim"],                      # arity
+        [],                                   # no verb at all
+    ):
+        r = _run_cli_with_nexus_unavailable(argv, tmp_path)
+        assert r.returncode == LAYOUT_USAGE_EXIT, (
+            f"{argv} exited {r.returncode}, expected {LAYOUT_USAGE_EXIT}: {r.stderr}"
+        )
+        assert r.stdout == "", f"{argv} printed to stdout on a refusal: {r.stdout!r}"
+        assert r.stderr.strip(), f"{argv} refused silently"
+        assert "Traceback" not in r.stderr, (
+            f"{argv} produced a traceback rather than a refusal:\n{r.stderr}"
+        )
