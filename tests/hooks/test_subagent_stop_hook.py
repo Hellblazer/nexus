@@ -21,6 +21,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+from tests._hook_wiring import events_for  # noqa: E402
+
 SESSION = "sess-testorch"
 NAME = "worker-a"
 AGENT_ID = f"a{NAME}-6f59dab8bbb14864"
@@ -2015,21 +2017,20 @@ class TestPluginWiring:
 
     def test_registered_in_hooks_json(self) -> None:
         """Naming is not wiring: assert the SubagentStop entry actually
-        invokes the ported hook. RDR-215 bead nexus-q02nx.21 re-points this
-        from the retired ``subagent-stop.sh`` command entry to the
-        ``hook_subagent_stop`` MCP tool hooks.json now wires it through."""
-        hooks = json.loads((REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
-        subagent_stop = hooks["hooks"].get("SubagentStop", [])
-        mcp_tools = [
-            h
-            for entry in subagent_stop
-            for h in entry.get("hooks", [])
-            if h.get("type") == "mcp_tool"
-        ]
-        assert any(
-            h.get("server") == "plugin:conexus:nexus" and h.get("tool") == "hook_subagent_stop"
-            for h in mcp_tools
-        ), (
-            "hook_subagent_stop not registered as an mcp_tool under "
-            f"SubagentStop in hooks.json (found: {mcp_tools!r})"
+        invokes the ported hook.
+
+        Keyed on hook identity across both declaration tiers. This hook
+        went bash script -> ``hook_subagent_stop`` mcp_tool (bead
+        nexus-q02nx.21) -> ``nx-hook subagent-stop`` (bead nexus-17i1n,
+        because an ``mcp_tool`` hook cannot return the stop verdict this
+        one exists to return). Which tier it sits on is not what this
+        test is about, and pinning the tier here made it fail on a fix.
+
+        Which tier it MUST sit on is a real invariant, but it belongs
+        with the others of its kind:
+        ``tests/test_deciding_hooks_are_command_tier.py``.
+        """
+        assert "SubagentStop" in events_for("subagent_stop"), (
+            "subagent_stop is not wired under SubagentStop in hooks.json, on "
+            "either tier"
         )

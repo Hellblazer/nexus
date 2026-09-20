@@ -170,16 +170,11 @@
         "matcher": "",
         "hooks": [
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_subagent_stop",
-            "input": {
-              "session_id": "${session_id}",
-              "agent_id": "${agent_id}",
-              "agent_type": "${agent_type}",
-              "agent_transcript_path": "${agent_transcript_path}",
-              "stop_hook_active": "${stop_hook_active}"
-            },
+            "type": "command",
+            "command": "nx-hook",
+            "args": [
+              "subagent-stop"
+            ],
             "timeout": 10
           },
           {
@@ -217,14 +212,11 @@
         "matcher": "Bash",
         "hooks": [
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_pre_close_verification",
-            "input": {
-              "session_id": "${session_id}",
-              "tool_name": "${tool_name}",
-              "tool_input": "${tool_input}"
-            },
+            "type": "command",
+            "command": "nx-hook",
+            "args": [
+              "pre-close-verification"
+            ],
             "timeout": 5
           },
           {
@@ -266,13 +258,11 @@
         "matcher": "mcp__plugin_conexus_.*",
         "hooks": [
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_auto_approve",
-            "input": {
-              "tool_name": "${tool_name}",
-              "hook_event_name": "${hook_event_name}"
-            },
+            "type": "command",
+            "command": "nx-hook",
+            "args": [
+              "auto-approve"
+            ],
             "timeout": 5
           }
         ]
@@ -301,13 +291,11 @@
         "matcher": "mcp__plugin_conexus_.*",
         "hooks": [
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_auto_approve",
-            "input": {
-              "tool_name": "${tool_name}",
-              "hook_event_name": "${hook_event_name}"
-            },
+            "type": "command",
+            "command": "nx-hook",
+            "args": [
+              "auto-approve"
+            ],
             "timeout": 5
           }
         ]

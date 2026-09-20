@@ -23,6 +23,8 @@ HOOKS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts
 HOOKS_JSON = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
 CONFIG_READER = HOOKS_DIR / "read_verification_config.py"
 
+from tests._hook_wiring import matchers_for  # noqa: E402
+
 _STOP_PY_DRIVER = """
 import json, sys
 from nexus._hook_runtime._io import never_fail
@@ -196,18 +198,15 @@ class TestHooksJsonStructure:
         PreToolUse now carries a second entry (the Agent-dispatch matcher,
         nexus-qc4p1), and an index-positional assertion says nothing about
         the hook it is named for once the list has more than one member.
-        RDR-215 bead nexus-q02nx.21 re-declared this entry to the
-        ``hook_pre_close_verification`` mcp_tool, so the key is now the
-        tool name rather than a bash command string."""
-        data = json.loads(HOOKS_JSON.read_text())
-        owners = [
-            entry["matcher"]
-            for entry in data["hooks"]["PreToolUse"]
-            if any(
-                h.get("tool") == "hook_pre_close_verification"
-                for h in entry.get("hooks", [])
-            )
-        ]
+        This assertion has now been rewritten three times for the same
+        reason -- index, then bash command string, then mcp_tool name --
+        each time because the entry moved and the key was written against
+        one declaration FORM. Bead nexus-17i1n moved it again, off the
+        tool tier, because an ``mcp_tool`` hook cannot return a verdict
+        and the gate shipped inert in 7.55.0. So it is keyed on hook
+        IDENTITY across both forms now (``_names_hook``), and a fourth
+        move will not need a fourth rewrite."""
+        owners = matchers_for("pre_close_verification", "PreToolUse")
         assert owners == ["Bash"], owners
 
     def test_hooks_json_existing_hooks_unchanged(self) -> None:

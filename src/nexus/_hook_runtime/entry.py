@@ -144,6 +144,29 @@ VERB_TABLE: dict[str, str] = {
     "expectations_undeclared": "nexus.hooks.ledger_verbs",
     "expectations_reconcile": "nexus.hooks.ledger_verbs",
     "expectations_expect": "nexus.hooks.ledger_verbs",
+    # The three DECIDING hooks (bead nexus-17i1n). Each of these was wired
+    # as an `mcp_tool` entry at bead nexus-q02nx.21 and shipped inert in
+    # conexus 7.55.0: an `mcp_tool` hook CANNOT return a permission or stop
+    # decision. Claude Code's own hooks guide lists the four hook types
+    # that can decide -- prompt, agent, command, http -- and `mcp_tool` is
+    # not among them; its documented failure posture is "non-blocking
+    # error", and its output is read for context, never for a verdict.
+    # Measured 2026-09-20 against CLI 2.1.278 with the 7.55.0 pin: a
+    # `bd close` naming a bead with no review marker reached `bd` itself
+    # and closed it, while the same payload through `run()` returns a
+    # correct deny. So these three take the command tier, for the same
+    # reason `phase_review_close_requires_gate` was never allowed on the
+    # tool tier at all (see nexus.mcp.hooks' `_NEVER_TOOL_TIER`).
+    #
+    # They keep their tool-tier registrations, which stay useful for
+    # diagnosis and for a caller that wants the verdict as data; what
+    # changed is which tier `hooks.json` WIRES. `_DECIDING_HOOKS` in
+    # nexus.mcp.hooks names the set, and
+    # tests/test_deciding_hooks_are_command_tier.py refuses a hooks.json
+    # that wires any of them as an mcp_tool again.
+    "pre-close-verification": "nexus.hooks.pre_close_verification",
+    "subagent-stop": "nexus.hooks.subagent_stop",
+    "auto-approve": "nexus.hooks.auto_approve",
 }
 
 #: Verbs whose exit code nx-hook must propagate from ``run()`` instead of

@@ -378,9 +378,15 @@ class TestPreToolUseApproval:
     def test_pretooluse_entry_runs_the_same_handler_as_permissionrequest(self) -> None:
         """Each plugin's PreToolUse and PermissionRequest entries must
         invoke the identical handler — exec-form ``python3 <script>`` for sn
-        (RDR-215 bead nexus-q02nx.23), the ``hook_auto_approve`` mcp_tool
-        for nx (bead nexus-q02nx.21 re-declared it away from the bash
-        ``command`` shape this test used to compare).
+        (RDR-215 bead nexus-q02nx.23), ``nx-hook auto-approve`` for nx.
+
+        The nx side has now been through three shapes: a bash ``command``
+        string, then the ``hook_auto_approve`` mcp_tool at bead
+        nexus-q02nx.21, and back to the command tier at bead nexus-17i1n
+        because an ``mcp_tool`` hook cannot return a verdict and the
+        approver's whole output is one. The comparison itself never
+        cared which shape; only the expected value did, so that is all
+        that moves here.
 
         The sn side joins ``command`` with ``args``. Under exec form the
         ``command`` alone is the bare word ``python3`` for BOTH events, so
@@ -401,7 +407,7 @@ class TestPreToolUseApproval:
             return out
 
         nx_pre, nx_perm = handlers(self.NX_HOOKS, "PreToolUse"), handlers(self.NX_HOOKS, "PermissionRequest")
-        assert nx_pre == nx_perm == {"hook_auto_approve"}, (
+        assert nx_pre == nx_perm == {"nx-hook auto-approve"}, (
             f"{self.NX_HOOKS}: PreToolUse {nx_pre} vs PermissionRequest {nx_perm}"
         )
 

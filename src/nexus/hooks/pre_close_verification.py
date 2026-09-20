@@ -55,7 +55,7 @@ import shutil
 import subprocess
 import time
 
-from nexus._hook_runtime._io import HookResult
+from nexus._hook_runtime._io import HookResult, structured_field
 
 __all__ = ["run"]
 
@@ -511,7 +511,22 @@ def run(payload: dict | None) -> HookResult:
     if isinstance(tool_input, dict):
         command = str(tool_input.get("command") or "")
     elif isinstance(tool_input, str):
-        command = tool_input
+        # Two different strings reach this branch and they are NOT
+        # interchangeable. A bare command ("bd close nexus-xxxxx") is what
+        # a direct caller passes, and is the command. JSON TEXT holding
+        # the whole tool_input object is what an Any-typed tool-tier
+        # parameter accepts, and reading THAT as the command is how the
+        # gate went inert (bead nexus-17i1n): _bd_verbs looks for a bd
+        # verb, finds none inside the JSON quoting, and no verb means no
+        # gate, so the close was allowed. Telling them apart on a leading
+        # brace keeps the deliberate bare-command path and closes the
+        # other, without structured_field's warning firing on every
+        # legitimate bare command (which is not JSON and never will be).
+        stripped = tool_input.strip()
+        if stripped.startswith("{"):
+            command = str(structured_field(data, "tool_input").get("command") or "")
+        else:
+            command = tool_input
     if not command:
         return _allow()
 

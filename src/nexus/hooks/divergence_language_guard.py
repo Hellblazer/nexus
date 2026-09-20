@@ -41,7 +41,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from nexus._hook_runtime._io import HookResult
+from nexus._hook_runtime._io import HookResult, structured_field
 from nexus.hooks._plugin import plugin_script
 
 __all__ = ["run"]
@@ -138,10 +138,7 @@ def run(payload: dict | None) -> HookResult:
     if str(data.get("tool_name") or "") not in _WATCHED_TOOLS:
         return _allow()
 
-    tool_input = data.get("tool_input")
-    file_path = ""
-    if isinstance(tool_input, dict):
-        file_path = str(tool_input.get("file_path") or "")
+    file_path = str(structured_field(data, "tool_input").get("file_path") or "")
     if _SCANNED_PREFIX not in file_path:
         return _allow()
     if not Path(file_path).is_file():

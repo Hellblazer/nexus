@@ -279,16 +279,31 @@ and only the ledger verbs have one.
 | `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |
 | `Stop` | `hook_stop_verification` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
 | `StopFailure` | `hook_stop_failure` | Advisory on abnormal session termination |
-| `PreToolUse` (`Bash`) | `hook_pre_close_verification` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
+| `PreToolUse` (`Bash`) | `nx-hook pre-close-verification` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4) |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/phase_review_close_requires_gate.py` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
 | `PreToolUse` (`Agent\|Task`) | `hook_agent_dispatch_expect` | Write the RDR-184 EXPECT ledger row from the dispatch's own `subagent_type` + `run_in_background`, so orchestration doesn't have to hand-write it (nexus-qc4p1) |
 | `PostToolUse` | `hook_divergence_language_guard` | Advisory scan of RDR post-mortem writes for divergence-language patterns (RDR-065 Gap 2) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `SubagentStart` | `hook_subagent_start_stamp` | Record the RDR-184 EXPECT-ledger START row (agent id + type) at dispatch time (nexus-ccs9v.16) |
-| `SubagentStop` | `hook_subagent_stop` | Block a named background teammate's idle once if it never sent a completion report (RDR-184 Gap 1) |
-| `PreToolUse` (`mcp__plugin_conexus_.*`) | `hook_auto_approve` | Auto-approve nexus and nexus-catalog MCP tool calls; paired with the PermissionRequest entry below because the two events fire in different permission modes |
-| `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hook_auto_approve` | Auto-approve nexus and nexus-catalog MCP tool calls |
+| `SubagentStop` | `nx-hook subagent-stop` | Block a named background teammate's idle once if it never sent a completion report (RDR-184 Gap 1) |
+| `PreToolUse` (`mcp__plugin_conexus_.*`) | `nx-hook auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls; paired with the PermissionRequest entry below because the two events fire in different permission modes |
+| `PermissionRequest` (`mcp__plugin_conexus_.*`) | `nx-hook auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls |
+
+**Why some rows are `nx-hook <verb>` and others are `hook_<name>`.** A
+hook that returns a VERDICT — a `permissionDecision`, a `behavior`, a
+stop `decision` — belongs on the command tier, because an `mcp_tool`
+hook cannot return one. Claude Code names four hook types that carry a
+decision (`prompt`, `agent`, `command`, `http`) and `mcp_tool` is not
+among them; its output is read for context. The three deciding hooks
+(`pre-close-verification`, `subagent-stop`, `auto-approve`) were wired as
+`mcp_tool` in conexus 7.55.0 and all three were inert for that release —
+the close gate let an unreviewed `bd close` through while returning a
+correct deny to anything that called it directly. Each is still
+registered on both tiers, because the verdict is useful as data; only the
+command tier is wired. `nexus.mcp.hooks.DECIDING_HOOKS` is the list, and
+`tests/test_deciding_hooks_are_command_tier.py` refuses a `hooks.json`
+that moves any of them back.
 
 ## Slash Commands
 
