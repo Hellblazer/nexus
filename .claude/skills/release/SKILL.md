@@ -1,11 +1,22 @@
 ---
 name: release
-description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. Enforces the full release checklist from AGENTS.md § Cutting a release. Also surfaces as /conexus:release.
+description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. This skill IS the release checklist and its authority; AGENTS.md points here. Also surfaces as /conexus:release.
 ---
 
 # Release Checklist
 
-Follow every step in order. Do not skip or reorder. Authority: AGENTS.md § Cutting a release (`docs/contributing.md#release-process` is the long form; T2 [22511] gap 11 — this line previously cited a "CLAUDE.md § Release Process" heading that does not exist in CLAUDE.md/AGENTS.md, only in `docs/contributing.md`).
+Follow every step in order. Do not skip or reorder.
+
+**This file is the authority for cutting a release.** AGENTS.md § Cutting a
+release is a pointer to it, not a parallel copy — the authority was inverted
+deliberately (2026-09-20) because the two had drifted and a reader had no way
+to tell which was current: AGENTS.md carried a retirement the skill contradicted
+57 lines later, a `git add` block here absorbed its own commit, and a rule
+stated in both had widened in one. Two copies of a procedure decay until the
+stale one wins an argument. `docs/contributing.md#release-process` remains the
+long form for rollback and one-time setup. (Historical note, T2 [22511] gap 11:
+this line once cited a "CLAUDE.md § Release Process" heading that exists in
+neither file.)
 
 ## Steps
 
@@ -127,9 +138,42 @@ tests/e2e/local-service-gate.sh      # integration incl. the local-service funct
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/migration-rehearsal/run.sh --candidate-migration   # REQUIRED when the tree carries a changeset (nexus-z0ylb)
 tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see below
+bash tests/e2e/gen-flip-live-holder.sh   # ~30s — REQUIRED for shim/flip/GC changes, see 1c below
 ```
 
 All must pass. Integration is excluded from CI and is the last line of defense before tag-push.
+
+**Reading the battery's table, which is where a vacuous pass hides.** The
+driver runs about 30 minutes on this box. Reds never stop it and it prints one
+table at the end, so the verdict you act on is the table, not the exit. **A leg
+with no verdict line is MISSING, never passed** — implemented at
+`release-battery.sh:162` (`LEG_STATUS[$leg]="MISSING"`), and it is the rule
+that stops a silently-empty leg reading as green. Consumers also refuse
+artifacts whose manifest tree identity is not this checkout's, so a dirtied
+tree rebuilds rather than reusing a stale wheel or jar (nexus-mbeke) — if a leg
+seems to rebuild when you expected reuse, that is why, and it is correct.
+
+**1c. The generation-flip live-holder gate.** `bash
+tests/e2e/gen-flip-live-holder.sh` (~30s, nexus-utpuw.17). REQUIRED for any
+change touching `src/nexus/_install/**`, `src/nexus/install_layout.py`,
+`src/nexus/install_census.py`, or anything else in the shim / flip / GC
+machinery — that trigger list is the reason to run it standalone, outside a
+full battery, when a change lands in those paths. It builds TWO real conexus
+generations from this checkout, spawns an actual `nx-mcp` holder THROUGH the
+shim, flips `current` underneath it, and asserts the live process still answers
+a real MCP tools/call from its ORIGINAL generation while a fresh spawn lands in
+the new one and GC refuses to reap the held tree. Hermetic by construction
+(`env -i`, virgin HOME, its own `NEXUS_CONFIG_DIR`) and it ASSERTS ITS OWN SEAL:
+an unscrubbed `nx-mcp` was measured answering a real `search` out of the
+OPERATOR'S live collections, so a call that SUCCEEDS there fails the gate. Must
+end `GEN-FLIP LIVE-HOLDER PASSED`. The fast-loop half of the pair is
+`tests/scripts/test_generation_flip_live_holder.py` (nexus-utpuw.16), which runs
+on every `pytest -n auto` against a fixture package; this one guards the
+ARTIFACT — real console scripts, real dependency graph, the real certifi path
+whose failure was the concrete nexus-q3xrx symptom (95 cacert tracebacks).
+Nothing else in the fast gates exercises shim/current/GC at all. It is wired
+into `release-battery.sh:127`, so a full battery covers it; the standalone run
+is for the trigger list above.
 
 Count the advisories too. A gate that passed on a fallback prints one
 `GATE PASSED-BY-DEFAULT: <gate> <reason>` line and still exits 0
@@ -161,6 +205,14 @@ against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s leg
 G does the same against a live cloud config — together the only pre-tag
 proof that `conexus/hooks/scripts/tuple_ledger_project.py` actually lands a
 tuple on both install classes (nexus-g2lln / nexus-0zsmg).
+
+**Leg 9/10 (nexus-utpuw.19) — a generation install on that same virgin HOME.**
+Worth naming separately because it is load-bearing twice over: it is the only
+fresh-journey coverage of the `<tools>/gen-<stamp>` + shim path, and the only
+proof the built WHEEL actually ships `nexus/_install/*.sh`. Every other test of
+`packaged_install_dir()` runs against an editable checkout, where that path
+exists because the repo does — so those tests would pass against a wheel that
+ships none of it.
 
 This step's plain invocation is the LOCAL WHEEL layer only (dependencies
 resolve from this checkout's `uv.lock`/wheel metadata). It cannot reproduce a
@@ -318,6 +370,15 @@ Required on every release (nexus-6xkdu: a diff-based trigger list was rejected �
 ```
 
 Smoke (step 6) never calls `nx index pdf`; this is the only pre-tag gate that exercises MinerU end-to-end through the production indexing path (step 3b of 11, the `bft-to-smr.pdf` formula fixture) — the slow-marked `test_mineru_path_preserves_formulas` pytest test runs in no default or scheduled suite (nexus-6xkdu). Must end `SHAKEDOWN PASSED`; a `SHAKEDOWN FAILED` verdict or non-zero exit halts the release. All four indexing steps (2, 3a, 3b, 4) can now fail the run — the `|| true` that previously made them unable to redden the run was removed at nexus-6xkdu.
+
+**Throughput is timed here, and a missing baseline is not a pass.** Steps 2/11
+and 4/11, and the shakeout's Phase C, are timed against a committed per-corpus
+baseline (`tests/e2e/migration-rehearsal/lib/index-throughput-baselines.tsv`,
+2x ceiling, nexus-98zsp). A MISSING baseline is recorded and reported as SOFT,
+never as a pass, so commit the row it prints rather than moving on — an absent
+row is the state in which this gate measures nothing. A red here is an
+embed-throughput regression in the engine or the client, which is the class
+`engine-service-v0.1.99` shipped through every other gate.
 
 ### 6d. Migration-release branch (CONDITIONAL — this release ships a data migration)
 
@@ -637,7 +698,7 @@ nx --version                 # must print X.Y.Z
 
 ## See also
 
-- `AGENTS.md` § Cutting a release (canonical; defer to it on any discrepancy)
+- `AGENTS.md` § Cutting a release (a pointer to this file; this file is canonical for the procedure)
 - `docs/contributing.md#release-process` (long form — Step-by-step checklist, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
 - `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
 - `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)

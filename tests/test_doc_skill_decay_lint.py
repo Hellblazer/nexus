@@ -561,20 +561,21 @@ PATH_EXISTS_ALLOWLIST: dict[tuple[str, str], str] = {
     ("AGENTS.md", "tests/test_your_cmd.py"): (
         "2026-09-19: same workflow example, the paired test-file placeholder."
     ),
-    (
-        "AGENTS.md",
-        "conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py",
-    ): (
-        "2026-09-19: historical reference -- the sentence naming it says "
-        "outright the file 'was deleted 2026-08-22'; kept as a "
-        "retrospective pointer, the same shape as "
-        "test_release_artifact_verb_rot.py's _RETIRED_SCRIPT_ALLOWLIST "
-        "for a narrated-but-gone artifact."
-    ),
+    # REMOVED 2026-09-20. The entry was a retrospective pointer to
+    # `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`,
+    # a file whose own sentence said it "was deleted 2026-08-22". Its only
+    # occurrence in AGENTS.md sat inside § Cutting a release, which became a
+    # pointer to the release skill in the same commit, so the dangling
+    # reference went with it. The FACT it carried survives in full at
+    # AGENTS.md's Hot rules: "The plugin no longer ships a review-coverage
+    # push gate (deleted 2026-08-22, Sam's decision...)". Verified before
+    # shrinking, because a stale-entry failure is equally consistent with
+    # "the reference was cleaned up" and "the fact was lost".
 }
-#: Seeded 2026-09-19 at the exact count found on first live run. Bump only
-#: with a deliberate edit naming the new entry's reason in the same commit.
-_PATH_ALLOWLIST_CEILING = 3
+#: Seeded 2026-09-19 at the exact count found on first live run, 3. Now 2, and
+#: it may only go down. Bump only with a deliberate edit naming the new entry's
+#: reason in the same commit.
+_PATH_ALLOWLIST_CEILING = 2
 
 
 def _unallowlisted_path_violations(result: PathScanResult) -> list[PathViolation]:

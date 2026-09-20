@@ -376,7 +376,8 @@ Every step below is **required**. Missing any one of them has caused problems in
    their next one (nexus-utpuw.8). What still matters here is ISOLATION —
    the sandbox `HOME` must be activated *before* the reinstall runs, because
    the generation root resolves off `$HOME`; get that wrong and the sandbox
-   writes into the live install (AGENTS.md § Cutting a release, step 6).
+   writes into the live install (the `release` skill, step 6 — AGENTS.md
+   § Cutting a release is a pointer to it as of 2026-09-20).
 
 7c. **Run the sandbox shakedown** (~5-10 min warm cache, +10-15 min cold)
    ```bash

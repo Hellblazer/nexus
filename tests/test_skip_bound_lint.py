@@ -179,7 +179,9 @@ _GATE_KEYWORDS: tuple[str, ...] = (
 #: 253d0bc4a: all three sat unenforced in the substrate bucket).
 _GATE_LIKE_BY_NAME: dict[str, str] = {
     "tests/scripts/test_generation_flip_live_holder.py":
-        "AGENTS.md step 1c: required for any change to the shim / flip / GC machinery",
+        "release skill step 1c: required for any change to the shim / flip / GC "
+        "machinery (moved out of AGENTS.md 2026-09-20, when that section became a "
+        "pointer and the skill became the authority)",
     "tests/scripts/test_reinstall_tool_generations.py":
         "its own docstring: 'THIS MODULE IS THE ACCEPTANCE CRITERION' (nexus-utpuw.8)",
     "tests/scripts/test_post_publish_dispatch_check.py":
