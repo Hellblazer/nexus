@@ -2474,3 +2474,279 @@ class TestNonfiniteEmbeddings:
         out = store.project_against("src", ["tgt"], _FakeChromaClient({"src": src}), threshold=0.85)
         assert out["nonfinite_chunks"] == []
         assert out["total_chunks"] == 1
+
+
+# ── Mixed-dimension centroid fetches (nexus-pktki) ────────────────────────────
+#
+# TaxonomyCentroidRepository.fetchCentroids loops every dim in DIMS and
+# concatenates, so an envelope is ragged whenever the matched rows span more
+# than one embedding dimension. np.array(..., dtype=np.float32) raises a bare
+# ValueError on such a list (numpy 2.2.6: "inhomogeneous shape"), and it raises
+# BEFORE each site's own shape[1] guard can run — those guards encode a premise
+# ("one fetch, one dimension") the Java loop falsifies.
+#
+# The rebuild read refuses, because it REPLACES the taxonomy and a partial old
+# set would transfer operator labels for some centroids and silently mark the
+# rest pending. The three comparison paths drop the incommensurable rows and
+# log, which is the row-wise reading of the guard they already carried.
+
+
+class TestMixedCentroidDimensions:
+    def _store(self, client, records):
+        client._centroid_store = _FakeCentroidStore(records)
+        return client
+
+    def test_rebuild_read_refuses_and_names_collection_and_dims(self, client) -> None:
+        self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a"},
+            {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0], "label": "b"},
+            {"collection": "c", "topic_id": 3, "embedding": [1.0, 0.0, 0.0], "label": "mid-migration"},
+        ])
+        with pytest.raises(_hts.MixedEmbeddingDimensionsError) as exc:
+            client.read_rebuild_old_state("c")
+        msg = str(exc.value)
+        assert "'c'" in msg, "the operator needs the collection named"
+        assert "2d x2" in msg and "3d x1" in msg, msg
+
+    def test_rebuild_refusal_is_non_destructive(self, client) -> None:
+        """The refusal must precede the centroid delete, not follow it."""
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a"},
+            {"collection": "c", "topic_id": 2, "embedding": [1.0, 0.0, 0.0], "label": "b"},
+        ])
+        with pytest.raises(_hts.MixedEmbeddingDimensionsError):
+            store.rebuild_taxonomy("c", ["d1"], np.array([[1.0, 0.0]], dtype=np.float32), ["t"])
+        assert not [c for c in store._centroid_store.calls if c[0] == "delete_ids"]
+        assert len(store._centroid_store._records) == 2
+
+    def test_uniform_fetch_is_unaffected(self, client) -> None:
+        self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a"},
+            {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0], "label": "b"},
+        ])
+        state = client.read_rebuild_old_state("c")
+        assert state["old_centroids"].shape == (2, 2)
+
+    def test_compute_assignments_drops_incommensurable_centroids(self, client) -> None:
+        """A 3d centroid beside 2d ones must not crash the assignment, and must
+        not be argmax'd onto either — the doc lands on the 2d centroid it
+        actually matches."""
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "keep"},
+            {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0, 0.0], "label": "stale-dim"},
+        ])
+        out = store.compute_assignments("c", ["d1"], [[0.9, 0.1]])
+        assert [a["topic_id"] for a in out] == [1]
+
+    def test_compute_assignments_empty_when_nothing_commensurable(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "a"},
+            {"collection": "c", "topic_id": 2, "embedding": [1.0, 0.0, 0.0, 0.0], "label": "b"},
+        ])
+        assert store.compute_assignments("c", ["d1"], [[0.9, 0.1]]) == []
+
+    def test_compute_cross_links_survives_a_ragged_foreign_set(self, client) -> None:
+        """get_foreign spans collections, so a heterogeneous estate makes it
+        ragged with no migration in progress at all."""
+        store = self._store(client, [
+            {"collection": "other", "topic_id": 9, "embedding": [1.0, 0.0], "label": "same-dim"},
+            {"collection": "elsewhere", "topic_id": 10, "embedding": [1.0, 0.0, 0.0], "label": "other-embedder"},
+        ])
+        pairs = store.compute_cross_links(
+            "c", [[1.0, 0.0]], [{"topic_id": 5}],
+        )
+        assert pairs == [(5, 9)]
+
+    def test_project_against_uses_only_commensurable_targets(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+            {"collection": "tgt2", "topic_id": 8, "embedding": [1.0, 0.0, 0.0], "label": "T8", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0]})
+        out = store.project_against(
+            "src", ["tgt", "tgt2"], _FakeChromaClient({"src": src}), threshold=0.85,
+        )
+        assert out["total_centroids"] == 1, "the 3d target is not comparable and is not counted"
+        assert [t["topic_id"] for t in out["matched_topics"]] == [7]
+        # The drop is an operator-visible standing condition, not just a log
+        # line: for a dual-embedder tenant it recurs identically every call.
+        assert out["incommensurable_centroids"] == 1
+
+    def test_project_against_reports_zero_incommensurable_on_a_uniform_estate(
+        self, client,
+    ) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0]})
+        out = store.project_against(
+            "src", ["tgt"], _FakeChromaClient({"src": src}), threshold=0.85,
+        )
+        assert out["incommensurable_centroids"] == 0
+
+    def test_project_against_still_raises_when_no_target_is_commensurable(self, client) -> None:
+        """The pre-existing raise is kept for the case it was written for."""
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0, 0.0], "label": "T7", "doc_count": 1},
+            {"collection": "tgt2", "topic_id": 8, "embedding": [1.0, 0.0, 0.0, 0.0], "label": "T8", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0]})
+        with pytest.raises(ValueError, match="Dimension mismatch"):
+            store.project_against("src", ["tgt", "tgt2"], _FakeChromaClient({"src": src}))
+
+
+def _centroid_envelope_np_array_sites(source: str) -> list[str]:
+    """Names that hold a store-envelope embeddings list AND are handed straight
+    to a numpy array constructor somewhere in the module.
+
+    Structural, not a name allowlist: it tracks the dataflow from
+    ``<env>.get("embeddings")`` — the only way an envelope's rows enter this
+    module — and reports any tainted name used as the array constructor's first
+    argument.
+
+    Taint spreads through assignment, aliasing, augmented assignment, and the
+    ``.extend``/``.append`` accumulation forms, to a fixpoint, because a review
+    of the first version (T2 nexus/nexus-pktki-ragged-centroids-review-findings)
+    found it tracked only the first two and so could be evaded by a refactor as
+    ordinary as ``rows = c_embs``.
+
+    Taint is PER FUNCTION. A module-global set was tried first, on the theory
+    that over-approximating fails loudly rather than quietly — but once taint
+    propagates through aliases, a global set collides on ordinary parameter
+    names (``rows``, ``embs``) and reports four functions that never touch an
+    envelope. A guard whose false positives must be suppressed by name is a
+    growing allowlist, which is the failure mode this project already knows.
+    The two funnel helpers are exempt: materializing the rows is their job.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    _FUNNELS = {"_uniform_embedding_matrix", "_commensurable_embedding_matrix"}
+    #: numpy entry points that materialize a sequence of rows into an array and
+    #: therefore raise on a ragged one.
+    _CTORS = {"array", "asarray", "asanyarray", "vstack", "stack"}
+
+    def is_embeddings_get(node: ast.AST) -> bool:
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "get" and sub.args
+                    and isinstance(sub.args[0], ast.Constant)
+                    and sub.args[0].value == "embeddings"):
+                return True
+        return False
+
+    def target_names(node: ast.AST) -> list[str]:
+        """Every Name bound by an assignment target, unpacking included."""
+        return [n.id for n in ast.walk(node) if isinstance(n, ast.Name)]
+
+    def mentions_tainted(node: ast.AST, tainted: set[str]) -> bool:
+        return any(
+            isinstance(n, ast.Name) and n.id in tainted for n in ast.walk(node)
+        )
+
+    def taint_of(scope: ast.AST) -> set[str]:
+        tainted: set[str] = set()
+        for _ in range(16):  # fixpoint; these bodies are far shallower
+            before = set(tainted)
+            for node in ast.walk(scope):
+                if isinstance(node, (ast.Assign, ast.AugAssign)):
+                    value = node.value
+                    if is_embeddings_get(value) or mentions_tainted(value, tainted):
+                        targets = (
+                            node.targets if isinstance(node, ast.Assign)
+                            else [node.target]
+                        )
+                        for tgt in targets:
+                            tainted.update(target_names(tgt))
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in {"extend", "append"}
+                        and isinstance(node.func.value, ast.Name) and node.args
+                        and (is_embeddings_get(node.args[0])
+                             or mentions_tainted(node.args[0], tainted))):
+                    tainted.add(node.func.value.id)
+            if tainted == before:
+                break
+        return tainted
+
+    hits: list[str] = []
+    for scope in ast.walk(tree):
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if scope.name in _FUNNELS:
+            continue
+        tainted = taint_of(scope)
+        if not tainted:
+            continue
+        for node in ast.walk(scope):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _CTORS
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "np" and node.args
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id in tainted):
+                hits.append(f"{node.args[0].id}@line{node.lineno}")
+    return sorted(set(hits))
+
+
+class TestCentroidMatrixConstructionIsFunnelled:
+    """A fifth call site must inherit the fix, not re-derive the crash.
+
+    The guard is only worth its line count if it fails on the code it was
+    written against, so the companion test replays the pre-fix module.
+    """
+
+    def test_no_site_builds_a_centroid_matrix_directly(self) -> None:
+        import inspect
+        source = inspect.getsource(_hts)
+        hits = _centroid_envelope_np_array_sites(source)
+        assert hits == [], (
+            "centroid envelope rows reach np.array directly at "
+            f"{hits}; route them through _uniform_embedding_matrix (refuse) or "
+            "_commensurable_embedding_matrix (filter) so a ragged fetch is "
+            "diagnosed rather than raising a bare ValueError (nexus-pktki)"
+        )
+
+    def test_the_guard_fails_on_the_pre_fix_module(self) -> None:
+        """Non-vacuity: the pre-fix shape is what the guard must catch."""
+        pre_fix = (
+            "def read_rebuild_old_state(self, collection_name):\n"
+            "    env = self._centroid.get_by_collection(collection_name)\n"
+            "    embeddings = env.get('embeddings') or []\n"
+            "    return np.array(embeddings, dtype=np.float32)\n"
+            "def project_against(self, targets):\n"
+            "    ctr_raw = []\n"
+            "    for tc in targets:\n"
+            "        env = self._centroid.get_by_collection(tc)\n"
+            "        ctr_raw.extend(env.get('embeddings') or [])\n"
+            "    return np.array(ctr_raw, dtype=np.float32)\n"
+        )
+        hits = _centroid_envelope_np_array_sites(pre_fix)
+        assert len(hits) == 2, hits
+
+    def test_the_guard_survives_the_obvious_evasions(self) -> None:
+        """A guard is worth its line count only if a plain refactor cannot walk
+        past it. These four forms were all invisible to the first version
+        (review finding, T2 nexus/nexus-pktki-ragged-centroids-review-findings).
+        """
+        evasions = (
+            "def alias(self, c):\n"
+            "    env = self._centroid.get_by_collection(c)\n"
+            "    c_embs = env.get('embeddings') or []\n"
+            "    rows = c_embs\n"
+            "    return np.array(rows, dtype=np.float32)\n"
+            "def augmented(self, targets):\n"
+            "    acc = []\n"
+            "    for t in targets:\n"
+            "        acc += self._centroid.get_by_collection(t).get('embeddings')\n"
+            "    return np.asarray(acc, dtype=np.float32)\n"
+            "def unpacked(self, c):\n"
+            "    env = self._centroid.get_foreign(c)\n"
+            "    lhs, rhs = env.get('embeddings'), None\n"
+            "    return np.vstack(lhs)\n"
+            "def appended(self, c):\n"
+            "    acc = []\n"
+            "    acc.append(self._centroid.get_foreign(c).get('embeddings'))\n"
+            "    return np.array(acc, dtype=np.float32)\n"
+        )
+        hits = _centroid_envelope_np_array_sites(evasions)
+        assert len(hits) == 4, hits

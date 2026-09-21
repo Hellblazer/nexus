@@ -143,6 +143,122 @@ def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
     return sim
 
 
+class MixedEmbeddingDimensionsError(RuntimeError):
+    """An embedding fetch returned rows of more than one dimension where the
+    caller needs a single commensurable set (nexus-pktki).
+
+    ``TaxonomyCentroidRepository.fetchCentroids`` loops every dim in ``DIMS`` and
+    concatenates, so the envelope is ragged whenever the matched rows span more
+    than one dimension — a tenant part-way through an embedding migration, or
+    (for the foreign/multi-target reads) any estate where two collections sit on
+    different embedders, which RDR-210's side-by-side bge-768 and Voyage posture
+    makes ordinary rather than exceptional.
+
+    Raised on the two reads whose result defines a POPULATION: the rebuild read,
+    where dropping incommensurable rows would transfer operator labels for some
+    old centroids and silently mark the rest pending, and the source-chunk read,
+    where it would understate the projection's own coverage counters.
+
+    The three comparison paths drop those rows and log instead. NOT because they
+    are read-only — they are not, and an earlier version of this docstring said
+    so wrongly (critique, T2 nexus/critique-nexus-pktki-ragged-centroids-diff-
+    2026-09-21): all three feed persist_assignments / persist_cross_links, so
+    every one of the five writes durable taxonomy state. The distinction is what
+    a partial result MEANS. Those three emit per-row results that are each
+    individually correct — a doc assigned to the nearest commensurable centroid
+    is assigned correctly — and the set-wise guard they used to carry emitted
+    NOTHING in the same situation, so filtering is strictly more informative
+    than what it replaces. A partial POPULATION is a wrong answer wearing the
+    shape of a right one.
+    """
+
+
+def _centroid_dim_census(rows: list[Any]) -> dict[int, int]:
+    """Row count per embedding dimension, e.g. ``{768: 12, 1024: 3}``.
+
+    Built from ``len(row)`` rather than numpy, because a ragged list is exactly
+    the input ``np.array(..., dtype=np.float32)`` cannot accept: it raises
+    ValueError ("inhomogeneous shape") on numpy 2.2.6, which is the crash this
+    census exists to replace with a diagnosis.
+    """
+    census: dict[int, int] = {}
+    for row in rows:
+        census[len(row)] = census.get(len(row), 0) + 1
+    return census
+
+
+def _uniform_embedding_matrix(
+    rows: list[Any], *, collection: str, site: str, remedy: str,
+) -> "np.ndarray":
+    """Embedding rows as one float32 matrix, refusing a mixed-dimension set.
+
+    The ONLY sanctioned way to build a matrix a caller then mutates state from.
+    ``tests/db/test_http_taxonomy_store.py`` walks this module's AST and fails if
+    any other site calls ``np.array`` on an embeddings list off a store
+    envelope, so a later call site inherits the refusal instead of re-deriving
+    the crash — which is how the source-chunk paging site was found.
+    """
+    if not rows:
+        return np.empty((0, 0), dtype=np.float32)
+    census = _centroid_dim_census(rows)
+    if len(census) > 1:
+        raise MixedEmbeddingDimensionsError(
+            f"{site}: collection {collection!r} has embeddings at "
+            f"{len(census)} dimensions "
+            f"({', '.join(f'{d}d x{n}' for d, n in sorted(census.items()))}). "
+            + remedy
+        )
+    return np.array(rows, dtype=np.float32)
+
+
+#: Remedy line for the rebuild read: a partial old set is worse than a refusal,
+#: because it transfers operator labels for some centroids and silently marks
+#: the rest pending.
+_REBUILD_REMEDY = (
+    "A rebuild cannot preserve operator labels across incommensurable "
+    "centroids. Finish the embedding migration for this collection, or purge "
+    "the stale-dimension centroids, then rebuild."
+)
+
+#: Remedy line for the source-chunk read: dropping chunks would understate the
+#: projection's own coverage counters rather than fail.
+_SOURCE_CHUNK_REMEDY = (
+    "A projection cannot compare source chunks of different dimensions against "
+    "one centroid set. Finish the embedding migration for this collection, "
+    "then project again."
+)
+
+
+def _commensurable_embedding_matrix(
+    rows: list[Any], *, target_dim: int, collection: str, site: str,
+) -> tuple["np.ndarray", list[int]]:
+    """Centroid rows at ``target_dim`` only, as a matrix plus the kept indices.
+
+    The row-wise reading of the set-wise ``shape[1] != shape[1]`` guards these
+    comparison paths already carried. Those guards encode the right intent —
+    compare only commensurable vectors — against a premise the Java fetch
+    falsifies, namely that one fetch yields one dimension. Applied per row, the
+    same rule survives a ragged envelope; applied per set, it never runs,
+    because ``np.array`` raises first.
+
+    Callers filter their own parallel metadata lists by the returned indices.
+    """
+    keep = [i for i, row in enumerate(rows) if len(row) == target_dim]
+    if len(keep) != len(rows):
+        _log.warning(
+            "centroid_dimension_filtered",
+            collection=collection,
+            site=site,
+            target_dim=target_dim,
+            kept=len(keep),
+            dropped=len(rows) - len(keep),
+            census=_centroid_dim_census(rows),
+        )
+    if not keep:
+        return np.empty((0, target_dim), dtype=np.float32), []
+    return np.array([rows[i] for i in keep], dtype=np.float32), keep
+
+
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
 
 
@@ -850,14 +966,23 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if not c_embs or not embeddings:
             return []
 
-        cent = np.array(c_embs, dtype=np.float32)
+        # q FIRST: it supplies the dimension the centroid set is filtered to.
+        # The old order built `cent` first and compared whole shapes, which a
+        # ragged envelope never reaches (nexus-pktki).
         q = np.array(
             [e if isinstance(e, list) else (e.tolist() if hasattr(e, "tolist") else list(e))
              for e in embeddings],
             dtype=np.float32,
         )
-        if q.size == 0 or q.shape[1] != cent.shape[1]:
+        if q.size == 0:
+            return []
+        cent, kept = _commensurable_embedding_matrix(
+            c_embs, target_dim=int(q.shape[1]),
+            collection=collection_name, site="compute_assignments",
+        )
+        if cent.shape[0] == 0:
             return []  # dimension mismatch — oracle short-circuit (SC-10)
+        c_metas = [c_metas[i] for i in kept]
 
         # nexus-2fa0w: a NaN/inf doc row or centroid row is excluded and
         # logged, never silently argmax'd onto centroid 0.
@@ -933,10 +1058,18 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if other_embs_raw is None or len(other_embs_raw) == 0:
             return []
 
-        other_embs = np.array(other_embs_raw, dtype=np.float32)
         new_embs = np.array(new_centroids, dtype=np.float32)
-        if new_embs.size == 0 or new_embs.shape[1] != other_embs.shape[1]:
+        if new_embs.size == 0:
             return []
+        # The foreign set spans collections by construction, so it is ragged
+        # whenever two of them sit on different embedders (nexus-pktki).
+        other_embs, kept = _commensurable_embedding_matrix(
+            other_embs_raw, target_dim=int(new_embs.shape[1]),
+            collection=collection_name, site="compute_cross_links",
+        )
+        if other_embs.shape[0] == 0:
+            return []
+        other_metas = [other_metas[i] for i in kept]
 
         # nexus-2fa0w: non-finite centroids on either side are excluded and
         # logged rather than compared.
@@ -1206,10 +1339,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         metadatas = env.get("metadatas") or []
         old_centroid_ids = env.get("ids") or []
 
-        old_centroids = (
-            np.array(embeddings, dtype=np.float32)
-            if embeddings
-            else np.empty((0, 0), dtype=np.float32)
+        old_centroids = _uniform_embedding_matrix(
+            embeddings, collection=collection_name, site="read_rebuild_old_state",
+            remedy=_REBUILD_REMEDY,
         )
         old_labels: list[str] = []
         old_review_statuses: list[str] = []
@@ -1800,7 +1932,12 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 return dict(_empty)
             _PAGE = 300
             src_ids = []
-            src_emb_pages: list[np.ndarray] = []
+            # Rows accumulate RAW and become one matrix after the loop. Building
+            # a matrix per page hid the mixed-dimension case twice over: a
+            # ragged page raised a bare ValueError, and pages that each happened
+            # to be uniform but differed from one another failed later in
+            # np.concatenate instead (nexus-pktki).
+            src_emb_rows: list[Any] = []
             offset = 0
             while True:
                 page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
@@ -1809,13 +1946,16 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 if not page_ids or page_embs is None:
                     break
                 src_ids.extend(page_ids)
-                src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+                src_emb_rows.extend(page_embs)
                 if len(page_ids) < _PAGE:
                     break
                 offset += _PAGE
             if not src_ids:
                 return dict(_empty)
-            src_embs = np.concatenate(src_emb_pages)
+            src_embs = _uniform_embedding_matrix(
+                src_emb_rows, collection=source_collection,
+                site="project_against.source", remedy=_SOURCE_CHUNK_REMEDY,
+            )
 
         # 2. Target centroids from the centroid-port ($in target_collections).
         ctr_raw: list[list[float]] = []
@@ -1844,14 +1984,29 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 "nonfinite_chunks": nonfinite_chunks,
                 "total_chunks": total_chunks_fetched, "total_centroids": 0,
             }
-        ctr_embs = np.array(ctr_raw, dtype=np.float32)
-
-        # 3. Dimension check (oracle raises ValueError).
-        if src_embs.shape[1] != ctr_embs.shape[1]:
+        # 3. Dimension check (oracle raises ValueError). ctr_raw accumulates
+        # across target_collections, so it is ragged as soon as two targets sit
+        # on different embedders (nexus-pktki). Targets that cannot be compared
+        # are dropped and logged; the raise is kept for the case it was written
+        # for — NOTHING in the target set is commensurable with the source.
+        ctr_embs, ctr_kept = _commensurable_embedding_matrix(
+            ctr_raw, target_dim=int(src_embs.shape[1]),
+            collection=source_collection, site="project_against",
+        )
+        if ctr_embs.shape[0] == 0:
+            found = sorted(_centroid_dim_census(ctr_raw))
             raise ValueError(
                 f"Dimension mismatch: source embeddings {src_embs.shape[1]}d, "
-                f"centroids {ctr_embs.shape[1]}d"
+                f"centroids {'d, '.join(str(d) for d in found)}d"
             )
+        ctr_metas = [ctr_metas[i] for i in ctr_kept]
+        # Surfaced, not merely logged: for a steady-state dual-embedder tenant
+        # the dropped targets are the SAME ones on every call, so the projection
+        # silently and permanently stops linking those collections. That is a
+        # standing condition an operator has to be able to see, which is the
+        # same reason incomplete_fetch and nonfinite_chunks are in this dict
+        # (critique, T2 nexus/critique-nexus-pktki-ragged-centroids-diff-2026-09-21).
+        incommensurable_centroids = len(ctr_raw) - len(ctr_kept)
 
         # Non-finite centroids are dropped from the target set the same way.
         ctr_ok = _finite_row_mask(
@@ -1868,6 +2023,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 "nonfinite_chunks": nonfinite_chunks,
                 "total_chunks": total_chunks_fetched,
                 "total_centroids": len(ctr_metas),
+                "incommensurable_centroids": incommensurable_centroids,
             }
 
         # 4-5. Cosine similarity matrix (raw) + ICF-adjusted filter matrix.
@@ -1946,6 +2102,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "nonfinite_chunks": nonfinite_chunks,
             "total_chunks": total_chunks_fetched,
             "total_centroids": len(ctr_metas),
+            "incommensurable_centroids": incommensurable_centroids,
         }
 
     # ── ICF / analytics ────────────────────────────────────────────────────────
