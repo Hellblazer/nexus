@@ -191,8 +191,41 @@ def test_a_nested_pytest_run_is_not_refused(tmp_path: Path) -> None:
     finally:
         release()
 
-    assert out.returncode == 0, (
-        f"a nested run was refused its own parent's lease (rc={out.returncode})\n"
+    combined = out.stdout + out.stderr
+
+    # THE CLAIM, asserted on the refusal's OWN signature and nothing else.
+    # It runs on every path, whatever the child's exit code, so the skip
+    # below can never carry it away.
+    #
+    # The first cut asserted ``out.returncode == 0`` under a message naming a
+    # lease refusal, which attributed ANY nonzero rc to this guard. Under a
+    # full ``-n auto`` run the child exits 1 from a HikariPool
+    # ConnectException -- it cannot reach its substrate under the outer run's
+    # resource pressure -- and the message said "refused its own parent's
+    # lease" about a substrate failure it never looked at. Found by nexus-34,
+    # reproduced on two trees; it passes alone and under -n 4 alone, so the
+    # misattribution only ever surfaced where the stdout was longest.
+    #
+    # A lease refusal has a signature: exit 75 and a named line. Anything
+    # else is some other failure, and this test must not speak for it.
+    assert out.returncode != 75, (
+        f"a nested run was refused its own parent's lease (exit 75)\n"
         f"stdout:\n{out.stdout[-1500:]}\nstderr:\n{out.stderr[-1500:]}"
     )
-    assert "suite lease: refusing" not in (out.stdout + out.stderr)
+    assert "suite lease: refusing" not in combined, (
+        "a nested run hit the suite-lease refusal path\n"
+        f"stdout:\n{out.stdout[-1500:]}\nstderr:\n{out.stderr[-1500:]}"
+    )
+
+    if out.returncode != 0:
+        # Not a refusal -- the assertions above already proved that -- so the
+        # child died of something this test does not own. Say what, rather
+        # than blaming the lease. Reported as a skip and never as a pass,
+        # and the claim above was already checked, so this is not a vacuous
+        # exit: the guard under test was exercised on this path too.
+        pytest.skip(
+            "nested pytest failed for a reason that is not a lease refusal "
+            f"(rc={out.returncode}); the refusal signature was absent, which "
+            "is what this test asserts. Child output tail:\n"
+            f"{out.stdout[-800:]}\n{out.stderr[-800:]}"
+        )
