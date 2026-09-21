@@ -177,7 +177,7 @@ def _uniform_embedding_matrix(
             f"{site}: collection {collection!r} has embeddings at "
             f"{len(census)} dimensions "
             f"({', '.join(f'{d}d x{n}' for d, n in sorted(census.items()))}). "
-            + remedy
+            + remedy.format(collection=collection)
         )
     return np.array(rows, dtype=np.float32)
 
@@ -185,11 +185,21 @@ def _uniform_embedding_matrix(
 #: Remedy line for the rebuild read: a partial old set is worse than a refusal,
 #: because it transfers operator labels for some centroids and silently marks
 #: the rest pending.
+#: ``{collection}`` is substituted by :func:`_uniform_embedding_matrix`, which
+#: is the only caller and does have the name in hand. The first version left a
+#: literal ``<collection>`` in the text: a remedy naming a real verb that the
+#: operator still has to fill in by hand is only half-reachable, and calling
+#: that "swept the sibling" overstated it (round-4 critique).
 _REBUILD_REMEDY = (
     "A rebuild cannot preserve operator labels across incommensurable "
-    "centroids. Finish the embedding migration for this collection, or purge "
-    "the stale-dimension centroids, then rebuild."
+    "centroids. Finish the embedding migration for this collection, or discard "
+    "its taxonomy with `nx taxonomy reset -c {collection}` and discover afresh."
 )
+# Swept alongside the cross-space refusal, not separately: this line used to say
+# "purge the stale-dimension centroids", which is the SAME defect the reviewers
+# found one module over — a remedy phrased as an action with no verb behind it.
+# Naming a defect class and fixing only the instance that fired is not fixing
+# the class, and this was its sibling.
 
 #: Remedy line for the source-chunk read: dropping chunks would understate the
 #: projection's own coverage counters rather than fail.
@@ -1327,6 +1337,36 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 old_labels.append(m.get("label") or "")
                 old_review_statuses.append("pending")
 
+        # Operator labels that NO centroid carries. This is the signal the
+        # bad1e8348 warning was reaching for, and it is live HERE and nowhere
+        # else: _merge_labels only ever sees labels derived from the centroid
+        # metadata above, so by the time it runs, a label with no centroid has
+        # already been dropped and cannot be counted. This function is the one
+        # place both sides exist — T2's own topic map, and the centroid ids —
+        # so the comparison is possible exactly here.
+        #
+        # Round 3 DELETED that warning on the grounds it could not fire, which
+        # was true of where it sat and the wrong conclusion: the right move was
+        # to relocate it to the join, not to drop the observation (round-3
+        # critique). The state it reports is real — it is what a rebuild
+        # interrupted between its delete and its persist leaves behind, and
+        # those labels are about to be lost with no other signal.
+        carried = {int(t) for t in old_centroid_topic_ids}
+        orphaned = [
+            tid for tid, (label, _status) in old_topic_map.items()
+            if int(tid) not in carried and label
+        ]
+        if orphaned:
+            _log.warning(
+                "taxonomy_labels_without_centroids",
+                collection=collection_name,
+                orphaned_topics=len(orphaned),
+                topic_ids=sorted(orphaned)[:20],
+                centroids=len(old_centroid_topic_ids),
+                detail="operator labels exist on topics no centroid carries; "
+                       "a rebuild cannot transfer them and they will be lost",
+            )
+
         return {
             "old_centroids": old_centroids,
             "old_labels": old_labels,
@@ -1346,6 +1386,25 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         the oracle's "call this after the Chroma delete" contract.
         """
         return self._post("/purge_collection", {"collection": collection})
+
+    def reset_collection(self, collection: str) -> dict[str, int]:
+        """Discard a collection's taxonomy entirely: T2 rows AND its centroids.
+
+        :meth:`purge_collection` deliberately leaves the centroid half to the
+        caller, which is right for the orchestrators that already hold the
+        port — and wrong for an operator-facing reset, where "taxonomy gone"
+        must mean gone on both sides or the next rebuild reads stale centroids
+        and the reset silently did not take.
+
+        Returns purge_collection's 4-key count dict plus ``centroids``.
+
+        nexus-dtqd7: this is the verb the cross-space rebuild refusal names.
+        Without it the refusal pointed at a remedy that did not exist, and the
+        only reachable purge destroyed the collection's documents too.
+        """
+        counts = dict(self.purge_collection(collection))
+        counts["centroids"] = int(self._centroid.purge(collection))
+        return counts
 
     # ── Orchestrators (thin compose-glue) (RDR-152 nexus-1di3r.9) ──────────────
     #

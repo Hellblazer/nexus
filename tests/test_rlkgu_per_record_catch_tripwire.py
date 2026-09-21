@@ -365,6 +365,18 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # `nx index repo` walk skips this one file instead of aborting the
     # whole run.
     "UnextractableContentError",
+    # nexus-z0lu4. These two were command-level until `nx dt index` began
+    # passing source_uri, and their entries in the command-level table said so
+    # in as many words: "neither the --dir batch loop nor nx dt index passes
+    # --source-uri per-record". True when written, false as of that change —
+    # the premise moved and the classification had to move with it. Both now
+    # reach a batch loop, where one record's identity precondition must fail
+    # that record only. Single-file commands still convert them to a
+    # ClickException at the wrapper boundary before any loop sees them, so the
+    # command-level behaviour is unchanged; it is only the batch surfaces that
+    # gained them.
+    "SourceUriNotFoundError",
+    "SourceUriCollectionMismatchError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,
@@ -431,22 +443,8 @@ _COMMAND_LEVEL_REASONS: dict[str, str] = {
         "dimension validation (GH #1370 D2), not reachable from the "
         "ingest call stack."
     ),
-    "SourceUriNotFoundError": (
-        "Raised when --source-uri is set and unresolvable -- a single-"
-        "record IDENTITY precondition. index_pdf_cmd/index_md_cmd's own "
-        "wrappers convert it to click.ClickException at the single-file "
-        "command boundary (intentional abort, no batch to protect); "
-        "neither the --dir batch loop nor nx dt index passes "
-        "--source-uri per-record."
-    ),
-    "SourceUriCollectionMismatchError": (
-        "Same shape as SourceUriNotFoundError above -- single-record "
-        "identity precondition, converted to click.ClickException at the "
-        "single-file command wrapper; not reachable from the --dir / "
-        "nx dt index per-record loops."
-    ),
     "EphemeralPathRefusedError": (
-        "Same shape as SourceUriNotFoundError above (nexus-3o4lt): a "
+        "A single-record IDENTITY precondition (nexus-3o4lt): a "
         "single-record IDENTITY precondition raised by _repo_home_for "
         "before any chunk or catalog write, when a repo file exists only "
         "in a nested worktree. index_pdf_cmd/index_md_cmd's wrappers "

@@ -332,6 +332,13 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'close_session': [],
     },
     'taxonomy': {
+        # nexus-dtqd7: the taxonomy-only reset behind `nx taxonomy reset`, and
+        # the exit the cross-space rebuild refusal names. Service-only: it
+        # composes purge_collection (T2) with the centroid port's purge, and
+        # the SQLite twin never owned the centroid half — that was the caller's
+        # job there, which is exactly the split that let a reset leave live
+        # centroids behind. No oracle method for the contract to see.
+        'reset_collection': ['collection'],
         # nexus-onjvy: the quality columns (similarity / assigned_at /
         # source_collection) were WRITE-ONLY until engine-service-v0.1.58 added
         # /assignments/details. The SQLite twin read them through a raw

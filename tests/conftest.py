@@ -218,6 +218,90 @@ def _selected_t2_substrate_boots_engine() -> bool:
     return selected != "none" and selected not in _RETIRED_T2_SUBSTRATES
 
 
+#: Release callable for this session's suite lease, or None when this process
+#: does not hold one (a worker, a non-engine run, or a box that let it pass).
+_suite_lease_release = None
+
+
+def _take_suite_lease() -> None:
+    """Hold the box for THIS substrate-heavy run, and refuse a second one.
+
+    The build lease made the box single-writer for Maven and the gate above
+    already refuses a suite while a build holds it. But the suite took no
+    lease of its own, so suite-versus-suite was invisible: two full runs
+    exhaust the machine-wide SysV shared-memory budget and report thousands
+    of setup errors that read as breakage rather than contention
+    (nexus-6qp25).
+
+    Gated on the same predicate as the build check -- only a run that will
+    boot the engine competes for that budget, so `=none` runs take nothing
+    and are never blocked.
+
+    Controller-only, like the gate above: xdist workers spawn after this
+    returns and must not each take a lease they would then each release.
+    """
+    global _suite_lease_release
+    if not _selected_t2_substrate_boots_engine():
+        return
+    try:
+        from tests import _suite_lease  # noqa: PLC0415 — deferred: test-support module, not needed unless this run competes for the box
+
+        # A nested pytest is one run inside another, already serialised by
+        # construction -- not a second competitor for the box. 19 test files
+        # here spawn one, and without this exemption the inner run refuses
+        # against a lease the OUTER run holds, naming it as the holder.
+        if _suite_lease.inside_a_holder():
+            return
+
+        held = _suite_lease.holder()
+        if held is not None:
+            wait = _suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0
+            if wait == 0:
+                pytest.exit(
+                    "suite lease: refusing to start — another substrate-heavy "
+                    f"run holds this box ({held}). Two at once exhaust the "
+                    "machine-wide shared-memory budget and report contention "
+                    "as thousands of setup errors (nexus-6qp25). Wait for it, "
+                    "set NX_SUITE_LEASE_WAIT=1 to queue behind it, or "
+                    "NX_TEST_T2_SUBSTRATE=none for a run that needs no engine.",
+                    returncode=75,
+                )
+        _suite_lease_release = _suite_lease.acquire(
+            _suite_lease_label(),
+            wait_seconds=_suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0,
+        )
+    except pytest.exit.Exception:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the lease must never break collection on its own bug
+        import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+        _sys.stderr.write(f"suite-lease gate skipped on its own error: {exc!r}\n")
+
+
+def _suite_lease_wait_requested() -> bool:
+    raw = os.environ.get("NX_SUITE_LEASE_WAIT", "").strip()
+    return bool(raw) and raw != "0"
+
+
+def _suite_lease_label() -> str:
+    """Name the holder well enough for a peer to find it: cwd plus argv."""
+    import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+    args = " ".join(_sys.argv[1:])[:120]
+    return f"{Path.cwd().name}: pytest {args}".strip()
+
+
+def _release_suite_lease() -> None:
+    global _suite_lease_release
+    if _suite_lease_release is None:
+        return
+    try:
+        _suite_lease_release()
+    except Exception:  # noqa: BLE001 — a failed release leaves a lease its dead pid disowns
+        pass
+    _suite_lease_release = None
+
+
 def _gate_on_build_lease() -> None:
     """Refuse the whole session ONCE while a service build holds the lease,
     or wait for it when asked (nexus-pv93h).
@@ -370,6 +454,7 @@ def pytest_sessionstart(session):
     _is_controller_or_serial = not _is_xdist_worker(session)
     if _is_controller_or_serial:
         _gate_on_build_lease()
+        _take_suite_lease()
 
     # nexus-pfuns: FENCE $HOME before any test runs. The gates were fenced
     # first; this suite was not, and it runs with the operator's real home.
@@ -481,6 +566,7 @@ def _check_fixture_cache_leaks(session) -> None:
 
 
 def pytest_sessionfinish(session, exitstatus):
+    _release_suite_lease()
     _check_fixture_cache_leaks(session)
     _check_scenario_non_vacuity(session)
     _check_mandatory_pin_non_vacuity(session)

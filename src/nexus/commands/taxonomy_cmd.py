@@ -20,6 +20,7 @@ from nexus.commands._helpers import (
 )
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
+from nexus.db.t2.taxonomy_compute import MixedEmbeddingDimensionsError
 
 
 def _T2Database(path, *, client=None):
@@ -748,6 +749,15 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 count = discover_for_collection(
                     col_name, db.taxonomy, t3, force=force,
                 )
+            except MixedEmbeddingDimensionsError as exc:
+                # nexus-dtqd7 follow-up. This loop's whole shape is
+                # per-collection isolation, and an uncaught refusal aborted the
+                # entire batch over one migrated collection (code review of
+                # bad1e8348). Same treatment as the conflict below: name it,
+                # keep going, fail the run at the end.
+                click.echo(f"  {col_name}: REFUSED: {exc}", err=True)
+                failed.append(col_name)
+                continue
             except TopicPersistConflictError as exc:
                 # GH #1489 (nexus-zhxxd): a persist conflict on a collection
                 # with no topics is a store defect, not a race. Name it per
@@ -821,10 +831,105 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
 
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         t3 = make_t3()
-        count = discover_for_collection(
-            collection, db.taxonomy, t3, force=True,
-        )
+        try:
+            count = discover_for_collection(
+                collection, db.taxonomy, t3, force=True,
+            )
+        except MixedEmbeddingDimensionsError as exc:
+            # The refusal carries its own remedy; a traceback would bury it.
+            click.echo(f"Refused: {exc}", err=True)
+            raise SystemExit(1) from None
     click.echo(f"Rebuilt {count} topics for collection {collection!r}.")
+
+
+@taxonomy.command("reset")
+@click.option("--collection", "-c", required=True, help="T3 collection whose taxonomy to discard")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt")
+def reset_cmd(collection: str, yes: bool) -> None:
+    """Discard a collection's taxonomy: topics, assignments, links, centroids.
+
+    The documents and their chunks are NOT touched -- this is the taxonomy-only
+    reset, not `nx collection delete`.
+
+    Exists because a refusal has to name a way through (nexus-dtqd7). When a
+    collection has migrated embedders, its old centroids and its documents live
+    in different spaces, operator labels cannot be carried across, and a rebuild
+    refuses rather than dropping them silently. The two ways forward are to
+    re-embed so both sides share one space, or to discard the taxonomy on
+    purpose and discover afresh. The second one had no verb: the refusal named
+    a remedy that did not exist, and the only reachable "purge" destroyed the
+    whole collection's documents (both reviewers of bad1e8348 caught this).
+
+    NOT a narrower rebuild. The engine's purge deletes topic_assignments by
+    SOURCE_COLLECTION as well as by topic id, so it also removes this
+    collection's documents' projections onto OTHER collections' topics, which a
+    rebuild leaves alone. That makes reset strictly more destructive than the
+    operation it is offered as an alternative to. Scoping it tighter needs an
+    engine change and rides that release train (nexus-0v0nj); until then the
+    widening is disclosed before the prompt, not discovered from the counts
+    afterwards.
+    """
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
+        topics = db.taxonomy.get_all_topics(collection=collection)
+        # ONE PATH, deliberately. Round 3 added a SECOND branch here for the
+        # no-topics case, so an interrupted reset could finish its own work, and
+        # that branch reproduced in new code the exact defect the rest of this
+        # command exists to fix: it called reset_collection unconditionally with
+        # no disclosure, no prompt (--yes had nothing to skip), and reported
+        # only centroids — so a run that destroyed cross-collection assignments
+        # and found no centroids printed "Nothing to reset", which was false.
+        #
+        # The ASYMMETRY was the bug. purgeCollection deletes topic_assignments
+        # by SOURCE_COLLECTION whether or not this collection owns any topics,
+        # so a collection with zero topics can still have outbound projections
+        # to lose. Two branches meant two homes for the disclosure and only one
+        # of them had it. There is one path now: every reset states the same
+        # scope, prompts the same way and reports the same counts, topics or no
+        # topics (round-4 review).
+        labelled = [
+            t for t in topics
+            if (t.get("review_status") or "") == "accepted"
+        ]
+        if topics:
+            click.echo(
+                f"This discards the taxonomy for {collection!r}: {len(topics)} "
+                f"topic(s), {len(labelled)} of them operator-accepted, with "
+                "their assignments, links and centroids."
+            )
+        else:
+            click.echo(
+                f"Collection {collection!r} owns no topics. Resetting still "
+                "clears whatever an interrupted reset left behind, and the "
+                "scope below applies either way."
+            )
+        click.echo("The collection's documents and chunks are not touched.")
+        # The engine's purge also deletes topic_assignments by SOURCE_COLLECTION
+        # (TaxonomyRepository.purgeCollection), which reaches BEYOND this
+        # collection's own topics: it removes this collection's documents'
+        # projections onto OTHER collections' topics. A rebuild never touches
+        # those, so reset is strictly more destructive than the operation it is
+        # offered as the alternative to, and saying so is the whole point --
+        # this session has spent the day on losses that were real, unavoidable
+        # and silent, and quietly widening one while fixing another would be
+        # the same defect wearing a fix's clothes.
+        click.echo(
+            "It ALSO removes this collection's cross-collection projections — "
+            "its documents' assignments onto other collections' topics, which a "
+            "rebuild would have kept. Re-run `nx taxonomy project` afterwards to "
+            "rebuild them."
+        )
+        if not yes:
+            # Irreversible, and the accepted-label count is exactly the thing
+            # the operator is being asked to weigh, so it is printed above the
+            # prompt rather than left to be inferred.
+            click.confirm("Proceed?", abort=True)
+        counts = db.taxonomy.reset_collection(collection)
+    click.echo(
+        f"Reset {collection!r}: {counts.get('topics', 0)} topics, "
+        f"{counts.get('assignments', 0)} assignments, {counts.get('links', 0)} links, "
+        f"{counts.get('centroids', 0)} centroids removed."
+    )
+    click.echo(f"Run `nx taxonomy discover --collection {collection}` to rediscover.")
 
 
 # ── Review command (RDR-070, nexus-lbu) ─────────────────────────────────────

@@ -254,6 +254,26 @@ def _index_record(
 
     from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415 — command-local import (doc_indexer)
 
+    # NAME THE DEVONthink IDENTITY when the document is already catalogued
+    # (nexus-z0lu4). index_pdf/index_markdown already take source_uri and
+    # resolve through by_source_uri FIRST — owner-agnostic and path-independent
+    # — precisely so a document whose real identity is an out-of-band URI is
+    # not re-registered by a path lookup that cannot see it. nexus-y8qtj built
+    # that for this exact case; its docstring names `nx dt index` as the
+    # motivating example. This command simply never passed it, so every
+    # DEVONthink re-index went through the owner-scoped path lookup and minted
+    # a duplicate whenever the document lived under another owner (measured 19
+    # times in one run). Using the built mechanism also covers the two cases a
+    # corpus redirect cannot: a REPO-owned existing row, and a file DEVONthink
+    # has moved since it was registered.
+    #
+    # Only when a row already holds the URI: supplying one that resolves to
+    # nothing is a hard SourceUriNotFoundError by design, and a first index has
+    # no such row.
+    dt_source_uri = (
+        f"x-devonthink-item://{uuid}" if _dt_uri_is_catalogued(uuid) else ""
+    )
+
     file_path = Path(path)
     ext = file_path.suffix.lower()
     if ext == ".pdf":
@@ -265,6 +285,7 @@ def _index_record(
         raw = index_pdf(
             file_path, corpus=corpus, collection_name=collection, extractor=extractor,
             force=force, force_re_embed=force_re_embed, return_metadata=True,
+            source_uri=dt_source_uri,
         )
         if isinstance(raw, dict):
             chunks = int(raw.get("chunks", 0) or 0)
@@ -276,12 +297,43 @@ def _index_record(
             chunks = raw if isinstance(raw, int) else 0
             pages = None
     else:  # .md — extension filtering happens in index_cmd
-        raw = index_markdown(file_path, corpus=corpus, collection_name=collection, force=force, force_re_embed=force_re_embed)
+        raw = index_markdown(
+            file_path, corpus=corpus, collection_name=collection, force=force,
+            force_re_embed=force_re_embed, source_uri=dt_source_uri,
+        )
         chunks = raw if isinstance(raw, int) else 0
         pages = None
 
     stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=_dt_record_facts(uuid))
     return stamped, chunks, pages
+
+
+def _dt_uri_is_catalogued(uuid: str) -> bool:
+    """True when a LIVE catalog document already holds this DEVONthink URI.
+
+    nexus-z0lu4. Gates whether `source_uri` is passed to the indexer, and the
+    gate is required rather than defensive: index_pdf/index_markdown RAISE
+    SourceUriNotFoundError when a supplied source_uri resolves to nothing
+    (nexus-y8qtj deliberately refuses to fall back to registering a new
+    Document, since that silent fallback IS the y8qtj defect). A first-ever
+    index has no such row yet, so it must not name the URI; the post-index
+    stamp establishes the identity instead.
+
+    Fail-soft: a catalog that cannot be read reports False, which degrades to
+    the pre-existing behaviour rather than failing the index.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return False
+    try:
+        return reader.by_source_uri(f"x-devonthink-item://{uuid}") is not None
+    except Exception as exc:  # noqa: BLE001 — a probe failure must not abort the index
+        _log.warning("dt_uri_probe_failed", uuid=uuid, error=str(exc))
+        return False
+    finally:
+        reader.close()
 
 
 def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None) -> bool:
@@ -321,12 +373,23 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
     # Tag interactive so the daemon prioritises it over a batch index burst.
     writer = make_catalog_writer(priority="interactive")
     try:
-        # Globally find the entry by file_path — no owner constraint
-        # because we don't know it from here. ``documents`` is keyed
-        # by tumbler primary key plus a unique (file_path) row per
-        # indexed file, so this returns one row.
+        # DEVONthink URI FIRST, file_path only as a fallback.
+        #
+        # This used to resolve by file_path alone, on the stated premise that
+        # ``documents`` carries "a unique (file_path) row per indexed file, so
+        # this returns one row". The schema does not enforce that — the only
+        # uniqueness is the PARTIAL index on (tenant_id, source_uri) — and when
+        # a second row exists for the same path (nexus-z0lu4), the lookup
+        # returned the OTHER one: the pre-existing entry that already carried
+        # this DT URI. Stamping it with the URI it already had was a silent
+        # no-op, so the row that actually needed the identity kept its weak
+        # file:// one and nothing reported a problem.
+        #
+        # The URI is the authoritative key here and is what _stamp_page_gap
+        # already uses; resolving both the same way is also what stops one
+        # `nx dt index` run from stamping two different documents.
         # nexus-xnz0o: use catalog API (uniform SQLite + service mode).
-        entry = reader.find_by_file_path(str(file_path))
+        entry = reader.by_source_uri(dt_uri) or reader.find_by_file_path(str(file_path))
         if entry is None:
             _log.warning(
                 "dt_stamp_no_entry_found",

@@ -443,6 +443,7 @@ def catalog_update(
     corpus: Annotated[str, Field(description="New corpus label; omit (\"\") to leave unchanged.")] = "",
     physical_collection: Annotated[str, Field(description="New backing T3 collection name; omit (\"\") to leave unchanged.")] = "",
     meta: Annotated[str, Field(description="New extra metadata as a JSON object string; omit (\"\") to leave unchanged.")] = "",
+    alias_of: Annotated[str, Field(description="Canonical tumbler this entry is a duplicate of; the catalog follows the alias chain on resolve. Omit (\"\") to leave unchanged.")] = "",
 ) -> dict:
     """Update one or more fields on an already-registered catalog entry.
 
@@ -450,6 +451,15 @@ def catalog_update(
     fields passed as non-empty/non-zero are changed. Returns
     `{"tumbler": ..., "updated": [<field names>]}`, or an error if no
     field was given to update.
+
+    ``alias_of`` points a duplicate entry at its canonical one, which the
+    catalog follows on resolve. It is the right answer whenever the same
+    document is registered twice — a re-fetched source, a moved file — and
+    it was reachable only from Python (``HttpCatalogClient.set_alias``)
+    until now. The visible cost of that: recovering a paper whose source
+    path had expired produced a second entry for it, and the choice was
+    between leaving a duplicate in search results and deleting the old
+    entry along with the three links pointing at it. Aliasing is neither.
     """
     cat, err = _require_catalog()
     if err:
@@ -473,6 +483,8 @@ def catalog_update(
             fields["physical_collection"] = physical_collection
         if meta:
             fields["meta"] = _json.loads(meta)
+        if alias_of:
+            fields["alias_of"] = str(Tumbler.parse(alias_of))
         if not fields:
             return {"error": "No fields to update"}
         writer.update(Tumbler.parse(tumbler), **fields)
@@ -880,6 +892,18 @@ def main():
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.catalog")
+
+    # This server is patched only TRANSITIVELY: nexus/mcp/__init__.py imports
+    # nexus.mcp.core, and importing core is what applies the SDK patches.
+    # Report the result here too, so the catalog server's own log states
+    # whether it got them instead of leaving it to be inferred from that
+    # import chain (nexus-dgvsz).
+    from nexus.mcp.core import _SDK_PATCH_RESULTS  # noqa: PLC0415 — deferred; importing core is what applies the patches
+
+    from nexus.mcp._sdk_patches import report_sdk_patches  # noqa: PLC0415 — deferred, entry-point only
+
+    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp-catalog")
+
     log.info(
         "mcp_server_starting",
         server="nx-mcp-catalog",

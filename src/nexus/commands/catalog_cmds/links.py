@@ -344,12 +344,32 @@ def links_for_file_cmd(file_path: str) -> None:
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
+    # A PATH CAN NAME SEVERAL DOCUMENTS, and this command answers about a FILE.
+    # Nothing forbids two catalog documents sharing a file_path — the only
+    # uniqueness is the partial index on source_uri — and it happens whenever
+    # one file is catalogued under two owners (nexus-z0lu4, 19 times in a single
+    # run). Showing one document's links as though they were the file's hides
+    # the other's completely, and the reader has no way to know it exists. The
+    # least astonishing answer is to say how many there are and show each.
     # nexus-xnz0o: replaced raw SQL with catalog API.
-    entry = cat.find_by_file_path(file_path)
-    if not entry:
+    if hasattr(cat, "find_all_by_file_path"):
+        entries = cat.find_all_by_file_path(file_path)
+    else:  # a catalog double or an older client: keep the single-entry path
+        entries = [e for e in [cat.find_by_file_path(file_path)] if e]
+    if not entries:
         click.echo(f"No catalog entry for: {file_path}")
         return
+    if len(entries) > 1:
+        click.echo(
+            f"{len(entries)} catalog documents share this path: "
+            f"{', '.join(str(e.tumbler) for e in entries)}"
+        )
+    for entry in entries:
+        _echo_links_for_entry(cat, entry)
 
+
+def _echo_links_for_entry(cat, entry) -> None:
+    """Print one document's header and its links, or 'No links.'"""
     tumbler_str = str(entry.tumbler)
     click.echo(f"{tumbler_str} {entry.content_type}: {entry.title}")
 
@@ -383,7 +403,7 @@ def links_for_file_cmd(file_path: str) -> None:
         return
 
     for t, t_title, t_type, l_type, direction in sorted(all_link_rows, key=lambda r: (r[3], r[2])):
-        arrow = "→" if direction == "outgoing" else "←"
+        arrow = "\u2192" if direction == "outgoing" else "\u2190"
         click.echo(f"  {arrow} [{l_type}] {t} {t_type}: {t_title}")
 
 

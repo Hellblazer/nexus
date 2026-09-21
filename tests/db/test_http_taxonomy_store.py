@@ -1679,6 +1679,45 @@ class TestPersist:
         assert np.array_equal(
             state["old_centroids"], np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=np.float32))
 
+    def test_read_rebuild_old_state_warns_on_labels_no_centroid_carries(
+        self, client,
+    ) -> None:
+        """The orphaned-label signal, at the join where both sides exist.
+
+        bad1e8348 put this warning inside _merge_labels, where it could not
+        fire: that function only ever sees labels derived from the centroid
+        metadata, so a label with no centroid is already gone before it runs.
+        Round 3 deleted it; the right move was to relocate it here, which is the
+        one place T2's own topic map and the centroid ids are both in hand
+        (round-3 critique). The state is real — it is what a rebuild interrupted
+        between its delete and its persist leaves behind.
+        """
+        self._seed_topic(client, 1, "carried", "c", review="accepted")
+        self._seed_topic(client, 2, "orphaned", "c", review="accepted")
+        client._centroid_store = _FakeCentroidStore([
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "carried"},
+        ])
+        with structlog.testing.capture_logs() as logs:
+            client.read_rebuild_old_state("c")
+        ev = [e for e in logs if e.get("event") == "taxonomy_labels_without_centroids"]
+        assert len(ev) == 1, logs
+        assert ev[0]["orphaned_topics"] == 1
+        assert ev[0]["topic_ids"] == [2]
+        assert ev[0]["collection"] == "c"
+
+    def test_read_rebuild_old_state_is_silent_when_every_label_is_carried(
+        self, client,
+    ) -> None:
+        """The asymmetry that keeps the warning worth reading: a healthy
+        collection says nothing."""
+        self._seed_topic(client, 1, "carried", "c", review="accepted")
+        client._centroid_store = _FakeCentroidStore([
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "carried"},
+        ])
+        with structlog.testing.capture_logs() as logs:
+            client.read_rebuild_old_state("c")
+        assert [e for e in logs if e.get("event") == "taxonomy_labels_without_centroids"] == []
+
     def test_read_rebuild_old_state_empty_centroids(self, client) -> None:
         client._centroid_store = _FakeCentroidStore([])
         state = client.read_rebuild_old_state("empty")
@@ -2694,16 +2733,60 @@ def _centroid_envelope_np_array_sites(source: str) -> list[str]:
                 break
         return tainted
 
+    funcs = {
+        f.name: f for f in ast.walk(tree)
+        if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    scope_taint: dict[str, set[str]] = {
+        name: taint_of(f) for name, f in funcs.items() if name not in _FUNNELS
+    }
+
+    # ONE CALL HOP. The per-function version was intraprocedural, so lifting
+    # the construction into a new helper defeated it completely — a far more
+    # natural refactor than any of the four evasions its own tests check (code
+    # review, T2 nexus/nexus-pktki-ragged-centroids-review-findings). Passing a
+    # tainted value into another function in this module now taints the
+    # parameter it lands on, so that helper is checked the way its caller was.
+    for scope_name, tainted in list(scope_taint.items()):
+        for node in ast.walk(funcs[scope_name]):
+            if not isinstance(node, ast.Call):
+                continue
+            # Bare `helper(...)` AND `self.helper(...)`. Matching bare names
+            # only left the likeliest refactor wide open: every taint site in
+            # this module sits inside an HttpTaxonomyStore METHOD, so extracting
+            # the construction into a new private method — more natural here
+            # than a module-level function — evaded the guard completely, and
+            # neither of the hop tests covered it (round-3 review, T2 [26637]).
+            if isinstance(node.func, ast.Name):
+                callee_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                callee_name = node.func.attr
+            else:
+                continue
+            callee = funcs.get(callee_name)
+            if callee is None or callee_name in _FUNNELS:
+                continue
+            positional = [a.arg for a in callee.args.args]
+            # `self.helper(x)` passes x as the callee's SECOND parameter, since
+            # self is bound implicitly. Without this the taint lands on the
+            # wrong name and the guard silently checks nothing.
+            if (isinstance(node.func, ast.Attribute)
+                    and positional and positional[0] in {"self", "cls"}):
+                positional = positional[1:]
+            params = positional + [a.arg for a in callee.args.kwonlyargs]
+            for i, arg in enumerate(node.args):
+                if isinstance(arg, ast.Name) and arg.id in tainted and i < len(params):
+                    scope_taint.setdefault(callee_name, set()).add(params[i])
+            for kw in node.keywords:
+                if (kw.arg and isinstance(kw.value, ast.Name)
+                        and kw.value.id in tainted and kw.arg in params):
+                    scope_taint.setdefault(callee_name, set()).add(kw.arg)
+
     hits: list[str] = []
-    for scope in ast.walk(tree):
-        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if scope.name in _FUNNELS:
-            continue
-        tainted = taint_of(scope)
+    for scope_name, tainted in scope_taint.items():
         if not tainted:
             continue
-        for node in ast.walk(scope):
+        for node in ast.walk(funcs[scope_name]):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr in _CTORS
                     and isinstance(node.func.value, ast.Name)
@@ -2776,3 +2859,50 @@ class TestCentroidMatrixConstructionIsFunnelled:
         )
         hits = _centroid_envelope_np_array_sites(evasions)
         assert len(hits) == 4, hits
+
+    def test_the_guard_follows_one_call_hop(self) -> None:
+        """Extracting the construction into a helper was the easy way past the
+        intraprocedural version (code review). One hop closes it."""
+        extracted = (
+            "def build(rows):\n"
+            "    return np.array(rows, dtype=np.float32)\n"
+            "def read(self, c):\n"
+            "    env = self._centroid.get_by_collection(c)\n"
+            "    embs = env.get('embeddings') or []\n"
+            "    return build(embs)\n"
+        )
+        assert _centroid_envelope_np_array_sites(extracted) == ["rows@line2"]
+
+    def test_the_guard_follows_a_method_hop(self) -> None:
+        """The refactor that actually defeated the first hop version.
+
+        Every taint site in this module lives inside an HttpTaxonomyStore
+        method, so `self._build(embs)` is the natural extraction — more natural
+        than a module-level function — and matching only bare-name calls missed
+        it entirely (round-3 review). The self parameter also shifts the
+        positional index, which is why the fixture passes the rows second.
+        """
+        extracted = (
+            "class Store:\n"
+            "    def _build(self, rows):\n"
+            "        return np.array(rows, dtype=np.float32)\n"
+            "    def read(self, c):\n"
+            "        env = self._centroid.get_by_collection(c)\n"
+            "        embs = env.get('embeddings') or []\n"
+            "        return self._build(embs)\n"
+        )
+        assert _centroid_envelope_np_array_sites(extracted) == ["rows@line3"], (
+            "extracting matrix construction into a private METHOD must not "
+            "walk past the guard"
+        )
+
+    def test_the_guard_follows_a_keyword_hop_too(self) -> None:
+        extracted = (
+            "def build(*, rows):\n"
+            "    return np.array(rows, dtype=np.float32)\n"
+            "def read(self, c):\n"
+            "    env = self._centroid.get_foreign(c)\n"
+            "    embs = env.get('embeddings') or []\n"
+            "    return build(rows=embs)\n"
+        )
+        assert _centroid_envelope_np_array_sites(extracted) == ["rows@line2"]

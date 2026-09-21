@@ -272,35 +272,6 @@ def test_merge_labels_dimension_mismatch_returns_pending_as_defence_in_depth() -
     assert merged[0]["label"] is None
 
 
-def _events(logs: list[dict], name: str) -> list[dict]:
-    return [e for e in logs if e.get("event") == name]
-
-
-def test_merge_labels_is_silent_on_a_genuine_first_rebuild() -> None:
-    """No centroids and no labels: nothing was lost, so nothing is said.
-
-    The asymmetry with the next test is the whole point — a warning that fires
-    on every first rebuild is one nobody reads by the time it matters.
-    """
-    new = np.array([[1.0, 0.0]], dtype=np.float32)
-    with structlog.testing.capture_logs() as logs:
-        tc._merge_labels(np.empty((0, 2), dtype=np.float32), [], [], new)
-    assert _events(logs, "centroid_labels_without_centroids") == []
-
-
-def test_merge_labels_warns_when_labels_survive_without_centroids() -> None:
-    """Labels with no centroid to carry them is the state the old
-    delete-before-compute defect left behind; those labels are about to be
-    dropped and that must not be silent (nexus-dtqd7)."""
-    new = np.array([[1.0, 0.0]], dtype=np.float32)
-    with structlog.testing.capture_logs() as logs:
-        tc._merge_labels(
-            np.empty((0, 2), dtype=np.float32), ["curated"], ["accepted"], new,
-        )
-    ev = _events(logs, "centroid_labels_without_centroids")
-    assert len(ev) == 1 and ev[0]["old_labels"] == 1
-
-
 # ── compute_discovered_topics ────────────────────────────────────────────────
 
 
@@ -394,8 +365,99 @@ def test_compute_rebuild_plan_refuses_a_cross_space_rebuild() -> None:
     assert "'c__migrated'" in msg, "the operator needs the collection named"
     assert "768d" in msg and "384d" in msg, msg
     # A refusal with no way out is a different dead end, so the message has to
-    # carry both real remedies.
-    assert "purge" in msg and "re-embed" in msg, msg
+    # carry both real remedies. The FIRST version named "purge the taxonomy",
+    # which was not a verb that existed — both reviewers caught it. The
+    # companion test test_refusal_names_a_verb_that_exists pins the reachability
+    # half; this pins that the message says it.
+    assert "re-embed" in msg, msg
+    assert "nx taxonomy reset" in msg, msg
+
+
+def test_compute_rebuild_plan_refuses_before_the_small_corpus_short_circuit() -> None:
+    """The guard must cover the FUNCTION, not one path through it.
+
+    bad1e8348 placed this check below the `n < 5` return. rebuild_taxonomy
+    deletes the old centroids and persists whatever plan it gets back, empty
+    included, so a migrated collection with a small corpus still lost every
+    label — through the very defect the guard exists to close.
+    """
+    with pytest.raises(tc.MixedEmbeddingDimensionsError):
+        tc.compute_rebuild_plan(
+            "c__tiny_migrated",
+            ["a", "b"],
+            np.zeros((2, 384), dtype=np.float32),
+            ["x", "y"],
+            old_centroids=np.ones((2, 768), dtype=np.float32),
+            old_labels=["curated one", "curated two"],
+            old_review_statuses=["accepted", "accepted"],
+            old_centroid_topic_ids=[1, 2],
+            manual_assignments={},
+        )
+
+
+def test_compute_rebuild_plan_refuses_before_the_all_noise_short_circuit() -> None:
+    """The other bypassed path: a corpus large enough to cluster, that
+    clusters as pure noise, returned an empty plan the same way."""
+    rng = np.random.default_rng(3)
+    # Uniform noise in a wide space: no density structure for HDBSCAN to find.
+    embeddings = rng.standard_normal((40, 384)).astype(np.float32)
+    with pytest.raises(tc.MixedEmbeddingDimensionsError):
+        tc.compute_rebuild_plan(
+            "c__noise_migrated",
+            [f"d{i}" for i in range(40)],
+            embeddings,
+            [f"unrelated text {i}" for i in range(40)],
+            old_centroids=np.ones((1, 768), dtype=np.float32),
+            old_labels=["curated"],
+            old_review_statuses=["accepted"],
+            old_centroid_topic_ids=[1],
+            manual_assignments={},
+        )
+
+
+def test_compute_rebuild_plan_refuses_when_the_document_width_is_unknown() -> None:
+    """Unknown width is not a pass.
+
+    The guard was a conjunction of positives, so a 1-D or (0,0) embeddings
+    array — shapes this signature admits — made it silently no-op while the
+    destructive path below ran anyway. It held only because a caller checked
+    first, and a claim resting on a redundant check one layer up dies the day
+    someone tidies that check away (round-3 review).
+    """
+    for embeddings in (
+        np.zeros((0, 0), dtype=np.float32),
+        np.zeros((6,), dtype=np.float32),
+    ):
+        with pytest.raises(tc.MixedEmbeddingDimensionsError) as exc:
+            tc.compute_rebuild_plan(
+                "c__unknown_width",
+                ["a", "b"],
+                embeddings,
+                ["x", "y"],
+                old_centroids=np.ones((1, 768), dtype=np.float32),
+                old_labels=["curated"],
+                old_review_statuses=["accepted"],
+                old_centroid_topic_ids=[1],
+                manual_assignments={},
+            )
+        assert "unknown" in str(exc.value), str(exc.value)
+
+
+def test_compute_rebuild_plan_first_ever_rebuild_is_never_refused() -> None:
+    """No old centroids means no dimension to disagree with, at any corpus
+    size — including the short-circuit sizes the guard now runs ahead of."""
+    plan = tc.compute_rebuild_plan(
+        "c__first",
+        ["a", "b"],
+        np.zeros((2, 384), dtype=np.float32),
+        ["x", "y"],
+        old_centroids=np.empty((0, 0), dtype=np.float32),
+        old_labels=[],
+        old_review_statuses=[],
+        old_centroid_topic_ids=[],
+        manual_assignments={},
+    )
+    assert plan == {"specs": [], "manual_transfers": {}}
 
 
 def test_compute_rebuild_plan_still_merges_within_one_space() -> None:

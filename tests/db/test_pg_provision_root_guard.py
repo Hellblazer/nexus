@@ -16,12 +16,15 @@ discovery, and that ordering is itself what two of them assert.
 """
 from __future__ import annotations
 
+import contextlib
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from nexus.commands import init as init_cmd
 from nexus.db import pg_provision
-from nexus.db.pg_provision import PgRootUserError, _refuse_root, provision
+from nexus.db.pg_provision import PgRootUserError, refuse_root, provision
 
 
 class _Tripwire(Exception):
@@ -31,7 +34,7 @@ class _Tripwire(Exception):
 def test_refuse_root_raises_when_euid_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
     with pytest.raises(PgRootUserError):
-        _refuse_root()
+        refuse_root()
 
 
 def test_refuse_root_is_silent_for_an_unprivileged_euid(
@@ -40,7 +43,7 @@ def test_refuse_root_is_silent_for_an_unprivileged_euid(
     # Non-vacuity for the test above: the guard keys on the euid VALUE, so it
     # cannot be passing merely because it raises unconditionally.
     monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
-    _refuse_root()
+    refuse_root()
 
 
 def test_refuse_root_treats_a_missing_geteuid_as_not_root(
@@ -49,7 +52,7 @@ def test_refuse_root_treats_a_missing_geteuid_as_not_root(
     # os.geteuid is POSIX-only. Windows support is WSL2-only, so an absent
     # geteuid is 'not root' rather than an AttributeError mid-provision.
     monkeypatch.delattr(pg_provision.os, "geteuid", raising=False)
-    _refuse_root()
+    refuse_root()
 
 
 def test_provision_refuses_as_root_before_touching_the_bundle(
@@ -96,3 +99,120 @@ def test_the_message_names_the_cause_and_the_remedy() -> None:
     assert "useradd -m -s /bin/bash nexus" in msg
     # The environment class that hits it.
     assert "wsl.conf" in msg
+
+
+def _tripwired_init(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record which bundle paths get reached, rather than how the step exits.
+
+    The step wraps bundle acquisition in `except Exception` and turns any
+    failure into SystemExit(1), so asserting on SystemExit cannot tell the
+    guard firing apart from the bundle blowing up. The first version of this
+    test did exactly that and passed with the guard deleted.
+    """
+    reached: list[str] = []
+    monkeypatch.setattr(
+        init_cmd, "_select_bundled_pg",
+        lambda *_a, **_k: (reached.append("extract"), None)[1],
+    )
+    monkeypatch.setattr(
+        init_cmd, "_acquire_pg_bundle_step",
+        lambda *_a, **_k: reached.append("download"),
+    )
+    return reached
+
+
+def test_init_refuses_root_before_the_bundle_is_acquired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim the FIRST cut of this fix made and did not deliver.
+
+    provision()'s own guard is too late to save the download: init.py's
+    _provision_postgres_step acquires the bundle and only THEN calls
+    provision(). The effect worth asserting is that a root user never reaches
+    the acquisition at all.
+    """
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    reached = _tripwired_init(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        init_cmd._provision_postgres_step()
+
+    assert exc.value.code == 1
+    assert reached == [], (
+        f"root reached the bundle path(s) {reached} before being refused — "
+        "the guard in _provision_postgres_step is missing or too late, which "
+        "is the nexus-ov1oq defect its first fix claimed to have closed"
+    )
+
+
+def test_init_reaches_the_bundle_when_not_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity: with ONLY the euid changed, the bundle path IS reached."""
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
+    reached = _tripwired_init(monkeypatch)
+
+    # What happens AFTER the bundle path is not this test's business — the
+    # step may fail for any number of reasons in a sandbox with no real
+    # bundle. The assertion is only that a non-root user gets that far.
+    with contextlib.suppress(BaseException):
+        init_cmd._provision_postgres_step()
+
+    assert reached, "the bundle path was never reached even as a normal user"
+
+
+# ── the CLASS, not just the nx init instance ─────────────────────────────────
+
+
+def test_every_pg_subprocess_refuses_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_run is the choke point: initdb, pg_ctl, psql and createdb all use it.
+
+    Guarding only the entry points is whack-a-mole — a new caller reaching
+    _start_cluster or _psql directly bypasses them, which is exactly what the
+    daemon does.
+    """
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire("subprocess spawned")),
+    )
+    with pytest.raises(PgRootUserError):
+        pg_provision._run(["/bin/true"])
+
+
+def test_run_still_spawns_for_an_unprivileged_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity: with only the euid changed, _run reaches subprocess.run."""
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
+    out = pg_provision._run(["/bin/echo", "ok"])
+    assert out.returncode == 0
+
+
+def test_the_daemon_self_heal_path_refuses_as_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """storage_service_daemon._ensure_pg_running bypasses BOTH entry guards.
+
+    It imports _start_cluster directly, so before the _run guard a
+    root-launched `nx daemon service start` -- or an automatic PG respawn
+    under root -- hit initdb's bare exit status wrapped in an opaque
+    StorageServiceStartError. Asserted through _start_cluster, which is the
+    function the daemon actually calls.
+    """
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    # Trip on the SPAWN, not on a missing fake binary. Without this the
+    # deletion check fails with FileNotFoundError for tmp_path/pg_ctl —
+    # which is an incidental reason, and would report the guard "working"
+    # on any box where that path happened to exist.
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire("pg_ctl spawned")),
+    )
+    bins = pg_provision.PgBinaries(
+        bin_dir=tmp_path, initdb=tmp_path / "initdb", pg_ctl=tmp_path / "pg_ctl",
+        psql=tmp_path / "psql", createdb=tmp_path / "createdb",
+    )
+    with pytest.raises(PgRootUserError) as exc:
+        pg_provision._start_cluster(bins, tmp_path / "pgdata", 55999)
+    assert "useradd -m -s /bin/bash nexus" in str(exc.value)

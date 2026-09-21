@@ -2594,6 +2594,10 @@
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
+          "alias_of": {
+            "default": "",
+            "type": "string"
+          },
           "author": {
             "default": "",
             "type": "string"

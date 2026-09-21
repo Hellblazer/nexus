@@ -129,7 +129,14 @@ def test_held_lease_gate_still_fires_for_the_engine_substrate(tmp_path: Path) ->
         "an engine-substrate run beside a held lease was not refused at the "
         "session-start gate:\n" + (proc.stdout + proc.stderr)[-2000:]
     )
-    assert "refusing to start" in proc.stdout + proc.stderr
+    # "refusing to start" alone does NOT discriminate: tests/conftest.py has
+    # two producers of exit 75 and both emit that clause -- the suite lease at
+    # :261 ("suite lease: refusing to start") and this engine-substrate gate
+    # at :343 ("engine substrate: refusing to start"). Keying on the shared
+    # clause is keying on nothing, which is exactly the "refused for the wrong
+    # reason" this test's own docstring says it exists to catch. The prefix is
+    # the discriminating token (nexus-6qp25 sweep).
+    assert "engine substrate: refusing to start" in proc.stdout + proc.stderr
 
 
 def test_none_substrate_still_runs(tmp_path: Path) -> None:
