@@ -9,6 +9,7 @@ run refuses", and only a second run can show that.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -206,26 +207,53 @@ def test_a_nested_pytest_run_is_not_refused(tmp_path: Path) -> None:
     # reproduced on two trees; it passes alone and under -n 4 alone, so the
     # misattribution only ever surfaced where the stdout was longest.
     #
-    # A lease refusal has a signature: exit 75 and a named line. Anything
-    # else is some other failure, and this test must not speak for it.
-    assert out.returncode != 75, (
-        f"a nested run was refused its own parent's lease (exit 75)\n"
-        f"stdout:\n{out.stdout[-1500:]}\nstderr:\n{out.stderr[-1500:]}"
+    # NON-VACUITY FIRST (nexus-moht0). The lease decision happens in the
+    # child's ``pytest_sessionstart``, BEFORE any substrate boots, so a child
+    # that dies later of a substrate failure has still answered the question
+    # this test asks. A child that dies EARLIER -- a conftest ImportError, a
+    # usage error, the wrong interpreter -- never reached the lease logic at
+    # all, and its clean-looking absence of a refusal line proves nothing.
+    # That distinction is the whole guard: without it the assertion below
+    # passes hardest exactly when the child ran least.
+    #
+    # Asserted as POSITIVE EVIDENCE that the session started, never as a list
+    # of ways it might not have. The first cut of this guard enumerated two
+    # failure shapes -- a conftest ImportError and exit 4 -- and was checked
+    # against a real dead child that produced NEITHER: a system interpreter
+    # with no pytest at all exits 1 with "No module named pytest", sails past
+    # both, and lands on a clean-looking absence of a refusal line. Two
+    # observed shapes, a blocklist covering one. Enumerating failure modes is
+    # a reconstruction and inherits the usual tax; requiring the run to show
+    # it got somewhere is a read.
+    #
+    # A summary line means collection completed, which means
+    # ``pytest_sessionstart`` -- where the lease is taken -- has already run.
+    # A child that dies AFTER that (the HikariPool ConnectException under
+    # load) has still answered this test's question; one that dies before it
+    # never asked.
+    assert re.search(r"\d+ (passed|failed|error|skipped|deselected)", combined), (
+        "the child never reached a pytest summary line, so it never got to "
+        "pytest_sessionstart and never asked for a lease -- a missing refusal "
+        "line here is not evidence of anything (wrong interpreter? no pytest?)"
+        f"\nrc={out.returncode}\nstdout:\n{out.stdout[-1500:]}"
+        f"\nstderr:\n{out.stderr[-1500:]}"
     )
+
+    # THE CLAIM. The refusal LINE is the signature, not the exit code: exit
+    # 75 is shared with ``_gate_on_build_lease`` (tests/conftest.py:342-347),
+    # which refuses a DIFFERENT resource, so keying on the code alone would
+    # blame the suite lease for a build-lease refusal. The two are only
+    # separable today because NX_BUILD_LEASE_ROOT isolates both leases to a
+    # fresh tmp dir here -- an accident of the fixture, not something an
+    # assertion on rc could defend. The line is unambiguous and is always
+    # emitted with the refusal (verified: lease held, marker scrubbed, child
+    # exits 75 AND prints it).
+    #
+    # No skip branch, deliberately. The first cut skipped on any nonzero rc
+    # that was not a refusal, which under sustained load -- the exact
+    # condition where dd64caf9d's regression resurfaces -- would have skipped
+    # every run with nothing counting the skips.
     assert "suite lease: refusing" not in combined, (
         "a nested run hit the suite-lease refusal path\n"
         f"stdout:\n{out.stdout[-1500:]}\nstderr:\n{out.stderr[-1500:]}"
     )
-
-    if out.returncode != 0:
-        # Not a refusal -- the assertions above already proved that -- so the
-        # child died of something this test does not own. Say what, rather
-        # than blaming the lease. Reported as a skip and never as a pass,
-        # and the claim above was already checked, so this is not a vacuous
-        # exit: the guard under test was exercised on this path too.
-        pytest.skip(
-            "nested pytest failed for a reason that is not a lease refusal "
-            f"(rc={out.returncode}); the refusal signature was absent, which "
-            "is what this test asserts. Child output tail:\n"
-            f"{out.stdout[-800:]}\n{out.stderr[-800:]}"
-        )

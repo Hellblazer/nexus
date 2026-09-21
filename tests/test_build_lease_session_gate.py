@@ -84,4 +84,13 @@ def test_waiting_starts_the_session_once_the_holder_exits(tmp_path: Path) -> Non
 def test_an_exhausted_wait_still_refuses(tmp_path: Path, bound: str) -> None:
     _hold(tmp_path, os.getpid())
     proc = _child(tmp_path, NX_BUILD_LEASE_WAIT=bound)
-    assert proc.returncode == 75, proc.stdout + proc.stderr
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 75, out
+    # Exit 75 alone is NOT this gate's signature: tests/conftest.py has TWO
+    # producers of it -- the suite lease at :261 ("suite lease: refusing to
+    # start") and this build-lease/engine-substrate gate at :343 ("engine
+    # substrate: refusing to start"). The shared clause "refusing to start"
+    # is satisfied by either, so the DISCRIMINATING token is the prefix
+    # before the colon. Corroborated the way the sibling test above does
+    # (nexus-6qp25 sweep).
+    assert "engine substrate: refusing to start" in out, out
