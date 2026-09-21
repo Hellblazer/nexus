@@ -177,7 +177,7 @@ def _uniform_embedding_matrix(
             f"{site}: collection {collection!r} has embeddings at "
             f"{len(census)} dimensions "
             f"({', '.join(f'{d}d x{n}' for d, n in sorted(census.items()))}). "
-            + remedy
+            + remedy.format(collection=collection)
         )
     return np.array(rows, dtype=np.float32)
 
@@ -185,10 +185,15 @@ def _uniform_embedding_matrix(
 #: Remedy line for the rebuild read: a partial old set is worse than a refusal,
 #: because it transfers operator labels for some centroids and silently marks
 #: the rest pending.
+#: ``{collection}`` is substituted by :func:`_uniform_embedding_matrix`, which
+#: is the only caller and does have the name in hand. The first version left a
+#: literal ``<collection>`` in the text: a remedy naming a real verb that the
+#: operator still has to fill in by hand is only half-reachable, and calling
+#: that "swept the sibling" overstated it (round-4 critique).
 _REBUILD_REMEDY = (
     "A rebuild cannot preserve operator labels across incommensurable "
     "centroids. Finish the embedding migration for this collection, or discard "
-    "its taxonomy with `nx taxonomy reset -c <collection>` and discover afresh."
+    "its taxonomy with `nx taxonomy reset -c {collection}` and discover afresh."
 )
 # Swept alongside the cross-space refusal, not separately: this line used to say
 # "purge the stale-dimension centroids", which is the SAME defect the reviewers

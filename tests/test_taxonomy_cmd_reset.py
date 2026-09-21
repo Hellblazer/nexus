@@ -147,27 +147,35 @@ def test_reset_proceeds_on_yes_and_reports_counts(wired) -> None:
     assert "discover --collection c" in result.output, "the way back must be named"
 
 
-def test_reset_with_no_topics_still_sweeps_orphaned_centroids(wired) -> None:
-    """The recovery case, and the reason this is not an early return.
+def test_reset_with_no_topics_still_discloses_and_prompts(wired) -> None:
+    """The no-topics path is NOT a quiet sweep.
 
-    reset_collection is two calls — the T2 purge then the centroid purge — so a
-    failure between them leaves topics gone and centroids behind. Gating the
-    no-op on topics alone made the one verb built to remove those centroids
-    answer "nothing to do", leaving them unreachable through it (round-3
-    review). It must fall through and finish its own interrupted work.
+    Round 3 gave it its own branch: reset_collection called unconditionally,
+    no disclosure, no prompt (--yes had nothing to skip), centroids-only
+    reporting. purgeCollection deletes topic_assignments by SOURCE_COLLECTION
+    whether or not this collection owns topics, so a collection with zero
+    topics can still have outbound projections to destroy — and that branch
+    destroyed them silently, reproducing in new code the defect the rest of
+    this command exists to fix (round-4 review). One path now.
     """
-    wired.centroids_left = 3
-    result = CliRunner().invoke(taxonomy, ["reset", "-c", "empty", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert wired.reset_calls == ["empty"], "the sweep must actually run"
-    assert "Swept 3 orphaned centroid(s)" in result.output, result.output
+    result = CliRunner().invoke(taxonomy, ["reset", "-c", "empty"], input="n\n")
+    assert result.exit_code != 0, "declining must not reset"
+    assert wired.reset_calls == [], "a declined reset must touch nothing"
+    assert "owns no topics" in result.output, result.output
+    # the widening is disclosed HERE too, not only on the has-topics path
+    assert "cross-collection projections" in result.output, result.output
+    assert "nx taxonomy project" in result.output, result.output
 
 
-def test_reset_on_a_genuinely_clean_collection_says_so(wired) -> None:
-    wired.centroids_left = 0
+def test_reset_with_no_topics_reports_every_count_not_just_centroids(wired) -> None:
+    """"Nothing to reset" was printable after destroying assignments, because
+    the branch reported centroids alone."""
     result = CliRunner().invoke(taxonomy, ["reset", "-c", "empty", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "Nothing to reset" in result.output, result.output
+    assert wired.reset_calls == ["empty"]
+    out = result.output
+    assert "assignments" in out and "links" in out and "centroids" in out, out
+    assert "Nothing to reset" not in out, out
 
 
 def test_reset_collection_clears_both_halves() -> None:

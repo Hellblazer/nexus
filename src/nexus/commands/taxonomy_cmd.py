@@ -871,33 +871,37 @@ def reset_cmd(collection: str, yes: bool) -> None:
     """
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topics = db.taxonomy.get_all_topics(collection=collection)
-        if not topics:
-            # NOT a bare return. reset_collection is two calls — the T2 purge,
-            # then the centroid purge — and a failure between them leaves the
-            # topics gone and the centroids behind. Gating the no-op on topics
-            # alone made the one verb built to remove those centroids answer
-            # "nothing to do", so it could not finish its own interrupted work
-            # (round-3 review, T2 [26637]). Falling through makes the verb
-            # idempotent and self-healing, and it reports what it removed.
-            click.echo(
-                f"No topics for collection {collection!r} — sweeping for "
-                "centroids left behind by an interrupted reset."
-            )
-            swept = db.taxonomy.reset_collection(collection).get("centroids", 0)
-            click.echo(
-                f"Swept {swept} orphaned centroid(s)." if swept
-                else "Nothing to reset."
-            )
-            return
+        # ONE PATH, deliberately. Round 3 added a SECOND branch here for the
+        # no-topics case, so an interrupted reset could finish its own work, and
+        # that branch reproduced in new code the exact defect the rest of this
+        # command exists to fix: it called reset_collection unconditionally with
+        # no disclosure, no prompt (--yes had nothing to skip), and reported
+        # only centroids — so a run that destroyed cross-collection assignments
+        # and found no centroids printed "Nothing to reset", which was false.
+        #
+        # The ASYMMETRY was the bug. purgeCollection deletes topic_assignments
+        # by SOURCE_COLLECTION whether or not this collection owns any topics,
+        # so a collection with zero topics can still have outbound projections
+        # to lose. Two branches meant two homes for the disclosure and only one
+        # of them had it. There is one path now: every reset states the same
+        # scope, prompts the same way and reports the same counts, topics or no
+        # topics (round-4 review).
         labelled = [
             t for t in topics
             if (t.get("review_status") or "") == "accepted"
         ]
-        click.echo(
-            f"This discards the taxonomy for {collection!r}: {len(topics)} topic(s), "
-            f"{len(labelled)} of them operator-accepted, with their assignments, "
-            "links and centroids."
-        )
+        if topics:
+            click.echo(
+                f"This discards the taxonomy for {collection!r}: {len(topics)} "
+                f"topic(s), {len(labelled)} of them operator-accepted, with "
+                "their assignments, links and centroids."
+            )
+        else:
+            click.echo(
+                f"Collection {collection!r} owns no topics. Resetting still "
+                "clears whatever an interrupted reset left behind, and the "
+                "scope below applies either way."
+            )
         click.echo("The collection's documents and chunks are not touched.")
         # The engine's purge also deletes topic_assignments by SOURCE_COLLECTION
         # (TaxonomyRepository.purgeCollection), which reaches BEYOND this
