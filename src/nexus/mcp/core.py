@@ -49,6 +49,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_h
 # ported Claude Code hooks. HOOK_TOOLS carries one entry per port, starting
 # with hook_auto_approve (bead nexus-q02nx.4). See nexus/mcp/hooks.py's
 # module docstring for the full contract.
+from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
@@ -1904,6 +1905,13 @@ if _FastMCPSettings is not None:
         )
 else:  # pragma: no cover — future SDK restructure
     structlog.get_logger(__name__).debug("fastmcp_settings_symbol_unavailable")
+
+# nexus-rjmyk: correct the SDK's cancellation response BEFORE the server
+# exists, so no request can be cancelled through the unpatched path. Answering
+# a cancelled request makes the client drop the whole stdio transport (ten
+# measured teardowns), and the module refuses to patch a shape it cannot
+# verify, so it self-retires if upstream ever fixes it.
+_apply_sdk_patches()
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
