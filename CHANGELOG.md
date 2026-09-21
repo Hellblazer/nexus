@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.55.3] - 2026-09-21
+
+Pairs with engine-service-v0.1.129, unchanged from 7.55.2 — this release carries no engine-side change.
+
+### Fixed
+
+- **The MCP server ran its slow tools on the event loop, which killed stdio connections under parallel work.** FastMCP calls a sync `@mcp.tool()` body directly from inside its async dispatch, with no thread offload, so a single tool body owned the whole server's event loop for its duration. Measured against the installed SDK: a 2-second sync tool blocks a concurrent call for the full 2 seconds, where the same work behind `asyncio.to_thread` lets it through in 0.05s. nexus's slow tools are sync and not cheap — `store_get` at 19s, `search` at 14s, `store_put` at 8-10s on a live connection — while the conexus hooks are wired as MCP tool calls with 5-10 second timeouts onto that same connection. They did not lose a race; they never started. The client then abandoned the request id, the loop freed, the server answered anyway, and the late answer arrived as an id the client no longer knew — which tears down the stdio transport, taking every tool on the server with it. Sync tool bodies now run in a thread, so short-deadline calls are not starved behind long ones. The wire contract is unchanged: the wrapper preserves each tool's signature, so its advertised schema is identical. (nexus-dgvsz)
+
+  This is the second half of the 7.55.2 cancellation fix, which closed the case where the *client* cancels; this closes the pressure that made the client give up in the first place. Whether it ends the teardowns is settled by watching for new unknown-message-id entries in the client logs under load, not by a test, so the bead stays open pending that observation.
+
+- **The MCP server's post-store hook registry is now locked.** It was unlocked for as long as that was safe by construction — sync tool bodies held the single event-loop thread, so two `store_put` calls could not interleave. Offloading them to threads makes concurrent fires of the same hook reachable, including the manifest hook's client-side read-modify-write sweep, so the MCP registry now serializes per-hook exactly as the bulk indexer's already did. (nexus-dgvsz)
+
+- **`nx init` failed opaquely as root, after paying for the download.** On a root-default box — a WSL2 distro whose install left no unprivileged user, or a container with no `USER` directive — `nx init` fetched and verified the ~100MB bundled PostgreSQL and then died with a bare non-zero exit status from `initdb`. The cause appears only in initdb's own output: it refuses to run as root, because the server process needs an unprivileged owner. No part of provisioning can succeed that way, so nexus now refuses at the top with the cause and the remedy named, before the download. (nexus-ov1oq)
+
+- **A cross-embedder taxonomy rebuild silently dropped every operator label.** When a collection's documents had fully migrated to a different embedder since its last rebuild, the old and new centroids differed in dimension, label transfer matched nothing, and the rebuild deleted every labelled centroid — uniformly on both sides, so the existing fetch-boundary guard could not see it. `compute_rebuild_plan` now refuses, naming both ways out. (nexus-dtqd7)
+
+- **A ragged centroid fetch aborted the rebuild instead of reporting itself.** (nexus-pktki)
+
 ## [7.55.2] - 2026-09-21
 
 ### Fixed

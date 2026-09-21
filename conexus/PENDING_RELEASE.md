@@ -30,6 +30,6 @@ mechanize, it matters enough to ship.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.55.2)
+## Awaiting the next release or plugin cut (pinned: v7.55.3)
 
-_Empty. Everything previously listed here went live with 7.55.2._
+_Empty. Everything previously listed here went live with 7.55.2, and 7.55.3 carries no plugin-surface change._
