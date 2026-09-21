@@ -282,6 +282,28 @@ def _patch_sync_tool_offload() -> str:
     return "applied"
 
 
+def report_sdk_patches(log: Any, results: dict[str, str], **extra: Any) -> None:
+    """Emit one line per patch status, at INFO.
+
+    Separate from :func:`apply_sdk_patches` because of WHEN each has to run.
+    Applying must happen at module import — the offload patch replaces
+    ``Tool.from_function``, and the ``@mcp.tool()`` decorators that call it run
+    at import as well — but ``configure_logging`` does not run until ``main()``.
+    A status logged from inside the apply therefore reaches no handler and is
+    dropped, which is what made "is the patch live in this process?" an audit
+    instead of a grep. Moving the level from DEBUG to INFO did not fix that:
+    the level was never the problem, the timing was (nexus-dgvsz).
+    """
+    for name, status in results.items():
+        log.info(
+            "mcp_sdk_patch_applied" if status == "applied"
+            else "mcp_sdk_patch_not_applied",
+            patch=name,
+            status=status,
+            **extra,
+        )
+
+
 def apply_sdk_patches() -> dict[str, str]:
     """Apply every local SDK correction. Never raises.
 
@@ -303,9 +325,7 @@ def apply_sdk_patches() -> dict[str, str]:
     # INFO log they left no trace at all: 3.5 MB of mcp.log carried zero
     # occurrences, so "is the patch live in this process?" took an audit to
     # answer instead of a grep (nexus-dgvsz).
-    for name, status in results.items():
-        if status == "applied":
-            _log.info("mcp_sdk_patch_applied", patch=name)
-        else:
-            _log.info("mcp_sdk_patch_not_applied", patch=name, status=status)
+    # Deliberately SILENT. This runs at module import, before
+    # configure_logging, so anything emitted here reaches no handler.
+    # main() calls report_sdk_patches once logging exists (nexus-dgvsz).
     return results

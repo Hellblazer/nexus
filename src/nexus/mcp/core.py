@@ -1922,7 +1922,14 @@ else:  # pragma: no cover — future SDK restructure
 # a cancelled request makes the client drop the whole stdio transport (ten
 # measured teardowns), and the module refuses to patch a shape it cannot
 # verify, so it self-retires if upstream ever fixes it.
-_apply_sdk_patches()
+#: Kept so ``main()`` can REPORT what happened here once logging exists.
+#: This call is at import time by necessity — the offload patch replaces
+#: ``Tool.from_function``, and the ``@mcp.tool()`` decorators that call it run
+#: at import too — but ``configure_logging`` does not run until main(). So the
+#: statuses logged from inside this call reach no handler and vanish, which is
+#: exactly the invisibility the move from DEBUG to INFO was supposed to end and
+#: did not: the level changed, the timing did not (nexus-dgvsz).
+_SDK_PATCH_RESULTS: dict[str, str] = _apply_sdk_patches()
 
 mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
@@ -12199,6 +12206,15 @@ def main():
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.core")
+
+    # Report the import-time SDK patching NOW, because now is the first moment
+    # a handler exists to receive it. Without this the statuses are computed
+    # and dropped, and "is the patch live in this process?" stays an audit
+    # rather than a grep (nexus-dgvsz).
+    from nexus.mcp._sdk_patches import report_sdk_patches  # noqa: PLC0415 — deferred, entry-point only
+
+    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp")
+
     log.info(
         "mcp_server_starting",
         server="nx-mcp",

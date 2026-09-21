@@ -880,6 +880,18 @@ def main():
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.catalog")
+
+    # This server is patched only TRANSITIVELY: nexus/mcp/__init__.py imports
+    # nexus.mcp.core, and importing core is what applies the SDK patches.
+    # Report the result here too, so the catalog server's own log states
+    # whether it got them instead of leaving it to be inferred from that
+    # import chain (nexus-dgvsz).
+    from nexus.mcp.core import _SDK_PATCH_RESULTS  # noqa: PLC0415 — deferred; importing core is what applies the patches
+
+    from nexus.mcp._sdk_patches import report_sdk_patches  # noqa: PLC0415 — deferred, entry-point only
+
+    report_sdk_patches(log, _SDK_PATCH_RESULTS, server="nx-mcp-catalog")
+
     log.info(
         "mcp_server_starting",
         server="nx-mcp-catalog",
