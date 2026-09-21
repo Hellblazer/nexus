@@ -1422,9 +1422,22 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         old = self.read_rebuild_old_state(collection_name)
         old_tids = [int(t) for t in old["old_centroid_topic_ids"] if int(t) >= 0]
-        if old_tids:
-            self._centroid.delete_ids(collection_name, old_tids)
 
+        # COMPUTE BEFORE DELETE. The delete used to run first, so any raise in
+        # here left the collection with zero centroids — and that state is
+        # silent through every layer that could report it: the plpgsql
+        # `nearest` CTE returns no rows so assigned=0; `unmatched_chashes` is
+        # computed from chunk existence rather than assignment
+        # (TaxonomyRepository.java:858-868) so it comes back empty; and the
+        # client tripwire only fires on a non-empty unmatched list
+        # (mcp_infra.py:1215-1229). Taxonomy for that collection would be dead
+        # indefinitely with no operator signal.
+        #
+        # The trigger is reachable, not hypothetical: fetchCentroids loops all
+        # three dim columns, so a tenant part-way through an embedding
+        # migration yields a ragged list and np.array(dtype=np.float32) raises
+        # before any plan exists. Nothing below reads the port, so computing
+        # first costs nothing and makes the failure non-destructive.
         plan = self.compute_rebuild_plan(
             collection_name, doc_ids, embeddings, texts,
             old_centroids=old["old_centroids"],
@@ -1433,6 +1446,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             old_centroid_topic_ids=old["old_centroid_topic_ids"],
             manual_assignments=old["manual_assignments"],
         )
+
+        if old_tids:
+            self._centroid.delete_ids(collection_name, old_tids)
         topic_ids = self.persist_rebuild_topics(collection_name, plan)
         if topic_ids:
             records = self._centroid_records_for_port(
