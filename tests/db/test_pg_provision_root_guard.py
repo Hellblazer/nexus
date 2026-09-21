@@ -158,3 +158,64 @@ def test_init_reaches_the_bundle_when_not_root(
         init_cmd._provision_postgres_step()
 
     assert reached, "the bundle path was never reached even as a normal user"
+
+
+# ── the CLASS, not just the nx init instance ─────────────────────────────────
+
+
+def test_every_pg_subprocess_refuses_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_run is the choke point: initdb, pg_ctl, psql and createdb all use it.
+
+    Guarding only the entry points is whack-a-mole — a new caller reaching
+    _start_cluster or _psql directly bypasses them, which is exactly what the
+    daemon does.
+    """
+    import subprocess
+
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire("subprocess spawned")),
+    )
+    with pytest.raises(PgRootUserError):
+        pg_provision._run(["/bin/true"])
+
+
+def test_run_still_spawns_for_an_unprivileged_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity: with only the euid changed, _run reaches subprocess.run."""
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
+    out = pg_provision._run(["/bin/echo", "ok"])
+    assert out.returncode == 0
+
+
+def test_the_daemon_self_heal_path_refuses_as_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """storage_service_daemon._ensure_pg_running bypasses BOTH entry guards.
+
+    It imports _start_cluster directly, so before the _run guard a
+    root-launched `nx daemon service start` -- or an automatic PG respawn
+    under root -- hit initdb's bare exit status wrapped in an opaque
+    StorageServiceStartError. Asserted through _start_cluster, which is the
+    function the daemon actually calls.
+    """
+    import subprocess
+
+    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    # Trip on the SPAWN, not on a missing fake binary. Without this the
+    # deletion check fails with FileNotFoundError for tmp_path/pg_ctl —
+    # which is an incidental reason, and would report the guard "working"
+    # on any box where that path happened to exist.
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire("pg_ctl spawned")),
+    )
+    bins = pg_provision.PgBinaries(
+        bin_dir=tmp_path, initdb=tmp_path / "initdb", pg_ctl=tmp_path / "pg_ctl",
+        psql=tmp_path / "psql", createdb=tmp_path / "createdb",
+    )
+    with pytest.raises(PgRootUserError) as exc:
+        pg_provision._start_cluster(bins, tmp_path / "pgdata", 55999)
+    assert "useradd -m -s /bin/bash nexus" in str(exc.value)

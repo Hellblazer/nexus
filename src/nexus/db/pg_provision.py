@@ -495,7 +495,28 @@ def _bundle_lib_env(cmd: list[str], env: dict | None) -> dict:
 
 
 def _run(cmd: list[str], *, check: bool = True, capture: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run a subprocess, raising on non-zero exit when *check* is True."""
+    """Run a subprocess, raising on non-zero exit when *check* is True.
+
+    THE CHOKE POINT for the root refusal. Every PostgreSQL subprocess this
+    module spawns -- initdb, pg_ctl, psql, createdb -- routes through here,
+    so this is the one place a new caller cannot bypass. The two earlier
+    guards stay because each buys something this one cannot:
+    ``_provision_postgres_step`` refuses before the ~100MB bundle DOWNLOAD,
+    which is not a subprocess and never reaches here, and ``provision``
+    refuses at the public API boundary rather than from inside a helper
+    several frames down.
+
+    Guarding here is what closes the CLASS rather than one instance
+    (nexus-ov1oq). ``storage_service_daemon._ensure_pg_running`` imports
+    ``_start_cluster`` directly and never calls ``provision``, so a
+    root-launched ``nx daemon service start`` -- or an automatic PG respawn
+    under root -- bypassed both earlier guards and surfaced initdb's bare
+    exit status wrapped in a StorageServiceStartError. Both standing
+    reviewers found that path independently while reviewing the guard that
+    did not cover it. It refuses here now, and the daemon's own handler
+    interpolates the exception text, so the remedy travels with it.
+    """
+    refuse_root()
     _log.debug("pg_provision_run", cmd=cmd)
     kw: dict = dict(check=check, text=True, env=_bundle_lib_env(cmd, env))
     if capture:
