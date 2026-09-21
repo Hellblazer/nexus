@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.55.2] - 2026-09-21
+
+Plugin version aligned with conexus 7.55.2. No plugin-side changes: nothing
+under `conexus/`, `sn/` or `.claude-plugin/` differs from the v7.55.1 tag, so
+`PENDING_RELEASE.md` was already empty going into this release and the pin
+advance carries no behavioural surface with it.
+
 ## [7.55.1] - 2026-09-20
 
 Three plugin-surface changes go live with this release, all of them fixes to
