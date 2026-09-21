@@ -230,10 +230,29 @@ if (allFindings.length > 0) {
     );
   }
 
-  voteResults = (
-    await parallel(
-      allFindings.flatMap((finding, findingIndex) =>
-        Array.from({ length: votesFor(finding) }, (_unused, voteIndex) => () =>
+  // Round-major, not finding-major: every finding's FIRST vote is queued
+  // before any finding's second. This file used to claim a uniform
+  // degradation under a tight budget -- drop every finding to one vote --
+  // via a cap that could never fire. Removing that cap without this would
+  // have replaced it with an order-dependent one, where a budget that runs
+  // out mid-fan-out gives the first findings three votes and the last ones
+  // none. Ordering the queue this way degrades gracefully instead.
+  //
+  // Honest bound: the reference documents that excess calls queue and run as
+  // slots free up, but does NOT document the queue's ordering discipline. So
+  // this is better than finding-major under a FIFO queue and no worse under
+  // any other -- it is not a guarantee. The deterministic lever for cheap
+  // verification is `args.votesPerFinding`, which the caller controls.
+  const maxVotes = allFindings.reduce(
+    (most, finding) => Math.max(most, votesFor(finding)),
+    0
+  );
+  const voteThunks = [];
+  for (let voteIndex = 0; voteIndex < maxVotes; voteIndex += 1) {
+    allFindings.forEach((finding, findingIndex) => {
+      if (voteIndex >= votesFor(finding)) return;
+      voteThunks.push(
+        () =>
           agent(
             `A reviewer (lens: ${finding.lens}) claims:\n\n${finding.claim}\n\nEvidence given: ${finding.evidence}\n\nCheck the evidence yourself and argue against the claim as strongly as you honestly can. State whether the claim is refuted.`,
             {
@@ -251,10 +270,11 @@ if (allFindings.length > 0) {
           ).then((result) =>
             result ? { findingIndex, ...result } : { findingIndex, landed: false }
           )
-        )
-      )
-    )
-  ).filter(Boolean);
+      );
+    });
+  }
+
+  voteResults = (await parallel(voteThunks)).filter(Boolean);
 
   allFindings.forEach((finding, findingIndex) => {
     const landed = voteResults.filter(

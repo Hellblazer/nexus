@@ -190,6 +190,55 @@ def test_dead_wire_census_flags_an_unverified_candidate(tmp_path: Path) -> None:
     assert result["complete"] is False
 
 
+def test_dead_wire_census_keys_rows_on_the_enumerated_id(tmp_path: Path) -> None:
+    """Row identity comes from the enumeration, not the trace agent's echo.
+
+    `droppedIds` and `unverifiedCandidateIds` are keyed on `item.id`. Keying
+    `rows[].id` on the id the trace agent retyped means a single divergent
+    echo silently breaks the cross-reference inside one payload -- and every
+    other scenario here hand-constructs the two as equal, so nothing else
+    exercises the divergence.
+    """
+    scenario = {
+        "args": {"surface": "routes"},
+        "agents": {
+            "enumerate": {
+                "items": [
+                    {"id": "GET /v1/remap", "location": "RemapHandler.java"},
+                    {"id": "GET /v1/staging", "location": "StagingHandler.java"},
+                ]
+            },
+            # The agent echoes a normalised id that is not the one it was given.
+            "trace:GET /v1/remap": {
+                "id": "remap",
+                "classification": "dead",
+                "evidence": "no client literal",
+            },
+            "trace:GET /v1/staging": {
+                "id": "v1/staging",
+                "classification": "suspected",
+                "evidence": "no literal found",
+            },
+            "verify:GET /v1/remap": {
+                "id": "remap",
+                "upheld": True,
+                "reasoning": "stands",
+            },
+            "verify:GET /v1/staging": None,
+        },
+    }
+    result = run_workflow(DEAD_WIRE_CENSUS, scenario, tmp_path)["result"]
+
+    assert [row["id"] for row in result["rows"]] == [
+        "GET /v1/remap",
+        "GET /v1/staging",
+    ]
+    # The cross-reference holds: every flagged id is findable among the rows.
+    row_ids = {row["id"] for row in result["rows"]}
+    assert set(result["unverifiedCandidateIds"]) <= row_ids
+    assert result["unverifiedCandidateIds"] == ["GET /v1/staging"]
+
+
 def test_dead_wire_census_calls_an_empty_enumeration_inconclusive(
     tmp_path: Path,
 ) -> None:
@@ -269,6 +318,54 @@ def test_pressure_test_votes_then_synthesizes(tmp_path: Path) -> None:
     labels = [d["label"] for d in report["dispatched"]]
     assert labels.count("verify:code-mechanics:0:0") == 1
     assert sum(1 for label in labels if label.startswith("verify:")) == 4
+
+
+def test_pressure_test_queues_votes_round_major(tmp_path: Path) -> None:
+    """Every finding's first vote is queued before any finding's second.
+
+    Finding-major order means a budget that runs out mid-fan-out gives the
+    first findings every vote and the last ones none. Round-major degrades
+    evenly instead. `parallel()` invokes its thunks in array order, so the
+    harness's dispatch log is the queue order.
+    """
+    agents = {
+        "review:code-mechanics": {
+            "lens": "code-mechanics",
+            "findings": [{"severity": "critical", "claim": "c1", "evidence": "e1"}],
+        },
+        "review:spec-fidelity": {
+            "lens": "spec-fidelity",
+            "findings": [{"severity": "critical", "claim": "c2", "evidence": "e2"}],
+        },
+        "review:adversarial-revert-case": {
+            "lens": "adversarial-revert-case",
+            "findings": [],
+        },
+        "synthesize": {"verdict": "fix-then-ship", "ranked": []},
+    }
+    for finding_index, lens in ((0, "code-mechanics"), (1, "spec-fidelity")):
+        for vote_index in range(3):
+            agents[f"verify:{lens}:{finding_index}:{vote_index}"] = {
+                "refuted": False,
+                "reasoning": "stands",
+            }
+    scenario = {
+        "args": {"target": "diff X", "spec": "directive Y"},
+        "agents": agents,
+    }
+    report = run_workflow(PRESSURE_TEST, scenario, tmp_path)
+
+    verify_order = [
+        d["label"] for d in report["dispatched"] if d["label"].startswith("verify:")
+    ]
+    assert verify_order == [
+        "verify:code-mechanics:0:0",
+        "verify:spec-fidelity:1:0",
+        "verify:code-mechanics:0:1",
+        "verify:spec-fidelity:1:1",
+        "verify:code-mechanics:0:2",
+        "verify:spec-fidelity:1:2",
+    ]
 
 
 def test_pressure_test_reports_a_finding_no_vote_landed_on(

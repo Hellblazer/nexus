@@ -212,7 +212,7 @@ const verifyStage = async (prev) => {
   const verification = await agent(
     `A trace concluded this item is "${traced.classification}": ${traced.id}\n\nEvidence given: ${traced.evidence}\n\nTry to prove this wrong: look for indirect callers (reflection, config-driven dispatch, string-built call sites, a caller in a different repo, ops tooling, a deploy script), and check whether "unused" here actually means "useful but not yet wired" rather than "safe to delete." State your verdict and whether the original classification stands.`,
     {
-      label: `verify:${traced.id}`,
+      label: `verify:${item.id}`,
       phase: 'verify',
       schema: {
         type: 'object',
@@ -260,7 +260,12 @@ const rows = items.map((item, index) => {
   }
 
   return {
-    id: traced.id,
+    // `item.id`, never `traced.id`: the enumerated id is ground truth, and
+    // the trace agent's echoed one is a value a model retyped. They are the
+    // same string until they are not, and `droppedIds` /
+    // `unverifiedCandidateIds` in this same payload are keyed on `item.id` —
+    // so keying rows off the echo is what would break the cross-reference.
+    id: item.id,
     location: item.location,
     classification:
       verification && !verification.upheld
