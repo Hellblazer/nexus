@@ -134,6 +134,154 @@ def _patch_cancellation_response() -> str:
     return "applied"
 
 
+#: The pristine ``Tool.from_function`` as it was before the offload patch
+#: replaced it, captured on first application. Exists for the non-vacuity
+#: test: importing ``nexus.mcp`` applies the patches, so the unpatched
+#: baseline is otherwise unreachable from inside the process.
+_ORIGINAL_TOOL_FROM_FUNCTION: Any = None
+
+
+def restore_sync_tool_offload() -> bool:
+    """Put the SDK's own ``Tool.from_function`` back. Test support only.
+
+    Returns True when something was restored. Not used by the server.
+    """
+    if _ORIGINAL_TOOL_FROM_FUNCTION is None:
+        return False
+    from mcp.server.fastmcp.tools.base import Tool  # noqa: PLC0415 — SDK internal, probed
+
+    Tool.from_function = _ORIGINAL_TOOL_FROM_FUNCTION  # type: ignore[assignment]
+    return True
+
+
+def _offloaded(fn: Any) -> Any:
+    """Wrap a blocking sync tool body so it runs off the event loop.
+
+    ``functools.wraps`` keeps ``__wrapped__``, so ``inspect.signature`` still
+    reports the ORIGINAL signature -- which is what FastMCP builds the tool's
+    JSON schema from. The wire contract is therefore untouched; only where the
+    body executes changes.
+    """
+    import asyncio  # noqa: PLC0415 — only on the patch path
+    import functools  # noqa: PLC0415 — only on the patch path
+
+    @functools.wraps(fn)
+    async def _run_in_thread(*args: Any, **kwargs: Any) -> Any:
+        # to_thread copies the current contextvars into the worker, so
+        # structlog's bound context and anything else contextvar-scoped
+        # survives the hop.
+        return await asyncio.to_thread(lambda: fn(*args, **kwargs))
+
+    return _run_in_thread
+
+
+def _patch_sync_tool_offload() -> str:
+    """Run sync ``@mcp.tool()`` bodies in a thread instead of on the loop.
+
+    THE DEFECT, measured against the installed SDK::
+
+        slow_sync    slow finished at 2.00s, fast finished at 2.00s  -> BLOCKED
+        slow_async   slow finished at 2.00s, fast finished at 0.05s  -> free
+
+    ``mcp/server/fastmcp/utilities/func_metadata.py`` calls a sync tool body
+    DIRECTLY from inside its async dispatch::
+
+        if fn_is_async:
+            return await fn(**arguments_parsed_dict)
+        else:
+            return fn(**arguments_parsed_dict)
+
+    There is no thread offload anywhere on that path, so one sync tool body
+    holds the whole server's event loop for its entire duration. Ours are not
+    cheap: store_get 19s, search 14s, store_put 8-10s, all measured on a live
+    connection. Meanwhile the conexus hooks are wired as ``mcp_tool`` entries
+    with 5-10s timeouts on that SAME connection, so they do not lose a race --
+    they never get to start.
+
+    What that costs is not slowness, it is the transport. The client abandons
+    the request id at its timeout, the loop eventually frees, the server
+    answers anyway, and the late answer arrives as an id the client no longer
+    knows -- the same unknown-id teardown ``_patch_cancellation_response``
+    addresses from the other side.
+
+    WHAT IS MEASURED AND WHAT IS INFERRED, kept apart deliberately. Measured:
+    the blocking above, in this repo, against this SDK; and one teardown at
+    2026-09-21T08:31:16Z whose two stray ids were late RESULTS, id 48
+    carrying a ``hook_subagent_start`` response and id 49 an empty one.
+    Inferred, and NOT established: that those two ids were starved by a
+    slow tool body in particular. The client log records no outbound
+    notifications and no ``Calling MCP tool: hook_*`` lines, so the path
+    from "the loop was blocked" to "this teardown happened" is a hypothesis
+    that fits, not an observation. This patch is justified by the measured
+    blocking on its own; whether it ends the teardowns is settled by
+    watching for new unknown-id lines in the client logs under load, which
+    is nexus-rjmyk's own standing bar.
+
+    Patched at the REGISTRATION boundary rather than at the 59 call sites,
+    for one reason that matters: ``search``, ``store_put`` and the rest are
+    imported and called synchronously by ``nexus.commands.doc`` and by a long
+    tail of tests. Turning those module-level names into coroutines would
+    break every one of them. Wrapping what FastMCP registers leaves the
+    module-level names exactly as they are.
+
+    Returns a short status string naming what happened, for the caller to log.
+    """
+    try:
+        from mcp.server.fastmcp.tools.base import Tool  # noqa: PLC0415 — SDK internal, probed
+        from mcp.server.fastmcp.utilities.func_metadata import (  # noqa: PLC0415 — SDK internal, probed
+            FuncMetadata,
+        )
+    except Exception as exc:  # noqa: BLE001 — boundary: a moved symbol must not kill startup
+        return f"unavailable: {exc}"
+
+    try:
+        from mcp.server.fastmcp.tools.base import _is_async_callable  # noqa: PLC0415 — SDK internal, probed
+    except Exception:  # noqa: BLE001 — private helper; the stdlib check is equivalent here
+        _is_async_callable = inspect.iscoroutinefunction  # type: ignore[assignment]
+
+    original = Tool.__dict__.get("from_function")
+    if original is None:
+        return "unavailable: Tool has no from_function"
+    if getattr(original, "_nx_patched", False):
+        return "already applied"
+
+    dispatch = getattr(FuncMetadata, "call_fn_with_arg_validation", None)
+    if dispatch is None:
+        return "unavailable: FuncMetadata has no call_fn_with_arg_validation"
+    try:
+        source = inspect.getsource(dispatch)
+    except (OSError, TypeError) as exc:
+        # Cannot read it, so cannot prove the SDK still runs sync bodies on the
+        # loop. Refuse rather than wrap blind.
+        return f"skipped: cannot read call_fn_with_arg_validation source ({exc})"
+
+    if _calls_attribute(source, "to_thread"):
+        # Upstream started offloading. Wrapping on top of that would put the
+        # body in a thread inside a thread for no gain.
+        return "not needed: the SDK already offloads sync tool bodies"
+
+    underlying = original.__func__ if isinstance(original, classmethod) else original
+
+    # Kept so a test can measure the UNPATCHED behaviour. Importing
+    # nexus.mcp applies these patches as a side effect, so without this a
+    # "without the patch" test silently measures the patched path and the
+    # non-vacuity leg proves nothing.
+    global _ORIGINAL_TOOL_FROM_FUNCTION
+    if _ORIGINAL_TOOL_FROM_FUNCTION is None:
+        _ORIGINAL_TOOL_FROM_FUNCTION = original
+
+    def from_function_offloading_sync(cls: Any, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        if not _is_async_callable(fn):
+            fn = _offloaded(fn)
+        return underlying(cls, fn, *args, **kwargs)
+
+    from_function_offloading_sync._nx_patched = True  # type: ignore[attr-defined]
+    patched = classmethod(from_function_offloading_sync)
+    patched._nx_patched = True  # type: ignore[attr-defined]
+    Tool.from_function = patched  # type: ignore[assignment]
+    return "applied"
+
+
 def apply_sdk_patches() -> dict[str, str]:
     """Apply every local SDK correction. Never raises.
 
@@ -145,10 +293,19 @@ def apply_sdk_patches() -> dict[str, str]:
         results["cancellation_response"] = _patch_cancellation_response()
     except Exception as exc:  # noqa: BLE001 — boundary: no patch may kill startup
         results["cancellation_response"] = f"failed: {exc}"
+    try:
+        results["sync_tool_offload"] = _patch_sync_tool_offload()
+    except Exception as exc:  # noqa: BLE001 — boundary: no patch may kill startup
+        results["sync_tool_offload"] = f"failed: {exc}"
 
+    # INFO, not DEBUG. These patches are the difference between a transport
+    # that survives a fan-out and one that does not, and at DEBUG under an
+    # INFO log they left no trace at all: 3.5 MB of mcp.log carried zero
+    # occurrences, so "is the patch live in this process?" took an audit to
+    # answer instead of a grep (nexus-dgvsz).
     for name, status in results.items():
         if status == "applied":
-            _log.debug("mcp_sdk_patch_applied", patch=name)
+            _log.info("mcp_sdk_patch_applied", patch=name)
         else:
-            _log.debug("mcp_sdk_patch_not_applied", patch=name, status=status)
+            _log.info("mcp_sdk_patch_not_applied", patch=name, status=status)
     return results

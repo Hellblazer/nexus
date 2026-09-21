@@ -153,7 +153,12 @@ def test_respond_after_cancel_refuses_and_sends_nothing() -> None:
 
 def test_it_is_idempotent() -> None:
     _sdk_patches.apply_sdk_patches()
-    assert _sdk_patches.apply_sdk_patches() == {"cancellation_response": "already applied"}
+    # Named individually rather than asserted wholesale, so a patch added
+    # without a re-application status has to be a deliberate edit here.
+    assert _sdk_patches.apply_sdk_patches() == {
+        "cancellation_response": "already applied",
+        "sync_tool_offload": "already applied",
+    }
 
 
 # ── it must never kill startup ─────────────────────────────────────────────
