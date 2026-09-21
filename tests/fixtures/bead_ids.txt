@@ -2066,6 +2066,7 @@ nexus-b0tcf.1
 nexus-b14i
 nexus-b1v9z
 nexus-b23q
+nexus-b2eaw
 nexus-b2i
 nexus-b2i.1
 nexus-b2tld
@@ -2200,6 +2201,7 @@ nexus-bsg
 nexus-bsg.1
 nexus-bsjro
 nexus-bsm0p
+nexus-bt8w8
 nexus-bti
 nexus-btrw
 nexus-bugph
@@ -2593,6 +2595,7 @@ nexus-dt2tu.4
 nexus-dt2tu.5
 nexus-dtnpu
 nexus-dtqd7
+nexus-dtqd7.1
 nexus-du2dw
 nexus-du6d0
 nexus-duf53
@@ -4889,6 +4892,7 @@ nexus-ov0sw.1
 nexus-ov13k
 nexus-ov13k.1
 nexus-ov1oq
+nexus-ov1oq.1
 nexus-ov5tc
 nexus-ov5tc.1
 nexus-ov5y
@@ -5009,6 +5013,7 @@ nexus-pju4s
 nexus-pjzz8
 nexus-pk9yt
 nexus-pktki
+nexus-pktki.1
 nexus-pkzz0
 nexus-plcz
 nexus-plma0
