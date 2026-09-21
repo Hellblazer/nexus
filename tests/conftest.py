@@ -246,6 +246,13 @@ def _take_suite_lease() -> None:
     try:
         from tests import _suite_lease  # noqa: PLC0415 — deferred: test-support module, not needed unless this run competes for the box
 
+        # A nested pytest is one run inside another, already serialised by
+        # construction -- not a second competitor for the box. 19 test files
+        # here spawn one, and without this exemption the inner run refuses
+        # against a lease the OUTER run holds, naming it as the holder.
+        if _suite_lease.inside_a_holder():
+            return
+
         held = _suite_lease.holder()
         if held is not None:
             wait = _suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0

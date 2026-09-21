@@ -40,6 +40,16 @@ from pathlib import Path
 #: belongs to build-lease.sh and is never written from Python.
 RESOURCE = "suite"
 
+#: Set in the environment by the holder, so DESCENDANTS know they are inside
+#: it. A nested pytest -- and 19 test files in this repo spawn one -- is not a
+#: second competitor for the box; it is one run inside another, already
+#: serialised by construction. Without this the inner run asks for a lease the
+#: outer run is holding and refuses, naming the OUTER RUN AS THE HOLDER, which
+#: is how dd64caf9d red'd develop on test_real_config_dir_guard_wiring within
+#: minutes of landing. Environment inheritance is exactly the process-tree
+#: relationship we want: only children get it, and nesting depth is free.
+HELD_BY_ENV = "NX_SUITE_LEASE_HELD_BY"
+
 #: How long a caller waits for a live holder before giving up, when it has
 #: asked to wait at all. Suites here run ~5-15 minutes, so a wait that cannot
 #: outlast one is a wait that never succeeds.
@@ -61,6 +71,19 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True  # exists, owned by someone else
     return True
+
+
+def inside_a_holder() -> bool:
+    """True when this process is a DESCENDANT of the run holding the lease.
+
+    Keyed on a live pid, not merely on the variable being set: if the holder
+    died and left a child running, the child is a competitor again and should
+    take its own lease rather than inherit an exemption from a corpse.
+    """
+    raw = os.environ.get(HELD_BY_ENV, "").strip()
+    if not raw.isdigit():
+        return False
+    return _pid_alive(int(raw))
 
 
 def holder(lease_root: Path | None = None) -> str | None:
@@ -144,7 +167,11 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
         except Exception:  # noqa: BLE001 — a half-written lease reads as free, which is correct
             pass
 
+        # Descendants inherit this and skip the lease entirely.
+        os.environ[HELD_BY_ENV] = str(os.getpid())
+
         def _release() -> None:
+            os.environ.pop(HELD_BY_ENV, None)
             try:
                 for child in lease.iterdir():
                     child.unlink(missing_ok=True)

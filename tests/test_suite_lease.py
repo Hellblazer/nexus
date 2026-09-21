@@ -109,6 +109,11 @@ def test_a_second_pytest_run_refuses_while_one_holds_the_lease(
         env["NX_BUILD_LEASE_ROOT"] = str(root)
         env.pop("NX_SUITE_LEASE_WAIT", None)
         env.pop("NX_TEST_T2_SUBSTRATE", None)
+        # An INDEPENDENT run, so scrub the descendant marker this process set
+        # when it took the lease above. Leaving it in would exempt the child
+        # and this test would assert nothing -- which is the difference
+        # between this test and test_a_nested_pytest_run_is_not_refused.
+        env.pop(_suite_lease.HELD_BY_ENV, None)
         out = subprocess.run(
             [sys.executable, "-m", "pytest", probe, "-q", "-o", "addopts="],
             capture_output=True, text=True, env=env,
@@ -124,3 +129,70 @@ def test_a_second_pytest_run_refuses_while_one_holds_the_lease(
     combined = out.stdout + out.stderr
     assert "suite lease" in combined
     assert "the-holding-run" in combined, "the refusal must name the holder"
+
+
+# ── a nested pytest is not a second competitor ───────────────────────────────
+
+
+def test_a_descendant_of_the_holder_is_exempt(lease_root: Path) -> None:
+    """The unit-level property: inside a live holder, skip the lease."""
+    release = _suite_lease.acquire("outer", lease_root=lease_root)
+    assert release is not None
+    try:
+        assert _suite_lease.inside_a_holder(), (
+            "acquire must mark the environment so descendants can tell"
+        )
+    finally:
+        release()
+    assert not _suite_lease.inside_a_holder(), "release must clear the marker"
+
+
+def test_the_exemption_keys_on_a_LIVE_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child outliving its parent is a competitor again, not an heir.
+
+    Non-vacuity for the test above: without the liveness check the exemption
+    would be 'the variable is set', which a dead parent leaves behind.
+    """
+    monkeypatch.setenv(_suite_lease.HELD_BY_ENV, "4194304")  # cannot be alive
+    assert not _suite_lease.inside_a_holder()
+    monkeypatch.setenv(_suite_lease.HELD_BY_ENV, str(os.getpid()))
+    assert _suite_lease.inside_a_holder()
+
+
+def test_a_nested_pytest_run_is_not_refused(tmp_path: Path) -> None:
+    """THE REGRESSION. 19 test files here spawn a nested pytest.
+
+    This is the case dd64caf9d broke on develop within minutes: the inner run
+    asked for a lease the outer run held and refused, naming the outer run as
+    the holder, so the parent test failed on a missing terminal summary rather
+    than on anything it was about.
+
+    The existing refusal test passes a tmp lease root to the child, which
+    ALSO scrubs nothing about the environment -- but it never held a real
+    marker, so it could not see this. Here the environment is left intact,
+    because the marker is the mechanism.
+    """
+    root = tmp_path / "leases"
+    release = _suite_lease.acquire("the-outer-run", lease_root=root)
+    assert release is not None
+    try:
+        env = dict(os.environ)  # marker INCLUDED, unlike the refusal test
+        env["NX_BUILD_LEASE_ROOT"] = str(root)
+        env.pop("NX_TEST_T2_SUBSTRATE", None)
+        out = subprocess.run(
+            [sys.executable, "-m", "pytest",
+             "tests/test_suite_lease.py::test_a_free_resource_has_no_holder",
+             "-q", "-o", "addopts="],
+            capture_output=True, text=True, env=env,
+            cwd=str(Path(__file__).resolve().parents[1]),
+        )
+    finally:
+        release()
+
+    assert out.returncode == 0, (
+        f"a nested run was refused its own parent's lease (rc={out.returncode})\n"
+        f"stdout:\n{out.stdout[-1500:]}\nstderr:\n{out.stderr[-1500:]}"
+    )
+    assert "suite lease: refusing" not in (out.stdout + out.stderr)
