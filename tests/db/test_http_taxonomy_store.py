@@ -2519,6 +2519,32 @@ class TestMixedCentroidDimensions:
         assert not [c for c in store._centroid_store.calls if c[0] == "delete_ids"]
         assert len(store._centroid_store._records) == 2
 
+    def test_rebuild_refuses_a_fully_migrated_collection_without_deleting(
+        self, client,
+    ) -> None:
+        """nexus-dtqd7, at the orchestrator: uniform old centroids in the OLD
+        space. The fetch-boundary guard cannot see this — the envelope is
+        perfectly rectangular — so it is compute_rebuild_plan that must refuse,
+        and it must do so before rebuild_taxonomy deletes the labelled
+        centroids it is about to replace with unlabelled ones."""
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "curated"},
+        ])
+        # Two well-separated 2d blobs: the plan must reach the guard, not
+        # short-circuit on all-noise before it (first draft of this test did).
+        rng = np.random.default_rng(5)
+        docs = rng.standard_normal((60, 2)).astype(np.float32) * 0.05
+        docs[:30, 0] += 3.0
+        docs[30:, 1] += 3.0
+        texts = (
+            [f"machine learning neural gradient {i}" for i in range(30)]
+            + [f"database query indexing schema {i}" for i in range(30)]
+        )
+        with pytest.raises(_hts.MixedEmbeddingDimensionsError):
+            store.rebuild_taxonomy("c", [f"d{i}" for i in range(60)], docs, texts)
+        assert not [c for c in store._centroid_store.calls if c[0] == "delete_ids"]
+        assert store._centroid_store._records[0]["label"] == "curated"
+
     def test_uniform_fetch_is_unaffected(self, client) -> None:
         self._store(client, [
             {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "a"},

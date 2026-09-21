@@ -66,6 +66,7 @@ from nexus.errors import SplitConservationViolatedError
 # re-point the 2026-06-12 critic note predicted P4 would own.
 from nexus.db.t2.taxonomy_compute import (
     _NONFINITE_IDS_LOGGED,  # noqa: F401 — re-exported for tests
+    MixedEmbeddingDimensionsError,
     PROJECTION_THRESHOLD,
     _finite_row_mask,
     AssignResult,
@@ -141,36 +142,6 @@ def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
             nonfinite_cells=int((~np.isfinite(sim)).sum()),
         )
     return sim
-
-
-class MixedEmbeddingDimensionsError(RuntimeError):
-    """An embedding fetch returned rows of more than one dimension where the
-    caller needs a single commensurable set (nexus-pktki).
-
-    ``TaxonomyCentroidRepository.fetchCentroids`` loops every dim in ``DIMS`` and
-    concatenates, so the envelope is ragged whenever the matched rows span more
-    than one dimension — a tenant part-way through an embedding migration, or
-    (for the foreign/multi-target reads) any estate where two collections sit on
-    different embedders, which RDR-210's side-by-side bge-768 and Voyage posture
-    makes ordinary rather than exceptional.
-
-    Raised on the two reads whose result defines a POPULATION: the rebuild read,
-    where dropping incommensurable rows would transfer operator labels for some
-    old centroids and silently mark the rest pending, and the source-chunk read,
-    where it would understate the projection's own coverage counters.
-
-    The three comparison paths drop those rows and log instead. NOT because they
-    are read-only — they are not, and an earlier version of this docstring said
-    so wrongly (critique, T2 nexus/critique-nexus-pktki-ragged-centroids-diff-
-    2026-09-21): all three feed persist_assignments / persist_cross_links, so
-    every one of the five writes durable taxonomy state. The distinction is what
-    a partial result MEANS. Those three emit per-row results that are each
-    individually correct — a doc assigned to the nearest commensurable centroid
-    is assigned correctly — and the set-wise guard they used to carry emitted
-    NOTHING in the same situation, so filtering is strictly more informative
-    than what it replaces. A partial POPULATION is a wrong answer wearing the
-    shape of a right one.
-    """
 
 
 def _centroid_dim_census(rows: list[Any]) -> dict[int, int]:

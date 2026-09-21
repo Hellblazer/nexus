@@ -257,6 +257,36 @@ def _cluster(
     return labels, km.cluster_centers_
 
 
+class MixedEmbeddingDimensionsError(RuntimeError):
+    """An embedding fetch returned rows of more than one dimension where the
+    caller needs a single commensurable set (nexus-pktki).
+
+    ``TaxonomyCentroidRepository.fetchCentroids`` loops every dim in ``DIMS`` and
+    concatenates, so the envelope is ragged whenever the matched rows span more
+    than one dimension — a tenant part-way through an embedding migration, or
+    (for the foreign/multi-target reads) any estate where two collections sit on
+    different embedders, which RDR-210's side-by-side bge-768 and Voyage posture
+    makes ordinary rather than exceptional.
+
+    Raised on the two reads whose result defines a POPULATION: the rebuild read,
+    where dropping incommensurable rows would transfer operator labels for some
+    old centroids and silently mark the rest pending, and the source-chunk read,
+    where it would understate the projection's own coverage counters.
+
+    The three comparison paths drop those rows and log instead. NOT because they
+    are read-only — they are not, and an earlier version of this docstring said
+    so wrongly (critique, T2 nexus/critique-nexus-pktki-ragged-centroids-diff-
+    2026-09-21): all three feed persist_assignments / persist_cross_links, so
+    every one of the five writes durable taxonomy state. The distinction is what
+    a partial result MEANS. Those three emit per-row results that are each
+    individually correct — a doc assigned to the nearest commensurable centroid
+    is assigned correctly — and the set-wise guard they used to carry emitted
+    NOTHING in the same situation, so filtering is strictly more informative
+    than what it replaces. A partial POPULATION is a wrong answer wearing the
+    shape of a right one.
+    """
+
+
 def _merge_labels(
     old_centroids: np.ndarray,
     old_labels: list[str],
@@ -284,9 +314,30 @@ def _merge_labels(
     ]
 
     if old_centroids.shape[0] == 0:
+        # A first-ever rebuild has no centroids AND no labels, and there is
+        # nothing to report about it. Labels WITHOUT centroids is a different
+        # state entirely — it is what the delete-before-compute defect used to
+        # leave behind (nexus-pktki's sibling, fixed in 30e2b4aab) — and those
+        # labels are about to be dropped. Warning on both would cry wolf on
+        # every first rebuild, which is how a warning stops being read
+        # (nexus-dtqd7).
+        if old_labels:
+            _log.warning(
+                "centroid_labels_without_centroids",
+                old_labels=len(old_labels),
+                new_centroids=n_new,
+                detail="operator labels exist but no centroid carries them; "
+                       "they cannot be transferred and will be lost",
+            )
         return result
 
-    # Dimensionality mismatch guard (model upgrade scenario)
+    # Dimensionality mismatch guard (model upgrade scenario).
+    #
+    # Defence in depth ONLY, as of nexus-dtqd7: compute_rebuild_plan now
+    # refuses upstream before reaching here, because returning all-pending is a
+    # 100% operator-label loss on a path that then deletes the old centroids.
+    # Kept for any future caller that has not learned that yet — a silent
+    # all-pending is a worse failure than a redundant guard.
     if old_centroids.shape[1] != new_centroids.shape[1]:
         _log.warning(
             "centroid_dimension_mismatch",
@@ -629,6 +680,34 @@ def compute_rebuild_plan(
     new_centroids_arr = np.array(
         [centroids_arr[cid] for cid in real_labels], dtype=np.float32,
     )
+    # nexus-dtqd7. A collection that FULLY migrated embedders since its last
+    # rebuild has uniform old centroids in the OLD space and fresh ones in the
+    # new, so cosine between them is meaningless and _merge_labels matches
+    # nothing — every operator label silently becomes 'pending' while
+    # rebuild_taxonomy goes on to delete the labelled centroids and persist the
+    # unlabelled ones. 100% label loss, no signal, no undo.
+    #
+    # Refuse rather than warn, for the same reason the sibling fix (nexus-pktki)
+    # refuses on a population read: this path REPLACES state the operator
+    # curated by hand, and a warning on an unasked-for destructive step is not
+    # consent. A refusal must carry the way out or it is just a different dead
+    # end, hence both real remedies spelled in verbs that already exist.
+    #
+    # Deliberately NOT a force flag: purging the taxonomy and discovering afresh
+    # already IS the opt-in, and a second way to say the same thing is the one
+    # that would get used without thinking.
+    if old_centroids.shape[0] and old_centroids.shape[1] != new_centroids_arr.shape[1]:
+        raise MixedEmbeddingDimensionsError(
+            f"compute_rebuild_plan: collection {collection_name!r} has "
+            f"{old_centroids.shape[0]} existing centroid(s) at "
+            f"{old_centroids.shape[1]}d but its documents now embed at "
+            f"{new_centroids_arr.shape[1]}d, so operator labels cannot be "
+            "carried across — similarity between two embedding spaces is not "
+            "defined. Rebuilding anyway would drop every label on this "
+            "collection. Either purge the taxonomy and discover afresh, "
+            "accepting the label loss deliberately, or re-embed so both sides "
+            "share one space and then rebuild."
+        )
     merged = _merge_labels(
         old_centroids, old_labels, old_review_statuses, new_centroids_arr,
     )
