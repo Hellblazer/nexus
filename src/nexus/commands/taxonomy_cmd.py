@@ -859,11 +859,35 @@ def reset_cmd(collection: str, yes: bool) -> None:
     purpose and discover afresh. The second one had no verb: the refusal named
     a remedy that did not exist, and the only reachable "purge" destroyed the
     whole collection's documents (both reviewers of bad1e8348 caught this).
+
+    NOT a narrower rebuild. The engine's purge deletes topic_assignments by
+    SOURCE_COLLECTION as well as by topic id, so it also removes this
+    collection's documents' projections onto OTHER collections' topics, which a
+    rebuild leaves alone. That makes reset strictly more destructive than the
+    operation it is offered as an alternative to. Scoping it tighter needs an
+    engine change and rides that release train (nexus-0v0nj); until then the
+    widening is disclosed before the prompt, not discovered from the counts
+    afterwards.
     """
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topics = db.taxonomy.get_all_topics(collection=collection)
         if not topics:
-            click.echo(f"No taxonomy to reset for collection {collection!r}.")
+            # NOT a bare return. reset_collection is two calls — the T2 purge,
+            # then the centroid purge — and a failure between them leaves the
+            # topics gone and the centroids behind. Gating the no-op on topics
+            # alone made the one verb built to remove those centroids answer
+            # "nothing to do", so it could not finish its own interrupted work
+            # (round-3 review, T2 [26637]). Falling through makes the verb
+            # idempotent and self-healing, and it reports what it removed.
+            click.echo(
+                f"No topics for collection {collection!r} — sweeping for "
+                "centroids left behind by an interrupted reset."
+            )
+            swept = db.taxonomy.reset_collection(collection).get("centroids", 0)
+            click.echo(
+                f"Swept {swept} orphaned centroid(s)." if swept
+                else "Nothing to reset."
+            )
             return
         labelled = [
             t for t in topics
@@ -875,6 +899,21 @@ def reset_cmd(collection: str, yes: bool) -> None:
             "links and centroids."
         )
         click.echo("The collection's documents and chunks are not touched.")
+        # The engine's purge also deletes topic_assignments by SOURCE_COLLECTION
+        # (TaxonomyRepository.purgeCollection), which reaches BEYOND this
+        # collection's own topics: it removes this collection's documents'
+        # projections onto OTHER collections' topics. A rebuild never touches
+        # those, so reset is strictly more destructive than the operation it is
+        # offered as the alternative to, and saying so is the whole point --
+        # this session has spent the day on losses that were real, unavoidable
+        # and silent, and quietly widening one while fixing another would be
+        # the same defect wearing a fix's clothes.
+        click.echo(
+            "It ALSO removes this collection's cross-collection projections — "
+            "its documents' assignments onto other collections' topics, which a "
+            "rebuild would have kept. Re-run `nx taxonomy project` afterwards to "
+            "rebuild them."
+        )
         if not yes:
             # Irreversible, and the accepted-label count is exactly the thing
             # the operator is being asked to weigh, so it is printed above the

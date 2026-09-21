@@ -415,6 +415,34 @@ def test_compute_rebuild_plan_refuses_before_the_all_noise_short_circuit() -> No
         )
 
 
+def test_compute_rebuild_plan_refuses_when_the_document_width_is_unknown() -> None:
+    """Unknown width is not a pass.
+
+    The guard was a conjunction of positives, so a 1-D or (0,0) embeddings
+    array — shapes this signature admits — made it silently no-op while the
+    destructive path below ran anyway. It held only because a caller checked
+    first, and a claim resting on a redundant check one layer up dies the day
+    someone tidies that check away (round-3 review).
+    """
+    for embeddings in (
+        np.zeros((0, 0), dtype=np.float32),
+        np.zeros((6,), dtype=np.float32),
+    ):
+        with pytest.raises(tc.MixedEmbeddingDimensionsError) as exc:
+            tc.compute_rebuild_plan(
+                "c__unknown_width",
+                ["a", "b"],
+                embeddings,
+                ["x", "y"],
+                old_centroids=np.ones((1, 768), dtype=np.float32),
+                old_labels=["curated"],
+                old_review_statuses=["accepted"],
+                old_centroid_topic_ids=[1],
+                manual_assignments={},
+            )
+        assert "unknown" in str(exc.value), str(exc.value)
+
+
 def test_compute_rebuild_plan_first_ever_rebuild_is_never_refused() -> None:
     """No old centroids means no dimension to disagree with, at any corpus
     size — including the short-circuit sizes the guard now runs ahead of."""

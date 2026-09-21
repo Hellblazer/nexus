@@ -678,20 +678,37 @@ def compute_rebuild_plan(
     # end — `nx taxonomy reset` is that exit, and it is named in the message.
     if (
         old_centroids.shape[0]
-        and embeddings.ndim == 2
-        and embeddings.shape[1]
-        and old_centroids.shape[1] != embeddings.shape[1]
+        and (
+            embeddings.ndim != 2
+            or not embeddings.shape[1]
+            or old_centroids.shape[1] != embeddings.shape[1]
+        )
     ):
+        # The unknown-width cases refuse too, rather than falling through.
+        # Written as a conjunction of positives, this guard silently NO-OPPED on
+        # a 1-D or (0,0) embeddings array — shapes the signature admits — and
+        # the destructive path below runs regardless of width, so "the guard
+        # covers the function" held only because a caller happened to check
+        # first. A claim that depends on a redundant check one layer up stops
+        # being true the moment someone tidies that check away (round-3 review,
+        # T2 [26637]). If old centroids exist and the document width cannot be
+        # established, commensurability cannot be established either, and this
+        # path deletes labelled centroids: refuse.
+        width = (
+            embeddings.shape[1]
+            if embeddings.ndim == 2 and embeddings.shape[1]
+            else f"unknown (embeddings shape {embeddings.shape})"
+        )
         raise MixedEmbeddingDimensionsError(
             f"compute_rebuild_plan: collection {collection_name!r} has "
             f"{old_centroids.shape[0]} existing centroid(s) at "
             f"{old_centroids.shape[1]}d but its documents now embed at "
-            f"{embeddings.shape[1]}d, so operator labels cannot be carried "
+            f"{width}d, so operator labels cannot be carried "
             "across — similarity between two embedding spaces is not defined. "
             "Rebuilding anyway would drop every label on this collection. "
             "Either re-embed so both sides share one space and then rebuild, "
             f"or discard this collection's taxonomy deliberately with "
-            f"`nx taxonomy reset {collection_name}` and discover afresh."
+            f"`nx taxonomy reset -c {collection_name}` and discover afresh."
         )
 
     doc_ids, embeddings, texts = _drop_nonfinite_rows(

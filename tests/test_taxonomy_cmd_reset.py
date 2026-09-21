@@ -30,9 +30,14 @@ class _FakeTaxonomy:
     def get_all_topics(self, collection: str = "", **_: object) -> list[dict]:
         return [t for t in self._topics if t.get("collection") == collection]
 
+    centroids_left = 2
+
     def reset_collection(self, collection: str) -> dict[str, int]:
         self.reset_calls.append(collection)
-        return {"topics": 2, "assignments": 7, "links": 1, "meta": 1, "centroids": 2}
+        return {
+            "topics": 2, "assignments": 7, "links": 1, "meta": 1,
+            "centroids": self.centroids_left,
+        }
 
 
 class _FakeDB:
@@ -60,20 +65,26 @@ def wired(monkeypatch):
     return fake
 
 
-def test_refusal_names_a_verb_that_exists() -> None:
-    """THE reachability pin.
+def test_the_refusals_printed_command_actually_runs(wired) -> None:
+    """THE reachability pin, and it must exercise the command, not its name.
 
-    Builds the refusal message the rebuild path raises, extracts the `nx
-    taxonomy <verb>` it recommends, and asserts that verb is registered on the
-    taxonomy group. Rewording the message to name a different verb, or deleting
-    the verb, fails here — which is what the first version of this fix needed
-    and did not have.
+    The first version of this test extracted the verb token and asserted it was
+    registered on the group. That passed while the printed command was
+    `nx taxonomy reset <collection>` as a bare positional — which reset_cmd does
+    not accept, since it binds collection through -c/--collection like every
+    other taxonomy verb. So the refusal still named something an operator could
+    not run, and the test could not see it: checking that a verb exists is not
+    checking that the invocation parses (round-3 critique).
+
+    This lifts the command out of the refusal verbatim and runs it.
     """
+    import shlex
+
     import numpy as np
 
     with pytest.raises(tc.MixedEmbeddingDimensionsError) as exc:
         tc.compute_rebuild_plan(
-            "c__migrated",
+            "c",
             ["a", "b"],
             np.zeros((2, 384), dtype=np.float32),
             ["x", "y"],
@@ -84,13 +95,22 @@ def test_refusal_names_a_verb_that_exists() -> None:
             manual_assignments={},
         )
     msg = str(exc.value)
-    marker = "nx taxonomy "
-    assert marker in msg, msg
-    verb = msg.split(marker, 1)[1].split()[0].strip("`.,")
-    assert verb in taxonomy.commands, (
-        f"the refusal tells the operator to run `nx taxonomy {verb}`, which is "
-        f"not a registered verb; available: {sorted(taxonomy.commands)}"
-    )
+
+    # Pull the backticked command out of the message rather than retyping it,
+    # so a reworded remedy is exercised as written.
+    commands = [seg for seg in msg.split("`") if seg.strip().startswith("nx ")]
+    assert commands, f"the refusal names no runnable command: {msg}"
+
+    for cmd in commands:
+        argv = shlex.split(cmd)
+        assert argv[:2] == ["nx", "taxonomy"], argv
+        result = CliRunner().invoke(taxonomy, argv[2:] + ["--yes"])
+        # Exit code 2 is click's usage error: unknown verb, bad option, or an
+        # argument that does not bind. That is the failure this pins.
+        assert result.exit_code != 2, (
+            f"the refusal tells the operator to run `{cmd}`, which does not "
+            f"parse: {result.output}"
+        )
 
 
 def test_reset_requires_confirmation_and_reports_what_it_will_discard(wired) -> None:
@@ -103,6 +123,22 @@ def test_reset_requires_confirmation_and_reports_what_it_will_discard(wired) -> 
     assert "documents and chunks are not touched" in result.output, result.output
 
 
+def test_reset_discloses_that_it_reaches_beyond_this_collection(wired) -> None:
+    """The engine's purge deletes topic_assignments by SOURCE_COLLECTION as well
+    as by topic id (TaxonomyRepository.purgeCollection), so it removes this
+    collection's documents' projections onto OTHER collections' topics — which a
+    rebuild would have kept. reset is therefore strictly more destructive than
+    the operation it is offered as the alternative to, and the operator has to
+    be told BEFORE the prompt, not discover it from the counts afterwards.
+    """
+    result = CliRunner().invoke(taxonomy, ["reset", "-c", "c"], input="n\n")
+    assert "cross-collection projections" in result.output, result.output
+    assert "other collections' topics" in result.output, result.output
+    # and the way to rebuild them, since naming a loss without a remedy is the
+    # dead end this whole verb exists to avoid
+    assert "nx taxonomy project" in result.output, result.output
+
+
 def test_reset_proceeds_on_yes_and_reports_counts(wired) -> None:
     result = CliRunner().invoke(taxonomy, ["reset", "-c", "c", "--yes"])
     assert result.exit_code == 0, result.output
@@ -111,11 +147,27 @@ def test_reset_proceeds_on_yes_and_reports_counts(wired) -> None:
     assert "discover --collection c" in result.output, "the way back must be named"
 
 
-def test_reset_on_a_collection_with_no_taxonomy_is_a_no_op(wired) -> None:
+def test_reset_with_no_topics_still_sweeps_orphaned_centroids(wired) -> None:
+    """The recovery case, and the reason this is not an early return.
+
+    reset_collection is two calls — the T2 purge then the centroid purge — so a
+    failure between them leaves topics gone and centroids behind. Gating the
+    no-op on topics alone made the one verb built to remove those centroids
+    answer "nothing to do", leaving them unreachable through it (round-3
+    review). It must fall through and finish its own interrupted work.
+    """
+    wired.centroids_left = 3
     result = CliRunner().invoke(taxonomy, ["reset", "-c", "empty", "--yes"])
     assert result.exit_code == 0, result.output
-    assert wired.reset_calls == []
-    assert "No taxonomy to reset" in result.output
+    assert wired.reset_calls == ["empty"], "the sweep must actually run"
+    assert "Swept 3 orphaned centroid(s)" in result.output, result.output
+
+
+def test_reset_on_a_genuinely_clean_collection_says_so(wired) -> None:
+    wired.centroids_left = 0
+    result = CliRunner().invoke(taxonomy, ["reset", "-c", "empty", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Nothing to reset" in result.output, result.output
 
 
 def test_reset_collection_clears_both_halves() -> None:

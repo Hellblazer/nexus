@@ -187,9 +187,14 @@ def _uniform_embedding_matrix(
 #: the rest pending.
 _REBUILD_REMEDY = (
     "A rebuild cannot preserve operator labels across incommensurable "
-    "centroids. Finish the embedding migration for this collection, or purge "
-    "the stale-dimension centroids, then rebuild."
+    "centroids. Finish the embedding migration for this collection, or discard "
+    "its taxonomy with `nx taxonomy reset -c <collection>` and discover afresh."
 )
+# Swept alongside the cross-space refusal, not separately: this line used to say
+# "purge the stale-dimension centroids", which is the SAME defect the reviewers
+# found one module over — a remedy phrased as an action with no verb behind it.
+# Naming a defect class and fixing only the instance that fired is not fixing
+# the class, and this was its sibling.
 
 #: Remedy line for the source-chunk read: dropping chunks would understate the
 #: projection's own coverage counters rather than fail.
@@ -1326,6 +1331,36 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             else:
                 old_labels.append(m.get("label") or "")
                 old_review_statuses.append("pending")
+
+        # Operator labels that NO centroid carries. This is the signal the
+        # bad1e8348 warning was reaching for, and it is live HERE and nowhere
+        # else: _merge_labels only ever sees labels derived from the centroid
+        # metadata above, so by the time it runs, a label with no centroid has
+        # already been dropped and cannot be counted. This function is the one
+        # place both sides exist — T2's own topic map, and the centroid ids —
+        # so the comparison is possible exactly here.
+        #
+        # Round 3 DELETED that warning on the grounds it could not fire, which
+        # was true of where it sat and the wrong conclusion: the right move was
+        # to relocate it to the join, not to drop the observation (round-3
+        # critique). The state it reports is real — it is what a rebuild
+        # interrupted between its delete and its persist leaves behind, and
+        # those labels are about to be lost with no other signal.
+        carried = {int(t) for t in old_centroid_topic_ids}
+        orphaned = [
+            tid for tid, (label, _status) in old_topic_map.items()
+            if int(tid) not in carried and label
+        ]
+        if orphaned:
+            _log.warning(
+                "taxonomy_labels_without_centroids",
+                collection=collection_name,
+                orphaned_topics=len(orphaned),
+                topic_ids=sorted(orphaned)[:20],
+                centroids=len(old_centroid_topic_ids),
+                detail="operator labels exist on topics no centroid carries; "
+                       "a rebuild cannot transfer them and they will be lost",
+            )
 
         return {
             "old_centroids": old_centroids,
