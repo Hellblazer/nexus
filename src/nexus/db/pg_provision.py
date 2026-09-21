@@ -163,7 +163,7 @@ def root_user_remedy() -> str:
     )
 
 
-def _refuse_root() -> None:
+def refuse_root() -> None:
     """Refuse local provisioning when the process euid is 0 (nexus-ov1oq).
 
     ``os.geteuid`` is POSIX-only; on Windows the attribute is absent, and a
@@ -2095,7 +2095,7 @@ def provision(
     subprocess.CalledProcessError
         When any provisioning subprocess exits non-zero.
     """
-    _refuse_root()
+    refuse_root()
 
     if config_dir is None:
         from nexus.config import nexus_config_dir  # local import to avoid circular  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs

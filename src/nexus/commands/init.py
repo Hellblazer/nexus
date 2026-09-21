@@ -587,7 +587,22 @@ def _provision_postgres_step() -> None:
     error rather than a traceback — the user needs an install hint, not a
     Python exception.
     """
-    from nexus.db.pg_provision import PgBinaryNotFoundError, provision  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        PgBinaryNotFoundError,
+        PgRootUserError,
+        provision,
+        refuse_root,
+    )
+
+    # Before the bundle acquisition below, not only inside provision(): the
+    # download runs FIRST here, so a guard that lived only in provision()
+    # would still make a root user pay for ~100MB to reach the message
+    # (nexus-ov1oq — the guard's own first cut had exactly this gap).
+    try:
+        refuse_root()
+    except PgRootUserError as exc:
+        click.echo(f"\n{exc}", err=True)
+        raise SystemExit(1)
 
     config_dir = _config.nexus_config_dir()
     click.echo("\nProvisioning local Postgres cluster for the service backend …")
