@@ -68,22 +68,30 @@ and the cap never fired once (bead nexus-xeoa0).
   workflows for distribution to *other* repositories is undocumented as of
   2026-08-22. Until that is confirmed one way or the other, treat these as
   repo-local tools, not something the `conexus` plugin currently exports.
-- **Neither script has ever been run by the real Workflow tool.** They were
-  authored in 2026-08 against a description of the contract rather than the
-  contract itself, and both were broken from the first commit in the same
-  way: each passed its stage functions as `pipeline`'s ITEMS array and a
-  seed object as its only stage, so nothing downstream of that call had ever
-  executed. Nothing in this repo loaded the files, so nothing could see it.
-  Repaired on 2026-09-21 against the workflow-authoring reference (bead
-  nexus-xeoa0), and `tests/scripts/test_claude_workflows.py` now runs both
-  bodies against stub primitives that implement that reference.
+- **Both scripts were broken from their first commit until 2026-09-21, and
+  only one of them has since been run for real.** They were authored in
+  2026-08 against a description of the contract rather than the contract
+  itself, and both failed the same way: each passed its stage functions as
+  `pipeline`'s ITEMS array and a seed object as its only stage, so nothing
+  downstream of that call had ever executed. Nothing in this repo loaded the
+  files, so nothing could see it. Repaired against the workflow-authoring
+  reference under bead nexus-xeoa0.
 
-  That test catches a misused primitive shape, a mishandled `null` dispatch,
-  and a hole reported as a clean result. It does NOT prove the real runtime
-  agrees with the reference, because the stubs encode the same reading of it
-  that the scripts do. The first real invocation is still the first real
-  evidence — run it on a low-stakes target and fix the header's signature
-  block and the call sites together if anything differs.
+  `dead-wire-census.js` has now run under the real Workflow tool, over the
+  nexus-catalog link-graph tool surface: 11 agents, no errors, 7 items
+  enumerated and traced, 3 candidate-dead rows adversarially verified,
+  `complete: true`. That run is what confirms the result channel is a bare
+  top-level `return` (both files had guessed `export default result`), that
+  `pipeline(items, ...stages)` carries each item through both stages with the
+  conditional verify stage dispatching only for candidates, and that `log()`
+  and agent()'s label/phase/schema/effort opts behave as documented.
+
+  **`pressure-test.js` has NOT been run.** It shares the repaired idioms, and
+  `tests/scripts/test_claude_workflows.py` exercises both bodies against stub
+  primitives, but a stub can only confirm the reading of the reference the
+  scripts were written from. Treat its first invocation as its first real
+  evidence, and fix its header's signature block and its call sites together
+  if anything differs.
 - **A "dead" verdict is not a delete order.** Both the source pattern and
   `dead-wire-census.js` end with an evidence table, not an action. The real
   2026-08-19 census that this workflow is built from produced three
