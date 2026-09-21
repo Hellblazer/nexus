@@ -3670,6 +3670,7 @@ nexus-iu43o
 nexus-ivdqt
 nexus-ivdqt.1
 nexus-ivra
+nexus-ivu52
 nexus-ivv4d
 nexus-ivv4d.1
 nexus-ivzw8
@@ -6784,8 +6785,10 @@ nexus-yyev
 nexus-yyxmu
 nexus-yz8bt
 nexus-yz8bt.1
+nexus-yzij1
 nexus-z0br3
 nexus-z0idx
+nexus-z0lu4
 nexus-z0yd2
 nexus-z0ylb
 nexus-z1mu
@@ -6801,6 +6804,7 @@ nexus-z3znb
 nexus-z4j8d
 nexus-z4j8d.1
 nexus-z4m7
+nexus-z4rpi
 nexus-z4skl
 nexus-z4skl.1
 nexus-z5j0t
