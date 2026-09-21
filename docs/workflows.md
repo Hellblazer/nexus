@@ -86,7 +86,8 @@ and the cap never fired once (bead nexus-xeoa0).
   conditional verify stage dispatching only for candidates, and that `log()`
   and agent()'s label/phase/schema/effort opts behave as documented.
 
-  **`pressure-test.js` has NOT been run.** It shares the repaired idioms, and
+  **`pressure-test.js` has NOT been run** (bead nexus-wvquh). It shares the
+  repaired idioms, and
   `tests/scripts/test_claude_workflows.py` exercises both bodies against stub
   primitives, but a stub can only confirm the reading of the reference the
   scripts were written from. Treat its first invocation as its first real
