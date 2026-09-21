@@ -30,29 +30,45 @@
 // (no TS)"). If a different convention is established later, migrate this
 // file rather than assuming `.js` is settled.
 //
-// ASSUMED PRIMITIVE SIGNATURES — see pressure-test.js's header for the full
-// rationale; the short version, unchanged here:
-//   - `args` is an ambient global carrying this invocation's arguments.
-//   - `agent(prompt, opts)` dispatches one subagent call, schema-validated.
-//   - `pipeline(items, ...stages)` runs each ITEM through the stages
-//     independently, with no barrier between stages — the default shape
-//     for per-item work. (An earlier draft misread this as a sequential
-//     reduce-with-accumulator and serialized the Trace phase; wave code
-//     review [23363] caught it.)
-//   - `parallel(thunks)` runs an array of async thunks concurrently and
-//     waits for all of them (a TRUE BARRIER) — used for Trace (independent
-//     items, results collected once) and Verify (Census needs every
-//     verified "dead" candidate's outcome at once).
-//   - `budget` is a global exposing remaining agent-dispatch capacity, read
-//     defensively since its exact shape is unconfirmed.
-//   - `log(message)` is a global that writes a note into the workflow's run
-//     log/observability trail, independent of the returned value — used
-//     here to satisfy "no silent caps: log dropped items."
-//   - This script ends with `export default result` rather than a bare
-//     top-level `return`, because `export const meta = {...}` already makes
-//     this file an ES module. If the real Workflow tool expects the result
-//     some other way, only the last line needs to change.
-//   - No `Date.now()` / `Math.random()` anywhere in this file.
+// PRIMITIVE SIGNATURES — read from the workflow-authoring reference on
+// 2026-09-21 (bead nexus-xeoa0), which supersedes the ASSUMED block that
+// stood here. This file had NEVER EXECUTED: it called
+// `pipeline([stageFns], {})`, passing its four stage functions as the ITEMS
+// array and `{}` as its only stage. `{}` is not callable, so nothing after
+// that line had ever run. The header's own note that an earlier draft
+// misread `pipeline` the same way, and that wave code review [23363] caught
+// it, survived into the file while the correction did not.
+//   - `args` is an ambient global carrying this invocation's arguments, or
+//     `undefined` when none were passed.
+//   - `agent(prompt, opts)` dispatches one subagent call. With `opts.schema`
+//     it resolves to the validated object. It resolves to `null` — it does
+//     NOT throw — when the user skips the agent or the subagent dies on a
+//     terminal API error, so every result is null-checked here.
+//   - `pipeline(items, ...stages)` runs each ITEM through the stages with NO
+//     barrier between stages: item A can be in stage 2 while item B is still
+//     in stage 1. Stage N receives `(prevResult, originalItem, index)`. A
+//     stage that throws drops that item to `null` and skips its remaining
+//     stages, so the result array stays positionally aligned with `items`.
+//     This is the shape the Trace -> Verify chain wants: verifying item A
+//     needs item A's trace and nothing else.
+//   - `parallel(thunks)` is a TRUE BARRIER. Nothing here needs one: the only
+//     step that needs every item at once is the census reduction, which is
+//     plain code, not a dispatch.
+//   - `budget` is `{total: number|null, spent(), remaining()}` in TOKENS —
+//     `remaining` is a METHOD, and `total` is null when the user set no
+//     target. The retired `budgetRemaining()` here tested
+//     `typeof budget.remaining === 'number'`, which a method fails, so it
+//     always returned Infinity and the "no silent caps" cap it guarded never
+//     once fired. It also compared a COUNT OF ITEMS against a TOKEN figure.
+//     Both are gone; drops are now detected after the fact from the pipeline
+//     result, which is something this file can actually observe.
+//   - `log(message)` writes a narrator line into the run's progress display,
+//     independent of the returned value — used here for "no silent caps".
+//   - The script body runs inside an async function, so the result is a bare
+//     top-level `return`. The earlier `export default result` was the other
+//     half of the same unverified guess.
+//   - No `Date.now()` / `Math.random()` anywhere in this file; the runtime
+//     throws on them because they would break resume.
 
 export const meta = {
   name: 'dead-wire-census',
@@ -60,7 +76,14 @@ export const meta = {
     'Enumerate a surface (MCP tools, CLI verbs, skills, or HTTP routes), trace each item to its consumers, adversarially re-check every "dead" verdict, and return an evidence-backed census table.',
   whenToUse:
     'When checking a surface for built-but-disconnected work: after a refactor that may have orphaned call sites, before a deletion pass, or on the recurring cadence this project already runs by hand (see T2 nexus/engine-dead-wire-census-2026-08-19 and nexus/dead-wire-census-dispositions-2026-08-19 for a real run and its outcome). Every "dead" row here is evidence for a human decision, not a delete order — the same census produced a KEEP, a DELETE, and a WIRE-AS-A-FEATURE ruling on three different rows.',
-  phases: ['enumerate', 'trace', 'verify', 'census'],
+  // One entry per progress group, titles matched exactly against the `phase`
+  // passed in each agent() call. The census reduction has no entry because it
+  // dispatches no agent.
+  phases: [
+    { title: 'enumerate', detail: 'list every item on the surface' },
+    { title: 'trace', detail: 'one agent per item, find its consumers' },
+    { title: 'verify', detail: 'adversarial second look at every dead verdict' },
+  ],
 };
 
 // args:
@@ -86,193 +109,191 @@ const CLASSIFICATION_SCHEMA = {
   enum: ['live', 'dead', 'inert-in-mode', 'suspected'],
 };
 
-function budgetRemaining() {
-  // `budget` is a documented global whose exact shape is not pinned down
-  // anywhere in this repo. Read it defensively rather than assume a shape.
-  if (typeof budget === 'number') return budget;
-  if (
-    typeof budget === 'object' &&
-    budget !== null &&
-    typeof budget.remaining === 'number'
-  ) {
-    return budget.remaining;
-  }
-  return Infinity;
-}
+const isCandidateDead = (classification) =>
+  classification === 'dead' || classification === 'suspected';
 
-if (!args.surface) {
+if (!args || !args.surface) {
   throw new Error('dead-wire-census requires args.surface');
 }
 const surfaceDescription = SURFACE_PROMPTS[args.surface] ?? args.surface;
 
-const enumerateStage = async (ctx) => {
-  const enumeration = await agent(
-    `Enumerate every item on this surface: ${surfaceDescription}${
-      args.scopeHints ? `\n\nScope hints: ${args.scopeHints}` : ''
-    }\n\nList every item you find, even ones you suspect are already dead or test-only. Do not filter at this stage — filtering happens later, with evidence.`,
-    {
-      label: 'enumerate',
-      phase: 'enumerate',
-      // The only sanctioned effort override in this file: this step is
-      // mechanical (listing what exists), not judgment work.
-      effort: 'low',
-      schema: {
-        type: 'object',
-        required: ['items'],
-        properties: {
+// --- Enumerate -------------------------------------------------------------
+// One dispatch, no fan-out, so it runs before the pipeline rather than as a
+// stage of it: the pipeline's items ARE this step's output.
+
+const enumeration = await agent(
+  `Enumerate every item on this surface: ${surfaceDescription}${
+    args.scopeHints ? `\n\nScope hints: ${args.scopeHints}` : ''
+  }\n\nList every item you find, even ones you suspect are already dead or test-only. Do not filter at this stage — filtering happens later, with evidence.`,
+  {
+    label: 'enumerate',
+    phase: 'enumerate',
+    // The only sanctioned effort override in this file: this step is
+    // mechanical (listing what exists), not judgment work.
+    effort: 'low',
+    schema: {
+      type: 'object',
+      required: ['items'],
+      properties: {
+        items: {
+          type: 'array',
           items: {
-            type: 'array',
-            items: {
-              type: 'object',
-              required: ['id', 'location'],
-              properties: {
-                id: { type: 'string' },
-                location: { type: 'string' },
-              },
+            type: 'object',
+            required: ['id', 'location'],
+            properties: {
+              id: { type: 'string' },
+              location: { type: 'string' },
             },
           },
         },
       },
-    }
-  );
-  return { ...ctx, items: enumeration.items };
-};
-
-const traceStage = async (ctx) => {
-  // parallel() thunks: each item's trace is independent, so all traces run
-  // concurrently; the census phase later needs the collected array anyway,
-  // so the barrier costs nothing extra.
-  const traceFns = ctx.items.map((item) => async () => {
-    const traced = await agent(
-      `Find every consumer of this item: ${item.id} (defined at ${item.location}).\n\nSearch the whole client surface, not just the immediate directory. Classify as one of: live (has a real caller), dead (zero callers anywhere), inert-in-mode (has callers, but only reachable in a mode/config this install does not run), or suspected (you found no caller but did not exhaustively search every mode). Cite the grep/search evidence for the classification.`,
-      {
-        label: `trace:${item.id}`,
-        phase: 'trace',
-        schema: {
-          type: 'object',
-          required: ['id', 'classification', 'evidence'],
-          properties: {
-            id: { type: 'string' },
-            classification: CLASSIFICATION_SCHEMA,
-            evidence: { type: 'string' },
-          },
-        },
-      }
-    );
-    return traced;
-  });
-  const traced = (await parallel(traceFns)).filter(Boolean);
-  return { ...ctx, traced };
-};
-
-const verifyStage = async (ctx) => {
-  const candidateDead = ctx.traced.filter(
-    (t) => t.classification === 'dead' || t.classification === 'suspected'
-  );
-
-  if (candidateDead.length === 0) {
-    return { ...ctx, verified: [] };
+    },
   }
-
-  const remaining = budgetRemaining();
-  if (candidateDead.length > remaining) {
-    // No silent caps: if the budget cannot cover a second look at every
-    // candidate, say so loudly rather than quietly verifying a subset and
-    // presenting it as complete.
-    log(
-      `dead-wire-census: ${candidateDead.length} candidate-dead item(s) need adversarial verification but only ${remaining} agent dispatch(es) remain in budget. Verifying the first ${remaining} by trace order; the rest keep their unverified trace-stage classification in the census, flagged as such.`
-    );
-  }
-  const toVerify =
-    candidateDead.length > remaining
-      ? candidateDead.slice(0, Math.max(remaining, 0))
-      : candidateDead;
-  const skipped = candidateDead.slice(toVerify.length);
-  if (skipped.length > 0) {
-    log(
-      `dead-wire-census: skipped verification for (budget-limited): ${skipped
-        .map((s) => s.id)
-        .join(', ')}`
-    );
-  }
-
-  // True barrier: every "dead"/"suspected" candidate gets one adversarial
-  // second look, dispatched together, because Census needs the whole
-  // overturned/upheld set at once. This is the project's own
-  // unused-is-not-useless rule applied mechanically: "no caller found" is a
-  // starting hypothesis, not a verdict, until someone has tried to break it.
-  const verified = await parallel(
-    toVerify.map((c) =>
-      agent(
-        `A trace concluded this item is "${c.classification}": ${c.id}\n\nEvidence given: ${c.evidence}\n\nTry to prove this wrong: look for indirect callers (reflection, config-driven dispatch, string-built call sites, a caller in a different repo, ops tooling, a deploy script), and check whether "unused" here actually means "useful but not yet wired" rather than "safe to delete." State your verdict and whether the original classification stands.`,
-        {
-          label: `verify:${c.id}`,
-          phase: 'verify',
-          schema: {
-            type: 'object',
-            required: ['id', 'upheld', 'reasoning'],
-            properties: {
-              id: { type: 'string' },
-              upheld: { type: 'boolean' },
-              reasoning: { type: 'string' },
-            },
-          },
-        }
-      )
-    )
-  );
-  return { ...ctx, verified, skippedVerification: skipped.map((s) => s.id) };
-};
-
-const censusStage = async (ctx) => {
-  const verifiedById = new Map(ctx.verified.map((v) => [v.id, v]));
-  const skippedIds = new Set(ctx.skippedVerification ?? []);
-  const droppedNoVerification = [];
-
-  const rows = ctx.traced.map((t) => {
-    const verification = verifiedById.get(t.id);
-    const wasCandidate =
-      t.classification === 'dead' || t.classification === 'suspected';
-    if (wasCandidate && !verification && !skippedIds.has(t.id)) {
-      // Should not happen if verifyStage covered every candidate not
-      // explicitly skipped for budget reasons — log rather than silently
-      // drop, per this project's vacuous-gate doctrine: a sweep that finds
-      // nothing to check is a failure to surface, not a quiet pass.
-      droppedNoVerification.push(t.id);
-    }
-    return {
-      id: t.id,
-      location: ctx.items.find((i) => i.id === t.id)?.location ?? 'unknown',
-      classification:
-        verification && !verification.upheld
-          ? 'live (overturned on verify)'
-          : t.classification,
-      evidence: t.evidence,
-      verification: verification?.reasoning ?? null,
-      verificationSkipped: skippedIds.has(t.id),
-    };
-  });
-
-  if (droppedNoVerification.length > 0) {
-    log(
-      `dead-wire-census: ${droppedNoVerification.length} candidate-dead item(s) had no verification row and no recorded skip reason — kept at their pre-verify classification, flagged for follow-up: ${droppedNoVerification.join(', ')}`
-    );
-  }
-
-  return { ...ctx, rows, droppedNoVerification };
-};
-
-const finalCtx = await pipeline(
-  [enumerateStage, traceStage, verifyStage, censusStage],
-  {}
 );
 
-const result = {
-  surface: args.surface,
-  itemCount: finalCtx.items.length,
-  rows: finalCtx.rows,
-  skippedVerificationCount: (finalCtx.skippedVerification ?? []).length,
-  droppedCount: finalCtx.droppedNoVerification.length,
+if (!enumeration) {
+  throw new Error(
+    'dead-wire-census: the enumerate agent returned no result (skipped, or a terminal error). Nothing to census.'
+  );
+}
+const items = enumeration.items ?? [];
+if (items.length === 0) {
+  // The vacuous-gate doctrine: a sweep that found nothing to check is a
+  // failure to surface, not a quiet pass.
+  log(
+    `dead-wire-census: the enumerate agent found ZERO items on surface "${args.surface}". This is a failed enumeration, not an empty surface — treat the run as inconclusive.`
+  );
+}
+log(`dead-wire-census: enumerated ${items.length} item(s) on "${args.surface}".`);
+if (budget.total) {
+  log(
+    `dead-wire-census: ${Math.round(
+      budget.remaining() / 1000
+    )}k tokens remain of a ${Math.round(
+      budget.total / 1000
+    )}k target. Agent dispatches throw once the target is reached; any item whose chain is cut off that way is reported in droppedIds below rather than silently omitted.`
+  );
+}
+
+// --- Trace -> Verify -------------------------------------------------------
+// pipeline(), not a barrier: verifying item A needs item A's trace and
+// nothing else, so item A can be under adversarial verification while item B
+// is still being traced.
+
+const traceStage = async (item) => {
+  const traced = await agent(
+    `Find every consumer of this item: ${item.id} (defined at ${item.location}).\n\nSearch the whole client surface, not just the immediate directory. Classify as one of: live (has a real caller), dead (zero callers anywhere), inert-in-mode (has callers, but only reachable in a mode/config this install does not run), or suspected (you found no caller but did not exhaustively search every mode). Cite the grep/search evidence for the classification.`,
+    {
+      label: `trace:${item.id}`,
+      phase: 'trace',
+      schema: {
+        type: 'object',
+        required: ['id', 'classification', 'evidence'],
+        properties: {
+          id: { type: 'string' },
+          classification: CLASSIFICATION_SCHEMA,
+          evidence: { type: 'string' },
+        },
+      },
+    }
+  );
+  return { item, traced };
 };
 
-export default result;
+const verifyStage = async (prev) => {
+  const { item, traced } = prev;
+  if (!traced || !isCandidateDead(traced.classification)) {
+    return { item, traced, verification: null };
+  }
+
+  // This project's own unused-is-not-useless rule applied mechanically: "no
+  // caller found" is a starting hypothesis, not a verdict, until someone has
+  // tried to break it.
+  const verification = await agent(
+    `A trace concluded this item is "${traced.classification}": ${traced.id}\n\nEvidence given: ${traced.evidence}\n\nTry to prove this wrong: look for indirect callers (reflection, config-driven dispatch, string-built call sites, a caller in a different repo, ops tooling, a deploy script), and check whether "unused" here actually means "useful but not yet wired" rather than "safe to delete." State your verdict and whether the original classification stands.`,
+    {
+      label: `verify:${traced.id}`,
+      phase: 'verify',
+      schema: {
+        type: 'object',
+        required: ['id', 'upheld', 'reasoning'],
+        properties: {
+          id: { type: 'string' },
+          upheld: { type: 'boolean' },
+          reasoning: { type: 'string' },
+        },
+      },
+    }
+  );
+  return { item, traced, verification };
+};
+
+const chains = await pipeline(items, traceStage, verifyStage);
+
+// --- Census ----------------------------------------------------------------
+// Plain reduction over the whole result set. `chains` is positionally aligned
+// with `items`, so an item whose chain was dropped is still identifiable by
+// index — which is what lets a drop be reported by id instead of vanishing.
+
+const droppedIds = [];
+const unverifiedCandidateIds = [];
+
+const rows = items.map((item, index) => {
+  const chain = chains[index];
+  if (!chain || !chain.traced) {
+    droppedIds.push(item.id);
+    return {
+      id: item.id,
+      location: item.location,
+      classification: 'unknown (trace did not complete)',
+      evidence: null,
+      verification: null,
+      traceDropped: true,
+      verificationMissing: false,
+    };
+  }
+
+  const { traced, verification } = chain;
+  const wasCandidate = isCandidateDead(traced.classification);
+  if (wasCandidate && !verification) {
+    unverifiedCandidateIds.push(item.id);
+  }
+
+  return {
+    id: traced.id,
+    location: item.location,
+    classification:
+      verification && !verification.upheld
+        ? 'live (overturned on verify)'
+        : traced.classification,
+    evidence: traced.evidence,
+    verification: verification ? verification.reasoning : null,
+    traceDropped: false,
+    verificationMissing: wasCandidate && !verification,
+  };
+});
+
+if (droppedIds.length > 0) {
+  log(
+    `dead-wire-census: ${droppedIds.length} item(s) never got a trace result — the dispatch was skipped, errored terminally, or ran out of token budget. These are NOT clean rows; they are holes in the census: ${droppedIds.join(', ')}`
+  );
+}
+if (unverifiedCandidateIds.length > 0) {
+  log(
+    `dead-wire-census: ${unverifiedCandidateIds.length} candidate-dead item(s) got no adversarial second look — kept at their pre-verify classification and flagged for follow-up: ${unverifiedCandidateIds.join(', ')}`
+  );
+}
+
+return {
+  surface: args.surface,
+  itemCount: items.length,
+  rows,
+  droppedIds,
+  unverifiedCandidateIds,
+  // A census with holes is not a complete census. The caller should read this
+  // before treating any "dead" row as settled.
+  complete:
+    items.length > 0 &&
+    droppedIds.length === 0 &&
+    unverifiedCandidateIds.length === 0,
+};

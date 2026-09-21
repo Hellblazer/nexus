@@ -409,6 +409,7 @@ nexus-1y9i1
 nexus-1yemh
 nexus-1yqac
 nexus-1ytp6
+nexus-1ytxy
 nexus-20890
 nexus-20890.1
 nexus-20agh
@@ -1181,6 +1182,7 @@ nexus-6d0ye
 nexus-6dan
 nexus-6dfkn
 nexus-6doho
+nexus-6doho.1
 nexus-6drnh
 nexus-6e6u1
 nexus-6ee5i
@@ -3671,6 +3673,7 @@ nexus-ivdqt
 nexus-ivdqt.1
 nexus-ivra
 nexus-ivu52
+nexus-ivu52.1
 nexus-ivv4d
 nexus-ivv4d.1
 nexus-ivzw8
@@ -6456,6 +6459,7 @@ nexus-xe3fi.1
 nexus-xedhp
 nexus-xedhp.1
 nexus-xehfx
+nexus-xeoa0
 nexus-xepsr
 nexus-xeux8
 nexus-xf5r
@@ -6789,6 +6793,7 @@ nexus-yzij1
 nexus-z0br3
 nexus-z0idx
 nexus-z0lu4
+nexus-z0lu4.1
 nexus-z0yd2
 nexus-z0ylb
 nexus-z1mu

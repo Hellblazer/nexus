@@ -26,32 +26,41 @@
 // (no TS)"). If a different convention is established later, migrate this
 // file rather than assuming `.js` is settled.
 //
-// ASSUMED PRIMITIVE SIGNATURES (the model-facing contract names the
-// primitives — agent(), pipeline(), parallel(), budget — but not their exact
-// shapes; this file's exact use of them has not been run and should be
-// checked against the real Workflow tool before first execution):
-//   - `args` is an ambient global carrying this invocation's arguments.
-//   - `agent(prompt, opts)` dispatches one subagent call and resolves to its
-//     result, validated against `opts.schema` when given.
-//   - `pipeline(fns)` runs an array of async functions as the workflow's
-//     DEFAULT execution shape (sequential phases, or independent per-item
-//     work with no barrier between items — this file uses it for sequential
-//     phase composition, threading an accumulating context object through).
-//   - `parallel(fns)` runs an array of async functions concurrently as a
-//     TRUE BARRIER: every call must land before the caller proceeds. Used
-//     only where the next phase genuinely needs every result at once.
-//   - `budget` is a global exposing the run's remaining agent-dispatch
-//     capacity. Its exact shape is unconfirmed, so `budgetRemaining()` below
-//     reads it defensively and falls back to "no visible cap" rather than
-//     guessing a shape that does not exist.
-//   - This script ends with `export default result` rather than a bare
-//     top-level `return`, because `export const meta = {...}` already makes
-//     this file an ES module and a bare `return` is not legal at module top
-//     level. If the real Workflow tool expects the result some other way
-//     (a wrapping function, a `finish()`/`emit()` global), only the last
-//     line needs to change.
-//   - No `Date.now()` / `Math.random()` anywhere in this file, per the
-//     determinism requirement.
+// PRIMITIVE SIGNATURES — read from the workflow-authoring reference on
+// 2026-09-21 (bead nexus-xeoa0), which supersedes the ASSUMED block that
+// stood here. This file had NEVER EXECUTED, for the same reason its sibling
+// dead-wire-census.js had not: it called `pipeline([stageFns], {...})`,
+// passing its three stage functions as the ITEMS array and a seed object as
+// its only stage. A seed object is not callable, so nothing after that line
+// had ever run.
+//   - `args` is an ambient global carrying this invocation's arguments, or
+//     `undefined` when none were passed.
+//   - `agent(prompt, opts)` dispatches one subagent call. With `opts.schema`
+//     it resolves to the validated object. It resolves to `null` — it does
+//     NOT throw — when the user skips the agent or the subagent dies on a
+//     terminal API error, so every result is null-checked here.
+//   - `pipeline(items, ...stages)` runs each ITEM through the stages with no
+//     barrier between stages. It is the default shape for per-item work, and
+//     it is NOT what this file's three phases want: Verify needs every
+//     lens's findings at once and Synthesize needs the whole surviving set,
+//     so the phases here are plain sequential awaits and the fan-out inside
+//     each one is a `parallel()` barrier that earns its latency.
+//   - `parallel(thunks)` is a TRUE BARRIER: it awaits every thunk. A thunk
+//     that throws resolves to `null` in the result array rather than
+//     rejecting the call, so every array it returns is filtered here.
+//   - `budget` is `{total: number|null, spent(), remaining()}` in TOKENS —
+//     `remaining` is a METHOD, and `total` is null when the user set no
+//     target. The retired `budgetRemaining()` here tested
+//     `typeof budget.remaining === 'number'`, which a method fails, so it
+//     always returned Infinity and the vote scale-down it guarded never once
+//     fired. It also compared a COUNT OF AGENTS against a TOKEN figure.
+//   - The script body runs inside an async function, so the result is a bare
+//     top-level `return`. The earlier `export default result` was the other
+//     half of the same unverified guess. Editors that parse this file as a
+//     plain ES module flag that `return` and mark the returned bindings
+//     unused; the workflow runtime is the authority, not the editor.
+//   - No `Date.now()` / `Math.random()` anywhere in this file; the runtime
+//     throws on them because they would break resume.
 
 export const meta = {
   name: 'pressure-test',
@@ -59,7 +68,13 @@ export const meta = {
     'Run several reviewers with distinct lenses against a target and a spec, adversarially verify every finding by majority vote, then synthesize a ranked, deduplicated verdict.',
   whenToUse:
     'Before committing a change that carries real risk of a silent revert or a spec-fidelity gap: a diff implementing a verbatim directive, a design decision with more than one defensible reading, or any change under a "no more reverts" directive. Not for routine, low-risk edits — dispatch the two standing reviewers (code-review-expert, substantive-critic) for those instead; this workflow is heavier by design.',
-  phases: ['review', 'verify', 'synthesize'],
+  // One entry per progress group, titles matched exactly against the `phase`
+  // passed in each agent() call.
+  phases: [
+    { title: 'review', detail: 'one agent per lens, plus the optional probe' },
+    { title: 'verify', detail: 'adversarial refute votes on every finding' },
+    { title: 'synthesize', detail: 'rank and dedupe what survived' },
+  ],
 };
 
 // args:
@@ -108,30 +123,53 @@ const FINDING_SCHEMA = {
   },
 };
 
-function budgetRemaining() {
-  // `budget` is a documented global whose exact shape is not pinned down
-  // anywhere in this repo. Read it defensively rather than assume a shape.
-  if (typeof budget === 'number') return budget;
-  if (
-    typeof budget === 'object' &&
-    budget !== null &&
-    typeof budget.remaining === 'number'
-  ) {
-    return budget.remaining;
-  }
-  return Infinity;
+if (!args || !args.target) {
+  throw new Error('pressure-test requires args.target');
+}
+if (!args.spec) {
+  // The spec-fidelity lens is what makes this a pressure test rather than an
+  // ordinary review, and it has nothing to check the target against without
+  // this. Refuse rather than run a three-lens review under a four-lens name.
+  throw new Error(
+    'pressure-test requires args.spec — the verbatim directive or design decision the target is checked against'
+  );
 }
 
 const lenses = args.lenses ?? DEFAULT_LENSES;
 
-const reviewStage = async (ctx) => {
-  const reviewJobs = lenses.map((lens) =>
+
+// --- Review ----------------------------------------------------------------
+// A true barrier: the verify phase needs every lens's findings at once, so
+// this phase collects all of them before anything downstream starts.
+// parallel() takes THUNKS, not promises — an `agent(...)` call built eagerly
+// into an array would dispatch immediately and escape the concurrency cap.
+
+const reviewThunks = lenses.map((lens) => () =>
+  agent(
+    `${lens.instruction}\n\nTarget:\n${args.target}${
+      lens.name === 'spec-fidelity' ? `\n\nVerbatim directive:\n${args.spec}` : ''
+    }`,
+    {
+      label: `review:${lens.name}`,
+      phase: 'review',
+      schema: {
+        type: 'object',
+        required: ['lens', 'findings'],
+        properties: {
+          lens: { type: 'string' },
+          findings: { type: 'array', items: FINDING_SCHEMA },
+        },
+      },
+    }
+  )
+);
+
+if (args.probe) {
+  reviewThunks.push(() =>
     agent(
-      `${lens.instruction}\n\nTarget:\n${args.target}${
-        lens.name === 'spec-fidelity' ? `\n\nVerbatim directive:\n${args.spec}` : ''
-      }`,
+      `Empirically test this claim against a real example pulled from the target — do not reason about it in the abstract, run or trace the actual case: ${args.probe}\n\nTarget:\n${args.target}`,
       {
-        label: `review:${lens.name}`,
+        label: 'review:empirical-probe',
         phase: 'review',
         schema: {
           type: 'object',
@@ -144,101 +182,115 @@ const reviewStage = async (ctx) => {
       }
     )
   );
+}
 
-  if (args.probe) {
-    reviewJobs.push(
-      agent(
-        `Empirically test this claim against a real example pulled from the target — do not reason about it in the abstract, run or trace the actual case: ${args.probe}\n\nTarget:\n${args.target}`,
-        {
-          label: 'review:empirical-probe',
-          phase: 'review',
-          schema: {
-            type: 'object',
-            required: ['lens', 'findings'],
-            properties: {
-              lens: { type: 'string' },
-              findings: { type: 'array', items: FINDING_SCHEMA },
-            },
-          },
-        }
-      )
-    );
-  }
-
-  // True barrier: the verify stage needs every lens's findings at once, so
-  // this is one of the few places parallel() (not pipeline()) is correct.
-  const reviews = await parallel(reviewJobs);
-  return { ...ctx, reviews };
-};
-
-const verifyStage = async (ctx) => {
-  const allFindings = ctx.reviews.flatMap((r) =>
-    (r.findings ?? []).map((f) => ({ ...f, lens: r.lens }))
+const reviewsRaw = await parallel(reviewThunks);
+const reviews = reviewsRaw.filter(Boolean);
+if (reviews.length < reviewThunks.length) {
+  // No silent caps: a lens that never reported is a lens that did not run,
+  // and a verdict assembled from the rest is narrower than its name claims.
+  log(
+    `pressure-test: ${reviewThunks.length - reviews.length} of ${
+      reviewThunks.length
+    } review agent(s) returned nothing (skipped, or a terminal error). The verdict below covers ${
+      reviews.length
+    } lens(es), not the full battery.`
   );
-
-  if (allFindings.length === 0) {
-    return { ...ctx, allFindings, survivingFindings: [] };
-  }
-
-  const requestedVotes = args.votesPerFinding ?? 3;
-  const votesFor = (finding) =>
-    finding.severity === 'minor' ? 1 : requestedVotes;
-
-  const totalVoteAgents = allFindings.reduce(
-    (sum, f) => sum + votesFor(f),
-    0
+}
+if (reviews.length === 0) {
+  throw new Error(
+    'pressure-test: every review agent returned nothing. There is no verdict to synthesize.'
   );
-  const remaining = budgetRemaining();
-  const scaleDown = totalVoteAgents > remaining && totalVoteAgents > 0;
-  if (scaleDown) {
+}
+
+// --- Verify ----------------------------------------------------------------
+// A true barrier: a majority cannot be taken until a finding's votes have all
+// landed, and synthesis needs the whole surviving set at once.
+
+const allFindings = reviews.flatMap((r) =>
+  (r.findings ?? []).map((f) => ({ ...f, lens: r.lens }))
+);
+
+const requestedVotes = args.votesPerFinding ?? 3;
+const votesFor = (finding) => (finding.severity === 'minor' ? 1 : requestedVotes);
+
+let survivingFindings = [];
+let unverifiedFindings = [];
+let voteResults = [];
+
+if (allFindings.length > 0) {
+  if (budget.total) {
+    const plannedAgents = allFindings.reduce((sum, f) => sum + votesFor(f), 0);
     log(
-      `pressure-test: ${totalVoteAgents} verify agents would exceed the remaining budget (${remaining}); reducing every finding's vote count to 1. Verdicts on critical/significant findings are less robust this run.`
+      `pressure-test: ${allFindings.length} finding(s) -> ${plannedAgents} verify dispatch(es); ${Math.round(
+        budget.remaining() / 1000
+      )}k tokens remain of a ${Math.round(
+        budget.total / 1000
+      )}k target. Dispatches throw once the target is reached; any finding left without votes is reported as unverified rather than counted as surviving.`
     );
   }
 
-  // True barrier: every finding's votes must land before a majority can be
-  // taken, and synthesis needs the whole surviving set at once.
-  const voteResults = await parallel(
-    allFindings.flatMap((finding, findingIndex) => {
-      const votes = scaleDown ? 1 : votesFor(finding);
-      return Array.from({ length: votes }, () =>
-        agent(
-          `A reviewer (lens: ${finding.lens}) claims:\n\n${finding.claim}\n\nEvidence given: ${finding.evidence}\n\nCheck the evidence yourself and argue against the claim as strongly as you honestly can. State whether the claim is refuted.`,
-          {
-            label: `verify:${finding.lens}:${findingIndex}`,
-            phase: 'verify',
-            schema: {
-              type: 'object',
-              required: ['refuted', 'reasoning'],
-              properties: {
-                refuted: { type: 'boolean' },
-                reasoning: { type: 'string' },
+  voteResults = (
+    await parallel(
+      allFindings.flatMap((finding, findingIndex) =>
+        Array.from({ length: votesFor(finding) }, (_unused, voteIndex) => () =>
+          agent(
+            `A reviewer (lens: ${finding.lens}) claims:\n\n${finding.claim}\n\nEvidence given: ${finding.evidence}\n\nCheck the evidence yourself and argue against the claim as strongly as you honestly can. State whether the claim is refuted.`,
+            {
+              label: `verify:${finding.lens}:${findingIndex}:${voteIndex}`,
+              phase: 'verify',
+              schema: {
+                type: 'object',
+                required: ['refuted', 'reasoning'],
+                properties: {
+                  refuted: { type: 'boolean' },
+                  reasoning: { type: 'string' },
+                },
               },
-            },
-          }
-        ).then((result) => ({ findingIndex, ...result }))
-      );
-    })
-  );
+            }
+          ).then((result) =>
+            result ? { findingIndex, ...result } : { findingIndex, landed: false }
+          )
+        )
+      )
+    )
+  ).filter(Boolean);
 
-  const survivingFindings = allFindings.filter((_finding, findingIndex) => {
-    const votesForThis = voteResults.filter(
-      (v) => v.findingIndex === findingIndex
+  allFindings.forEach((finding, findingIndex) => {
+    const landed = voteResults.filter(
+      (v) => v.findingIndex === findingIndex && typeof v.refuted === 'boolean'
     );
-    const refutedCount = votesForThis.filter((v) => v.refuted).length;
-    // Majority vote: a finding survives unless MORE THAN HALF of its votes
-    // refute it. With one vote (minor findings, or a budget-forced scale
-    // down) that single vote decides.
-    return refutedCount * 2 <= votesForThis.length;
+    if (landed.length === 0) {
+      // A finding nobody managed to vote on has NOT survived an adversarial
+      // pass. Counting it as a survivor would make the synthesis prompt's own
+      // premise false, so it goes out separately instead.
+      unverifiedFindings.push(finding);
+      return;
+    }
+    const refutedCount = landed.filter((v) => v.refuted).length;
+    // Majority vote: a finding survives unless MORE THAN HALF of its landed
+    // votes refute it. With one vote (minor findings) that single vote decides.
+    if (refutedCount * 2 <= landed.length) {
+      survivingFindings.push(finding);
+    }
   });
 
-  return { ...ctx, allFindings, voteResults, survivingFindings };
-};
+  if (unverifiedFindings.length > 0) {
+    log(
+      `pressure-test: ${unverifiedFindings.length} finding(s) got ZERO landed verification votes and are reported as unverified, not as survivors: ${unverifiedFindings
+        .map((f) => f.claim)
+        .join(' | ')}`
+    );
+  }
+}
 
-const synthesizeStage = async (ctx) => {
-  const verdict = await agent(
+// --- Synthesize ------------------------------------------------------------
+
+let synthesis = null;
+if (survivingFindings.length > 0) {
+  synthesis = await agent(
     `Synthesize these surviving findings into a ranked, deduplicated verdict. Every finding here already survived an adversarial majority-vote refutation attempt, so do not re-litigate them — dedupe findings that restate the same defect from different lenses, then rank and give an overall verdict.\n\n${JSON.stringify(
-      ctx.survivingFindings,
+      survivingFindings,
       null,
       2
     )}`,
@@ -255,23 +307,23 @@ const synthesizeStage = async (ctx) => {
       },
     }
   );
-  return { ...ctx, ...verdict };
+} else {
+  log(
+    `pressure-test: nothing survived verification (${allFindings.length} finding(s) raised, ${unverifiedFindings.length} unverified). No synthesis agent dispatched; the verdict is reported as null rather than as "ship".`
+  );
+}
+
+return {
+  // null when no finding survived, or when the synthesis agent itself
+  // returned nothing. It is NOT a "ship" verdict either way — a caller that
+  // reads a missing verdict as approval is reading a hole as a pass.
+  verdict: synthesis ? synthesis.verdict : null,
+  ranked: synthesis ? synthesis.ranked : [],
+  reviewerCount: reviews.length,
+  reviewerRequested: reviewThunks.length,
+  findingCount: allFindings.length,
+  survivingCount: survivingFindings.length,
+  unverifiedFindings,
+  complete:
+    reviews.length === reviewThunks.length && unverifiedFindings.length === 0,
 };
-
-// pipeline() is the default here: each phase needs the previous phase's full
-// output, runs once, in order. The fan-out is inside reviewStage/verifyStage,
-// gated by parallel() only where a barrier is actually needed.
-const finalCtx = await pipeline(
-  [reviewStage, verifyStage, synthesizeStage],
-  { reviews: [] }
-);
-
-const result = {
-  verdict: finalCtx.verdict,
-  ranked: finalCtx.ranked,
-  reviewerCount: lenses.length + (args.probe ? 1 : 0),
-  findingCount: finalCtx.allFindings.length,
-  survivingCount: finalCtx.survivingFindings.length,
-};
-
-export default result;
