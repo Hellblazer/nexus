@@ -32,6 +32,32 @@ nx catalog show 1.8.14                   # same thing, by tumbler
 
 Shows full metadata plus all links in and out. The tumbler is a permanent address — once assigned, it never changes, even if the document is deleted and the catalog is compacted.
 
+## Point one document at another (aliases)
+
+When a document acquires a second catalog entry for the same bytes — a
+re-registration under a changed path, a recovered file whose `source_uri`
+pointed somewhere that no longer exists — you can alias the older entry to the
+newer one instead of deleting it:
+
+```
+mcp__plugin_conexus_nexus-catalog__update(tumbler="1.35.8", alias_of="1.35.9")
+```
+
+`show` and `resolve` follow the chain server-side, so showing the aliased entry
+returns the canonical one and retrieval stops surfacing both. Nothing is
+removed: the aliased tumbler keeps working as an address, and links pointing at
+it still resolve. That is the difference between aliasing and deleting — a
+delete takes the entry's inbound links with it.
+
+Aliasing is the right move when two entries are provably the same document
+(compare their `index_content_hash`). When they are different documents that
+merely share a path, the tool you want is `nx catalog links-for-file`, which
+lists every document registered at that path rather than silently picking one.
+
+Reachable from the MCP `update` tool (above) and from Python
+(`HttpCatalogClient.set_alias`). There is no `nx catalog` verb for it yet —
+bead nexus-bt8w8.
+
 ## Explore relationships
 
 ```bash

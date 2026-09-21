@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.56.0] - 2026-09-21
+
+Plugin version aligned with conexus 7.56.0. No plugin-side changes: nothing
+under `conexus/`, `sn/` or `.claude-plugin/` differs from the v7.55.3 tag, so
+`PENDING_RELEASE.md` was already empty going into this release.
+
+Felt through the plugin even so: the catalog `update` MCP tool now accepts
+`alias_of`, so an agent can point a duplicate catalog entry at its canonical
+one instead of choosing between a duplicated search result and deleting an
+entry along with the links pointing at it. `show` and `resolve` follow the
+chain server-side.
+
 ## [7.55.3] - 2026-09-21
 
 Plugin version aligned with conexus 7.55.3. No plugin-side changes: nothing

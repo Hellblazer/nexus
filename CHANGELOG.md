@@ -6,6 +6,76 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.56.0] - 2026-09-21
+
+Pairs with engine-service-v0.1.129, unchanged from 7.55.3 — this release carries no engine-side change.
+
+### Added
+
+- **`alias_of` on the MCP catalog `update` tool.** The engine has supported it
+  on `/update` all along — it is in `UPDATABLE_DOC_COLUMNS`, and `resolve`
+  walks the alias chain server-side — but the MCP surface did not offer it, so
+  the capability was reachable from Python (`HttpCatalogClient.set_alias`) and
+  from nowhere an operator or an agent actually works. Aliasing is the answer
+  when one document acquires a second catalog entry: it keeps search results
+  clean without deleting the older entry and the links pointing at it.
+
+### Fixed
+
+- **`nx dt index` no longer registers a duplicate catalog document** for a file
+  already catalogued under another owner. The indexer resolved its owner from
+  `corpus` and then looked the document up with an owner-scoped
+  `by_file_path`, which structurally cannot see a row living under a different
+  owner. It now resolves through `by_source_uri`, which is deliberately not
+  owner-scoped, so a DEVONthink URI finds its document wherever it lives.
+  Measured: one remediation run produced 19 duplicate pairs, each duplicate
+  carrying the weaker `file://` identity rather than the
+  `x-devonthink-item://` one that survives DEVONthink moving the file.
+- **The DEVONthink URI stamp no longer writes to the wrong document.** It
+  resolved the row to stamp by file path alone, on the premise that the
+  catalog holds one row per indexed file. The schema does not enforce that —
+  the only uniqueness is a partial index on `(tenant_id, source_uri)` — so with
+  two rows for one path it could stamp the one that already held the URI and
+  silently no-op, leaving the row that needed the identity on `file://`. It now
+  resolves by URI first and falls back to file path.
+- **A `--collection` that disagrees with an existing document is now a loud
+  error** (`SourceUriCollectionMismatchError`) rather than a silent duplicate.
+  Naming a source URI and a collection that disagree is a move, not a
+  re-index.
+- **A source-URI failure fails one record, not the whole batch.** Passing
+  `source_uri` made `SourceUriNotFoundError` and
+  `SourceUriCollectionMismatchError` reachable from a batch for the first time;
+  neither was in `PER_RECORD_SURVIVABLE_EXCEPTIONS`, so either aborted every
+  record after it. Single-file commands are unaffected — they already convert
+  both to a `ClickException` at the wrapper boundary.
+- **A path naming several documents is reported rather than silently
+  resolved.** `find_by_file_path`'s contract was already "first match"; what it
+  never did was say when it had chosen. It now warns with the count, the chosen
+  tumbler and the others. `nx catalog links-for-file` uses a new plural lookup:
+  the command answers about a FILE, and showing one document's links as the
+  file's hid the rest with no way for the reader to know they existed.
+- **The taxonomy cross-space rebuild refusal now covers the whole function and
+  is reachable.** 7.55.3 shipped it above only some of the paths that fetch
+  centroids, so a collection that had migrated embedders could still reach a
+  rebuild through an early return. The refusal also names a remedy that now
+  runs: `nx taxonomy reset` discards a collection's topics, assignments, links
+  and centroids without touching its documents or chunks, prompting first and
+  reporting how many topics were operator-accepted.
+- **Local PG provisioning refuses to run as root before the bundle download**,
+  not after it, and the guard now sits on the subprocess choke point rather
+  than beside it.
+- **MCP reports its SDK patch status where a handler can receive it.**
+
+### Internal
+
+- One substrate-heavy test suite per box, enforced by a lease rather than by
+  convention: two concurrent runs exhaust the machine-wide SysV shared-memory
+  budget and report the contention as thousands of setup errors that read as
+  breakage. A nested pytest run is recognised as a descendant of the holder
+  rather than as a rival.
+- Lease-refusal assertions key on the refusing gate's own prefixed line, since
+  two gates share exit 75 and both print "refusing to start".
+
 ## [7.55.3] - 2026-09-21
 
 Pairs with engine-service-v0.1.129, unchanged from 7.55.2 — this release carries no engine-side change.
