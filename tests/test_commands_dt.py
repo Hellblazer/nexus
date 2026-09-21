@@ -1698,6 +1698,192 @@ class TestSelectDtUriFromEntry:
         )
 
 
+# ── Cross-owner DT identity (nexus-z0lu4) ────────────────────────────────────
+
+
+class TestDtIndexDoesNotDuplicateAcrossOwners:
+    """`nx dt index` must index INTO the document that already holds the
+    DEVONthink UUID, wherever it lives.
+
+    The indexer resolves its owner from `corpus` and then looks the document up
+    with by_file_path(owner, path), which is owner-scoped — doc_indexer.py says
+    of the repo/curator pair that such a lookup "can NEVER see a repo-owner row
+    — structurally, not by accident". So a document catalogued under another
+    owner is invisible to a dt-corpus run, which registers a SECOND live
+    document for the same file. Measured: the 2026-09-21 MinerU remediation did
+    that 19 times, leaving pre-fix doubled text live beside the remediated copy.
+    """
+
+    def test_existing_corpus_overrides_the_requested_one(self, monkeypatch):
+        """The probe must find the document by DT URI and hand back ITS corpus,
+        not the one the caller asked for."""
+        import nexus.commands.dt as dt_module
+
+        class _Entry:
+            corpus = "augur-oracle"
+
+        class _Reader:
+            def by_source_uri(self, uri):
+                assert uri == "x-devonthink-item://UUID-1", uri
+                return _Entry()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(dt_module, "make_catalog_reader", lambda: _Reader(), raising=False)
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", lambda: _Reader(),
+        )
+        assert dt_module._existing_dt_corpus("UUID-1") == "augur-oracle"
+
+    def test_no_existing_entry_leaves_the_requested_corpus_alone(self, monkeypatch):
+        import nexus.commands.dt as dt_module
+
+        class _Reader:
+            def by_source_uri(self, uri):
+                return None
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", lambda: _Reader(),
+        )
+        assert dt_module._existing_dt_corpus("UUID-ABSENT") == ""
+
+    def test_a_probe_failure_never_aborts_the_index(self, monkeypatch):
+        """The probe is an optimisation over correctness of placement, not a
+        precondition for indexing at all: a catalog hiccup must degrade to the
+        old behaviour, not lose the document."""
+        import nexus.commands.dt as dt_module
+
+        class _Reader:
+            def by_source_uri(self, uri):
+                raise RuntimeError("catalog unreachable")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", lambda: _Reader(),
+        )
+        assert dt_module._existing_dt_corpus("UUID-BOOM") == ""
+
+    def test_stamp_resolves_by_dt_uri_not_file_path(self, monkeypatch, tmp_path):
+        """The stamp must land on the row holding the DEVONthink URI.
+
+        It used to resolve by file_path alone, on the premise that documents
+        carries "a unique (file_path) row per indexed file". The schema does not
+        enforce that — the only uniqueness is the PARTIAL index on
+        (tenant_id, source_uri) — so with two rows for one path the lookup
+        returned the other one, and stamping it with the URI it already had was
+        a silent no-op (nexus-z0lu4). Here by_source_uri and find_by_file_path
+        deliberately disagree; the URI must win.
+        """
+        import nexus.commands.dt as dt_module
+
+        class _Entry:
+            def __init__(self, tumbler):
+                self.tumbler = tumbler
+                self.title = ""
+                self.year = 0
+                self.meta: dict = {}
+
+        updated: dict = {}
+
+        class _Reader:
+            def by_source_uri(self, uri):
+                return _Entry("1.35.8")          # the row that holds the DT URI
+
+            def find_by_file_path(self, path):
+                return _Entry("1.12.145")        # the other row for the same path
+
+            def close(self):
+                pass
+
+        class _Writer:
+            def update(self, tumbler, **fields):
+                updated["tumbler"] = str(tumbler)
+                updated.update(fields)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_writer", lambda **kw: _Writer(),
+        )
+        pdf = tmp_path / "y.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        assert dt_module._stamp_dt_uri_on_entry(pdf, "UUID-9") is True
+        assert updated["tumbler"] == "1.35.8", updated
+
+    def test_stamp_falls_back_to_file_path_when_the_uri_is_unknown(
+        self, monkeypatch, tmp_path,
+    ):
+        """First index of a document: nothing holds the URI yet, so the
+        file_path lookup is still the right answer."""
+        import nexus.commands.dt as dt_module
+
+        class _Entry:
+            tumbler = "1.12.200"
+            title = ""
+            year = 0
+            meta: dict = {}
+
+        updated: dict = {}
+
+        class _Reader:
+            def by_source_uri(self, uri):
+                return None
+
+            def find_by_file_path(self, path):
+                return _Entry()
+
+            def close(self):
+                pass
+
+        class _Writer:
+            def update(self, tumbler, **fields):
+                updated["tumbler"] = str(tumbler)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_writer", lambda **kw: _Writer(),
+        )
+        pdf = tmp_path / "z.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        assert dt_module._stamp_dt_uri_on_entry(pdf, "UUID-NEW") is True
+        assert updated["tumbler"] == "1.12.200", updated
+
+    def test_index_record_indexes_into_the_existing_owner(self, monkeypatch, tmp_path):
+        """The wiring: _index_record must pass the EXISTING corpus to the
+        indexer, which is what puts it in the owner namespace where its own
+        owner-scoped lookup can find the row and update it in place."""
+        import nexus.commands.dt as dt_module
+
+        seen: dict = {}
+
+        def _fake_index_pdf(path, **kw):
+            seen.update(kw)
+            return {"chunks": 3, "pages_with_text": [1]}
+
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _fake_index_pdf)
+        monkeypatch.setattr(dt_module, "_existing_dt_corpus", lambda uuid: "augur-oracle")
+        monkeypatch.setattr(dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True)
+        monkeypatch.setattr(dt_module, "_dt_record_facts", lambda uuid: None)
+
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        dt_module._index_record(
+            "UUID-1", str(pdf), collection=None, corpus="dt", dry_run=False,
+        )
+        assert seen.get("corpus") == "augur-oracle", seen
+
+
 # ── _stamp_dt_uri_on_entry (post-index identity stamp) ───────────────────────
 
 
@@ -2389,6 +2575,15 @@ class TestPageCoverage:
         updates: list[tuple] = []
 
         class _Reader:
+            def by_source_uri(self, uri):
+                # Nothing holds this DT URI yet — the first index of this
+                # document, so the file_path lookup below is the right answer.
+                # The method has to EXIST: _stamp_dt_uri_on_entry resolves by
+                # URI first (nexus-z0lu4), and its broad except-Exception turns
+                # a missing attribute into a plain False return, so an
+                # incomplete fake reads as "stamp missed" rather than as a
+                # test-double that does not model the reader.
+                return None
             def find_by_file_path(self, p):
                 return SimpleNamespace(tumbler="1.12.9", title="pdf guess", year=0)
             def close(self): pass

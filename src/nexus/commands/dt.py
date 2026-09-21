@@ -254,6 +254,22 @@ def _index_record(
 
     from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415 — command-local import (doc_indexer)
 
+    # Index INTO the owner that already holds this document, if one does
+    # (nexus-z0lu4). Without this the indexer registers under the corpus it was
+    # given, cannot see the existing row because its lookup is owner-scoped, and
+    # leaves two live documents for one file.
+    existing_corpus = _existing_dt_corpus(uuid)
+    if existing_corpus and existing_corpus != corpus:
+        _log.info(
+            "dt_index_reusing_existing_corpus",
+            uuid=uuid,
+            requested_corpus=corpus,
+            existing_corpus=existing_corpus,
+            detail="document already catalogued under another owner; indexing "
+                   "in place rather than registering a duplicate",
+        )
+        corpus = existing_corpus
+
     file_path = Path(path)
     ext = file_path.suffix.lower()
     if ext == ".pdf":
@@ -282,6 +298,40 @@ def _index_record(
 
     stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=_dt_record_facts(uuid))
     return stamped, chunks, pages
+
+
+def _existing_dt_corpus(uuid: str) -> str:
+    """The corpus of the catalog entry already holding this DEVONthink UUID.
+
+    Empty string when there is none, or when the catalog cannot be read.
+
+    nexus-z0lu4. The indexer resolves its owner from ``corpus`` and then looks
+    the document up with ``by_file_path(owner, path)``, which is OWNER-SCOPED —
+    ``doc_indexer.py`` says so itself about the repo/curator pair: such a lookup
+    "can NEVER see a repo-owner row — structurally, not by accident". So a
+    document already catalogued under, say, ``augur-oracle`` is invisible to a
+    ``dt``-corpus index run, which registers a SECOND live document for the same
+    file. Measured: the 2026-09-21 MinerU remediation did that 19 times, leaving
+    the pre-fix doubled text live beside the remediated copy.
+
+    ``by_source_uri`` is deliberately NOT owner-scoped, so the DEVONthink URI —
+    the identity that is stable across DT relocations — resolves the document
+    wherever it lives. Using its corpus puts the indexer in the same owner
+    namespace, so its own lookup finds the existing row and updates in place.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return ""
+    try:
+        entry = reader.by_source_uri(f"x-devonthink-item://{uuid}")
+        return str(getattr(entry, "corpus", "") or "") if entry is not None else ""
+    except Exception as exc:  # noqa: BLE001 — a probe failure must not abort the index
+        _log.warning("dt_existing_corpus_probe_failed", uuid=uuid, error=str(exc))
+        return ""
+    finally:
+        reader.close()
 
 
 def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None) -> bool:
@@ -321,12 +371,23 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
     # Tag interactive so the daemon prioritises it over a batch index burst.
     writer = make_catalog_writer(priority="interactive")
     try:
-        # Globally find the entry by file_path — no owner constraint
-        # because we don't know it from here. ``documents`` is keyed
-        # by tumbler primary key plus a unique (file_path) row per
-        # indexed file, so this returns one row.
+        # DEVONthink URI FIRST, file_path only as a fallback.
+        #
+        # This used to resolve by file_path alone, on the stated premise that
+        # ``documents`` carries "a unique (file_path) row per indexed file, so
+        # this returns one row". The schema does not enforce that — the only
+        # uniqueness is the PARTIAL index on (tenant_id, source_uri) — and when
+        # a second row exists for the same path (nexus-z0lu4), the lookup
+        # returned the OTHER one: the pre-existing entry that already carried
+        # this DT URI. Stamping it with the URI it already had was a silent
+        # no-op, so the row that actually needed the identity kept its weak
+        # file:// one and nothing reported a problem.
+        #
+        # The URI is the authoritative key here and is what _stamp_page_gap
+        # already uses; resolving both the same way is also what stops one
+        # `nx dt index` run from stamping two different documents.
         # nexus-xnz0o: use catalog API (uniform SQLite + service mode).
-        entry = reader.find_by_file_path(str(file_path))
+        entry = reader.by_source_uri(dt_uri) or reader.find_by_file_path(str(file_path))
         if entry is None:
             _log.warning(
                 "dt_stamp_no_entry_found",
