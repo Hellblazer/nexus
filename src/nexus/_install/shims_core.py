@@ -234,7 +234,12 @@ def write_shims(
         # depth, it is a second thing to keep in sync that reads as protection.
         try:
             body = layout.render_shim(name, tools=gen.parent)
-        except Exception as exc:  # the renderer refuses, and names what it refused
+        except layout.LayoutError as exc:
+            # The renderer refuses and names what it refused. Caught NARROWLY,
+            # by the sibling's own error class rather than by Exception:
+            # anything else coming out of render_shim is a defect, and
+            # swallowing it here would turn it into a silently missing shim --
+            # the failure mode this whole file exists to make loud.
             diagnostics.append(f"nexus: skipped shim '{name}': {exc}")
             continue
         _write_one(target, name, body)
