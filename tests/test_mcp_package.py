@@ -131,15 +131,24 @@ def test_catalog_search_tool_schema_matches_catalog_search_not_a_private_helper(
     must expose ``query`` — never ``entry_path``/``wanted``, the
     _file_path_matches signature this bug wired up instead.
     """
+    import inspect
+
     from nexus.mcp.catalog import catalog_search, mcp
 
     tools = {t.name: t for t in mcp._tool_manager.list_tools()}
     assert "search" in tools, "catalog 'search' tool not registered at all"
     search_tool = tools["search"]
 
-    assert search_tool.fn is catalog_search, (
-        f"catalog 'search' tool is backed by {search_tool.fn!r} "
-        f"({search_tool.fn.__module__}.{search_tool.fn.__qualname__}), "
+    # Unwrapped, because the registered fn is now an asyncio.to_thread
+    # wrapper around the sync body (nexus-dgvsz). functools.wraps keeps
+    # __wrapped__, so inspect.unwrap reaches the real function and the guard
+    # keeps its full force: a decorator/def misplacement still wires a
+    # DIFFERENT function, and unwrapping a wrapper around the wrong function
+    # still yields the wrong function.
+    backing = inspect.unwrap(search_tool.fn)
+    assert backing is catalog_search, (
+        f"catalog 'search' tool is backed by {backing!r} "
+        f"({backing.__module__}.{backing.__qualname__}), "
         f"not catalog_search — a decorator/def misplacement wired the "
         f"wrong function to the 'search' name (nexus-cnzei.1)"
     )

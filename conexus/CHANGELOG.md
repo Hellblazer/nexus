@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.55.3] - 2026-09-21
+
+Plugin version aligned with conexus 7.55.3. No plugin-side changes: nothing
+under `conexus/`, `sn/` or `.claude-plugin/` differs from the v7.55.2 tag, so
+`PENDING_RELEASE.md` was already empty going into this release.
+
+Worth noting for plugin users even so, because it is felt through the plugin:
+the client-side fix in this release is the one that stops the MCP stdio
+connection dying under parallel agent dispatch. The hooks this plugin wires as
+MCP tool calls carry 5-10 second timeouts and share one connection with tools
+that run for tens of seconds; until 7.55.3 they could be starved past those
+timeouts, and the late reply killed the transport. No plugin file changed —
+the fix is entirely in the server this plugin talks to.
+
 ## [7.55.2] - 2026-09-21
 
 Plugin version aligned with conexus 7.55.2. No plugin-side changes: nothing

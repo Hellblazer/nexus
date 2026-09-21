@@ -124,6 +124,59 @@ class PgBinaryNotFoundError(RuntimeError):
     """Raised when no Postgres binaries are found on the system."""
 
 
+class PgRootUserError(RuntimeError):
+    """Raised when local provisioning is attempted as root (nexus-ov1oq).
+
+    ``initdb`` refuses to run as root — PostgreSQL's own rule, since the
+    server process needs an unprivileged owner — so an nx-managed cluster
+    cannot be created or run by root at all. Raised BEFORE the bundle fetch,
+    so the user gets the remedy instead of a ~100MB download followed by a
+    bare ``CalledProcessError`` that does not name the cause.
+
+    This project's answer is already 'run as an unprivileged user': every
+    containerized gate does ``useradd -m -s /bin/bash nexus`` + ``USER
+    nexus``, which is exactly why no gate exercised the root path until a
+    root-default WSL2 distro hit it.
+    """
+
+
+def root_user_remedy() -> str:
+    """The message :class:`PgRootUserError` carries."""
+    return (
+        "Local PostgreSQL cannot be provisioned as root.\n"
+        "\n"
+        "initdb refuses to run as root ('initdb: error: cannot be run as "
+        "root'), so the nx-managed cluster has no unprivileged owner to run "
+        "the server process under. This is PostgreSQL's rule, not an nx "
+        "restriction; there is no root-capable variant of it.\n"
+        "\n"
+        "Remedy: run nx as an unprivileged user, which is what every "
+        "containerized nexus gate does:\n"
+        "\n"
+        "    useradd -m -s /bin/bash nexus\n"
+        "    # then install and run nx as that user\n"
+        "\n"
+        "On a WSL2 distro whose default user is root, create the user as "
+        "above and reach it with `wsl -d <distro> -u nexus`, or make it the "
+        "distro default with a [user] default=nexus stanza in /etc/wsl.conf "
+        "followed by `wsl --terminate <distro>`."
+    )
+
+
+def _refuse_root() -> None:
+    """Refuse local provisioning when the process euid is 0 (nexus-ov1oq).
+
+    ``os.geteuid`` is POSIX-only; on Windows the attribute is absent, and a
+    native-Windows client is out of scope anyway (Windows support is WSL2
+    only), so a missing ``geteuid`` means 'not root'.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None or geteuid() != 0:
+        return
+    _log.error("pg_provision_refused_root")
+    raise PgRootUserError(root_user_remedy())
+
+
 @dataclass(frozen=True)
 class PgBinaries:
     """Resolved paths to the four required Postgres binaries."""
@@ -2035,9 +2088,15 @@ def provision(
         When no PostgreSQL installation is found.
     RuntimeError
         When the cluster fails to start within the timeout.
+    PgRootUserError
+        When the calling process is root. initdb refuses to run as root, so
+        no part of this function can succeed; refusing here keeps the user
+        from paying for the bundle download first (nexus-ov1oq).
     subprocess.CalledProcessError
         When any provisioning subprocess exits non-zero.
     """
+    _refuse_root()
+
     if config_dir is None:
         from nexus.config import nexus_config_dir  # local import to avoid circular  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
         config_dir = nexus_config_dir()

@@ -44,7 +44,7 @@ from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
-from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
+from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistry as _LockedHookRegistry, install_default_hooks as _install_default_hooks
 # RDR-215 Approach items 1 and 4: the tool-tier registration mechanism for
 # ported Claude Code hooks. HOOK_TOOLS carries one entry per port, starting
 # with hook_auto_approve (bead nexus-q02nx.4). See nexus/mcp/hooks.py's
@@ -288,7 +288,18 @@ def _cap_text_result(text: str, tool: str, cap: "int | None" = None) -> str:
 #: lifecycle matches the server process. ``install_default_hooks``
 #: wires the load-bearing default consumers (chash, taxonomy, manifest,
 #: aspect-extraction).
-_hooks = _HookRegistry()
+#: LOCKED since nexus-dgvsz. Until the sync-tool offload, every sync
+#: ``@mcp.tool()`` body ran on the one event-loop thread with no await point
+#: inside it, so two store_put calls could not interleave and an unlocked
+#: registry here was safe by construction. The offload runs those bodies on
+#: real threads, which makes concurrent fires of the SAME hook reachable --
+#: including the manifest hook's ``_sweep_superseded_vectors``, whose
+#: client-side read-modify-write TOCTOU is the live hazard
+#: :class:`LockedHookRegistry` documents (nexus-11gh6 / nexus-wxjr6) and the
+#: reason the bulk indexer already wraps its own registry the same way.
+#: Per-hook locks, so unrelated hooks never wait on each other and a
+#: zero-match fire takes no lock at all.
+_hooks = _LockedHookRegistry(_HookRegistry())
 _install_default_hooks(_hooks)
 
 # ── T1 session lifecycle (RDR-105 P4 → RDR-155 P4b) ─────────────────────────
@@ -4857,9 +4868,13 @@ def store_put(
             catalog_doc_id=catalog_doc_id,
             manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
-        # RDR-089 document-grain chain — plain sync call (FastMCP wraps
-        # this @mcp.tool() body in a thread pool at the framework level;
-        # store_put is `def`, not `async def`, so no await/to_thread).
+        # RDR-089 document-grain chain — plain sync call. This comment used to
+        # claim FastMCP thread-pools an @mcp.tool() body at the framework
+        # level. It does not: func_metadata.py calls a sync body directly from
+        # inside its async dispatch, so this whole function held the server's
+        # event loop. The offload is real now, but it comes from
+        # _sdk_patches._patch_sync_tool_offload wrapping what gets REGISTERED,
+        # not from the SDK (nexus-dgvsz).
         # content is the full document text already in scope; pass it
         # through literally per the P0.1 content-sourcing contract.
         # source_path (1st positional) is the chunk natural-id here — there

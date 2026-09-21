@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
+import structlog
 
 from nexus.db.t2 import taxonomy_compute as tc
 
@@ -254,11 +256,49 @@ def test_merge_labels_no_old_centroids_all_pending() -> None:
     assert merged == [{"label": None, "review_status": "pending", "old_centroid_idx": -1}]
 
 
-def test_merge_labels_dimension_mismatch_returns_pending() -> None:
+def test_merge_labels_dimension_mismatch_returns_pending_as_defence_in_depth() -> None:
+    """This pins a DEFENSIVE branch, not the production behaviour.
+
+    Returning all-pending here is a 100% operator-label loss, and
+    compute_rebuild_plan refuses before reaching it as of nexus-dtqd7 (see
+    test_compute_rebuild_plan_refuses_a_cross_space_rebuild). The branch stays
+    because a silent all-pending in some future caller is worse than a
+    redundant guard — but no real rebuild reaches it, and a reader who finds
+    this test should not conclude that a rebuild quietly drops labels.
+    """
     old = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)  # 3d
     new = np.array([[1.0, 0.0]], dtype=np.float32)  # 2d
     merged = tc._merge_labels(old, ["x"], ["accepted"], new)
     assert merged[0]["label"] is None
+
+
+def _events(logs: list[dict], name: str) -> list[dict]:
+    return [e for e in logs if e.get("event") == name]
+
+
+def test_merge_labels_is_silent_on_a_genuine_first_rebuild() -> None:
+    """No centroids and no labels: nothing was lost, so nothing is said.
+
+    The asymmetry with the next test is the whole point — a warning that fires
+    on every first rebuild is one nobody reads by the time it matters.
+    """
+    new = np.array([[1.0, 0.0]], dtype=np.float32)
+    with structlog.testing.capture_logs() as logs:
+        tc._merge_labels(np.empty((0, 2), dtype=np.float32), [], [], new)
+    assert _events(logs, "centroid_labels_without_centroids") == []
+
+
+def test_merge_labels_warns_when_labels_survive_without_centroids() -> None:
+    """Labels with no centroid to carry them is the state the old
+    delete-before-compute defect left behind; those labels are about to be
+    dropped and that must not be silent (nexus-dtqd7)."""
+    new = np.array([[1.0, 0.0]], dtype=np.float32)
+    with structlog.testing.capture_logs() as logs:
+        tc._merge_labels(
+            np.empty((0, 2), dtype=np.float32), ["curated"], ["accepted"], new,
+        )
+    ev = _events(logs, "centroid_labels_without_centroids")
+    assert len(ev) == 1 and ev[0]["old_labels"] == 1
 
 
 # ── compute_discovered_topics ────────────────────────────────────────────────
@@ -328,6 +368,53 @@ def test_compute_split_is_deterministic() -> None:
 
 
 # ── compute_rebuild_plan ─────────────────────────────────────────────────────
+
+
+def test_compute_rebuild_plan_refuses_a_cross_space_rebuild() -> None:
+    """nexus-dtqd7: old centroids in one embedding space, documents in another.
+
+    Cosine between two spaces is undefined, so the labels genuinely cannot be
+    carried. The defect was never that they were lost — it was that they were
+    lost SILENTLY, on a path that then deletes them.
+    """
+    doc_ids, embeddings, texts = _discovery_inputs()  # 384d docs
+    with pytest.raises(tc.MixedEmbeddingDimensionsError) as exc:
+        tc.compute_rebuild_plan(
+            "c__migrated",
+            doc_ids,
+            embeddings,
+            texts,
+            old_centroids=np.array([[1.0] * 768, [0.5] * 768], dtype=np.float32),
+            old_labels=["curated one", "curated two"],
+            old_review_statuses=["accepted", "accepted"],
+            old_centroid_topic_ids=[1, 2],
+            manual_assignments={},
+        )
+    msg = str(exc.value)
+    assert "'c__migrated'" in msg, "the operator needs the collection named"
+    assert "768d" in msg and "384d" in msg, msg
+    # A refusal with no way out is a different dead end, so the message has to
+    # carry both real remedies.
+    assert "purge" in msg and "re-embed" in msg, msg
+
+
+def test_compute_rebuild_plan_still_merges_within_one_space() -> None:
+    """The refusal must not fire on the case label transfer is FOR."""
+    doc_ids, embeddings, texts = _discovery_inputs()
+    old = np.zeros((1, 384), dtype=np.float32)
+    old[0, 0] = 3.0  # sits on top of the first cluster
+    plan = tc.compute_rebuild_plan(
+        "c__same_space",
+        doc_ids,
+        embeddings,
+        texts,
+        old_centroids=old,
+        old_labels=["curated"],
+        old_review_statuses=["accepted"],
+        old_centroid_topic_ids=[1],
+        manual_assignments={},
+    )
+    assert "curated" in [s["label"] for s in plan["specs"]]
 
 
 def test_compute_rebuild_plan_pure_and_serializable() -> None:

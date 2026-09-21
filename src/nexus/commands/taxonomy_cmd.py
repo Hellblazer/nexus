@@ -2590,6 +2590,19 @@ def project_cmd(
                 f"Non-finite chunks: {len(nonfinite)} (NaN/inf embedding rows, "
                 "excluded; see taxonomy_nonfinite_embeddings in the log)"
             )
+        incommensurable = result.get("incommensurable_centroids", 0)
+        if incommensurable:
+            # nexus-pktki: these targets sit on a different embedder, so they
+            # can never match this source and are excluded from the comparison.
+            # For a dual-embedder estate this is a STANDING condition, identical
+            # on every run, not a transient — hence a line of its own rather
+            # than only a log event (see centroid_dimension_filtered).
+            click.echo(
+                f"Incommensurable centroids: {incommensurable} (different "
+                "embedding dimension from this source, excluded; these target "
+                "collections can never link to this one until they share an "
+                "embedder)"
+            )
         covered = total - len(novel) - len(nonfinite)
         click.echo(f"Total: {len(matched)} matched topics, {covered}/{total} chunks covered")
 
