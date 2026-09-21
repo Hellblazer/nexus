@@ -194,10 +194,77 @@ class TestMineruRunViaServer:
             "backend": "pipeline", "formula_enable": "true", "return_md": "true",
             "return_middle_json": "true", "return_content_list": "true",
             "parse_method": "auto", "lang_list": "en",
-            "start_page_id": "0", "end_page_id": "5",
+            "start_page_id": "0", "end_page_id": "4",
         }
         for k, v in expected.items():
             assert data[k] == v
+
+    def test_end_page_id_is_inclusive_so_a_batch_extracts_only_its_own_pages(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """``end`` is an EXCLUSIVE slice bound; ``end_page_id`` is INCLUSIVE.
+
+        The case above used to assert ``end_page_id == "5"`` for the half-open
+        range [0, 5) — the off-by-one itself, written down as the expectation,
+        so the suite stayed green while every multi-batch extraction asked for
+        one page too many.
+
+        The consequence was silent and expensive. ``mineru_page_batch``
+        defaults to 1, so batches are [0,1), [1,2), [2,3)... and with an
+        inclusive end each one also extracted its successor's first page:
+        every page but the first and last was extracted TWICE, and both copies
+        were concatenated into the document text. Measured on a 19-page paper
+        (catalog 1.12.128) before this fix: 270,171 chars against 136,341 for
+        the same PDF in one batch (1.98x), 160 of 373 substantial blocks
+        redundant, and MinerU's own formula count exactly doubled — 844
+        against 422.
+
+        The duplicate text was chunked and embedded like any other text. It did
+        not corrupt storage, because identical chunk text collapses to one row
+        on the ``(tenant_id, collection, chash)`` primary key — which is why it
+        surfaced as a manifest-versus-T3 count divergence rather than an error.
+        """
+        with (
+            patch("nexus.pdf_extractor.httpx.post", return_value=_mock_post_ok()) as mock_post,
+            _patch_config(),
+        ):
+            extractor._mineru_run_via_server(dummy_pdf, 3, 4)
+
+        data = mock_post.call_args.kwargs.get("data") or mock_post.call_args[1].get("data", {})
+        assert data["start_page_id"] == "3"
+        assert data["end_page_id"] == "3", (
+            "a one-page batch must ask MinerU for exactly one page; an "
+            "inclusive end of 4 also extracts page 4, which the next batch "
+            "extracts again"
+        )
+
+    def test_consecutive_batches_request_disjoint_page_ranges(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """The property that actually matters: no page is asked for twice.
+
+        Asserting one batch's arithmetic in isolation would not catch a fix
+        that shifted both bounds together. This walks the ranges the extractor
+        builds at the default batch size of 1 and requires the inclusive spans
+        it sends to be disjoint.
+        """
+        sent: list[tuple[int, int]] = []
+        with (
+            patch("nexus.pdf_extractor.httpx.post", return_value=_mock_post_ok()) as mock_post,
+            _patch_config(),
+        ):
+            for start, end in [(0, 1), (1, 2), (2, 3)]:
+                extractor._mineru_run_via_server(dummy_pdf, start, end)
+                data = (mock_post.call_args.kwargs.get("data")
+                        or mock_post.call_args[1].get("data", {}))
+                sent.append((int(data["start_page_id"]), int(data["end_page_id"])))
+
+        assert sent == [(0, 0), (1, 1), (2, 2)]
+        for (_, prev_end), (next_start, _) in zip(sent, sent[1:]):
+            assert next_start > prev_end, (
+                f"page {next_start} is inside the previous batch's inclusive "
+                f"span ending at {prev_end}; it would be extracted twice"
+            )
 
     def test_table_enable_true_sent_as_string(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
         cfg = {"pdf": {"mineru_server_url": "http://127.0.0.1:8010", "mineru_table_enable": True}}

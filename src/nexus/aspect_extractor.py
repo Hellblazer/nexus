@@ -1502,6 +1502,15 @@ def _build_record_from_entry(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=config.model_version,
         extractor_name=config.extractor_name,
+        # The same identity the single-doc builders mint. Omitting it here
+        # stored the row with an empty source_uri, which is the key the
+        # aspect_sql operators re-derive and look up by — so the row matched
+        # nothing, and the miss was reported as "does not match", a content
+        # verdict rather than an error. Only this happy path was affected:
+        # the schema-failure branch above returns _empty_record, which did
+        # mint the URI, so a batch that validated produced unattributed rows
+        # while a batch that failed produced attributed ones.
+        source_uri=uri_for(collection, source_path),
     )
 
 

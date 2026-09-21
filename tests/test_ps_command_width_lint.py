@@ -73,8 +73,20 @@ def test_the_scan_sees_the_calls_it_guards() -> None:
     locations = [loc for loc, _args in _command_reading_calls()]
     assert len(locations) >= 6, locations
     for expected in (
-        "src/nexus/install_census.py",
+        # Moved from src/nexus/install_census.py when the census twin
+        # collapsed: the logic now lives in _install/ so that census.sh can
+        # dispatch to it without importing nexus. This assert is what noticed
+        # -- the scan kept passing while its subject had left the file.
+        "src/nexus/_install/census_core.py",
         "src/nexus/commands/doctor.py",
-        "src/nexus/_install/census.sh",
     ):
         assert any(loc.startswith(expected + ":") for loc in locations), expected
+
+    # census.sh no longer runs ps at all; it dispatches to census_core.py. Said
+    # here rather than dropped silently, because a name disappearing from a
+    # non-vacuity list is exactly the change this kind of list exists to make
+    # somebody justify.
+    assert not any(loc.startswith("src/nexus/_install/census.sh:") for loc in locations), (
+        "census.sh has grown a ps call again; the snapshot belongs in "
+        "census_core.py, where one call serves the whole census"
+    )

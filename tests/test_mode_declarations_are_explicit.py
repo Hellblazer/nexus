@@ -283,7 +283,12 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # continuation (the remaining entries mostly carry MANY tests per file,
 # or a scattered literal across dozens of call sites, and were left for
 # a future batch).
-_MODE_LINT_EXCLUDE_FILES_CEILING = 44
+_MODE_LINT_EXCLUDE_FILES_CEILING = 45
+# 44 -> 45 (nexus-vnz3d, 2026-09-20): +test_aspect_uri_repair.py. The
+# aspect source_uri backfill planner is a pure function whose only use of
+# the collection is a PREFIX test (FILE_ROUTED_PREFIXES); its voyage
+# tokens are the tail of conformant collection-NAME fixtures. Reason
+# class "string-literal-as-name"; full note on the conftest entry.
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).

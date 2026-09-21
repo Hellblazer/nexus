@@ -1,28 +1,43 @@
-#!/usr/bin/env sh
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 #
-# The generation layout, stated for shell. Twin of src/nexus/install_layout.py;
-# tests/test_install_layout_twins_agree.py is what says the two agree.
+# The generation layout, for shell callers. THE LOGIC IS NOT HERE: it is in
+# layout_core.py beside this file, and every function below dispatches to it.
 #
-# nexus-utpuw.1 (P0). Two implementations exist because the callers have
-# incompatible import constraints. The generation builder (.2) and the shim
-# writer (.4) run from scripts/reinstall-tool.sh, which may run with NOTHING
-# installed and therefore cannot import nexus. health.py and upgrade_finish.py
-# run after the install and can. Neither half may be edited alone: if this one
-# drifts, an install lands in a directory the Python half cannot find, and the
-# symptom is not a failure but a doctor reporting green about a tree nobody is
-# running from.
+# nexus-utpuw.1 (P0). This file used to be a second IMPLEMENTATION of the
+# layout contract, kept in step with src/nexus/install_layout.py by
+# tests/test_install_layout_twins_agree.py. Two implementations exist when the
+# callers have incompatible import constraints: the generation builder and the
+# shim writer run from scripts/reinstall-tool.sh, which may run with NOTHING
+# installed and therefore cannot import nexus.
 #
-# SOURCED, NEVER EXECUTED. No shebang, and deliberately no `set -e`: this file
-# is dotted into its callers, and options set here would silently change how
-# every one of them handles an unrelated failure. Functions signal by exit
-# status; callers decide.
+# The constraint was always importing NEXUS, never running Python -- the
+# scripts here call python3 constantly. So layout_core.py imports nothing from
+# nexus, runs as a plain script, and serves both callers. What was two
+# statements of one rule is now one.
 #
-# Every function prints its result to stdout and nothing else, so that a
-# caller can safely write `dir=$(nx_tools_dir) || exit 1`. Refusals print to
-# stderr and print NOTHING to stdout -- a refusal that also emits a path is
-# how a caller ends up installing into it.
+# WHAT IS STILL STATED TWICE, AND WHY THAT IS ALL RIGHT
+#
+# The NX_* constants below are still shell literals, pinned value-by-value
+# against layout_core's by the twins test, whose coverage assert PARSES this
+# file so a new constant cannot be added here without a twin. They stay because
+# single-sourcing them would mean eval-ing generated shell at source time and
+# would make SOURCING this file depend on python3 -- gc.sh and census.sh read
+# constants and call no functions at all, so they would newly fail whole rather
+# than at a call. A literal under a pin does not drift the way an escaping
+# routine or a resolution rule drifts; that is the duplication worth removing,
+# and it is gone.
+#
+# SOURCED, NEVER EXECUTED. No `set -e`: this file is dotted into its callers,
+# and options set here would silently change how every one of them handles an
+# unrelated failure. Functions signal by exit status; callers decide.
+#
+# THE CALLING CONTRACT, unchanged, and the reason the dispatch is not simply
+# `python3 ... "$@"`: every function prints its result to stdout and NOTHING
+# else does, so a caller can safely write `dir=$(nx_tools_dir) || exit 1`.
+# Refusals print to stderr and print nothing to stdout -- a refusal that also
+# emits a path is how a caller ends up installing into it. layout_core.py
+# honours the same contract, including NX_LAYOUT_USAGE_EXIT on every refusal.
 
 # gen-<stamp>: a prefix rather than a bare stamp, so a GC pass can tell a
 # generation from anything else that lands in the root.
@@ -66,161 +81,85 @@ NX_RECEIPT_FIELDS="schema version spec source_kind source extras python base_int
 # tell "no current generation" from a command that merely failed.
 NX_SHIM_NO_CURRENT_EXIT=70
 
-# EX_USAGE, for every refusal in this file.
+# EX_USAGE, for every refusal reached through this file.
 NX_LAYOUT_USAGE_EXIT=64
 
 # Where an install came from. Pinned against the Python half's SOURCE_KINDS.
 NX_SOURCE_KINDS="directory registry"
 
-# Which KIND of source a spec names, decided by SHAPE alone. The one place that
-# question is answered, because it used to be answered in two: the generation
-# builder classified by shape while scripts/reinstall-tool.sh's divergent-source
-# guard classified by whether "$SOURCE/pyproject.toml" existed. They agree on
-# "." and on "conexus" and disagree on a bare name that happens to match a
-# directory in cwd -- and the guard only fires when it concludes "registry", so
-# the disagreement SKIPPED the refusal that stops a PyPI install from wiping a
-# dev checkout's unreleased modules (nexus-pk9yt; the incident is nexus-q3xrx #2).
-#
-# Shape, never existence: a bare distribution name is a registry source wherever
-# you happen to be standing. Existence is still worth checking, but it answers
-# "can I read this", not "what kind of thing is it".
-# $1 source spec.
-nx_source_kind() {
-    case "${1-}" in
-        .|..|/*|./*|../*|"~"/*|*/*) printf 'directory\n' ;;
-        *)                          printf 'registry\n'  ;;
-    esac
-}
+# ---------------------------------------------------------------------------
+# The dispatcher
+# ---------------------------------------------------------------------------
 
-# Make a value safe to place inside a JSON string. Backslashes first, then
-# quotes -- the other order double-escapes. A value carrying a control
-# character (a newline in a path, say) cannot be represented by this escaper,
-# so it is REFUSED: emitting JSON the Python half will reject is strictly
-# worse than saying no here, where the message can name the field.
+# Run one layout verb in layout_core.py, which sits beside this file.
 #
-# $1 value. Prints the escaped form; non-zero and silent on a refusal.
-_nx_json_escape() {
-    case $1 in
-        *[[:cntrl:]]*)
-            echo "nexus: receipt values must not contain control characters" >&2
-            return "$NX_LAYOUT_USAGE_EXIT"
-            ;;
-    esac
-    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-}
-
-# The one override rule, shared by both directory variables. Five states:
-# unset and empty both fall back to the $HOME-derived default (`Path("")` is
-# `Path(".")` on the Python side, so honouring an exported-but-empty variable
-# would root the install at the caller's CWD); an absolute path is used
-# verbatim; a leading ~ is expanded, because a config file or a launchd plist
-# does not expand it the way a shell would; and a relative path is REFUSED
-# rather than anchored to a guess.
+# WHY THE CALLER HAS TO TELL US WHERE WE ARE. A sourced file cannot learn its
+# own path under POSIX sh: there is no BASH_SOURCE in dash, and $0 is the
+# SOURCING script. The obvious trick -- reading ${BASH_SOURCE[0]:-$0} here --
+# works under bash and silently resolves to "sh" under `sh -c '. layout.sh'`,
+# which is precisely how the twins test exercises this file. A mechanism that
+# breaks in the harness that tests it is not a mechanism. So every caller sets
+# NX_LAYOUT_HOME to the directory it already computed in order to source us.
 #
-# $1 variable name, for the message.  $2 raw value.  $3 default.
-_nx_resolve_dir() {
-    _nx_raw=$(printf '%s' "$2" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-    if [ -z "$_nx_raw" ]; then
-        printf '%s\n' "$3"
-        return 0
+# Refused loudly rather than guessed: a wrong guess here resolves paths against
+# somebody else's tree, and this file exists to stop exactly that.
+_nx_core() {
+    if [ -z "${NX_LAYOUT_HOME-}" ]; then
+        echo "nexus: NX_LAYOUT_HOME is unset. layout.sh is sourced, and a sourced" \
+             "file cannot find its own directory under POSIX sh, so the sourcing" \
+             "script must name it: NX_LAYOUT_HOME=\"\$_here\" before '. \$_here/layout.sh'." >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
     fi
-
-    case $_nx_raw in
-        '~') _nx_raw=$HOME ;;
-        '~/'*) _nx_raw=$HOME/${_nx_raw#'~/'} ;;
-    esac
-
-    case $_nx_raw in
-        /*) printf '%s\n' "$_nx_raw" ;;
-        *)
-            echo "nexus: $1=$2 is not an absolute path. The generation layout is" \
-                 "resolved from processes whose working directory is not stable," \
-                 "so a relative override is refused rather than anchored to a guess." >&2
-            return "$NX_LAYOUT_USAGE_EXIT"
-            ;;
-    esac
+    if [ ! -f "$NX_LAYOUT_HOME/layout_core.py" ]; then
+        echo "nexus: no layout_core.py in NX_LAYOUT_HOME=$NX_LAYOUT_HOME." \
+             "It ships beside layout.sh; an install that has one without the" \
+             "other is incomplete." >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
+    fi
+    python3 "$NX_LAYOUT_HOME/layout_core.py" "$@"
 }
+
+# Which KIND of source a spec names, decided by SHAPE alone. See layout_core's
+# source_kind for why shape and not existence: classifying by whether
+# "$SOURCE/pyproject.toml" exists skipped the refusal that stops a PyPI install
+# from wiping a dev checkout's unreleased modules (nexus-pk9yt).
+# $1 source spec.
+nx_source_kind() { _nx_core source_kind "${1-}"; }
 
 # The generation root. Recomputed on every call, never cached: release-sandbox.sh
 # and tests/e2e/run.sh isolate themselves ONLY by redirecting $HOME, so a value
 # captured once would make those harnesses write into the live install.
-nx_tools_dir() {
-    _nx_resolve_dir NX_TOOLS_DIR "${NX_TOOLS_DIR-}" "$HOME/.local/share/nexus/tools"
-}
+nx_tools_dir() { _nx_core tools_dir; }
 
 # The directory the shims are written into. Recomputed on every call.
-nx_bin_dir() {
-    _nx_resolve_dir NX_BIN_DIR "${NX_BIN_DIR-}" "$HOME/.local/bin"
-}
-
-# Refuse anything that is not a plain, single path component. An ALLOWLIST,
-# matching _COMPONENT_RE in the Python half, and deliberately so: an earlier
-# denylist here rejected separators, traversals and whitespace -- every PATH
-# hazard -- and still admitted `nx$(touch${IFS}PWNED)`, which lands inside a
-# double-quoted string in the rendered shim and executes on the next
-# invocation. The sink's hazard alphabet is not the path's. Audit finding F1
-# has the shim set DERIVED from installed-distribution entry_points, so these
-# names arrive from third-party wheels.
-#
-# $1 label.  $2 value.
-_nx_require_component() {
-    case $2 in
-        ''|[!A-Za-z0-9]*) _nx_bad_component "$1" "$2"; return "$NX_LAYOUT_USAGE_EXIT" ;;
-    esac
-    case $2 in
-        *[!A-Za-z0-9._-]*) _nx_bad_component "$1" "$2"; return "$NX_LAYOUT_USAGE_EXIT" ;;
-    esac
-    return 0
-}
-
-_nx_bad_component() {
-    echo "nexus: $1 must be letters, digits, '.', '-' and '_', not leading" \
-         "with '.' or '-', got '$2'" >&2
-}
-
-# $1 explicit tools root, or empty to resolve one.
-_nx_root() {
-    if [ -n "${1-}" ]; then
-        printf '%s\n' "$1"
-        return 0
-    fi
-    nx_tools_dir
-}
+nx_bin_dir() { _nx_core bin_dir; }
 
 # <tools>/gen-<stamp>: the directory one install builds and owns.
 # $1 stamp.  $2 optional tools root.
-nx_generation_dir() {
-    _nx_require_component "generation stamp" "$1" || return "$NX_LAYOUT_USAGE_EXIT"
-    _nx_gd_root=$(_nx_root "${2-}") || return "$NX_LAYOUT_USAGE_EXIT"
-    printf '%s\n' "$_nx_gd_root/$NX_GENERATION_PREFIX$1"
-}
+nx_generation_dir() { _nx_core generation_dir "${1-}" "${2-}"; }
 
 # <tools>/current: the pointer a flip moves and every shim reads.
 # $1 optional tools root.
-nx_current_link() {
-    _nx_cl_root=$(_nx_root "${1-}") || return "$NX_LAYOUT_USAGE_EXIT"
-    printf '%s\n' "$_nx_cl_root/$NX_CURRENT_LINK_NAME"
-}
+nx_current_link() { _nx_core current_link "${1-}"; }
 
 # <tools>/previous: the generation a rollback returns to.
 # $1 optional tools root.
-nx_previous_link() {
-    _nx_pl_root=$(_nx_root "${1-}") || return "$NX_LAYOUT_USAGE_EXIT"
-    printf '%s\n' "$_nx_pl_root/$NX_PREVIOUS_LINK_NAME"
-}
+nx_previous_link() { _nx_core previous_link "${1-}"; }
+
+# An explicit tools root, or a resolved one when the caller gave none.
+#
+# PUBLIC, and it was not before. This was `_nx_root`, a private helper, and
+# gc.sh, census.sh and legacy.sh all called it across the file boundary anyway
+# -- which made it part of the interface in fact while being named as though it
+# were not, and is why deleting it during the collapse broke three scripts that
+# no search for `nx_*` would have found. Named for what it is now.
+#
+# $1 optional tools root.
+nx_root() { _nx_core root "${1-}"; }
 
 # The receipt inside a generation, which must already be an absolute path.
 # $1 generation directory.
-nx_receipt_path() {
-    case ${1-} in
-        /*) printf '%s\n' "$1/$NX_RECEIPT_NAME" ;;
-        *)
-            echo "nexus: a generation path must be absolute, got '${1-}'" >&2
-            return "$NX_LAYOUT_USAGE_EXIT"
-            ;;
-    esac
-}
+nx_receipt_path() { _nx_core receipt_path "${1-}"; }
 
 # The body of <bin>/<command>.
 #
@@ -229,98 +168,20 @@ nx_receipt_path() {
 # NX_TOOLS_DIR changes and cannot be shared between sandboxes.
 #
 # $1 command.  $2 optional tools root.
-nx_render_shim() {
-    _nx_require_component "shim command" "$1" || return "$NX_LAYOUT_USAGE_EXIT"
-    _nx_shim_root=$(_nx_root "${2-}") || return "$NX_LAYOUT_USAGE_EXIT"
-    _nx_shim_ptr="$_nx_shim_root/$NX_CURRENT_LINK_NAME"
+nx_render_shim() { _nx_core render_shim "${1-}" "${2-}"; }
 
-    printf '%s\n' \
-        '#!/bin/sh' \
-        '# Generated by nexus. Rewritten on every install; edits are lost.' \
-        '#' \
-        '# The pointer is resolved BEFORE the exec, and that ordering is' \
-        '# load-bearing rather than stylistic. CPython looks for pyvenv.cfg next' \
-        '# to the executable as it was INVOKED, before it resolves symlinks, so' \
-        '# an exec through the pointer itself would leak that component into' \
-        '# sys.prefix and sys.path -- and the next flip would retarget every' \
-        '# not-yet-imported module in a process that was already running' \
-        '# (nexus-q3xrx).' \
-        "NX_GEN=\"\$(readlink \"$_nx_shim_ptr\")\" || {" \
-        "    echo \"nexus: $1: no current generation at $_nx_shim_ptr\" >&2" \
-        "    exit $NX_SHIM_NO_CURRENT_EXIT" \
-        '}' \
-        "exec \"\$NX_GEN/bin/$1\" \"\$@\""
-}
-
-# The one place a PEP 508 install spec is assembled. Extras PRECEDE the
-# version pin -- `conexus[local]==7.18.0` is valid, `conexus==7.18.0[local]`
-# is not. The fixup lived in scripts/reinstall-tool.sh:157-158 and the
-# generation builder would otherwise restate it; a spec and its extras must
-# not be able to disagree.
+# The one place a PEP 508 install spec is assembled. Extras PRECEDE the version
+# pin -- `conexus[local]==7.18.0` is valid, `conexus==7.18.0[local]` is not.
 #
 # $1 base (distribution name, or a path for a directory install)
 # $2 extras, comma-separated, may be empty
 # $3 version, may be empty (a directory install pins nothing)
-nx_build_spec() {
-    _nx_spec=$1
-    if [ -n "${2-}" ]; then
-        _nx_spec_extras=$(printf '%s' "$2" | tr ',' '\n' | grep -v '^$' \
-                          | LC_ALL=C sort -u | tr '\n' ',' | sed 's/,$//')
-        [ -n "$_nx_spec_extras" ] && _nx_spec="$_nx_spec[$_nx_spec_extras]"
-    fi
-    [ -n "${3-}" ] && _nx_spec="$_nx_spec==$3"
-    printf '%s\n' "$_nx_spec"
-}
+nx_build_spec() { _nx_core build_spec "${1-}" "${2-}" "${3-}"; }
 
-# The receipt, rendered. The generation builder (.2) supplies the values; the
-# SHAPE is fixed here so that the half which writes a receipt and the half
-# which reads it cannot disagree about what a receipt is.
+# The receipt, rendered by the same code that reads it.
 #
 # $1 version  $2 spec  $3 source_kind  $4 source  $5 extras (comma-separated,
 # may be empty)  $6 python  $7 base_interpreter  $8 created_at
 nx_render_receipt() {
-    _nx_kind_ok=0
-    for _nx_kind in $NX_SOURCE_KINDS; do
-        [ "$3" = "$_nx_kind" ] && _nx_kind_ok=1
-    done
-    if [ "$_nx_kind_ok" -ne 1 ]; then
-        echo "nexus: source_kind must be one of $NX_SOURCE_KINDS, got '$3'" >&2
-        return "$NX_LAYOUT_USAGE_EXIT"
-    fi
-
-    for _nx_value in "$1" "$2" "$4" "${5-}" "$6" "$7" "$8"; do
-        _nx_json_escape "$_nx_value" >/dev/null || return "$NX_LAYOUT_USAGE_EXIT"
-    done
-
-    # Sorted and de-duplicated, so a receipt is stable across installs and the
-    # spec the builder derives from it is deterministic. Matches the Python
-    # half's __post_init__.
-    _nx_extras_json=""
-    if [ -n "${5-}" ]; then
-        # LC_ALL=C so the order matches Python's sorted() byte-ordering. Under
-        # a UTF-8 locale `sort` collates differently and the two halves would
-        # write different receipts for the same extras.
-        _nx_extras_sorted=$(printf '%s' "$5" | tr ',' '\n' | grep -v '^$' | LC_ALL=C sort -u)
-        for _nx_extra in $_nx_extras_sorted; do
-            if [ -n "$_nx_extras_json" ]; then
-                _nx_extras_json="$_nx_extras_json, \"$(_nx_json_escape "$_nx_extra")\""
-            else
-                _nx_extras_json="\"$(_nx_json_escape "$_nx_extra")\""
-            fi
-        done
-    fi
-
-    printf '%s\n' \
-        '{' \
-        "  \"base_interpreter\": \"$(_nx_json_escape "$7")\"," \
-        "  \"created_at\": \"$(_nx_json_escape "$8")\"," \
-        "  \"extras\": [$_nx_extras_json]," \
-        "  \"installer_schema\": $NX_INSTALLER_SCHEMA," \
-        "  \"python\": \"$(_nx_json_escape "$6")\"," \
-        "  \"schema\": $NX_RECEIPT_SCHEMA," \
-        "  \"source\": \"$(_nx_json_escape "$4")\"," \
-        "  \"source_kind\": \"$(_nx_json_escape "$3")\"," \
-        "  \"spec\": \"$(_nx_json_escape "$2")\"," \
-        "  \"version\": \"$(_nx_json_escape "$1")\"" \
-        '}'
+    _nx_core render_receipt "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}" "${7-}" "${8-}"
 }

@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.55.2] - 2026-09-21
+
+### Fixed
+
+- **PDF extraction: duplicated content on multi-page documents.** MinerU's `end_page_id` is inclusive, and nexus was passing a half-open range end. With the default one-page batching, every page but the first and last was extracted twice and both copies were concatenated into the document text. Documents indexed before this release carry the duplicate text: it is chunked, embedded and searchable, so the same passage can be returned more than once and crowd out other results. Nothing is lost or corrupted — identical chunk text collapses to a single stored row — so the symptom is a document whose chunk count exceeds its distinct chunks. To correct an affected document, re-index it (`nx index pdf --force`, or `nx dt index --force` for DEVONthink records); re-embedding is skipped for any chunk whose text is unchanged.
+
+- **The MCP stdio connection died whenever a request was cancelled.** The `mcp` SDK's `RequestResponder.cancel()` answers a request it has just cancelled, but the client has already discarded that id, so the reply arrives as an unknown message id and the client tears down the whole transport — every tool on the server at once, with no auto-reconnect for stdio. Measured across 121 client log files: ten teardowns, five of them carrying `Request cancelled`. nexus now corrects the SDK at server startup so a cancelled request is answered with silence, which is what the SDK's own `respond()` already assumed. The patch verifies the defect is present before applying and no-ops if a future SDK fixes it. (nexus-rjmyk)
+
+- **Aspect rows built in batches carried no `source_uri`, so 481 of 2232 matched nothing.** The two single-document builders minted the URI and the batch builder did not, because it was written as a transform of the response entry and `source_uri` is derived rather than returned. The aspect operators re-derive that key and match it byte-equal, so an absent one reported as a content verdict — "does not match" — rather than as an error. (nexus-vnz3d)
+
+- **A failed taxonomy rebuild left a collection with no centroids and no signal.** `rebuild_taxonomy` deleted the existing centroids before computing the plan that replaces them, so any raise in between emptied the collection permanently. The empty state reports healthy through every layer: the nearest-centroid query returns no rows, the unmatched-chunk list is computed from chunk existence rather than assignment and so comes back empty, and the client tripwire only fires on a non-empty list.
+
+- `nx mineru status` printed `?` for every count: it read an `active_tasks` key the MinerU server's `/health` has never sent, while the server serves `processing_tasks`, `queued_tasks` and `completed_tasks`. The test fixture invented the same key, so the suite stayed green.
+
+- A development checkout no longer sends the anonymous install ping. `install_ping` had three off-switches — `NX_NO_TELEMETRY`, `telemetry.enabled` and the 24h throttle — and none asked whether the process was running out of a git checkout, which `nexus.db.service_endpoint.is_dev_checkout_process()` already answers for the production-write guard. Container-based test harnesses run an installed wheel rather than a checkout, so `NX_NO_TELEMETRY=1` remains required there and is enforced by a lint over every `docker run` under `tests/e2e`. (nexus-6doho)
+
+### Changed
+
+- The install shell under `src/nexus/_install/` now dispatches to stdlib-only Python cores instead of restating their logic. `layout.sh`, `census.sh`, `gc.sh` and `shims.sh` become thin dispatchers over `layout_core.py`, `census_core.py`, `gc_core.py` and `shims_core.py`; the cores import nothing from nexus, because the installer runs with nothing installed. The duplication being removed was not theoretical — collapsing it fixed a source-classification rule that had no Python twin at all, a census that under-reported holders for a relative path, and a shim pruner that treated a hostile-named shim as owned and so kept it forever while the writer refused to write it and `nx doctor` never walked it. (nexus-utpuw)
+
+### Engine
+
+- Pinned engine identity unchanged: `engine-service-v0.1.129`.
+
 ## [7.55.1] - 2026-09-20
 
 ### Fixed

@@ -2738,6 +2738,17 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # logic reads back, never a real embedder call or credential-gated
     # path. Reason class "string-literal-as-name".
     "test_collection_parse_funnel_slice2.py",
+    # nexus-vnz3d aspect source_uri backfill planner (2026-09-20): every
+    # test in this file drives plan_source_uri_backfill, a pure function
+    # whose only use of the collection is
+    # ``collection.startswith(FILE_ROUTED_PREFIXES)`` — a PREFIX test. The
+    # voyage tokens are the tail of conformant collection-NAME fixtures
+    # (knowledge__delos__voyage-context-3__v1,
+    # docs__nexus__voyage-context-3__v1), chosen so the fixture carries the
+    # RDR-103 shape real rows have. Nothing in the file embeds, reads a
+    # credential, or branches on is_local_mode, and no test in it could.
+    # Reason class "string-literal-as-name".
+    "test_aspect_uri_repair.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({

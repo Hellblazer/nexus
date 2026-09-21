@@ -1787,6 +1787,49 @@ class TestOrchestrators:
         assert port["embeddings"][0] == [0.0, 1.0]
         assert 1 not in {m["topic_id"] for m in port["metadatas"]}  # old id not reused
 
+    def test_a_failing_plan_leaves_the_old_centroids_intact(self, client, monkeypatch) -> None:
+        """A raise in compute_rebuild_plan must not destroy the live taxonomy.
+
+        The delete used to run BEFORE the compute, so any failure between them
+        left the collection with zero centroids — and that state is silent
+        through every layer that could report it: the plpgsql ``nearest`` CTE
+        returns no rows so ``assigned=0``; ``unmatched_chashes`` is computed
+        from chunk existence rather than assignment
+        (``TaxonomyRepository.java:858-868``) so it comes back empty; and the
+        client tripwire only fires on a non-empty unmatched list
+        (``mcp_infra.py:1215-1229``). Taxonomy for that collection would be
+        dead indefinitely with no operator signal.
+
+        The reachable trigger is not hypothetical: a tenant part-way through an
+        embedding migration gets a ragged list from ``fetchCentroids`` (all
+        three dim columns are looped) and ``np.array(..., dtype=np.float32)``
+        raises ValueError before any plan exists.
+        """
+        client.import_topic(
+            src_id=1, label="old", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=1, created_at="2026-01-01T00:00:00Z", review_status="accepted", terms=None)
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0], "label": "old", "doc_count": 1},
+        ])
+
+        def _boom(*a, **k):
+            raise ValueError("setting an array element with a sequence")
+
+        monkeypatch.setattr(_hts, "compute_rebuild_plan", _boom)
+
+        with pytest.raises(ValueError):
+            store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
+
+        # The old centroid is still served, and no delete was ever issued.
+        port = store._centroid_store.get_by_collection("c")
+        assert port["embeddings"] == [[1.0, 0.0]], (
+            "a failed rebuild destroyed the live centroids; the collection is "
+            "now silently taxonomy-less"
+        )
+        assert not [c for c in store._centroid_store.calls if c[0] == "delete_ids"]
+        # T2 side untouched too: the operator's label survives.
+        assert {t["label"] for t in client.get_all_topics(collection="c")} == {"old"}
+
     def test_rebuild_taxonomy_passes_old_state_kwargs(self, client, monkeypatch) -> None:
         # Proves the GLUE: read_rebuild_old_state's dict reaches compute_rebuild_plan
         # under the correct kwarg names (a compose-order test alone can't catch a

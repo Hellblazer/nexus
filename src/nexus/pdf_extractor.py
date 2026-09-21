@@ -227,6 +227,39 @@ _FORMULA_ROUTE_THRESHOLD = 5
 _MATH_UNICODE = frozenset("∑∫∏∀∃∈∉∪∩⊆⊇⊂⊃→←↔∧∨¬⇒⇔⇐∂∇≤≥≠±×÷√∞≈≡∝∅⊕⊗⊥∥")
 
 
+def _mineru_end_page_id(end: int | None) -> int:
+    """Convert an EXCLUSIVE page bound to MinerU's INCLUSIVE ``end_page_id``.
+
+    Every page range in this module is half-open, ``[start, end)``, the way
+    Python slices are. MinerU's ``start_page_id``/``end_page_id`` are both
+    inclusive. Passing ``end`` through unconverted asks for one page too many,
+    and since ``mineru_page_batch`` defaults to 1 the batches are ``[0,1)``,
+    ``[1,2)``, ``[2,3)``... so each also extracted its successor's first page:
+    every page but the first and last came back twice, and both copies were
+    concatenated into the document text.
+
+    Measured on a 19-page paper (catalog 1.12.128) before this existed:
+    270,171 chars against 136,341 for the same PDF in a single batch (1.98x),
+    160 of 373 substantial blocks redundant, and MinerU's own formula count
+    exactly doubled, 844 against 422. The duplicate text was chunked and
+    embedded like any other. It did not corrupt storage, because identical
+    chunk text collapses to one T3 row on the ``(tenant_id, collection,
+    chash)`` primary key — which is why it surfaced as a manifest-versus-T3
+    count divergence rather than as an error.
+
+    ``None`` means "to the end of the document" and keeps the sentinel both
+    call sites already used. This is a named function rather than a ``- 1`` at
+    each call site because there are two of them, in different methods (the
+    server path and the subprocess path); the next caller should not have to
+    rediscover which convention it is holding.
+    """
+    if end is None:
+        return 99999
+    # A half-open range is empty or negative only if a caller built it wrong;
+    # clamp rather than emit -1, which MinerU would read as "whole document".
+    return max(0, end - 1)
+
+
 def _count_formula_markers(text: str) -> int:
     """Count LaTeX formula markers in *text*.
 
@@ -1747,7 +1780,7 @@ class PDFExtractor:
                 data={
                     "backend": "pipeline",
                     "start_page_id": str(start),
-                    "end_page_id": str(end if end is not None else 99999),
+                    "end_page_id": str(_mineru_end_page_id(end)),
                     "formula_enable": "true",
                     "table_enable": str(get_mineru_table_enable()).lower(),
                     "return_md": "true",
@@ -1988,7 +2021,9 @@ class PDFExtractor:
                 [
                     sys.executable, "-c", _MINERU_WORKER_SCRIPT,
                     str(pdf_path), result_dir,
-                    str(start), "none" if end is None else str(end),
+                    # Inclusive, like the server path: the worker passes this
+                    # straight to do_parse's end_page_id.
+                    str(start), "none" if end is None else str(_mineru_end_page_id(end)),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,

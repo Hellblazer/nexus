@@ -30,6 +30,9 @@
 # legacy tree, never the pointer (see their own comments for why).
 
 _nx_legacy_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# layout.sh dispatches to layout_core.py beside it, and a sourced file
+# cannot find its own directory under POSIX sh. We already know it.
+NX_LAYOUT_HOME="$_nx_legacy_here"
 # shellcheck source=src/nexus/_install/layout.sh
 . "$_nx_legacy_here/layout.sh"
 
@@ -99,7 +102,7 @@ nx_register_legacy_generation() {
             return "$NX_LAYOUT_USAGE_EXIT"
             ;;
     esac
-    _nx_rlg_root="$(_nx_root "${2-}")" || return "$NX_LAYOUT_USAGE_EXIT"
+    _nx_rlg_root="$(nx_root "${2-}")" || return "$NX_LAYOUT_USAGE_EXIT"
     mkdir -p "$_nx_rlg_root" || return 1
     _nx_rlg_link="$(nx_generation_dir "$NX_LEGACY_GENERATION_NAME" "$_nx_rlg_root")" \
         || return "$NX_LAYOUT_USAGE_EXIT"

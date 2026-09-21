@@ -88,7 +88,8 @@ def main() -> int:
     # (1) The wheel must actually SHIP the installer. Asserted before use, so
     # a packaging regression reads as a packaging regression rather than as a
     # confusing bash error from a missing file.
-    for name in ("install_generation.sh", "flip.sh", "shims.sh", "layout.sh", "overrides.txt"):
+    for name in ("install_generation.sh", "flip.sh", "shims.sh", "layout.sh",
+                 "layout_core.py", "overrides.txt"):
         if not check(
             (install_dir / name).is_file(),
             f"packaged installer ships {name}",
