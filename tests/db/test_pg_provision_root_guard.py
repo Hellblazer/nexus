@@ -17,6 +17,7 @@ discovery, and that ordering is itself what two of them assert.
 from __future__ import annotations
 
 import contextlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -170,8 +171,6 @@ def test_every_pg_subprocess_refuses_as_root(monkeypatch: pytest.MonkeyPatch) ->
     _start_cluster or _psql directly bypasses them, which is exactly what the
     daemon does.
     """
-    import subprocess
-
     monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
     monkeypatch.setattr(
         subprocess, "run",
@@ -201,8 +200,6 @@ def test_the_daemon_self_heal_path_refuses_as_root(
     StorageServiceStartError. Asserted through _start_cluster, which is the
     function the daemon actually calls.
     """
-    import subprocess
-
     monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
     # Trip on the SPAWN, not on a missing fake binary. Without this the
     # deletion check fails with FileNotFoundError for tmp_path/pg_ctl —
