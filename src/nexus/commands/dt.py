@@ -254,21 +254,25 @@ def _index_record(
 
     from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415 — command-local import (doc_indexer)
 
-    # Index INTO the owner that already holds this document, if one does
-    # (nexus-z0lu4). Without this the indexer registers under the corpus it was
-    # given, cannot see the existing row because its lookup is owner-scoped, and
-    # leaves two live documents for one file.
-    existing_corpus = _existing_dt_corpus(uuid)
-    if existing_corpus and existing_corpus != corpus:
-        _log.info(
-            "dt_index_reusing_existing_corpus",
-            uuid=uuid,
-            requested_corpus=corpus,
-            existing_corpus=existing_corpus,
-            detail="document already catalogued under another owner; indexing "
-                   "in place rather than registering a duplicate",
-        )
-        corpus = existing_corpus
+    # NAME THE DEVONthink IDENTITY when the document is already catalogued
+    # (nexus-z0lu4). index_pdf/index_markdown already take source_uri and
+    # resolve through by_source_uri FIRST — owner-agnostic and path-independent
+    # — precisely so a document whose real identity is an out-of-band URI is
+    # not re-registered by a path lookup that cannot see it. nexus-y8qtj built
+    # that for this exact case; its docstring names `nx dt index` as the
+    # motivating example. This command simply never passed it, so every
+    # DEVONthink re-index went through the owner-scoped path lookup and minted
+    # a duplicate whenever the document lived under another owner (measured 19
+    # times in one run). Using the built mechanism also covers the two cases a
+    # corpus redirect cannot: a REPO-owned existing row, and a file DEVONthink
+    # has moved since it was registered.
+    #
+    # Only when a row already holds the URI: supplying one that resolves to
+    # nothing is a hard SourceUriNotFoundError by design, and a first index has
+    # no such row.
+    dt_source_uri = (
+        f"x-devonthink-item://{uuid}" if _dt_uri_is_catalogued(uuid) else ""
+    )
 
     file_path = Path(path)
     ext = file_path.suffix.lower()
@@ -281,6 +285,7 @@ def _index_record(
         raw = index_pdf(
             file_path, corpus=corpus, collection_name=collection, extractor=extractor,
             force=force, force_re_embed=force_re_embed, return_metadata=True,
+            source_uri=dt_source_uri,
         )
         if isinstance(raw, dict):
             chunks = int(raw.get("chunks", 0) or 0)
@@ -292,7 +297,10 @@ def _index_record(
             chunks = raw if isinstance(raw, int) else 0
             pages = None
     else:  # .md — extension filtering happens in index_cmd
-        raw = index_markdown(file_path, corpus=corpus, collection_name=collection, force=force, force_re_embed=force_re_embed)
+        raw = index_markdown(
+            file_path, corpus=corpus, collection_name=collection, force=force,
+            force_re_embed=force_re_embed, source_uri=dt_source_uri,
+        )
         chunks = raw if isinstance(raw, int) else 0
         pages = None
 
@@ -300,36 +308,30 @@ def _index_record(
     return stamped, chunks, pages
 
 
-def _existing_dt_corpus(uuid: str) -> str:
-    """The corpus of the catalog entry already holding this DEVONthink UUID.
+def _dt_uri_is_catalogued(uuid: str) -> bool:
+    """True when a LIVE catalog document already holds this DEVONthink URI.
 
-    Empty string when there is none, or when the catalog cannot be read.
+    nexus-z0lu4. Gates whether `source_uri` is passed to the indexer, and the
+    gate is required rather than defensive: index_pdf/index_markdown RAISE
+    SourceUriNotFoundError when a supplied source_uri resolves to nothing
+    (nexus-y8qtj deliberately refuses to fall back to registering a new
+    Document, since that silent fallback IS the y8qtj defect). A first-ever
+    index has no such row yet, so it must not name the URI; the post-index
+    stamp establishes the identity instead.
 
-    nexus-z0lu4. The indexer resolves its owner from ``corpus`` and then looks
-    the document up with ``by_file_path(owner, path)``, which is OWNER-SCOPED —
-    ``doc_indexer.py`` says so itself about the repo/curator pair: such a lookup
-    "can NEVER see a repo-owner row — structurally, not by accident". So a
-    document already catalogued under, say, ``augur-oracle`` is invisible to a
-    ``dt``-corpus index run, which registers a SECOND live document for the same
-    file. Measured: the 2026-09-21 MinerU remediation did that 19 times, leaving
-    the pre-fix doubled text live beside the remediated copy.
-
-    ``by_source_uri`` is deliberately NOT owner-scoped, so the DEVONthink URI —
-    the identity that is stable across DT relocations — resolves the document
-    wherever it lives. Using its corpus puts the indexer in the same owner
-    namespace, so its own lookup finds the existing row and updates in place.
+    Fail-soft: a catalog that cannot be read reports False, which degrades to
+    the pre-existing behaviour rather than failing the index.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
 
     reader = make_catalog_reader()
     if reader is None:
-        return ""
+        return False
     try:
-        entry = reader.by_source_uri(f"x-devonthink-item://{uuid}")
-        return str(getattr(entry, "corpus", "") or "") if entry is not None else ""
+        return reader.by_source_uri(f"x-devonthink-item://{uuid}") is not None
     except Exception as exc:  # noqa: BLE001 — a probe failure must not abort the index
-        _log.warning("dt_existing_corpus_probe_failed", uuid=uuid, error=str(exc))
-        return ""
+        _log.warning("dt_uri_probe_failed", uuid=uuid, error=str(exc))
+        return False
     finally:
         reader.close()
 

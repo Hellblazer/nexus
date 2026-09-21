@@ -1827,10 +1827,44 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # this is a no-op today; kept for consistency + regression defense. When
         # a path is shared across owners the server returns >1 match and this
         # preserves the documented "first match" contract.
+        matches = self.find_all_by_file_path(file_path)
+        if len(matches) > 1:
+            # SEVERAL DOCUMENTS PER PATH IS A NORMAL STEADY STATE, not damage.
+            # Nothing forbids it — the only uniqueness is the PARTIAL index on
+            # (tenant_id, source_uri) — and it arises whenever one file is
+            # catalogued under two owners, which the owner-scoped lookups
+            # cannot see (nexus-z0lu4, measured 19 times in a single run).
+            # "First match" has always been this method's contract; the cost
+            # was that choosing among several was indistinguishable from there
+            # being only one, and a caller documented the opposite premise and
+            # was silently wrong for as long as it existed. Say which one was
+            # chosen, and name the rest.
+            _log.warning(
+                "catalog_file_path_ambiguous",
+                file_path=file_path,
+                matches=len(matches),
+                chose=str(matches[0].tumbler),
+                others=[str(m.tumbler) for m in matches[1:]],
+                detail="several catalog documents share this file_path; "
+                       "returning the first. find_all_by_file_path returns all.",
+            )
+        return matches[0] if matches else None
+
+    def find_all_by_file_path(self, file_path: str) -> list[CatalogEntry]:
+        """EVERY document matching *file_path*, no owner filter.
+
+        The honest shape of this lookup. :meth:`find_by_file_path` returns the
+        first, which is right for a caller that also holds a stronger key — the
+        DEVONthink stamp resolves by URI and only falls back to the path — and
+        wrong for anything reporting to a human about "the" file, because a path
+        can name several documents and picking one silently hides the others.
+        """
+        # nexus-h9f1w / GH #1350: exact-match guard, same class as by_file_path.
+        # The owner-agnostic /list routes to documentsByFilePath (exact eq) so
+        # this is a no-op today; kept for consistency + regression defense.
         result = self._get("/list", file_path=file_path)
         docs = result.get("documents", []) if result else []
-        match = [d for d in docs if d.get("file_path") == file_path]
-        return _to_entry(match[0]) if match else None
+        return [_to_entry(d) for d in docs if d.get("file_path") == file_path]
 
     def by_owner(self, owner: Tumbler | str) -> list[CatalogEntry]:
         return self._docs_from(self._get("/list", owner=str(owner)))

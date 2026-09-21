@@ -1245,6 +1245,16 @@ class TestGenericFallbackHandlesUnknownTupleMember:
 
 
 class TestIdentityDropSummary:
+    @pytest.fixture(autouse=True)
+    def _first_index(self, monkeypatch):
+        """These exercise the register-throw SUMMARY, with a MagicMock catalog
+        whose every attribute is truthy — so the nexus-z0lu4 probe would report
+        a catalogued document that does not exist, and index_pdf would then
+        refuse the mismatched --collection. Model the first index they mean."""
+        monkeypatch.setattr(
+            "nexus.commands.dt._dt_uri_is_catalogued", lambda uuid: False,
+        )
+
     """``nx dt index`` reports SUCCESS when the preflight catalog register
     failed — chunks land in T3 (searchable) but no catalog Document exists
     for them (no tumbler, no ``--link-semantic``, no ``--writeback``).
@@ -1714,47 +1724,38 @@ class TestDtIndexDoesNotDuplicateAcrossOwners:
     that 19 times, leaving pre-fix doubled text live beside the remediated copy.
     """
 
-    def test_existing_corpus_overrides_the_requested_one(self, monkeypatch):
-        """The probe must find the document by DT URI and hand back ITS corpus,
-        not the one the caller asked for."""
-        import nexus.commands.dt as dt_module
-
-        class _Entry:
-            corpus = "augur-oracle"
-
+    def _reader(self, found):
         class _Reader:
             def by_source_uri(self, uri):
-                assert uri == "x-devonthink-item://UUID-1", uri
-                return _Entry()
+                assert uri.startswith("x-devonthink-item://"), uri
+                return object() if found else None
 
             def close(self):
                 pass
 
-        monkeypatch.setattr(dt_module, "make_catalog_reader", lambda: _Reader(), raising=False)
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader", lambda: _Reader(),
-        )
-        assert dt_module._existing_dt_corpus("UUID-1") == "augur-oracle"
+        return _Reader()
 
-    def test_no_existing_entry_leaves_the_requested_corpus_alone(self, monkeypatch):
+    def test_probe_reports_an_existing_document(self, monkeypatch):
         import nexus.commands.dt as dt_module
 
-        class _Reader:
-            def by_source_uri(self, uri):
-                return None
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", lambda: self._reader(True),
+        )
+        assert dt_module._dt_uri_is_catalogued("UUID-1") is True
 
-            def close(self):
-                pass
+    def test_probe_reports_absence_on_a_first_index(self, monkeypatch):
+        """A first index has no row holding the URI, and must NOT name it:
+        index_pdf raises SourceUriNotFoundError rather than falling back to
+        registering a new Document (nexus-y8qtj), so naming a URI that resolves
+        to nothing would turn every first index into a hard error."""
+        import nexus.commands.dt as dt_module
 
         monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader", lambda: _Reader(),
+            "nexus.catalog.factory.make_catalog_reader", lambda: self._reader(False),
         )
-        assert dt_module._existing_dt_corpus("UUID-ABSENT") == ""
+        assert dt_module._dt_uri_is_catalogued("UUID-NEW") is False
 
     def test_a_probe_failure_never_aborts_the_index(self, monkeypatch):
-        """The probe is an optimisation over correctness of placement, not a
-        precondition for indexing at all: a catalog hiccup must degrade to the
-        old behaviour, not lose the document."""
         import nexus.commands.dt as dt_module
 
         class _Reader:
@@ -1767,7 +1768,56 @@ class TestDtIndexDoesNotDuplicateAcrossOwners:
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_reader", lambda: _Reader(),
         )
-        assert dt_module._existing_dt_corpus("UUID-BOOM") == ""
+        assert dt_module._dt_uri_is_catalogued("UUID-BOOM") is False
+
+    def test_index_record_names_the_dt_uri_when_catalogued(self, monkeypatch, tmp_path):
+        """The wiring. Passing source_uri routes identity resolution through
+        by_source_uri, which is owner-agnostic AND path-independent — so it
+        covers the two cases a corpus redirect cannot: an existing REPO-owned
+        row, and a file DEVONthink has moved since registration."""
+        import nexus.commands.dt as dt_module
+
+        seen: dict = {}
+
+        def _fake_index_pdf(path, **kw):
+            seen.update(kw)
+            return {"chunks": 3, "pages_with_text": [1]}
+
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _fake_index_pdf)
+        monkeypatch.setattr(dt_module, "_dt_uri_is_catalogued", lambda uuid: True)
+        monkeypatch.setattr(dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True)
+        monkeypatch.setattr(dt_module, "_dt_record_facts", lambda uuid: None)
+
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        dt_module._index_record(
+            "UUID-1", str(pdf), collection=None, corpus="dt", dry_run=False,
+        )
+        assert seen.get("source_uri") == "x-devonthink-item://UUID-1", seen
+
+    def test_index_record_omits_the_uri_on_a_first_index(self, monkeypatch, tmp_path):
+        """Naming a URI that resolves to nothing is a hard error by design, so
+        the first index must pass an empty one and let the stamp establish the
+        identity afterwards."""
+        import nexus.commands.dt as dt_module
+
+        seen: dict = {}
+
+        def _fake_index_pdf(path, **kw):
+            seen.update(kw)
+            return {"chunks": 1, "pages_with_text": [1]}
+
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _fake_index_pdf)
+        monkeypatch.setattr(dt_module, "_dt_uri_is_catalogued", lambda uuid: False)
+        monkeypatch.setattr(dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True)
+        monkeypatch.setattr(dt_module, "_dt_record_facts", lambda uuid: None)
+
+        pdf = tmp_path / "n.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        dt_module._index_record(
+            "UUID-NEW", str(pdf), collection=None, corpus="dt", dry_run=False,
+        )
+        assert seen.get("source_uri") == "", seen
 
     def test_stamp_resolves_by_dt_uri_not_file_path(self, monkeypatch, tmp_path):
         """The stamp must land on the row holding the DEVONthink URI.
@@ -1858,30 +1908,6 @@ class TestDtIndexDoesNotDuplicateAcrossOwners:
         pdf.write_bytes(b"%PDF-1.4")
         assert dt_module._stamp_dt_uri_on_entry(pdf, "UUID-NEW") is True
         assert updated["tumbler"] == "1.12.200", updated
-
-    def test_index_record_indexes_into_the_existing_owner(self, monkeypatch, tmp_path):
-        """The wiring: _index_record must pass the EXISTING corpus to the
-        indexer, which is what puts it in the owner namespace where its own
-        owner-scoped lookup can find the row and update it in place."""
-        import nexus.commands.dt as dt_module
-
-        seen: dict = {}
-
-        def _fake_index_pdf(path, **kw):
-            seen.update(kw)
-            return {"chunks": 3, "pages_with_text": [1]}
-
-        monkeypatch.setattr("nexus.doc_indexer.index_pdf", _fake_index_pdf)
-        monkeypatch.setattr(dt_module, "_existing_dt_corpus", lambda uuid: "augur-oracle")
-        monkeypatch.setattr(dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True)
-        monkeypatch.setattr(dt_module, "_dt_record_facts", lambda uuid: None)
-
-        pdf = tmp_path / "x.pdf"
-        pdf.write_bytes(b"%PDF-1.4")
-        dt_module._index_record(
-            "UUID-1", str(pdf), collection=None, corpus="dt", dry_run=False,
-        )
-        assert seen.get("corpus") == "augur-oracle", seen
 
 
 # ── _stamp_dt_uri_on_entry (post-index identity stamp) ───────────────────────
