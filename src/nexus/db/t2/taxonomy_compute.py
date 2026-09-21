@@ -314,21 +314,16 @@ def _merge_labels(
     ]
 
     if old_centroids.shape[0] == 0:
-        # A first-ever rebuild has no centroids AND no labels, and there is
-        # nothing to report about it. Labels WITHOUT centroids is a different
-        # state entirely — it is what the delete-before-compute defect used to
-        # leave behind (nexus-pktki's sibling, fixed in 30e2b4aab) — and those
-        # labels are about to be dropped. Warning on both would cry wolf on
-        # every first rebuild, which is how a warning stops being read
-        # (nexus-dtqd7).
-        if old_labels:
-            _log.warning(
-                "centroid_labels_without_centroids",
-                old_labels=len(old_labels),
-                new_centroids=n_new,
-                detail="operator labels exist but no centroid carries them; "
-                       "they cannot be transferred and will be lost",
-            )
+        # A first-ever rebuild: nothing to carry, nothing to report.
+        #
+        # bad1e8348 added a warning here for "labels exist but no centroid
+        # carries them", and it was DEAD: read_rebuild_old_state builds
+        # old_labels by iterating the centroid envelope's metadata, so zero
+        # centroids structurally forces zero labels on every real call. Only a
+        # direct unit call could trip it, which is exactly what its test did —
+        # a check whose domain could not contain its claim. Removed rather than
+        # left standing, because a guard that cannot fire reads as coverage
+        # (critique of bad1e8348, T2 [26626]).
         return result
 
     # Dimensionality mismatch guard (model upgrade scenario).
@@ -658,6 +653,47 @@ def compute_rebuild_plan(
     the freshly-generated topic_id. Route 3 (unplaceable) is dropped with a
     warning. Empty ``specs`` on ``< 5`` docs / all-noise.
     """
+    # nexus-dtqd7. A collection that FULLY migrated embedders since its last
+    # rebuild has uniform old centroids in the OLD space and documents in the
+    # new, so cosine between them is meaningless: _merge_labels matches
+    # nothing, every operator label silently becomes 'pending', and
+    # rebuild_taxonomy goes on to delete the labelled centroids and persist the
+    # unlabelled ones. 100% label loss, no signal, no undo.
+    #
+    # THE CHECK IS FIRST, and it compares against the DOCUMENT embeddings
+    # rather than the clustered centroids, which carry the same width by
+    # construction. The first version of this guard sat just above
+    # _merge_labels, below the `n < 5` and all-noise returns — and both of
+    # those return an empty plan that rebuild_taxonomy then deletes and
+    # persists over, so a migrated collection that is small or clusters as
+    # noise still lost everything, through the very defect this guard exists
+    # to close. Worse, the test written for it hit that short-circuit and was
+    # steered around it with a bigger fixture instead of the code being fixed
+    # (code review of bad1e8348). Placing it before every early return is what
+    # makes the guard cover the function rather than one path through it.
+    #
+    # Refuse rather than warn: this path REPLACES state the operator curated by
+    # hand, and a warning on an unasked-for destructive step is not consent.
+    # A refusal must carry a reachable way out or it is just a different dead
+    # end — `nx taxonomy reset` is that exit, and it is named in the message.
+    if (
+        old_centroids.shape[0]
+        and embeddings.ndim == 2
+        and embeddings.shape[1]
+        and old_centroids.shape[1] != embeddings.shape[1]
+    ):
+        raise MixedEmbeddingDimensionsError(
+            f"compute_rebuild_plan: collection {collection_name!r} has "
+            f"{old_centroids.shape[0]} existing centroid(s) at "
+            f"{old_centroids.shape[1]}d but its documents now embed at "
+            f"{embeddings.shape[1]}d, so operator labels cannot be carried "
+            "across — similarity between two embedding spaces is not defined. "
+            "Rebuilding anyway would drop every label on this collection. "
+            "Either re-embed so both sides share one space and then rebuild, "
+            f"or discard this collection's taxonomy deliberately with "
+            f"`nx taxonomy reset {collection_name}` and discover afresh."
+        )
+
     doc_ids, embeddings, texts = _drop_nonfinite_rows(
         collection_name, doc_ids, embeddings, texts, site="compute_rebuild_plan",
     )
@@ -680,34 +716,6 @@ def compute_rebuild_plan(
     new_centroids_arr = np.array(
         [centroids_arr[cid] for cid in real_labels], dtype=np.float32,
     )
-    # nexus-dtqd7. A collection that FULLY migrated embedders since its last
-    # rebuild has uniform old centroids in the OLD space and fresh ones in the
-    # new, so cosine between them is meaningless and _merge_labels matches
-    # nothing — every operator label silently becomes 'pending' while
-    # rebuild_taxonomy goes on to delete the labelled centroids and persist the
-    # unlabelled ones. 100% label loss, no signal, no undo.
-    #
-    # Refuse rather than warn, for the same reason the sibling fix (nexus-pktki)
-    # refuses on a population read: this path REPLACES state the operator
-    # curated by hand, and a warning on an unasked-for destructive step is not
-    # consent. A refusal must carry the way out or it is just a different dead
-    # end, hence both real remedies spelled in verbs that already exist.
-    #
-    # Deliberately NOT a force flag: purging the taxonomy and discovering afresh
-    # already IS the opt-in, and a second way to say the same thing is the one
-    # that would get used without thinking.
-    if old_centroids.shape[0] and old_centroids.shape[1] != new_centroids_arr.shape[1]:
-        raise MixedEmbeddingDimensionsError(
-            f"compute_rebuild_plan: collection {collection_name!r} has "
-            f"{old_centroids.shape[0]} existing centroid(s) at "
-            f"{old_centroids.shape[1]}d but its documents now embed at "
-            f"{new_centroids_arr.shape[1]}d, so operator labels cannot be "
-            "carried across — similarity between two embedding spaces is not "
-            "defined. Rebuilding anyway would drop every label on this "
-            "collection. Either purge the taxonomy and discover afresh, "
-            "accepting the label loss deliberately, or re-embed so both sides "
-            "share one space and then rebuild."
-        )
     merged = _merge_labels(
         old_centroids, old_labels, old_review_statuses, new_centroids_arr,
     )

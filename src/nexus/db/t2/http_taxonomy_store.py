@@ -1347,6 +1347,25 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         return self._post("/purge_collection", {"collection": collection})
 
+    def reset_collection(self, collection: str) -> dict[str, int]:
+        """Discard a collection's taxonomy entirely: T2 rows AND its centroids.
+
+        :meth:`purge_collection` deliberately leaves the centroid half to the
+        caller, which is right for the orchestrators that already hold the
+        port — and wrong for an operator-facing reset, where "taxonomy gone"
+        must mean gone on both sides or the next rebuild reads stale centroids
+        and the reset silently did not take.
+
+        Returns purge_collection's 4-key count dict plus ``centroids``.
+
+        nexus-dtqd7: this is the verb the cross-space rebuild refusal names.
+        Without it the refusal pointed at a remedy that did not exist, and the
+        only reachable purge destroyed the collection's documents too.
+        """
+        counts = dict(self.purge_collection(collection))
+        counts["centroids"] = int(self._centroid.purge(collection))
+        return counts
+
     # ── Orchestrators (thin compose-glue) (RDR-152 nexus-1di3r.9) ──────────────
     #
     # compute_* (delegate) -> persist_* (Java) -> centroid R/W (port). The three

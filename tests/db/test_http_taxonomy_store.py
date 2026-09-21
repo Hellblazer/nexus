@@ -2694,16 +2694,43 @@ def _centroid_envelope_np_array_sites(source: str) -> list[str]:
                 break
         return tainted
 
+    funcs = {
+        f.name: f for f in ast.walk(tree)
+        if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    scope_taint: dict[str, set[str]] = {
+        name: taint_of(f) for name, f in funcs.items() if name not in _FUNNELS
+    }
+
+    # ONE CALL HOP. The per-function version was intraprocedural, so lifting
+    # the construction into a new helper defeated it completely — a far more
+    # natural refactor than any of the four evasions its own tests check (code
+    # review, T2 nexus/nexus-pktki-ragged-centroids-review-findings). Passing a
+    # tainted value into another function in this module now taints the
+    # parameter it lands on, so that helper is checked the way its caller was.
+    for scope_name, tainted in list(scope_taint.items()):
+        for node in ast.walk(funcs[scope_name]):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            callee = funcs.get(node.func.id)
+            if callee is None or node.func.id in _FUNNELS:
+                continue
+            params = [a.arg for a in callee.args.args] + [
+                a.arg for a in callee.args.kwonlyargs
+            ]
+            for i, arg in enumerate(node.args):
+                if isinstance(arg, ast.Name) and arg.id in tainted and i < len(params):
+                    scope_taint.setdefault(node.func.id, set()).add(params[i])
+            for kw in node.keywords:
+                if (kw.arg and isinstance(kw.value, ast.Name)
+                        and kw.value.id in tainted and kw.arg in params):
+                    scope_taint.setdefault(node.func.id, set()).add(kw.arg)
+
     hits: list[str] = []
-    for scope in ast.walk(tree):
-        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if scope.name in _FUNNELS:
-            continue
-        tainted = taint_of(scope)
+    for scope_name, tainted in scope_taint.items():
         if not tainted:
             continue
-        for node in ast.walk(scope):
+        for node in ast.walk(funcs[scope_name]):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr in _CTORS
                     and isinstance(node.func.value, ast.Name)
@@ -2776,3 +2803,30 @@ class TestCentroidMatrixConstructionIsFunnelled:
         )
         hits = _centroid_envelope_np_array_sites(evasions)
         assert len(hits) == 4, hits
+
+    def test_the_guard_follows_one_call_hop(self) -> None:
+        """Extracting the construction into a helper was the easy way past the
+        intraprocedural version (code review). One hop closes it."""
+        extracted = (
+            "def build(rows):\n"
+            "    return np.array(rows, dtype=np.float32)\n"
+            "def read(self, c):\n"
+            "    env = self._centroid.get_by_collection(c)\n"
+            "    embs = env.get('embeddings') or []\n"
+            "    return build(embs)\n"
+        )
+        assert _centroid_envelope_np_array_sites(extracted) == ["rows@line2"], (
+            "a tainted value passed into a helper must taint the parameter it "
+            "lands on, or the guard is defeated by an ordinary extraction"
+        )
+
+    def test_the_guard_follows_a_keyword_hop_too(self) -> None:
+        extracted = (
+            "def build(*, rows):\n"
+            "    return np.array(rows, dtype=np.float32)\n"
+            "def read(self, c):\n"
+            "    env = self._centroid.get_foreign(c)\n"
+            "    embs = env.get('embeddings') or []\n"
+            "    return build(rows=embs)\n"
+        )
+        assert _centroid_envelope_np_array_sites(extracted) == ["rows@line2"]

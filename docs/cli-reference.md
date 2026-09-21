@@ -1614,6 +1614,8 @@ Topic taxonomy — HDBSCAN clustering of T3 collection embeddings into topics fo
 
 Topics are auto-discovered after `nx index repo`, gated on the run actually having indexed files (an all-unchanged re-index skips the discover/kmeans/label/project/L1 pass entirely — a self-heal guard still runs discovery if a target collection has zero topics). The gate is per-collection: only collections whose own content kind (code / docs / rdr) wrote files this run enter the discover loop. Non-force discovery on a collection that already has topics returns instantly with `topics already exist … use `nx taxonomy rebuild` to re-discover` — previously the same no-op was decided only after fetching and clustering the full collection; incremental flush-grain assignment is what keeps existing topics current. Labeling with Claude haiku runs in a DETACHED background process spawned at the end of indexing (nexus-qqc1v) — the CLI exits immediately and labels land minutes later (progress: `~/.config/nexus/logs/deferred_labeling.log`; run `nx taxonomy label` manually if the spawn failed or you don't want to wait). Search results are grouped by topic and boosted when results share a topic cluster.
 
+A rebuild REFUSES when the collection's existing centroids and its documents sit in different embedding spaces — a collection that migrated embedders since its last rebuild (nexus-dtqd7). Similarity between two embedding spaces is not defined, so operator labels cannot be carried across, and rebuilding regardless would drop every label on the collection silently. The two ways forward are named in the refusal: re-embed so both sides share one space and rebuild, or discard the taxonomy deliberately with `nx taxonomy reset` and discover afresh. `reset` removes the collection's topics, assignments, links and centroids; it does NOT touch the documents or their chunks, which is what separates it from `nx collection delete`. It prompts, showing how many topics are operator-accepted, and `--yes` skips the prompt.
+
 ```
 nx taxonomy status                              # health: collections, coverage, review state
 nx taxonomy discover --all                      # discover topics for all T3 collections
@@ -1636,6 +1638,8 @@ nx taxonomy merge "source" "target"             # merge topics
 nx taxonomy split "label" --k 3                 # split into sub-topics
 nx taxonomy links                               # show inter-topic relationships
 nx taxonomy rebuild -c docs__nexus              # full rebuild
+nx taxonomy reset -c docs__nexus                # discard this collection's taxonomy (prompts first)
+nx taxonomy reset -c docs__nexus --yes          # same, unattended
 nx taxonomy project code__nexus                 # project against sibling collections
 nx taxonomy project code__nexus --against knowledge__art  # explicit targets
 nx taxonomy project code__nexus --use-icf --persist  # suppress hub topics (RDR-077)
