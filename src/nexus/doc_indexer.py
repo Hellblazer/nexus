@@ -1083,6 +1083,15 @@ def _register_or_lookup_doc_id(
             source_mtime = file_path.stat().st_mtime
         except OSError:
             source_mtime = 0.0
+        # nexus-yzij1: everything above failed to find a document for this
+        # path — the owner-scoped lookup, and the repo-owner widening, and
+        # (when one was supplied) the source_uri leg. That is exactly the
+        # branch where a SECOND document for a path another owner already
+        # holds gets minted. Allowed, and now audible.
+        from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+        announce_cross_owner_mint(
+            reader, fp, owner=owner, context="register_or_lookup_doc_id",
+        )
         # nexus-uxg4u task 2: only request the created-vs-matched signal
         # when THIS call's caller asked for it — mirroring every existing
         # call site's plain-tumbler contract exactly (never touching the
@@ -3398,6 +3407,15 @@ def _catalog_markdown_hook(
                 from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
                 _record_ephemeral_registration_skip(fp, str(owner), reason="worktree_or_tempdir")
                 return
+            # nexus-yzij1: the structural twin of the mint in
+            # ``pipeline_stages._catalog_pdf_hook``, and it gets the same
+            # treatment — the source_uri leg, the owner-scoped lookup and
+            # the repo-owner widening above all missed, so this can be the
+            # second document for a path another owner already holds.
+            from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+            announce_cross_owner_mint(
+                reader, fp, owner=owner, context="catalog_markdown_hook",
+            )
             writer.register(
                 owner=owner, title=title, content_type=content_type,
                 file_path=fp, physical_collection=collection_name,

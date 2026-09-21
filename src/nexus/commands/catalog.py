@@ -1523,6 +1523,13 @@ def _backfill_per_file_from_t3(
         existing = cat.by_file_path(owner, rel)
         if existing is not None:
             continue
+        # nexus-yzij1: owner-scoped miss, about to mint. The backfill walks
+        # T3 chunks, so it reaches files other indexers have already
+        # catalogued under their own owners more often than most writers.
+        from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+        announce_cross_owner_mint(
+            cat, rel, owner=owner, context="backfill_per_file_from_t3",
+        )
         try:
             w.register(
                 owner=owner,

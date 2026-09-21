@@ -946,6 +946,35 @@ def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
             try:
                 entry = reader.by_file_path(owner, rel)
                 if entry is None:
+                    # nexus-yzij1: the lookup is owner-scoped and CANNOT see a
+                    # row for this path owned by anyone else. Widening the
+                    # DELETE would be worse than the silence — a file leaving
+                    # this repo is no reason to tombstone another owner's
+                    # document of it — so the fix is to stop the miss being
+                    # indistinguishable from "no such document anywhere".
+                    # Its own try: this lookup attempts no delete, so letting
+                    # it fall into the handler below would file it under
+                    # "since_head_delete_doc_failed" and report a delete
+                    # failure that never happened.
+                    try:
+                        others = reader.find_all_by_file_path(rel)
+                    except Exception:  # noqa: BLE001 — informational only; a delete was never attempted
+                        _log.debug(
+                            "since_head_delete_foreign_owner_probe_failed",
+                            file_path=rel, exc_info=True,
+                        )
+                        others = []
+                    if others:
+                        _log.info(
+                            "since_head_delete_skipped_foreign_owner",
+                            file_path=rel,
+                            owner=str(owner),
+                            matches=len(others),
+                            candidates=[str(e.tumbler) for e in others],
+                            detail="catalogued under another owner; left live "
+                                   "deliberately — this run owns neither the "
+                                   "row nor the decision to remove it.",
+                        )
                     continue
                 writer.delete_document(entry.tumbler)
                 _log.info(

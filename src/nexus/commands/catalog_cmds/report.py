@@ -213,29 +213,39 @@ def session_summary_cmd(since: int) -> None:
         # nexus-xnz0o: replaced raw SQL with catalog API (uniform across backends).
         found_any = False
         for fp in sorted(files):
-            entry = cat.find_by_file_path(fp)
-            if not entry:
+            # nexus-yzij1: a path can name SEVERAL catalog documents (one file
+            # catalogued under two owners is a normal steady state). Taking the
+            # first reported one document's RDR links as though they were the
+            # path's, and could print "No linked RDRs found" while a sibling row
+            # carried every link. This report goes to a human, so it shows all.
+            entries = cat.find_all_by_file_path(fp)
+            if not entries:
                 continue
-            tumbler = entry.tumbler
-            # Collect titles of linked RDR documents (content_type == 'rdr').
-            rdr_titles: list[str] = []
-            for lnk in cat.links_from(tumbler):
-                peer_t = getattr(lnk, "to_tumbler", None)
-                if peer_t:
-                    peer = cat.resolve(peer_t)
-                    if peer and peer.content_type == "rdr":
-                        rdr_titles.append(peer.title)
-            for lnk in cat.links_to(tumbler):
-                peer_t = getattr(lnk, "from_tumbler", None)
-                if peer_t:
-                    peer = cat.resolve(peer_t)
-                    if peer and peer.content_type == "rdr":
-                        rdr_titles.append(peer.title)
-            rdr_titles = list(dict.fromkeys(rdr_titles))  # deduplicate order-preserving
-            if rdr_titles:
-                rdrs = ", ".join(rdr_titles)
-                click.echo(f"  {fp} — {len(rdr_titles)} RDR(s): {rdrs}")
-                found_any = True
+            several = len(entries) > 1
+            for entry in entries:
+                tumbler = entry.tumbler
+                # Collect titles of linked RDR documents (content_type == 'rdr').
+                rdr_titles: list[str] = []
+                for lnk in cat.links_from(tumbler):
+                    peer_t = getattr(lnk, "to_tumbler", None)
+                    if peer_t:
+                        peer = cat.resolve(peer_t)
+                        if peer and peer.content_type == "rdr":
+                            rdr_titles.append(peer.title)
+                for lnk in cat.links_to(tumbler):
+                    peer_t = getattr(lnk, "from_tumbler", None)
+                    if peer_t:
+                        peer = cat.resolve(peer_t)
+                        if peer and peer.content_type == "rdr":
+                            rdr_titles.append(peer.title)
+                rdr_titles = list(dict.fromkeys(rdr_titles))  # deduplicate order-preserving
+                if rdr_titles:
+                    rdrs = ", ".join(rdr_titles)
+                    # Name the tumbler only when there is a choice to explain;
+                    # the single-document line is what it always was.
+                    where = f" [{tumbler}]" if several else ""
+                    click.echo(f"  {fp}{where} — {len(rdr_titles)} RDR(s): {rdrs}")
+                    found_any = True
 
         if not found_any:
             click.echo("No linked RDRs found for recently modified files.")

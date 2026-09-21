@@ -101,6 +101,18 @@ class CatalogReader(Protocol):
     def find_by_file_path(self, file_path) -> object:  # canonical
         ...
 
+    def find_all_by_file_path(self, file_path) -> object:  # nexus-yzij1
+        # The honest shape of a path lookup: a path can name SEVERAL
+        # documents (one file catalogued under two owners is a normal
+        # steady state), and ``find_by_file_path`` returns only the first.
+        # Promoted onto the caller-facing contract because writers now
+        # depend on it — ``dt._stamp_dt_uri_on_entry`` refuses an ambiguous
+        # path rather than stamping a guess, and ``indexer.
+        # _delete_docs_for_paths`` reports the row it deliberately leaves
+        # live. A method three production call sites need is part of the
+        # surface, not a client-only extra.
+        ...
+
     def get_collection(self, name) -> object:  # canonical
         ...
 

@@ -1153,6 +1153,10 @@ def index_repo_cmd(
         # nexus-u8n4r: zero the worktree/tempdir registration-skip collector
         # so the end-of-run summary reflects only this run's refusals.
         reset_ephemeral_registration_skips()
+        # nexus-yzij1: same treatment for the cross-owner mint announcements,
+        # so the end-of-run line names only this run's duplications.
+        from nexus.catalog.path_ambiguity import reset_mints_over_existing_path  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        reset_mints_over_existing_path()
 
         bar: tqdm | None = None
         n = 0
@@ -1397,6 +1401,33 @@ def index_repo_cmd(
                 err=True,
             )
 
+        def _emit_cross_owner_mint_summary() -> None:
+            # nexus-yzij1: several catalog documents per file_path is a
+            # normal steady state, so this is NOT a failure line — nothing
+            # was skipped and nothing is wrong. It exists because the run
+            # quietly grew a second document for a file another owner
+            # already holds, and an operator who is never told that learns
+            # it from a census months later (19 in one run, nexus-z0lu4).
+            from nexus.catalog.path_ambiguity import get_mints_over_existing_path  # noqa: PLC0415 — deliberate function-local import (rare branch: only on cross-owner mints)
+            mints = get_mints_over_existing_path()
+            if not mints:
+                return
+            click.echo(
+                f"  ℹ {len(mints)} file(s) now have MORE THAN ONE catalog "
+                f"document (nexus-yzij1): this run registered a document for "
+                f"a path another owner already holds. Allowed, not an error. "
+                f"Inspect with 'nx catalog links-for-file <path>'.",
+                err=True,
+            )
+            for m in mints[:5]:
+                click.echo(
+                    f"      {m['file_path']} — also " +
+                    ", ".join(m["existing"]),
+                    err=True,
+                )
+            if len(mints) > 5:
+                click.echo(f"      … and {len(mints) - 5} more", err=True)
+
         # nexus-7niu: per-stage timer collection. The callback appends one
         # StageTimers per file; end-of-run aggregation formats the table.
         timers_collected: list = []  # list[StageTimers]
@@ -1463,6 +1494,7 @@ def index_repo_cmd(
             emit_retry_summary()
             _emit_manifest_write_failure_summary()
             _emit_ephemeral_skip_summary()
+            _emit_cross_owner_mint_summary()
             _emit_debug_timing()
         # nexus-5xn3k.6 AC4: the per-file "skipped" label already exists on
         # the on_file callback's console line (above, monitor/non-tty only)
