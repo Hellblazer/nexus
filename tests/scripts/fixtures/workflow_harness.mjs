@@ -6,7 +6,10 @@
 // workflow-authoring reference states it: pipeline(items, ...stages) runs each
 // ITEM through the stages and a throwing stage drops that item to null;
 // parallel(thunks) calls THUNKS and turns a rejection into a null element;
-// agent() resolves to null rather than throwing when a dispatch dies; budget
+// agent() has TWO documented failure modes and the stub models both: it
+// RESOLVES null when a dispatch is skipped or dies terminally, and it THROWS
+// once the token budget is exhausted. A scenario makes a label throw with
+// {"__throw": "<message>"}; budget
 // is {total, spent(), remaining()} with remaining as a METHOD. So this catches
 // a script that misuses a primitive's shape, mishandles a null, or lets a hole
 // read as a clean result. It does NOT prove the real runtime agrees with the
@@ -15,6 +18,10 @@
 // Usage: node workflow_harness.mjs <script.js> <scenario.json>
 // scenario.json: {args, budget: {total}, agents: {"<label>": <result|null>},
 //                 agentDefault: <result|null>}
+// An `agents` entry (or agentDefault) of {"__throw": "<message>"} makes that
+// dispatch REJECT instead of resolve. Without it the budget-exhaustion path is
+// structurally unreachable by any scenario, which is how two unprotected
+// `agent()` call sites shipped past a green suite (bead nexus-xeoa0).
 
 import { readFileSync } from 'node:fs';
 
@@ -31,10 +38,16 @@ const logs = [];
 const agent = async (prompt, opts) => {
   const label = (opts && opts.label) || '<unlabelled>';
   dispatched.push({ label, phase: opts && opts.phase, prompt });
-  if (Object.prototype.hasOwnProperty.call(scenario.agents ?? {}, label)) {
-    return scenario.agents[label];
+  const result = Object.prototype.hasOwnProperty.call(
+    scenario.agents ?? {},
+    label
+  )
+    ? scenario.agents[label]
+    : scenario.agentDefault ?? null;
+  if (result && typeof result === 'object' && '__throw' in result) {
+    throw new Error(result.__throw);
   }
-  return scenario.agentDefault ?? null;
+  return result;
 };
 
 // Documented: run each ITEM through all stages, no barrier between stages.

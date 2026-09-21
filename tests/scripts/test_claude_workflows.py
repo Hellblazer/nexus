@@ -190,6 +190,82 @@ def test_dead_wire_census_flags_an_unverified_candidate(tmp_path: Path) -> None:
     assert result["complete"] is False
 
 
+def test_dead_wire_census_keeps_a_trace_when_verify_throws(tmp_path: Path) -> None:
+    """A thrown verify must not be reported as a trace that never completed.
+
+    `agent()` THROWS on budget exhaustion rather than resolving null, and the
+    reference is explicit that a pipeline stage which throws drops its item to
+    null and skips the rest of the chain. So an unprotected throw inside
+    `verifyStage` discards a `traced` that already succeeded, and the item
+    comes back as "trace did not complete" -- a false statement about what
+    happened, and the expensive half of the chain thrown away with it.
+
+    Distinguishing assertion: `traceDropped is False`. The sibling test above
+    (`..._flags_an_unverified_candidate`) covers verify RESOLVING null and
+    reaches the same `unverifiedCandidateIds` row, so only this field
+    separates the two failure modes.
+    """
+    scenario = {
+        "args": {"surface": "routes"},
+        "agents": {
+            "enumerate": {"items": [{"id": "r1", "location": "H.java"}]},
+            "trace:r1": {
+                "id": "r1",
+                "classification": "suspected",
+                "evidence": "no literal found",
+            },
+            "verify:r1": {"__throw": "token budget exhausted"},
+        },
+    }
+    report = run_workflow(DEAD_WIRE_CENSUS, scenario, tmp_path)
+    result = report["result"]
+    row = result["rows"][0]
+    assert row["traceDropped"] is False
+    assert row["evidence"] == "no literal found"
+    assert row["classification"] == "suspected"
+    assert row["verificationMissing"] is True
+    assert result["droppedIds"] == []
+    assert result["unverifiedCandidateIds"] == ["r1"]
+    assert result["complete"] is False
+    assert any("verify dispatch for r1 threw" in line for line in report["logs"])
+
+
+def test_pressure_test_keeps_survivors_when_synthesis_throws(
+    tmp_path: Path,
+) -> None:
+    """A thrown synthesis loses the ranking, never the findings.
+
+    The synthesis dispatch is the one `agent()` call in that file outside a
+    `parallel()` thunk, and `parallel()` is what converts a throw into a null
+    element. Unprotected, a budget-exhausted synthesis propagates out of the
+    script and discards every review, every vote and every upheld finding.
+
+    `verdict: null` is ambiguous on its own -- it is also what "nothing
+    survived refutation" produces -- so the test pins the fields that tell the
+    two apart.
+    """
+    agents = _pt_reviews()
+    for i in range(3):
+        agents[f"verify:code-mechanics:0:{i}"] = {
+            "refuted": False,
+            "reasoning": "stands",
+        }
+    agents["verify:spec-fidelity:1:0"] = {"refuted": True, "reasoning": "wrong"}
+    agents["synthesize"] = {"__throw": "token budget exhausted"}
+    scenario = {
+        "args": {"target": "diff X", "spec": "directive Y"},
+        "agents": agents,
+    }
+    report = run_workflow(PRESSURE_TEST, scenario, tmp_path)
+    result = report["result"]
+    assert result["synthesisDropped"] is True
+    assert result["verdict"] is None
+    assert result["survivingCount"] >= 1
+    assert len(result["unrankedSurvivors"]) == result["survivingCount"]
+    assert result["complete"] is False
+    assert any("synthesis dispatch threw" in line for line in report["logs"])
+
+
 def test_dead_wire_census_keys_rows_on_the_enumerated_id(tmp_path: Path) -> None:
     """Row identity comes from the enumeration, not the trace agent's echo.
 

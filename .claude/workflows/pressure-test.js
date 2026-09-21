@@ -307,26 +307,45 @@ if (allFindings.length > 0) {
 // --- Synthesize ------------------------------------------------------------
 
 let synthesis = null;
+let synthesisDropped = false;
 if (survivingFindings.length > 0) {
-  synthesis = await agent(
-    `Synthesize these surviving findings into a ranked, deduplicated verdict. Every finding here already survived an adversarial majority-vote refutation attempt, so do not re-litigate them — dedupe findings that restate the same defect from different lenses, then rank and give an overall verdict.\n\n${JSON.stringify(
-      survivingFindings,
-      null,
-      2
-    )}`,
-    {
-      label: 'synthesize',
-      phase: 'synthesize',
-      schema: {
-        type: 'object',
-        required: ['verdict', 'ranked'],
-        properties: {
-          verdict: { enum: ['ship', 'fix-then-ship', 'not-justified'] },
-          ranked: { type: 'array', items: FINDING_SCHEMA },
+  // This is the only dispatch in the file not inside a `parallel()` thunk,
+  // and `parallel()` is what converts a throw into a null element. Here
+  // there is no such conversion, so an `agent()` throw — the documented
+  // budget-exhaustion case — would propagate out of the script and discard
+  // everything: every review, every vote, every upheld finding. Losing the
+  // ranking is acceptable; losing the findings that survived refutation
+  // because the ranking could not be paid for is not. The catch keeps the
+  // findings and records that the verdict is missing for a reason, which is
+  // different from missing because nothing survived.
+  try {
+    synthesis = await agent(
+      `Synthesize these surviving findings into a ranked, deduplicated verdict. Every finding here already survived an adversarial majority-vote refutation attempt, so do not re-litigate them — dedupe findings that restate the same defect from different lenses, then rank and give an overall verdict.\n\n${JSON.stringify(
+        survivingFindings,
+        null,
+        2
+      )}`,
+      {
+        label: 'synthesize',
+        phase: 'synthesize',
+        schema: {
+          type: 'object',
+          required: ['verdict', 'ranked'],
+          properties: {
+            verdict: { enum: ['ship', 'fix-then-ship', 'not-justified'] },
+            ranked: { type: 'array', items: FINDING_SCHEMA },
+          },
         },
-      },
-    }
-  );
+      }
+    );
+  } catch (err) {
+    synthesisDropped = true;
+    log(
+      `pressure-test: the synthesis dispatch threw (${
+        err && err.message ? err.message : err
+      }). ${survivingFindings.length} finding(s) DID survive refutation and are returned unranked; the null verdict here means the ranking was never paid for, not that nothing survived.`
+    );
+  }
 } else {
   log(
     `pressure-test: nothing survived verification (${allFindings.length} finding(s) raised, ${unverifiedFindings.length} unverified). No synthesis agent dispatched; the verdict is reported as null rather than as "ship".`
@@ -344,6 +363,17 @@ return {
   findingCount: allFindings.length,
   survivingCount: survivingFindings.length,
   unverifiedFindings,
+  // Only populated when the synthesis dispatch threw. It carries the findings
+  // that survived refutation but never got ranked, so the work they cost is
+  // not lost with the ranking. Empty on every other path, where `ranked`
+  // already carries them.
+  unrankedSurvivors: synthesisDropped ? survivingFindings : [],
+  // True when the ranking was lost to a throw. A caller MUST distinguish this
+  // from a null verdict caused by nothing surviving: same `verdict: null`,
+  // opposite meaning.
+  synthesisDropped,
   complete:
-    reviews.length === reviewThunks.length && unverifiedFindings.length === 0,
+    reviews.length === reviewThunks.length &&
+    unverifiedFindings.length === 0 &&
+    !synthesisDropped,
 };

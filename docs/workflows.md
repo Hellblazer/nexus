@@ -49,9 +49,32 @@ Neither script tries to pre-cap its own fan-out against it, because a count
 of items cannot be compared to a token figure. Both log the remaining budget
 before their fan-out when a target is set, and — this is the part that
 matters — both report, by id, every item or finding whose chain did not
-complete. A run that lost dispatches comes back with `complete: false` and a
-populated `droppedIds` / `unverifiedFindings`, never as a clean table with
-quiet holes in it.
+complete. A run that lost dispatches comes back with `complete: false` and
+the loss named, never as a clean table with quiet holes in it. The fields are
+per script and they are not interchangeable:
+
+- `dead-wire-census` emits `droppedIds` (an item with no trace result) and
+  `unverifiedCandidateIds` (a candidate-dead item whose adversarial second
+  look never landed).
+- `pressure-test` emits `unverifiedFindings` (a finding no verification vote
+  landed on) and `synthesisDropped` with `unrankedSurvivors` (findings that
+  survived refutation when the ranking dispatch itself was lost).
+
+`agent()` fails in two ways and they need different handling: it RESOLVES
+null when a dispatch is skipped or dies terminally, and it THROWS once the
+budget is spent. `parallel()` converts a thrown thunk into a null element, so
+every dispatch inside one is already covered; a pipeline stage that throws
+instead drops its whole item, and a bare top-level `await agent(...)` throws
+out of the script entirely. Both scripts catch at the two sites where that
+applied — `dead-wire-census`'s verify stage and `pressure-test`'s synthesis —
+so a budget spent late in a run costs the work that had not happened yet and
+not the work already paid for.
+
+The throw path is exercised: `workflow_harness.mjs` takes an agent result of
+`{"__throw": "..."}`, and both catches carry a test that was proved
+non-vacuous by removing the catch and watching it fail. Until 2026-09-21 the
+stub could only resolve, which is how both unprotected sites passed a green
+suite.
 
 Until 2026-09-21 both files claimed to scale fan-out down under a tight
 budget. They could not: each tested `typeof budget.remaining === 'number'`,

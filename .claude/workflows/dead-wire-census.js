@@ -209,22 +209,43 @@ const verifyStage = async (prev) => {
   // This project's own unused-is-not-useless rule applied mechanically: "no
   // caller found" is a starting hypothesis, not a verdict, until someone has
   // tried to break it.
-  const verification = await agent(
-    `A trace concluded this item is "${traced.classification}": ${traced.id}\n\nEvidence given: ${traced.evidence}\n\nTry to prove this wrong: look for indirect callers (reflection, config-driven dispatch, string-built call sites, a caller in a different repo, ops tooling, a deploy script), and check whether "unused" here actually means "useful but not yet wired" rather than "safe to delete." State your verdict and whether the original classification stands.`,
-    {
-      label: `verify:${item.id}`,
-      phase: 'verify',
-      schema: {
-        type: 'object',
-        required: ['id', 'upheld', 'reasoning'],
-        properties: {
-          id: { type: 'string' },
-          upheld: { type: 'boolean' },
-          reasoning: { type: 'string' },
+  //
+  // The catch is not defensive padding. `agent()` has TWO failure modes and
+  // they are not interchangeable: it RESOLVES null when a dispatch is skipped
+  // or dies terminally, and it THROWS when the token budget is exhausted.
+  // A throw here would propagate out of this stage, and the reference is
+  // explicit that a stage which throws drops its item to null and skips the
+  // rest of its chain — so an exhausted budget during verify would discard
+  // `traced`, which already succeeded, and the item would be reported as
+  // "trace did not complete". That is a false statement about what happened.
+  // Swallowing the throw into `verification: null` routes the item into the
+  // unverified-candidate path below, which is the accurate description: the
+  // trace stands, the adversarial second look did not happen.
+  let verification = null;
+  try {
+    verification = await agent(
+      `A trace concluded this item is "${traced.classification}": ${traced.id}\n\nEvidence given: ${traced.evidence}\n\nTry to prove this wrong: look for indirect callers (reflection, config-driven dispatch, string-built call sites, a caller in a different repo, ops tooling, a deploy script), and check whether "unused" here actually means "useful but not yet wired" rather than "safe to delete." State your verdict and whether the original classification stands.`,
+      {
+        label: `verify:${item.id}`,
+        phase: 'verify',
+        schema: {
+          type: 'object',
+          required: ['id', 'upheld', 'reasoning'],
+          properties: {
+            id: { type: 'string' },
+            upheld: { type: 'boolean' },
+            reasoning: { type: 'string' },
+          },
         },
-      },
-    }
-  );
+      }
+    );
+  } catch (err) {
+    log(
+      `dead-wire-census: verify dispatch for ${item.id} threw (${
+        err && err.message ? err.message : err
+      }) — the trace stands and the item is reported as an unverified candidate, not as a dropped trace.`
+    );
+  }
   return { item, traced, verification };
 };
 
