@@ -1420,6 +1420,7 @@ nexus-7l3zo
 nexus-7lb9
 nexus-7lm3q
 nexus-7lw6a
+nexus-7m6uc
 nexus-7m8
 nexus-7m8.1
 nexus-7m8i
