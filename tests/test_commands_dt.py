@@ -985,6 +985,8 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
     ExtractionQualityError,
     IndexRunVerifyRefused,
     NexusError as _NexusError,
+    SourceUriCollectionMismatchError,
+    SourceUriNotFoundError,
     UnchunkableContentError,
     UnextractableContentError,
 )
@@ -1011,6 +1013,17 @@ _MEMBER_KWARGS: dict[type, dict] = {
     # nexus-rqsh1/nexus-1sd0f: pre-registration chunkability guard in
     # index_markdown/index_pdf — one zero-byte/binary record must fail
     # that record only, never abort the rest of the batch.
+    # nexus-z0lu4: reachable from a BATCH for the first time once `nx dt
+    # index` began naming the DEVONthink URI. No batch caller passed
+    # source_uri before, so the gap had never fired; both standing reviewers
+    # found it independently and one reproduced a 2-record batch whose first
+    # record's mismatch stopped the second from ever dispatching.
+    # Empty because both are plain NexusError subclasses with no custom
+    # __init__, so they take a positional message only and this registry is
+    # kwargs-keyed. What is under test here is whether the per-record loop
+    # SURVIVES the type, not what the message says.
+    SourceUriNotFoundError: {},
+    SourceUriCollectionMismatchError: {},
     UnchunkableContentError: {
         "message": (
             "refusing to index empty.md: file is zero bytes — nothing "
@@ -1144,6 +1157,53 @@ class TestAllTupleMembersSurviveTheRealPerRecordPath:
         assert not seq, "U2 was never dispatched — the batch aborted after U1's exception"
         assert "1 failed" in result.output, result.output
         assert "Indexed 1 record(s)" in result.output, result.output
+
+
+@pytest.mark.parametrize(
+    "exc_type",
+    [SourceUriNotFoundError, SourceUriCollectionMismatchError],
+    ids=lambda c: c.__name__,
+)
+def test_a_source_uri_failure_fails_one_record_not_the_batch(
+    runner, monkeypatch, exc_type,
+) -> None:
+    """NAMED EXPLICITLY, not derived from PER_RECORD_SURVIVABLE_EXCEPTIONS.
+
+    The conformance class above parametrizes over the tuple itself, so removing
+    a member removes its test cases and the suite goes green having checked
+    less — a population drawn from the thing under test cannot witness that
+    thing's absence. This test names the two types outright, so dropping them
+    from the tuple fails it.
+
+    The defect it pins (nexus-z0lu4 follow-up, found independently by both
+    standing reviewers, one reproducing it): passing source_uri made these two
+    reachable from a batch for the first time, and neither was survivable, so
+    one mismatched record aborted every record after it.
+    """
+    from nexus.cli import main
+
+    records = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+    monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
+
+    seq = [
+        lambda *a, **kw: (_ for _ in ()).throw(exc_type("first record mismatches")),
+        lambda *a, **kw: 4,
+    ]
+
+    def _dispatch(*a, **kw):
+        return seq.pop(0)(*a, **kw)
+
+    monkeypatch.setattr("nexus.doc_indexer.index_pdf", _dispatch)
+
+    result = runner.invoke(main, ["dt", "index", "--uuid", records[0][0]])
+
+    assert "Traceback" not in result.output, result.output
+    assert not seq, (
+        f"U2 was never dispatched — the batch aborted after U1's "
+        f"{exc_type.__name__}"
+    )
+    assert "Indexed 1 record(s)" in result.output, result.output
 
 
 class _SyntheticThirdMember(_NexusError):

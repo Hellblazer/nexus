@@ -571,10 +571,25 @@ class CombinedWriteEmbedTimeoutError(NexusError):
 #: zero-byte or binary-content file in a batch must fail THAT record
 #: only; single-file commands translate it to ClickException at the
 #: wrapper boundary before any loop sees it.
+#: SourceUriNotFoundError / SourceUriCollectionMismatchError join on exactly
+#: the UnchunkableContentError precedent above, for the same reason. Both fire
+#: from index_pdf/index_markdown's source_uri-keyed identity resolution
+#: (nexus-y8qtj), and single-file commands already translate them to a
+#: ClickException at the wrapper boundary (commands/index.py) before any loop
+#: sees them — so adding them here changes only the BATCH surfaces. They became
+#: reachable from a batch when ``nx dt index`` started naming the DEVONthink URI
+#: (nexus-z0lu4); before that no batch caller passed source_uri at all, which is
+#: why the gap had never fired. Both standing reviewers caught it independently
+#: and one reproduced it: a 2-record batch whose first record mismatches never
+#: dispatches the second. One record naming a collection that disagrees with its
+#: document's home must fail THAT record — aborting the rest is precisely the
+#: regression class this tuple exists to prevent (nexus-2fyb/qo84l/9800y/hb10j).
 PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     ChunkLandingUnverifiedError,
     IndexRunVerifyRefused,
     ExtractionQualityError,
     UnchunkableContentError,
     UnextractableContentError,
+    SourceUriNotFoundError,
+    SourceUriCollectionMismatchError,
 )
