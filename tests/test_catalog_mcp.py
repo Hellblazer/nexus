@@ -405,6 +405,40 @@ def test_update(cat) -> None:
     assert catalog_show(tumbler="1.1.1")["title"] == "New Title"
 
 
+def test_update_sets_alias_of(cat) -> None:
+    """The same document registered twice needs a third option.
+
+    Until this was exposed, alias_of was reachable only from Python
+    (HttpCatalogClient.set_alias), so an operator holding a duplicate could
+    either leave it in search results or delete it along with every link
+    pointing at it. That is a real situation, not a hypothetical: recovering
+    a paper whose source path had expired produced exactly this pair.
+    """
+    catalog_register(title="Canonical", owner="1.1")
+    catalog_register(title="Duplicate", owner="1.1")
+    out = catalog_update(tumbler="1.1.2", alias_of="1.1.1")
+    assert "alias_of" in out.get("updated", []), out
+    # Assert the alias RESOLVES, not merely that it was stored. Showing the
+    # duplicate must now return the canonical entry, because the catalog walks
+    # the alias chain on resolve — that following is the whole point, and a
+    # stored-but-unfollowed alias would pass a field-equality check while
+    # doing nothing. (The first version of this test asserted
+    # show("1.1.2")["alias_of"] == "1.1.1" and failed for that exact reason:
+    # show had already resolved to the canonical row, whose own alias_of is
+    # empty.)
+    resolved = catalog_show(tumbler="1.1.2")
+    assert resolved["tumbler"] == "1.1.1", resolved
+    assert resolved["title"] == "Canonical", resolved
+
+
+def test_update_rejects_a_malformed_alias_target(cat) -> None:
+    """alias_of is parsed as a Tumbler, so a non-tumbler is refused rather
+    than written through and discovered later on a resolve."""
+    catalog_register(title="Canonical", owner="1.1")
+    out = catalog_update(tumbler="1.1.1", alias_of="not-a-tumbler")
+    assert "error" in out, out
+
+
 def _setup_two_docs(cat) -> None:
     catalog_register(title="A", owner="1.1")
     catalog_register(title="B", owner="1.1")
