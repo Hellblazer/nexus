@@ -20,9 +20,11 @@ Pairs with engine-service-v0.1.129, unchanged from 7.55.2 — this release carri
 
 - **`nx init` failed opaquely as root, after paying for the download.** On a root-default box — a WSL2 distro whose install left no unprivileged user, or a container with no `USER` directive — `nx init` fetched and verified the ~100MB bundled PostgreSQL and then died with a bare non-zero exit status from `initdb`. The cause appears only in initdb's own output: it refuses to run as root, because the server process needs an unprivileged owner. No part of provisioning can succeed that way, so nexus now refuses at the top with the cause and the remedy named, before the download. (nexus-ov1oq)
 
-- **A cross-embedder taxonomy rebuild silently dropped every operator label.** When a collection's documents had fully migrated to a different embedder since its last rebuild, the old and new centroids differed in dimension, label transfer matched nothing, and the rebuild deleted every labelled centroid — uniformly on both sides, so the existing fetch-boundary guard could not see it. `compute_rebuild_plan` now refuses, naming both ways out. (nexus-dtqd7)
+- **A cross-embedder taxonomy rebuild silently dropped every operator label — partially fixed.** When a collection's documents had fully migrated to a different embedder since its last rebuild, the old and new centroids differed in dimension, label transfer matched nothing, and the rebuild deleted every labelled centroid — uniformly on both sides, so the existing fetch-boundary guard could not see it. `compute_rebuild_plan` now refuses on the main path.
 
-- **A ragged centroid fetch aborted the rebuild instead of reporting itself.** (nexus-pktki)
+  **It does not yet cover every path, and the release notes for this version originally said it did.** The refusal sits below `compute_rebuild_plan`'s two no-op early returns — fewer than five documents, and an all-noise clustering. Both return an empty plan, and the rebuild then deletes the old centroids and persists what it was given, empty included. So a migrated collection that is small, or that clusters as noise, still loses its labels by the same route. The refusal also names "purge the taxonomy and discover afresh" as one way out, and no taxonomy-scoped purge verb is reachable from the CLI in this release — the only reachable purge destroys the collection's documents. Both gaps are fixed in the next release. This is a description correction, not a regression: those paths behaved identically before this change.
+
+- **A ragged centroid fetch aborted the rebuild instead of reporting itself.**
 
 ## [7.55.2] - 2026-09-21
 
