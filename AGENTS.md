@@ -317,6 +317,17 @@ things to avoid carefully; they are impossible.
    branch, which a `develop` push cannot move at all, so the collision
    stops existing rather than being avoided carefully.
 
+   This is ENFORCED, not advised (nexus-57cvk's own closing question, which
+   noted that "advice decays"): `release-battery.sh` refuses when this
+   checkout holds `develop` and it is not the only worktree on the box —
+   exactly the condition under which rule 9 lets a peer move the tree. The
+   branch test is rule 2's own, because git will not check out a branch
+   twice, so "holds develop" IS "is the primary"; a path heuristic would
+   false-positive on a renamed directory, and a false positive here blocks
+   a release. A lone checkout with no peers is allowed, since nothing there
+   can move anything. `NX_BATTERY_ALLOW_DEVELOP=1` opts a deliberate
+   non-release sweep back in.
+
    Rule 4 is the one that gave way, because the two are not the same kind
    of rule. Rule 9's reason is correctness: a stale primary answers
    questions wrongly and looks complete doing it. Rule 4's reason was
