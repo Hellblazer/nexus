@@ -27,10 +27,20 @@ reads::
         raise
 
 So the unbounded post-kill drain is inside ``if _mswindows``. On POSIX the
-call is ``process.wait()`` on a just-SIGKILLed direct child, which returns
-promptly; a differential experiment on macOS confirmed it — four separate
-grandchild-holding-the-pipe shapes, all of which returned at 1.00s against
-a 1.0s timeout, none of which blocked.
+call is ``process.wait()`` on a just-SIGKILLed direct child. ``wait()`` is
+itself untimed, so the step that makes it finite is worth stating: the child
+is already dying when it is called, and no descendant can delay it — where
+the Windows ``communicate()`` waits on the PIPE, which any descendant can
+hold open.
+
+That is pinned by
+``tests/test_bounded_subprocess.py::test_stock_subprocess_run_does_not_hang_on_posix``,
+which runs four grandchild-holding-the-pipe shapes against the STOCK call
+and asserts each returns inside its own timeout. It is a test rather than a
+sentence here because this claim first shipped as prose in three places at
+once, resting on an interactive probe that was recorded nowhere runnable,
+and a fix-check pass caught that. It goes red if CPython moves the drain out
+from under ``if _mswindows``.
 
 The two platforms therefore have DIFFERENT defects, and this module fixes
 both for different reasons:

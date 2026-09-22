@@ -13,7 +13,10 @@ defect this module exists for.
 WHAT THE DIFFERENTIAL OBSERVES, and why it is not "the stock call hangs":
 an earlier draft of this file asserted exactly that, and it FAILED — on
 macOS the stock call returned at 1.00s against its 1.0s timeout. Four
-grandchild-holding-the-pipe shapes were then probed and none blocked.
+grandchild-holding-the-pipe shapes were then probed and none blocked — a
+finding that lived only in prose until a fix-check pass noticed it had no
+artifact, and that is now
+:func:`test_stock_subprocess_run_does_not_hang_on_posix` below.
 CPython 3.12.11's ``subprocess.run`` puts the unbounded post-kill
 ``communicate()`` inside ``if _mswindows`` and calls ``process.wait()`` on
 POSIX, so the hang is Windows-only. The POSIX defect is a LEAK: ``wait()``
@@ -53,6 +56,57 @@ def _sleeper_alive(marker: str) -> bool:
         ["pgrep", "-f", f"sleep {marker}"], capture_output=True, text=True, timeout=10
     )
     return found.returncode == 0
+
+
+#: The four shapes probed when the POSIX/Windows split was established. Each
+#: leaves a grandchild holding the stdout pipe; on Windows each would hang
+#: the post-kill drain. The claim they support is NEGATIVE — that none of
+#: them hangs on POSIX — which is why there are four rather than one.
+_POSIX_NON_HANG_SHAPES: dict[str, list[str]] = {
+    "sh_backgrounds_and_exits": ["sh", "-c", "sleep 30 & exit 0"],
+    "sh_backgrounds_and_stays": ["sh", "-c", "sleep 30 & sleep 30"],
+    "python_grandchild": [
+        sys.executable,
+        "-c",
+        "import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);raise SystemExit(0)",
+    ],
+    "explicit_stdout_redirect": ["sh", "-c", "sleep 30 >&1 & exit 0"],
+}
+
+
+@posix_only
+@pytest.mark.parametrize("shape", sorted(_POSIX_NON_HANG_SHAPES))
+def test_stock_subprocess_run_does_not_hang_on_posix(shape: str) -> None:
+    """Stock ``subprocess.run`` honours its timeout on POSIX, every shape.
+
+    THIS TEST EXISTS BECAUSE ITS CLAIM WAS PROSE. The RDR-218 text, this
+    module's docstring and ``bounded_subprocess.py`` all asserted "four
+    distinct grandchild-holding-the-pipe shapes all returned at 1.00s
+    against a 1.0s timeout" on the strength of an interactive probe that
+    was never recorded anywhere runnable. A fix-check pass caught that the
+    figure appeared in three co-shipped prose sites and no artifact. This
+    is the artifact.
+
+    The claim is NEGATIVE — that the drain hang does not occur here — so it
+    is asserted against the STOCK call, not against ``run_bounded``. If
+    CPython ever moves the untimed post-kill ``communicate()`` out from
+    under ``if _mswindows``, this goes red and the POSIX half of the
+    module's account needs rewriting.
+    """
+    argv = _POSIX_NON_HANG_SHAPES[shape]
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(  # noqa: S603 - the stock call is the subject here
+            argv, capture_output=True, text=True, timeout=_BOUND_S
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < _BOUND_S + 2.0, (
+        f"stock subprocess.run took {elapsed:.2f}s against a {_BOUND_S}s timeout "
+        f"for shape {shape!r} -- the post-kill drain blocked, which on POSIX it "
+        "is not supposed to do. The module docstring's Windows-only claim is "
+        "now wrong and needs re-deriving from CPython's current source."
+    )
 
 
 def _sweep(*markers: str) -> None:
