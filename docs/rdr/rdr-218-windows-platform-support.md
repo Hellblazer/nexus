@@ -499,6 +499,56 @@ different: `nexus-dgvsz`'s starvation symptom shares one serialized stdio pipe
 across nine `mcp_tool` hook entries with 5–10 second timeouts, and Windows adds
 latency on that pipe (`nexus-34f7r`). Unmeasured on Windows.
 
+**The two load-bearing mechanism claims are now VERIFIED by experiment**
+(2026-09-21, qwentescence, WSL 2.7.14.0, kernel 6.18.33.2). They were asserted
+first and tested afterwards, which is the wrong order; the record of the test
+is below so nobody has to take the assertion on faith again.
+
+*A `docker export` rootfs boots under WSL2 with systemd as pid 1.* An
+`ubuntu:24.04` image with `systemd systemd-sysv dbus` installed, a baked
+`/etc/wsl.conf` carrying `[boot] systemd=true` and `[user] default=nexus`, and
+an unprivileged `nexus` user, cross-built `--platform linux/amd64` on an arm64
+Mac, exported with `docker export` to a 104 MB tar, copied to the Windows host
+and imported with `wsl --import`. Results: `IMPORT_EXIT=0`; `PID1=systemd`;
+`WHOAMI=nexus`, so the baked default user applied; `ARCH=x86_64`, so the
+cross-built rootfs runs on the AMD64 host; and the image marker confirmed the
+booted distro was that image.
+
+`systemctl is-system-running` reports **degraded**, and the single cause is
+`kmod-static-nodes.service` ("Create List of Static Device Nodes"), which is
+meaningless under WSL's own kernel. Nothing else failed. A first-boot warning —
+"Failed to start the systemd user session" — is cosmetic: `systemd-logind` is
+`active`, and **`loginctl enable-linger nexus` returns `Linger=yes`**, so Gap
+3's session-teardown fix works inside a docker-built appliance.
+
+*WSL2 mounts a separate virtual disk, and the data survives replacing the
+image.* A 2 GB expandable VHDX created with `diskpart` (`New-VHD` is absent on
+this host — no Hyper-V module), attached with
+`wsl --mount --vhd <path> --bare`, appeared as `/dev/sde`, was formatted ext4
+**inside the distro** — which is what the 2026-09-18 research requires of the
+PostgreSQL data directory, as opposed to a 9P mount under `/mnt/c` — mounted,
+and round-tripped a marker file.
+
+Then the decisive test: the distro was `--unregister`ed and re-imported from
+the same tar, simulating an image update, and the volume reattached.
+`SURVIVED_MARKER=rdr218-data-volume` against a fresh rootfs. So "update the
+service without toasting the data" is a measured property of this design, not
+an aspiration.
+
+**Still unverified, and it is the friction claim rather than the mechanism:**
+whether `wsl --mount` and `wsl --import` work *without administrative rights*.
+Both succeeded here, but the ssh session that ran them carries a full
+Administrator token, so the experiment cannot distinguish "works" from "works
+because elevated" — and Microsoft documents `wsl --mount` as requiring
+elevation. This matters for the Desktop install story specifically and is the
+next thing Phase 1 should settle.
+
+**Also unverified, and smaller:** that a *fixed* port behaves under WSL2's
+localhost relay the way ephemeral ones did — what was measured was the bind
+*family*, not port fixedness; and that Windows wheels exist for the whole
+conexus dependency closure, which the native-client half needs and which no
+gate covers.
+
 **That WSL2 itself is acceptable as a dependency.** Every option except C
 requires it. On the one host tested, installing it required an MSI, admin
 rights and a reboot, because the inbox stub and winget both failed. If that is
@@ -555,8 +605,11 @@ from assets CI already publishes, and most of it is testable on a Linux runner
 
 A published WSL2 root-filesystem image, consumed by `wsl --import`, containing:
 
-- The `linux-amd64` PostgreSQL 17 + pgvector bundle, already provisioned into a
-  cluster rather than merely downloaded.
+- The `linux-amd64` PostgreSQL 17 + pgvector bundle — the *binaries*. Not a
+  provisioned cluster: a PostgreSQL data directory is coupled to binary
+  version, locale and collation, so baking one post-`initdb` is a portability
+  trap this design does not need to take. The cluster is created on first boot,
+  onto the data volume below.
 - The `linux-amd64` `nexus-service` engine binary.
 - Both ONNX models — bge-768 (~416 MB) and the ms-marco cross-encoder
   (~91 MB) — pre-fetched, since these are the two steps of `nx init` that cost
@@ -573,6 +626,73 @@ That collapses steps 2 through 7 of the Problem Statement — the unprivileged
 user, `uv`, the interpreter-pinned install, `nx init`'s downloads, lingering,
 and the bind flag — into one download and one import.
 
+### Code and data are separate, and both locations are already configurable
+
+Sam, 2026-09-21: "can't we mount the data volume or something so we can update
+the service without toasting all the data (or worse, back/up)". Yes, and it
+needs no code change — the two directories involved are *already* environment
+overrides:
+
+- `NEXUS_CONFIG_DIR` (`src/nexus/config.py:619`, tier 1 of
+  `nexus_config_dir()`) relocates the durable estate. Everything derives from
+  it: the PostgreSQL cluster (`pg_provision.py:2125`, `config_dir /
+  "postgres"`), the engine binary
+  (`binary_install.py:359`, `config_dir / "service" / ...`), credentials, logs
+  and leases.
+- `NX_ONNX_MODEL_DIR` (`src/nexus/db/onnx_model_root.py:37,53`) relocates the
+  ONNX models, which otherwise sit under `HOME/.cache/nexus/onnx_models`.
+
+So the appliance splits cleanly into an immutable half that ships in the image
+and a persistent half on a mounted volume:
+
+| | lives in | contents |
+|---|---|---|
+| **Code** | the image, replaced on update | OS, Python, the conexus wheel, PostgreSQL binaries, the systemd unit, the `nexus` user with lingering, and — if the size answer goes that way — the ONNX models |
+| **Data** | a mounted volume, never replaced | `NEXUS_CONFIG_DIR`: the PostgreSQL cluster, the engine binary, credentials, logs |
+
+Three things fall out of that split, and the third is the one that matters
+most.
+
+First, updating the service stops being destructive by construction: re-import
+a new image, re-attach the same volume, and the cluster is untouched. That is
+the property Sam asked for, and it is also what makes a backup story optional
+rather than urgent — though not unnecessary.
+
+Second, the ONNX models become a genuine choice rather than a build constraint
+(decision surface item 2). In the image they are ~500 MB of immutable content
+that a re-import refreshes; on the volume the image is smaller and first boot
+is slower. Either is one environment variable.
+
+Third — **this resolves a contradiction an earlier draft of this record
+carried.** That draft said the client inside the appliance updates in place
+while "the engine and PostgreSQL change only when a new image is imported."
+That was wrong: a local-mode box converges its engine from
+`PINNED_SERVICE_TAG`, which derives from `REQUIRED_ENGINE_VERSION`, so an
+in-place client update *does* move the engine by downloading a new binary. With
+the split above the behaviour is coherent instead of contradictory: the engine
+binary lives on the *data* volume, so a converged engine persists across
+re-imports and the image's engine is only ever the initial seed. A re-import
+cannot silently downgrade a converged engine, and the one-engine-identity-per-
+release contract holds inside the appliance exactly as it does on any other
+local-mode box.
+
+### Publishing it, and downloading it during install
+
+Sam, 2026-09-21: "can't we publish the appliance and download it in the install
+process?" Yes, and the appliance inherits machinery that already exists rather
+than needing its own. The PostgreSQL bundle and the engine binary are already
+published as release assets and already acquired with verification — a sha256
+check plus a Sigstore protobuf bundle, with no `cosign` binary required, and an
+extract-time `bundle/.build_prefix` marker check
+(`src/nexus/db/pg_bundle.py`, `src/nexus/daemon/binary_install.py`). An image
+is one more asset on that path.
+
+So "download during install" is not a new subsystem: it is the same
+verified-asset acquisition the client already performs twice, pointed at a
+third artifact. What genuinely is new is the *size* — decision surface item 1 —
+and whether a plain signed tarball is an acceptable distribution channel or
+whether the install wants winget or the Microsoft Store.
+
 ### The release lifecycle this rides
 
 The appliance's contents are, almost exactly, the engine release's published
@@ -585,10 +705,12 @@ as a draft until every one is present
 image needs.
 
 This also answers the update question Sam's constraint opens. He allowed a CLI
-for updating but not for installing, and the split falls out naturally: the
-*client* inside the appliance updates in place, which is an `nx` operation and
-therefore permitted; the *engine and PostgreSQL* change only when a new image
-is imported, on the engine cadence, which is rare and deliberate.
+for updating but not for installing, and with the code/data split above the
+model is: the *image* is replaced on the engine cadence, rarely and
+deliberately; the *client* updates in place, which is an `nx` operation and
+therefore permitted; and the *data* is never replaced by either, because it is
+not in the image. Engine convergence rides the client update and persists on
+the data volume, so the two cadences do not fight.
 
 ### Approach
 
@@ -605,6 +727,15 @@ underneath the attempt.
 
 No image-building automation in this phase. If the shape is wrong, it is wrong
 before any CI work is spent on it.
+
+The two mechanism questions this phase existed to de-risk are already
+answered — a `docker export` rootfs boots with systemd as pid 1, lingering
+works in it, a separate VHDX mounts as ext4 inside the distro, and the data
+survives an unregister-and-re-import cycle (see Critical Assumptions). What
+Phase 1 still owes is the *elevation* question: whether `wsl --import` and
+`wsl --mount` work for a non-administrator, since the experiment ran under an
+Administrator token and cannot tell the difference. A negative answer does not
+reshape the architecture but does reshape the Desktop install flow.
 
 **Phase 2 — the endpoint contract (Gaps 1 and 2).** With an appliance we
 control, discovery mostly dissolves: the systemd unit pins a *fixed* port
