@@ -40,6 +40,14 @@ ROUTING = (
     / "conexus" / "hooks" / "scripts" / "routing"
 )
 
+#: Where a PORTED guard lives (nexus-t9klx). The two-surface contract this
+#: module pins — registry.yaml and the call site must agree on fail_closed —
+#: is not about which directory the guard sits in, so the call-site scan
+#: covers both. Scanning only the plugin directory would have quietly
+#: reported a ported rule as having no call site at all, which is how this
+#: file first went red.
+WHEEL_HOOKS = pathlib.Path(__file__).parent.parent / "src" / "nexus" / "hooks"
+
 #: Drives ``_lib.run_hook`` with a body that raises, in a child process,
 #: because ``run_hook``'s emitters call ``sys.exit`` and its stdout IS the
 #: assertion. Nothing here imports the hook scripts in-process.
@@ -144,6 +152,18 @@ class TestTheTwoSurfacesAgree:
             m = re.search(r"run_hook\([^)]*fail_closed=(True|False)", body)
             if m:
                 flags[script.stem] = m.group(1) == "True"
+        # Ported guards: keyed on the module's OWN RULE_NAME rather than its
+        # filename, because the verb name, the module name and the rule name
+        # deliberately differ — the port carried RULE_NAME unchanged so old
+        # and new routing-log rows stay comparable.
+        for module in sorted(WHEEL_HOOKS.glob("*.py")):
+            body = module.read_text()
+            m = re.search(r"run_hook_result\((?:[^)]|\n)*?fail_closed=(True|False)", body)
+            if not m:
+                continue
+            name = re.search(r'^RULE_NAME\s*=\s*"([^"]+)"', body, re.MULTILINE)
+            if name:
+                flags[name.group(1)] = m.group(1) == "True"
         return flags
 
     def test_every_registry_rule_has_a_call_site(self):

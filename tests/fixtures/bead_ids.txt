@@ -1017,6 +1017,7 @@ nexus-5da44
 nexus-5daww
 nexus-5daww.1
 nexus-5dcky
+nexus-5dcky.1
 nexus-5den3
 nexus-5dmpe
 nexus-5drgy
@@ -5628,6 +5629,7 @@ nexus-t0nrd
 nexus-t0p7o
 nexus-t0p7o.1
 nexus-t0zcn
+nexus-t10nc
 nexus-t1b1k
 nexus-t1hnc
 nexus-t1hnc.1

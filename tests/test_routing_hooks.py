@@ -82,8 +82,11 @@ _ROUTING_ALLOW_OWNERSHIP_PHRASE = "not yours to reach for"
 #: Live hook scripts (relative to routing/) whose deny message offers the
 #: `# routing-allow:` escape and must therefore carry the same ownership
 #: phrase as the authoring template.
+#: nexus-t9klx ported phase_review_close_requires_gate.py into the wheel;
+#: its verb's deny wording is unchanged and is checked by
+#: tests/test_routing_phase_review_close.py against the same template.
+#: This tuple names PLUGIN-RESIDENT scripts, so it shrinks as they go.
 _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE = (
-    "phase_review_close_requires_gate.py",
     "subagent_git_write_requires_orchestrator.py",
 )
 

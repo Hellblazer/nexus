@@ -54,9 +54,15 @@ _EXEMPT_RELATIVE_PATHS = frozenset({"_hook_logging.py"})
 #: file-discovery walk or the AST detection return nothing (e.g. a wrong
 #: glob, or a rewrite that changes both files' import shape at once)
 #: reads as a pass, not a silent vacuity (nexus-moht0 doctrine).
+#: ``routing/phase_review_close_requires_gate.py`` was the second member
+#: until nexus-t9klx ported it into the wheel, where the stdout/structlog
+#: collision this guard exists for cannot happen: a verb returns its
+#: envelope as a value and never writes the decision channel itself. One
+#: name left is thin for a non-vacuity floor, and the floor walks to zero
+#: as the last plugin scripts go — at which point this module is DELETED
+#: rather than left asserting over an empty set.
 _KNOWN_NEXUS_IMPORTING_FILES = frozenset({
     "rdr_hook.py",
-    "routing/phase_review_close_requires_gate.py",
 })
 
 

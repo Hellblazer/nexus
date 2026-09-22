@@ -218,6 +218,13 @@ def test_the_resolver_list_covers_what_reaches_the_plugin() -> None:
         # module was fixed. _code_only fixed the scan instead, and five of
         # the six stopped matching.
         "nexus.hooks.pre_close_verification",
+        # Reaches the plugin because reaching the plugin IS its job
+        # (nexus-t9klx): it reads the INSTALLED plugin's
+        # .claude-plugin/plugin.json version to detect plugin<->CLI skew,
+        # which is the whole of RDR-143. There is no sibling SCRIPT being
+        # resolved here — the thing it reads is the plugin's own manifest,
+        # and it would still read it if every script were gone.
+        "nexus.hooks.version_lockstep",
     }
     surprises = unlisted - known_ok
     assert not surprises, (
