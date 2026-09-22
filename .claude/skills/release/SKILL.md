@@ -20,6 +20,16 @@ neither file.)
 
 ## Steps
 
+### Where to run the battery
+
+In the release worktree, on the release branch — never in the shared primary
+checkout. AGENTS.md § "Worktrees: one session, one worktree" rule 4 carries the
+reason and the incident; the short version is that rule 9 fast-forwards the
+primary on every push to `develop`, and a tree that moves mid-battery makes the
+artifact-identity guard (nexus-mbeke) refuse every remaining leg. Cut the
+worktree before Step 1's expensive legs, so the artifacts are built once and in
+the tree that actually ships.
+
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
 The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release pins ONE engine IDENTITY, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — the engine the release was built and gated with, installed on EVERY path (fresh init AND upgrade). It is NOT a compatibility minimum and NOT a range (Hal directive 2026-07-15). `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independently hand-typed literal — there is no floor/exact split to reason about, bumping the one constant moves both together, by construction.

@@ -978,6 +978,7 @@ nexus-571e6
 nexus-572g
 nexus-575kd
 nexus-575kd.1
+nexus-57cvk
 nexus-57dh4
 nexus-57j
 nexus-57j.1
@@ -3937,6 +3938,7 @@ nexus-k8s4v
 nexus-k9er
 nexus-kard5
 nexus-kas9u
+nexus-kas9u.1
 nexus-kbn97
 nexus-kc4x
 nexus-kcaqk
@@ -4837,6 +4839,7 @@ nexus-oei.5
 nexus-oei.5.1
 nexus-oen22
 nexus-oeqk8
+nexus-of2x8
 nexus-ofpqq
 nexus-og52j
 nexus-ogccs
@@ -5602,6 +5605,7 @@ nexus-ssp.1
 nexus-ssqk9
 nexus-st976
 nexus-stkek
+nexus-stkek.1
 nexus-stvfd
 nexus-stx52
 nexus-sue7d

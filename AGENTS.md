@@ -304,12 +304,34 @@ things to avoid carefully; they are impossible.
    false the first time someone runs a suite there, and a rule that is
    false on first contact becomes advisory.
 
-4. **The release battery runs IN THE PRIMARY.** It keys artifacts on the
-   working tree's identity and refuses artifacts whose manifest identity is
-   not this checkout's (nexus-mbeke), so rotating worktrees would rebuild
-   the wheel, jar and native candidate every time. The engine build does
-   NOT need the primary: the lease lives in the git common dir and the jar
-   cache is keyed on `service/` content, so any worktree gets a copy.
+4. **The release battery runs IN THE RELEASE WORKTREE, never the primary**
+   (nexus-57cvk; this said "in the primary" until 2026-09-22). It keys
+   artifacts on the working tree's identity and refuses artifacts whose
+   manifest identity is not this checkout's (nexus-mbeke), so the tree it
+   runs in must not move underneath it — and the primary moves by
+   construction, because rule 9 fast-forwards it on every push to
+   `develop`. On 2026-09-22 that ended 7.57.0's battery on its twelfth leg
+   with a tree-identity mismatch naming two hashes: eleven legs green,
+   nothing wrong with the code, and neither session having done anything
+   the rules did not tell it to. A release worktree holds the release
+   branch, which a `develop` push cannot move at all, so the collision
+   stops existing rather than being avoided carefully.
+
+   Rule 4 is the one that gave way, because the two are not the same kind
+   of rule. Rule 9's reason is correctness: a stale primary answers
+   questions wrongly and looks complete doing it. Rule 4's reason was
+   cost: the primary was where the artifacts already were, so rotating
+   worktrees rebuilt the wheel and the native candidate every time. Cost
+   yields to correctness.
+
+   The rebuild is worth paying on its own merits anyway. The version bump
+   lands in the release branch, so a battery run in the primary gates a
+   tree that is NOT the tree that ships. One artifact rebuild per release
+   buys "we gated what we shipped", which is the whole point of a battery.
+
+   The engine build needs neither tree: the lease lives in the git common
+   dir and the jar cache is keyed on `service/` content, so any worktree
+   gets a copy.
 
 5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Scoped runs
    are unaffected. This rule exists because worktrees DESTROY an accidental
@@ -355,7 +377,9 @@ things to avoid carefully; they are impossible.
 
    Attach it to the push rather than to a schedule or a habit, because the
    push is the event that creates the staleness and is already a thing
-   someone does deliberately. If the primary is dirty, do NOT force it:
+   someone does deliberately. It is unconditional: rule 4 moved the
+   release battery out of the primary precisely so that nothing you have
+   to check for can be running in there. If the primary is dirty, do NOT force it:
    a dirty primary is a rule-3 violation someone is mid-way through, and
    clobbering it is worse than a stale read. Say so on the bus instead.
 
