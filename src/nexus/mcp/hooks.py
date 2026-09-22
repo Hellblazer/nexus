@@ -67,8 +67,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Iterable, Mapping
-from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
-from concurrent.futures import TimeoutError as _FuturesTimeout
+import threading as _threading
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
@@ -163,10 +162,34 @@ DECIDING_HOOKS: frozenset[str] = frozenset(
 #: only thing it can still do is hold a tool call open. Answering without it
 #: is strictly better than holding the session, whatever the cause.
 #:
-#: CHOOSING A VALUE. Keep it under the hooks.json `timeout` of every event
-#: the hook is wired on, and above what its own work legitimately costs. The
-#: default suits a hook whose work is local; a hook that shells out wants
-#: room for its subprocesses' own timeouts (see `stop_verification`).
+#: CHOOSING A VALUE — derived, not invented. A wired hook's bound is the
+#: `timeout` its own `hooks.json` entry declares, MINUS a second, so the tool
+#: answers just before the harness stops listening rather than just after.
+#:
+#: The margin is not tidiness. `nexus-dgvsz` measured what a late answer
+#: costs on this transport: the client abandons the request id at its own
+#: timeout, the server answers afterwards, and the late reply arrives as an
+#: unknown message id and tears the stdio connection down. A bound equal to
+#: the budget is a coin flip on exactly that, so it has to land inside it.
+#:
+#: `tests/hooks/test_hook_tool_timeout.py` reads `hooks.json` and fails if
+#: any spec's bound reaches what its own events allow, so this stays derived
+#: rather than merely having been derived once.
+#:
+#: The DEFAULT applies to a spec `hooks.json` does not wire as an
+#: `mcp_tool` — the `DECIDING_HOOKS` above take the command tier, where the
+#: harness kills the process outright and nothing here is reachable. It
+#: exists so an unwired spec still has a bound, not because 30s means
+#: anything in particular.
+#:
+#: `stop_verification` is the one spec below its event's number: Stop allows
+#: 180s, and 90 covers the 60s of subprocess timeouts its own work can
+#: legitimately reach while halving what a Windows user waits at session end.
+#: That derivation assumes `subprocess.run(timeout=N)` caps execution, which
+#: the measurement above disproves for this exact shape — so read the 90 as a
+#: ceiling on LEGITIMATE work, never as a promise about the blocked path.
+#: The bound is what makes the blocked path finite; the number only decides
+#: how long finite is.
 #:
 #: WHAT A TIMEOUT LEAVES BEHIND. Python cannot kill a thread, so the blocked
 #: `run()` keeps running, and on Windows it stays blocked for the life of the
@@ -244,6 +267,10 @@ class HookToolSpec:
 HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     HookToolSpec(
         name="agent_dispatch_expect",
+        # PreToolUse wires this at 10s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=9.0,
         run=_run_agent_dispatch_expect,
         fields=("session_id", "tool_name", "tool_use_id", "tool_input"),
         structured_fields=frozenset({"tool_input"}),
@@ -293,6 +320,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_start_stamp",
+        # SubagentStart wires this at 10s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=9.0,
         run=_run_subagent_start_stamp,
         fields=("session_id", "agent_id", "agent_type"),
         field_docs={
@@ -401,6 +432,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_start",
+        # SubagentStart wires this at 10s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=9.0,
         run=_run_subagent_start,
         fields=('session_id', 'agent_id', 'agent_type', 'task'),
         field_docs={
@@ -421,6 +456,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="post_compact",
+        # PostCompact wires this at 10s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=9.0,
         run=_run_post_compact,
         fields=('session_id',),
         field_docs={
@@ -434,6 +473,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="divergence_language_guard",
+        # PostToolUse wires this at 10s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=9.0,
         run=_run_divergence_language_guard,
         fields=('session_id', 'tool_name', 'tool_input'),
         structured_fields=frozenset({"tool_input"}),
@@ -450,6 +493,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_start_tuple",
+        # SubagentStart wires this at 10s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=9.0,
         run=_run_subagent_start_tuple,
         fields=("session_id", "agent_id", "agent_type", "task"),
         field_docs={
@@ -475,6 +522,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_stop_tuple",
+        # SubagentStop wires this at 10s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=9.0,
         run=_run_subagent_stop_tuple,
         fields=("session_id", "agent_id", "agent_type"),
         field_docs={
@@ -494,6 +545,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="stop_failure",
+        # StopFailure wires this at 5s in hooks.json; the bound sits a
+        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
+        # margin exists (nexus-dgvsz: a late answer tears down the transport).
+        timeout_s=4.0,
         run=_run_stop_failure,
         fields=("error", "error_details"),
         field_docs={
@@ -597,6 +652,18 @@ def _run_bounded(
     See :data:`DEFAULT_HOOK_TOOL_TIMEOUT_S` for the measurement this exists
     for and for what the abandoned thread costs.
 
+    A DAEMON THREAD, not a ThreadPoolExecutor, and the difference is the
+    whole fix rather than a style choice. ``concurrent.futures.thread``
+    registers a process-wide ``atexit`` handler that ``join()``s every live
+    pool thread unconditionally; ``shutdown(wait=False)`` does not exempt it.
+    Measured on this project's own interpreter: a pool whose worker is
+    abandoned keeps the PROCESS from exiting (``timeout 8`` -> rc 124) after
+    ``main()`` returned in a second, while the same shape on a daemon thread
+    exits in 0.26s. nx-mcp relies on a clean exit at stdin EOF to run its T1
+    shutdown, so a pool here would have traded a hang at the Stop hook for a
+    hang at session end — the orphaned-process symptom this bead opened with,
+    moved to a later moment. Found in review of the first cut.
+
     The timed-out shape is ``HookResult(crashed=True)`` — the SAME shape
     :func:`never_fail` produces for a hook that raised. That is deliberate:
     both mean "this hook said nothing", the harness already treats that as
@@ -604,13 +671,21 @@ def _run_bounded(
     a distinction no caller acts on. The log event differs, which is where
     the distinction belongs.
     """
-    pool = _ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{tool_name}-bounded")
-    future = pool.submit(spec.run, payload)
-    # shutdown(wait=False) so a timed-out worker does not pin this call; the
-    # thread is abandoned, not joined. Python has no way to cancel it.
-    try:
-        return future.result(timeout=spec.timeout_s)
-    except _FuturesTimeout:
+    box: dict[str, Any] = {}
+
+    def _call() -> None:
+        try:
+            box["result"] = spec.run(payload)
+        except BaseException as exc:  # noqa: BLE001 — re-raised in the caller; see below
+            box["error"] = exc
+
+    worker = _threading.Thread(
+        target=_call, name=f"{tool_name}-bounded", daemon=True
+    )
+    worker.start()
+    worker.join(spec.timeout_s)
+
+    if worker.is_alive():
         _log.warning(
             "hook_tool_timed_out",
             hook=tool_name,
@@ -621,8 +696,16 @@ def _run_bounded(
             ),
         )
         return HookResult(crashed=True)
-    finally:
-        pool.shutdown(wait=False)
+
+    # Re-raised HERE, in the calling thread, so never_fail sees it exactly as
+    # it would have without the bound. That is what keeps its documented
+    # passthrough intact: KeyboardInterrupt, SystemExit and CancelledError
+    # (including wrapped in a BaseExceptionGroup) must reach the caller
+    # rather than being turned into a silent result, and an exception left
+    # sitting in a worker thread would reach nobody.
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:

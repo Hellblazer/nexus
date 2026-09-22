@@ -2931,6 +2931,7 @@ nexus-fcfio
 nexus-fcjt7
 nexus-fctci
 nexus-fcx2s
+nexus-fd3zf
 nexus-fdfh3
 nexus-fdk1x
 nexus-fdn1c

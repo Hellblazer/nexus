@@ -11,7 +11,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A hook tool can no longer hold a session open** (nexus-5dcky). Every
   `hook_<name>` MCP tool now bounds its `run()`; past the bound the tool
   answers with the same empty result a crashed hook already produces, and
-  logs `hook_tool_timed_out`. `hooks.json` wires `hook_stop_verification` on
+  logs `hook_tool_timed_out`. Each wired hook's bound is derived from the
+  `timeout` its own `hooks.json` entry declares, a second inside it —
+  `tests/hooks/test_hook_tool_timeout.py` reads that file and fails if any
+  bound reaches its budget. The margin is `nexus-dgvsz`'s: a reply that
+  lands after the client abandoned the request id arrives as an unknown
+  message and tears the stdio transport down, so a bound equal to the
+  budget would trade a hang for a teardown. `hooks.json` wires
+  `hook_stop_verification` on
   Stop, so on native Windows with no service endpoint — the default state
   there, since the PG bundle has no Windows target and `nx init` refuses —
   `claude -p` answered the prompt and then sat there indefinitely. Measured
@@ -29,11 +36,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whatever the cause. Python cannot kill the thread, so a timed-out `run()` is
   abandoned rather than stopped — stated in the code, not left to be found.
 
+  It runs on a daemon thread rather than a `ThreadPoolExecutor`, and that is
+  the fix rather than a style choice: `concurrent.futures.thread` joins every
+  live pool thread from a process-wide `atexit` handler and
+  `shutdown(wait=False)` does not exempt it, so an abandoned worker kept the
+  interpreter from exiting at all. Since nx-mcp exits at stdin EOF and runs
+  its T1 shutdown there, the first cut of this fix would have moved the hang
+  from the Stop hook to session end. Caught in review; pinned by a
+  subprocess test that fails with `TimeoutExpired` if it comes back.
+
   The original diagnosis in `nexus-5dcky` and RDR-218's Gap 4, that a hook
   blocks when it cannot resolve a service endpoint, was an inference from a
   four-way probe and is wrong: none of the SessionStart hooks block, both MCP
   servers initialize and list tools in about a second, and the Stop hook's
   blocking path touches no storage at all. Both records are corrected.
+
+  What this does NOT cover, stated because the bead's own diagnosis was
+  wider than its title: MCP tools that are not hooks and do touch storage —
+  `tuple_registry` and every other `T2Database` caller — are still unbounded
+  and still hang on Windows with no endpoint. Bounding those is a change to
+  the failure mode of every storage operation on every platform rather than
+  a rider on this fix, so it is `nexus-fd3zf` with both arguments written
+  out.
 
 ## [7.57.0] - 2026-09-22
 
