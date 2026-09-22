@@ -32,7 +32,8 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.55.3)
 
-- `conexus/hooks/scripts/preflight.py` — its `nx` install hint now names an
-  interpreter (`uv tool install conexus --python 3.12`). Without it a user on a
-  distro whose `python3` is 3.14 follows the hint into the nexus-sa187 resolver
-  failure. Sessions running the pinned plugin still read the old hint.
+- `conexus/hooks/scripts/preflight.py` — DELETED. `hooks.json`'s SessionStart
+  entry has named the `nx-hook preflight` verb since RDR-215 nexus-q02nx.21, so
+  nothing wired this copy; deleting it is that port's remaining half. Sessions
+  running the pinned plugin still carry the file, and it is still unwired there,
+  so the deletion changes nothing they observe.

@@ -27,10 +27,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at the right layer never saw this: the interpreter was the uncontrolled
   variable. `tests/test_documented_install_interpreter_pin.py` now holds the
   README, the site, `docs/configuration.md` and that MVV leg to one
-  interpreter, and checks it against `requires-python`. A second check pins
-  the two copies of the preflight install hint equal to each other, since the
-  existing coverage there is keyword-loose and would not have noticed one copy
-  gaining the flag and the other keeping the unresolvable command.
+  interpreter, and checks it against `requires-python`.
+
+### Removed
+
+- **`conexus/hooks/scripts/preflight.py`**, the pre-RDR-215 implementation of
+  the SessionStart preflight. `hooks.json` has named the `nx-hook preflight`
+  verb since nexus-q02nx.21 and the `/conexus:nx-preflight` command goes
+  through `nx command-context`, so nothing ran this copy; deleting it is that
+  port's remaining half, recorded as the exit condition in
+  `tests/hooks/test_preflight_verb.py`'s own docstring and left undone when the
+  port landed. It surfaced because the install hint it carried had to be
+  hand-edited in parallel with its twin for nexus-sa187 — a duplicated fact
+  with no consumer. The verb's tests drop the dual-implementation fixture they
+  only needed while both existed; `tests/test_nx_preflight_hook.py` keeps the
+  half that is about hooks.json rather than about an implementation, namely
+  that the preflight runs above the guidance it counter-signals.
 
 ## [7.56.0] - 2026-09-21
 
