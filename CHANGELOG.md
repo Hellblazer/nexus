@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hook tool can no longer hold a session open** (nexus-5dcky). Every
+  `hook_<name>` MCP tool now bounds its `run()`; past the bound the tool
+  answers with the same empty result a crashed hook already produces, and
+  logs `hook_tool_timed_out`. `hooks.json` wires `hook_stop_verification` on
+  Stop, so on native Windows with no service endpoint — the default state
+  there, since the PG bundle has no Windows target and `nx init` refuses —
+  `claude -p` answered the prompt and then sat there indefinitely. Measured
+  2026-09-22: past 300 seconds; with the bound, it returns at 90 seconds.
+
+  The bound sits at the boundary rather than on the blocking call because
+  there turned out to be two blocking sites, not one. `hook_stop_verification`
+  blocks in a `git rev-parse` whose `subprocess.run(timeout=5.0)` does not
+  bound it — the pipe-drain shape, where the timeout kills the child and the
+  drain waits on a handle something else holds — and tools that construct a
+  `T2Database` block importing numpy's C extension, which takes 0.08s outside
+  that process and is unexplained. A hook is advisory and the harness carries
+  its own per-entry `timeout`, so a hook past that budget cannot affect
+  anything except by holding a tool call open; answering without it is better
+  whatever the cause. Python cannot kill the thread, so a timed-out `run()` is
+  abandoned rather than stopped — stated in the code, not left to be found.
+
+  The original diagnosis in `nexus-5dcky` and RDR-218's Gap 4, that a hook
+  blocks when it cannot resolve a service endpoint, was an inference from a
+  four-way probe and is wrong: none of the SessionStart hooks block, both MCP
+  servers initialize and list tools in about a second, and the Stop hook's
+  blocking path touches no storage at all. Both records are corrected.
+
 ## [7.57.0] - 2026-09-22
 
 Pairs with engine-service-v0.1.129, unchanged from 7.56.0 — this release carries no engine-side change.

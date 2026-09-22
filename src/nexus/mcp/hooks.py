@@ -67,8 +67,12 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Annotated, Any
+
+import structlog
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
@@ -136,6 +140,43 @@ DECIDING_HOOKS: frozenset[str] = frozenset(
     }
 )
 
+#: How long a hook tool's ``run()`` may take before the tool answers without
+#: it (nexus-5dcky).
+#:
+#: THE BUG. On native Windows with no service endpoint — which is every
+#: Windows box, since the PG bundle has no Windows target and `nx init`
+#: refuses — the first storage-touching MCP tool call in a server process
+#: never returned. Measured 2026-09-22 on qwentescence: `tuple_registry` and
+#: `hook_stop_verification` both blocked past 300s, while `hook_auto_approve`
+#: and `hook_stop_failure`, which touch no storage, returned in 0.0s. The
+#: blocked thread sat in `T2Database.__init__` importing numpy's C extension;
+#: the same import outside that process takes 0.08s, including from a worker
+#: thread under an asyncio loop, and the same tool on Linux returns its
+#: endpoint error in 0.5s. `hooks.json` wires `hook_stop_verification` on
+#: Stop, so `claude -p` answered and then sat there — the reported symptom.
+#:
+#: WHY A BOUND RATHER THAN A CURE FOR THAT IMPORT. The import pathology is
+#: real and still unexplained, and it is not the only way a hook can block.
+#: A hook is ADVISORY: it warns, and the harness that called it already
+#: carries its own `timeout` in `hooks.json`. A hook still running past that
+#: budget cannot affect anything — the harness has stopped waiting — so the
+#: only thing it can still do is hold a tool call open. Answering without it
+#: is strictly better than holding the session, whatever the cause.
+#:
+#: CHOOSING A VALUE. Keep it under the hooks.json `timeout` of every event
+#: the hook is wired on, and above what its own work legitimately costs. The
+#: default suits a hook whose work is local; a hook that shells out wants
+#: room for its subprocesses' own timeouts (see `stop_verification`).
+#:
+#: WHAT A TIMEOUT LEAVES BEHIND. Python cannot kill a thread, so the blocked
+#: `run()` keeps running, and on Windows it stays blocked for the life of the
+#: process. That is a leaked worker thread per timed-out call, which is the
+#: price of not hanging the session, and it is bounded by how many times a
+#: hook fires. It is stated here rather than discovered later.
+DEFAULT_HOOK_TOOL_TIMEOUT_S: float = 30.0
+
+_log = structlog.get_logger(__name__)
+
 
 @dataclass(frozen=True)
 class HookToolSpec:
@@ -177,6 +218,10 @@ class HookToolSpec:
     input schema is what the model sees: a field that is provably always a
     string should say so. Listed fields are typed ``Any``; every other field
     stays ``str | None``.
+
+    ``timeout_s`` bounds how long ``run`` may take before the tool answers
+    without it; see :data:`DEFAULT_HOOK_TOOL_TIMEOUT_S` for why a bound
+    exists at all and how to choose one.
     """
 
     name: str
@@ -185,6 +230,7 @@ class HookToolSpec:
     field_docs: Mapping[str, str] = field(default_factory=dict)
     summary: str = ""
     structured_fields: frozenset[str] = frozenset()
+    timeout_s: float = DEFAULT_HOOK_TOOL_TIMEOUT_S
 
 
 # One entry per ported hook module (RDR-215 Approach item 4). The first real
@@ -319,6 +365,13 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
             "in progress, and background agents the ledger lists as "
             "outstanding — advisory only, it can never block a stop"
         ),
+        # Above the default because this one shells out twice — `git status`
+        # and `bd`, each with its own 30s subprocess timeout in
+        # nexus.hooks.stop_verification — so 60s of legitimate work is
+        # reachable. Still well under the 180s `hooks.json` gives its Stop
+        # entry, which is the ceiling that matters: past that the harness has
+        # stopped waiting and finishing buys nothing.
+        timeout_s=90.0,
     ),
     HookToolSpec(
         name="pre_close_verification",
@@ -536,6 +589,42 @@ def _field_description(spec: HookToolSpec, payload_field: str) -> str:
     return f"Hook payload field {payload_field!r} for the {spec.name} hook."
 
 
+def _run_bounded(
+    spec: HookToolSpec, payload: dict[str, Any] | None, tool_name: str
+) -> HookResult:
+    """``spec.run(payload)``, or a silent result once ``spec.timeout_s`` passes.
+
+    See :data:`DEFAULT_HOOK_TOOL_TIMEOUT_S` for the measurement this exists
+    for and for what the abandoned thread costs.
+
+    The timed-out shape is ``HookResult(crashed=True)`` — the SAME shape
+    :func:`never_fail` produces for a hook that raised. That is deliberate:
+    both mean "this hook said nothing", the harness already treats that as
+    proceed, and inventing a third shape would make the tool boundary carry
+    a distinction no caller acts on. The log event differs, which is where
+    the distinction belongs.
+    """
+    pool = _ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{tool_name}-bounded")
+    future = pool.submit(spec.run, payload)
+    # shutdown(wait=False) so a timed-out worker does not pin this call; the
+    # thread is abandoned, not joined. Python has no way to cancel it.
+    try:
+        return future.result(timeout=spec.timeout_s)
+    except _FuturesTimeout:
+        _log.warning(
+            "hook_tool_timed_out",
+            hook=tool_name,
+            timeout_s=spec.timeout_s,
+            msg=(
+                "the hook exceeded its bound and the tool answered without "
+                "it; the worker thread is abandoned and may still be running"
+            ),
+        )
+        return HookResult(crashed=True)
+    finally:
+        pool.shutdown(wait=False)
+
+
 def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
     """Build the ``hook_<name>`` tool function FastMCP registers.
 
@@ -552,7 +641,10 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
     tool_name = f"hook_{spec.name}"
 
     def _tool(**kwargs: Any) -> CallToolResult:
-        result = never_fail(lambda: spec.run(nest_payload(kwargs) or None), hook=tool_name)
+        result = never_fail(
+            lambda: _run_bounded(spec, nest_payload(kwargs) or None, tool_name),
+            hook=tool_name,
+        )
         return CallToolResult(content=[TextContent(type="text", text=result.stdout or "")], isError=False)
 
     _tool.__name__ = tool_name

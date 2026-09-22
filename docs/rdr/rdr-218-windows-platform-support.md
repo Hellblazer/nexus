@@ -137,6 +137,28 @@ Windows *can* read the distro's filesystem, over the `\\wsl$\<distro>\` UNC
 path, so a reader is feasible. Nothing implements one, and the resolution chain
 has no tier that would call it.
 
+**This is stronger than "unimplemented": the lease tier cannot succeed on
+Windows even in principle, and it fails for a reason nothing surfaces.**
+Measured 2026-09-22 on qwentescence, from a native Windows client, at debug
+level:
+
+```
+service_endpoint_lease_discover_failed error="module 'os' has no attribute 'getuid'"
+```
+
+The address file is named for the POSIX uid — `storage_service_addr.<uid>` —
+so discovery calls `os.getuid()`, which does not exist on Windows at all. The
+attempt raises `AttributeError` before it reaches the filesystem, and the
+`\\wsl$\` path being readable is beside the point: there is no uid to build the
+filename from. A Windows reader for that tier therefore needs a decision this
+record has not taken — what identity names that file when the platform has no
+uid — and not merely an implementation.
+
+It also explains, retroactively, something the 2026-09-21 trial recorded as
+friction without a cause: every service restart needed `NX_SERVICE_*`
+hand-copied again. That was not a rough edge on an unfinished path. It was the
+only path, because the tier beneath it can never fire.
+
 This gap is load-bearing for every option below that keeps the service in WSL2.
 It is also the only step in the eleven with no workaround at all, which makes
 it the sharpest thing this record has to decide.
@@ -208,18 +230,56 @@ on native Windows hangs indefinitely — past 100 seconds and past 150 seconds,
 on a prompt whose entire body is `Reply with exactly: PLUGINPROBE`. Isolated
 four ways on the same host within minutes: no plugin and no endpoint returns
 promptly; plugin enabled and no endpoint hangs; plugin disabled returns
-promptly; plugin enabled *with* the endpoint set returns promptly. So a hook
-blocks when it cannot resolve a service, and the block is unbounded rather than
-a timeout that continues.
+promptly; plugin enabled *with* the endpoint set returns promptly.
 
-This is Windows-specific for a structural reason. On Linux and macOS the
-no-endpoint branch finds a running local service or starts one, so it is barely
-reachable. On Windows there is no local service and there cannot be one, so the
-unresolvable branch is the *default state* for every native Windows user. It is
-therefore the first thing a new user meets, and everything that works — the
-client, both MCP servers, the hook executables, all verified on that same host
-— is behind it. `claude mcp list` reports both conexus servers Connected right
-up until a plain prompt hangs forever. Filed as `nexus-5dcky`.
+**That isolation named WHEN correctly and WHY wrongly, and the correction
+matters for the remedy.** The original reading here — "a hook blocks when it
+cannot resolve a service endpoint" — was an inference from the four probes,
+not a mechanism, and measurement on 2026-09-22 falsified it. None of the
+SessionStart hooks block: all six `nx-hook` verbs return in under 2.1 seconds,
+the two `python3` entries fail loudly in 0.1s, both MCP servers initialize in
+about a second and list 64 and 10 tools instantly, and `npx` fetches the
+sequential-thinking server in 11.6s cold. What blocks is the TOOL CALL, and
+there are two distinct blocking sites:
+
+- `hook_stop_verification`, which `hooks.json` wires on Stop, blocks in
+  `nexus/hooks/verification_config.py:97` `_git_common_root` — inside a
+  `subprocess.run(["git", ...], capture_output=True, timeout=5.0)`, still
+  there when sampled at 25 seconds. A five-second timeout that does not bound
+  anything is the pipe-drain shape: the timeout kills the direct child, and
+  the drain that follows waits on a handle something else still holds. This is
+  the site that produces the reported symptom, because Stop fires at the end
+  of a `claude -p` turn — the model answers, and then the session sits there.
+- `tuple_registry`, and other tools that construct a `T2Database`, block in
+  `T2Database.__init__` importing numpy's C extension. The same import outside
+  that process takes 0.08 seconds, including from a worker thread under an
+  asyncio loop, and this one is unexplained.
+
+Two consequences the first reading obscured. The endpoint is not what blocks:
+`hook_stop_verification` touches no storage on the path that hangs, and
+setting `NX_SERVICE_*` made the fourth probe fast for a different reason than
+the one assumed. And the git-subprocess site is not obviously Windows-specific
+— an unbounded pipe drain behind a bounded-looking timeout is a general shape,
+and nothing measured says it cannot happen elsewhere.
+
+The remedy follows from having two sites rather than one: a bound at the
+hook-tool boundary, which covers both and covers whatever the third turns out
+to be, rather than a repair to either blocking path. Hook tools are advisory
+and the harness already carries its own `timeout` per entry, so a hook past
+that budget can no longer affect anything except by holding the session open.
+Measured on qwentescence against a wheel carrying the bound: the Stop hook
+returns at its bound with the same empty result a crashed hook produces, where
+before it never returned.
+
+It reaches a Windows user first for a structural reason, whatever its cause.
+On Linux and macOS a running local service exists or is started, so these
+paths are barely reachable; on Windows there is no local service and there
+cannot be one, so the unresolvable state is the *default* for every native
+Windows user. It is therefore the first thing a new user meets, and everything
+that works — the client, both MCP servers, the hook executables, and the MCP
+tool surface itself, all verified on that same host — is behind it.
+`claude mcp list` reports both conexus servers Connected right up until a
+plain prompt hangs. Filed as `nexus-5dcky`.
 
 #### Gap 5: the desktop bundle is a shim, not a bundle, and it excludes Windows by manifest
 
