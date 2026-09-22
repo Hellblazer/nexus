@@ -1,7 +1,48 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-143 SessionStart hook: plugin<->CLI version lockstep (Shape B).
+"""The ``version-lockstep`` hook verb (nexus-t9klx).
+
+Port of ``conexus/hooks/scripts/version_lockstep_hook.py``, the second of
+the five ``hooks.json`` entries that still named a bare ``python3``. Stock
+Windows has no ``python3`` on PATH, so this SessionStart entry could not
+fire there at all — on a platform where an unattended upgrade path is
+exactly what a new user needs most.
+
+**"Move, do not rewrite."** Detection is carried across unchanged: the same
+version check, the same nexus-konsk ref-drift check with its shared 2s git
+budget, the same markers, the same combined-context shapes, the same
+fail-safe swallow. Three changes were unavoidable:
+
+1. **The interpreter preamble is gone.** The script inserted its own
+   directory on ``sys.path``, imported the plugin's ``_interpreter``,
+   re-execed, and then refused Python < 3.12. In the wheel the interpreter
+   is the one conexus was installed under. That preamble is also the stated
+   reason the ref-drift functions below MIRROR ``nexus.plugin_lockstep``'s
+   readers instead of importing them; the constraint is gone, the mirroring
+   is kept (see the note at the end).
+
+2. **``main() -> None`` (print, exit 0) becomes ``run(payload) ->
+   HookResult``**, and the four print branches become the returned stdout.
+   The payload is accepted and ignored, exactly as the script ignored
+   stdin.
+
+3. **The action is dispatched as a module, not a path.** The script ran
+   ``[sys.executable, str(_ACTION), ...]`` against its plugin-resident
+   sibling; the sibling moved too, so this runs
+   ``[sys.executable, "-m", "nexus.hooks.version_lockstep_action", ...]``.
+   The argv contract is unchanged. This is strictly better on the platform
+   that prompted the port: ``sys.executable`` here is conexus's own
+   interpreter rather than whatever ``python3`` PATH happened to offer.
+
+**DELIBERATELY NOT DE-DUPLICATED**, for the same reason stated in the
+action's own docstring: this module can now import ``nexus.plugin_lockstep``
+rather than mirroring its registry and marketplace readers, and doing so in
+the same change that claims nothing moved would hide a behaviour change
+inside a port. It wants its own change and its own evidence.
+
+The original module docstring follows, unedited:
+
+RDR-143 SessionStart hook: plugin<->CLI version lockstep (Shape B).
 
 The blocking, stdlib-only SessionStart entry point. It detects skew
 between the installed plugin version (the marketplace surface) and the
@@ -80,25 +121,9 @@ version check.
 """
 from __future__ import annotations
 
-import os
 import sys
 
-# RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
-# `python3`, so PATH decides the interpreter. Put back the resolution
-# `_run_python_hook.sh` used to perform, before anything that needs 3.12
-# or `nexus` is imported. See _interpreter.py for what is at stake.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _interpreter  # noqa: E402 -- must follow the sys.path insert
-
-_interpreter.reexec_if_needed()
-
-if sys.version_info < (3, 12):
-    sys.stderr.write(
-        f"ERROR: conexus plugin hook requires Python 3.12+, got {sys.version.split()[0]}\n"
-        f"  Resolved: {sys.executable}\n"
-        f"  Install: brew install python@3.13 (macOS) | apt install python3.12 (Ubuntu) | uv python install 3.12\n"
-    )
-    sys.exit(1)
+from nexus._hook_runtime._io import HookResult
 
 import json
 import os
@@ -117,8 +142,12 @@ DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 # python here, the same one _run_python_hook.sh would have picked, without
 # a second bash process or a second round of probes. The action needs
 # nothing more: it is stdlib-only itself (no `nexus` import).
-_SCRIPTS_DIR = Path(__file__).resolve().parent
-_ACTION = _SCRIPTS_DIR / "version_lockstep_action.py"
+#: The detached action, dispatched by MODULE rather than by path
+#: (nexus-t9klx). The script resolved a sibling file next to itself; both
+#: files moved into the wheel, so a path would now be an installed
+#: package's file — real, but pointless to spell when ``-m`` names the
+#: same thing and keeps working under a zipped or relocated install.
+_ACTION_MODULE = "nexus.hooks.version_lockstep_action"
 
 #: The plugins this wheel ships -- same set as
 #: ``nexus.plugin_lockstep.PLUGINS``, duplicated per the stdlib-only
@@ -158,7 +187,7 @@ _REF_DRIFT_SENTINEL = "__ref_drift__"
 def debug(msg: str) -> None:
     """Print a debug line to stderr when NX_HOOK_DEBUG=1."""
     if DEBUG:
-        print(f"[version-lockstep-hook] {msg}", file=sys.stderr)
+        print(f"[version-lockstep-hook] {msg}", file=sys.stderr)  # noqa: T201 — carried: stderr, not the stdout decision channel
 
 
 def marker_path() -> Path:
@@ -234,7 +263,7 @@ def dispatch_action(target_version: str) -> None:
     Uses Popen with detached stdio so synchronous SessionStart is never
     blocked. We deliberately do not wait()/communicate().
     """
-    cmd = [sys.executable, str(_ACTION), target_version]
+    cmd = [sys.executable, "-m", _ACTION_MODULE, target_version]
     try:
         subprocess.Popen(
             cmd,
@@ -537,7 +566,7 @@ def dispatch_ref_drift_action() -> None:
     line (``src/nexus/plugin_lockstep.py``) is the same instruction a
     manual ``nx upgrade`` already prints on a successful ref-move.
     """
-    cmd = [sys.executable, str(_ACTION), _REF_DRIFT_SENTINEL]
+    cmd = [sys.executable, "-m", _ACTION_MODULE, _REF_DRIFT_SENTINEL]
     try:
         subprocess.Popen(
             cmd,
@@ -550,10 +579,14 @@ def dispatch_ref_drift_action() -> None:
     except OSError as exc:
         debug(f"failed to dispatch ref-drift action: {exc}")
 
-
-def main() -> None:
+def run(payload: dict | None) -> HookResult:
     """Detect skew (version mismatch, and separately, nexus-konsk ref
-    drift), nudge + dispatch on either. Always fail-safe."""
+    drift), nudge + dispatch on either. Always fail-safe.
+
+    ``payload`` is accepted for the shared verb contract and ignored: the
+    script read no stdin either, resolving everything from the environment
+    and on-disk markers.
+    """
     try:
         plugin_version = read_plugin_version()
         version_mismatch = bool(plugin_version) and read_marker() != plugin_version
@@ -582,15 +615,11 @@ def main() -> None:
             write_ref_drift_marker({pid: now for pid, _was, now in pending})
 
         if version_mismatch and pending:
-            print(_combined_context(plugin_version, pending))  # type: ignore[arg-type]
-        elif version_mismatch:
-            print(build_context(plugin_version))  # type: ignore[arg-type]
-        elif pending:
-            print(build_ref_drift_context(pending))
+            return HookResult(stdout=_combined_context(plugin_version, pending))  # type: ignore[arg-type]
+        if version_mismatch:
+            return HookResult(stdout=build_context(plugin_version))  # type: ignore[arg-type]
+        if pending:
+            return HookResult(stdout=build_ref_drift_context(pending))
     except Exception as exc:  # noqa: BLE001 - hook must never raise
         debug(f"swallowed unexpected error: {exc}")
-
-
-if __name__ == "__main__":
-    main()
-    sys.exit(0)
+    return HookResult()

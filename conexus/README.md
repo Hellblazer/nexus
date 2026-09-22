@@ -92,9 +92,6 @@ conexus/
 │   └── scripts/                       # Plugin-resident hooks and shared helpers.
 │       │                              # Most hooks now live in the conexus WHEEL
 │       │                              # (nexus.hooks.*) — see the table below.
-│       ├── behaviour_census.py        # SessionStart: the previous session's delegation
-│       │                              # and deliberation rates
-│       ├── version_lockstep_hook.py   # SessionStart(startup): plugin↔CLI version skew
 │       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
 │       ├── _interpreter.py            # Shared helper: re-exec under an interpreter that
 │       │                              # can serve the hook (3.12 floor, and the
@@ -270,8 +267,8 @@ and only the ledger verbs have one.
 | `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
 | `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
-| `SessionStart` | `hooks/scripts/behaviour_census.py` | Report the PREVIOUS session's delegation and deliberation rates against baselines from the user's own trailing sessions (nexus-4lnn1) |
-| `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
+| `SessionStart` | `nx-hook behaviour-census` | Report the PREVIOUS session's raw thinking and decision counts (nexus-4lnn1) |
+| `SessionStart` (matcher `startup`) | `nx-hook version-lockstep` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `UserPromptSubmit` | `hooks/scripts/mailbox_drain.py` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
 | `SubagentStart` | `hook_subagent_start_tuple` | Project the ledger START tuple, as a sibling of the main hook so its failure does not take the projection with it |

@@ -26,18 +26,13 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus" / "hooks" / "scripts" / "version_lockstep_action.py"
-)
+#: The action's module, ported into the wheel at nexus-t9klx. Fresh per
+#: test for the same reason as the hook's: import-time env reads.
+_ACTION_MODULE = "nexus.hooks.version_lockstep_action"
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("version_lockstep_action", SCRIPT)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return importlib.reload(importlib.import_module(_ACTION_MODULE))
 
 
 @pytest.fixture()
@@ -140,7 +135,7 @@ def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results):
 
 class TestScriptPresence:
     def test_script_exists(self) -> None:
-        assert SCRIPT.exists()
+        assert importlib.util.find_spec(_ACTION_MODULE) is not None
 
 
 class TestEditableGate:

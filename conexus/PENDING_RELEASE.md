@@ -32,6 +32,13 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.57.0)
 
+- nexus-t9klx — `conexus/hooks/scripts/version_lockstep_hook.py` and
+  `conexus/hooks/scripts/version_lockstep_action.py`, DELETED with the
+  SessionStart(startup) entry re-pointed at `nx-hook version-lockstep`. The
+  action moved with its dispatcher rather than being reached back into the
+  plugin: one caller is enough to keep a plugin-resident script alive, which
+  is what RDR-215 removes. Same drift shape as the entry below.
+
 - nexus-t9klx — `conexus/hooks/hooks.json` and
   `conexus/hooks/scripts/behaviour_census.py`: the SessionStart behaviour census moved from a bare
   `python3 ${CLAUDE_PLUGIN_ROOT}/...` entry to `nx-hook behaviour-census`, and

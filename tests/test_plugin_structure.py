@@ -162,7 +162,7 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
 
 _PLUGIN_ROOT_REF = re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT\}?/([^\s'\"]+)")
 
-_MIN_HOOK_SCRIPT_REFS = 4
+_MIN_HOOK_SCRIPT_REFS = 3
 """Non-vacuity floor for :func:`_hook_script_refs`.
 
 RDR-215 nexus-q02nx.21 rewrote 21 of the 25 hooks.json entries into
@@ -178,8 +178,8 @@ close gate failed open. This floor makes the emptying itself a failure.
 
 Four is the measured count, not a margin: every other entry is
 ``mcp_tool`` or exec-form ``nx-hook`` and names no plugin-root path at
-all. Five until nexus-t9klx ported ``behaviour_census.py`` to the
-``behaviour-census`` verb; the remaining four are that bead's own work,
+all. Five until nexus-t9klx began porting them (behaviour_census.py, then
+version_lockstep_hook.py with its detached action); the remaining three are that bead's own work,
 so this floor walks down to zero with it and is deleted when it gets
 there. Raise it when an entry is added, and read a drop as the extractor
 going blind before reading it as a deletion.
@@ -210,15 +210,15 @@ def _hook_script_refs() -> list[tuple[str, str]]:
     return results
 
 
-_PYTHON_HOOK_SCRIPT_MIN_COUNT = 4
+_PYTHON_HOOK_SCRIPT_MIN_COUNT = 3
 """Non-vacuity floor for :func:`_python_hook_script_paths`.
 
 Measured 2026-09-19 (RDR-215 nexus-q02nx.21/.22, after
 ``_run_python_hook.sh`` was deleted and interpreter resolution moved into
 each script's own module-scope ``_interpreter.reexec_if_needed()`` call):
-hooks.json declared exactly 5 ``python3`` exec-form entries; nexus-t9klx
-ported the first of them (``behaviour_census.py`` -> the
-``behaviour-census`` verb) and this came down with it. Not a margin, same
+hooks.json declared exactly 5 ``python3`` exec-form entries; nexus-t9klx has
+ported two of them so far (behaviour_census.py and
+version_lockstep_hook.py) and this comes down with each. Not a margin, same
 convention as ``_MIN_HOOK_SCRIPT_REFS`` above -- raise it when another
 plugin-resident Python hook is added, and read a drop as the extractor
 losing its grip on the declaration form rather than as scripts genuinely

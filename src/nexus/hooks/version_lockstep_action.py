@@ -1,7 +1,43 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-143 detached upgrade action for the plugin<->CLI version lockstep.
+"""The detached lockstep upgrade action (nexus-t9klx).
+
+Port of ``conexus/hooks/scripts/version_lockstep_action.py``. Not a hook
+and not a verb: ``nexus.hooks.version_lockstep`` dispatches it DETACHED,
+with a target version or the ref-drift sentinel as ``argv[1]``, and never
+waits for it. It moved with its dispatcher because leaving it behind would
+keep a plugin-resident script alive for the sake of one caller, which is
+the thing RDR-215 removes — the same call ``session_context`` made for
+``t2_prefix_scan``.
+
+**"Move, do not rewrite."** The body is carried across unchanged: same
+gates, same ordering, same marker semantics, same fail-safe swallow. Two
+things are gone because they cannot mean anything here:
+
+1. **The interpreter preamble.** The script began by inserting its own
+   directory on ``sys.path``, importing the plugin's ``_interpreter`` and
+   re-execing, then refusing Python < 3.12. In the wheel the interpreter is
+   the one conexus was installed under, by construction. That preamble was
+   the *reason* this file duplicated readers from ``nexus.install_layout``
+   rather than importing them — see the comment that survives below, which
+   is now describing a constraint that no longer binds.
+
+2. **The ``__main__`` guard**, replaced by ``-m`` dispatch:
+   ``python -m nexus.hooks.version_lockstep_action <target>``. Its
+   ``main(argv)`` signature is unchanged, so the argv contract the
+   dispatcher writes is the one it already wrote.
+
+**DELIBERATELY NOT DE-DUPLICATED.** Now that this runs under conexus's own
+interpreter it *could* import ``nexus.install_layout`` and
+``nexus.plugin_lockstep`` instead of mirroring them. It does not, in this
+change. This file performs an unattended, detached upgrade of the user's
+own install; swapping its readers for different ones is a behaviour change
+wearing a refactor's clothes, and it belongs in its own change with its own
+evidence rather than riding a port whose whole claim is that nothing moved.
+
+The original module docstring follows, unedited:
+
+RDR-143 detached upgrade action for the plugin<->CLI version lockstep.
 
 Fire-and-forget worker dispatched by ``version_lockstep_hook.py`` after it
 detects skew. Runs AFTER the current session has already started against
@@ -63,12 +99,6 @@ from __future__ import annotations
 
 import sys
 
-if sys.version_info < (3, 12):
-    sys.stderr.write(
-        f"ERROR: conexus plugin hook requires Python 3.12+, got {sys.version.split()[0]}\n"
-    )
-    sys.exit(1)
-
 import os
 import re
 import shutil
@@ -119,7 +149,7 @@ _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?)")
 def debug(msg: str) -> None:
     """Print a debug line to stderr when NX_HOOK_DEBUG=1."""
     if DEBUG:
-        print(f"[version-lockstep-action] {msg}", file=sys.stderr)
+        print(f"[version-lockstep-action] {msg}", file=sys.stderr)  # noqa: T201 — carried: stderr, not the stdout decision channel
 
 
 def marker_path() -> Path:
@@ -490,8 +520,3 @@ def main(argv: list[str]) -> None:
             )
     except Exception as exc:  # noqa: BLE001 - detached action must never raise
         debug(f"swallowed unexpected error: {exc}")
-
-
-if __name__ == "__main__":
-    main(sys.argv)
-    sys.exit(0)

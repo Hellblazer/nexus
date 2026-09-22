@@ -67,9 +67,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "nx-hook",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"
+              "version-lockstep"
             ],
             "timeout": 5
           }

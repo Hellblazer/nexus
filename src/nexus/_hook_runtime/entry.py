@@ -130,6 +130,11 @@ VERB_TABLE: dict[str, str] = {
     # real .exe shim from the installer. Stdlib-only and storage-free, so
     # the port is the script's body with print() replaced by HookResult.
     "behaviour-census": "nexus.hooks.behaviour_census",
+    # The second, ported in the same bead. Its detached action moved with
+    # it (nexus.hooks.version_lockstep_action) rather than being reached
+    # back into the plugin: one caller is all it takes to keep a
+    # plugin-resident script alive, which is what RDR-215 removes.
+    "version-lockstep": "nexus.hooks.version_lockstep",
     "rdr": "nexus.hooks.rdr_verb",
     # The two SessionStart entries that carried SHELL LOGIC in their command
     # string -- `nx upgrade --auto 2>/dev/null || echo ... >&2` and `nx self

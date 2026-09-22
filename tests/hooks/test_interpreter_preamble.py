@@ -30,15 +30,21 @@ MODULE = SCRIPTS / "_interpreter.py"
 HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 
 PREAMBLE_SCRIPTS = [
-    "version_lockstep_hook.py",
     "mailbox_drain.py",
     "routing/subagent_git_write_requires_orchestrator.py",
     "routing/phase_review_close_requires_gate.py",
 ]
-"""The four that refuse to run below 3.12, measured, not read off a guard.
+"""The ones still plugin-resident that refuse to run below 3.12, measured
+rather than read off a guard.
 
-``behaviour_census.py`` is the fifth exec-form entry and is genuinely
-stdlib-3.9-safe, so it is declared but deliberately absent here.
+Was four, and ``behaviour_census.py`` was a declared fifth exec-form entry
+deliberately absent because it is genuinely stdlib-3.9-safe. nexus-t9klx
+ported both it and ``version_lockstep_hook.py`` into the wheel, where the
+interpreter is the one conexus was installed under and there is no
+preamble to assert. This list shrinks to nothing as that bead finishes,
+and this module is DELETED with the last entry rather than left asserting
+over an empty list — the preamble it pins exists only in plugin-resident
+scripts.
 """
 
 
@@ -267,12 +273,12 @@ class TestTheScriptsCarryIt:
     def test_the_list_covers_every_bare_python3_entry(self) -> None:
         """A sixth exec-form hook must not join silently.
 
-        ``behaviour_census.py`` is the one deliberate omission; anything else
+        Nothing is exempt any more; anything
         appearing here has never been checked against a 3.9 interpreter.
         """
         declared = set(_declared_python3_scripts())
         assert declared, "hooks.json declares no bare-python3 scripts; extractor is blind"
-        unaccounted = declared - set(PREAMBLE_SCRIPTS) - {"behaviour_census.py"}
+        unaccounted = declared - set(PREAMBLE_SCRIPTS)
         assert not unaccounted, (
             f"exec-form hooks with no interpreter preamble and no exemption: "
             f"{sorted(unaccounted)}"
@@ -311,7 +317,7 @@ class TestTheThingsPreviouslyAsserted:
     """
 
     @pytest.mark.parametrize(
-        "rel", [*PREAMBLE_SCRIPTS, "_interpreter.py", "behaviour_census.py"]
+        "rel", [*PREAMBLE_SCRIPTS, "_interpreter.py"]
     )
     def test_it_parses_under_python_3_9(self, rel: str) -> None:
         """A 3.12-only construct anywhere in the file defeats the preamble.
@@ -331,39 +337,11 @@ class TestTheThingsPreviouslyAsserted:
                 f"file is parsed in full before any of it runs."
             )
 
-    def test_behaviour_census_is_genuinely_stdlib_only(self) -> None:
-        """Its exemption from the preamble list rests on this.
-
-        ``test_the_list_covers_every_bare_python3_entry`` exempts
-        behaviour_census.py as "genuinely stdlib-3.9-safe". That was an
-        allowlist entry with no check that its premise still holds; a
-        `nexus` import would make it need the generation python like the
-        other four, silently.
-        """
-        tree = ast.parse((SCRIPTS / "behaviour_census.py").read_text())
-        imported = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(a.name.split(".")[0] for a in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                imported.add(node.module.split(".")[0])
-        assert "nexus" not in imported, (
-            "behaviour_census.py imports nexus, so it needs an interpreter "
-            "that can import nexus -- the generation python. Either give it "
-            "the preamble and add it to PREAMBLE_SCRIPTS, or drop the import."
-        )
-
-    def test_it_runs_under_an_interpreter_below_3_12(self) -> None:
-        """The exemption's other half, measured where a box allows it."""
-        old = _old_python()
-        if old is None:
-            pytest.skip("no interpreter below 3.12 on this box")
-        proc = subprocess.run(
-            [old, str(SCRIPTS / "behaviour_census.py")],
-            input="{}", capture_output=True, text=True, timeout=120, env=_env(),
-        )
-        assert proc.returncode == 0, (
-            f"behaviour_census.py exited {proc.returncode} under {old}; it is "
-            f"declared as a bare python3 entry with no preamble on the "
-            f"strength of running there.\n{proc.stderr[-2000:]}"
-        )
+    # DELETED at nexus-t9klx: test_behaviour_census_is_genuinely_stdlib_only
+    # and test_it_runs_under_an_interpreter_below_3_12. Both existed to
+    # check that behaviour_census.py's exemption from PREAMBLE_SCRIPTS
+    # still held -- that it imported no `nexus` and really did run under a
+    # pre-3.12 interpreter. The file is in the wheel now, where it imports
+    # `nexus` by design and runs under conexus's own interpreter, so the
+    # exemption and both of its checks have no subject. Removed rather than
+    # rewritten: there is nothing left for them to be about.
