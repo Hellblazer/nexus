@@ -269,9 +269,26 @@ there are two distinct blocking sites:
 Two consequences the first reading obscured. The endpoint is not what blocks:
 `hook_stop_verification` touches no storage on the path that hangs, and
 setting `NX_SERVICE_*` made the fourth probe fast for a different reason than
-the one assumed. And the git-subprocess site is not obviously Windows-specific
-— an unbounded pipe drain behind a bounded-looking timeout is a general shape,
-and nothing measured says it cannot happen elsewhere.
+the one assumed.
+
+A second consequence stood here until 2026-09-22: that the git-subprocess
+site is "not obviously Windows-specific — an unbounded pipe drain behind a
+bounded-looking timeout is a general shape, and nothing measured says it
+cannot happen elsewhere." **Something has since been measured, and it says
+the opposite.** CPython 3.12.11's `subprocess.run` performs the untimed
+post-kill `communicate()` only under `if _mswindows`; the POSIX branch calls
+`process.wait()` and never drains. Read from `inspect.getsource` on the
+pinned interpreter, and confirmed by a macOS differential in which four
+distinct grandchild-holding-the-pipe shapes all returned at 1.00s against a
+1.0s timeout. The unbounded-drain HANG is Windows-only. POSIX has a
+different defect in the same shape — `wait()` reaps the direct child and
+leaves its descendants running, an orphan leak — which is real, and is not
+this gap's symptom.
+
+The superseded reading is quoted rather than deleted because it was honest
+before the measurement existed, and because the correction is the reusable
+part: "a general shape, and nothing measured says otherwise" is an argument
+that survives unexamined until somebody reads the source.
 
 The remedy follows from having two sites rather than one: a bound at the
 hook-tool boundary, rather than a repair to either blocking path. Hook tools
@@ -1341,3 +1358,5 @@ questions rather than from the drafting.
 | 2026-09-21 | Verified both mechanism claims by experiment: a `docker export` rootfs boots with systemd as pid 1 and lingering works; a mounted VHDX survives unregister-and-re-import. |
 | 2026-09-21 | Added the structural sections this file was missing against RDR-217's shape. |
 | 2026-09-22 | Gate round 1 fixes: Gap 4's boundary bound covers the hook-tool half only, not the ordinary-tool population (`nexus-fd3zf`); Test Plan gains boundary item 6 for an ordinary tool call, since `claude -p` exercises only the covered half; Phase 3 takes all of `nexus-34f7r` and names `nexus-fd3zf`; two wrong code citations corrected (`binary_install.py:394`->`:338`, `binary_install.py:359`->`binary_lifecycle.py:44`). |
+| 2026-09-22 | Gate round 2 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `5ba0cdbfa`; critique `nexus_rdr/218-gate-critique-2026-09-22-r2`. |
+| 2026-09-22 | Round-2 Significant: replaced the superseded ``not obviously Windows-specific`` hedge in Gap 4, which contradicted the measured `if _mswindows` finding two paragraphs later. |
