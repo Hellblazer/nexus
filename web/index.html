@@ -141,7 +141,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <h2 id="before">Before you start</h2>
 <div class="tbl"><table>
 <tr><th>Need</th><th>Why</th><th>Check</th></tr>
-<tr><td>Python 3.12 or 3.13</td><td>Python 3.14 does not work yet. If needed, uv downloads Python 3.13 for you.</td><td><code>python3 --version</code></td></tr>
+<tr><td>Python 3.12 or 3.13</td><td>Python 3.14 does not work yet, which is why the install command names 3.12. uv downloads it for you.</td><td><code>python3 --version</code></td></tr>
 <tr><td>uv</td><td>Installs and runs the <code>nx</code> command.</td><td><code>uv --version</code></td></tr>
 <tr><td>git</td><td>Nexus reads git information when it indexes a repository.</td><td><code>git --version</code></td></tr>
 <tr data-for="code" class="must"><td>Node.js (with npm)</td><td><strong>Required for the plugin.</strong> The plugin starts one of its servers with <code>npx</code>. Without Node.js there is no error message. The plugin installs, but its tools never appear.</td><td><code>node --version</code><br><code>npm --version</code></td></tr>
@@ -158,7 +158,7 @@ brew install node</span></pre><button class="copy">Copy</button></div>
 curl -LsSf https://astral.sh/uv/install.sh | sh<span data-for="code">
 <span class="c"># Node.js (required for the plugin): distro package, or</span>
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - &amp;&amp; sudo apt-get install -y nodejs</span></pre><button class="copy">Copy</button></div>
-<p class="note">If <code>python3 --version</code> shows 3.14, run <code>uv python install 3.13</code> one time. uv then uses 3.13 automatically.</p>
+<p class="note">The install command in step 1 names the interpreter it needs, so a <code>python3</code> of 3.14 does not matter.</p>
 
 <!-- ===== Claude Code + CLI path ===== -->
 <section data-for="code cli">
@@ -173,8 +173,9 @@ curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - &amp;&amp; su
 <li><div class="step">
   <h3>Install the <code>nx</code> command</h3>
   <p>The first command installs <code>nx</code>. The second command moves it to the layout that Nexus manages. This removes one package that causes conflicts. On Linux, it also replaces a 4.5 GB GPU package with a smaller CPU package.</p>
-  <div class="cmd"><pre>uv tool install conexus
+  <div class="cmd"><pre>uv tool install conexus --python 3.12
 nx self install</pre><button class="copy">Copy</button></div>
+  <p class="note"><code>--python 3.12</code> is part of the command. Without it uv picks an interpreter itself, and on a machine with no other one — a fresh Ubuntu 26.04, whose <code>python3</code> is 3.14 — the install stops with a resolver error about torch wheels. uv downloads 3.12 for you.</p>
   <p class="note">If the terminal cannot find <code>nx</code> after this, add <code>~/.local/bin</code> to your PATH. Then open a new terminal.</p>
 </div></li>
 <li><div class="step">
@@ -226,7 +227,7 @@ nx search "how does retry work"</pre><button class="copy">Copy</button></div>
 <li><div class="step">
   <h3>Set up the storage service</h3>
   <p>The extension does not start the service itself. Run these commands one time in a terminal:</p>
-  <div class="cmd"><pre>uv tool install conexus
+  <div class="cmd"><pre>uv tool install conexus --python 3.12
 nx self install
 nx init
 nx doctor</pre><button class="copy">Copy</button></div>
@@ -288,8 +289,9 @@ ls ~/.config/nexus                                <span class="c"># must not exi
 <p class="note">Old installs from before mid-2026 may also have a directory <code>~/.local/share/nexus/chroma</code> or a <code>com.nexus.t2</code> unit. The commands above remove both.</p>
 
 <h2 id="problems">Problems</h2>
-<details><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH. Then open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus</code>.</p></details>
-<details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>Nexus runs on Python 3.14, which does not work. Run these three commands in order: <code>uv python install 3.13</code>, then <code>uv tool install conexus --force --python 3.13</code>, then <code>nx self install</code>.</p></details>
+<details><summary>The install fails with "No solution found when resolving dependencies"</summary><p>The hint names torch and <code>cp314</code>. You left <code>--python 3.12</code> off the install command and your <code>python3</code> is 3.14. Run the command again with the flag.</p></details>
+<details><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH. Then open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus --python 3.12</code>.</p></details>
+<details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>Nexus runs on Python 3.14, which does not work. Run these two commands in order: <code>uv tool install conexus --force --python 3.12</code>, then <code>nx self install</code>.</p></details>
 <details><summary>nx doctor says credentials not set</summary><p>This is normal for a local install. Only the cloud service needs a token.</p></details>
 <details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If the index was interrupted, run <code>nx index repo .</code> again. It continues where it stopped. If you updated with <code>uv tool install</code>, see "Update Nexus" above.</p></details>
 <details><summary>Plugin installed but its tools never appear</summary><p>There are two common causes. The <code>nx</code> command is not installed, or Node.js is not installed. Run <code>/conexus:nx-preflight</code>. It tells you which one.</p></details>

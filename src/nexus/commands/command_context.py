@@ -569,7 +569,7 @@ def render_nx_preflight(cwd: Path) -> str:
         "nx",
         "### 1. nx CLI",
         "nx not found in PATH\n"
-        "Install: uv tool install conexus  OR  pip install conexus\n"
+        "Install: uv tool install conexus --python 3.12  OR  pip install conexus\n"
         "Docs: https://github.com/Hellblazer/nexus",
     )
 

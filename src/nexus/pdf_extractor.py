@@ -566,6 +566,158 @@ def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
     return _MD_IMAGE_REF_RE.sub(_repl, md)
 
 
+_TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.S)
+_TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.S)
+_TD_RE = re.compile(r"<(t[dh])\b([^>]*)>(.*?)</\1>", re.S)
+_COLSPAN_RE = re.compile(r"colspan\s*=\s*\"?(\d+)\"?", re.I)
+_TABLE_CAPTION_RE = re.compile(r"table\s+([IVXLC]+|\d+)\b", re.I)
+#: How far back from a table to look for its caption label.
+_CAPTION_LOOKBACK_CHARS = 400
+#: Opening of the suspect-table marker. Also the idempotency probe.
+_MARKER_PREFIX = "[table structure suspect"
+
+
+def _row_widths(block: str) -> list[list[str]]:
+    """Each row's cell texts, with a ``colspan``-ed cell repeated so a row's
+    length is its effective column count."""
+    rows: list[list[str]] = []
+    for row in _TR_RE.findall(block):
+        cells: list[str] = []
+        for _tag, attrs, body in _TD_RE.findall(row):
+            span = _COLSPAN_RE.search(attrs)
+            width = max(1, int(span.group(1))) if span else 1
+            cells.extend([body.strip()] * width)
+        rows.append(cells)
+    return rows
+
+
+def _table_shape_defects(block: str) -> list[dict]:
+    """Structural disagreements inside one captured table.
+
+    Two signals, because the two mechanisms measured on the KnowFeat paper
+    are different and the first cannot see the second:
+
+    ``header_column_mismatch``
+        The header row's effective width disagrees with the modal data-row
+        width. This is the TABLE I collapse: a header line rendered as one
+        ``colspan="10"`` cell over rows carrying nine, which leaves every
+        value unattributable to a column.
+    ``empty_row_label``
+        A data row whose leading cell is empty in a table whose other rows
+        are labelled. This is the TABLE V row-label merge, where two labels
+        fused into one cell and shifted every later row up by one; cell
+        counts stay constant, so only the orphaned row betrays it.
+    """
+    rows = _row_widths(block)
+    if len(rows) < 2:
+        # A header with no data rows has nothing to disagree with it.
+        return []
+    header, data = rows[0], rows[1:]
+    defects: list[dict] = []
+    widths = [len(r) for r in data if r]
+    if widths:
+        modal = max(set(widths), key=widths.count)
+        if len(header) != modal:
+            defects.append({
+                "kind": "header_column_mismatch",
+                "header_columns": len(header),
+                "row_columns": modal,
+            })
+    labelled = sum(1 for r in data if r and r[0])
+    unlabelled = [i for i, r in enumerate(data, start=1) if r and not r[0]]
+    if unlabelled and labelled >= 2:
+        defects.append({"kind": "empty_row_label", "rows": unlabelled})
+    return defects
+
+
+def _table_caption_label(text: str, table_start: int) -> str:
+    """The table's own caption label from the text just before it, else ``""``.
+
+    The LAST numbered match in the window, returned as matched. This used to
+    locate the label with ``window.lower().rfind("table")``, which can land
+    on a different occurrence than the regex matched: a bare, unnumbered
+    "table" mention after the real caption ("in the related work table
+    below") produced a label of ``"table b"`` (code-review round 1).
+    """
+    window = text[max(0, table_start - _CAPTION_LOOKBACK_CHARS):table_start]
+    matches = list(_TABLE_CAPTION_RE.finditer(window))
+    return matches[-1].group(0).strip() if matches else ""
+
+
+def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
+    """Prefix every structurally suspect table with a marker naming the
+    disagreement, and return the defects found (nexus-stkek).
+
+    MinerU's table HTML was stored verbatim and checked by nothing: no HTML
+    parser is imported anywhere in ``src/nexus``, and the post-extraction
+    quality gate reads whitespace and token statistics only. On the KnowFeat
+    paper that let TABLE I into the store stating the OPPOSITE of the source
+    — three of its seven property rows read as entirely blank, "Provenance
+    track." among them, which is the one property the paper exists to claim.
+
+    This marks rather than refuses, and deliberately does not join the
+    quality gate. One malformed table in an otherwise clean 11-page
+    extraction is not garbage text; failing the document over it would be
+    overridden by habit, and a gate that is always overridden protects
+    nothing. The marker is text the embedder sees, so a query that surfaces
+    the table surfaces the warning with it — the same reasoning as
+    :func:`_mark_unextracted_visuals`, whose idiom this follows.
+
+    The table's own HTML is never edited. A misaligned table still holds
+    values a reader may want, and silently rewriting them would be a second
+    unverifiable transformation on top of the first.
+
+    Marking is NOT guarded against running twice. It was, briefly, by a
+    ``_MARKER_PREFIX in block`` substring test justified as protecting a
+    ``--force`` re-index from a second marker. Review round 2 falsified both
+    halves: no reachable production path feeds already-marked text back
+    through here, because MinerU writes to a fresh tempdir that is rmtree'd
+    on every call, and the guard's one demonstrated effect was a FALSE
+    NEGATIVE — a table with a genuine ``header_column_mismatch`` whose own
+    cell prose merely mentioned the marker string was silently skipped, and
+    the run summary under-reported with it. A duplicate marker costs a line
+    of text; a silently unflagged table costs the thing this function
+    exists for.
+    """
+    if not text or "<table" not in text:
+        return text, []
+    found: list[dict] = []
+
+    def _repl(m: re.Match) -> str:
+        block = m.group(0)
+        defects = _table_shape_defects(block)
+        if not defects:
+            return block
+        reasons: list[str] = []
+        for d in defects:
+            match d["kind"]:
+                case "header_column_mismatch":
+                    reasons.append(
+                        f"header describes {d['header_columns']} columns, "
+                        f"rows carry {d['row_columns']}"
+                    )
+                case "empty_row_label":
+                    n = len(d["rows"])
+                    reasons.append(f"{n} row{'s' if n != 1 else ''} with no label")
+        label = _table_caption_label(text, m.start())
+        found.extend({**d, "label": label} for d in defects)
+        named = f" ({label})" if label else ""
+        marker = (
+            f"{_MARKER_PREFIX}{named}: {'; '.join(reasons)}; "
+            "values may be misaligned]"
+        )
+        # Just INSIDE the opening tag, not on a line before it. That span is
+        # what PDFChunker's _table_header re-injects into every continuation
+        # chunk, so every chunk of a split table carries the warning. On its
+        # own line before <table>, a table big enough to trip the
+        # table_break branch left the marker in the PRECEDING chunk and in
+        # none of the table's own (substantive-critic round 1).
+        open_end = block.find(">") + 1
+        return f"{block[:open_end]}{marker}{block[open_end:]}"
+
+    return _TABLE_BLOCK_RE.sub(_repl, text), found
+
+
 @dataclass
 class ExtractionResult:
     """Result of PDF text extraction."""
@@ -1448,6 +1600,11 @@ class PDFExtractor:
         # "mineru+docling-degraded" rather than a bare "mineru" that
         # would silently overstate MinerU's actual coverage.
         degraded_pages: list[int] = []
+        # nexus-stkek: structurally suspect tables found while marking, in
+        # document order. Collected here rather than at assembly because the
+        # marker is inserted into the per-batch markdown, before
+        # per_page_lengths is measured (see below).
+        table_defects: list[dict] = []
 
         def _rebase_page_idx(content_list: list[dict], batch_start: int) -> None:
             # MinerU numbers ``page_idx`` from the start of the batch it parsed.
@@ -1535,6 +1692,18 @@ class PDFExtractor:
             # consistent with the stored normalized text.
             md = _unwrap_mineru_font_tags(_normalize_mineru_latex(md))
             md = _mark_unextracted_visuals(md, content_list)
+            # nexus-stkek: mark suspect tables HERE, beside the visual
+            # markers and before _append_page/_append_batch measures this
+            # text, because both of those insert characters and
+            # per_page_lengths -> page_boundaries -> chunk_start_char are
+            # all measured downstream of them. Inserting at assembly
+            # instead would shift every boundary past the first marker,
+            # which is the defect class nexus-kas9u came from.
+            # A table spanning a BATCH boundary is not checked: neither
+            # half matches a complete <table>...</table>, so it passes
+            # through unmarked rather than being judged on half its rows.
+            md, found = mark_misshapen_tables(md)
+            table_defects.extend(found)
             if span <= 1:
                 _append_page(s, md, content_list, pdf_info)
             else:
@@ -1558,6 +1727,7 @@ class PDFExtractor:
             per_page_lengths=per_page_lengths,
             formula_count_floor=formula_count,
             degraded_page_count=len(degraded_pages),
+            table_defects=table_defects,
         )
 
     def _probe_mineru_health(self, base_url: str) -> tuple[bool, str]:
@@ -2133,6 +2303,7 @@ class PDFExtractor:
         per_page_lengths: list[tuple[int, int]] | None = None,
         formula_count_floor: int = 0,
         degraded_page_count: int = 0,
+        table_defects: list[dict] | None = None,
     ) -> ExtractionResult:
         """Assemble an ExtractionResult from (merged) MinerU outputs.
 
@@ -2232,6 +2403,13 @@ class PDFExtractor:
             for e in content_list
             if e.get("type") == "table" and e.get("table_body")
         ]
+        if table_defects:
+            _log.warning(
+                "table_structure_suspect",
+                count=len(table_defects),
+                tables=sorted({d.get("label") or "(unlabelled)" for d in table_defects}),
+                path=str(pdf_path),
+            )
         return ExtractionResult(
             text=md_text,
             metadata={
@@ -2241,6 +2419,7 @@ class PDFExtractor:
                 "formula_count": formula_count,
                 "page_boundaries": page_boundaries,
                 "table_regions": table_regions,
+                "table_defects": table_defects or [],
                 "docling_title": "",
                 "pdf_title": "",
                 "pdf_author": "",

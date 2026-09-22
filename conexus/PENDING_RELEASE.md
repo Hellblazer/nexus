@@ -30,6 +30,10 @@ mechanize, it matters enough to ship.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.55.3)
+## Awaiting the next release or plugin cut (pinned: v7.57.0)
 
-_Empty. Everything previously listed here went live with 7.55.2, and 7.55.3 carries no plugin-surface change._
+_Empty. `conexus/hooks/scripts/preflight.py`'s deletion (nexus-sa187) went live with
+7.57.0 when `source.ref` advanced to `v7.57.0`; it was the only plugin-surface
+difference from the previous pinned tag, and it was unwired in installed sessions
+either way — `hooks.json` has named the `nx-hook preflight` verb since RDR-215
+nexus-q02nx.21._

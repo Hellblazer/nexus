@@ -1908,6 +1908,9 @@ class TestDtIndexDoesNotDuplicateAcrossOwners:
             def find_by_file_path(self, path):
                 return _Entry("1.12.145")        # the other row for the same path
 
+            def find_all_by_file_path(self, path):  # nexus-yzij1
+                return [_Entry("1.12.145")]
+
             def close(self):
                 pass
 
@@ -1949,6 +1952,9 @@ class TestDtIndexDoesNotDuplicateAcrossOwners:
 
             def find_by_file_path(self, path):
                 return _Entry()
+
+            def find_all_by_file_path(self, path):  # nexus-yzij1: the writer
+                return [_Entry()]                   # resolves by this now
 
             def close(self):
                 pass
@@ -2672,6 +2678,8 @@ class TestPageCoverage:
                 return None
             def find_by_file_path(self, p):
                 return SimpleNamespace(tumbler="1.12.9", title="pdf guess", year=0)
+            def find_all_by_file_path(self, p):  # nexus-yzij1
+                return [SimpleNamespace(tumbler="1.12.9", title="pdf guess", year=0)]
             def close(self): pass
 
         class _Writer:

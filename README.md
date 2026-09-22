@@ -13,7 +13,7 @@ The package on PyPI is `conexus`. The command it installs is `nx`. The full inst
 
 | Need | Why | Check |
 |---|---|---|
-| Python 3.12 or 3.13 | Python 3.14 does not work yet. If needed, uv downloads 3.13 for you. | `python3 --version` |
+| Python 3.12 or 3.13 | Python 3.14 does not work yet, which is why the install command below names 3.12. uv downloads it for you. | `python3 --version` |
 | [uv](https://docs.astral.sh/uv/) | Installs and runs the `nx` command. | `uv --version` |
 | git | Nexus reads git information when it indexes a repository. | `git --version` |
 | Node.js with npm | Required for the Claude Code plugin. Without it the plugin installs but its tools never appear, with no error message. | `node --version` |
@@ -28,9 +28,11 @@ Run the steps in this order. Each step can be run again without harm.
 **1. Install the `nx` command.** The second command moves it to the layout that Nexus manages.
 
 ```bash
-uv tool install conexus
+uv tool install conexus --python 3.12
 nx self install
 ```
+
+`--python 3.12` is part of the command, not an option. Without it uv picks an interpreter itself, and on a machine that has no other one — a fresh Ubuntu 26.04, whose `python3` is 3.14 — it picks 3.14 and the install stops with a resolver error naming torch wheels. uv downloads 3.12 for you if you do not have it.
 
 If the terminal cannot find `nx` afterward, add `~/.local/bin` to your PATH and open a new terminal.
 
@@ -98,7 +100,8 @@ The full sequence, including exporting your knowledge first and removing the Cla
 | Symptom | Do this |
 |---|---|
 | `nx: command not found` | Add `~/.local/bin` to your PATH and open a new terminal. If PATH is right, run `nx self install`. |
-| Crash on startup, or an import error naming voyageai or Pydantic v1 | You are on Python 3.14. Run `uv python install 3.13`, then `uv tool install conexus --force --python 3.13`, then `nx self install`. |
+| The install itself fails with "No solution found when resolving dependencies" and a hint about torch ABI tags | You left `--python 3.12` off the install command and your `python3` is 3.14. Run it again with the flag. |
+| Crash on startup, or an import error naming voyageai or Pydantic v1 | You are on Python 3.14. Run `uv tool install conexus --force --python 3.12`, then `nx self install`. |
 | `nx doctor` says credentials not set | Normal for a local install. Only the cloud service needs a token. |
 | `nx search` returns nothing | Run `nx doctor`. If the index was interrupted, run `nx index repo .` again. If you updated with `uv tool install`, see Update above. |
 | Plugin installed but its tools never appear | The `nx` command or Node.js is missing. Run `/conexus:nx-preflight`; it says which. |

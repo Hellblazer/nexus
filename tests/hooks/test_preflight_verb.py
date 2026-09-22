@@ -2,13 +2,15 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Tests for the ``preflight`` hook verb (RDR-215 bead nexus-q02nx.21).
 
-Ports ``conexus/hooks/scripts/preflight.py``'s coverage
-(``tests/test_nx_preflight_hook.py``) onto :func:`nexus.hooks.preflight_verb.run`,
-driving both implementations per assertion via the dual ``impl`` fixture
-pattern used in ``tests/hooks/test_post_compact_hook.py``: the original
-script stays wired in ``conexus/hooks/hooks.json`` until bead nexus-q02nx.21/.22
-re-declares that SessionStart entry, so every assertion here is a
-differential against what production still runs.
+Carries what ``conexus/hooks/scripts/preflight.py`` used to be tested for.
+That script was the pre-RDR-215 implementation, and while it was still wired
+in ``hooks.json`` every assertion here ran against both copies through a dual
+``impl`` fixture. ``hooks.json``'s SessionStart entry now names
+``nx-hook preflight``, the script has been deleted, and this verb is the only
+implementation left -- so the fixture is gone with it.
+
+``tests/test_nx_preflight_hook.py`` keeps the other half: that the hook is
+wired SECOND, above the guidance emission it counter-signals.
 """
 from __future__ import annotations
 
@@ -21,29 +23,6 @@ from pathlib import Path
 import pytest
 
 from nexus.hooks import preflight_verb
-
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus" / "hooks" / "scripts" / "preflight.py"
-)
-
-#: Which implementation :func:`_run_preflight` drives, set per-test by `impl`.
-_IMPL = "script"
-
-
-@pytest.fixture(params=["script", "python"], autouse=True)
-def impl(request):
-    """Run every assertion against BOTH implementations.
-
-    Drop the "script" param once bead nexus-q02nx.21/.22 re-points the
-    ``hooks.json`` SessionStart entry at the ``nx-hook preflight`` verb and
-    the plugin script is deleted.
-    """
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "script"
-
 
 #: A child process, not an in-process call: these tests vary PATH per case,
 #: and ``os.environ`` is process-global.
@@ -66,13 +45,9 @@ def _run_preflight(env_path: str | None = None) -> tuple[int, str]:
     env = os.environ.copy()
     if env_path is not None:
         env["PATH"] = env_path
-    argv = (
-        [sys.executable, "-c", _PY_DRIVER]
-        if _IMPL == "python"
-        else [sys.executable, str(SCRIPT)]
-    )
     result = subprocess.run(
-        argv, capture_output=True, text=True, timeout=20, env=env,
+        [sys.executable, "-c", _PY_DRIVER],
+        capture_output=True, text=True, timeout=20, env=env,
     )
     return result.returncode, result.stdout
 
@@ -142,21 +117,17 @@ class TestPreflightVerbDoesNotReadStdin:
     """
 
     def test_runs_with_no_stdin_attached(self) -> None:
-        """A closed/empty stdin must not hang or crash either implementation."""
-        argv = (
-            [sys.executable, "-c", _PY_DRIVER]
-            if _IMPL == "python"
-            else [sys.executable, str(SCRIPT)]
-        )
+        """A closed/empty stdin must not hang or crash the verb."""
         result = subprocess.run(
-            argv, input="", capture_output=True, text=True, timeout=20,
+            [sys.executable, "-c", _PY_DRIVER],
+            input="", capture_output=True, text=True, timeout=20,
         )
         assert result.returncode == 0
 
 
 class TestPreflightVerbDirect:
     """Exercises :func:`nexus.hooks.preflight_verb.run` in-process, independent
-    of the dual-drive subprocess harness above.
+    of the subprocess harness above.
     """
 
     def test_ignores_payload_argument(self) -> None:
@@ -169,3 +140,4 @@ class TestPreflightVerbDirect:
     def test_exit_code_always_zero(self) -> None:
         result = preflight_verb.run(None)
         assert result.exit_code == 0
+

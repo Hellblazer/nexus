@@ -344,12 +344,20 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
     ``source_uri`` (``file://...``); this is fine for non-DT ingest but
     breaks RDR-099 AC-1, where the catalog identity must survive DT
     moving the underlying file inside its ``Files.noindex/`` tree.
-    Looking up the entry by ``file_path`` immediately after the indexer
-    call is reliable because no other registrar runs between the two.
+
+    Resolution is by the DEVONthink URI first and the path only as a
+    fallback. The path fallback used to rest on "looking up the entry by
+    ``file_path`` immediately after the indexer call is reliable because no
+    other registrar runs between the two" — which was never a property of
+    the path, only of the timing. A file catalogued under a second owner by
+    some earlier run leaves two rows standing before this function is ever
+    called (nexus-z0lu4, nexus-yzij1), and no amount of proximity to the
+    indexer changes that. When the path names more than one document, this
+    refuses rather than stamping a guess.
 
     Returns ``True`` when the entry now carries the DT identity,
-    ``False`` on any miss (uninitialized catalog, no matching row,
-    SQLite exception). Failures are logged and surfaced in the dt
+    ``False`` on any miss (uninitialized catalog, no matching row, an
+    ambiguous path, a catalog exception). Failures are logged and surfaced in the dt
     index summary line by the caller; the function does not raise so
     a stamp miss leaves a recoverable ``file://`` entry rather than
     aborting the whole batch. ``nx catalog update --source-uri`` can
@@ -389,7 +397,30 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
         # already uses; resolving both the same way is also what stops one
         # `nx dt index` run from stamping two different documents.
         # nexus-xnz0o: use catalog API (uniform SQLite + service mode).
-        entry = reader.by_source_uri(dt_uri) or reader.find_by_file_path(str(file_path))
+        #
+        # nexus-yzij1: the path fallback REFUSES rather than guesses. Taking
+        # the first of several was the remaining half of the defect above:
+        # this call stamps identity onto whichever row it picks, and a wrong
+        # pick is unrecoverable from the log alone. Several rows per path is
+        # a normal steady state, so the honest answer when the weak key names
+        # more than one is "I cannot tell which", not a coin flip.
+        entry = reader.by_source_uri(dt_uri)
+        if entry is None:
+            by_path = reader.find_all_by_file_path(str(file_path))
+            if len(by_path) > 1:
+                _log.warning(
+                    "dt_stamp_ambiguous_file_path",
+                    file_path=str(file_path),
+                    uuid=uuid,
+                    dt_uri=dt_uri,
+                    matches=len(by_path),
+                    candidates=[str(e.tumbler) for e in by_path],
+                    detail="several catalog documents share this file_path and "
+                           "none carries this DEVONthink URI; refusing to stamp "
+                           "rather than guess which one is the record.",
+                )
+                return False
+            entry = by_path[0] if by_path else None
         if entry is None:
             _log.warning(
                 "dt_stamp_no_entry_found",
@@ -1459,8 +1490,16 @@ def index_cmd(
             "Some records were indexed but their catalog entry still "
             "carries source_uri=file://… instead of x-devonthink-item://"
             "<UUID>. Inspect ~/Library/Logs (or your structlog sink) "
-            "for 'dt_stamp_failed' events and recover with "
-            "'nx catalog update <tumbler> --source-uri x-devonthink-item://<UUID>'.",
+            "for 'dt_stamp_failed' and 'dt_stamp_ambiguous_file_path' "
+            "events and recover with "
+            "'nx catalog update <tumbler> --source-uri x-devonthink-item://<UUID>'."
+            "\n  A 'dt_stamp_ambiguous_file_path' event is a DIFFERENT "
+            "failure: several catalog documents share that file_path and "
+            "none carried the URI, so nothing was stamped rather than the "
+            "wrong row being stamped (nexus-yzij1). That event names every "
+            "candidate tumbler — pick the one that is the record before "
+            "running the recovery command, because here the tool genuinely "
+            "cannot tell which it is.",
         )
 
     # nexus-5xn3k.6 (RUNFENCE C4, bead scope note 2026-08-02 16:34) +

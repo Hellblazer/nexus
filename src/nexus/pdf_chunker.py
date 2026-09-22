@@ -321,7 +321,19 @@ class PDFChunker:
 
     @staticmethod
     def _table_header(text: str, table_start: int) -> str:
-        """``<table>`` opening plus the first complete row, or ``""``."""
+        """``<table>`` opening plus the first complete row, or ``""``.
+
+        A SECOND consumer depends on this exact span, and the coupling was
+        undeclared in both directions until review round 2 named it
+        (nexus-stkek): :func:`nexus.pdf_extractor.mark_misshapen_tables`
+        puts its suspect-table marker just inside the opening tag,
+        specifically so that re-injecting this span carries the marker into
+        every continuation chunk of a split table. Narrowing what this
+        returns, or dropping the re-injection, would silently stop that
+        marker reaching the table it flags, with only
+        ``tests/test_table_shape_marker.py``'s 90-row co-location test to
+        catch it.
+        """
         open_end = text.find(">", table_start)
         row_end = text.find(_ROW_END, table_start)
         if open_end == -1 or row_end == -1:

@@ -6,6 +6,106 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.57.0] - 2026-09-22
+
+Pairs with engine-service-v0.1.129, unchanged from 7.56.0 — this release carries no engine-side change.
+
+### Fixed
+
+- **`store_get` no longer returns duplicated text when rebuilding a
+  PDF-derived document.** The whole-document rebuild joined a document's
+  manifest chunks with no de-overlapping, which is correct for a `store_put`
+  note (whose pieces do not overlap) and wrong for every PDF, because the
+  chunker overlaps its chunks by 20% of the window by design. On an 11-page
+  paper that duplicated 18.7% of the text and spliced words at the seams.
+  Stored data was never affected — only the rebuild — so this repairs existing
+  documents with no re-index and no user action. Affects the MCP `store_get`
+  tool and `nx store get` alike. Measured across the live store: 134 of 140
+  PDF-chunked documents, 30.4% of all knowledge documents.
+
+- **PDF table extraction flags a table whose rows disagree with its header.**
+  MinerU's table HTML was stored verbatim and checked by nothing, so a table
+  whose header collapsed into a single `colspan` cell could read back stating
+  the opposite of the source, with every value row left unattributable to a
+  column. Two signals now mark such a table in place: a header whose width
+  disagrees with its data rows, and a row that lost its label to a merge. The
+  table's own HTML is never edited, and the marker rides inside the table so it
+  reaches every chunk of one that spans several. Markers are added at index
+  time, so they appear on newly indexed documents only.
+
+- **Path-keyed catalog writers refuse, report or announce instead of guessing.**
+  Several catalog documents per `file_path` is a normal steady state — nothing
+  forbids it, the only uniqueness is the partial index on
+  `(tenant_id, source_uri)`, and it arises whenever one file is catalogued
+  under two owners. The resolver already said when it chose among several; the
+  callers did not. `nx dt index` now returns without stamping when the path
+  names more than one document, naming every candidate, rather than stamping
+  the first — writing identity onto the wrong row is how one run stamped the
+  wrong document. The since-head delete reports the foreign-owner row it
+  deliberately leaves live instead of skipping in silence. `nx catalog
+  session-summary` shows every document for a path, where it previously
+  reported one row's RDR links as the path's and could print "No linked RDRs
+  found" while the links sat one row away. And the four single-document
+  registrars announce before minting a second document for an
+  already-catalogued path, recorded into a per-run collector that `nx index`
+  resets and surfaces at the end of a run.
+
+- **The documented install command names its interpreter** (nexus-sa187).
+  `uv tool install conexus` is now `uv tool install conexus --python 3.12`
+  everywhere a user is told to type it: README, the site's two install flows,
+  `docs/getting-started.md`, `docs/cli-reference.md`, `docs/configuration.md`
+  (both its "recommended setup" line and its `[local]` variant), and the
+  `nx`-missing hint both preflight copies print. Ubuntu 26.04 LTS ships CPython 3.14 as
+  `python3`, and on a box with no other interpreter uv picked it and the
+  resolve failed outright — the torch pin (`>=2.8,<2.9`) has no `cp314`
+  wheels. Every fresh install on the current Linux LTS hit it; measured
+  2026-09-21 on WSL2 Ubuntu 26.04.1, and reproducible offline with
+  `uv pip compile --universal --python-version 3.14`. Widening the torch pin
+  would be a move toward 3.14, which this release cannot run, so the fix is to
+  stop leaving the interpreter to the ambient `python3`.
+
+  `tests/e2e/fresh-install-mvv.sh --published` had been passing `--python 3.12`
+  all along while the docs passed nothing, which is exactly why the right gate
+  at the right layer never saw this: the interpreter was the uncontrolled
+  variable. `tests/test_documented_install_interpreter_pin.py` now holds the
+  README, the site, `docs/configuration.md` and that MVV leg to one
+  interpreter, and checks it against `requires-python`.
+
+### Added
+
+- **`find_all_by_file_path` on the `CatalogReader` protocol.** The honest shape
+  of a path lookup: a path can name several documents, and `find_by_file_path`
+  returns only the first. Promoted onto the caller-facing contract because
+  three production call sites now depend on it.
+
+### Removed
+
+- **`conexus/hooks/scripts/preflight.py`**, the pre-RDR-215 implementation of
+  the SessionStart preflight. `hooks.json` has named the `nx-hook preflight`
+  verb since nexus-q02nx.21 and the `/conexus:nx-preflight` command goes
+  through `nx command-context`, so nothing ran this copy; deleting it is that
+  port's remaining half, recorded as the exit condition in
+  `tests/hooks/test_preflight_verb.py`'s own docstring and left undone when the
+  port landed. It surfaced because the install hint it carried had to be
+  hand-edited in parallel with its twin for nexus-sa187 — a duplicated fact
+  with no consumer. The verb's tests drop the dual-implementation fixture they
+  only needed while both existed; `tests/test_nx_preflight_hook.py` keeps the
+  half that is about hooks.json rather than about an implementation, namely
+  that the preflight runs above the guidance it counter-signals.
+
+### Known issues
+
+- A document indexed from markdown (`docs__`, `rdr__`) can still read back with
+  duplicated text at chunk seams. Its chunks record abutting spans, so the
+  de-overlapping above does not apply to them. The cause is not established and
+  a re-index may or may not resolve it, which is why this release promises
+  neither. Tracked separately.
+
+- A re-index after this release is not a no-op for a PDF with a flagged table.
+  The marker changes extracted *text*, so that table's chunks get new content
+  hashes. Expected for a text change, but worth knowing before re-indexing a
+  large corpus.
+
 ## [7.56.0] - 2026-09-21
 
 Pairs with engine-service-v0.1.129, unchanged from 7.55.3 — this release carries no engine-side change.

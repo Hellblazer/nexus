@@ -792,6 +792,14 @@ def _catalog_pdf_hook(
                     file_path_str, str(owner), reason="worktree_or_tempdir",
                 )
                 return
+            # nexus-yzij1: the lookup above is owner-scoped (and the
+            # source_uri leg missed, or there was no URI), so this mint can
+            # be the second document for a path another owner already holds.
+            # That is allowed; going unremarked is not.
+            from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog)
+            announce_cross_owner_mint(
+                reader, file_path_str, owner=owner, context="catalog_pdf_hook",
+            )
             writer.register(
                 owner=owner, title=effective_title, content_type="paper",
                 author=author, year=year, corpus=corpus,
