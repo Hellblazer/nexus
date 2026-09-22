@@ -7,7 +7,7 @@ priority: high
 author: Sam
 reviewed-by: pending
 created: 2026-09-21
-related_issues: [nexus-sa187, nexus-5dcky, nexus-t9klx, nexus-34f7r, nexus-1vc0n]
+related_issues: [nexus-sa187, nexus-5dcky, nexus-t9klx, nexus-34f7r, nexus-1vc0n, nexus-fd3zf, nexus-t10nc]
 related_rdrs: [RDR-126, RDR-155, RDR-197, RDR-210, RDR-215]
 ---
 
@@ -274,13 +274,45 @@ the one assumed. And the git-subprocess site is not obviously Windows-specific
 and nothing measured says it cannot happen elsewhere.
 
 The remedy follows from having two sites rather than one: a bound at the
-hook-tool boundary, which covers both and covers whatever the third turns out
-to be, rather than a repair to either blocking path. Hook tools are advisory
-and the harness already carries its own `timeout` per entry, so a hook past
-that budget can no longer affect anything except by holding the session open.
-Measured on qwentescence against a wheel carrying the bound: the Stop hook
-returns at its bound with the same empty result a crashed hook produces, where
-before it never returned.
+hook-tool boundary, rather than a repair to either blocking path. Hook tools
+are advisory and the harness already carries its own `timeout` per entry, so a
+hook past that budget can no longer affect anything except by holding the
+session open. Measured on qwentescence against a wheel carrying the bound: the
+Stop hook returns at its bound with the same empty result a crashed hook
+produces, where before it never returned.
+
+**That bound covers ONE of the two sites, not both. An earlier draft of this
+section claimed it covered "both, and whatever the third turns out to be",
+and that was wrong.** `mcp/hooks.py`'s `Thread.join(timeout)` containment is
+applied at the `hook_<name>` tool boundary and reaches roughly twelve tools.
+`tuple_registry` is not one of them: it is an ORDINARY MCP tool, and so are
+the 50-plus others that construct a `T2Database` (`nexus-fd3zf`, opened
+against this gap and absent from an earlier draft of the Beads section
+below). Every one of those stays unbounded on Windows with no endpoint
+configured, and hangs forever rather than for a budget. So:
+
+- `hook_stop_verification`, the site that produces the REPORTED symptom, is
+  covered.
+- `tuple_registry` and the whole ordinary-tool population are NOT, and need
+  either their own boundary bound or a bound at the blocking call.
+
+The reason this overreach survived a reading is worth keeping: the measured
+probe was `claude -p`, which fires Stop and therefore exercises exactly the
+covered site. A green result there says nothing about the uncovered one. The
+Test Plan's boundary half has been corrected to drive an ordinary tool call
+as well — see item 5 — because otherwise a green battery would keep
+reporting this gap closed while 50-plus tools still hang.
+
+One part of the remedy has landed since: `nexus.bounded_subprocess.run_bounded`
+(`nexus-t10nc`) bounds the git-subprocess site's shape at the call, reaping
+with an explicit timeout, which is what the Windows hang needs — CPython
+3.12's unbounded post-kill drain is inside `if _mswindows`, and the POSIX
+branch never had it. Converting `verification_config.py:97` to it is a
+one-line change, held only by `nexus-t9klx`'s in-flight restructuring of
+`src/nexus/hooks/`.
+
+So the remedy has three parts, of which one has landed, one is open as
+`nexus-fd3zf`, and one is a one-line follow-on behind `nexus-t9klx`.
 
 It reaches a Windows user first for a structural reason, whatever its cause.
 On Linux and macOS a running local service exists or is started, so these
@@ -663,7 +695,7 @@ The finding that makes this tractable, and it is worth stating before the plan:
 choke point that refuses Windows — it knows `mac-arm64`, `mac-x64`,
 `linux-amd64` and `linux-arm64`, and raises a `RuntimeError` naming Windows as
 a "release N+1" follow-on. Every consumer routes through it
-(`pg_bundle.py:129`, `binary_install.py:394`, `:611`), and the engine binary's
+(`pg_bundle.py:129`, `binary_install.py:338`, `:611`), and the engine binary's
 `asset_name()` raises there too, uncaught, before any download.
 
 An appliance never asks that question. The image runs `linux-amd64` binaries
@@ -721,7 +753,7 @@ overrides:
   `nexus_config_dir()`) relocates the durable estate. Everything derives from
   it: the PostgreSQL cluster (`pg_provision.py:2125`, `config_dir /
   "postgres"`), the engine binary
-  (`binary_install.py:359`, `config_dir / "service" / ...`), credentials, logs
+  (`binary_lifecycle.py:44`, `config_dir / "service" / ...`), credentials, logs
   and leases.
 - `NX_ONNX_MODEL_DIR` (`src/nexus/db/onnx_model_root.py:37,53`) relocates the
   ONNX models, which otherwise sit under `HOME/.cache/nexus/onnx_models`.
@@ -985,13 +1017,25 @@ sequences with the appliance's own cadence rather than against it.
 
 **Phase 3 — make the Windows client behave (Gaps 3 and 4).** The hang is first
 because it is what a new user meets first (`nexus-5dcky`): whatever hook blocks
-on an unresolvable endpoint must bound its wait and continue. Then the hook
-tier: port the five `python3` entries to `nx-hook` verbs (`nexus-t9klx`, and
-Sam has already ruled "we need everything ported") — no new executables are
-needed, since they become verbs on an `nx-hook` that already ships and already
-works on Windows. Then the process primitives (`nexus-34f7r`): `safe_killpg`
-not catching the `AttributeError` Windows actually raises, and SessionEnd
-having no fast path where POSIX has a double-fork.
+on an unresolvable endpoint must bound its wait and continue. That is the
+hook-tool half only; the ordinary-tool half (`nexus-fd3zf` — 50-plus tools
+constructing a `T2Database`, reached by no bound today) belongs to this phase
+as well, and is the larger of the two. Then the hook tier: port the five
+`python3` entries to `nx-hook` verbs (`nexus-t9klx`, and Sam has already ruled
+"we need everything ported") — no new executables are needed, since they
+become verbs on an `nx-hook` that already ships and already works on Windows.
+
+Then the process primitives, and this phase takes ALL of `nexus-34f7r`'s
+items rather than the two an earlier draft named: `safe_killpg` not catching
+the `AttributeError` Windows actually raises; SessionEnd having no fast path
+where POSIX has a double-fork; `start_new_session=True` being accepted and
+silently ignored, so code that believes it holds a killable process group
+does not; and the remaining async-primitive gaps that bead enumerates. The
+first and third are already partly answered by `nexus.bounded_subprocess.
+kill_child_and_descendants` (`nexus-t10nc`, landed) — the single named branch
+for "there is no process group here", which reports the reach it achieved so
+a weaker Windows kill is visible rather than silent, and which `nexus-34f7r`
+was scoped to build on rather than beside.
 
 Two incidental defects found during research belong in this phase because they
 are in the same code and the same class:
@@ -1121,7 +1165,14 @@ checks, carrying a max-skip assert so an absent host fails rather than passes.
    Windows Claude Code session — the check that already exists for this purpose
    and the one that would have caught the 7.41.0 projector-dead-on-cloud class.
 5. A plain `claude -p` returns rather than hanging, with and without an
-   endpoint configured — the Gap 4 regression.
+   endpoint configured — the Gap 4 regression for the HOOK-TOOL half.
+6. **An ordinary MCP tool call returns rather than hanging**, with no endpoint
+   configured — `tuple_registry` or any other `T2Database` constructor. This
+   item is separate from 5 on purpose. `claude -p` fires Stop, so item 5
+   exercises only the `hook_<name>` boundary, which is the half that already
+   has a bound; the 50-plus ordinary tools in `nexus-fd3zf` are reached by
+   neither that bound nor item 5. A battery green on 5 alone would report
+   Gap 4 closed while most of the surface still hangs forever.
 
 ### What neither half covers, stated so it is not mistaken for coverage
 
@@ -1254,6 +1305,13 @@ questions rather than from the drafting.
   endpoint. Gap 4.
 - `nexus-t9klx` — five bare-`python3` hook entries to port to `nx-hook` verbs.
 - `nexus-34f7r` — Windows async and process-primitive gaps.
+- `nexus-fd3zf` — the 50-plus ordinary MCP tools that construct a
+  `T2Database` and hang forever on Windows with no endpoint. Gap 4's
+  uncovered half: the hook-tool boundary bound does not reach them.
+- `nexus-t10nc` — `run_bounded`, the bounded-subprocess primitive. Landed.
+  Bounds the reap that makes the Windows drain unbounded, and is the
+  site-level fix for `verification_config.py:97` once `nexus-t9klx` frees
+  `src/nexus/hooks/`.
 
 ### Code the design depends on
 
@@ -1262,8 +1320,10 @@ questions rather than from the drafting.
 - `src/nexus/config.py:619` — `NEXUS_CONFIG_DIR`, which relocates the durable
   estate onto the data volume.
 - `src/nexus/db/onnx_model_root.py:37,53` — `NX_ONNX_MODEL_DIR`.
-- `src/nexus/daemon/binary_install.py:359` — the engine binary under
-  `config_dir`, which is why convergence persists on the volume.
+- `src/nexus/daemon/binary_lifecycle.py:44` — `well_known_binary_path()`,
+  the engine binary under `config_dir`, which is why convergence persists
+  on the volume. (An earlier draft cited `binary_install.py:359`; that is
+  `binary_sidecar_path()`, the provenance sidecar, not the binary.)
 - `service/src/main/java/dev/nexus/service/NexusService.java:309` —
   `NX_SERVICE_BIND` and its own warning about binding past loopback.
 
@@ -1279,3 +1339,4 @@ questions rather than from the drafting.
 | 2026-09-21 | Gate split into a substrate half on `ubuntu-latest` and a boundary half as a release-battery leg on qwentescence (Sam), rather than a Windows CI runner. |
 | 2026-09-21 | Verified both mechanism claims by experiment: a `docker export` rootfs boots with systemd as pid 1 and lingering works; a mounted VHDX survives unregister-and-re-import. |
 | 2026-09-21 | Added the structural sections this file was missing against RDR-217's shape. |
+| 2026-09-22 | Gate round 1 fixes: Gap 4's boundary bound covers the hook-tool half only, not the ordinary-tool population (`nexus-fd3zf`); Test Plan gains boundary item 6 for an ordinary tool call, since `claude -p` exercises only the covered half; Phase 3 takes all of `nexus-34f7r` and names `nexus-fd3zf`; two wrong code citations corrected (`binary_install.py:394`->`:338`, `binary_install.py:359`->`binary_lifecycle.py:44`). |
