@@ -417,11 +417,24 @@ def test_check_blocked_when_a_code_commit_since_h_was_never_exercised(tmp_path: 
 # ci.yml, so it found "the most recent COMPLETED code-exercised run" was the
 # PREVIOUS push while the covering run for the current push was still
 # `in_progress`, and reported four just-pushed, currently-being-tested
-# commits BLOCKED. The coordinator's correction (verbatim, because it
-# reverses this file's own first attempt): an in-flight covering run is a
-# CANNOT VERIFY (exit 2), never a silent PASS (exit 0) -- "the check must
-# not report pass or fail on evidence it does not have". These are the
-# first-class scenarios required as evidence: queued, in_progress,
+# commits BLOCKED.
+#
+# Round 2 made an in-flight covering run CANNOT VERIFY (exit 2). Round 3
+# corrected that: `workflow_run`/`schedule` (the trigger fix that would have
+# made "in flight" the rare case) only fire from the DEFAULT branch
+# (verified against GitHub's own docs -- this repo's default branch is
+# `main`, which only advances at a release), so a workflow_run-triggered
+# copy of this audit added on `develop` would have been DORMANT until the
+# next release and then fired using `main`'s stale copy -- a silent
+# vacuous-gate absence, worse than the noisy false positive it replaced.
+# The trigger stays `on: push`, which means an in-flight covering run is the
+# COMMON case, not a rare race -- so exit 2 (a failing exit code) on every
+# single code push would be exactly the "an honest check that is useless"
+# outcome that gets muted. classify_pending_commits's OUTPUT is unchanged
+# (still `(blocked, pending)`); what changed is what `check()` DOES with
+# `pending` -- it narrows the CLAIM to exclude those commits (prints them,
+# does not fail on them) rather than failing the whole invocation. These are
+# the first-class scenarios required as evidence: queued, in_progress,
 # in_progress-then-cancelled, and completed-but-skipped.
 
 
@@ -472,10 +485,11 @@ def test_classify_pending_commits_docs_only_commits_are_in_neither_list() -> Non
 # ── check()-level in-flight scenarios (the required evidence) ──────────────
 
 
-def test_check_cannot_verify_when_covering_run_is_queued(tmp_path: Path) -> None:
+def test_check_out_of_scope_not_failing_when_covering_run_is_queued(tmp_path: Path) -> None:
     """SCENARIO 1: queued. The exact race from the audit's own first live
     run -- ci.yml's run for THIS push has not even started executing jobs
-    yet."""
+    yet. Round 3: this is now a NON-FAILING out-of-scope note, since the
+    push trigger makes it the routine case, not a rare race."""
     repo = _init_repo(tmp_path)
     floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
     tip_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "just pushed")
@@ -487,10 +501,10 @@ def test_check_cannot_verify_when_covering_run_is_queued(tmp_path: Path) -> None
         jobs_by_run_id={1: _SUCCESS_JOBS},  # run 2's jobs are never fetched: still queued
     )
     rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
-    assert rc == 2, "a queued covering run must be CANNOT VERIFY, never a pass"
+    assert rc == 0, "a queued covering run must never fail the invocation -- it is out of scope, not a verdict"
 
 
-def test_check_cannot_verify_when_covering_run_is_in_progress(tmp_path: Path) -> None:
+def test_check_out_of_scope_not_failing_when_covering_run_is_in_progress(tmp_path: Path) -> None:
     """SCENARIO 2: in_progress. The literal shape of run 35770759430 at the
     moment the audit's own first live run (35770759535) queried it."""
     repo = _init_repo(tmp_path)
@@ -504,15 +518,16 @@ def test_check_cannot_verify_when_covering_run_is_in_progress(tmp_path: Path) ->
         jobs_by_run_id={1: _SUCCESS_JOBS},
     )
     rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
-    assert rc == 2, "an in_progress covering run must be CANNOT VERIFY, never a pass"
+    assert rc == 0, "an in_progress covering run must never fail the invocation"
 
 
 def test_check_blocked_after_in_progress_run_concludes_cancelled(tmp_path: Path) -> None:
     """SCENARIO 3: in_progress, THEN cancelled. Re-running the SAME audit
-    after the in-flight run concludes (as a workflow_run-triggered audit
-    would, on ci.yml's own completion) must resolve CANNOT VERIFY to
-    BLOCKED -- this is the bead's actual defect, now surfaced the moment
-    the covering run concludes rather than waiting for a follow-up push."""
+    after the in-flight run concludes (as the NEXT push's own audit would,
+    since the trigger stays `on: push`) must resolve the out-of-scope note
+    to a real BLOCKED -- this is the bead's actual defect, caught the
+    moment a fresh push re-derives coverage rather than staying silent
+    forever."""
     repo = _init_repo(tmp_path)
     floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
     tip_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "just pushed")
@@ -524,10 +539,12 @@ def test_check_blocked_after_in_progress_run_concludes_cancelled(tmp_path: Path)
         jobs_by_run_id={1: _SUCCESS_JOBS},
     )
     rc_while_running = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
-    assert rc_while_running == 2
+    assert rc_while_running == 0, "still in flight -- out of scope, not a verdict yet"
 
     # The run concludes -- cancelled (superseded by a later push, in the
-    # real scenario). Re-audit the SAME head with no other change.
+    # real scenario). Re-audit the SAME head with no other change (this
+    # models the NEXT push's own from-scratch audit, since nothing here is
+    # workflow_run-triggered by the conclusion itself).
     router.runs_page = [
         {"id": 2, "head_sha": tip_sha, "status": "completed"},
         {"id": 1, "head_sha": floor_sha, "status": "completed"},
@@ -535,6 +552,29 @@ def test_check_blocked_after_in_progress_run_concludes_cancelled(tmp_path: Path)
     router.jobs_by_run_id[2] = _CANCELLED_JOBS
     rc_after_cancel = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
     assert rc_after_cancel == 1, "a concluded-cancelled covering run must resolve to BLOCKED, never stay silent"
+
+
+def test_check_prints_the_out_of_scope_tail_to_stdout_not_stderr(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The out-of-scope note must be VISIBLE (round 3's whole point -- "print
+    it, don't stay silent"), and on stdout specifically: a caller scanning
+    stderr for trouble must not see it, since exit 0 already says nothing
+    failed."""
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
+    tip_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "just pushed")
+    router = _RunRouter(
+        runs_page=[
+            {"id": 2, "head_sha": tip_sha, "status": "in_progress"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={1: _SUCCESS_JOBS},
+    )
+    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert "OUT OF SCOPE" in out
+    assert tip_sha in out
+    assert "OUT OF SCOPE" not in err
 
 
 def test_check_stays_blocked_for_a_completed_run_whose_pytest_jobs_skipped(tmp_path: Path) -> None:
@@ -596,12 +636,12 @@ def test_falsification_reconstructed_bead_sequence_goes_red_then_green(tmp_path:
             # push's own ci.yml run finished fast (~55s per the bead).
             {"id": 3, "head_sha": docs_tip_sha, "status": "completed"},
             # The cancelled run: CONCLUDED with conclusion cancelled --
-            # cancellation is itself a completion (GitHub fires
-            # workflow_run.completed for it too), and by the time the
-            # docs-only push's own run exists at all, this one is long
-            # since finished being cancelled -- no in-flight run anywhere
-            # in this fixture is what makes this scenario genuinely BLOCKED
-            # rather than merely CANNOT VERIFY.
+            # cancellation IS a completion (status becomes "completed",
+            # conclusion "cancelled"), and by the time the docs-only push's
+            # own run exists at all, this one is long since finished being
+            # cancelled -- no in-flight run anywhere in this fixture is
+            # what makes this scenario genuinely BLOCKED rather than merely
+            # out-of-scope.
             {"id": 2, "head_sha": cancelled_code_sha, "status": "completed"},
             # The last run that actually exercised code, further back.
             {"id": 1, "head_sha": floor_sha, "status": "completed"},

@@ -83,48 +83,68 @@ exhausting ``--max-runs-scanned`` without ever finding a code-exercised run
 all exit 2 (CANNOT VERIFY), never 0. Only "every post-*H* commit is
 docs-only OR already covered" exits 0.
 
-THE RACE THIS SCRIPT'S OWN TRIGGER CREATES, and why in-flight coverage is a
-THIRD outcome, not a fourth branch of "covered" (nexus-of2x8 round 2,
-2026-09-22, the check's own first live run). This audit was originally
-``on: push`` -- the SAME event that starts ``ci.yml``. Its first real run
-(35770759535) started 18 seconds after a push and searched for "the most
-recent COMPLETED code-exercised run" while ci.yml's own matrix for that
-EXACT push (35770759430) was still ``in_progress``. The search fell back to
-the PREVIOUS push's run and reported all four just-pushed commits BLOCKED
--- every one of them was, at that instant, being tested by the run in
-flight. Reporting them covered (a silent PASS) would have been wrong for
+THE RACE THIS SCRIPT'S OWN TRIGGER CREATES (nexus-of2x8 round 2,
+2026-09-22, the check's own first live run). This audit is ``on: push`` --
+the SAME event that starts ``ci.yml``. Its first real run (35770759535)
+started 18 seconds after a push and searched for "the most recent
+COMPLETED code-exercised run" while ci.yml's own matrix for that EXACT
+push (35770759430) was still ``in_progress``. The search fell back to the
+PREVIOUS push's run and reported all four just-pushed commits BLOCKED --
+every one of them was, at that instant, being tested by the run in flight.
+Reporting them covered (a silent PASS, exit 0) would have been wrong for
 the same reason the original defect is wrong: a check that answers a
-question it cannot yet answer, in either direction, is not evidence. So a
-commit whose only covering run is still queued/in_progress is a THIRD
-verdict -- CANNOT VERIFY, exit 2, the same code this script already uses
-for every other "the dependency this needs is absent" case -- never a
-fourth "pending, exit 0" state, because exit 0 there would be exactly the
-bead's original failure shape one layer up: a silent pass on evidence that
-does not yet exist. Genuinely lost coverage still reports BLOCKED with
-first priority (a proven problem is never softened into "cannot verify"
-just because some OTHER commit in the same window happens to be pending) --
-see :func:`classify_pending_commits` and the priority order in
+question it cannot yet answer, in either direction, is not evidence.
+
+ROUND 3 CORRECTION, replacing round 2's fix (kept here because the wrong
+turn is instructive, not because it is live): round 2 moved the trigger to
+``on: workflow_run`` keyed to ``ci.yml``'s own ``completed`` event, so the
+covering run for the push under audit would always have concluded by the
+time this script ran. VERIFIED WRONG against GitHub's own documentation
+(events-that-trigger-workflows): both ``workflow_run`` and ``schedule``
+"will only trigger a workflow run if the workflow file exists on the
+default branch" -- and this repo's default branch is ``main``, which only
+advances at a release (AGENTS.md's Worktrees section; all routine work
+lands on ``develop``). A ``workflow_run``-triggered audit added on
+``develop`` would have been DORMANT until the next release promoted it to
+``main``, and would then fire using ``main``'s copy of the file, not
+``develop``'s -- a silent absence indistinguishable from a check that keeps
+passing, which is the nexus-moht0 vacuous-gate class by name, and strictly
+worse than the noisy false positive it would have replaced. No working
+``workflow_run`` example exists anywhere in this repo's workflows to have
+caught that assumption before it shipped.
+
+THE ACTUAL FIX stays on ``on: push`` and narrows the CLAIM instead of
+guessing about commits whose evidence does not exist yet. :func:`check`
+computes *H* exactly as before (the most recent COMPLETED code-exercised
+run) and asserts coverage only over commits it can ALREADY resolve today:
+everything at or before *H* (rule (b)), plus any commit after *H* that is
+itself docs-only (rule (a), which needs no CI evidence at all). A
+code-touching commit after *H* that only an IN-FLIGHT run's tree might
+eventually cover is neither -- :func:`check` PRINTS it (the sha, and which
+in-flight run might resolve it) rather than staying silent about it, and
+does not fold it into the exit code. Exit 0 means "everything this
+invocation actually examined is clean", a narrower, always-true-or-loud
+claim rather than a guess in either direction (this is the "a check's
+domain must contain its claim" principle -- see the
+``feedback_a_checks_domain_must_contain_the_claim`` T2 record). Genuinely
+lost coverage -- a commit covered by NOTHING, not even something in flight
+-- still reports BLOCKED (exit 1) immediately and takes priority; a
+completed run whose pytest jobs SKIPPED is not in flight (it already
+concluded) and can never excuse a code commit into the out-of-scope tail
+-- see :func:`classify_pending_commits` and the priority order in
 :func:`check`.
 
-Closing this at the SOURCE, not just in the reporting: the trigger moved
-from ``on: push`` to ``on: workflow_run`` keyed to ``ci.yml``'s own
-``completed`` event (see ``.github/workflows/ci-commit-coverage-audit.yml``).
-``workflow_run``'s ``completed`` type fires for EVERY conclusion of the
-named workflow -- ``success``, ``failure``, AND ``cancelled`` -- so the
-covering run for the exact push under audit is, by construction, no longer
-in flight by the time this script runs for it. This removes the race for
-the common case (a push whose own run completes without being
-superseded) entirely; it does not remove the in-flight code path, because
-a CANCELLED run's own ``workflow_run.completed`` event fires the audit
-WHILE THE SUPERSEDING PUSH'S RUN IS STILL RUNNING -- that push's in-flight
-run is exactly what caused the cancellation, so it is reliably present in
-the runs list at that moment. This is the bead's exact scenario, caught
-earlier than the bead's own account (which surfaced only after a
-FOLLOW-UP push): the cancelled commit's own audit run now fires
-immediately and correctly reports CANNOT VERIFY (an in-flight run covers
-it) rather than a false BLOCKED, and resolves to OK moments later when the
-superseding run's own ``workflow_run.completed`` event re-audits with that
-run now completed and code-exercised.
+THE RESIDUAL GAP, stated rather than hidden: if develop goes quiet
+immediately after a run is cancelled, nothing re-audits, and the
+out-of-scope tail stays unexamined indefinitely -- it is PRINTED every
+run, so it is visible in the log rather than lost, but visible-in-a-log is
+weaker than a red check, and a human has to go looking for it rather than
+being told. ``workflow_dispatch`` (declared below, and unlike
+``workflow_run``/``schedule`` it DOES work from any branch per the same
+GitHub documentation) lets someone manually re-run this audit against the
+same head once the in-flight run concludes, closing the gap on demand
+rather than automatically. See the module's own report for this repo's
+assessment of how much that closes versus a genuinely automatic re-check.
 
 Usage::
 
@@ -132,16 +152,18 @@ Usage::
     uv run python scripts/check_ci_commit_coverage.py --repo Hellblazer/nexus \\
         --branch develop --head <sha>
 
-Exit codes: ``0`` every commit since the last code-exercised run is either
-docs-only or covered by a COMPLETED code-exercised run, ``1`` BLOCKED --
-one or more commits touch code and are covered by nothing at all, not even
-an in-flight run (names them; takes priority over exit 2 when both occur in
-the same window), ``2`` CANNOT VERIFY -- either the usual absent-dependency
-cases (missing token/repo, API/git error, no completed code-exercised run
-found within the scanned window), OR one or more commits are covered ONLY
-by a run that has not concluded yet (named, along with the in-flight run
-id) -- "could not verify" is never "must be fine", and an unresolved
-question is never answered as a pass.
+Exit codes: ``0`` every commit this invocation could actually examine
+(everything up to the last completed code-exercised run, plus any
+docs-only or otherwise-resolvable commits after it) is covered -- any
+commit left unresolved because its only potential covering run has not
+concluded is PRINTED, not silently passed, and does not affect this exit
+code; ``1`` BLOCKED -- one or more commits touch code and are covered by
+nothing at all, not even an in-flight run (names them; takes priority over
+the out-of-scope tail in the same window); ``2`` CANNOT VERIFY -- the
+absent-dependency cases only (missing token/repo, API/git error, no
+completed code-exercised run found within the scanned window) -- "could
+not verify" is never "must be fine", but an in-flight covering run is no
+longer one of these cases (see ROUND 3 CORRECTION above).
 """
 from __future__ import annotations
 
@@ -590,33 +612,38 @@ def check(
         print(f"\n{_REMEDY}", file=sys.stderr)
         return 1
 
+    audited_count = len(pending_shas) - len(pending)
     if pending:
+        # OUT OF SCOPE, not CANNOT VERIFY (round 3 correction -- see the
+        # module docstring). This is printed to STDOUT, not stderr: it is
+        # not a problem the exit code reflects, so it must not read like one
+        # to a caller that only checks stderr for trouble. The claim this
+        # invocation makes narrows to exclude these shas rather than
+        # guessing about them in either direction.
         print(
-            f"CANNOT VERIFY: {len(pending)} commit(s) on {branch!r} between the "
-            f"last code-exercised run ({last_covering_run.head_sha}) and "
-            f"{head_sha} touch code and are covered ONLY by a run that has "
-            f"not concluded yet (in-flight head(s): "
-            f"{', '.join(sorted(set(in_flight_head_shas)))}):",
-            file=sys.stderr,
+            f"NOTE: {len(pending)} commit(s) on {branch!r} touch code and are "
+            "OUT OF SCOPE for this invocation -- their only potential "
+            "covering run has not concluded yet (in-flight head(s): "
+            f"{', '.join(sorted(set(in_flight_head_shas)))}). This is not a "
+            "pass on these commits and not a failure of this run -- the "
+            "claim below is scoped to exclude them. The next push's audit "
+            "re-derives from scratch and will report them BLOCKED for real "
+            "if the in-flight run turns out to have been cancelled with "
+            "nothing else covering them, or resolve them into the covered "
+            "set if it succeeds. If develop goes quiet before another push "
+            "arrives, re-run this audit manually via workflow_dispatch once "
+            "the in-flight run concludes to close this out sooner:"
         )
         for c in pending:
-            print(f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}", file=sys.stderr)
-        print(
-            "\nThis is not a failure -- it is an unanswered question. "
-            "Re-running this audit once the in-flight run concludes will "
-            "resolve it to either OK (the run succeeded and exercised code) "
-            "or BLOCKED (the run was cancelled/failed and nothing else "
-            "covers these commits). See the module docstring's THE RACE "
-            "section (nexus-of2x8).",
-            file=sys.stderr,
-        )
-        return 2
+            print(f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}")
+        print()
 
     print(
-        f"OK: every commit between the last code-exercised run "
-        f"({last_covering_run.head_sha}) and {head_sha} on {branch!r} is "
-        f"either docs-only or already covered by that run's tree "
-        f"({len(pending_shas)} commit(s) checked)."
+        f"OK: every commit this invocation could examine, between the last "
+        f"code-exercised run ({last_covering_run.head_sha}) and {head_sha} on "
+        f"{branch!r}, is either docs-only or already covered by that run's "
+        f"tree ({audited_count}/{len(pending_shas)} commit(s) audited"
+        f"{f', {len(pending)} left out of scope' if pending else ''})."
     )
     return 0
 
