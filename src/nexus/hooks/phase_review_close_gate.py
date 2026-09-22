@@ -1,6 +1,36 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-121 Phase 2 hook 2: phase-review close requires a PASSED gate.
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""The ``phase-review-close-gate`` hook verb (nexus-t9klx).
+
+Port of ``conexus/hooks/scripts/routing/phase_review_close_requires_gate.py``,
+the routing framework's one ``fail_closed`` rule. It stays on the COMMAND
+tier, which is where a rule that must still deny when it crashes belongs:
+``nexus.mcp.hooks._NEVER_TOOL_TIER`` refuses to register this name as an
+``mcp_tool`` at all, because a tool-boundary crash renders as
+``isError=False`` — an allow — and that is precisely backwards here. An
+``nx-hook`` verb is the command tier, so the port does not move it.
+
+**"Move, do not rewrite."** The checks are carried across unchanged: the
+same trigger regexes with their GH #931 narrowing, the same three sentinel
+conditions, the same escape-token audit, the same redirect message. Two
+changes were unavoidable:
+
+1. **The interpreter preamble is gone**, as in every verb: the wheel runs
+   under conexus's own interpreter.
+
+2. **The emitters return instead of exiting.** ``_lib.allow()`` /
+   ``_lib.deny()`` printed an envelope and ``sys.exit(0)``; this body
+   returns ``_lib.allow_result()`` / ``_lib.deny_result()`` and
+   ``run_hook_result`` hands it back. That matters more here than
+   elsewhere: a ``sys.exit`` inside a verb reaches ``never_fail``'s
+   SystemExit passthrough and ends the hook process mid-dispatch, which
+   for a fail-closed rule is the one shape it must never take. The
+   fail-closed branch itself is unchanged and now returns a deny envelope
+   on ANY exception, which ``run_hook_result``'s own tests exercise.
+
+The original module docstring follows, unedited:
+
+RDR-121 Phase 2 hook 2: phase-review close requires a PASSED gate.
 
 Denies ``bd close <bead-id>`` for phase-review beads (title contains
 ``phase`` or ``review``) unless a fresh PASSED sentinel exists for the
@@ -29,26 +59,10 @@ import pathlib
 import re
 import shutil
 import subprocess
-import sys
 from typing import Any
 
-# Hook framework lives next to this script.
-# RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
-# `python3`, so PATH decides the interpreter. Put back the resolution
-# `_run_python_hook.sh` used to perform, before anything that needs 3.12
-# or `nexus` is imported. See _interpreter.py for what is at stake.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import _interpreter  # noqa: E402 -- must follow the sys.path insert
-
-_interpreter.reexec_if_needed()
-
-sys.path.insert(0, os.path.dirname(__file__))
-import _lib  # noqa: E402
-
-# Shared hook-logging bridge lives one directory up, alongside this script's
-# sibling _endpoint_resolve.py (nexus-cnzei.2 fix round 2).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import _hook_logging  # noqa: E402
+from nexus._hook_runtime._io import HookResult, configure_hook_logging
+from nexus.hooks import _routing_lib as _lib
 
 RULE_NAME = "phase_review_close_requires_gate"
 
@@ -107,18 +121,18 @@ def _claude_pid() -> int:
         # payload the harness parses.
         #
         # _hook_logging.configure_hook_logging() carries its OWN internal
-        # best-effort catch (never raises); the outer `except Exception:
+        # best-effort catch (never raises); the outer `except Exception:  # noqa: BLE001 — carried: this hook must reach a verdict, never raise
         # return os.getppid()` below is a SEPARATE, independent guarantee --
         # it also covers a total absence of _hook_logging itself and the
         # `nexus.session` import/call that follows. See
         # test_claude_pid_survives_a_logging_setup_failure, which asserts
         # the outer catch specifically by bypassing the inner one.
-        _hook_logging.configure_hook_logging()
+        configure_hook_logging()
 
-        from nexus.session import find_immediate_claude_pid
+        from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — carried: deferred so the PID path costs nothing when the hook never reaches it
 
         return find_immediate_claude_pid()
-    except Exception:
+    except Exception:  # noqa: BLE001 — carried: this hook must reach a verdict, never raise
         return os.getppid()
 
 
@@ -210,14 +224,14 @@ def _redirect_message(rdr_id: str | None, phase: str | None, reason: str) -> str
     )
 
 
-def body(payload: dict[str, Any]) -> None:
+def body(payload: dict[str, Any]) -> HookResult | None:
     command = _lib.get_bash_command(payload)
     if not command:
-        _lib.allow()
+        return _lib.allow_result()
 
     match = _BD_CLOSE_RE.search(command)
     if not match:
-        _lib.allow()
+        return _lib.allow_result()
 
     # Escape token takes precedence; audit and pass through.
     if _lib.should_skip_for_reason(command):
@@ -226,14 +240,14 @@ def body(payload: dict[str, Any]) -> None:
             command_fragment=command,
             escape_reason=_lib.extract_escape_reason(command),
         )
-        _lib.allow()
+        return _lib.allow_result()
 
     bead_id = match.group("bead_id")
     bd_output = _bd_show(bead_id)
     if not bd_output:
         # Cannot determine if this is a phase-review bead. Allow rather
         # than fail-closed; we have no signal to deny on.
-        _lib.allow()
+        return _lib.allow_result()
 
     # Trigger: match against the bead's TITLE line only (the first non-empty
     # line of bd show output), and only for the narrow "Phase N ... review
@@ -242,7 +256,7 @@ def body(payload: dict[str, Any]) -> None:
     # or "review" no longer false-positive (GH #931 / nexus-1pr9n).
     title_line = _bd_header_line(bd_output)
     if not _GATE_TITLE_RE.search(title_line):
-        _lib.allow()
+        return _lib.allow_result()
 
     rdr_id, phase = _extract_rdr_phase(bd_output)
     if not rdr_id or not phase:
@@ -253,7 +267,7 @@ def body(payload: dict[str, Any]) -> None:
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.deny(
+        return _lib.deny_result(
             _redirect_message(rdr_id, phase, reason),
             summary=f"Phase-review close blocked ({rdr_id} phase {phase}): run the gate first.",
         )
@@ -265,7 +279,7 @@ def body(payload: dict[str, Any]) -> None:
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.deny(
+        return _lib.deny_result(
             _redirect_message(rdr_id, phase, reason),
             summary=f"Phase-review close blocked ({rdr_id} phase {phase}): run the gate first.",
         )
@@ -274,10 +288,12 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="allow", tool_name="Bash",
         command_fragment=command,
     )
-    _lib.allow(
+    return _lib.allow_result(
         f"phase-review close approved by sentinel (RDR-{rdr_id} phase {phase})"
     )
 
-
-if __name__ == "__main__":
-    _lib.run_hook(body, fail_closed=True, rule_name=RULE_NAME)
+def run(payload: dict | None) -> HookResult:
+    """Decide whether this ``bd close`` may proceed. Fail-closed."""
+    return _lib.run_hook_result(
+        body, payload, fail_closed=True, rule_name=RULE_NAME
+    )

@@ -32,7 +32,6 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 PREAMBLE_SCRIPTS = [
     "mailbox_drain.py",
     "routing/subagent_git_write_requires_orchestrator.py",
-    "routing/phase_review_close_requires_gate.py",
 ]
 """The ones still plugin-resident that refuse to run below 3.12, measured
 rather than read off a guard.

@@ -249,6 +249,19 @@ def aggregate_from_store(
     return _aggregate_from_records(rows)
 
 
+#: ``nx-hook`` verb -> the rule name that verb's guard writes to the routing
+#: log. Needed because a ported guard is declared by VERB in hooks.json and
+#: there is no script stem to derive a name from, while the log keeps the
+#: original rule name (the port carried each guard's ``RULE_NAME``
+#: unchanged, so old and new log rows stay comparable). A guard ported
+#: without an entry here reports as "(unregistered)" while running
+#: perfectly -- which is exactly the symptom this function's own history
+#: records, one declaration-form change earlier.
+_VERB_RULE_NAMES: dict[str, str] = {
+    "phase-review-close-gate": "phase_review_close_requires_gate",
+}
+
+
 def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
     """Rule names currently registered in the plugin's hooks.json.
 
@@ -277,6 +290,18 @@ def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
         rules: set[str] = set()
 
         def _consider(text: str) -> None:
+            # A VERB, since nexus-t9klx began porting the routing guards
+            # into the wheel. There is no /routing/ path to read a stem
+            # from any more, and the verb name is not the rule name: the
+            # rule name is what the guard LOGS (its own RULE_NAME, which
+            # the port carried unchanged), so the two are mapped
+            # explicitly rather than transformed. Same failure this
+            # function already survived once -- the comment below records
+            # the extractor going blind when the declaration form moved,
+            # and reporting every live rule "(unregistered)".
+            if text in _VERB_RULE_NAMES:
+                rules.add(_VERB_RULE_NAMES[text])
+                return
             if "/routing/" not in text:
                 return
             stem = text.rsplit("/", 1)[-1]

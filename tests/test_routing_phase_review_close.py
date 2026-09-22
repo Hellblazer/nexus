@@ -31,15 +31,12 @@ import time
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
-HOOK_SCRIPT = (
-    PROJECT_ROOT
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "routing"
-    / "phase_review_close_requires_gate.py"
-)
-
+#: nexus-t9klx ported the script to a verb; these cases drive it through
+#: nx-hook's own dispatch, so the verb name and the payload plumbing stay
+#: inside what they prove.
+HOOK_ARGV = [
+    sys.executable, "-m", "nexus._hook_runtime.entry", "phase-review-close-gate",
+]
 
 @pytest.fixture
 def tmp_env(tmp_path, monkeypatch):
@@ -89,7 +86,7 @@ def _run_hook(payload: dict, env_extra: dict[str, str], bin_dir: pathlib.Path | 
     if bin_dir is not None:
         env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
     proc = subprocess.run(
-        [sys.executable, str(HOOK_SCRIPT)],
+        HOOK_ARGV,
         input=json.dumps(payload),
         capture_output=True,
         text=True,
@@ -140,16 +137,23 @@ def _make_sentinel(
 
 
 # ---------------------------------------------------------------------------
-# Hook script exists
+# The verb is reachable
 # ---------------------------------------------------------------------------
 
 
-def test_hook_script_exists():
-    assert HOOK_SCRIPT.exists()
+def test_the_verb_these_cases_drive_is_registered():
+    """Replaces "the script exists" and "the script has a shebang".
 
+    nexus-t9klx ported this guard into the wheel, where there is no file to
+    point at and a shebang would mean nothing. What is worth asserting is
+    what the two script checks were really standing in for: that the name
+    these cases drive is a name nx-hook actually dispatches.
+    """
+    from nexus._hook_runtime.entry import VERB_TABLE
 
-def test_hook_script_executable_shebang():
-    assert HOOK_SCRIPT.read_text().startswith("#!/usr/bin/env python3")
+    assert VERB_TABLE.get("phase-review-close-gate") == (
+        "nexus.hooks.phase_review_close_gate"
+    ), f"nx-hook does not dispatch this verb; table has {sorted(VERB_TABLE)}"
 
 
 # ---------------------------------------------------------------------------
@@ -412,15 +416,11 @@ def test_sentinel_corrupt_json_denies(tmp_env):
 
 
 def _load_phase_review_close_module():
-    import importlib.util
+    import importlib
 
-    spec = importlib.util.spec_from_file_location(
-        "phase_review_close_requires_gate_under_test", HOOK_SCRIPT,
+    return importlib.reload(
+        importlib.import_module("nexus.hooks.phase_review_close_gate")
     )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_claude_pid_configures_hook_logging_before_importing_nexus_session(
@@ -436,7 +436,7 @@ def test_claude_pid_configures_hook_logging_before_importing_nexus_session(
     monkeypatch.delenv("NX_FAKE_CLAUDE_PID", raising=False)
     mod = _load_phase_review_close_module()
     calls: list[str] = []
-    monkeypatch.setattr(mod._hook_logging, "configure_hook_logging", lambda: calls.append("called"))
+    monkeypatch.setattr(mod, "configure_hook_logging", lambda: calls.append("called"))
     mod._claude_pid()
     assert calls == ["called"]
 
@@ -460,7 +460,8 @@ def test_claude_pid_survives_a_logging_setup_failure(monkeypatch) -> None:
     def boom():
         raise RuntimeError("configure_hook_logging itself raised")
 
-    monkeypatch.setattr(mod._hook_logging, "configure_hook_logging", boom)
+    monkeypatch.setattr(
+            mod, "configure_hook_logging", boom)
     pid = mod._claude_pid()
     assert isinstance(pid, int)
 
@@ -510,7 +511,7 @@ def test_malformed_stdin_fails_closed(tmp_env):
     review close that lacks a valid sentinel.
     """
     proc = subprocess.run(
-        [sys.executable, str(HOOK_SCRIPT)],
+        HOOK_ARGV,
         input="",
         capture_output=True, text=True, timeout=10,
     )
@@ -573,11 +574,8 @@ def test_hooks_json_registers_routing_hook():
     # a `bd close` Bash command and the path assertion stays green. For
     # the routing framework's only fail_closed rule.
     declared = _declared_paths(data, "PreToolUse", matcher="Bash")
-    assert any(
-        p.endswith("hooks/scripts/routing/phase_review_close_requires_gate.py")
-        for p in declared
-    ), (
-        "phase_review_close_requires_gate.py must be registered under the "
-        "Bash matcher at its real path, hooks/scripts/routing/. Declared "
-        f"under Bash: {declared}"
+    assert "phase-review-close-gate" in declared, (
+        "the phase-review close gate must be registered under the Bash "
+        "matcher, as `nx-hook phase-review-close-gate` since nexus-t9klx "
+        f"ported it into the wheel. Declared under Bash: {declared}"
     )

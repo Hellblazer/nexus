@@ -135,6 +135,11 @@ VERB_TABLE: dict[str, str] = {
     # back into the plugin: one caller is all it takes to keep a
     # plugin-resident script alive, which is what RDR-215 removes.
     "version-lockstep": "nexus.hooks.version_lockstep",
+    # The routing framework's one fail_closed rule (nexus-t9klx). It was
+    # already command-tier-only by ruling -- nexus.mcp.hooks._NEVER_TOOL_TIER
+    # refuses to register it as an mcp_tool, because a tool-boundary crash
+    # renders as allow and this rule must still deny. The port keeps it here.
+    "phase-review-close-gate": "nexus.hooks.phase_review_close_gate",
     "rdr": "nexus.hooks.rdr_verb",
     # The two SessionStart entries that carried SHELL LOGIC in their command
     # string -- `nx upgrade --auto 2>/dev/null || echo ... >&2` and `nx self

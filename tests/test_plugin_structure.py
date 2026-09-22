@@ -162,7 +162,7 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
 
 _PLUGIN_ROOT_REF = re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT\}?/([^\s'\"]+)")
 
-_MIN_HOOK_SCRIPT_REFS = 3
+_MIN_HOOK_SCRIPT_REFS = 2
 """Non-vacuity floor for :func:`_hook_script_refs`.
 
 RDR-215 nexus-q02nx.21 rewrote 21 of the 25 hooks.json entries into
@@ -210,7 +210,7 @@ def _hook_script_refs() -> list[tuple[str, str]]:
     return results
 
 
-_PYTHON_HOOK_SCRIPT_MIN_COUNT = 3
+_PYTHON_HOOK_SCRIPT_MIN_COUNT = 2
 """Non-vacuity floor for :func:`_python_hook_script_paths`.
 
 Measured 2026-09-19 (RDR-215 nexus-q02nx.21/.22, after

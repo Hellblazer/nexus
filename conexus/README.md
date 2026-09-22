@@ -278,7 +278,7 @@ and only the ledger verbs have one.
 | `StopFailure` | `hook_stop_failure` | Advisory on abnormal session termination |
 | `PreToolUse` (`Bash`) | `nx-hook pre-close-verification` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4) |
-| `PreToolUse` (`Bash`) | `hooks/scripts/routing/phase_review_close_requires_gate.py` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
+| `PreToolUse` (`Bash`) | `nx-hook phase-review-close-gate` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
 | `PreToolUse` (`Agent\|Task`) | `hook_agent_dispatch_expect` | Write the RDR-184 EXPECT ledger row from the dispatch's own `subagent_type` + `run_in_background`, so orchestration doesn't have to hand-write it (nexus-qc4p1) |
 | `PostToolUse` | `hook_divergence_language_guard` | Advisory scan of RDR post-mortem writes for divergence-language patterns (RDR-065 Gap 2) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |

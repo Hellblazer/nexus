@@ -32,6 +32,14 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.57.0)
 
+- nexus-t9klx — `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py`,
+  DELETED, with the PreToolUse Bash entry re-pointed at
+  `nx-hook phase-review-close-gate`. The routing framework's one fail_closed
+  rule; it stays on the command tier, which is where a rule that must still
+  deny when it crashes belongs. `routing/_lib.py` moved into the wheel with
+  it as `nexus.hooks._routing_lib`, dropping the stdlib endpoint mirror for
+  the client's own primitives.
+
 - nexus-t9klx — `conexus/hooks/scripts/version_lockstep_hook.py` and
   `conexus/hooks/scripts/version_lockstep_action.py`, DELETED with the
   SessionStart(startup) entry re-pointed at `nx-hook version-lockstep`. The
