@@ -49,8 +49,8 @@ done
 # >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
 # tests/test_release_battery_refuses_moving_tree.py; keep both markers.
 #
-# AGENTS.md § Worktrees rule 4 says the battery runs in the RELEASE
-# WORKTREE, never the primary. That rule was advice, and this repo's own
+# AGENTS.md § Worktrees: one session, one worktree -- rule 4 says the
+# battery runs in the RELEASE WORKTREE, never the primary. That rule was advice, and this repo's own
 # history says advice decays -- so this is the enforceable half the bead
 # asked for.
 #
@@ -80,7 +80,8 @@ BATTERY REFUSED: this checkout holds `develop` and is not the only worktree
 on this box.
 
 Another session that pushes to develop is obliged to fast-forward this
-checkout (AGENTS.md § Worktrees rule 9), which moves the tree the battery
+checkout (AGENTS.md § Worktrees: one session, one worktree, rule 9),
+which moves the tree the battery
 keys its artifacts on. That ends the run on a tree-identity mismatch after
 the legs have already been paid for -- measured on 7.57.0, twelfth leg,
 eleven legs green.
