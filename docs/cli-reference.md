@@ -1087,6 +1087,8 @@ nx catalog session-summary [--since HOURS]
 
 Show linked RDRs for recently git-modified files. Default: last 24 hours. Useful for understanding design context of files you're working on.
 
+A file path can name more than one catalog document — one file catalogued under two owners is a normal steady state — and every such document is reported, each labelled with its tumbler. Before 7.57.0 only the first was consulted, so this could print "No linked RDRs found" while the links sat on a sibling row.
+
 ### nx catalog link-generate
 
 ```
