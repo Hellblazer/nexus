@@ -391,6 +391,7 @@ nexus-1utk3
 nexus-1utk3.1
 nexus-1v4u7
 nexus-1v4u7.1
+nexus-1vc0n
 nexus-1vd4v
 nexus-1vogq
 nexus-1vpal
@@ -569,6 +570,7 @@ nexus-33q80
 nexus-33q80.1
 nexus-33xm
 nexus-346q
+nexus-34f7r
 nexus-34urv
 nexus-34wrg
 nexus-35ok4
@@ -1013,6 +1015,7 @@ nexus-5d88u
 nexus-5da44
 nexus-5daww
 nexus-5daww.1
+nexus-5dcky
 nexus-5den3
 nexus-5dmpe
 nexus-5drgy
@@ -1554,6 +1557,7 @@ nexus-8d6e
 nexus-8dr2u
 nexus-8eaeg
 nexus-8eaeg.1
+nexus-8eg4w
 nexus-8el5
 nexus-8emxy
 nexus-8emxy.1
@@ -1871,6 +1875,7 @@ nexus-9yrus.1
 nexus-9yt2p
 nexus-9z1qy
 nexus-9zk8
+nexus-9zly6
 nexus-9zmpl
 nexus-9zuks
 nexus-9zuks.1
@@ -2556,6 +2561,7 @@ nexus-dpe79
 nexus-dpm
 nexus-dpm.1
 nexus-dpthy
+nexus-dqe86
 nexus-dqp
 nexus-dqp.1
 nexus-dqp.1.1
@@ -3929,6 +3935,7 @@ nexus-k8mpp
 nexus-k8s4v
 nexus-k9er
 nexus-kard5
+nexus-kas9u
 nexus-kbn97
 nexus-kc4x
 nexus-kcaqk
@@ -5548,6 +5555,7 @@ nexus-shp1y
 nexus-si99t
 nexus-sia
 nexus-sia.1
+nexus-silj0
 nexus-sitj
 nexus-siva
 nexus-siy7
@@ -5592,6 +5600,7 @@ nexus-ssp
 nexus-ssp.1
 nexus-ssqk9
 nexus-st976
+nexus-stkek
 nexus-stvfd
 nexus-stx52
 nexus-sue7d
@@ -5646,6 +5655,7 @@ nexus-t8c1s
 nexus-t952k
 nexus-t952k.1
 nexus-t9dgf
+nexus-t9klx
 nexus-t9oy4
 nexus-t9qvl
 nexus-t9rmg
@@ -6791,6 +6801,7 @@ nexus-yyxmu
 nexus-yz8bt
 nexus-yz8bt.1
 nexus-yzij1
+nexus-yzij1.1
 nexus-z0br3
 nexus-z0idx
 nexus-z0lu4

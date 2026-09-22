@@ -292,14 +292,110 @@ def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str
         chashes = [r.chash for r in rows]
         if len(chashes) < 2 or not set(chunk_ids) <= set(chashes):
             continue
-        parts: list[str] = []
+        parts: list[tuple[str, int | None, int | None]] = []
         for chash in chashes:
             entry = t3.get_by_id(collection, chash)
             if entry is None:
                 return None
-            parts.append(entry.get("content", ""))
-        return chashes[0], "".join(parts), len(chashes)
+            parts.append((
+                entry.get("content", ""),
+                _span_offset(entry.get("chunk_start_char")),
+                _span_offset(entry.get("chunk_end_char")),
+            ))
+        return chashes[0], join_manifest_parts(parts), len(chashes)
     return None
+
+
+def _span_offset(value: Any) -> int | None:
+    """A chunk's recorded source offset as an int, or ``None`` when it has
+    none. Chunk metadata round-trips through JSON, so an offset can arrive
+    as a string; anything that is not a whole number is treated as absent,
+    which costs the rebuild only the overlap trim."""
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: Shortest suffix/prefix agreement the rebuild will act on. Below this, an
+#: agreement is as likely to be a coincidence of punctuation or markup as a
+#: real overlap, and trimming one would delete text the document needs.
+MIN_VERIFIED_OVERLAP: int = 12
+
+
+def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
+    """Join ``(text, start_char, end_char)`` manifest parts in position
+    order, dropping the PDF chunker's overlap where the recorded spans and
+    the text agree there is one (nexus-kas9u).
+
+    This used to be ``"".join``, which is correct for a ``store_put`` note:
+    :func:`note_pieces` cuts a note into non-overlapping pieces, and
+    ``tests/test_store_put_split.py`` pins that they rejoin byte-exactly.
+    :class:`~nexus.pdf_chunker.PDFChunker` overlaps its chunks by
+    ``_DEFAULT_OVERLAP`` of the window on purpose, so the same join
+    reproduced the overlap for every PDF document. Measured on the KnowFeat
+    paper (tumbler 1.12.152, 57 chunks): 59 duplicated runs covering 14,199
+    of 75,999 characters, the longest exactly ``overlap_chars``, with
+    mid-token splices where a chunk ended mid-word. The stored chunks were
+    clean the whole time; only the rebuild was wrong, identically on the MCP
+    ``store_get`` and ``nx store get`` paths.
+
+    The spans only ever PROPOSE a trim and the text decides, because the
+    stored text is not a verbatim slice of the source: ``PDFChunker``
+    strips each chunk, and a chunk opening inside a table is prefixed with
+    that table's header row. So three shapes must survive untouched, and
+    each is a real case rather than a hypothetical:
+
+    * **Sub-pieces of one window.** ``pdf_chunker``'s byte/token post-pass
+      splits an oversized chunk with ``dict(c.metadata)``, so the pieces
+      carry identical spans. An equal span means "same window", never an
+      overlap of the window's whole length.
+    * **No recorded span.** ``store_put`` notes, and any chunk written
+      before the spans existed. Nothing to propose a trim, so none happens.
+    * **An unconfirmed overlap.** A table continuation's header prefix
+      means it does not begin with the previous part's tail. Trimming on
+      the span alone would eat real rows, so a span with no matching text
+      is logged and left whole.
+
+    Only removal is possible here. No separator is ever inserted, both
+    because the note contract above forbids it and because the chunker
+    starts a chunk at the previous chunk's exact end only around a table,
+    where a lost strip character cannot glue two words together.
+    """
+    joined = ""
+    prev_span: tuple[int | None, int | None] = (None, None)
+    for index, (text, start, end) in enumerate(parts):
+        if not joined:
+            joined, prev_span = text, (start, end)
+            continue
+        prev_start, prev_end = prev_span
+        trim = 0
+        overlap = (
+            prev_end - start
+            if start is not None
+            and prev_end is not None
+            and (start, end) != (prev_start, prev_end)
+            and start < prev_end
+            else 0
+        )
+        if overlap >= MIN_VERIFIED_OVERLAP:
+            # The match is bounded ABOVE by the recorded overlap: stripping
+            # can only ever shorten the agreement, never lengthen it.
+            for k in range(min(overlap, len(text), len(joined)), MIN_VERIFIED_OVERLAP - 1, -1):
+                if joined.endswith(text[:k]):
+                    trim = k
+                    break
+            if trim == 0:
+                _log.debug(
+                    "document_rebuild_overlap_unconfirmed",
+                    part_index=index,
+                    recorded_overlap=overlap,
+                )
+        joined += text[trim:]
+        prev_span = (start, end)
+    return joined
 
 
 def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
