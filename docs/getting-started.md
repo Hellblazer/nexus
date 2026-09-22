@@ -29,11 +29,11 @@ Check your Python version:
 python3 --version
 ```
 
-If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use it automatically.
+If you're on 3.14+, nothing extra is needed: the install command below names its own interpreter (`--python 3.12`) and uv downloads it.
 
 ## Install
 
-See the [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) for the full install walkthrough: `uv tool install conexus`, `nx init` (**nexus-service** provisioning — the native Postgres + pgvector + bge-768 backend that serves every persistent tier), updating, and verifying with `nx doctor`.
+See the [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) for the full install walkthrough: `uv tool install conexus --python 3.12`, `nx init` (**nexus-service** provisioning — the native Postgres + pgvector + bge-768 backend that serves every persistent tier), updating, and verifying with `nx doctor`.
 
 Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document — pre-PG installs need a **two-hop** upgrade via `conexus==6.18.1` (the last migration-capable release); a direct jump to current migrates nothing.
 
@@ -190,8 +190,8 @@ generation layout). If it is on PATH and `nx` still does not resolve, `ls -l
 ~/.local/bin/nx` says which layout you are on: a small shell script is a
 nexus-owned generation shim, a symlink into `~/.local/share/uv/tools/` is the
 uv-tool layout. Reinstall accordingly — `nx self install` from any working `nx`,
-`scripts/reinstall-tool.sh` from a checkout, or `uv tool install conexus` if
-nothing is installed yet.
+`scripts/reinstall-tool.sh` from a checkout, or `uv tool install conexus --python 3.12`
+if nothing is installed yet.
 
 **`nx` resolves but nothing starts** — On the generation layout every command
 resolves `~/.local/share/nexus/tools/current` at spawn, so a missing or dangling
@@ -206,12 +206,11 @@ your install actually uses with `nx doctor`, or `head -1 $(which nx)` on the
 uv-tool layout. If it reports 3.14, rebuild the uv environment:
 
 ```bash
-uv python install 3.13
-uv tool install conexus --force --python 3.13   # use "conexus[local]" here if you rely on the bge-768 embedder
+uv tool install conexus --force --python 3.12   # use "conexus[local]" here if you rely on the bge-768 embedder
 ```
 
 Note: `uv tool upgrade` reuses the existing environment's Python — it won't
-switch from 3.14 to 3.13 automatically, which is why this one case wants
+switch from 3.14 to 3.12 automatically, which is why this one case wants
 `--force`. Because `--force` rebuilds from scratch it drops optional extras, so
 re-include `[local]` (i.e. install `"conexus[local]"`) if you use the bge-768
 embedder. Do not reach for this on a generation box: it rebuilds the uv tree and
@@ -222,7 +221,7 @@ interpreter is already supported.
 
 **`nx index repo .` fails with a service-auth error** — In managed-cloud mode, indexing requires a reachable service and a valid `NX_SERVICE_TOKEN`. Export the token (`export NX_SERVICE_TOKEN=…`) and confirm the endpoint with `nx doctor`, or use local mode (run `nx daemon service start`, no token needed).
 
-**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14, so this is the same uv-tool-layout case as *Crash on startup* above and takes the same fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed; re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
+**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14, so this is the same uv-tool-layout case as *Crash on startup* above and takes the same fix: `uv tool install conexus --force --python 3.12` (re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 

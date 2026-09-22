@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documented install command names its interpreter** (nexus-sa187).
+  `uv tool install conexus` is now `uv tool install conexus --python 3.12`
+  everywhere a user is told to type it: README, the site's two install flows,
+  `docs/getting-started.md`, `docs/cli-reference.md`, and the `nx`-missing hint
+  both preflight hooks print. Ubuntu 26.04 LTS ships CPython 3.14 as
+  `python3`, and on a box with no other interpreter uv picked it and the
+  resolve failed outright — the torch pin (`>=2.8,<2.9`) has no `cp314`
+  wheels. Every fresh install on the current Linux LTS hit it; measured
+  2026-09-21 on WSL2 Ubuntu 26.04.1, and reproducible offline with
+  `uv pip compile --universal --python-version 3.14`. Widening the torch pin
+  would be a move toward 3.14, which this release cannot run, so the fix is to
+  stop leaving the interpreter to the ambient `python3`.
+
+  `tests/e2e/fresh-install-mvv.sh --published` had been passing `--python 3.12`
+  all along while the docs passed nothing, which is exactly why the right gate
+  at the right layer never saw this: the interpreter was the uncontrolled
+  variable. `tests/test_documented_install_interpreter_pin.py` now holds the
+  README, the site and that MVV leg to one interpreter, and checks it against
+  `requires-python`.
+
 ## [7.56.0] - 2026-09-21
 
 Pairs with engine-service-v0.1.129, unchanged from 7.55.3 — this release carries no engine-side change.

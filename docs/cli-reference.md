@@ -2991,7 +2991,7 @@ For a brand-new install the recommended setup is the collapsed flow
 (RDR-174 — one provisioning command, no separate T2-daemon step):
 
 ```
-uv tool install conexus    # the nx CLI
+uv tool install conexus --python 3.12    # the nx CLI (3.14 has no torch wheels)
 nx init                    # acquire the pinned signed engine + PG bundle, provision Postgres+pgvector, fetch bge-768, start the service, offer autostart
 ```
 

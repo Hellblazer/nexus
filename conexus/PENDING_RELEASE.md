@@ -32,4 +32,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.55.3)
 
-_Empty. Everything previously listed here went live with 7.55.2, and 7.55.3 carries no plugin-surface change._
+- `conexus/hooks/scripts/preflight.py` — its `nx` install hint now names an
+  interpreter (`uv tool install conexus --python 3.12`). Without it a user on a
+  distro whose `python3` is 3.14 follows the hint into the nexus-sa187 resolver
+  failure. Sessions running the pinned plugin still read the old hint.
