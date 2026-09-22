@@ -2,10 +2,11 @@
 title: "Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop"
 id: RDR-218
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-09-22
 priority: high
 author: Sam
-reviewed-by: pending
+reviewed-by: self
 created: 2026-09-21
 related_issues: [nexus-sa187, nexus-5dcky, nexus-t9klx, nexus-34f7r, nexus-1vc0n, nexus-fd3zf, nexus-t10nc]
 related_rdrs: [RDR-126, RDR-155, RDR-197, RDR-210, RDR-215]
