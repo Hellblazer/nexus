@@ -23,7 +23,7 @@ export NX_SERVICE_PORT=$SVCPORT NX_SERVICE_TOKEN=spiketoken NX_EMBED_MODE=onnx
 
 "$JH/bin/java" \
   -agentlib:native-image-agent=config-merge-dir="$TRACE_DIR",experimental-class-define-support \
-  --enable-preview --enable-native-access=ALL-UNNAMED \
+  --enable-native-access=ALL-UNNAMED \
   -jar "$JAR" > /tmp/lp2qo-trace-svc.log 2>&1 &
 SVCPID=$!
 echo "svc pid $SVCPID (agent tracing)"
