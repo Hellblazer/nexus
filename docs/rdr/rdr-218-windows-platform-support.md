@@ -56,6 +56,7 @@ answers what "install" should mean on Windows.
 
 ## Problem Statement
 
+
 **The goal is a new capability, not a port.** A never-touches-a-terminal
 install does not exist on any platform today. All three documented install
 paths — `docs/desktop-deployment.md:62-80`, `README.md:72`, and
@@ -286,7 +287,10 @@ Windows hardware and belonging in the release battery rather than a workflow.
 
 ---
 
+---
+
 ## Relationship to Prior Records
+
 
 **T2 `nexus/windows-support-research-of-record-2026-09-18`** is the decision
 this record revisits. Its three research documents stand and are reused here:
@@ -325,7 +329,10 @@ cloud-mode Windows client can assume about the engine it talks to.
 
 ---
 
+---
+
 ## Context
+
 
 ### Background
 
@@ -383,7 +390,10 @@ executable.
 
 ---
 
+---
+
 ## Research Findings
+
 
 ### Investigation
 
@@ -401,7 +411,7 @@ hook, never from the bundle. Whatever this record decides, that instruction is
 evidence the CLI-side Windows story was already being thought about in one
 place and not joined up.
 
-**Thread 2 — cloud-mode onboarding. Complete; see Option A.** The decisive
+**Thread 2 — cloud-mode onboarding. Complete; see Alternative 1.** The decisive
 finding is that cloud access is operator-issued and deliberately not
 self-serve, which closes the option that would have been lowest-friction.
 
@@ -480,7 +490,7 @@ native-executable option space: that a Windows native engine image needs VS
 Build Tools 2022 on a Windows host, that PG17+pgvector has no relocatable
 Windows bundle available, and that Windows-on-ARM has no GraalVM native-image
 or onnxruntime target. This record does not re-derive them; it treats them as
-the cost inputs to Option C.
+the cost inputs to Alternative 3.
 
 ### Critical Assumptions
 
@@ -557,7 +567,10 @@ and belongs in the install flow rather than the prerequisites list.
 
 ---
 
+---
+
 ## Proposed Solution
+
 
 ### Direction, set by Sam
 
@@ -712,7 +725,154 @@ therefore permitted; and the *data* is never replaced by either, because it is
 not in the image. Engine convergence rides the client update and persists on
 the data volume, so the two cadences do not fight.
 
-### Approach
+### The decision surface that remains
+
+Ruling on the appliance does not settle these:
+
+1. **Image size and distribution.** PostgreSQL plus both models plus the engine
+   plus a Python runtime is comfortably over 1.5 GB uncompressed. Is that
+   acceptable as a release asset on the engine cadence, and is a compressed
+   tarball with a signature enough, or does it want a Store/winget channel?
+2. **Whether the models belong in the image at all.** They are the bulk of it.
+   Pre-fetched means a large image; fetched on first boot means a fast download
+   and a slow first run, which is the tradeoff `nx init` makes today.
+3. **The fixed port.** Which port, what happens on a collision, and whether a
+   user running two appliances is a case worth supporting.
+4. **Windows-on-ARM.** The appliance sidesteps GraalVM entirely, but a
+   `linux-amd64` image on an ARM Windows host needs emulation. `linux-arm64`
+   assets already exist, so a second image is cheap to assemble and expensive to
+   gate. Out of scope for the first cut, but it should be named as out of scope
+   rather than unconsidered.
+5. ~~Which Windows host the release battery's new leg runs on.~~ **Settled
+   (Sam, 2026-09-21): qwentescence. "qwentescence was born for this work."**
+   It is already the host of record for every Windows measurement in this
+   document and for v7.56.0's local-supervisor box class. What remains is
+   operational rather than a design choice: it also serves a qwen backend on
+   port 1235, so a reboot for Windows Update or a WSL restart takes that down,
+   and the battery leg should say so where a release runner will read it.
+6. **What happens to the WSL2 dependency itself.** The appliance assumes WSL2
+   is present. On the one host measured, installing WSL2 needed an MSI, admin
+   rights and a reboot because the inbox stub and winget both failed. Does the
+   install flow attempt it, detect and instruct, or refuse?
+
+### What proceeds regardless
+
+`nexus-sa187` should not wait on this record. Ubuntu 26.04 ships CPython 3.14
+and the torch pin has no `cp314` wheels, so `uv tool install conexus` fails
+resolution on the current Linux LTS whether or not Windows is ever supported.
+It is independently justified and it blocks fresh Linux installs today. It also
+touches the appliance directly, since the image's own client install faces the
+same resolver.
+
+---
+
+## Alternatives Considered
+
+
+**Alternative 1 — cloud mode as the Windows default. CLOSED by research; recorded
+because its closure is load-bearing for everything else.** No local substrate
+at all, which would have been the lowest-friction option of the five. It fails
+on access, not on technology: the service token is provisioned by an operator
+out of band. `docs/managed-onboarding.md:12-14` states that `nx` "does not
+self-serve signup or mint tokens"; RDR-166 named this its own Gap 1 and at
+`:125-127` explicitly rejected building self-serve, citing "a conexus
+self-serve API that may not exist". Both `nx service token issue` and
+`nx tenant create` require an existing root bearer against a deployment you
+already control. No signup route exists anywhere in `src/`,
+`service/src/main`, `web/` or `docs/` — established by search, not inferred.
+
+The client also cannot select a tenant even though the server is genuinely
+multi-tenant: `_process_default_tenant()` returns the literal string
+`"default"` (`src/nexus/db/http_vector_client.py:4561-4576`), every T2 store
+hardcodes the same, and there is no tenant environment variable or config key.
+
+A second, independent reason to be wary of this option even if self-serve
+appeared: a cloud-only population has *zero local remediation*. The managed
+handshake is the one surviving `>=` engine floor
+(`src/nexus/engine_version.py:4-18`), it is enforced on the data path rather
+than only in `nx doctor` — `get_http_vector_client()` probes once per process
+and hard-fails, caching `INCOMPATIBLE` for the life of the process
+(`http_vector_client.py:4740-4770`) — and its own error text tells the user it
+"cannot be fixed locally". That couples every Windows user to the operator's
+deploy cadence in a way local-mode users are not coupled.
+
+**Alternative 2 — bundled client plus auto-provisioned WSL2.** Provision the WSL2
+side programmatically at first run rather than shipping it pre-built. Every
+step was performed from a script on 2026-09-21, so it is demonstrably
+automatable. Not taken because the automation runs on the user's machine, which
+is where the variance lives: the host measured had a stub `wsl.exe`, an
+access-denied `winget`, a stale `uv` trampoline, and an `npm` that resolved
+through `/mnt/c` to a Windows binary. It also inherits the whole of Gap 5 — the
+`.mcpb` carries no runtime and no client today — and its machinery is testable
+only against a real Windows host, which is exactly what CI does not have.
+
+**Alternative 3 — a native Windows service.** A Windows PostgreSQL bundle plus a
+Windows engine. Retained as the fallback if the appliance shape fails, and
+cheaper than it first appears because of one finding: the engine has a
+**sanctioned JVM-JAR run path**, not merely a test shim. `NEXUS_SERVICE_JAR`
+(`src/nexus/daemon/storage_service_daemon.py:405-430`, argv assembly at
+`:1019-1057`) makes `nx init --service` skip native-binary acquisition
+entirely (`src/nexus/commands/init.py:189-197`, pinned by
+`tests/daemon/test_jar_launch_opt_in.py:143-155`), the launch flags are only
+`-Duser.timezone=UTC`, and the client's wire path is artifact-indifferent. So a
+Windows service could ship a JRE and the JAR and sidestep GraalVM
+native-image altogether. What remains genuinely hard is the PostgreSQL bundle,
+and the Windows Python supervisor, which is POSIX throughout. Also noted: the
+`native-libs-windows` pom profile (`pom.xml:663-670`) exists but hardcodes
+x64 under an architecture-free activation, so it would silently select x64
+libraries on Windows-on-ARM, and CI has never exercised it.
+
+**Alternative 4 — staged hybrid, cloud first.** Superseded by Alternative 1's closure.
+Without self-serve cloud access there is no cloud arm to stage behind.
+
+---
+
+## Trade-offs
+
+### What the appliance buys
+
+A first install that is one download plus one import rather than eleven manual
+steps, most of which need a terminal. Persistence, lingering, the unprivileged
+user and the bind flag all become properties of an artifact rather than
+instructions in a document, which is the difference between a thing that works
+and a thing that works when followed correctly. And a build that reuses the
+`linux-amd64` artifacts CI already publishes, so no new platform target enters
+the release surface.
+
+### What it costs
+
+**Size.** PostgreSQL binaries, the engine, a Python runtime and the wheel, plus
+both ONNX models if they ride inside, is comfortably over 1.5 GB. The measured
+probe image — Ubuntu plus systemd and nothing else — was already 104 MB, and
+that is the floor rather than an estimate of the real thing.
+
+**A fourth artifact class.** The repo already runs two release lifecycles and
+one plugin channel. An image is a fourth thing to build, sign, publish, version
+and eventually deprecate, and RDR-197's sunset trigger exists because artifact
+classes outlive their usefulness quietly.
+
+**A dependency we do not control.** Everything here rests on WSL2 behaving as
+measured on one host at one version (2.7.14.0). WSL ships on Microsoft's
+cadence, and three behaviours we depend on — the localhost relay's treatment of
+bind families, `--mount --vhd`, and `/etc/wsl.conf` honouring `systemd=true` —
+are implementation details rather than contracts.
+
+**Two residues that no design here removes**, both from the VM model: host
+sleep freezes the guest clock, which exposes T1 lease and T2 TTL arithmetic;
+and VM teardown is an unclean PostgreSQL shutdown, so WAL recovery becomes the
+normal startup path rather than the exceptional one.
+
+### What we give up by not taking the alternatives
+
+Rejecting a native Windows service keeps WSL2 as a hard prerequisite, and on
+the one host measured, installing WSL2 itself needed an MSI, administrative
+rights and a reboot. That cost does not disappear; it sits outside this
+record's boundary. Rejecting cloud keeps the substrate problem, but it also
+keeps local remediation, which a cloud-only population would not have.
+
+---
+
+## Implementation Plan
 
 **Phase 1 — prove the shape, and close the one unproven link.** Build an image
 by hand from today's published `linux-amd64` assets, `wsl --import` it on a
@@ -832,7 +992,7 @@ vacuous-gate doctrine and must carry a max-skip assert, exactly as the other
 legs do.
 
 This is the phase that turns "supported" from a claim into something we can
-keep, and this seam is the concrete reason the appliance beat Option B:
+keep, and this seam is the concrete reason the appliance beat Alternative 2:
 install-time provisioning is testable only against a real Windows host, while
 an image is testable almost entirely without one.
 
@@ -843,111 +1003,107 @@ install path a Desktop user can follow. This is last because it is the phase
 whose right answer depends on everything above, and because until Phase 1 lands
 there is nothing worth documenting.
 
-### The decision surface that remains
+---
 
-Ruling on the appliance does not settle these:
+## Test Plan
 
-1. **Image size and distribution.** PostgreSQL plus both models plus the engine
-   plus a Python runtime is comfortably over 1.5 GB uncompressed. Is that
-   acceptable as a release asset on the engine cadence, and is a compressed
-   tarball with a signature enough, or does it want a Store/winget channel?
-2. **Whether the models belong in the image at all.** They are the bulk of it.
-   Pre-fetched means a large image; fetched on first boot means a fast download
-   and a slow first run, which is the tradeoff `nx init` makes today.
-3. **The fixed port.** Which port, what happens on a collision, and whether a
-   user running two appliances is a case worth supporting.
-4. **Windows-on-ARM.** The appliance sidesteps GraalVM entirely, but a
-   `linux-amd64` image on an ARM Windows host needs emulation. `linux-arm64`
-   assets already exist, so a second image is cheap to assemble and expensive to
-   gate. Out of scope for the first cut, but it should be named as out of scope
-   rather than unconsidered.
-5. ~~Which Windows host the release battery's new leg runs on.~~ **Settled
-   (Sam, 2026-09-21): qwentescence. "qwentescence was born for this work."**
-   It is already the host of record for every Windows measurement in this
-   document and for v7.56.0's local-supervisor box class. What remains is
-   operational rather than a design choice: it also serves a qwen backend on
-   port 1235, so a reboot for Windows Update or a WSL restart takes that down,
-   and the battery leg should say so where a release runner will read it.
-6. **What happens to the WSL2 dependency itself.** The appliance assumes WSL2
-   is present. On the one host measured, installing WSL2 needed an MSI, admin
-   rights and a reboot because the inbox stub and winget both failed. Does the
-   install flow attempt it, detect and instruct, or refuse?
+The gate splits along the seam Phase 4 establishes, and each half has a
+different owner and cadence.
 
-### What proceeds regardless
+### Substrate half — `ubuntu-latest`, every push
 
-`nexus-sa187` should not wait on this record. Ubuntu 26.04 ships CPython 3.14
-and the torch pin has no `cp314` wheels, so `uv tool install conexus` fails
-resolution on the current Linux LTS whether or not Windows is ever supported.
-It is independently justified and it blocks fresh Linux installs today. It also
-touches the appliance directly, since the image's own client install faces the
-same resolver.
+Runs in a container built from the same Dockerfile that produces the shipped
+image, so the artifact under test is the artifact that ships. Each assertion is
+chosen because its failure mode is silent rather than loud:
 
-### Options considered and not taken
+1. The image boots and PostgreSQL provisions **as the unprivileged user**. The
+   root refusal (`pg_provision_refused_root`) is the exact failure a
+   container-built image invites, since containers default to root.
+2. The engine's `release_version` equals `REQUIRED_ENGINE_VERSION`. A drifting
+   image is the "cut, gated, never pinned" failure the engine-identity contract
+   exists to prevent.
+3. The schema walk applies its expected changeset count, and the three outcome
+   counts partition `pending_at_start` exactly — the `nexus-jl08t` identity.
+4. Both ONNX models resolve from wherever `NX_ONNX_MODEL_DIR` points. A missing
+   model degrades search silently rather than failing, which is the
+   `docs/desktop-deployment.md:262` mis-mode one layer down.
+5. A full storage round trip from a client inside the container: write, read
+   back, and confirm the row reached PostgreSQL rather than a fallback.
+6. `loginctl enable-linger` succeeds and `systemctl is-system-running` reports
+   no failed unit other than `kmod-static-nodes.service`. Pinning the *known*
+   failure is what makes a new one visible.
 
-**Option A — cloud mode as the Windows default. CLOSED by research; recorded
-because its closure is load-bearing for everything else.** No local substrate
-at all, which would have been the lowest-friction option of the five. It fails
-on access, not on technology: the service token is provisioned by an operator
-out of band. `docs/managed-onboarding.md:12-14` states that `nx` "does not
-self-serve signup or mint tokens"; RDR-166 named this its own Gap 1 and at
-`:125-127` explicitly rejected building self-serve, citing "a conexus
-self-serve API that may not exist". Both `nx service token issue` and
-`nx tenant create` require an existing root bearer against a deployment you
-already control. No signup route exists anywhere in `src/`,
-`service/src/main`, `web/` or `docs/` — established by search, not inferred.
+### Boundary half — release battery, real Windows hardware
 
-The client also cannot select a tenant even though the server is genuinely
-multi-tenant: `_process_default_tenant()` returns the literal string
-`"default"` (`src/nexus/db/http_vector_client.py:4561-4576`), every T2 store
-hardcodes the same, and there is no tenant environment variable or config key.
+A leg on qwentescence, run at release time beside the existing §11d box-class
+checks, carrying a max-skip assert so an absent host fails rather than passes.
 
-A second, independent reason to be wary of this option even if self-serve
-appeared: a cloud-only population has *zero local remediation*. The managed
-handshake is the one surviving `>=` engine floor
-(`src/nexus/engine_version.py:4-18`), it is enforced on the data path rather
-than only in `nx doctor` — `get_http_vector_client()` probes once per process
-and hard-fails, caching `INCOMPATIBLE` for the life of the process
-(`http_vector_client.py:4740-4770`) — and its own error text tells the user it
-"cannot be fixed locally". That couples every Windows user to the operator's
-deploy cadence in a way local-mode users are not coupled.
+1. `wsl --import` of the published image, and `wsl --mount --vhd` of the data
+   volume.
+2. Data survives an image replacement: unregister, re-import, reattach, prior
+   contents intact. Proven by hand on 2026-09-21; it is the design's
+   load-bearing property, so it belongs in a gate rather than in a memory.
+3. The endpoint resolves from Windows without hand-copied environment
+   variables, once Phase 2 lands.
+4. `tests/e2e/post-publish-dispatch-check.sh` ends
+   `POST-PUBLISH DISPATCH CHECK PASSED` from a real Agent dispatch in a native
+   Windows Claude Code session — the check that already exists for this purpose
+   and the one that would have caught the 7.41.0 projector-dead-on-cloud class.
+5. A plain `claude -p` returns rather than hanging, with and without an
+   endpoint configured — the Gap 4 regression.
 
-**Option B — bundled client plus auto-provisioned WSL2.** Provision the WSL2
-side programmatically at first run rather than shipping it pre-built. Every
-step was performed from a script on 2026-09-21, so it is demonstrably
-automatable. Not taken because the automation runs on the user's machine, which
-is where the variance lives: the host measured had a stub `wsl.exe`, an
-access-denied `winget`, a stale `uv` trampoline, and an `npm` that resolved
-through `/mnt/c` to a Windows binary. It also inherits the whole of Gap 5 — the
-`.mcpb` carries no runtime and no client today — and its machinery is testable
-only against a real Windows host, which is exactly what CI does not have.
+### What neither half covers, stated so it is not mistaken for coverage
 
-**Option C — a native Windows service.** A Windows PostgreSQL bundle plus a
-Windows engine. Retained as the fallback if the appliance shape fails, and
-cheaper than it first appears because of one finding: the engine has a
-**sanctioned JVM-JAR run path**, not merely a test shim. `NEXUS_SERVICE_JAR`
-(`src/nexus/daemon/storage_service_daemon.py:405-430`, argv assembly at
-`:1019-1057`) makes `nx init --service` skip native-binary acquisition
-entirely (`src/nexus/commands/init.py:189-197`, pinned by
-`tests/daemon/test_jar_launch_opt_in.py:143-155`), the launch flags are only
-`-Duser.timezone=UTC`, and the client's wire path is artifact-indifferent. So a
-Windows service could ship a JRE and the JAR and sidestep GraalVM
-native-image altogether. What remains genuinely hard is the PostgreSQL bundle,
-and the Windows Python supervisor, which is POSIX throughout. Also noted: the
-`native-libs-windows` pom profile (`pom.xml:663-670`) exists but hardcodes
-x64 under an architecture-free activation, so it would silently select x64
-libraries on Windows-on-ARM, and CI has never exercised it.
+Windows-on-ARM. WSL2 version drift. Host sleep and Windows Update reboots. The
+unelevated-install question, until it is answered. And the `.mcpb` surface,
+which has no validation gate at all today (`nexus-uvn3t`).
 
-**Option D — staged hybrid, cloud first.** Superseded by Option A's closure.
-Without self-serve cloud access there is no cloud arm to stage behind.
+---
+
+## Validation
+
+### Testing Strategy
+
+1. **Scenario**: the substrate suite above, against a deliberately root-owned
+   data directory.
+   **Expected**: red on assertion 1. A container-built image that provisions
+   PostgreSQL as root is the most likely regression in this design, and a suite
+   that cannot produce that failure is not testing for it.
+2. **Scenario**: an image built from an engine tag older than
+   `REQUIRED_ENGINE_VERSION`.
+   **Expected**: red on assertion 2, naming both versions.
+3. **Scenario**: the boundary leg with no Windows host reachable.
+   **Expected**: red, not skip. A leg that skip-passes when its dependency is
+   absent is the `nexus-moht0` vacuous-gate shape, which is precisely this
+   record's Gap 6 complaint.
+4. **Scenario**: image replacement with the data volume carrying a populated
+   catalog rather than a marker file.
+   **Expected**: the catalog survives, and the engine on the volume — not the
+   image's seed engine — is the one that runs.
+
+### Size and performance expectations
+
+No latency target is set: the appliance changes how the service is installed,
+not how it performs, and the service inside it is the same `linux-amd64` binary
+local Linux users already run.
+
+Two figures are worth holding as budgets rather than targets. The probe image
+was 104 MB for Ubuntu plus systemd alone. And first-run cost is a *choice*
+rather than a constant: models inside the image mean a larger download and a
+fast first query, models fetched on first boot mean the reverse, and the
+decision surface keeps that open deliberately.
+
+---
 
 ## Open Questions
 
+
 1. ~~Is a cloud service token self-service?~~ **Answered: operator-issued.**
-   Option A is closed.
+   Alternative 1 is closed.
 2. ~~Can the `.mcpb` carry a Python runtime?~~ **Answered: it carries none
    today**, and is gated to darwin/linux. See Gap 5.
 3. ~~Can the engine run from a plain JAR?~~ **Answered: yes, and it is a
-   sanctioned production path** (`NEXUS_SERVICE_JAR`). Kept as Option C's
+   sanctioned production path** (`NEXUS_SERVICE_JAR`). Kept as Alternative 3's
    cost reducer, not needed by the appliance.
 4. Does the MCP *tool* surface work from a native Windows client? Still
    unproven; the one attempt was invalidated by Gap 3. Phase 1 closes it.
@@ -955,3 +1111,100 @@ Without self-serve cloud access there is no cloud arm to stage behind.
    without administrative rights, given WSL2 itself is already present?
 6. What is the update path for an appliance image, and does Sam's "updating via
    CLI is fine" extend to re-importing a distro?
+
+---
+
+## Finalization Gate
+
+### Not yet run
+
+This record is `status: draft`. The finalization gate has not run, and no
+contradiction check is asserted here.
+
+That omission is deliberate. RDR-217's own gate section records that its
+no-contradictions clause "has made it twice before and been falsified both
+times, once by gate round 1 and once by the fix check on that round's diff,
+each of which found a contradiction this section had already declared absent."
+Asserting cleanliness before the gate runs is the failure mode, so this section
+stays empty until `/conexus:rdr-gate` fills it.
+
+### Corrections already made during drafting
+
+Recorded because the count is the honest measure of how much this document
+moved before anyone reviewed it, and because three of the five came from Sam's
+questions rather than from the drafting.
+
+1. **The desktop bundle claim.** An early draft asserted the `.mcpb` could ship
+   a Python runtime and the client. It ships neither — a 1–2 KB launcher shim
+   requiring `uv` and a host Python, gated to `darwin`/`linux`. The claim had
+   already been stated aloud before research contradicted it.
+2. **The problem framing.** The draft treated no-terminal install as a Windows
+   gap. It is unmet on every platform, so this is a new capability rather than a
+   port, which changes what "low friction" is measured against.
+3. **The update story contradicted the engine contract.** The draft said the
+   engine changes "only when a new image is imported", contradicting local-mode
+   convergence from `PINNED_SERVICE_TAG`. Resolved by the code/data split: the
+   engine binary lives on the data volume, so convergence persists across
+   re-imports.
+4. **A baked PostgreSQL cluster.** The draft had the bundle arrive "already
+   provisioned into a cluster". A data directory is coupled to binary version,
+   locale and collation; the design now bakes binaries and runs `initdb` on
+   first boot onto the volume.
+5. **Two mechanism claims asserted before testing.** The `docker export` rootfs
+   and the mountable data volume were written as established and verified
+   afterwards. They hold, but the order was wrong, and the experiment record
+   now sits in Critical Assumptions so the next reader need not take the
+   assertion on faith.
+
+---
+
+## References
+
+### Records
+
+- T2 `nexus/windows-support-research-of-record-2026-09-18` — the decision this
+  record revisits, and its three research documents.
+- T2 `nexus/windows-client-over-wsl2-service-trial-2026-09-21` — the measured
+  trial that falsified its central conclusion.
+- RDR-126 — deferred "Windows Claude Desktop … to a follow-up RDR". This is it.
+- RDR-155 P4b — consolidated T3 onto pgvector, which is why the service side is
+  the hard half.
+- RDR-166 — decided managed access is operator-provisioned; rejected self-serve.
+- RDR-197 — the independent plugin release channel, and the sunset-trigger
+  precedent for a new artifact class.
+- RDR-215 — removed the plugin's shell tier "so a native Windows client becomes
+  viable". The enabling work.
+
+### Beads
+
+- `nexus-sa187` — the torch pin fails resolution on Ubuntu 26.04. Proceeds
+  independently of this record.
+- `nexus-5dcky` — the plugin hangs `claude -p` on native Windows with no
+  endpoint. Gap 4.
+- `nexus-t9klx` — five bare-`python3` hook entries to port to `nx-hook` verbs.
+- `nexus-34f7r` — Windows async and process-primitive gaps.
+
+### Code the design depends on
+
+- `src/nexus/db/pg_bundle.py:54-72` — `current_platform_tag()`, the single
+  choke point that refuses Windows and that an appliance never asks.
+- `src/nexus/config.py:619` — `NEXUS_CONFIG_DIR`, which relocates the durable
+  estate onto the data volume.
+- `src/nexus/db/onnx_model_root.py:37,53` — `NX_ONNX_MODEL_DIR`.
+- `src/nexus/daemon/binary_install.py:359` — the engine binary under
+  `config_dir`, which is why convergence persists on the volume.
+- `service/src/main/java/dev/nexus/service/NexusService.java:309` —
+  `NX_SERVICE_BIND` and its own warning about binding past loopback.
+
+---
+
+## Revision History
+
+| Date | Change |
+|------|--------|
+| 2026-09-21 | Created as `draft`. Problem statement, six gaps, five options surveyed, cloud closed by research, appliance chosen (Sam). |
+| 2026-09-21 | Reframed: no-terminal install is unmet on every platform, so this is a new capability rather than a port. Added the desktop-bundle gap. |
+| 2026-09-21 | Added the code/data split (Sam) on the existing `NEXUS_CONFIG_DIR` and `NX_ONNX_MODEL_DIR` overrides; resolved the update-story contradiction; corrected the baked-cluster claim. |
+| 2026-09-21 | Gate split into a substrate half on `ubuntu-latest` and a boundary half as a release-battery leg on qwentescence (Sam), rather than a Windows CI runner. |
+| 2026-09-21 | Verified both mechanism claims by experiment: a `docker export` rootfs boots with systemd as pid 1 and lingering works; a mounted VHDX survives unregister-and-re-import. |
+| 2026-09-21 | Added the structural sections this file was missing against RDR-217's shape. |
