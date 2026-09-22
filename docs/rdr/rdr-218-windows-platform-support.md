@@ -282,7 +282,7 @@ Stop hook returns at its bound with the same empty result a crashed hook
 produces, where before it never returned.
 
 **That bound covers ONE of the two sites, not both. An earlier draft of this
-section claimed it covered "both, and whatever the third turns out to be",
+section claimed it "covers both and covers whatever the third turns out to be",
 and that was wrong.** `mcp/hooks.py`'s `Thread.join(timeout)` containment is
 applied at the `hook_<name>` tool boundary and reaches roughly twelve tools.
 `tuple_registry` is not one of them: it is an ORDINARY MCP tool, and so are
@@ -300,7 +300,7 @@ The reason this overreach survived a reading is worth keeping: the measured
 probe was `claude -p`, which fires Stop and therefore exercises exactly the
 covered site. A green result there says nothing about the uncovered one. The
 Test Plan's boundary half has been corrected to drive an ordinary tool call
-as well — see item 5 — because otherwise a green battery would keep
+as well — see item 6 — because otherwise a green battery would keep
 reporting this gap closed while 50-plus tools still hang.
 
 One part of the remedy has landed since: `nexus.bounded_subprocess.run_bounded`
@@ -1032,8 +1032,9 @@ where POSIX has a double-fork; `start_new_session=True` being accepted and
 silently ignored, so code that believes it holds a killable process group
 does not; and the remaining async-primitive gaps that bead enumerates. The
 first and third are already partly answered by `nexus.bounded_subprocess.
-kill_child_and_descendants` (`nexus-t10nc`, landed) — the single named branch
-for "there is no process group here", which reports the reach it achieved so
+kill_child_and_descendants` (`nexus-t10nc`, landed) — the single named
+platform branch for the absent-process-group case, which reports the reach
+it achieved so
 a weaker Windows kill is visible rather than silent, and which `nexus-34f7r`
 was scoped to build on rather than beside.
 
