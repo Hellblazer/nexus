@@ -1,67 +1,46 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Report the PREVIOUS session's raw thinking/decision counts at SessionStart.
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""The ``behaviour-census`` hook verb (nexus-t9klx).
 
-Measured 2026-09-19 over 25 transcripts of one project: 105
-sequentialthinking calls against 2,905 decision-bearing calls. Both are
-invisible while a session runs, which is why prose alone has never moved
-them.
+Port of ``conexus/hooks/scripts/behaviour_census.py``, one of the five
+``hooks.json`` entries that still named a bare ``python3`` after RDR-215
+had deleted every shell script from the plugin. Stock Windows has no
+``python3`` on PATH; on the host of record the only ``python3.exe`` was a
+stale uv trampoline that errors before it runs anything. A console-script
+verb gets a real ``.exe`` shim from the installer, and rides something the
+installer replaces in lockstep instead of whatever happens to be on PATH.
 
-WHY SessionStart AND NOT SessionEnd. ``nexus._session_end_census`` already
-runs a capability census at SessionEnd, and its docstring records that the
-grandchild's stdio goes to /dev/null before import, so anything printed
-there is provably invisible. It also records that a visible parent-side
-line was considered and REJECTED on measured cost: a full capability census
-re-walks every transcript for the session (~0.21s for a 70-file session,
-~0.50s at 88MB), unbounded and data-dependent. That rejection does not
-transfer here, and the difference is the whole design: this reads ONE
-transcript and counts two things. Measured on the same corpus: 12.5ms for a
-6.7MB transcript, 178ms for the largest on disk at 165MB.
+Reports the PREVIOUS session's raw thinking/decision counts at
+SessionStart. The reasoning behind every constant below — why raw counts
+and never a ratio, why ``Bash`` needs a substring list, why ``isSidechain``
+is filtered though it matches nothing today — is carried with them.
 
-WHY RAW COUNTS AND NEVER A COMPLIANCE VERDICT. T3 "Design: restoring the
-nexus agent tool-guidance layer" (2026-07-31) states the governing
-constraint: before mechanizing compliance for any capability, a census must
-be able to distinguish "not reached for because forgotten" from "not
-reached for because correctly rejected". A tool call absent from a
-transcript looks identical whether it was forgotten or correctly rejected,
-and this census can never tell those apart -- so it reports raw counts and
-explicitly refuses to compute a coverage ratio, a delegation rate, or any
-other percentage. An earlier version of this script DID compute one
-("deliberation 34.6%") from two defects that both inflated it: a window
-counter that advanced only on a decision, not on every tool call (so a
-single stub thought could "cover" seven decisions at unbounded distance
-from it), and a decision set so narrow (~436 of 4,653 real tool calls) that
-most state-mutating Bash calls under the harness's auto mode simply never
-counted. Fixing both moved the reported figure from 34.6% to 6.4% on the
-same corpus -- a 5.4x swing from bugs, not behaviour, which is exactly the
-failure mode a raw count cannot produce: there is no ratio to be wrong
-about.
+**"Move, do not rewrite" (RDR-215 Approach item 9).** The census itself is
+carried across unchanged: same constants, same ``Counts``, same
+``census``/``project_dir``/``previous_transcripts``. Two changes were
+unavoidable:
 
-DISPATCH IS A RAW COUNT TOO, NOT ONLY THE RATIO THAT WAS DELETED. "N
-dispatched, M performed by this session directly" is exactly as honest as
-the thought/decision counts above -- it says nothing about whether M should
-have been smaller, only what happened. Only the percentage built from it
-("delegation 25.0%") implied a verdict, so only the percentage is gone. An
-Agent/Task dispatch is also counted in the decision set below and so also
-appears in the distance distribution: the dispatch line answers "how much
-was handed off", the distance line answers "how much was deliberated
-before it happened", and one call legitimately answers both questions at
-once.
+1. **``main() -> int`` (read stdin, ``print``, exit 0) becomes
+   ``run(payload) -> HookResult``.** The payload arrives as an argument
+   rather than as JSON on stdin, and the report accumulates into
+   ``HookResult.stdout`` instead of printing. ``nexus._hook_runtime.entry``
+   writes ``result.stdout + "\n"`` when it is not ``None`` and nothing at
+   all when it is, which reproduces the script's ``print`` and its silence
+   respectively.
 
-NO SCHEMA, NO STORE. Deliberately computes from the transcript rather than
-reading a stored row: storing would mean new ``capability_census`` columns,
-hence a Liquibase changeset, an engine tag, a PITR-fork walk rehearsal and
-a paired deploy, to display a couple of numbers.
-
-Failure mode is always "print nothing and move on". Exit code is always 0;
-a census must never block a session opening.
+2. **The bare ``except`` around ``main()`` is gone**, because
+   ``nexus._hook_runtime._io.never_fail`` is that guard for every verb and
+   a second one here would only hide what it swallowed. The script's own
+   "failure mode is always print nothing and move on" is unchanged; it is
+   now the shared primitive's promise rather than this file's.
 """
 from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
+
+from nexus._hook_runtime._io import HookResult
 
 #: Tool calls this session performed itself rather than dispatching. A raw
 #: count paired against `dispatch` below (Agent/Task calls) -- "N
@@ -245,55 +224,57 @@ def previous_transcripts(pdir: Path, current_id: str | None) -> list[Path]:
     files = [p for p in pdir.glob("*.jsonl") if p.stem != current_id]
     return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
 
-
-def _report(c: Counts) -> None:
-    print("## Session behaviour census (previous session)\n")
-    print(REFUSAL + "\n")
-    print(f"- {c.think} thought(s), {c.decisions} state-mutating action(s)")
-    print(f"- {c.dispatch} dispatched (Agent/Task calls), {c.hands_on} performed by this session directly (the HANDS_ON set)")
+def _report(c: Counts) -> str:
+    """The census as text. ``print`` per line in the script; one joined
+    string here, which ``entry.main`` writes with the same trailing byte.
+    """
+    lines = [
+        "## Session behaviour census (previous session)",
+        "",
+        REFUSAL,
+        "",
+        f"- {c.think} thought(s), {c.decisions} state-mutating action(s)",
+        f"- {c.dispatch} dispatched (Agent/Task calls), {c.hands_on} performed "
+        "by this session directly (the HANDS_ON set)",
+    ]
     if c.distances:
         med = _percentile(c.distances, 50.0)
         p25 = _percentile(c.distances, 25.0)
         p75 = _percentile(c.distances, 75.0)
-        print(
+        lines.append(
             f"- tool-call distance from the nearest prior thought "
             f"({len(c.distances)} of {c.decisions} action(s) had one): "
             f"median {med:g}, p25 {p25:g}, p75 {p75:g}"
         )
     if c.ungrounded:
-        print(f"- {c.ungrounded} action(s) had no prior thought anywhere earlier in the transcript")
+        lines.append(
+            f"- {c.ungrounded} action(s) had no prior thought anywhere "
+            "earlier in the transcript"
+        )
+    return "\n".join(lines)
 
 
-def main() -> int:
-    try:
-        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
-        payload = json.loads(raw) if raw.strip() else {}
-    except Exception:  # noqa: BLE001 — a malformed payload must not block a session opening
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
+def run(payload: dict | None) -> HookResult:
+    """Census the previous session's transcript, or say nothing."""
+    data = payload if isinstance(payload, dict) else {}
 
-    pdir = project_dir(payload)
+    pdir = project_dir(data)
     if pdir is None:
-        return 0
-    prior = previous_transcripts(pdir, payload.get("session_id"))
+        return HookResult()
+    prior = previous_transcripts(pdir, data.get("session_id"))
     if not prior:
-        return 0
+        return HookResult()
 
     last = census(prior[0])
     if last.tool_calls == 0:
         # Non-vacuity: a parse that saw nothing is not a session that did
         # nothing. Say so rather than print a 0, which reads identically.
-        print("## Session behaviour census\n")
-        print(f"Could not read `{prior[0].name}`: no tool calls parsed. Census skipped, not zero.")
-        return 0
+        return HookResult(
+            stdout=(
+                "## Session behaviour census\n\n"
+                f"Could not read `{prior[0].name}`: no tool calls parsed. "
+                "Census skipped, not zero."
+            )
+        )
 
-    _report(last)
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception:  # noqa: BLE001 — last resort: a census never fails a session start
-        sys.exit(0)
+    return HookResult(stdout=_report(last))

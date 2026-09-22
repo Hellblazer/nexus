@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The SessionStart behaviour census hook (conexus/hooks/scripts/behaviour_census.py).
+"""The SessionStart behaviour census hook (``nx-hook behaviour-census``).
 
-Every case runs the REAL script as a subprocess against a real transcript
-directory. Deliberately not a reimplementation of its counting: a gate whose
+Every case runs the REAL verb as a subprocess against a real transcript
+directory. It drove the plugin script until nexus-t9klx ported it into the
+wheel; the cases are unchanged, and what moved is the argv. Deliberately not a reimplementation of its counting: a gate whose
 domain excludes the shipped artifact proves only that the gate's own copy
 works (nexus-01, 2026-09-19, on
 ``test_a_stdlib_only_verb_dispatch_never_loads_structlog`` passing green while
@@ -25,7 +26,11 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "behaviour_census.py"
+#: The same entry the console script runs, driven the way
+#: tests/hooks/test_nx_hook_entry.py drives every other verb: through
+#: nx-hook's own dispatch, so the verb NAME and the payload plumbing are
+#: inside what these cases prove, not assumed around them.
+_ENTRY_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", "behaviour-census"]
 
 
 def _tool_use(name: str, command: str | None = None) -> str:
@@ -42,13 +47,31 @@ def _thought() -> str:
 def _run(transcript_path: Path, session_id: str = "current") -> subprocess.CompletedProcess[str]:
     payload = json.dumps({"session_id": session_id, "transcript_path": str(transcript_path)})
     return subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        _ENTRY_ARGV,
         input=payload, capture_output=True, text=True, timeout=60, check=False,
     )
 
 
-def test_the_script_ships_where_the_hook_declares_it() -> None:
-    assert SCRIPT.is_file(), f"hooks.json declares {SCRIPT.name}; it must exist"
+def test_hooks_json_wires_the_verb_these_cases_drive() -> None:
+    """The replacement for "the script exists where hooks.json says".
+
+    A verb has no file to point at, so the equivalent check is that the
+    name is the one hooks.json actually wires. Without it these cases
+    could all pass against a verb no session ever calls.
+    """
+    hooks = json.loads(
+        (Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json").read_text()
+    )
+    wired = [
+        (entry.get("command"), tuple(entry.get("args") or []))
+        for entries in hooks["hooks"].values()
+        for group in entries
+        for entry in group.get("hooks", [])
+    ]
+    assert ("nx-hook", ("behaviour-census",)) in wired, (
+        "hooks.json does not wire `nx-hook behaviour-census`; these cases "
+        f"drive a verb nothing fires. Wired: {sorted(set(wired))}"
+    )
 
 
 def test_no_prior_session_is_silent(tmp_path: Path) -> None:
@@ -278,7 +301,7 @@ def test_output_never_contains_a_percentage_and_always_contains_the_refusal(
 @pytest.mark.parametrize("payload", ["", "not json", "[]", "null"])
 def test_a_malformed_payload_never_blocks_a_session(payload: str) -> None:
     r = subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        _ENTRY_ARGV,
         input=payload, capture_output=True, text=True, timeout=60, check=False,
     )
     assert r.returncode == 0, "a census must never fail a session start"

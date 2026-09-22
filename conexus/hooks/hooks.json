@@ -54,9 +54,9 @@
           },
           {
             "type": "command",
-            "command": "python3",
+            "command": "nx-hook",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py"
+              "behaviour-census"
             ],
             "timeout": 5
           }

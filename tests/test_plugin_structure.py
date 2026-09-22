@@ -162,7 +162,7 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
 
 _PLUGIN_ROOT_REF = re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT\}?/([^\s'\"]+)")
 
-_MIN_HOOK_SCRIPT_REFS = 5
+_MIN_HOOK_SCRIPT_REFS = 4
 """Non-vacuity floor for :func:`_hook_script_refs`.
 
 RDR-215 nexus-q02nx.21 rewrote 21 of the 25 hooks.json entries into
@@ -176,10 +176,13 @@ over nothing -- while two entries pointed at
 only fail_closed rule, so a missing-path exit is not a deny and the
 close gate failed open. This floor makes the emptying itself a failure.
 
-Five is the measured count after that rewrite, not a margin: the other
-20 entries are ``mcp_tool`` or exec-form ``nx-hook`` and name no
-plugin-root path at all. Raise it when an entry is added, and read a
-drop as the extractor going blind before reading it as a deletion.
+Four is the measured count, not a margin: every other entry is
+``mcp_tool`` or exec-form ``nx-hook`` and names no plugin-root path at
+all. Five until nexus-t9klx ported ``behaviour_census.py`` to the
+``behaviour-census`` verb; the remaining four are that bead's own work,
+so this floor walks down to zero with it and is deleted when it gets
+there. Raise it when an entry is added, and read a drop as the extractor
+going blind before reading it as a deletion.
 """
 
 
@@ -207,17 +210,21 @@ def _hook_script_refs() -> list[tuple[str, str]]:
     return results
 
 
-_PYTHON_HOOK_SCRIPT_MIN_COUNT = 5
+_PYTHON_HOOK_SCRIPT_MIN_COUNT = 4
 """Non-vacuity floor for :func:`_python_hook_script_paths`.
 
 Measured 2026-09-19 (RDR-215 nexus-q02nx.21/.22, after
 ``_run_python_hook.sh`` was deleted and interpreter resolution moved into
 each script's own module-scope ``_interpreter.reexec_if_needed()`` call):
-hooks.json declares exactly 5 ``python3`` exec-form entries. Not a margin,
-same convention as ``_MIN_HOOK_SCRIPT_REFS`` above -- raise it when a
-sixth plugin-resident Python hook is added, and read a drop as the
-extractor losing its grip on the declaration form rather than as scripts
-genuinely having been removed without also lowering this floor.
+hooks.json declared exactly 5 ``python3`` exec-form entries; nexus-t9klx
+ported the first of them (``behaviour_census.py`` -> the
+``behaviour-census`` verb) and this came down with it. Not a margin, same
+convention as ``_MIN_HOOK_SCRIPT_REFS`` above -- raise it when another
+plugin-resident Python hook is added, and read a drop as the extractor
+losing its grip on the declaration form rather than as scripts genuinely
+having been removed without also lowering this floor. It reaches zero
+when that bead finishes, and is deleted rather than left at zero: a floor
+of zero is satisfied by an extractor that sees nothing.
 """
 
 _MIN_HOOKS_JSON_ENTRIES_EXAMINED = 20
@@ -232,20 +239,21 @@ should not force a bump here on every unrelated hooks.json edit -- only a
 walk that finds implausibly little should fail.
 """
 
-_NO_PYTHON_FLOOR_NEEDED = frozenset({"hooks/scripts/behaviour_census.py"})
+_NO_PYTHON_FLOOR_NEEDED: frozenset[str] = frozenset()
 """Plugin-root-relative paths exempt from the Python-3.12-floor half of
 :func:`TestHooks.test_python_hook_has_future_annotations_and_version_guard`.
 
-``behaviour_census.py`` is the documented exception: pure stdlib (no
-``nexus`` import, no 3.12-only syntax), never calls
-``_interpreter.reexec_if_needed()``, and fails silently by design (its own
-docstring: "Failure mode is always 'print nothing and move on'"). This
-matches ``_interpreter.py``'s own accounting -- "Four of the five scripts
-refuse to run under Python 3.12-... only one spells the guard itself, the
-rest inherit it through `_lib` / `_endpoint_resolve`" -- which is four,
-not five; this is the fifth. Not a general escape hatch: a script added
-here without the same stdlib-only, reexec-free shape defeats the check it
-is exempted from.
+EMPTY as of nexus-t9klx. ``behaviour_census.py`` was its one entry --
+pure stdlib, no ``nexus`` import, no 3.12-only syntax, never calling
+``_interpreter.reexec_if_needed()`` -- and the same properties that made
+it exempt are what made it the first of the five bare-``python3`` hooks
+to port into the wheel. In the wheel there is no floor to enforce at all:
+the interpreter is the one conexus was installed under.
+
+Empty is the right state rather than a smell, and it stays empty: a
+script added here without that same stdlib-only, reexec-free shape
+defeats the check it is exempted from. Delete this set along with the
+check when the last plugin-resident Python hook goes.
 """
 
 

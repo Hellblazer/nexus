@@ -32,8 +32,14 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.57.0)
 
-_Empty. `conexus/hooks/scripts/preflight.py`'s deletion (nexus-sa187) went live with
-7.57.0 when `source.ref` advanced to `v7.57.0`; it was the only plugin-surface
-difference from the previous pinned tag, and it was unwired in installed sessions
-either way — `hooks.json` has named the `nx-hook preflight` verb since RDR-215
-nexus-q02nx.21._
+- nexus-t9klx — `conexus/hooks/hooks.json` and
+  `conexus/hooks/scripts/behaviour_census.py`: the SessionStart behaviour census moved from a bare
+  `python3 ${CLAUDE_PLUGIN_ROOT}/...` entry to `nx-hook behaviour-census`, and
+  the script is DELETED. Stock Windows has no `python3` on PATH, so that entry
+  could never run there; a console-script verb gets a real `.exe` shim from the
+  installer. This is real drift rather than a no-op: the wheel carries the verb
+  either way, but only a new pin makes `hooks.json` name it, so sessions on
+  v7.57.0 keep running the old entry against their own copy of the script.
+
+(The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
+nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)

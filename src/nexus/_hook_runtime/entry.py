@@ -125,6 +125,11 @@ VERB_TABLE: dict[str, str] = {
     # port of the `nx hook session-start` Click verb.
     "preflight": "nexus.hooks.preflight_verb",
     "session-context": "nexus.hooks.session_context",
+    # The first of the five bare-`python3` entries ported at nexus-t9klx.
+    # Stock Windows has no python3 on PATH; a console-script verb gets a
+    # real .exe shim from the installer. Stdlib-only and storage-free, so
+    # the port is the script's body with print() replaced by HookResult.
+    "behaviour-census": "nexus.hooks.behaviour_census",
     "rdr": "nexus.hooks.rdr_verb",
     # The two SessionStart entries that carried SHELL LOGIC in their command
     # string -- `nx upgrade --auto 2>/dev/null || echo ... >&2` and `nx self
