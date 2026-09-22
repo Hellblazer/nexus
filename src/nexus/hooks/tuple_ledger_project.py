@@ -219,8 +219,28 @@ def _log_skip(session_id: str, reason: str) -> None:
 # ── Endpoint + credential resolution ────────────────────────────────────
 
 
-def _resolve_base_url(config_dir: Path) -> tuple[str, bool]:
+def _resolve_base_url() -> tuple[str, bool]:
     """``(base_url, is_local_supervisor)``, or raise :class:`_Skip`.
+
+    TAKES NO ``config_dir``, and that is the correction rather than an
+    omission (nexus-t9klx). It used to accept one and never read it: both
+    legs resolve the process's own config dir themselves --
+    ``get_credential`` through ``nexus_config_dir``, and ``discover_lease``
+    which has no such parameter at all -- so the argument was a promise the
+    body could not keep, right only where the caller's dir and the
+    process's coincide.
+
+    That is the same defect this bead fixed one module over, in
+    ``_routing_lib._read_config_yml_credentials``, where a parity test
+    passing a tmp dir got the developer's real credentials back. Found by
+    sweeping for siblings of it rather than by a failure here. The fix is
+    the opposite one, because the cause is: there, a primitive existed that
+    could honour the directory, so the wrapper was pointed at it; here
+    ``discover_lease`` is the single discovery implementation shared by the
+    vector client, the catalog and the T2 resolvers, and threading a
+    config dir through it is a change to that contract, not a residual. So
+    the signature stops claiming what it never did, and a caller that needs
+    a specific config dir has to raise that with ``discover_lease``.
 
     Mirrors :func:`nexus.db.service_endpoint.resolve_service_endpoint`'s
     precedence, using its own primitives rather than a re-implementation:
@@ -329,7 +349,7 @@ def _resolve_endpoint_and_token(config_dir: Path) -> tuple[str, str, bool]:
     PRECEDENCE section."""
     from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred, same reason as above
 
-    base_url, is_local_supervisor = _resolve_base_url(config_dir)
+    base_url, is_local_supervisor = _resolve_base_url()
     manager = DataTokenManager(config_dir=config_dir)
     token = manager.fresh_lease_token(base_url, _RESOLVED_TENANT)
     if token:
