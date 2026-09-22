@@ -124,6 +124,29 @@ def test_sub_pieces_of_one_window_are_joined_untouched() -> None:
     assert join_manifest_parts(parts) == "First half of one window. Second half of it."
 
 
+def test_a_note_pieces_note_is_joined_untouched() -> None:
+    """The measured shape of a store_put note: every piece reports
+    chunk_start_char=0 with a DIFFERENT end. A live two-piece note in
+    knowledge__nexus carries (0, 1352) then (0, 1550). Read as an overlap
+    that is 1,352 of the second piece's 1,550 characters, so a coincidental
+    agreement would delete most of the note. The start has to advance for an
+    overlap to be considered at all, which rules this out by construction."""
+    first, second = "A" * 1352, "B" * 1550
+    assert join_manifest_parts([(first, 0, 1352), (second, 0, 1550)]) == first + second
+
+
+def test_a_note_whose_pieces_happen_to_agree_at_the_seam_is_still_intact() -> None:
+    """The same regime with the coincidence actually present: the second
+    piece opens with exactly the characters the first one ends with. Under a
+    span comparison that only asked for a DIFFERENT span, the text check
+    would have confirmed a bogus overlap and eaten it."""
+    seam = "the same twelve and more characters"
+    first, second = "opening prose " + seam, seam + " and the rest of the note"
+    joined = join_manifest_parts([(first, 0, len(first)), (second, 0, len(second))])
+    assert joined == first + second
+    assert joined.count(seam) == 2
+
+
 def test_parts_with_no_recorded_span_join_exactly_as_before() -> None:
     """store_put notes and any pre-span chunk: no span, no trim, byte-exact
     concatenation. tests/test_store_put_split.py asserts note_pieces rejoin

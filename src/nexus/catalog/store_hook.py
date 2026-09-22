@@ -352,6 +352,20 @@ def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
       splits an oversized chunk with ``dict(c.metadata)``, so the pieces
       carry identical spans. An equal span means "same window", never an
       overlap of the window's whole length.
+    * **A ``note_pieces`` note.** Its pieces each report
+      ``chunk_start_char=0`` with DIFFERENT ends — measured on a live
+      two-piece note as ``(0, 1352)`` then ``(0, 1550)``. Read as an
+      overlap that would be 1,352 characters of a 1,550-character piece,
+      so a coincidental twelve-character agreement would silently delete
+      most of the note. The start must therefore ADVANCE for an overlap to
+      be considered, which excludes this regime by construction rather
+      than leaving it to the text check to refuse. ``note_pieces``' own
+      docstring already states the write-side half of this
+      (``"".join(pieces) == content`` always, which "rules out the
+      markdown chunker here, which prepends a section heading to each
+      chunk and overlaps neighbours"); the read side never had the
+      matching exclusion, which is how nexus-b2tld's fix to an under-join
+      opened an over-join.
     * **No recorded span.** ``store_put`` notes, and any chunk written
       before the spans existed. Nothing to propose a trim, so none happens.
     * **An unconfirmed overlap.** A table continuation's header prefix
@@ -372,12 +386,17 @@ def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
             continue
         prev_start, prev_end = prev_span
         trim = 0
+        # A real overlap advances the window: start strictly greater than the
+        # previous start, and short of the previous end. Requiring the
+        # ADVANCE, rather than merely a different span, is what keeps the
+        # note regimes out by construction instead of by luck — see the
+        # note_pieces case in this function's docstring.
         overlap = (
             prev_end - start
             if start is not None
+            and prev_start is not None
             and prev_end is not None
-            and (start, end) != (prev_start, prev_end)
-            and start < prev_end
+            and prev_start < start < prev_end
             else 0
         )
         if overlap >= MIN_VERIFIED_OVERLAP:
