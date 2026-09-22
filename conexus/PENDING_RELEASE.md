@@ -75,5 +75,12 @@ on 2026-09-22. A bullet that wraps is fine; a PATH that wraps is not.
   plugin importer was the guard above; the wheel's `nexus.hooks._routing_lib`
   is the same library, and two copies of it would drift.
 
+- nexus-t9klx — `conexus/hooks/scripts/routing/registry.yaml`: both rules now
+  declare `hook_verb` plus the wheel `module` instead of a `hook_script`
+  filename, since neither guard is a plugin script any more. Documentation
+  only — `routing_stats` reads hooks.json, never this file — so nothing
+  behaves differently when it goes live; it is declared because it drifted,
+  which is the whole contract.
+
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)
