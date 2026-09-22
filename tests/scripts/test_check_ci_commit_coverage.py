@@ -19,6 +19,7 @@ commit, cancelled; a docs-only push on top; nothing since) and proves
 that actually runs pytest clears it. A gate that has never failed proves
 nothing.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -106,7 +107,9 @@ def test_predicate_order_matches_ci_yml_case_block() -> None:
     """Pin against a LIVE parse of ci.yml's case block, not a copy of its
     text -- an edit to one without the other reds this test instead of the
     two silently drifting apart."""
-    ci_yml = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    ci_yml = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
     start = ci_yml.index('case "$f" in')
     end = ci_yml.index("esac", start) + len("esac")
     case_block = ci_yml[start:end]
@@ -211,7 +214,10 @@ def test_find_uncovered_commits_flags_only_code_touching_commits() -> None:
 
 
 def test_find_uncovered_commits_empty_when_all_docs_only() -> None:
-    commits = [gate.CommitInfo("d1", ("docs/a.md",)), gate.CommitInfo("d2", ("web/x.html",))]
+    commits = [
+        gate.CommitInfo("d1", ("docs/a.md",)),
+        gate.CommitInfo("d2", ("web/x.html",)),
+    ]
     assert gate.find_uncovered_commits(commits) == []
 
 
@@ -225,7 +231,9 @@ def test_fetch_push_runs_requests_the_right_url() -> None:
         seen_urls.append(url)
         return {"workflow_runs": [{"id": 1, "head_sha": "aaa"}]}
 
-    runs = gate.fetch_push_runs("o/r", "tok", "develop", "ci.yml", max_runs=100, api=fake_api)
+    runs = gate.fetch_push_runs(
+        "o/r", "tok", "develop", "ci.yml", max_runs=100, api=fake_api
+    )
     assert len(runs) == 1
     assert len(seen_urls) == 1
     assert "branch=develop" in seen_urls[0]
@@ -246,7 +254,9 @@ def test_fetch_push_runs_paginates_until_max_runs_or_empty_page() -> None:
         calls["n"] += 1
         return page
 
-    runs = gate.fetch_push_runs("o/r", "tok", "develop", "ci.yml", max_runs=150, api=fake_api)
+    runs = gate.fetch_push_runs(
+        "o/r", "tok", "develop", "ci.yml", max_runs=150, api=fake_api
+    )
     assert len(runs) == 101
     # page 1 (100 items, a FULL page -- keep going) + page 2 (1 item, SHORT
     # of the 50 requested -- GitHub's own "no more pages" signal, stop
@@ -296,7 +306,9 @@ class _RunRouter:
     """Fake GitHub API: routes the runs-list URL to a fixed page, and each
     per-run jobs URL to that run's own job dict, keyed by run id."""
 
-    def __init__(self, runs_page: list[dict], jobs_by_run_id: dict[int, dict[str, str]]) -> None:
+    def __init__(
+        self, runs_page: list[dict], jobs_by_run_id: dict[int, dict[str, str]]
+    ) -> None:
         self.runs_page = runs_page
         self.jobs_by_run_id = jobs_by_run_id
 
@@ -347,7 +359,14 @@ def test_check_cannot_verify_when_no_runs_found(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _commit(repo, "README.md", "hi", "init")
     rc = gate.check(
-        "o/r", "tok", "develop", "ci.yml", "HEAD", str(repo), 100, api=lambda u: {"workflow_runs": []}
+        "o/r",
+        "tok",
+        "develop",
+        "ci.yml",
+        "HEAD",
+        str(repo),
+        100,
+        api=lambda u: {"workflow_runs": []},
     )
     assert rc == 2
 
@@ -363,7 +382,9 @@ def test_check_cannot_verify_when_no_run_ever_exercised_code(tmp_path: Path) -> 
     assert rc == 2
 
 
-def test_check_passes_when_head_itself_is_the_code_exercised_run(tmp_path: Path) -> None:
+def test_check_passes_when_head_itself_is_the_code_exercised_run(
+    tmp_path: Path,
+) -> None:
     repo = _init_repo(tmp_path)
     sha = _commit(repo, "src/nexus/foo.py", "code", "add code")
     router = _RunRouter(
@@ -374,7 +395,9 @@ def test_check_passes_when_head_itself_is_the_code_exercised_run(tmp_path: Path)
     assert rc == 0
 
 
-def test_check_passes_when_trailing_commits_since_h_are_all_docs_only(tmp_path: Path) -> None:
+def test_check_passes_when_trailing_commits_since_h_are_all_docs_only(
+    tmp_path: Path,
+) -> None:
     repo = _init_repo(tmp_path)
     code_sha = _commit(repo, "src/nexus/foo.py", "code", "add code")
     _commit(repo, "docs/a.md", "doc", "docs only")
@@ -386,27 +409,41 @@ def test_check_passes_when_trailing_commits_since_h_are_all_docs_only(tmp_path: 
         ],
         jobs_by_run_id={2: _SKIPPED_JOBS, 1: _SUCCESS_JOBS},
     )
-    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
     assert rc == 0
 
 
-def test_check_blocked_when_a_code_commit_since_h_was_never_exercised(tmp_path: Path) -> None:
+def test_check_blocked_when_a_code_commit_since_h_was_never_exercised(
+    tmp_path: Path,
+) -> None:
     """The class this script exists to catch, in miniature: a code commit
     (cancelled run) followed only by docs-only pushes, with NO in-flight run
     anywhere to explain the gap -- genuinely, permanently uncovered."""
     repo = _init_repo(tmp_path)
     floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
-    uncovered_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "touches code, run cancelled")
-    tip_sha = _commit(repo, "docs/a.md", "doc", "docs only, supersedes the cancelled run")
+    uncovered_sha = _commit(
+        repo, "src/nexus/pdf_extractor.py", "new code", "touches code, run cancelled"
+    )
+    tip_sha = _commit(
+        repo, "docs/a.md", "doc", "docs only, supersedes the cancelled run"
+    )
     router = _RunRouter(
         runs_page=[
             {"id": 3, "head_sha": tip_sha, "status": "completed"},
-            {"id": 2, "head_sha": uncovered_sha, "status": "completed"},  # CANCELLED, but CONCLUDED
+            {
+                "id": 2,
+                "head_sha": uncovered_sha,
+                "status": "completed",
+            },  # CANCELLED, but CONCLUDED
             {"id": 1, "head_sha": floor_sha, "status": "completed"},
         ],
         jobs_by_run_id={3: _SKIPPED_JOBS, 2: _CANCELLED_JOBS, 1: _SUCCESS_JOBS},
     )
-    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
     assert rc == 1
 
 
@@ -447,7 +484,9 @@ def test_run_is_in_flight_true_for_in_progress() -> None:
 
 
 def test_run_is_in_flight_false_for_completed() -> None:
-    assert gate.run_is_in_flight({"status": "completed", "conclusion": "success"}) is False
+    assert (
+        gate.run_is_in_flight({"status": "completed", "conclusion": "success"}) is False
+    )
 
 
 def test_classify_pending_commits_pending_when_covered_by_in_flight_head() -> None:
@@ -455,7 +494,8 @@ def test_classify_pending_commits_pending_when_covered_by_in_flight_head() -> No
     is PENDING, not BLOCKED -- its verdict does not exist yet."""
     commits = [gate.CommitInfo("code1", ("src/nexus/foo.py",))]
     blocked, pending = gate.classify_pending_commits(
-        commits, in_flight_head_shas=["still-running-head"],
+        commits,
+        in_flight_head_shas=["still-running-head"],
         is_ancestor_or_equal=lambda c, r: (c, r) == ("code1", "still-running-head"),
     )
     assert blocked == []
@@ -476,7 +516,9 @@ def test_classify_pending_commits_blocked_when_no_in_flight_run_covers_it() -> N
 def test_classify_pending_commits_docs_only_commits_are_in_neither_list() -> None:
     commits = [gate.CommitInfo("docs1", ("docs/a.md",))]
     blocked, pending = gate.classify_pending_commits(
-        commits, in_flight_head_shas=["anything"], is_ancestor_or_equal=lambda c, r: True
+        commits,
+        in_flight_head_shas=["anything"],
+        is_ancestor_or_equal=lambda c, r: True,
     )
     assert blocked == []
     assert pending == []
@@ -485,7 +527,9 @@ def test_classify_pending_commits_docs_only_commits_are_in_neither_list() -> Non
 # ── check()-level in-flight scenarios (the required evidence) ──────────────
 
 
-def test_check_out_of_scope_not_failing_when_covering_run_is_queued(tmp_path: Path) -> None:
+def test_check_out_of_scope_not_failing_when_covering_run_is_queued(
+    tmp_path: Path,
+) -> None:
     """SCENARIO 1: queued. The exact race from the audit's own first live
     run -- ci.yml's run for THIS push has not even started executing jobs
     yet. Round 3: this is now a NON-FAILING out-of-scope note, since the
@@ -498,13 +542,21 @@ def test_check_out_of_scope_not_failing_when_covering_run_is_queued(tmp_path: Pa
             {"id": 2, "head_sha": tip_sha, "status": "queued"},
             {"id": 1, "head_sha": floor_sha, "status": "completed"},
         ],
-        jobs_by_run_id={1: _SUCCESS_JOBS},  # run 2's jobs are never fetched: still queued
+        jobs_by_run_id={
+            1: _SUCCESS_JOBS
+        },  # run 2's jobs are never fetched: still queued
     )
-    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
-    assert rc == 0, "a queued covering run must never fail the invocation -- it is out of scope, not a verdict"
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 0, (
+        "a queued covering run must never fail the invocation -- it is out of scope, not a verdict"
+    )
 
 
-def test_check_out_of_scope_not_failing_when_covering_run_is_in_progress(tmp_path: Path) -> None:
+def test_check_out_of_scope_not_failing_when_covering_run_is_in_progress(
+    tmp_path: Path,
+) -> None:
     """SCENARIO 2: in_progress. The literal shape of run 35770759430 at the
     moment the audit's own first live run (35770759535) queried it."""
     repo = _init_repo(tmp_path)
@@ -517,11 +569,15 @@ def test_check_out_of_scope_not_failing_when_covering_run_is_in_progress(tmp_pat
         ],
         jobs_by_run_id={1: _SUCCESS_JOBS},
     )
-    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
     assert rc == 0, "an in_progress covering run must never fail the invocation"
 
 
-def test_check_blocked_after_in_progress_run_concludes_cancelled(tmp_path: Path) -> None:
+def test_check_blocked_after_in_progress_run_concludes_cancelled(
+    tmp_path: Path,
+) -> None:
     """SCENARIO 3: in_progress, THEN cancelled. Re-running the SAME audit
     after the in-flight run concludes (as the NEXT push's own audit would,
     since the trigger stays `on: push`) must resolve the out-of-scope note
@@ -538,7 +594,9 @@ def test_check_blocked_after_in_progress_run_concludes_cancelled(tmp_path: Path)
         ],
         jobs_by_run_id={1: _SUCCESS_JOBS},
     )
-    rc_while_running = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    rc_while_running = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
     assert rc_while_running == 0, "still in flight -- out of scope, not a verdict yet"
 
     # The run concludes -- cancelled (superseded by a later push, in the
@@ -550,11 +608,17 @@ def test_check_blocked_after_in_progress_run_concludes_cancelled(tmp_path: Path)
         {"id": 1, "head_sha": floor_sha, "status": "completed"},
     ]
     router.jobs_by_run_id[2] = _CANCELLED_JOBS
-    rc_after_cancel = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
-    assert rc_after_cancel == 1, "a concluded-cancelled covering run must resolve to BLOCKED, never stay silent"
+    rc_after_cancel = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc_after_cancel == 1, (
+        "a concluded-cancelled covering run must resolve to BLOCKED, never stay silent"
+    )
 
 
-def test_check_prints_the_out_of_scope_tail_to_stdout_not_stderr(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_check_prints_the_out_of_scope_tail_to_stdout_not_stderr(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """The out-of-scope note must be VISIBLE (round 3's whole point -- "print
     it, don't stay silent"), and on stdout specifically: a caller scanning
     stderr for trouble must not see it, since exit 0 already says nothing
@@ -569,7 +633,9 @@ def test_check_prints_the_out_of_scope_tail_to_stdout_not_stderr(tmp_path: Path,
         ],
         jobs_by_run_id={1: _SUCCESS_JOBS},
     )
-    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
     assert rc == 0
     out, err = capsys.readouterr()
     assert "OUT OF SCOPE" in out
@@ -577,7 +643,9 @@ def test_check_prints_the_out_of_scope_tail_to_stdout_not_stderr(tmp_path: Path,
     assert "OUT OF SCOPE" not in err
 
 
-def test_check_stays_blocked_for_a_completed_run_whose_pytest_jobs_skipped(tmp_path: Path) -> None:
+def test_check_stays_blocked_for_a_completed_run_whose_pytest_jobs_skipped(
+    tmp_path: Path,
+) -> None:
     """SCENARIO 4: completed, but SKIPPED (the doc-only fast lane's own
     shape). The second-order trap named explicitly: this must NOT be read
     as in-flight (it is not -- status is completed) and must NOT become H
@@ -585,17 +653,27 @@ def test_check_stays_blocked_for_a_completed_run_whose_pytest_jobs_skipped(tmp_p
     BLOCKED, unconditionally."""
     repo = _init_repo(tmp_path)
     floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
-    uncovered_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "touches code")
+    uncovered_sha = _commit(
+        repo, "src/nexus/pdf_extractor.py", "new code", "touches code"
+    )
     tip_sha = _commit(repo, "docs/a.md", "doc", "docs-only push on top")
     router = _RunRouter(
         runs_page=[
-            {"id": 2, "head_sha": tip_sha, "status": "completed"},  # SKIPPED, not in-flight
+            {
+                "id": 2,
+                "head_sha": tip_sha,
+                "status": "completed",
+            },  # SKIPPED, not in-flight
             {"id": 1, "head_sha": floor_sha, "status": "completed"},
         ],
         jobs_by_run_id={2: _SKIPPED_JOBS, 1: _SUCCESS_JOBS},
     )
-    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
-    assert rc == 1, "a completed-but-skipped run must never excuse a code commit -- BLOCKED, not PENDING"
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 1, (
+        "a completed-but-skipped run must never excuse a code commit -- BLOCKED, not PENDING"
+    )
 
 
 # ── THE MANDATORY FALSIFICATION CHECK ───────────────────────────────────────
@@ -607,7 +685,9 @@ def test_check_stays_blocked_for_a_completed_run_whose_pytest_jobs_skipped(tmp_p
 # and the real matrix runs, covering dbf255efe and bf84cb512 together").
 
 
-def test_falsification_reconstructed_bead_sequence_goes_red_then_green(tmp_path: Path) -> None:
+def test_falsification_reconstructed_bead_sequence_goes_red_then_green(
+    tmp_path: Path,
+) -> None:
     repo = _init_repo(tmp_path)
 
     # A prior known-good floor: some earlier commit whose run genuinely
@@ -650,7 +730,14 @@ def test_falsification_reconstructed_bead_sequence_goes_red_then_green(tmp_path:
     )
 
     rc_before = gate.check(
-        "Hellblazer/nexus", "tok", "develop", "ci.yml", docs_tip_sha, str(repo), 100, api=router
+        "Hellblazer/nexus",
+        "tok",
+        "develop",
+        "ci.yml",
+        docs_tip_sha,
+        str(repo),
+        100,
+        api=router,
     )
     assert rc_before == 1, "the reconstructed bead sequence must be reported BLOCKED"
 
@@ -658,7 +745,10 @@ def test_falsification_reconstructed_bead_sequence_goes_red_then_green(tmp_path:
     # the fast lane does not fire and the real matrix runs, covering the
     # cancelled commit and this one together.
     resolved_tip_sha = _commit(
-        repo, "src/nexus/pdf_chunker.py", "chunker v1", "touches code again; real matrix runs"
+        repo,
+        "src/nexus/pdf_chunker.py",
+        "chunker v1",
+        "touches code again; real matrix runs",
     )
     router.runs_page = [
         {"id": 4, "head_sha": resolved_tip_sha, "status": "completed"},
@@ -667,6 +757,74 @@ def test_falsification_reconstructed_bead_sequence_goes_red_then_green(tmp_path:
     router.jobs_by_run_id[4] = _SUCCESS_JOBS
 
     rc_after = gate.check(
-        "Hellblazer/nexus", "tok", "develop", "ci.yml", resolved_tip_sha, str(repo), 100, api=router
+        "Hellblazer/nexus",
+        "tok",
+        "develop",
+        "ci.yml",
+        resolved_tip_sha,
+        str(repo),
+        100,
+        api=router,
     )
     assert rc_after == 0, "a later code-touching, fully-tested push must clear the hole"
+
+
+# ── the out-of-scope ANNOTATION: the third outcome's signal, not its logic ──
+#
+# CANNOT-VERIFY / out-of-scope existed in check()'s logic and not in its
+# SIGNAL: the note prints inside a run that concludes green, and nobody reads
+# the log of a green run. These pin the ::warning:: annotation that narrows
+# that gap. An annotation nobody proves fires is the same class of defect it
+# was added to fix.
+
+
+def _annot_commit(sha: str, files: tuple[str, ...]) -> gate.CommitInfo:
+    return gate.CommitInfo(sha=sha, changed_files=files)
+
+
+def test_annotation_is_emitted_under_github_actions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    gate._emit_out_of_scope_annotation(
+        [
+            _annot_commit("a" * 40, ("src/nexus/x.py",)),
+            _annot_commit("b" * 40, ("src/nexus/y.py",)),
+        ],
+        ["c" * 40],
+    )
+    out = capsys.readouterr().out
+    assert out.startswith("::warning title="), f"not a workflow command: {out!r}"
+    # The shas and the in-flight head must be IN the annotation -- an
+    # annotation that says "some commits" sends the reader back to the log,
+    # which is the surface this exists to avoid.
+    assert "a" * 12 in out
+    assert "b" * 12 in out
+    assert "c" * 12 in out
+    assert "workflow_dispatch" in out, (
+        "the annotation must name the remedy, not just the state"
+    )
+    assert out.count("::warning") == 1, (
+        "one annotation for the set; GitHub caps them per run"
+    )
+
+
+def test_annotation_is_silent_outside_github_actions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A local run prints clean text, not workflow-command noise."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    gate._emit_out_of_scope_annotation(
+        [_annot_commit("a" * 40, ("src/nexus/x.py",))], ["c" * 40]
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_annotation_not_emitted_when_github_actions_is_not_literally_true(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    gate._emit_out_of_scope_annotation(
+        [_annot_commit("a" * 40, ("src/nexus/x.py",))], ["c" * 40]
+    )
+    assert capsys.readouterr().out == ""

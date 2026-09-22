@@ -165,6 +165,7 @@ completed code-exercised run found within the scanned window) -- "could
 not verify" is never "must be fine", but an in-flight covering run is no
 longer one of these cases (see ROUND 3 CORRECTION above).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -258,7 +259,9 @@ def is_docs_only_commit(changed_files: tuple[str, ...] | list[str]) -> bool:
 @dataclass(frozen=True)
 class RunRecord:
     head_sha: str
-    jobs: dict[str, str]  # job name -> conclusion ("success", "skipped", "cancelled", ...)
+    jobs: dict[
+        str, str
+    ]  # job name -> conclusion ("success", "skipped", "cancelled", ...)
 
 
 @dataclass(frozen=True)
@@ -481,6 +484,47 @@ def git_changed_files(repo_path: str, sha: str) -> tuple[str, ...]:
 # ── Orchestration ───────────────────────────────────────────────────────────
 
 
+def _emit_out_of_scope_annotation(
+    pending: "list[CommitInfo]", in_flight_head_shas: "list[str]"
+) -> None:
+    """Raise the out-of-scope note from the log body to a run ANNOTATION.
+
+    THE GAP THIS NARROWS, and it does not close it. CANNOT-VERIFY /
+    out-of-scope exists in this script's logic and did not exist in its
+    SIGNAL: the note prints inside a run that concludes GREEN, and nobody
+    reads the log of a green run. So the third outcome degraded to "pass"
+    at exactly the moment it matters — develop going quiet after a
+    cancelled run, with nobody revisiting.
+
+    A `::warning::` workflow command renders as an annotation on the run
+    summary and on the commit's checks UI, which is visible WITHOUT opening
+    the log and without failing anything. That is the one surface GitHub
+    Actions offers between "log line" and "red check".
+
+    Why not a red check instead: a red that fires on the routine
+    back-to-back-push case is a red people learn to ignore, and an ignored
+    red is worse than an honest annotation. Why not `neutral`: a job's
+    conclusion is success/failure/cancelled/skipped — Actions gives a
+    normal job no neutral conclusion to return.
+
+    Emitted only under GITHUB_ACTIONS so a local or `uv run` invocation
+    prints clean text. Annotations are capped by GitHub per run, so this
+    emits ONE covering the whole set rather than one per commit.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    shas = ", ".join(c.sha[:12] for c in pending)
+    heads = ", ".join(sorted(set(s[:12] for s in in_flight_head_shas)))
+    print(
+        f"::warning title=Commit coverage not yet determinable::"
+        f"{len(pending)} commit(s) touching code are OUT OF SCOPE for this audit "
+        f"({shas}). Their only potential covering run has not concluded "
+        f"(in-flight: {heads}). This run's GREEN verdict excludes them. "
+        f"If that run is cancelled and develop goes quiet, re-run this audit "
+        f"via workflow_dispatch rather than assuming they were covered."
+    )
+
+
 def check(
     repo: str,
     token: str,
@@ -501,9 +545,14 @@ def check(
         return 2
 
     try:
-        raw_runs = fetch_push_runs(repo, token, branch, workflow_file, max_runs_scanned, api=api)
+        raw_runs = fetch_push_runs(
+            repo, token, branch, workflow_file, max_runs_scanned, api=api
+        )
     except (urllib.error.HTTPError, urllib.error.URLError) as exc:
-        print(f"CANNOT VERIFY: GitHub API error listing {workflow_file} runs: {exc}", file=sys.stderr)
+        print(
+            f"CANNOT VERIFY: GitHub API error listing {workflow_file} runs: {exc}",
+            file=sys.stderr,
+        )
         return 2
 
     if not raw_runs:
@@ -544,7 +593,10 @@ def check(
         try:
             jobs = fetch_run_jobs(repo, run_id, token, api=api)
         except (urllib.error.HTTPError, urllib.error.URLError) as exc:
-            print(f"CANNOT VERIFY: GitHub API error fetching jobs for run {run_id}: {exc}", file=sys.stderr)
+            print(
+                f"CANNOT VERIFY: GitHub API error fetching jobs for run {run_id}: {exc}",
+                file=sys.stderr,
+            )
             return 2
         if not run_is_code_exercised(jobs):
             continue
@@ -581,7 +633,9 @@ def check(
         return 2
 
     try:
-        pending_shas = git_rev_list_range(repo_path, last_covering_run.head_sha, head_sha)
+        pending_shas = git_rev_list_range(
+            repo_path, last_covering_run.head_sha, head_sha
+        )
     except RuntimeError as exc:
         print(f"CANNOT VERIFY: {exc}", file=sys.stderr)
         return 2
@@ -589,13 +643,16 @@ def check(
     commits: list[CommitInfo] = []
     try:
         for sha in pending_shas:
-            commits.append(CommitInfo(sha=sha, changed_files=git_changed_files(repo_path, sha)))
+            commits.append(
+                CommitInfo(sha=sha, changed_files=git_changed_files(repo_path, sha))
+            )
     except RuntimeError as exc:
         print(f"CANNOT VERIFY: {exc}", file=sys.stderr)
         return 2
 
     blocked, pending = classify_pending_commits(
-        commits, in_flight_head_shas,
+        commits,
+        in_flight_head_shas,
         is_ancestor_or_equal=lambda c, r: git_is_ancestor(repo_path, c, r),
     )
 
@@ -608,7 +665,10 @@ def check(
             file=sys.stderr,
         )
         for c in blocked:
-            print(f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}", file=sys.stderr)
+            print(
+                f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}",
+                file=sys.stderr,
+            )
         print(f"\n{_REMEDY}", file=sys.stderr)
         return 1
 
@@ -635,8 +695,11 @@ def check(
             "the in-flight run concludes to close this out sooner:"
         )
         for c in pending:
-            print(f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}")
+            print(
+                f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}"
+            )
         print()
+        _emit_out_of_scope_annotation(pending, in_flight_head_shas)
 
     print(
         f"OK: every commit this invocation could examine, between the last "
@@ -650,8 +713,14 @@ def check(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""), help="owner/name")
-    ap.add_argument("--token", default=os.environ.get("GITHUB_TOKEN", ""), help="token with actions:read")
+    ap.add_argument(
+        "--repo", default=os.environ.get("GITHUB_REPOSITORY", ""), help="owner/name"
+    )
+    ap.add_argument(
+        "--token",
+        default=os.environ.get("GITHUB_TOKEN", ""),
+        help="token with actions:read",
+    )
     ap.add_argument("--branch", default="develop")
     ap.add_argument("--workflow-file", default="ci.yml")
     ap.add_argument(
