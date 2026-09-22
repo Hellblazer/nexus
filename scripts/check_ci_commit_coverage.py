@@ -81,7 +81,50 @@ absent. Absence is never a silent pass: a missing token/repo, an API error,
 an *H* whose head_sha is not resolvable/reachable in this checkout, or
 exhausting ``--max-runs-scanned`` without ever finding a code-exercised run
 all exit 2 (CANNOT VERIFY), never 0. Only "every post-*H* commit is
-docs-only" exits 0.
+docs-only OR already covered" exits 0.
+
+THE RACE THIS SCRIPT'S OWN TRIGGER CREATES, and why in-flight coverage is a
+THIRD outcome, not a fourth branch of "covered" (nexus-of2x8 round 2,
+2026-09-22, the check's own first live run). This audit was originally
+``on: push`` -- the SAME event that starts ``ci.yml``. Its first real run
+(35770759535) started 18 seconds after a push and searched for "the most
+recent COMPLETED code-exercised run" while ci.yml's own matrix for that
+EXACT push (35770759430) was still ``in_progress``. The search fell back to
+the PREVIOUS push's run and reported all four just-pushed commits BLOCKED
+-- every one of them was, at that instant, being tested by the run in
+flight. Reporting them covered (a silent PASS) would have been wrong for
+the same reason the original defect is wrong: a check that answers a
+question it cannot yet answer, in either direction, is not evidence. So a
+commit whose only covering run is still queued/in_progress is a THIRD
+verdict -- CANNOT VERIFY, exit 2, the same code this script already uses
+for every other "the dependency this needs is absent" case -- never a
+fourth "pending, exit 0" state, because exit 0 there would be exactly the
+bead's original failure shape one layer up: a silent pass on evidence that
+does not yet exist. Genuinely lost coverage still reports BLOCKED with
+first priority (a proven problem is never softened into "cannot verify"
+just because some OTHER commit in the same window happens to be pending) --
+see :func:`classify_pending_commits` and the priority order in
+:func:`check`.
+
+Closing this at the SOURCE, not just in the reporting: the trigger moved
+from ``on: push`` to ``on: workflow_run`` keyed to ``ci.yml``'s own
+``completed`` event (see ``.github/workflows/ci-commit-coverage-audit.yml``).
+``workflow_run``'s ``completed`` type fires for EVERY conclusion of the
+named workflow -- ``success``, ``failure``, AND ``cancelled`` -- so the
+covering run for the exact push under audit is, by construction, no longer
+in flight by the time this script runs for it. This removes the race for
+the common case (a push whose own run completes without being
+superseded) entirely; it does not remove the in-flight code path, because
+a CANCELLED run's own ``workflow_run.completed`` event fires the audit
+WHILE THE SUPERSEDING PUSH'S RUN IS STILL RUNNING -- that push's in-flight
+run is exactly what caused the cancellation, so it is reliably present in
+the runs list at that moment. This is the bead's exact scenario, caught
+earlier than the bead's own account (which surfaced only after a
+FOLLOW-UP push): the cancelled commit's own audit run now fires
+immediately and correctly reports CANNOT VERIFY (an in-flight run covers
+it) rather than a false BLOCKED, and resolves to OK moments later when the
+superseding run's own ``workflow_run.completed`` event re-audits with that
+run now completed and code-exercised.
 
 Usage::
 
@@ -89,11 +132,16 @@ Usage::
     uv run python scripts/check_ci_commit_coverage.py --repo Hellblazer/nexus \\
         --branch develop --head <sha>
 
-Exit codes: ``0`` every commit since the last code-exercised run is covered,
-``1`` BLOCKED -- one or more uncovered code commits found (names them),
-``2`` CANNOT VERIFY (missing token/repo, API/git error, or no code-exercised
-run found within the scanned window -- "could not verify" is never "must be
-fine").
+Exit codes: ``0`` every commit since the last code-exercised run is either
+docs-only or covered by a COMPLETED code-exercised run, ``1`` BLOCKED --
+one or more commits touch code and are covered by nothing at all, not even
+an in-flight run (names them; takes priority over exit 2 when both occur in
+the same window), ``2`` CANNOT VERIFY -- either the usual absent-dependency
+cases (missing token/repo, API/git error, no completed code-exercised run
+found within the scanned window), OR one or more commits are covered ONLY
+by a run that has not concluded yet (named, along with the in-flight run
+id) -- "could not verify" is never "must be fine", and an unresolved
+question is never answered as a pass.
 """
 from __future__ import annotations
 
@@ -227,6 +275,47 @@ def find_uncovered_commits(commits_since_h: list[CommitInfo]) -> list[CommitInfo
     pytest against a tree containing them (rule (a) does not apply either).
     """
     return [c for c in commits_since_h if not is_docs_only_commit(c.changed_files)]
+
+
+def run_is_in_flight(raw_run: dict) -> bool:
+    """True iff *raw_run* (a raw GitHub Actions run dict) has not yet
+    concluded. ``status`` is one of ``queued``, ``in_progress``, ``waiting``,
+    ``requested``, ``pending`` or ``completed`` -- everything except
+    ``completed`` means the run's verdict does not exist yet, regardless of
+    what ``conclusion`` currently reads (GitHub leaves it ``null`` until the
+    run finishes)."""
+    return raw_run.get("status") != "completed"
+
+
+def classify_pending_commits(
+    commits_since_h: list[CommitInfo],
+    in_flight_head_shas: list[str],
+    is_ancestor_or_equal: Callable[[str, str], bool],
+) -> tuple[list[CommitInfo], list[CommitInfo]]:
+    """Split the code-touching commits in *commits_since_h* into
+    ``(blocked, pending)``.
+
+    A commit already excluded by :func:`find_uncovered_commits` (docs-only)
+    is in neither list -- it needs no run at all. Of the remainder: PENDING
+    is a commit that is an ancestor of (or equal to) some run in
+    *in_flight_head_shas* -- a run that has not concluded, so the verdict
+    for this commit does not exist yet (CANNOT VERIFY, never a silent pass
+    -- see the module docstring's THE RACE section). BLOCKED is everything
+    else: covered by nothing at all, not even a run in progress.
+
+    *is_ancestor_or_equal* is injected (real git in :func:`check`, a fake
+    in tests) so this classification is unit-testable without a git
+    subprocess.
+    """
+    uncovered = find_uncovered_commits(commits_since_h)
+    blocked: list[CommitInfo] = []
+    pending: list[CommitInfo] = []
+    for c in uncovered:
+        if any(is_ancestor_or_equal(c.sha, ihs) for ihs in in_flight_head_shas):
+            pending.append(c)
+        else:
+            blocked.append(c)
+    return blocked, pending
 
 
 # ── GitHub API (thin; the logic above is pure and tested separately) ───────
@@ -405,11 +494,31 @@ def check(
         return 2
 
     last_covering_run: RunRecord | None = None
+    in_flight_head_shas: list[str] = []
     for raw in raw_runs:
         run_id = raw.get("id")
         candidate_sha = raw.get("head_sha", "")
         if not run_id or not candidate_sha:
             continue
+
+        if run_is_in_flight(raw):
+            # Not yet concluded -- its own verdict does not exist yet, so it
+            # can never become H (last_covering_run), but it CAN mean a
+            # commit reachable from it is merely PENDING rather than
+            # BLOCKED (see the module docstring's THE RACE section). Record
+            # it and keep walking further back for a genuine completed H --
+            # do not stop the search here.
+            if git_commit_exists(repo_path, candidate_sha):
+                in_flight_head_shas.append(candidate_sha)
+            else:
+                print(
+                    f"note: in-flight run {run_id}'s head {candidate_sha} is "
+                    "not resolvable in this checkout -- not counted as a "
+                    "pending-coverage candidate",
+                    file=sys.stderr,
+                )
+            continue
+
         try:
             jobs = fetch_run_jobs(repo, run_id, token, api=api)
         except (urllib.error.HTTPError, urllib.error.URLError) as exc:
@@ -463,18 +572,45 @@ def check(
         print(f"CANNOT VERIFY: {exc}", file=sys.stderr)
         return 2
 
-    uncovered = find_uncovered_commits(commits)
-    if uncovered:
+    blocked, pending = classify_pending_commits(
+        commits, in_flight_head_shas,
+        is_ancestor_or_equal=lambda c, r: git_is_ancestor(repo_path, c, r),
+    )
+
+    if blocked:
         print(
-            f"BLOCKED: {len(uncovered)} commit(s) on {branch!r} between the last "
+            f"BLOCKED: {len(blocked)} commit(s) on {branch!r} between the last "
             f"code-exercised run ({last_covering_run.head_sha}) and {head_sha} "
-            "touch code but were never exercised by pytest on any tree:",
+            "touch code and are covered by NOTHING -- not a completed run, "
+            "not even one still in progress:",
             file=sys.stderr,
         )
-        for c in uncovered:
+        for c in blocked:
             print(f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}", file=sys.stderr)
         print(f"\n{_REMEDY}", file=sys.stderr)
         return 1
+
+    if pending:
+        print(
+            f"CANNOT VERIFY: {len(pending)} commit(s) on {branch!r} between the "
+            f"last code-exercised run ({last_covering_run.head_sha}) and "
+            f"{head_sha} touch code and are covered ONLY by a run that has "
+            f"not concluded yet (in-flight head(s): "
+            f"{', '.join(sorted(set(in_flight_head_shas)))}):",
+            file=sys.stderr,
+        )
+        for c in pending:
+            print(f"  - {c.sha}: {', '.join(c.changed_files) or '(no files -- malformed diff)'}", file=sys.stderr)
+        print(
+            "\nThis is not a failure -- it is an unanswered question. "
+            "Re-running this audit once the in-flight run concludes will "
+            "resolve it to either OK (the run succeeded and exercised code) "
+            "or BLOCKED (the run was cancelled/failed and nothing else "
+            "covers these commits). See the module docstring's THE RACE "
+            "section (nexus-of2x8).",
+            file=sys.stderr,
+        )
+        return 2
 
     print(
         f"OK: every commit between the last code-exercised run "

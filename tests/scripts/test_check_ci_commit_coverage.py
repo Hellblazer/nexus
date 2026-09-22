@@ -356,7 +356,7 @@ def test_check_cannot_verify_when_no_run_ever_exercised_code(tmp_path: Path) -> 
     repo = _init_repo(tmp_path)
     sha = _commit(repo, "README.md", "hi", "init")
     router = _RunRouter(
-        runs_page=[{"id": 1, "head_sha": sha}],
+        runs_page=[{"id": 1, "head_sha": sha, "status": "completed"}],
         jobs_by_run_id={1: _SKIPPED_JOBS},
     )
     rc = gate.check("o/r", "tok", "develop", "ci.yml", sha, str(repo), 100, api=router)
@@ -367,7 +367,7 @@ def test_check_passes_when_head_itself_is_the_code_exercised_run(tmp_path: Path)
     repo = _init_repo(tmp_path)
     sha = _commit(repo, "src/nexus/foo.py", "code", "add code")
     router = _RunRouter(
-        runs_page=[{"id": 1, "head_sha": sha}],
+        runs_page=[{"id": 1, "head_sha": sha, "status": "completed"}],
         jobs_by_run_id={1: _SUCCESS_JOBS},
     )
     rc = gate.check("o/r", "tok", "develop", "ci.yml", sha, str(repo), 100, api=router)
@@ -381,8 +381,8 @@ def test_check_passes_when_trailing_commits_since_h_are_all_docs_only(tmp_path: 
     tip_sha = _commit(repo, "README.md", "readme", "more docs")
     router = _RunRouter(
         runs_page=[
-            {"id": 2, "head_sha": tip_sha},
-            {"id": 1, "head_sha": code_sha},
+            {"id": 2, "head_sha": tip_sha, "status": "completed"},
+            {"id": 1, "head_sha": code_sha, "status": "completed"},
         ],
         jobs_by_run_id={2: _SKIPPED_JOBS, 1: _SUCCESS_JOBS},
     )
@@ -392,21 +392,170 @@ def test_check_passes_when_trailing_commits_since_h_are_all_docs_only(tmp_path: 
 
 def test_check_blocked_when_a_code_commit_since_h_was_never_exercised(tmp_path: Path) -> None:
     """The class this script exists to catch, in miniature: a code commit
-    (cancelled run) followed only by docs-only pushes."""
+    (cancelled run) followed only by docs-only pushes, with NO in-flight run
+    anywhere to explain the gap -- genuinely, permanently uncovered."""
     repo = _init_repo(tmp_path)
     floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
     uncovered_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "touches code, run cancelled")
     tip_sha = _commit(repo, "docs/a.md", "doc", "docs only, supersedes the cancelled run")
     router = _RunRouter(
         runs_page=[
-            {"id": 3, "head_sha": tip_sha},
-            {"id": 2, "head_sha": uncovered_sha},
-            {"id": 1, "head_sha": floor_sha},
+            {"id": 3, "head_sha": tip_sha, "status": "completed"},
+            {"id": 2, "head_sha": uncovered_sha, "status": "completed"},  # CANCELLED, but CONCLUDED
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
         ],
         jobs_by_run_id={3: _SKIPPED_JOBS, 2: _CANCELLED_JOBS, 1: _SUCCESS_JOBS},
     )
     rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
     assert rc == 1
+
+
+# ── run_is_in_flight() / classify_pending_commits(): the in-flight fix ─────
+#
+# nexus-of2x8 round 2 (2026-09-22): this audit's own FIRST live run went red
+# on a false positive -- it is triggered BY the same push that starts
+# ci.yml, so it found "the most recent COMPLETED code-exercised run" was the
+# PREVIOUS push while the covering run for the current push was still
+# `in_progress`, and reported four just-pushed, currently-being-tested
+# commits BLOCKED. The coordinator's correction (verbatim, because it
+# reverses this file's own first attempt): an in-flight covering run is a
+# CANNOT VERIFY (exit 2), never a silent PASS (exit 0) -- "the check must
+# not report pass or fail on evidence it does not have". These are the
+# first-class scenarios required as evidence: queued, in_progress,
+# in_progress-then-cancelled, and completed-but-skipped.
+
+
+def test_run_is_in_flight_true_for_queued() -> None:
+    assert gate.run_is_in_flight({"status": "queued"}) is True
+
+
+def test_run_is_in_flight_true_for_in_progress() -> None:
+    assert gate.run_is_in_flight({"status": "in_progress"}) is True
+
+
+def test_run_is_in_flight_false_for_completed() -> None:
+    assert gate.run_is_in_flight({"status": "completed", "conclusion": "success"}) is False
+
+
+def test_classify_pending_commits_pending_when_covered_by_in_flight_head() -> None:
+    """A code-touching commit that is an ancestor of an in-flight run's head
+    is PENDING, not BLOCKED -- its verdict does not exist yet."""
+    commits = [gate.CommitInfo("code1", ("src/nexus/foo.py",))]
+    blocked, pending = gate.classify_pending_commits(
+        commits, in_flight_head_shas=["still-running-head"],
+        is_ancestor_or_equal=lambda c, r: (c, r) == ("code1", "still-running-head"),
+    )
+    assert blocked == []
+    assert [c.sha for c in pending] == ["code1"]
+
+
+def test_classify_pending_commits_blocked_when_no_in_flight_run_covers_it() -> None:
+    """No in-flight run at all (or none whose tree reaches this commit):
+    genuinely, currently uncovered."""
+    commits = [gate.CommitInfo("code1", ("src/nexus/foo.py",))]
+    blocked, pending = gate.classify_pending_commits(
+        commits, in_flight_head_shas=[], is_ancestor_or_equal=lambda c, r: False
+    )
+    assert [c.sha for c in blocked] == ["code1"]
+    assert pending == []
+
+
+def test_classify_pending_commits_docs_only_commits_are_in_neither_list() -> None:
+    commits = [gate.CommitInfo("docs1", ("docs/a.md",))]
+    blocked, pending = gate.classify_pending_commits(
+        commits, in_flight_head_shas=["anything"], is_ancestor_or_equal=lambda c, r: True
+    )
+    assert blocked == []
+    assert pending == []
+
+
+# ── check()-level in-flight scenarios (the required evidence) ──────────────
+
+
+def test_check_cannot_verify_when_covering_run_is_queued(tmp_path: Path) -> None:
+    """SCENARIO 1: queued. The exact race from the audit's own first live
+    run -- ci.yml's run for THIS push has not even started executing jobs
+    yet."""
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
+    tip_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "just pushed")
+    router = _RunRouter(
+        runs_page=[
+            {"id": 2, "head_sha": tip_sha, "status": "queued"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={1: _SUCCESS_JOBS},  # run 2's jobs are never fetched: still queued
+    )
+    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc == 2, "a queued covering run must be CANNOT VERIFY, never a pass"
+
+
+def test_check_cannot_verify_when_covering_run_is_in_progress(tmp_path: Path) -> None:
+    """SCENARIO 2: in_progress. The literal shape of run 35770759430 at the
+    moment the audit's own first live run (35770759535) queried it."""
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
+    tip_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "just pushed")
+    router = _RunRouter(
+        runs_page=[
+            {"id": 2, "head_sha": tip_sha, "status": "in_progress"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={1: _SUCCESS_JOBS},
+    )
+    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc == 2, "an in_progress covering run must be CANNOT VERIFY, never a pass"
+
+
+def test_check_blocked_after_in_progress_run_concludes_cancelled(tmp_path: Path) -> None:
+    """SCENARIO 3: in_progress, THEN cancelled. Re-running the SAME audit
+    after the in-flight run concludes (as a workflow_run-triggered audit
+    would, on ci.yml's own completion) must resolve CANNOT VERIFY to
+    BLOCKED -- this is the bead's actual defect, now surfaced the moment
+    the covering run concludes rather than waiting for a follow-up push."""
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
+    tip_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "just pushed")
+    router = _RunRouter(
+        runs_page=[
+            {"id": 2, "head_sha": tip_sha, "status": "in_progress"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={1: _SUCCESS_JOBS},
+    )
+    rc_while_running = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc_while_running == 2
+
+    # The run concludes -- cancelled (superseded by a later push, in the
+    # real scenario). Re-audit the SAME head with no other change.
+    router.runs_page = [
+        {"id": 2, "head_sha": tip_sha, "status": "completed"},
+        {"id": 1, "head_sha": floor_sha, "status": "completed"},
+    ]
+    router.jobs_by_run_id[2] = _CANCELLED_JOBS
+    rc_after_cancel = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc_after_cancel == 1, "a concluded-cancelled covering run must resolve to BLOCKED, never stay silent"
+
+
+def test_check_stays_blocked_for_a_completed_run_whose_pytest_jobs_skipped(tmp_path: Path) -> None:
+    """SCENARIO 4: completed, but SKIPPED (the doc-only fast lane's own
+    shape). The second-order trap named explicitly: this must NOT be read
+    as in-flight (it is not -- status is completed) and must NOT become H
+    (its pytest jobs never ran) -- a code-touching commit here stays
+    BLOCKED, unconditionally."""
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
+    uncovered_sha = _commit(repo, "src/nexus/pdf_extractor.py", "new code", "touches code")
+    tip_sha = _commit(repo, "docs/a.md", "doc", "docs-only push on top")
+    router = _RunRouter(
+        runs_page=[
+            {"id": 2, "head_sha": tip_sha, "status": "completed"},  # SKIPPED, not in-flight
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={2: _SKIPPED_JOBS, 1: _SUCCESS_JOBS},
+    )
+    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc == 1, "a completed-but-skipped run must never excuse a code commit -- BLOCKED, not PENDING"
 
 
 # ── THE MANDATORY FALSIFICATION CHECK ───────────────────────────────────────
@@ -442,12 +591,20 @@ def test_falsification_reconstructed_bead_sequence_goes_red_then_green(tmp_path:
             # docs-only against floor_sha..docs_tip_sha's OWN diff would in
             # reality have been cancelled_code_sha..docs_tip_sha, but the
             # predicate itself is not under test here -- what matters is
-            # that its jobs report skip, not success.
-            {"id": 3, "head_sha": docs_tip_sha},
-            # The cancelled run: never completed.
-            {"id": 2, "head_sha": cancelled_code_sha},
+            # that its jobs report skip, not success. CONCLUDED (status
+            # completed): by the time THIS audit run fires, the docs-only
+            # push's own ci.yml run finished fast (~55s per the bead).
+            {"id": 3, "head_sha": docs_tip_sha, "status": "completed"},
+            # The cancelled run: CONCLUDED with conclusion cancelled --
+            # cancellation is itself a completion (GitHub fires
+            # workflow_run.completed for it too), and by the time the
+            # docs-only push's own run exists at all, this one is long
+            # since finished being cancelled -- no in-flight run anywhere
+            # in this fixture is what makes this scenario genuinely BLOCKED
+            # rather than merely CANNOT VERIFY.
+            {"id": 2, "head_sha": cancelled_code_sha, "status": "completed"},
             # The last run that actually exercised code, further back.
-            {"id": 1, "head_sha": floor_sha},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
         ],
         jobs_by_run_id={3: _SKIPPED_JOBS, 2: _CANCELLED_JOBS, 1: _SUCCESS_JOBS},
     )
@@ -464,7 +621,7 @@ def test_falsification_reconstructed_bead_sequence_goes_red_then_green(tmp_path:
         repo, "src/nexus/pdf_chunker.py", "chunker v1", "touches code again; real matrix runs"
     )
     router.runs_page = [
-        {"id": 4, "head_sha": resolved_tip_sha},
+        {"id": 4, "head_sha": resolved_tip_sha, "status": "completed"},
         *router.runs_page,
     ]
     router.jobs_by_run_id[4] = _SUCCESS_JOBS
