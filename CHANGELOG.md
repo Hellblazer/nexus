@@ -27,8 +27,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The bound sits at the boundary rather than on the blocking call because
   there turned out to be two blocking sites, not one. `hook_stop_verification`
   blocks in a `git rev-parse` whose `subprocess.run(timeout=5.0)` does not
-  bound it — the pipe-drain shape, where the timeout kills the child and the
-  drain waits on a handle something else holds — and tools that construct a
+  bound it — observed still running at 25 seconds, by a mechanism that is
+  NOT the generic pipe-drain story this entry first gave (a piped
+  `git rev-parse` spawns no pager, no hook and no credential helper, so no
+  descendant of it holds the write end; see `nexus-t10nc`) — and tools that
+  construct a
   `T2Database` block importing numpy's C extension, which takes 0.08s outside
   that process and is unexplained. A hook is advisory and the harness carries
   its own per-entry `timeout`, so a hook past that budget cannot affect

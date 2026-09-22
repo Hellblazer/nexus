@@ -245,11 +245,22 @@ there are two distinct blocking sites:
 - `hook_stop_verification`, which `hooks.json` wires on Stop, blocks in
   `nexus/hooks/verification_config.py:97` `_git_common_root` — inside a
   `subprocess.run(["git", ...], capture_output=True, timeout=5.0)`, still
-  there when sampled at 25 seconds. A five-second timeout that does not bound
-  anything is the pipe-drain shape: the timeout kills the direct child, and
-  the drain that follows waits on a handle something else still holds. This is
-  the site that produces the reported symptom, because Stop fires at the end
-  of a `claude -p` turn — the model answers, and then the session sits there.
+  there when sampled at 25 seconds. This is the site that produces the
+  reported symptom, because Stop fires at the end of a `claude -p` turn — the
+  model answers, and then the session sits there.
+
+  **Why it outlives its own timeout is unexplained, and the obvious answer
+  is wrong.** This record first said "the pipe-drain shape": the timeout
+  kills the direct child and the drain that follows waits on a handle a
+  grandchild still holds. A census of the 80 capture-plus-timeout sites in
+  `src/nexus/` (`nexus-t10nc`) falsified that for THIS site specifically —
+  `git rev-parse` with stdout piped is leaf-shaped, spawning no pager, no
+  hook and no credential helper, so the write end was held by something that
+  is not a descendant of that git at all. The generic story does cover the
+  other exposed sites; it does not cover the one that was measured. A
+  standing hypothesis, labelled as one: on Windows, concurrent spawning from
+  threads can leak a pipe handle into a SIBLING process, and the hook path
+  does run each tool in a worker thread. Testable directly, untested so far.
 - `tuple_registry`, and other tools that construct a `T2Database`, block in
   `T2Database.__init__` importing numpy's C extension. The same import outside
   that process takes 0.08 seconds, including from a worker thread under an
