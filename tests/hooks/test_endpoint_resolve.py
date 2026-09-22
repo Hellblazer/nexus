@@ -52,7 +52,6 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 MODULE_PATH = SCRIPTS_DIR / "_endpoint_resolve.py"
 T2_PREFIX_SCAN_PATH = SCRIPTS_DIR / "t2_prefix_scan.py"
-ROUTING_LIB_PATH = SCRIPTS_DIR / "routing" / "_lib.py"
 TUPLE_LEDGER_PATH = SCRIPTS_DIR / "tuple_ledger_project.py"
 
 
@@ -104,10 +103,28 @@ def test_module_exists_and_never_imports_nexus() -> None:
     assert "from nexus" not in src
 
 
+#: The plugin scripts that still need this module. ``routing/_lib.py`` was
+#: the third and is GONE (nexus-t9klx): it moved into the wheel, where the
+#: whole reason for a stdlib mirror — a plugin script cannot import
+#: ``nexus`` — does not apply, and it calls the client's own primitives
+#: instead. Both survivors are genuinely plugin-resident and unported.
+_SHARED_MODULE_CONSUMERS = [T2_PREFIX_SCAN_PATH, TUPLE_LEDGER_PATH]
+
+
+def test_the_consumer_list_is_not_empty() -> None:
+    """Non-vacuity floor. The list shrank once and shrinks again when
+    ``mailbox_drain.py`` is ported; at zero this module is deleted rather
+    than left parametrized over nothing."""
+    assert len(_SHARED_MODULE_CONSUMERS) == 2, (
+        "the shared resolver's consumer list changed; say so here rather "
+        "than letting the check below cover less in silence"
+    )
+
+
 @pytest.mark.parametrize(
     "consumer_path",
-    [T2_PREFIX_SCAN_PATH, ROUTING_LIB_PATH, TUPLE_LEDGER_PATH],
-    ids=["t2_prefix_scan.py", "routing/_lib.py", "tuple_ledger_project.py"],
+    _SHARED_MODULE_CONSUMERS,
+    ids=["t2_prefix_scan.py", "tuple_ledger_project.py"],
 )
 def test_every_consumer_imports_the_shared_module(consumer_path: Path) -> None:
     """The bead's actual ask: no consumer keeps a private copy of the

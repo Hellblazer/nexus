@@ -113,12 +113,14 @@ VERB_TABLE: dict[str, str] = {
     # the wheel at bead nexus-q02nx.21. Their closures permitted it: two
     # are stdlib-only and rdr_hook's sole non-stdlib import was
     # _hook_logging, whose one public function has a same-name equivalent
-    # in _io. The other three Python hooks (mailbox_drain and the two
-    # routing guards) stay plugin-resident in python3 exec form, because
-    # each reaches _endpoint_resolve.py, which cannot leave the plugin --
-    # t2_prefix_scan.py and tuple_ledger_project.py still import it and
-    # neither is ported by this epic. Full reasoning and the measured
-    # closure: T2 nexus_rdr/215-tier-resolution-bead-21.
+    # in _io. Full reasoning and the measured closure: T2
+    # nexus_rdr/215-tier-resolution-bead-21. That bead left the other three
+    # Python hooks plugin-resident in python3 exec form, reasoning that each
+    # reaches _endpoint_resolve.py, which cannot leave the plugin. nexus-t9klx
+    # answered that instead of accepting it: the mirror is not carried across,
+    # the ported module calls the client's own primitives, and _endpoint_resolve
+    # stays behind for t2_prefix_scan.py and tuple_ledger_project.py, which
+    # still import it and are not ported by this epic.
     #
     # "session-context", not "session-start": these are two DIFFERENT
     # SessionStart hooks and the good name was already taken above by the
@@ -140,6 +142,13 @@ VERB_TABLE: dict[str, str] = {
     # refuses to register it as an mcp_tool, because a tool-boundary crash
     # renders as allow and this rule must still deny. The port keeps it here.
     "phase-review-close-gate": "nexus.hooks.phase_review_close_gate",
+    # The routing framework's other guard, and the deliberately FAIL-OPEN
+    # one (nexus-t9klx). Its posture is the opposite of the line above and
+    # stays that way: registry.yaml carries Sam's 2026-07-25 reasoning that
+    # a crash in a broken guard must not brick every agent's Bash. Porting
+    # it emptied `routing/` of code -- `routing/_lib.py` had no plugin
+    # importer left and went with it.
+    "subagent-git-write-gate": "nexus.hooks.subagent_git_write_gate",
     "rdr": "nexus.hooks.rdr_verb",
     # The two SessionStart entries that carried SHELL LOGIC in their command
     # string -- `nx upgrade --auto 2>/dev/null || echo ... >&2` and `nx self

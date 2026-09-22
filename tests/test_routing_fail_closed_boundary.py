@@ -50,11 +50,16 @@ WHEEL_HOOKS = pathlib.Path(__file__).parent.parent / "src" / "nexus" / "hooks"
 
 #: Drives ``_lib.run_hook`` with a body that raises, in a child process,
 #: because ``run_hook``'s emitters call ``sys.exit`` and its stdout IS the
-#: assertion. Nothing here imports the hook scripts in-process.
+#: assertion. Nothing here imports the hook modules in-process.
+#:
+#: nexus-t9klx: a package import, not a ``sys.path`` insert into
+#: ``routing/``. Both guards are in the wheel now and the plugin's copy of
+#: the library is deleted. ``run_hook`` itself is deliberately still what
+#: is driven, not ``run_hook_result``: this file pins the fail-closed
+#: BOUNDARY — that a crashed guard still writes an envelope — and
+#: ``run_hook`` is the exiting form where that is hardest to hold.
 _DRIVER = """
-import sys
-sys.path.insert(0, {routing!r})
-import _lib
+from nexus.hooks import _routing_lib as _lib
 
 def body(payload):
     raise RuntimeError("induced: the guard could not determine the state")
@@ -65,8 +70,7 @@ _lib.run_hook(body, fail_closed={fail_closed}, rule_name="induced_test_rule")
 
 def _drive(*, fail_closed: bool) -> tuple[int, dict]:
     proc = subprocess.run(
-        [sys.executable, "-c",
-         _DRIVER.format(routing=str(ROUTING), fail_closed=fail_closed)],
+        [sys.executable, "-c", _DRIVER.format(fail_closed=fail_closed)],
         input="{}", capture_output=True, text=True, timeout=30,
     )
     assert proc.stdout.strip(), (
@@ -145,13 +149,14 @@ class TestTheTwoSurfacesAgree:
     @staticmethod
     def _call_site_flags() -> dict[str, bool]:
         flags: dict[str, bool] = {}
-        for script in sorted(ROUTING.glob("*.py")):
-            if script.name.startswith("_"):
-                continue
-            body = script.read_text()
-            m = re.search(r"run_hook\([^)]*fail_closed=(True|False)", body)
-            if m:
-                flags[script.stem] = m.group(1) == "True"
+        # The plugin-directory scan that used to run here is GONE, not
+        # merely empty (nexus-t9klx). Both guards and the library are in
+        # the wheel and `routing/` holds no Python at all, so a glob over
+        # it could only ever contribute nothing — and a scan that cannot
+        # match reads exactly like one that found everything in order.
+        # `test_every_call_site_is_in_the_registry`'s non-empty assert is
+        # what keeps the remaining scan honest.
+        #
         # Ported guards: keyed on the module's OWN RULE_NAME rather than its
         # filename, because the verb name, the module name and the rule name
         # deliberately differ — the port carried RULE_NAME unchanged so old

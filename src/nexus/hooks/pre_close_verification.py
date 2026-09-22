@@ -56,7 +56,6 @@ import subprocess
 import time
 
 from nexus._hook_runtime._io import HookResult
-from nexus.hooks._plugin import _is_unexpanded
 
 __all__ = ["run"]
 
@@ -866,65 +865,35 @@ def _log_override_escape(ids: list[str], command: str) -> None:
 
     Import is deferred to the override path only: the fast-no-op path must
     not pay for a sink it never writes to.
-    THE ONE PART OF THIS HOOK THAT DOES NOT PORT CLEANLY, recorded rather
-    than faked. ``log_routing_event`` lives in
-    ``conexus/hooks/scripts/routing/_lib.py`` -- PLUGIN content, not the
-    wheel -- and since 2026-09-05 it POSTs to the engine's
-    ``routing_events`` table; the JSONL append it used to do was deleted,
-    so writing that file from here would resurrect a sink nothing reads.
-    There is no wheel-side writer to call instead.
 
-    So this does what the bash did: resolves the plugin's own ``_lib`` and
-    calls it. The difference is that a FAILURE IS LOUD. The bash ended its
-    import in a bare ``except: pass``, which for an AUDIT of override use
-    is the wrong direction -- the whole point is that a bypass leaves a
+    THIS USED TO BE "the one part of this hook that does not port
+    cleanly", and it no longer is (nexus-t9klx). The reasoning recorded
+    here was that ``log_routing_event`` lived in
+    ``conexus/hooks/scripts/routing/_lib.py`` -- plugin content, not the
+    wheel -- with no wheel-side writer to call instead, so this function
+    located the plugin's ``routing/`` directory off ``CLAUDE_PLUGIN_ROOT``
+    or a checkout-relative path, pushed it onto ``sys.path``, and did a
+    bare ``import _lib``.
+
+    That premise is now false in both halves. The library moved into the
+    wheel as ``nexus.hooks._routing_lib``, and the plugin copy was deleted
+    once the last plugin script importing it was ported, so there IS a
+    wheel-side writer and the directory this searched for holds no Python
+    at all. The whole resolution dance goes with it: no env var to read,
+    no unexpanded-``${...}`` guard, no ``sys.path`` mutation, no
+    checkout-relative fallback that was absent once installed anyway.
+
+    Found by deleting the plugin copy and watching this go quiet — the
+    two ``TestF2EnvPrefixOverride`` cases stopped seeing an audit record.
+    Which is the loudness below earning its keep: an ``ImportError`` here
+    warns instead of vanishing. The bash this was ported from ended its
+    import in a bare ``except: pass``, and for an AUDIT of override use
+    that is the wrong direction -- the point is that a bypass leaves a
     trace, and a silently-missing trace is indistinguishable from a bypass
-    that never happened. First draft of this port imported a
-    ``nexus.hooks.routing_log`` that does not exist, inside a try/except
-    that would have swallowed it forever; that is the same defect one
-    level worse, and it is why this now warns.
+    that never happened.
     """
-    # NOT off CLAUDE_PLUGIN_ROOT alone. The script resolves this off its
-    # OWN real location and says why in a comment I read and then ignored:
-    # "tests deliberately fake that var to redirect the
-    # read_verification_config.py lookup earlier in this file, and
-    # following it here would silently miss the import (caught below, so
-    # the miss would otherwise be invisible)". The differential caught it
-    # exactly as predicted. The port has no script location, so it tries
-    # the env var first and then the checkout-relative plugin path, which
-    # is this module's equivalent anchor.
-    candidates = []
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    # Same guard as plugin_root's, because this reads the variable
-    # DIRECTLY and so never passed through it. conexus/.mcp.json sets the
-    # MCP servers' env to the literal "${CLAUDE_PLUGIN_ROOT}" (Claude Code
-    # does not expand ${...} in an MCP env block), and a non-empty literal
-    # is truthy -- so this appended a candidate that can never exist and
-    # leaned entirely on the checkout fallback below, which is itself
-    # absent once installed. Found sweeping for siblings of nexus-b5ugt
-    # rather than by a failure: this path at least _warns when it finds
-    # nothing, which is why it was less visible than the hooks that
-    # simply went quiet.
-    if root and not _is_unexpanded(root):
-        candidates.append(os.path.join(root, "hooks", "scripts", "routing"))
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))))
-    candidates.append(
-        os.path.join(repo, "conexus", "hooks", "scripts", "routing")
-    )
-    routing = next((c for c in candidates if os.path.isdir(c)), "")
-    if not routing:
-        _warn(
-            "override audit NOT recorded: no plugin routing dir "
-            f"(tried {candidates!r}). The bypass happened and left no trace."
-        )
-        return
-    import sys  # noqa: PLC0415 — only the override path pays this
-
-    if routing not in sys.path:
-        sys.path.insert(0, routing)
     try:
-        import _lib  # noqa: PLC0415 — plugin-side, resolved above
+        from nexus.hooks import _routing_lib as _lib  # noqa: PLC0415 — only the override path pays this
 
         _lib.log_routing_event(
             rule="pre_close_verification_hook",

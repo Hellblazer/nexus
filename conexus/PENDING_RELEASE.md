@@ -38,8 +38,9 @@ to it — which is exactly how two of these went undeclared and red'd develop
 on 2026-09-22. A bullet that wraps is fine; a PATH that wraps is not.
 
 - nexus-t9klx — `conexus/hooks/hooks.json`: all five bare-`python3` entries
-  are being re-pointed at `nx-hook` verbs, three of them so far
-  (`behaviour-census`, `version-lockstep`, `phase-review-close-gate`). Stock
+  are being re-pointed at `nx-hook` verbs, four of them so far
+  (`behaviour-census`, `version-lockstep`, `phase-review-close-gate`,
+  `subagent-git-write-gate`). Stock
   Windows has no `python3` on PATH, so those entries could never fire there;
   a console script gets a real `.exe` shim from the installer. Sessions on
   v7.57.0 keep running the old entries against their own copies until a new
@@ -63,6 +64,16 @@ on 2026-09-22. A bullet that wraps is fine; a PATH that wraps is not.
   where a rule that must still deny when it crashes belongs. `_lib.py` moved
   into the wheel with it, dropping the stdlib endpoint mirror for the
   client's own primitives.
+
+- nexus-t9klx — `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`:
+  DELETED, ported to the `subagent-git-write-gate` verb. The routing
+  framework's other guard, and the deliberately fail-OPEN one: a crash in a
+  broken guard must not brick every agent's Bash, and that posture is carried
+  across unchanged.
+
+- nexus-t9klx — `conexus/hooks/scripts/routing/_lib.py`: DELETED. Its last
+  plugin importer was the guard above; the wheel's `nexus.hooks._routing_lib`
+  is the same library, and two copies of it would drift.
 
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)

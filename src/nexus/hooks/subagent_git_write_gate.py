@@ -1,6 +1,42 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-184 Gap-4 mechanization (nexus-s88vq, widened by nexus-ays2l): deny
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""The ``subagent-git-write-gate`` hook verb (nexus-t9klx).
+
+Port of ``conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py``,
+the fourth of the five bare-``python3`` ``hooks.json`` entries. It is the
+routing framework's other guard, and the deliberately FAIL-OPEN one:
+``registry.yaml`` carries Sam's 2026-07-25 reasoning that a crash inside a
+broken guard must not brick every agent's Bash. ``fail_closed=False`` is
+carried across unchanged.
+
+**"Move, do not rewrite."** Every check is the same object it was: the same
+normalization chain, the same adjacency and primary rules, the same
+heredoc-aware segmentation, the same two deny messages. Two changes were
+unavoidable, and they are the same two every verb in this port has made:
+
+1. **The interpreter preamble is gone.** The script inserted two
+   ``sys.path`` entries and called ``_interpreter.reexec_if_needed()``
+   because ``hooks.json`` launched it with a bare ``python3`` and PATH
+   decided which interpreter arrived. That is the whole defect this bead
+   closes: a console-script verb runs under conexus's own interpreter, so
+   there is nothing to discover and nothing to re-exec into. ``sys`` went
+   with it — it had no other use in this module.
+
+2. **The emitters return instead of exiting.** ``_lib.allow()`` /
+   ``_lib.deny()`` printed an envelope and ``sys.exit(0)``; this body
+   returns ``_lib.allow_result()`` / ``_lib.deny_result()`` and
+   ``run_hook_result`` hands it back, exactly as
+   ``phase_review_close_gate`` does. The control flow is unchanged because
+   the original relied on ``allow()`` never returning: every call site was
+   already terminal, so every one becomes a ``return``.
+
+``import _lib`` becomes ``from nexus.hooks import _routing_lib as _lib`` —
+the same library, moved into the wheel at ``5e24abfc2`` for this bead. No
+call site changed name.
+
+The original module docstring follows, unedited:
+
+RDR-184 Gap-4 mechanization (nexus-s88vq, widened by nexus-ays2l): deny
 index-writing AND working-tree-destroying git verbs from SUBAGENTS in the
 shared tree.
 
@@ -375,21 +411,15 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 from typing import Any
 
-# RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
-# `python3`, so PATH decides the interpreter. Put back the resolution
-# `_run_python_hook.sh` used to perform, before anything that needs 3.12
-# or `nexus` is imported. See _interpreter.py for what is at stake.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import _interpreter  # noqa: E402 -- must follow the sys.path insert
+from nexus._hook_runtime._io import HookResult
+from nexus.hooks import _routing_lib as _lib
 
-_interpreter.reexec_if_needed()
-
-sys.path.insert(0, os.path.dirname(__file__))
-import _lib  # noqa: E402
-
+#: Unchanged by the port, deliberately: the verb is named
+#: ``subagent-git-write-gate`` but the rule logs under the name it always
+#: has, so routing-log rows from before and after this move stay
+#: comparable. ``routing_stats._VERB_RULE_NAMES`` carries the mapping.
 RULE_NAME = "subagent_git_write_requires_orchestrator"
 
 #: Index/history writers. These are a HYGIENE concern: ``git add`` mutates
@@ -1220,15 +1250,16 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
     return head
 
 
-def body(payload: dict[str, Any]) -> None:
+def body(payload: dict[str, Any]) -> HookResult:
     agent_id = str(payload.get("agent_id") or "")
 
     if not agent_id:
-        _lib.allow()  # main conversation — the rule targets subagents only
+        # main conversation — the rule targets subagents only
+        return _lib.allow_result()
 
     command = _lib.get_bash_command(payload)
     if not command:
-        _lib.allow()
+        return _lib.allow_result()
 
     normalized = _normalize_for_primary_scan(command)
 
@@ -1262,7 +1293,7 @@ def body(payload: dict[str, Any]) -> None:
             _delete_all_expansions(normalized)
         )
     if not spliced_fragment and primary_match is None:
-        _lib.allow()
+        return _lib.allow_result()
 
     # Match FIRST, escape SECOND (the nexus-mzvwa.8 telemetry rule) — applies
     # to EITHER gate above.
@@ -1272,7 +1303,7 @@ def body(payload: dict[str, Any]) -> None:
             command_fragment=command,
             escape_reason=_lib.extract_escape_reason(command),
         )
-        _lib.allow()
+        return _lib.allow_result()
 
     cwd = str(payload.get("cwd") or "") or os.getcwd()
     worktree = _in_linked_worktree(cwd)
@@ -1280,7 +1311,7 @@ def body(payload: dict[str, Any]) -> None:
         # Linked worktree, POSITIVELY PROVEN: the agent owns its tree,
         # including destroying it. This is the ONLY exemption from either
         # gate's verdict, applied uniformly.
-        _lib.allow()
+        return _lib.allow_result()
     # worktree is False (primary checkout) OR None (undeterminable) — EITHER
     # GATE WINS either way (nexus-3c92m round 4; retires the old nexus-ays2l
     # item 3 fail-open-for-hygiene-verbs carve-out). "I could not prove this
@@ -1295,7 +1326,7 @@ def body(payload: dict[str, Any]) -> None:
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.deny(
+        return _lib.deny_result(
             _spliced_expansion_deny_message(
                 agent_type, spliced_fragment, git_present=git_present,
             ),
@@ -1305,7 +1336,6 @@ def body(payload: dict[str, Any]) -> None:
                 f"(nexus-3c92m round 8 adjacency rule)."
             ),
         )
-        return
 
     # SECONDARY (structured parser): naming only, never decides. Preferred
     # when it agrees with the primary rule (more precise verb name); when it
@@ -1317,7 +1347,7 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="deny", tool_name="Bash",
         command_fragment=command,
     )
-    _lib.deny(
+    return _lib.deny_result(
         _deny_message(agent_type, verb_names, undeterminable=worktree is None),
         summary=(
             f"subagent git write verb ({verb_names}) blocked in the shared "
@@ -1326,5 +1356,14 @@ def body(payload: dict[str, Any]) -> None:
     )
 
 
-if __name__ == "__main__":
-    _lib.run_hook(body, fail_closed=False, rule_name=RULE_NAME)
+def run(payload: dict | None) -> HookResult:
+    """Decide whether this subagent's Bash command may proceed. Fail-OPEN.
+
+    ``fail_closed=False`` is the whole posture and is carried unchanged: a
+    crash in this guard allows, because a broken guard must not brick every
+    agent's Bash. Its sibling ``phase_review_close_gate`` is the opposite,
+    for its own stated reason; the two are not a pair to be made uniform.
+    """
+    return _lib.run_hook_result(
+        body, payload, fail_closed=False, rule_name=RULE_NAME
+    )

@@ -1346,6 +1346,44 @@ def get_credential(name: str) -> str:
     return ""
 
 
+def persisted_credentials(config_dir: Path) -> dict[str, str]:
+    """Credentials persisted in *config_dir*'s ``config.yml``, file only.
+
+    Two things this is NOT, both deliberate, and both the reason it exists
+    rather than being folded into :func:`get_credential` (nexus-t9klx):
+
+    * It reads the config dir it is GIVEN, not the process's own. That is
+      the whole point — ``get_credential`` resolves
+      :func:`_global_config_path` itself, so a caller holding a config dir
+      has no way to say which file it means.
+    * It consults NO environment variable. A caller that wants the
+      env-over-file precedence wants ``get_credential``; a caller
+      resolving an endpoint by its own documented precedence applies the
+      env leg itself, and an env value arriving a second time under the
+      name of the file leg makes the two indistinguishable.
+
+    An absent key is ABSENT from the result, never ``""``. A caller
+    distinguishing "not configured" from "configured empty" needs that,
+    and it is what the plugin's stdlib mirror
+    (``_endpoint_resolve.read_config_yml_credentials``) returns, which
+    ``tests/test_routing_hooks.py``'s parity suite holds the two to.
+
+    Returns ``{}`` when the file is absent, unreadable, or carries no
+    ``credentials:`` block.
+    """
+    path = config_dir / "config.yml"
+    if not path.exists():
+        return {}
+    block = _load_global_config(path).get("credentials") or {}
+    if not isinstance(block, dict):
+        return {}
+    return {
+        str(key): str(value).strip()
+        for key, value in block.items()
+        if value is not None
+    }
+
+
 def set_config_value(dotted_key: str, value: str | bool) -> None:
     """Persist a dotted config key in ``~/.config/nexus/config.yml``.
 

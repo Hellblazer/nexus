@@ -26,7 +26,12 @@ import urllib.parse
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
-LIB_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
+#: nexus-t9klx: the library moved into the wheel, and the plugin copy was
+#: DELETED once its last plugin importer — the subagent git-write guard —
+#: was ported. These tests had stayed pinned to the plugin copy, which is
+#: to say they were exercising the one that no longer runs. The drift the
+#: port's own commit message warned about, arriving from the test side.
+LIB_PATH = PROJECT_ROOT / "src" / "nexus" / "hooks" / "_routing_lib.py"
 REGISTRY_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
 README_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "README.md"
 
@@ -79,15 +84,18 @@ def test_readme_exists():
 #: match there, which is a false negative this test must not have.
 _ROUTING_ALLOW_OWNERSHIP_PHRASE = "not yours to reach for"
 
-#: Live hook scripts (relative to routing/) whose deny message offers the
-#: `# routing-allow:` escape and must therefore carry the same ownership
-#: phrase as the authoring template.
-#: nexus-t9klx ported phase_review_close_requires_gate.py into the wheel;
-#: its verb's deny wording is unchanged and is checked by
-#: tests/test_routing_phase_review_close.py against the same template.
-#: This tuple names PLUGIN-RESIDENT scripts, so it shrinks as they go.
+#: Live guards whose deny message offers the `# routing-allow:` escape and
+#: must therefore carry the same ownership phrase as the authoring
+#: template. nexus-t9klx ported BOTH of them into the wheel, so these are
+#: wheel modules now rather than plugin script names.
+#:
+#: They stay in ONE list rather than being checked by each guard's own test
+#: file. The property is cross-file parity — the README template and every
+#: guard saying the same thing — and S8 shipped inconsistently in the first
+#: place precisely because each site was looked at on its own.
 _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE = (
-    "subagent_git_write_requires_orchestrator.py",
+    PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py",
+    PROJECT_ROOT / "src" / "nexus" / "hooks" / "phase_review_close_gate.py",
 )
 
 
@@ -107,17 +115,32 @@ def test_readme_template_deny_example_does_not_hand_over_the_escape():
     )
 
 
-@pytest.mark.parametrize("filename", _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE)
-def test_live_hook_deny_wording_matches_the_readme_template(filename: str) -> None:
+def test_the_escape_offering_guards_are_still_enumerated() -> None:
+    """Non-vacuity floor for the parametrize below.
+
+    The list names files by path, and a path that stops resolving makes
+    the check below pass by examining nothing — which is exactly what a
+    port does to a list of filenames. Both guards moved once already.
+    """
+    assert len(_LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE) == 2, (
+        "the routing framework has two guards offering the escape; if one "
+        "was added or removed, say so here rather than letting the parity "
+        "check below quietly cover less"
+    )
+
+
+@pytest.mark.parametrize(
+    "hook_path", _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE, ids=lambda p: p.name
+)
+def test_live_hook_deny_wording_matches_the_readme_template(hook_path) -> None:
     """Parity check, not a duplicate of the README's own test: if the
     README's phrase and a live hook's phrase ever diverge (one gets fixed,
     the other doesn't -- exactly how S8 shipped inconsistently the first
     time), this fails and names which file fell behind."""
-    hook_path = README_PATH.parent / filename
     assert hook_path.exists(), f"missing: {hook_path}"
     hook_text = hook_path.read_text(encoding="utf-8")
     assert _ROUTING_ALLOW_OWNERSHIP_PHRASE in hook_text, (
-        f"{filename} offers the `# routing-allow:` escape but its deny "
+        f"{hook_path.name} offers the `# routing-allow:` escape but its deny "
         f"message no longer carries {_ROUTING_ALLOW_OWNERSHIP_PHRASE!r} -- "
         f"it has diverged from routing/README.md's authoring template"
     )
@@ -204,11 +227,12 @@ def _run_stub(body: str, stdin: str = "") -> subprocess.CompletedProcess:
     test_rule/unknown fail-ladder pair into the LIVE
     ~/.config/nexus/routing_log.jsonl (312 pairs over the 48-day soak).
     """
+    # nexus-t9klx: a package import now, not a sys.path insert. The library
+    # lives in the wheel; the plugin copy it used to load by directory is
+    # deleted. Aliased to `_lib` so every stub body below reads unchanged.
     stub = textwrap.dedent(
         f"""
-        import sys
-        sys.path.insert(0, {str(LIB_PATH.parent)!r})
-        import _lib
+        from nexus.hooks import _routing_lib as _lib
         {body}
         """
     )
@@ -468,13 +492,21 @@ def test_log_routing_event_resolves_from_lease_file_with_no_env_set(tmp_path, mo
     monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
     monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
-    lease_path = cfg_dir / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text(json.dumps({
-        "status": "live",
-        "heartbeat_epoch": _time.time(),
-        "ttl": 60.0,
-        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "lease-bearer-token"},
-    }))
+    from nexus.daemon.service_registry import LeaseRecord
+
+    # A whole record, as ServiceRegistry writes it — see _write_lease below
+    # for why a hand-written partial is not a lease file (nexus-t9klx).
+    (cfg_dir / f"storage_service_addr.{os.getuid()}").write_text(
+        LeaseRecord(
+            scope_key="storage_service",
+            generation=1,
+            owner_token="owner-fixture",
+            heartbeat_epoch=_time.time(),
+            ttl=60.0,
+            endpoint={"host": "127.0.0.1", "port": 4242, "token": "lease-bearer-token"},
+            version="0.0.0-fixture",
+        ).to_json()
+    )
     lib = _load_lib()
 
     sent: list[dict] = []
@@ -947,31 +979,72 @@ def _load_t2_prefix_scan():
     return module
 
 
+def _write_lease(config_dir, *, age: float = 0.0, ttl: float = 60.0) -> None:
+    """A lease file of the shape ``ServiceRegistry`` actually writes.
+
+    nexus-t9klx: this used to be a hand-written partial — status,
+    heartbeat_epoch, ttl, endpoint and nothing else, because that is all
+    the plugin's tolerant mirror reads. The wheel's wrapper goes through
+    ``LeaseRecord.from_json``, which requires the whole record, so the
+    partial made the two disagree on an input the supervisor never
+    produces. ``LeaseRecord.to_json`` is the file format; build the
+    fixture from it rather than from what one reader happens to look at.
+    """
+    from nexus.daemon.service_registry import LeaseRecord
+
+    record = LeaseRecord(
+        scope_key="storage_service",
+        generation=1,
+        owner_token="owner-fixture",
+        heartbeat_epoch=_time.time() - age,
+        ttl=ttl,
+        endpoint={"host": "127.0.0.1", "port": 4242, "token": "tok"},
+        version="0.0.0-fixture",
+    )
+    (config_dir / f"storage_service_addr.{os.getuid()}").write_text(record.to_json())
+
+
 def test_parity_read_service_lease_fresh(tmp_path):
     scan = _load_t2_prefix_scan()
     lib = _load_lib()
-    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text(json.dumps({
-        "status": "live",
-        "heartbeat_epoch": _time.time(),
-        "ttl": 60.0,
-        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
-    }))
+    _write_lease(tmp_path)
     assert lib._read_service_lease(tmp_path) == scan._read_lease(tmp_path)
 
 
 def test_parity_read_service_lease_expired(tmp_path):
     scan = _load_t2_prefix_scan()
     lib = _load_lib()
-    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text(json.dumps({
+    _write_lease(tmp_path, age=120.0)
+    assert lib._read_service_lease(tmp_path) is None
+    assert scan._read_lease(tmp_path) is None
+
+
+def test_a_truncated_lease_record_is_refused_by_the_wheel_only(tmp_path):
+    """The one place the two readers genuinely differ, named rather than hidden.
+
+    The mirror reads the four fields it needs and ignores the rest; the
+    wheel's wrapper validates the whole record through
+    ``LeaseRecord.from_json``. A lease file missing ``scope_key`` /
+    ``generation`` / ``owner_token`` / ``version`` therefore resolves to an
+    endpoint for one and to ``None`` for the other.
+
+    The supervisor never writes such a file, so this is not a live
+    divergence — and the direction is the safe one either way: ``None``
+    drops the routing event to the meter, where a wrong endpoint would
+    send it somewhere. Pinned so that if the record format ever loses a
+    field, the disagreement surfaces here instead of as a guard that
+    silently stopped logging.
+    """
+    (tmp_path / f"storage_service_addr.{os.getuid()}").write_text(json.dumps({
         "status": "live",
-        "heartbeat_epoch": _time.time() - 120.0,
+        "heartbeat_epoch": _time.time(),
         "ttl": 60.0,
         "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
     }))
-    assert lib._read_service_lease(tmp_path) is None
-    assert scan._read_lease(tmp_path) is None
+    assert _load_lib()._read_service_lease(tmp_path) is None
+    assert _load_t2_prefix_scan()._read_lease(tmp_path) == {
+        "host": "127.0.0.1", "port": 4242, "token": "tok",
+    }
 
 
 def test_parity_read_service_lease_malformed(tmp_path):

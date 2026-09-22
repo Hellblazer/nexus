@@ -353,19 +353,30 @@ def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | Non
 
 def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
     """``service_url``/``service_token`` from the persisted ``config.yml``.
-    Delegates to the shared sibling module (nexus-aginu), which also
-    strips a trailing inline ``# comment`` -- real YAML does, and the
-    pre-consolidation "ported verbatim" copy did not.
-    ``tests/test_routing_hooks.py``'s
-    ``test_parity_read_config_yml_credentials_*`` suite still runs both
-    wrappers against the same on-disk ``config.yml`` fixture and asserts
-    identical return values.
-    """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred, same reason
 
+    ``tests/test_routing_hooks.py``'s
+    ``test_parity_read_config_yml_credentials_*`` suite runs this wrapper
+    and the plugin's stdlib mirror against the same on-disk fixture and
+    asserts identical return values.
+
+    It calls :func:`nexus.config.persisted_credentials`, NOT
+    ``get_credential``, and that distinction is the whole of nexus-t9klx's
+    correction to its own earlier port (5e24abfc2). ``get_credential``
+    resolves the process's config dir itself and consults the environment
+    first, so the version that called it ignored the ``config_dir`` it was
+    handed and answered from the real ``~/.config/nexus`` with an env
+    value layered on top. Under the parity fixture that read the
+    developer's own config; in production the two directories coincide by
+    accident, which is why nothing had caught it. It also returned ``""``
+    for an absent key where the mirror omits it.
+    """
+    from nexus.config import persisted_credentials  # noqa: PLC0415 — deferred, same reason
+
+    creds = persisted_credentials(config_dir)
     return {
-        key: (get_credential(key) or "").strip()
+        key: creds[key]
         for key in ("service_url", "service_token")
+        if key in creds
     }
 
 
