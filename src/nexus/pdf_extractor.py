@@ -573,6 +573,8 @@ _COLSPAN_RE = re.compile(r"colspan\s*=\s*\"?(\d+)\"?", re.I)
 _TABLE_CAPTION_RE = re.compile(r"table\s+([IVXLC]+|\d+)\b", re.I)
 #: How far back from a table to look for its caption label.
 _CAPTION_LOOKBACK_CHARS = 400
+#: Opening of the suspect-table marker. Also the idempotency probe.
+_MARKER_PREFIX = "[table structure suspect"
 
 
 def _row_widths(block: str) -> list[list[str]]:
@@ -629,13 +631,17 @@ def _table_shape_defects(block: str) -> list[dict]:
 
 
 def _table_caption_label(text: str, table_start: int) -> str:
-    """The table's own caption label from the text just before it, else ``""``."""
+    """The table's own caption label from the text just before it, else ``""``.
+
+    The LAST numbered match in the window, returned as matched. This used to
+    locate the label with ``window.lower().rfind("table")``, which can land
+    on a different occurrence than the regex matched: a bare, unnumbered
+    "table" mention after the real caption ("in the related work table
+    below") produced a label of ``"table b"`` (code-review round 1).
+    """
     window = text[max(0, table_start - _CAPTION_LOOKBACK_CHARS):table_start]
-    matches = _TABLE_CAPTION_RE.findall(window)
-    if not matches:
-        return ""
-    tail = window[window.lower().rfind("table"):]
-    return tail.split("\n", 1)[0].strip()[: len("table") + 1 + len(matches[-1])]
+    matches = list(_TABLE_CAPTION_RE.finditer(window))
+    return matches[-1].group(0).strip() if matches else ""
 
 
 def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
@@ -667,6 +673,11 @@ def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
 
     def _repl(m: re.Match) -> str:
         block = m.group(0)
+        if _MARKER_PREFIX in block:
+            # Already marked. Extraction can run again over marked text
+            # (a --force re-index of a document indexed after this shipped);
+            # a second marker would say nothing new.
+            return block
         defects = _table_shape_defects(block)
         if not defects:
             return block
@@ -684,10 +695,18 @@ def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
         label = _table_caption_label(text, m.start())
         found.extend({**d, "label": label} for d in defects)
         named = f" ({label})" if label else ""
-        return (
-            f"[table structure suspect{named}: {'; '.join(reasons)}; "
-            f"values may be misaligned]\n{block}"
+        marker = (
+            f"{_MARKER_PREFIX}{named}: {'; '.join(reasons)}; "
+            "values may be misaligned]"
         )
+        # Just INSIDE the opening tag, not on a line before it. That span is
+        # what PDFChunker's _table_header re-injects into every continuation
+        # chunk, so every chunk of a split table carries the warning. On its
+        # own line before <table>, a table big enough to trip the
+        # table_break branch left the marker in the PRECEDING chunk and in
+        # none of the table's own (substantive-critic round 1).
+        open_end = block.find(">") + 1
+        return f"{block[:open_end]}{marker}{block[open_end:]}"
 
     return _TABLE_BLOCK_RE.sub(_repl, text), found
 

@@ -29,6 +29,9 @@ protects nothing.
 """
 from __future__ import annotations
 
+import re
+
+from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import mark_misshapen_tables
 
 # The real TABLE I shape, trimmed to four properties. The header's colspan
@@ -60,6 +63,12 @@ MERGED_ROW_LABEL = (
 )
 
 
+def _without_marker(text: str) -> str:
+    """*text* with any suspect-table marker removed, for asserting the table's
+    own bytes were untouched."""
+    return re.sub(r"\[table structure suspect[^\]]*\]", "", text)
+
+
 def test_a_well_formed_table_is_left_exactly_alone() -> None:
     marked, defects = mark_misshapen_tables(WELL_FORMED)
     assert marked == WELL_FORMED
@@ -73,12 +82,13 @@ def test_the_header_collapse_is_detected_and_marked() -> None:
     assert defects[0]["kind"] == "header_column_mismatch"
     assert defects[0]["header_columns"] == 10
     assert defects[0]["row_columns"] == 9
-    assert marked.startswith("[table structure suspect")
+    assert "[table structure suspect" in marked
     assert "header describes 10 columns" in marked
     assert "rows carry 9" in marked
     # The table itself is preserved verbatim: the marker adds a warning, it
-    # never edits or drops the values a reader may still want.
-    assert KNOWFEAT_TABLE_I in marked
+    # never edits or drops the values a reader may still want. Stripping the
+    # marker restores the original block byte for byte.
+    assert _without_marker(marked) == KNOWFEAT_TABLE_I
 
 
 def test_a_row_that_lost_its_label_is_detected() -> None:
@@ -87,7 +97,7 @@ def test_a_row_that_lost_its_label_is_detected() -> None:
     kinds = [d["kind"] for d in defects]
     assert "empty_row_label" in kinds, defects
     assert "[table structure suspect" in marked
-    assert MERGED_ROW_LABEL in marked
+    assert _without_marker(marked) == MERGED_ROW_LABEL
 
 
 def test_a_table_label_is_named_in_the_marker_when_the_caption_has_one() -> None:
@@ -132,3 +142,58 @@ def test_a_ragged_table_reports_the_modal_row_width() -> None:
     assert len(defects) == 1
     assert defects[0]["header_columns"] == 4
     assert defects[0]["row_columns"] == 2
+
+
+# ── review round 1: nexus-stkek marker placement and labelling ──────────────
+
+def test_the_label_is_the_last_NUMBERED_caption_not_the_last_word_table() -> None:
+    """code-review finding: the label was read by rfind("table") over the
+    lookback window, which can land on a different occurrence than the one
+    the regex matched. A bare, unnumbered "table" mention after the real
+    caption then produced a label like "table b"."""
+    text = (
+        "TABLE I\nCOMPARISON OF METHODS.\n"
+        "We also compare with OCTree in the related work table below.\n"
+        + KNOWFEAT_TABLE_I
+    )
+    marked, defects = mark_misshapen_tables(text)
+    assert defects[0]["label"] == "TABLE I", defects[0]["label"]
+    assert "(TABLE I)" in marked
+
+
+def test_the_marker_rides_inside_the_table_so_continuation_chunks_keep_it() -> None:
+    """substantive-critic finding: with the marker on its own line BEFORE
+    <table>, a table big enough to trip PDFChunker's table_break left the
+    marker in the preceding chunk and none of the table's own chunks. The
+    marker now sits just inside the opening tag, which is the span
+    _table_header re-injects into every continuation chunk."""
+    marked, _ = mark_misshapen_tables(KNOWFEAT_TABLE_I)
+    assert not marked.startswith("[table structure suspect"), (
+        "a marker before the tag is what separated it from the table"
+    )
+    assert marked.startswith("<table>[table structure suspect")
+
+
+def test_every_chunk_of_a_flagged_oversized_table_carries_the_marker() -> None:
+    """The property the docstring claims, pinned against the real chunker:
+    a query that surfaces any part of the table surfaces the warning."""
+    rows = "".join(
+        f"<tr><td>row {i:03d}</td><td>{i * 3}</td><td>{i * 7}</td></tr>" for i in range(90)
+    )
+    big = '<table><tr><td colspan="9">collapsed header</td></tr>' + rows + "</table>"
+    text = "prose before the table.\n\nTABLE VII\nA LARGE TABLE.\n" + big + "\n\nprose after."
+    marked, defects = mark_misshapen_tables(text)
+    assert defects, "fixture must be flagged, or this pins nothing"
+
+    chunks = PDFChunker(chunk_chars=700).chunk(marked, {})
+    body = [c for c in chunks if "<tr><td>row " in c.text]
+    assert len(body) > 1, "fixture must split the table across chunks"
+    missing = [c.chunk_index for c in body if "[table structure suspect" not in c.text]
+    assert missing == [], f"table chunks without the marker: {missing}"
+
+
+def test_an_already_marked_table_is_not_marked_twice() -> None:
+    once, _ = mark_misshapen_tables(KNOWFEAT_TABLE_I)
+    twice, defects = mark_misshapen_tables(once)
+    assert twice == once
+    assert defects == []
