@@ -183,19 +183,36 @@ DECIDING_HOOKS: frozenset[str] = frozenset(
 #: anything in particular.
 #:
 #: `stop_verification` is the one spec below its event's number: Stop allows
-#: 180s, and 90 covers the 60s of subprocess timeouts its own work can
-#: legitimately reach while halving what a Windows user waits at session end.
-#: That derivation assumes `subprocess.run(timeout=N)` caps execution, which
-#: the measurement above disproves for this exact shape — so read the 90 as a
-#: ceiling on LEGITIMATE work, never as a promise about the blocked path.
-#: The bound is what makes the blocked path finite; the number only decides
-#: how long finite is.
+#: 180s and this is 90. Read that 90 honestly, because two earlier drafts of
+#: this comment did not.
+#:
+#: Its worst legitimate case is 60s — `_git_is_dirty` and
+#: `_beads_in_progress`, 30s of subprocess timeout each. But both sit behind
+#: an early return in `stop_verification.run()`: they are reached only when
+#: the config read succeeds AND `on_stop` is true. The call that actually
+#: blocks, `_read_config`, runs BEFORE either. So on the hanging path the
+#: subprocess budget justifies nothing at all, and 90 is simply how long a
+#: Windows user waits at session end. It is half of what Stop allows, which
+#: is the whole of its defence.
+#:
+#: The subprocess arithmetic carries a second hole worth naming: it assumes
+#: `subprocess.run(timeout=N)` caps execution, and the measurement above —
+#: a 5s timeout still running at 25s — disproves that for this exact shape.
+#: What makes the blocked path finite is `Thread.join(timeout)` here, which
+#: does not depend on any of it. The number only decides how long finite is.
 #:
 #: WHAT A TIMEOUT LEAVES BEHIND. Python cannot kill a thread, so the blocked
 #: `run()` keeps running, and on Windows it stays blocked for the life of the
 #: process. That is a leaked worker thread per timed-out call, which is the
 #: price of not hanging the session, and it is bounded by how many times a
 #: hook fires. It is stated here rather than discovered later.
+#:
+#: One sharper edge of that, found in review: CPython holds a per-module
+#: import lock, so a worker abandoned MID-IMPORT keeps that module
+#: unimportable for the life of the process, and a later import of it hangs
+#: outside this bound's reach. The trade is still the right one — a call
+#: that returns beats a call that never does — but it is a trade, not a
+#: clean win. Recorded with its evidence in `nexus-fd3zf`.
 DEFAULT_HOOK_TOOL_TIMEOUT_S: float = 30.0
 
 _log = structlog.get_logger(__name__)
