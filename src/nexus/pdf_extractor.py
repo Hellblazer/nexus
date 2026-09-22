@@ -666,6 +666,18 @@ def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
     The table's own HTML is never edited. A misaligned table still holds
     values a reader may want, and silently rewriting them would be a second
     unverifiable transformation on top of the first.
+
+    Marking is NOT guarded against running twice. It was, briefly, by a
+    ``_MARKER_PREFIX in block`` substring test justified as protecting a
+    ``--force`` re-index from a second marker. Review round 2 falsified both
+    halves: no reachable production path feeds already-marked text back
+    through here, because MinerU writes to a fresh tempdir that is rmtree'd
+    on every call, and the guard's one demonstrated effect was a FALSE
+    NEGATIVE — a table with a genuine ``header_column_mismatch`` whose own
+    cell prose merely mentioned the marker string was silently skipped, and
+    the run summary under-reported with it. A duplicate marker costs a line
+    of text; a silently unflagged table costs the thing this function
+    exists for.
     """
     if not text or "<table" not in text:
         return text, []
@@ -673,11 +685,6 @@ def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
 
     def _repl(m: re.Match) -> str:
         block = m.group(0)
-        if _MARKER_PREFIX in block:
-            # Already marked. Extraction can run again over marked text
-            # (a --force re-index of a document indexed after this shipped);
-            # a second marker would say nothing new.
-            return block
         defects = _table_shape_defects(block)
         if not defects:
             return block

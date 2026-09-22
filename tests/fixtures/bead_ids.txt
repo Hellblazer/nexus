@@ -3475,6 +3475,7 @@ nexus-hmu02.1
 nexus-hmxi
 nexus-hnh20
 nexus-hnmfr
+nexus-hno4p
 nexus-ho9d2
 nexus-hog01
 nexus-homw
@@ -6777,6 +6778,7 @@ nexus-yrlbd
 nexus-yrm0i
 nexus-ysrwi
 nexus-yttqr
+nexus-yu16e
 nexus-yu9w5
 nexus-yulol
 nexus-yuogq

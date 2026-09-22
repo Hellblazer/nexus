@@ -192,8 +192,18 @@ def test_every_chunk_of_a_flagged_oversized_table_carries_the_marker() -> None:
     assert missing == [], f"table chunks without the marker: {missing}"
 
 
-def test_an_already_marked_table_is_not_marked_twice() -> None:
-    once, _ = mark_misshapen_tables(KNOWFEAT_TABLE_I)
-    twice, defects = mark_misshapen_tables(once)
-    assert twice == once
-    assert defects == []
+def test_a_table_whose_own_prose_mentions_the_marker_is_still_flagged() -> None:
+    """code-review round 2. An unanchored `_MARKER_PREFIX in block` guard,
+    added to keep a re-extraction from double-marking, silently skipped a
+    genuinely broken table that merely MENTIONED the marker string in a
+    cell, and under-reported the run summary with it. No reachable path
+    feeds already-marked text back through extraction anyway, so the guard
+    is gone: a duplicate marker costs a line, a silently unflagged table
+    costs the whole point."""
+    sneaky = KNOWFEAT_TABLE_I.replace(
+        "<td>Property Semantic underst.</td>",
+        "<td>Discussed under [table structure suspect] in the appendix</td>",
+    )
+    marked, defects = mark_misshapen_tables(sneaky)
+    assert [d["kind"] for d in defects] == ["header_column_mismatch"], defects
+    assert marked.startswith("<table>[table structure suspect")
