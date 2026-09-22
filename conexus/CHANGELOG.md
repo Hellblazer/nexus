@@ -1,5 +1,31 @@
 # Changelog
 
+## [7.57.0] - 2026-09-22
+
+Plugin version aligned with conexus 7.57.0. No plugin-side changes: nothing
+under `conexus/`, `sn/` or `.claude-plugin/` differs from the v7.56.0 tag except
+the deletion of `conexus/hooks/scripts/preflight.py`, which was already unwired in
+installed sessions — `hooks.json` has named the `nx-hook preflight` verb since
+RDR-215 — so nothing a running session does changes.
+
+Felt through the plugin even so, because both fixes land in tools an agent
+reaches for constantly. `store_get` no longer returns duplicated text when it
+rebuilds a PDF-derived document — the chunks were always stored correctly and
+only the rebuild was wrong, so this repairs every affected document the moment
+the release lands, with no re-index. Measured across the live store: 134 of 140
+PDF-chunked documents, 30.4% of all knowledge documents.
+
+And the catalog's path-keyed writers stop guessing. `nx dt index` refuses to
+stamp a DEVONthink identity when the file path names more than one catalog
+document, naming every candidate instead of silently writing to whichever came
+first; `nx catalog session-summary` reports every document for a path rather
+than one row's links as though they were the path's.
+
+A known limit worth carrying into a session: documents indexed from markdown
+(`docs__`, `rdr__`) can still read back with duplicated text at chunk seams.
+That is a different cause, tracked separately, and is not fixed here — so
+prefer reading an RDR off disk over `store_get` until it is.
+
 ## [7.56.0] - 2026-09-21
 
 Plugin version aligned with conexus 7.56.0. No plugin-side changes: nothing
