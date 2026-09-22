@@ -32,7 +32,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.55.3)
 
-- `conexus/hooks/scripts/preflight.py` — DELETED. `hooks.json`'s SessionStart
+- `conexus/hooks/scripts/preflight.py` (nexus-sa187) — DELETED. `hooks.json`'s SessionStart
   entry has named the `nx-hook preflight` verb since RDR-215 nexus-q02nx.21, so
   nothing wired this copy; deleting it is that port's remaining half. Sessions
   running the pinned plugin still carry the file, and it is still unwired there,
