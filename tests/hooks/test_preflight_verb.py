@@ -169,3 +169,49 @@ class TestPreflightVerbDirect:
     def test_exit_code_always_zero(self) -> None:
         result = preflight_verb.run(None)
         assert result.exit_code == 0
+
+
+class TestInstallHintParity:
+    """The two copies of the install hint cannot drift apart while both exist.
+
+    ``_install_hint`` is the one string a user reads when ``nx`` is missing,
+    so it is the one string that has to be right, and it is written out twice
+    -- here and in the plugin script this verb ports. The assertions above are
+    keyword-loose by design ("brew install", "winget install"), which is
+    exactly the shape that would let one copy gain ``--python 3.12``
+    (nexus-sa187) while the other kept telling a user on a 3.14 distro to run
+    a command that cannot resolve. This pins them equal instead.
+
+    It goes away with the script: ``hooks.json``'s SessionStart entry already
+    names the ``nx-hook preflight`` verb, so nothing wires the plugin copy any
+    more, and this module's own opening docstring records deletion as that
+    port's remaining half.
+    """
+
+    @staticmethod
+    def _script_module():
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_preflight_script", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        # dataclasses resolves a class's module through sys.modules while the
+        # decorator runs, so the script's own _ToolStatus cannot be built from
+        # an unregistered module.
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+    @pytest.mark.parametrize("tool", ["nx", "bd"])
+    def test_hints_are_identical(self, platform: str, tool: str, monkeypatch) -> None:
+        script = self._script_module()
+        monkeypatch.setattr(sys, "platform", platform)
+        script_hint = script._install_hint(tool)
+        verb_hint = preflight_verb._install_hint(tool)
+        assert script_hint, f"{tool}/{platform}: the script copy has no hint at all"
+        assert script_hint == verb_hint, (
+            f"{tool}/{platform}: the plugin script says {script_hint!r}, the "
+            f"nx-hook verb says {verb_hint!r}. One copy was edited and the "
+            "other was not."
+        )

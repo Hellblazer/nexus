@@ -41,12 +41,18 @@ _REPO_ROOT = pathlib.Path(__file__).parent.parent
 _README = _REPO_ROOT / "README.md"
 _SITE = _REPO_ROOT / "web" / "index.html"
 _MVV = _REPO_ROOT / "tests" / "e2e" / "fresh-install-mvv.sh"
+_CONFIGURATION = _REPO_ROOT / "docs" / "configuration.md"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
 #: The documented install command, wherever it is written for a user to type.
 #: The ``--python`` flag is required by construction: a match without it is
 #: not a match, so a reverted flag reads as "command missing", not as a pass.
-_INSTALL_RE = re.compile(r"uv tool install conexus --python (\d+\.\d+)")
+#: Both spellings of the package count -- ``docs/configuration.md`` documents
+#: the ``[local]`` extra as its own install command, and it resolves through
+#: the identical uv-tool layer.
+_INSTALL_RE = re.compile(
+    r"uv tool install (?:\"conexus\[local\]\"|conexus) --python (\d+\.\d+)"
+)
 
 #: The MVV's published-install leg, the gate that resolves against real PyPI.
 _MVV_RE = re.compile(r"tool install --python (\d+\.\d+) \"\$PKG_SPEC\"")
@@ -56,6 +62,7 @@ _MVV_RE = re.compile(r"tool install --python (\d+\.\d+) \"\$PKG_SPEC\"")
 #: notice this test rather than pass with zero matches.
 _MIN_README_OCCURRENCES = 1
 _MIN_SITE_OCCURRENCES = 2
+_MIN_CONFIGURATION_OCCURRENCES = 2
 
 
 def _pins(path: pathlib.Path, pattern: re.Pattern[str]) -> list[str]:
@@ -123,4 +130,22 @@ def test_the_documented_interpreter_is_one_the_package_admits() -> None:
     assert Version(f"{pin}.0") in SpecifierSet(requires_python), (
         f"The docs tell users to install under Python {pin}, which "
         f"requires-python ({requires_python}) does not admit."
+    )
+
+
+def test_configuration_doc_install_commands_name_the_same_interpreter() -> None:
+    """``docs/configuration.md`` is the surface the first review of this fix
+    caught: it carries its own "recommended setup" line plus the ``[local]``
+    install, both of which a user types, and both of which the first cut of
+    this lint could not see.
+    """
+    pins = _pins(_CONFIGURATION, _INSTALL_RE)
+    assert len(pins) >= _MIN_CONFIGURATION_OCCURRENCES, (
+        f"docs/configuration.md carries {len(pins)} pinned install commands, "
+        f"expected at least {_MIN_CONFIGURATION_OCCURRENCES} (the recommended "
+        "setup line and the `[local]` extra)."
+    )
+    assert set(pins) == {_readme_pin()}, (
+        f"docs/configuration.md names {sorted(set(pins))}, README.md names "
+        f"{_readme_pin()}."
     )
