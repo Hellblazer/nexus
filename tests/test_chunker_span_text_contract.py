@@ -410,11 +410,19 @@ def test_note_pieces_windowed_split_has_no_overlap_claim() -> None:
     every adjacent pair must abut — this pins that store_put's own writer
     already satisfies the contract's abut side, the regime
     join_manifest_parts's docstring calls out as needing the "start must
-    ADVANCE" exclusion rather than a naive span comparison."""
+    ADVANCE" exclusion rather than a naive span comparison.
+
+    Model-neutral collection name on purpose (RDR-109 mode lint): this is
+    not about cloud vs. local mode, only about note_pieces' windowless
+    split path, which fires for ANY model window_for_model does not
+    recognize (it warns and returns None) — an unrecognized-but-4-segment
+    token exercises that branch exactly as a real cloud token would,
+    without asserting anything about a real embedder.
+    """
     from nexus.catalog.store_hook import note_pieces
 
     content = " ".join(f"note sentence {i:04d} carries unique wording." for i in range(200))
-    pieces = note_pieces(content, "docs__test__voyage-context-3__v1")
+    pieces = note_pieces(content, "docs__test__model-ctx__v1")
     assert len(pieces) >= 2, "fixture must force a real split"
     offset = 0
     spans: list[Span] = []
