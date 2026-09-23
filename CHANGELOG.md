@@ -6,7 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx catalog merge <duplicate> <canonical>`** (nexus-z4rpi): collapses a duplicate catalog entry in one transaction, moving its source URI and links. `nx catalog update --alias-of` (nexus-bt8w8) sets only the alias.
+- **`nx catalog sweep-ghosts [--apply]`** and a `ghost-sweep` doctor row (nexus-29drn): collect RDR-204 ghosts created after the one-time automatic sweep.
+- **Develop pushes take a tuple-space lock** (nexus-agctp): `scripts/git-push-develop.sh` claims `lock/ci-develop-push` around the push and names the holder and expiry when it is held.
+- The release battery refuses a paired engine release whose DATA EFFECT relay table was never attested (nexus-iu43o); plugin cuts can defer a ledger entry that straddles wheel content (nexus-2x3qy).
+- Local-install resource figures in the README and getting-started guide (nexus-7f6po): about 1.2 GB idle, 4.2-4.5 GB while indexing, measured on Apple Silicon.
+
+### Removed
+
+- **The `attention_guided_v1` salience boost** (nexus-0hqez). It never took effect: the hybrid scorer overwrote it, and nothing extracted the salient sentences it needed.
+- `table_regions[].html` in PDF extraction metadata (nexus-dqe86): written at three sites, read by none.
+
 ### Fixed
+
+- **An older nx no longer rolls the engine back** (nexus-b2eaw). The version stamp behind the post-upgrade finish pass was compared by string equality, so with two conexus versions on one box every alternating `nx` call re-ran the finish pass, and an older client converged the engine toward its own older pin. The stamp now only moves forward. A deliberate downgrade of the installed CLI says so and names `nx daemon restart-stale`; a dev checkout stays quiet.
+- **Interactive sessions no longer skip conexus hooks before nx-mcp connects** (nexus-veh77). Interactive Claude Code starts turn 1 without waiting for MCP servers, so every tool-tier hook for a request that began first was silently skipped (measured on macOS and WSL2). A SessionStart verb, `nx-hook mcp-connect-wait`, now waits up to 15 s for this session's nx-mcp and says so if it gives up; `nx-hook mcp-connect-check` warns once if nx-mcp disconnects mid-session.
+- **The RDR-184 ledger projector works on clients configured by `NX_SERVICE_*`** (nexus-08cfl). It presents the same credential the real client does when no `mint_token` is configured; persistent skips show in `nx doctor --check-tuple-projection`.
+- **Serena write tools are denied from a session relocated into another git tree** (nexus-ebx0s). The write used to succeed against the tree Serena started in, dry runs included. A session that started in a worktree keeps its writes.
+- **Mutating sweeps are never auto-retried on a gateway error** (nexus-ll31n). GC, purge-trash and other non-idempotent sweep routes across every client store no longer replay on 502/503/504; the catalog client also stopped raising a TypeError when asked not to retry.
+- **`store_put` no longer adopts another collection's document** (nexus-bb6n2). A re-put into a different collection whose text overlapped an existing same-titled note rewrote that note's manifest; dedup is now scoped to the target collection. Superseding a note also reaps its now-unreferenced chunks.
+- **Markdown documents rebuild without duplicated overlap** (nexus-yz7se). Chunk spans now describe the text each chunk actually carries, and the rebuild keeps one copy of a repeated section heading. Existing `rdr__`/`docs__` rows keep the old spans until reindexed.
+- **Figure markers keep their label and cover docling extractions** (nexus-9zly6); orphaned figures with no image path get a marker too.
+- **`nx taxonomy reset` keeps cross-collection projections** (nexus-0v0nj).
+- **`nx index repo --corpus knowledge` routing is recorded, not inferred** (nexus-l52ms). A knowledge collection that merely shares the repo's owner id can no longer take the docs slot.
+- **Hand-edited autostart units are backed up before convergence** (nexus-gq1pv), keeping the newest five per unit.
+- **`beads_prime` fails closed on an unreadable config** (nexus-i4odo) and says the config could not be read instead of claiming priming was declined.
+- **Post-mortems archive to a subject collection** (nexus-vupim), not the repo's own `knowledge__<owner>` collection.
+- **A collection import with no `content_type` gets the field-named 422** (nexus-3fsyx) instead of an opaque 409.
+- Assorted smaller fixes: vimgrep/compact/context output stays parseable when a title stands in for a path and contains a colon (nexus-1uov1); `nx command-context devonthink-index` recognises explicit selectors (nexus-bgt0r); the dispatch check finds its own session and is portable to GNU `stat` (nexus-7m6uc); the stat dialect bug is fixed in six other scripts.
 
 - **A hook tool can no longer hold a session open** (nexus-5dcky). Every
   `hook_<name>` MCP tool now bounds its `run()`; past the bound the tool
