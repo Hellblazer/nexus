@@ -8,6 +8,7 @@ binary discovery (env override + well-known + absent), the native argv in
 ``_spawn_service``, the absence of any schema-skew gate on the native path, and
 ``start_storage_service`` resolving the binary (failing loud when none exists).
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -103,13 +104,18 @@ def test_supervisor_requires_a_binary(tmp_path):
 def _spawn_and_capture_argv(sup) -> list[str]:
     fake_proc = MagicMock()
     fake_proc.pid = 4242
-    with patch(
-        "nexus.daemon.storage_service_daemon._allocate_free_port", return_value=18091
-    ), patch(
-        "nexus.logging_setup.open_child_log_or_devnull", return_value=MagicMock()
-    ), patch(
-        "nexus.daemon.storage_service_daemon._popen", return_value=fake_proc
-    ) as popen:
+    with (
+        patch(
+            "nexus.daemon.storage_service_daemon._allocate_free_port",
+            return_value=18091,
+        ),
+        patch(
+            "nexus.logging_setup.open_child_log_or_devnull", return_value=MagicMock()
+        ),
+        patch(
+            "nexus.daemon.storage_service_daemon._popen", return_value=fake_proc
+        ) as popen,
+    ):
         proc, port = sup._spawn_service()
     assert proc is fake_proc
     assert port == 18091
@@ -127,7 +133,11 @@ def test_spawn_native_uses_binary_argv(tmp_path):
     )
     argv = _spawn_and_capture_argv(sup)
     # nexus-9gaj7: the launch line carries the UTC pin; the binary is still argv[0].
-    assert argv == [str(binary), "-Duser.timezone=UTC"], "native launch must exec the binary directly"
+    assert argv == [
+        str(binary),
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=true",
+    ], "native launch must exec the binary directly"
 
 
 # ── RDR-161: no schema-skew gate on the native path ──────────────────────────
@@ -153,16 +163,12 @@ def test_native_start_has_no_schema_skew_gate(tmp_path):
     )
     fake_proc = MagicMock()
     fake_proc.pid = 4242
-    with patch(
-        "nexus.daemon.storage_service_daemon.ServiceRegistry"
-    ) as Reg, patch.object(
-        sup, "_ensure_pg_running"
-    ), patch.object(
-        sup, "_spawn_service", return_value=(fake_proc, 18092)
-    ) as spawn, patch.object(
-        sup, "_wait_for_service_ready"
-    ), patch.object(
-        sup, "_publish"
+    with (
+        patch("nexus.daemon.storage_service_daemon.ServiceRegistry") as Reg,
+        patch.object(sup, "_ensure_pg_running"),
+        patch.object(sup, "_spawn_service", return_value=(fake_proc, 18092)) as spawn,
+        patch.object(sup, "_wait_for_service_ready"),
+        patch.object(sup, "_publish"),
     ):
         Reg.return_value.discover.return_value = None
         sup._supervisor = MagicMock()

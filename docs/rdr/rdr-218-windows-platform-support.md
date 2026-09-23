@@ -196,6 +196,21 @@ loopback-only semantics intact. That is a change to the Java service, so it
 rides an engine tag and has a different release path from everything else in
 this record.
 
+Implemented at nexus-ijue9.7 as `Ipv4StackFeature`, a GraalVM build Feature
+that bakes `java.net.preferIPv4Stack=true` as a runtime default into the
+image. The image is therefore IPv4-only by default, with
+`NX_SERVICE_IPV4_ONLY=0` as an opt-out that `storage_service_daemon` turns
+into a runtime `-D`. That polarity REVERSES the earlier working assumption in
+this record that the behaviour would be off by default and opted into. The
+reason the earlier assumption was wrong is mechanical, not a change of mind: a
+Feature runs at image build time, so no runtime environment variable can gate
+whether it applies, only override its result. Sam ruled the reversed polarity
+correct on 2026-09-23. `EgressProxy.java:34` records that the cloud egress
+proxy is IPv4, which is what makes an IPv4 default safe rather than merely
+convenient; `nexus-wovg1` tracks the one thing that is still inference, namely
+whether the cloud deployment launches through that supervisor at all and so
+can reach the opt-out.
+
 #### Gap 3: the service does not survive, for two independent reasons
 
 Two distinct failures, discovered in sequence, each of which alone makes a

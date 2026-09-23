@@ -62,6 +62,7 @@ nexus-070e2
 nexus-07dm6
 nexus-07z0
 nexus-085xt
+nexus-08cfl
 nexus-08i1
 nexus-08puh
 nexus-08v8
@@ -747,6 +748,7 @@ nexus-43qgm.9
 nexus-441p5
 nexus-441p5.1
 nexus-446yl
+nexus-44812
 nexus-44lw2
 nexus-44lw2.1
 nexus-45i92
@@ -6385,6 +6387,7 @@ nexus-wnost
 nexus-wnp3c
 nexus-wnpet
 nexus-wo6sc
+nexus-wovg1
 nexus-wowg
 nexus-wp94t
 nexus-wp9s
@@ -6871,6 +6874,7 @@ nexus-z7hf
 nexus-z7s5r
 nexus-z8xfo
 nexus-z8xfo.1
+nexus-z9cz2
 nexus-z9qt5
 nexus-z9wa0
 nexus-za6e6
