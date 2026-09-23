@@ -209,3 +209,55 @@ def test_markdown_section_heading_repeat_rebuilds_to_one_copy() -> None:
     for suffix in ("One.", "Two.", "Three.", "Four.", "Five."):
         needle = para + suffix
         assert rebuilt.count(needle) == 1, f"{needle!r} appears {rebuilt.count(needle)} times in the rebuild"
+
+
+def test_heading_strip_is_anchored_to_the_immediately_preceding_chunk_not_any_occurrence() -> None:
+    """Round-2 batch review (T2 nexus/review-burndown-batch2-2026-09-23):
+    the duplicate-heading check was ``heading_match.group(0) in joined`` --
+    a substring search across the WHOLE accumulated rebuild, not a
+    comparison against the heading the part actually being overlapped
+    (the immediately preceding one) itself carried. A heading string that
+    merely happens to occur mid-body somewhere earlier in the document
+    (prose citing "## Results" as an example of ATX syntax, say) must
+    never be treated as confirming a duplicate for an unrelated seam.
+
+    Three hand-built parts, matching this file's own convention for
+    pinning the join's edge cases directly rather than through a real
+    chunker fixture (a genuine cross-section overlap like part1/part2
+    below cannot occur from _split_large_section's actual output -- two
+    different sections never share an overlapping span -- so this needs a
+    synthetic three-part fixture to exercise the exact code path):
+
+    - part0's BODY (not its head) mentions "## Results" as an aside, with
+      no heading of its own at position 0 -- a decoy occurrence.
+    - part1's own head is "## Intro", genuinely different from part2's.
+    - part2's own head is "## Results" and it overlaps part1 (its real,
+      immediately-preceding neighbor) by both span and the shared tail
+      text -- but part1 never carried "## Results" as ITS OWN heading,
+      only part0 mentioned it, mid-body, elsewhere.
+
+    part2's own heading must survive in the rebuild: the decoy mid-body
+    mention in part0 must never cause it to be treated as an
+    already-emitted duplicate and stripped.
+
+    Fails before the fix: part2's "## Results" heading is silently
+    dropped (``joined.count("## Results") == 1``, decoy only), because
+    "## Results\\n\\n" is found as a bare substring of the accumulated
+    `joined` (from part0's mid-body aside) even though part1 -- the chunk
+    part2 actually overlaps -- never carried it as its own heading.
+    """
+    tail = "ABCDEFGHIJKLMNOPQRST"  # 20 chars, exactly the span overlap below
+    part0 = (
+        "Some prose that cites ## Results\n\nas an example, nothing structural here.",
+        0, 100,
+    )
+    part1 = ("## Intro\n\n" + tail, 100, 130)
+    text2 = "## Results\n\n" + tail + " NEWMATERIAL"
+    part2 = (text2, 110, 110 + len(text2))
+
+    joined = join_manifest_parts([part0, part1, part2])
+    assert joined.count("## Results") == 2, (
+        "part 0's aside mention and part 2's own genuine heading must both "
+        f"survive the rebuild; got: {joined!r}"
+    )
+    assert "NEWMATERIAL" in joined

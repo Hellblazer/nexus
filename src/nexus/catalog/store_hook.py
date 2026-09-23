@@ -418,9 +418,24 @@ def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
             # match with a duplicate leading heading stripped FIRST, and
             # fall back to the untouched text if that does not confirm
             # either — never strip on the strength of the heading alone.
+            #
+            # nexus-yz7se round-2 (T2 nexus/review-burndown-batch2-2026-09-23):
+            # this used to be `heading_match.group(0) in joined` — a
+            # substring search across the WHOLE accumulated rebuild, which
+            # a heading string merely mentioned mid-body somewhere earlier
+            # in the document (prose citing "## Results" as an ATX-syntax
+            # example, say) would satisfy just as well as a genuine
+            # repeat. Anchored instead to the heading *parts[index - 1][0]*
+            # — the part this overlap is actually WITH — carried at its
+            # own head, compared exactly, never a substring test.
             match_text = text
             heading_match = _MARKDOWN_HEADING_RE.match(text)
-            if heading_match and heading_match.group(0) in joined:
+            prev_heading_match = _MARKDOWN_HEADING_RE.match(parts[index - 1][0])
+            if (
+                heading_match
+                and prev_heading_match
+                and heading_match.group(1) == prev_heading_match.group(1)
+            ):
                 match_text = text[heading_match.end():]
             # The match is bounded ABOVE by the recorded overlap: stripping
             # can only ever shorten the agreement, never lengthen it.
