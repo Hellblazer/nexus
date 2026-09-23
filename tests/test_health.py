@@ -885,9 +885,10 @@ _BGE_PROFILE = [
 ]
 
 
-def _coll(name: str, ct: str, model: str, state: str = "live") -> dict:
+def _coll(name: str, ct: str, model: str, state: str = "live", *, superseded_by: str = "") -> dict:
     return {"name": name, "content_type": ct, "owner_id": "1-1", "embedding_model": model,
-            "lifecycle_state": state, "dimension": 1024 if model.startswith("voyage") else 768}
+            "lifecycle_state": state, "dimension": 1024 if model.startswith("voyage") else 768,
+            "superseded_by": superseded_by}
 
 
 class _FakeReader:
@@ -990,6 +991,28 @@ def test_embedding_profile_dormant_is_red_with_remedy(monkeypatch) -> None:
     assert _is_red(r) and name in r.detail
     assert any("referenced but empty" in s for s in r.fix_suggestions)
     assert any("remove the references" in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_dormant_excludes_superseded_rows(monkeypatch) -> None:
+    """nexus-s1rzg: a dormant row that has ALSO been superseded (the
+    catalog's own "this row is retired" signal, already excluded from
+    `nx catalog doctor --collections-drift`'s projection_maybe_gone
+    calculation) must not still fail this check. Before this fix, a
+    superseded projection row with no successor left in the doctor's own
+    supersede_collection(<old>, <target>) recipe still read as a live
+    "referenced but empty" failure forever -- the exact gap the bead's
+    own implementation note flagged as needing confirmation before a
+    retire could actually green both doctor checks.
+    """
+    name = "docs__1-1__voyage-context-3__v1"
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll(name, "docs", "voyage-context-3", "dormant",
+              superseded_by="retired__debris__none__v1"),
+    ]))
+    r = _by_label(health._check_embedding_profile(), "Collections dormant")
+    assert r.ok is True
+    assert name not in r.detail
 
 
 @pytest.mark.usefixtures("cloud_mode")

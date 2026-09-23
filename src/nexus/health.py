@@ -6380,7 +6380,19 @@ def _check_embedding_profile() -> list[HealthResult]:
         return results
 
     def _names(state: str) -> list[str]:
-        return sorted(str(r.get("name", "")) for r in rows if r.get("lifecycle_state") == state)
+        # nexus-s1rzg: a superseded row is already the catalog's own
+        # "this row is retired" signal -- `nx catalog doctor
+        # --collections-drift` already excludes superseded_by rows from its
+        # drift population (superseded_names), so a projection row retired
+        # via supersede_collection(<old>, <target>) with no successor must
+        # not still read as a live dormant/disputed/quarantine failure here.
+        # Without this, the doctor's own documented recipe for retiring a
+        # stale row could never actually green THIS check, however many
+        # rows it was applied to.
+        return sorted(
+            str(r.get("name", "")) for r in rows
+            if r.get("lifecycle_state") == state and not r.get("superseded_by")
+        )
 
     off_profile: list[str] = []
     for r in rows:
