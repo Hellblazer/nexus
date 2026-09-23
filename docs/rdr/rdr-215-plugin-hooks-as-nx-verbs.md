@@ -1217,3 +1217,98 @@ registration module on the existing server, and one package.
   missing every tool-tier event 4 times out of 4.
   WSL2 and `PostCompact`/`StopFailure` remain unmeasured, as the round-1
   entry above already recorded.
+- 2026-09-23 (nexus-veh77 round 2, Sam's review the same day): the barrier
+  above shipped keyed on the T1 lease. Sam's review asked the sharper
+  question: enumerate, from `nexus.mcp.core._t1_lifespan`, every condition
+  where `nx-mcp` starts and CONNECTS fine but never publishes that lease --
+  for each, the barrier would stall the FULL 15s bound on every session
+  start, "a user-facing regression on exactly the boxes that are already
+  unhealthy." Measured: the lease is published UNCONDITIONALLY before
+  `yield` in exactly ONE of `_t1_lifespan`'s branches (the successful-mint
+  path); every other branch that still reaches `yield` and serves every
+  non-T1 tool normally does NOT publish one --
+  - `USE_INHERITED` (an already-live `NX_T1_SESSION` inherited from a
+    parent process): no mint attempted at all.
+  - `USE_LEASED`, borrowing a lease a DIFFERENT, earlier process already
+    published: this process never publishes its own.
+  - No resolvable session id (`resolve_active_session_id()` returns
+    `None`): nothing to key a lease on.
+  - **Deferred mint (nexus-brw1s), the sharpest case**: the storage service
+    is unreachable at MCP boot -- down, not yet started, a fresh install
+    before `nx daemon service start` has ever run, a transient cloud auth
+    or network failure -- so the mint is deferred to first T1 use and the
+    server starts anyway, serving every non-T1 tool. This fires on
+    precisely the boxes already least healthy, and would have cost every
+    one of them the full bound on EVERY session start, forever, until T1
+    was fixed, even though `nx-mcp` itself connects in well under a
+    second. Also covers "a fresh install with no service yet" and "cloud
+    mode with a transient failure" from Sam's own enumeration prompt --
+    both are this same branch (an unreachable storage service), not
+    separate code paths.
+  Two conditions Sam asked about are NOT `_t1_lifespan` cases at all, and
+  the fix below does not reach them: **the plugin's MCP server failing to
+  spawn**, and **a nexus MCP server the user has disabled** (Claude Code
+  can disable an individual `mcpServers` entry independently of a plugin's
+  `hooks.json`) -- in both, `nx-mcp` never runs long enough to reach
+  `_t1_lifespan` at all, so no signal keyed on anything inside it can ever
+  appear. These are addressed in the "short-bound heuristic" paragraph
+  below, not by the marker.
+  **Fix**: a NEW signal, `nexus.mcp.connect_marker`
+  (`src/nexus/mcp/connect_marker.py`), published UNCONDITIONALLY --
+  independent of T1 mint outcome -- from every one of `_t1_lifespan`'s
+  branches right before its own `yield` (four call sites: `USE_INHERITED`,
+  `USE_LEASED`, the mint-race-borrowed sub-branch, and the shared yield
+  covering no-resolvable-session/deferred-mint/successful-mint), and
+  cleared at every matching teardown point. `nexus.hooks.mcp_connect_wait`
+  now polls THIS signal instead of the T1 lease. A missing T1 lease no
+  longer costs the barrier anything beyond the actual connect time.
+  **Proof**: `tests/mcp/test_connect_marker.py` (the marker module, 8
+  cases, real files) and `tests/hooks/test_mcp_connect_wait_verb.py`
+  (rewritten onto the marker, plus an explicit "T1 down, marker up
+  resolves well under the bound" case). The load-bearing proof is
+  end-to-end against the REAL `_t1_lifespan` deferred-mint branch:
+  `tests/db/test_t1_cli_dedicated_session.py::TestMintErrorWrapping::
+  test_branch0_mint_failure_still_publishes_the_connect_marker`, sibling
+  to the existing `test_branch0_mint_failure_DEFERS_and_the_server_starts`
+  (nexus-brw1s) and driving the SAME `_t1_lifespan` call under the SAME
+  mint-failure injection -- pins that the T1 lease is genuinely absent,
+  the connect marker is genuinely present DURING the yield, the barrier's
+  own polling primitive against the real marker file resolves in well
+  under 1s (not 15s), and the marker is cleared at teardown.
+  **A short-bound heuristic for "`nx-mcp` was never going to start at all"
+  (disabled by the user, or a spawn failure) was considered and
+  rejected.** No signal on a box cleanly discriminates that case from a
+  legitimately slow first boot (a fresh install's local PG init/migration
+  run can legitimately take LONGER than steady state) -- and the two need
+  OPPOSITE treatment: a "has this marker ever been published before"
+  flag would shorten the bound on exactly the highest-value, most
+  sympathetic case (a brand new user's very first session) to guard
+  against a rarer, self-inflicted one. Getting the direction wrong there
+  is worse than the residual it would guard against. Accepted residual:
+  a genuinely disabled or never-spawning `nx-mcp` still pays the full 15s
+  bound once per session -- bounded, session-start-only, and that same
+  session already gets a louder, independent signal today (`nx-hook
+  preflight`'s `## nx Preflight: FAILED` marker, same matcher group) that
+  nexus tooling is not working here at all. Full reasoning:
+  `nexus.mcp.connect_marker`'s own module docstring.
+  **Ladder re-verify (round 2b, macOS, `barrier2.plan`, 2 reps each,
+  after switching the probe's own readiness-signal format from the T1
+  lease to the marker)**: the first re-run surfaced a genuine
+  probe-fidelity bug, not a defect in the fix -- the probe published its
+  marker BEFORE importing/constructing `FastMCP` (an ordering the T1-lease
+  probe also had, latent in round 1 too but never triggered in that
+  smaller sample), leaving a ~44-180ms window where the barrier had
+  already released but the probe was not yet actually serving; one of two
+  `ladder_s8` reps landed a request in that window and missed. Fixed by
+  building `FastMCP`/`mcp` BEFORE the delay/publish/serve sequence,
+  mirroring the real `nx-mcp`'s own shape (`mcp = FastMCP(...)` built at
+  import time, the marker publish happening inside the lifespan `mcp.run()`
+  itself later invokes). After the fix, re-run clean:
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop |
+  |---|---|---|---|---|---|---|---|---|
+  | thresh | 0 | 0 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+
+  Matches round 1's clean result for the same rungs -- the marker-based
+  signal preserves the fix exactly.
