@@ -970,3 +970,92 @@ def test_a_rejected_run_says_which_pytest_jobs_it_saw(
         "the note must carry the conclusions it actually read, not just "
         "that it rejected the run"
     )
+
+
+# ── The stale window is GitHub's, and it is intermittent ───────────────────
+#
+# Measured 2026-09-23: 25 consecutive identical requests for this repo's
+# ci.yml run list returned 23 current windows and 2 stale ones, both the SAME
+# page (newest run 2026-09-07T10:04:00Z). A page-size hypothesis was
+# falsified within the minute -- per_page=3 stale, per_page=100 current, the
+# inverse of the pairing that suggested it. At ~8% per request a bounded
+# retry is the remedy; a different query is not.
+
+
+class _FlakyRunRouter(_RunRouter):
+    """A router that serves a stale page for the first *stale_count* calls.
+
+    Reproduces the measured shape: the stale page is a real, well-formed
+    window of older runs, not an error and not an empty list, which is
+    exactly why nothing caught it.
+    """
+
+    def __init__(self, stale_page, fresh_page, jobs_by_run_id, stale_count) -> None:
+        super().__init__(fresh_page, jobs_by_run_id)
+        self.stale_page = stale_page
+        self.fresh_page = fresh_page
+        self.stale_count = stale_count
+        self.runs_calls = 0
+
+    def __call__(self, url: str) -> dict:
+        if "/runs?" in url or url.endswith("/runs"):
+            self.runs_calls += 1
+            if self.runs_calls <= self.stale_count:
+                return {"workflow_runs": self.stale_page}
+            return {"workflow_runs": self.fresh_page}
+        return super().__call__(url)
+
+
+def _stale_window_repo(tmp_path: Path):
+    """A repo plus the two windows: an ancient stale one, and the true one."""
+    repo = _init_repo(tmp_path)
+    ancient_sha = _commit(repo, "src/nexus/base.py", "base", "ancient floor")
+    floor_sha = _commit(repo, "src/nexus/mid.py", "mid", "the real floor")
+    tip_sha = _commit(repo, "src/nexus/tip.py", "tip", "the audited head")
+    stale = [{"id": 1, "head_sha": ancient_sha, "status": "completed"}]
+    fresh = [
+        {"id": 3, "head_sha": tip_sha, "status": "completed"},
+        {"id": 2, "head_sha": floor_sha, "status": "completed"},
+    ]
+    jobs = {1: _SUCCESS_JOBS, 2: _SUCCESS_JOBS, 3: _SUCCESS_JOBS}
+    return repo, tip_sha, stale, fresh, jobs
+
+
+def test_a_stale_window_is_refetched_rather_than_believed(tmp_path: Path) -> None:
+    """One stale page must not cost a red check; the retry sees through it."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _FlakyRunRouter(stale, fresh, jobs, stale_count=1)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 0, "a single stale window must be retried through, not believed"
+    assert router.runs_calls == 2, (
+        f"expected exactly one refetch, got {router.runs_calls} run-list call(s)"
+    )
+
+
+def test_the_retry_is_bounded_and_still_refuses(tmp_path: Path) -> None:
+    """Non-vacuity for the retry: it must not paper over a window that never
+    reaches the head. A persistently short window is a real condition, and
+    the answer to it is still CANNOT VERIFY, not a floor picked out of it."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _FlakyRunRouter(stale, fresh, jobs, stale_count=99)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 2, "a window that never reaches the head is still CANNOT VERIFY"
+    assert router.runs_calls == gate.WINDOW_FETCH_ATTEMPTS, (
+        f"the retry must be bounded at WINDOW_FETCH_ATTEMPTS "
+        f"({gate.WINDOW_FETCH_ATTEMPTS}), got {router.runs_calls}"
+    )
+
+
+def test_the_stale_attempt_is_logged_not_swallowed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A retry that hides the phenomenon would let its rate change unseen."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _FlakyRunRouter(stale, fresh, jobs, stale_count=1)
+    gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    err = capsys.readouterr().err
+    assert "attempt 1/" in err and "refetching" in err

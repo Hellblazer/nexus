@@ -180,6 +180,20 @@ empty jobs is CANNOT VERIFY, and every rejection prints the pytest job
 conclusions it actually saw. :func:`window_reaches_head` adds the guard that
 makes a wrong floor unreachable rather than merely diagnosable, by checking
 the one thing that must be true of a window that reaches the present.
+
+STALE WINDOWS, measured (2026-09-23). The cause is now known and it is not
+this script's: GitHub intermittently serves a stale cached page for this
+repo's ``ci.yml`` run list. 25 consecutive identical requests returned 23
+current windows and 2 stale ones, and both stale samples were the SAME page,
+newest run 2026-09-07T10:04:00Z, against a repo whose newest run was that
+day's. A first hypothesis that page size selected the behaviour was
+falsified within the minute: ``per_page=3`` returned the stale window while
+``per_page=100`` returned the current one, the exact inverse of the pairing
+that suggested it. So it is one cached page served at roughly 8% of
+requests, independent of ``per_page``, and a retry is the remedy rather than
+a different query. :data:`WINDOW_FETCH_ATTEMPTS` refetches before believing a
+short window, and each stale observation is logged rather than swallowed, so
+the phenomenon stays visible if its rate changes.
 """
 
 from __future__ import annotations
@@ -206,6 +220,14 @@ CODE_EXERCISED_JOB_PREFIXES: tuple[str, ...] = (
     "pytest (lint markers)",
     "pytest (mode-declarations census)",
 )
+
+#: How many times to fetch the run list before believing a window that does
+#: not reach the audited head. See STALE WINDOWS in the module docstring: the
+#: measured per-request rate is about 8%, so three attempts takes a false
+#: CANNOT VERIFY from roughly 1 push in 12 to roughly 1 in 2000. Raising this
+#: buys very little and delays a genuine refusal; lowering it to 1 restores
+#: the noisy behaviour.
+WINDOW_FETCH_ATTEMPTS: int = 3
 
 _REMEDY = (
     "Remedy: this commit's code was never exercised by pytest on any tree. "
@@ -583,41 +605,50 @@ def check(
         )
         return 2
 
-    try:
-        raw_runs = fetch_push_runs(
-            repo, token, branch, workflow_file, max_runs_scanned, api=api
-        )
-    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+    raw_runs: list[dict] = []
+    for attempt in range(1, WINDOW_FETCH_ATTEMPTS + 1):
+        try:
+            raw_runs = fetch_push_runs(
+                repo, token, branch, workflow_file, max_runs_scanned, api=api
+            )
+        except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+            print(
+                f"CANNOT VERIFY: GitHub API error listing {workflow_file} runs: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+        if not raw_runs:
+            print(
+                f"CANNOT VERIFY: no push-triggered {workflow_file} runs found on "
+                f"{branch!r} in {repo!r} -- either the branch/workflow name is "
+                "wrong, or this repo genuinely has no CI history yet.",
+                file=sys.stderr,
+            )
+            return 2
+
+        if window_reaches_head(raw_runs, head_sha):
+            break
         print(
-            f"CANNOT VERIFY: GitHub API error listing {workflow_file} runs: {exc}",
+            f"note: attempt {attempt}/{WINDOW_FETCH_ATTEMPTS} got a window of "
+            f"{len(raw_runs)} run(s) whose newest is for "
+            f"{raw_runs[0].get('head_sha', '<none>')}, not reaching the "
+            f"audited head {head_sha} -- refetching (see STALE WINDOWS).",
             file=sys.stderr,
         )
-        return 2
-
-    if not raw_runs:
-        print(
-            f"CANNOT VERIFY: no push-triggered {workflow_file} runs found on "
-            f"{branch!r} in {repo!r} -- either the branch/workflow name is "
-            "wrong, or this repo genuinely has no CI history yet.",
-            file=sys.stderr,
-        )
-        return 2
-
-    if not window_reaches_head(raw_runs, head_sha):
+    else:
         newest = raw_runs[0].get("head_sha", "<none>")
         print(
-            f"CANNOT VERIFY: the scanned window of {len(raw_runs)} "
-            f"{workflow_file} run(s) does not contain a run for {head_sha}, "
-            f"the very commit being audited (newest run in the window is for "
-            f"{newest}). Every push to {branch!r} starts a {workflow_file} "
-            "run for that same sha, so the head's own run missing from the "
-            "window means the window is not the recent history this audit "
-            "assumes -- it is stale, filtered, or truncated. Choosing a "
+            f"CANNOT VERIFY: {WINDOW_FETCH_ATTEMPTS} fetches of the "
+            f"{workflow_file} run list all returned a window that does not "
+            f"contain a run for {head_sha}, the very commit being audited "
+            f"(newest in the last window is for {newest}). Every push to "
+            f"{branch!r} starts a {workflow_file} run for that same sha, so "
+            "the head's own run missing from every window means this is not "
+            "the intermittent stale page the retry exists for. Choosing a "
             "coverage floor from it would name a commit hundreds of pushes "
             "back and report everything since as BLOCKED, which is a false "
-            "alarm, not a finding (measured twice on run 35862641493, "
-            "2026-09-23: two invocations over the identical head chose two "
-            "different ancient floors and reported 1257 and 97 commits).",
+            "alarm, not a finding.",
             file=sys.stderr,
         )
         return 2
