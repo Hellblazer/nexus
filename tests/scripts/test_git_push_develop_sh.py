@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -525,12 +527,92 @@ class TestPushLock:
         parts = [p for p in env.get("PATH", "").split(os.pathsep) if p != venv_bin]
         return {**env, "PATH": os.pathsep.join(parts)}
 
+    @staticmethod
+    def _installed_nx_standin(tmp_path: Path) -> Path:
+        """A stand-in "installed nx generation" for tests that need the
+        script's nx-resolution (review finding 2) to succeed normally, not
+        refuse.
+
+        `_without_this_worktrees_venv` above strips this worktree's own
+        `.venv/bin` because that IS the dev-checkout install the resolver
+        is correct to refuse -- but on a box with no
+        `scripts/reinstall-tool.sh`-installed generation (every GitHub
+        Actions runner: confirmed directly, CI run 35900352343 failed
+        every TestPushLock case expecting a normal push with
+        PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX, plus a bare FileNotFoundError
+        for 'nx' from a test's own direct subprocess call), stripping
+        `.venv/bin` leaves NOTHING on PATH for either the script or these
+        tests' own direct `nx` calls to find. This directory -- under
+        `tmp_path`, so always outside this repo and outside any `.venv/`
+        -- holds a tiny wrapper that `exec`s the real venv `nx` by its own
+        absolute path, standing in for "an installed generation" without
+        being one: prepending it to PATH satisfies the resolver (not
+        under `.venv/`, not under this checkout) while still running the
+        exact `nx` this dev checkout has.
+
+        A wrapper, not a symlink straight to `.venv/bin/nx`: harmless
+        here either way, since that script's own shebang is an ABSOLUTE
+        path to `.venv/bin/python` (confirmed directly, so the kernel
+        follows it regardless of how the script itself was reached) --
+        but the wrapper form matches this repo's own installed-`nx` shim
+        pattern (`~/.local/bin/nx`) and costs nothing extra.
+        """
+        # NOT `.resolve()`: `sys.executable` is `.venv/bin/python3`, where
+        # the venv's `nx` console script actually lives as a sibling --
+        # `uv run` gives THIS worktree's own `.venv/bin/python3` directly,
+        # not a further symlink to it. `.resolve()` follows that path's
+        # OWN symlink chain past `.venv/bin/` to uv's shared interpreter
+        # install (`~/.local/share/uv/python/...`), which has no `nx` at
+        # all -- confirmed directly: resolving landed one directory too
+        # far and skipped every TestPushLock case needing this stand-in.
+        real_nx = Path(sys.executable).parent / "nx"
+        if not real_nx.exists():
+            pytest.skip(f"no venv nx entry point at {real_nx} to stand in for an installed generation")
+        standin_dir = tmp_path / "installed-nx-standin"
+        standin_dir.mkdir(exist_ok=True)
+        wrapper = standin_dir / "nx"
+        wrapper.write_text(f"#!/usr/bin/env bash\nexec {shlex.quote(str(real_nx))} \"$@\"\n")
+        wrapper.chmod(0o755)
+        return standin_dir
+
+    @classmethod
+    def _with_installed_nx_standin(cls, env: dict, tmp_path: Path) -> dict:
+        """`_without_this_worktrees_venv` plus the stand-in prepended to
+        PATH -- the combination every TestPushLock test that expects the
+        script to proceed normally (not refuse on nx-resolution) needs.
+
+        The stand-in changes which PATH ENTRY resolves `nx` (satisfying
+        the SCRIPT's own `.venv/`-path check), but the process it execs
+        is still this dev checkout's own `nx`/`nexus` -- there is no
+        other kind available on a box with no installed generation (every
+        CI runner). So its real writes still trip the SEPARATE
+        nexus-a2qhz production-write guard, which checks where the
+        RUNNING process's `nexus` package resolves from, not the PATH
+        used to reach it -- confirmed directly: without this, every test
+        using the stand-in failed with ProductionWriteGuardError instead
+        of reaching the throwaway engine substrate at all. The guard's
+        own docstring names the fix for exactly this shape: "a test that
+        spawns a subprocess needing the REAL guard behavior ... against
+        the test substrate must set the real NX_ALLOW_PROD_WRITE env var
+        explicitly for that subprocess's own environment." Every write
+        under this stand-in targets ONLY the per-test throwaway engine
+        (tests/_engine_substrate.py), never anything real.
+        """
+        env = cls._without_this_worktrees_venv(env)
+        standin_dir = cls._installed_nx_standin(tmp_path)
+        env["PATH"] = f"{standin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["NX_ALLOW_PROD_WRITE"] = (
+            "TestPushLock nx-standin: every write targets a throwaway "
+            "per-test engine substrate, never a real install"
+        )
+        return env
+
     @classmethod
     def _lock_env(cls, state: dict, token: str, tmp_path: Path, *, label: str) -> dict:
         parsed = urlparse(state["base_url"])
         cfg_dir = tmp_path / f"nexus-config-isolated-{label}"
         cfg_dir.mkdir(exist_ok=True)
-        env = cls._without_this_worktrees_venv({**os.environ})
+        env = cls._with_installed_nx_standin({**os.environ}, tmp_path)
         # tests/conftest.py's own autouse engine-substrate fixture sets
         # NX_SERVICE_URL in THIS pytest process's os.environ (for in-process
         # T2 store construction) -- and NX_SERVICE_URL outranks NX_SERVICE_
@@ -623,7 +705,7 @@ class TestPushLock:
         origin, work = repos
         cfg_dir = tmp_path / "nexus-config-isolated-unreachable"
         cfg_dir.mkdir(exist_ok=True)
-        env = self._without_this_worktrees_venv({**os.environ})
+        env = self._with_installed_nx_standin({**os.environ}, tmp_path)
         env["NX_SERVICE_URL"] = ""  # see _lock_env's comment: pop alone does not survive _run()'s merge
         env["NEXUS_CONFIG_DIR"] = str(cfg_dir)
         env["NX_SERVICE_HOST"] = "127.0.0.1"
