@@ -2458,6 +2458,30 @@ def converge_service_autostart_unit(
         "then `nx doctor` to confirm the service came back up."
     )
 
+    # nexus-gq1pv: uninstall_autostart runs BEFORE install_autostart below,
+    # so by the time install runs, `dest` no longer exists and
+    # install_autostart's own ContentDiffersError/--force guard (which a
+    # direct `nx daemon service install --autostart` honours) never sees
+    # the differing content -- it only ever sees "nothing here yet". A
+    # hand-edited unit is therefore invisible to that guard on this path
+    # and would otherwise be silently discarded on every drift-converge
+    # pass, with no refusal and no backup. Back the CURRENT content up
+    # beside the unit before either step runs, and fold the backup path
+    # into `note` so every message this function returns from here on
+    # names it -- nothing an operator wrote to this file is lost, even
+    # though the automatic heal still proceeds. A backup write failure
+    # refuses to converge at all rather than proceed without one.
+    backup_path = dest.with_name(f"{dest.name}.pre-convergence.{int(time.time())}")
+    try:
+        backup_path.write_text(probe.existing)
+    except OSError as exc:
+        return [
+            f"NEEDS HUMAN: {note}, but backing up the existing unit to "
+            f"{backup_path} before converging it failed ({exc}) -- "
+            f"{manual_fallback}"
+        ]
+    note = f"{note} (previous content backed up to {backup_path})"
+
     # nexus-ebbvt review round 1, finding 3: the initial stop and the
     # compensating restart below must target the SAME resolved config
     # dir explicitly, not let the stop re-derive its own from environment
@@ -2599,13 +2623,15 @@ def converge_service_autostart_unit(
     if running.up:
         actions = [
             f"converged the storage-service autostart unit at "
-            f"{install_result.dest} ({install_result.detail}) — verified "
+            f"{install_result.dest} ({install_result.detail}); previous "
+            f"content backed up to {backup_path} — verified "
             "the service came back up"
         ]
     else:
         actions = [
             f"NEEDS HUMAN: converged the storage-service autostart unit at "
-            f"{install_result.dest} ({install_result.detail}), but the "
+            f"{install_result.dest} ({install_result.detail}); previous "
+            f"content backed up to {backup_path}, but the "
             f"service is not answering after the restart ({running.reason or 'no answer'}) "
             "-- check `nx daemon service status` and `nx doctor`."
         ]

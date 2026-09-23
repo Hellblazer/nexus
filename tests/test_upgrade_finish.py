@@ -2619,6 +2619,66 @@ class TestConvergeServiceAutostartUnit:
         assert str(dest) in actions[0]
         assert "NEEDS HUMAN" not in actions[0]
 
+    def test_drift_attended_backs_up_existing_unit_before_overwrite(self, tmp_path):
+        """nexus-gq1pv: uninstall_autostart runs before install_autostart,
+        so install_autostart's own ContentDiffersError/--force guard never
+        sees dest's differing content -- it only ever sees an absent file.
+        A hand-edited unit must not be silently discarded on this path:
+        the pre-convergence content is backed up beside the unit before
+        either step runs, and the action line names the backup."""
+        from nexus.daemon.installer import (  # noqa: PLC0415 — local import, test-only convenience
+            InstallResult, InstallStatus, UninstallResult, UninstallStatus,
+        )
+
+        dest = self._drifted(tmp_path)
+        original_content = dest.read_text()
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
+             patch("nexus.daemon.installer.install_autostart",
+                   return_value=InstallResult(
+                       status=InstallStatus.NEWLY_INSTALLED, dest=dest,
+                       detail="Activated via: launchctl bootstrap ...",
+                   )), \
+             patch("nexus.upgrade_finish.run_bounded", return_value=stop_result), \
+             patch("nexus.upgrade_finish._running_engine",
+                   return_value=_RunningEngine(up=True, version=(1, 2, 3))):
+            actions = converge_service_autostart_unit(tmp_path)
+
+        assert len(actions) == 1
+        assert "backed up" in actions[0]
+        backups = list(tmp_path.glob("com.nexus.service.plist.pre-convergence.*"))
+        assert len(backups) == 1, backups
+        assert backups[0].read_text() == original_content
+        assert str(backups[0]) in actions[0]
+
+    def test_backup_write_failure_refuses_to_converge(self, tmp_path):
+        """A backup that cannot be written must refuse the whole converge
+        rather than proceed and risk destroying the only copy of a
+        hand-edited unit."""
+        dest = self._drifted(tmp_path)
+        tmp_path.chmod(0o555)
+        try:
+            with patch("nexus.config.is_local_mode", return_value=True), \
+                 patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+                 patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+                 patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+                 patch("nexus.daemon.installer.install_autostart") as install, \
+                 patch("nexus.upgrade_finish.run_bounded") as sp:
+                actions = converge_service_autostart_unit(tmp_path)
+        finally:
+            tmp_path.chmod(0o755)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "backing up" in actions[0]
+        uninstall.assert_not_called()
+        install.assert_not_called()
+        sp.assert_not_called()
+        assert dest.read_text() == "old content with ProcessType Background\n"
+
     def test_stop_failure_is_needs_human_never_mutates_unit(self, tmp_path):
         dest = self._drifted(tmp_path)
         stop_result = MagicMock(returncode=1, stdout="", stderr="boom")
