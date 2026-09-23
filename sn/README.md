@@ -21,7 +21,7 @@ Subagents spawned by Claude Code don't see your CLAUDE.md instructions. They hav
 ### Prerequisites
 
 - **Serena**: requires `uvx` ([uv](https://docs.astral.sh/uv/) must be installed)
-- **Hooks**: run through `uv run`, the same uv Serena needs, so no separate `python3` on PATH is required (stock Windows has none)
+- **Hooks**: run through `uv run`, the same uv Serena needs, so no separate `python3` on PATH is required (stock Windows has none). This applies to all four hooks, including Context7's auto-approve, so a Context7-only install also needs uv. On a box with no Python at all, uv downloads one on first use; a hook that fires during that download can hit its 5 second timeout and is skipped for that event only. Serena's first `uvx` launch normally fetches it first.
 - **Context7**: requires `npx` ([Node.js](https://nodejs.org/) must be installed)
 - **Serena project config**: each project needs a `.serena/project.yml`. Auto-generate one with:
   ```bash

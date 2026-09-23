@@ -135,7 +135,8 @@ class TestSnHooksLaunchUnderUv:
 
     @staticmethod
     def _uv() -> str:
-        # `uv run` exports UV; a bare pytest falls back to PATH. CI and the
+        # `uv run` exports UV (the uv binary's path); a bare pytest falls
+        # back to PATH. CI and the
         # dev loop both have uv, so its absence is a failure, not a skip.
         uv = os.environ.get("UV") or shutil.which("uv")
         if not uv:
@@ -165,7 +166,10 @@ class TestSnHooksLaunchUnderUv:
 
     def _run(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "UV_PYTHON_DOWNLOADS": "never", "CLAUDE_PLUGIN_ROOT": str(SN_DIR)}
-        env.pop("VIRTUAL_ENV", None)
+        # --no-config gates config FILES only; uv still honours UV_* env
+        # vars, and an ambient UV_PYTHON would choose the interpreter here.
+        for var in ("VIRTUAL_ENV", "UV_PYTHON", "UV_NO_CONFIG", "UV_CONFIG_FILE"):
+            env.pop(var, None)
         return subprocess.run(
             argv, input=self.PAYLOAD, cwd=cwd, env=env,
             capture_output=True, text=True, timeout=60,
@@ -176,7 +180,8 @@ class TestSnHooksLaunchUnderUv:
         for argv in self._argvs():
             result = self._run(argv, cwd)
             assert result.returncode == 0, (argv, result.stderr)
-            # The boundary returns 0 on a crash too; a crash leaves a trace.
+            # The boundary returns 0 on a crash too; a crash leaves a trace
+            # (_hook_boundary.guard's traceback.print_exc).
             assert "Traceback" not in result.stderr, (argv, result.stderr)
             if argv[-1].endswith("auto_approve_sn_mcp.py"):
                 out = json.loads(result.stdout)

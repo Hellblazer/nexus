@@ -203,7 +203,7 @@ def reject_sn(event: str, entry: dict) -> str | None:
             f"`python3` is not on PATH on stock Windows (nexus-j4iy0)."
         )
     args = entry.get("args", [])
-    if tuple(args[:-1]) != SN_UV_ARGV or not args:
+    if tuple(args[:-1]) != SN_UV_ARGV:  # [] slices to (), so this also rejects empty args
         return (
             f"runs uv with {args!r}; the argv must be exactly "
             f"{list(SN_UV_ARGV)} followed by one script path"

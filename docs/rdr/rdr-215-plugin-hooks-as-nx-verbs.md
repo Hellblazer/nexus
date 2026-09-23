@@ -495,7 +495,7 @@ call the same functions.
 8. **The sn plugin.** sn ships no Python package and no server of its
    own, and its hook logic already lives in two bundled stdlib scripts
    (`auto_approve_sn_mcp.py`, `worktree_guard.py`) that the bash wrappers
-   call with `python3`. Its four entries become exec-form `python3`: the
+   call with `python3`. Its four entries become exec-form `python3` [since 2026-09-23 exec-form `uv run`, nexus-j4iy0]: the
    `PreToolUse` and `PermissionRequest` entries on `auto_approve_sn_mcp.py`,
    `SubagentStart` on a new `subagent_start.py` that carries
    `mcp-inject.sh`'s body (the section files, the envelope, and the
@@ -630,7 +630,7 @@ settled the other four) -- and no `command` or `args` element equals
 `nx-hook` is not `nx`. A `SessionStart` entry must be command tier. For
 the sn `hooks.json`: every entry has `args`, `command` is exactly
 `python3`, and the sole `args` element is a `.py` path under
-`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/`.
+`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/`. (Launcher changed to `uv run` at nexus-j4iy0, 2026-09-23; see Revision History.)
 
 **Tests.** Each retargeted test keeps its payload fixture and expected
 bytes. Tool-tier tests call the registered tool through the server's
@@ -693,7 +693,8 @@ that client or shell out to `nx` for every call.
   tools, so the drift ledger entry states the wheel floor.
 - 15 conexus hooks stop spawning a process at all; six `SessionStart`
   hooks and the close gate spawn one `nx-hook` each instead of bash, the
-  lockstep hook spawns `python3`, and the four sn hooks spawn `python3`
+  lockstep hook spawns `python3`, and the four sn hooks spawn `python3` [`uv`
+  since nexus-j4iy0]
   instead of bash.
 - The hook tools appear in the model's tool list.
 - 4,200 lines of bash leave; roughly the same amount of Python arrives,
@@ -894,7 +895,7 @@ replaces the lines that carry them; no other behaviour changes.
   `hook_` prefix, the description, and the auto-approve matcher are the
   mitigation.
 - **Plugin independence.** sn's hooks depend on `python3` and its own
-  bundled scripts only; nothing in this RDR makes sn require conexus.
+  bundled scripts only; nothing in this RDR makes sn require conexus. (Launcher changed to `uv run` at nexus-j4iy0, 2026-09-23; see Revision History.)
 - **Logging.** Hooks log to the hook log through `_hook_logging.py`
   today; the shared boundary keeps that path so a swallowed exception is
   still recorded.
@@ -1072,3 +1073,10 @@ registration module on the existing server, and one package.
   rather than an update: a constraint's shape outlives its rationale, and
   a reader who finds a reason recorded next to the decision does not
   re-derive it.
+- 2026-09-23 (nexus-j4iy0): sn's four hooks launch through exec-form
+  `uv run --no-project --no-config --quiet <script>` instead of `python3`,
+  which stock Windows lacks. The independence ruling stands: the scripts
+  stay stdlib-only and never import the conexus wheel. The dependency moved
+  from `python3` to `uv`, which Serena's `uvx` launch already required; a
+  user who runs sn for Context7 alone now needs uv for the hooks. The shape
+  lint in `tests/test_hooks_json_shape_lint.py` pins the argv whole.
