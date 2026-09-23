@@ -422,3 +422,113 @@ def test_note_pieces_windowed_split_has_no_overlap_claim() -> None:
         spans.append((piece, offset, offset + len(piece)))
         offset += len(piece)
     assert_adjacent_span_text_contract(spans, writer="store_hook.note_pieces")
+
+
+# ── nexus-yu16e: manifest POSITION order vs SPAN order ──────────────────────
+#
+# Measured on a live document (rdr__1-1, the RDR-159 tumbler): two chunks
+# adjacent BY MANIFEST POSITION carried spans that ran ~15KB backward.
+# RDR-108 defines position as "0-indexed ordinal within the doc" — i.e.
+# document sequence — so position disagreeing with span order is a real
+# defect if it can happen. A prior sweep of 535 live rdr__/docs__
+# documents found zero backward jumps elsewhere. This is the code-level
+# half of the re-check the bead asked for: every write site (pipeline_
+# stages.py, doc_indexer.py) assigns manifest position from the chunk
+# LIST's own enumeration order or its own recorded ``chunk_index`` field
+# (never batch-arrival order — see manifest_write_batch_hook's docstring),
+# so the question reduces to whether a chunker's own OUTPUT LIST can ever
+# be out of span order. These reuse the same fixtures and helpers as the
+# span/text contract above; a chunker whose emission order is already
+# span-monotonic could not produce the measured anomaly today, which
+# supports the "stale data" reading of nexus-yu16e over a live defect.
+
+
+def _assert_positions_non_decreasing(chunks: list[Span], *, writer: str) -> None:
+    violations = [
+        f"[{writer}] position {i}->{i + 1}: span start went from "
+        f"{chunks[i][1]} to {chunks[i + 1][1]} (backward)"
+        for i in range(len(chunks) - 1)
+        if chunks[i][1] is not None and chunks[i + 1][1] is not None
+        and chunks[i + 1][1] < chunks[i][1]
+    ]
+    assert not violations, "\n".join(violations)
+
+
+def test_pdf_chunker_position_order_matches_span_order() -> None:
+    text = " ".join(f"Sentence number {i:04d} carries its own content." for i in range(400))
+    chunker = PDFChunker(chunk_chars=400, overlap_percent=0.3)
+    spans = _pdf_spans(chunker, text)
+    assert len(spans) >= 3
+    _assert_positions_non_decreasing(spans, writer="pdf_chunker.PDFChunker")
+
+
+def test_pdf_chunker_with_table_position_order_matches_span_order() -> None:
+    rows = "\n".join(f"<tr><td>row-{i:04d}</td><td>value-{i:04d}</td></tr>" for i in range(40))
+    table = f"<table><tr><th>Key</th><th>Value</th></tr>\n{rows}</table>"
+    text = (
+        " ".join(f"Intro sentence {i:04d} sets up the table." for i in range(30))
+        + "\n\n" + table + "\n\n"
+        + " ".join(f"Outro sentence {i:04d} follows the table." for i in range(30))
+    )
+    chunker = PDFChunker(chunk_chars=300, overlap_percent=0.3)
+    spans = _pdf_spans(chunker, text)
+    assert len(spans) >= 3
+    _assert_positions_non_decreasing(spans, writer="pdf_chunker.PDFChunker+table")
+
+
+def test_md_chunker_multi_section_position_order_matches_span_order() -> None:
+    text = "\n\n".join(
+        f"## Section {i}\n\nParagraph body for section {i}, distinct content only here."
+        for i in range(8)
+    )
+    spans = _md_spans(text)
+    assert len(spans) >= 8
+    _assert_positions_non_decreasing(spans, writer="md_chunker.SemanticMarkdownChunker")
+
+
+def test_md_chunker_oversized_section_position_order_matches_span_order() -> None:
+    """Forces _split_large_section's overlap-tail path — the SAME writer
+    site nexus-yz7se's fix touched, and the most direct code-level probe
+    of whether that fix (or an adjacent regression) could reorder a
+    section's own sub-chunks."""
+    paragraphs = "\n\n".join(
+        f"Paragraph {i:04d} discusses distinct topic content padded out long "
+        f"enough that several of these together force a section split here."
+        for i in range(40)
+    )
+    text = f"## Body\n\n{paragraphs}"
+    spans = _md_spans(text)
+    assert len(spans) >= 3, "fixture must force _split_large_section's overlap branch"
+    _assert_positions_non_decreasing(
+        spans, writer="md_chunker.SemanticMarkdownChunker[oversized]",
+    )
+
+
+def test_prose_indexer_position_order_matches_span_order() -> None:
+    content = "\n".join(f"prose line {i:04d} holds unique wording for this test." for i in range(80))
+    spans = _prose_spans(content, chunk_lines=10, overlap=0.3)
+    assert len(spans) >= 3
+    _assert_positions_non_decreasing(spans, writer="prose_indexer._line_chunk")
+
+
+def test_code_indexer_position_order_matches_span_order() -> None:
+    content = "\n".join(
+        f"result_{i:04d} = compute_value(input_{i:04d}, factor={i}, padding_for_length=True)"
+        for i in range(80)
+    )
+    spans = _code_spans(content, chunk_lines=10)
+    assert len(spans) >= 3
+    _assert_positions_non_decreasing(spans, writer="code_indexer.chunk_file[line-fallback]")
+
+
+def test_position_order_check_is_not_vacuous_on_a_reordered_fixture() -> None:
+    """Non-vacuity: two spans swapped out of order must be flagged — the
+    exact shape of the live anomaly (adjacent-by-position, ~15KB apart)."""
+    text = " ".join(f"Sentence number {i:04d} carries its own content." for i in range(400))
+    chunker = PDFChunker(chunk_chars=400, overlap_percent=0.3)
+    spans = _pdf_spans(chunker, text)
+    assert len(spans) >= 3
+    bad = list(spans)
+    bad[0], bad[1] = bad[1], bad[0]
+    with pytest.raises(AssertionError):
+        _assert_positions_non_decreasing(bad, writer="pdf_chunker.PDFChunker")
