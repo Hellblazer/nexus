@@ -143,5 +143,20 @@ never ran them either.
 - nexus-ebx0s — `sn/README.md`: § Worktree Guidance and Guard reworded to describe the single `write_denial_reason` decision and its two-branch ordering (record-decides-first, cwd-only fallback second), replacing round 1's "three places" framing where the relocated-session case was a separate, always-consulted check.
 - nexus-ebx0s — `AGENTS.md`: § Worktrees rule 11 reworded to name the actual hazard (a relocated session's Serena write can succeed against the primary; the dry-run report cannot be trusted) instead of describing only a restriction, to say plainly that the exact reported shape (cwd never differs from the primary) remains undetectable from cwd alone even with this fix, and to note that round 2 now allows a session that legitimately started inside a worktree to keep writing there.
 
+- nexus-silj0 — `conexus/skills/orchestration/SKILL.md`: item 3 of the
+  Background-Teammate Ledger section now names the `workflow-subagent`
+  exception: a Workflow-tool agent gets its own census/undeclared bucket
+  (`WORKFLOW\tchecked=<n>`, excluded from the `undeclared` deficit) instead
+  of reading as UNDECLARED the way every other hook-invisible dispatch
+  still does. Wording only — the audit itself lives in the wheel
+  (`nexus.hooks.expectations`) and is live the moment the release ships,
+  independent of this pin.
+
+- nexus-silj0 — `conexus/commands/continuation.md`: the Gap-1
+  declaration-completeness step names the same `workflow-subagent`
+  exception, so a continuation handoff written under the OLD pin does not
+  file a bead for a Workflow-tool run that the new wheel already buckets
+  cleanly. Wording only.
+
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)

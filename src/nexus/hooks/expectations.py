@@ -58,6 +58,7 @@ from pathlib import Path
 
 __all__ = [
     "ExpectationsUsageError",
+    "WORKFLOW_SUBAGENT_TYPE",
     "expectations_already_blocked",
     "expectations_append_row",
     "expectations_archive",
@@ -146,6 +147,27 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$")
 
 _MODES = ("background", "sync")
+
+#: The ``agent_type`` the harness stamps on a SubagentStart payload for an
+#: agent the WORKFLOW tool spawned (nexus-silj0), measured 2026-09-21 across
+#: 11 STARTs from one Workflow-tool run (session 2109cc46, run
+#: wf_baae5a4e-bfd: 1 enumerate + 7 trace + 3 verify agents). No PreToolUse
+#: hook can write this class an EXPECT row in advance the way
+#: ``hook_agent_dispatch_expect`` does for the Agent tool -- the fan-out
+#: count is a property of the SCRIPT's execution (``pipeline()``/
+#: ``parallel()`` fan out over data computed at runtime; a loop can be
+#: budget-bounded or loop-until-dry), not knowable at PreToolUse time, and a
+#: guessed EXPECT row would inflate the credit pool exactly the way a
+#: duplicate hand-write does. Sam's ruling (2026-09-23, bead nexus-silj0,
+#: option 2 of the bead's own candidates): this class gets its own bucket in
+#: both the census and the undeclared audit -- counted and reported, never
+#: folded into the ``undeclared`` deficit that exit code 2 exists to signal,
+#: and never allowed to spend another type's EXPECT credit. Left alone,
+#: every session that uses the Workflow tool at all ends with a non-zero
+#: declaration audit, which is how the one signal that distinguishes a real
+#: undeclared Agent dispatch from routine workflow use gets swamped into
+#: noise.
+WORKFLOW_SUBAGENT_TYPE = "workflow-subagent"
 
 
 class ExpectationsUsageError(ValueError):
@@ -531,10 +553,26 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     has no unspent EXPECT credit left. An EXPECT row of EITHER mode supplies
     credit, so a deliberately-declared sync dispatch stays audit-clean.
 
+    A START whose type is exactly :data:`WORKFLOW_SUBAGENT_TYPE` (nexus-silj0,
+    Sam's ruling) is pulled out of the audited population entirely, before
+    ``checked``/``recognized``/``undeclared`` are computed: it is counted and
+    reported on its own ``WORKFLOW\tchecked=<n>`` line, but it can neither
+    land in ``undeclared`` (so it never drives exit code 2) nor spend a unit
+    of some other type's EXPECT credit (it is never in the credit-consuming
+    loop at all). The line is emitted only when ``n > 0`` and always
+    immediately before ``SUMMARY``, so the "a populated result always ends
+    with SUMMARY or BLINDSPOT" contract (asserted in
+    ``TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne``) is unchanged.
+
     Exit codes, quoted in AGENTS.md: 0 clean, 1 BLINDSPOT, 2 undeclared>0,
     3 no ledger. **3 is not a pass** -- absence of a ledger is not evidence
     of cleanliness, which is why it carries a note naming the two
-    explanations and how to tell them apart.
+    explanations and how to tell them apart. A session with ONLY workflow
+    STARTs and no EXPECT rows is genuinely 0 (nothing Agent-tool-shaped to
+    audit), not 1 BLINDSPOT (that code requires an EXPECT row with zero
+    STARTs, and a workflow-only session has neither) -- the WORKFLOW line is
+    what keeps that 0 from reading as "nothing happened" when 11 agents
+    plainly did.
     """
     rows = _readable_rows(session_id)
     if rows is None:
@@ -555,6 +593,8 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     credit: dict[str, int] = {}
     seen_dispatch: set[str] = set()
     expect_total = 0
+    workflow_order: list[str] = []
+    workflow_seen: set[str] = set()
 
     for row in rows:
         verb = row[1] if len(row) > 1 else ""
@@ -568,9 +608,18 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
             # START gives rc=2 with `UNDECLARED\t<id>\t` there and gave
             # rc=0 here.
             agent_id = row[2]
+            agent_type = row[3] if len(row) > 3 else ""
+            if agent_type == WORKFLOW_SUBAGENT_TYPE:
+                # Its own bucket (nexus-silj0): counted, but pulled out
+                # before the credit-consuming loop below, so it can neither
+                # become UNDECLARED nor spend another type's credit.
+                if agent_id not in workflow_seen:
+                    workflow_seen.add(agent_id)
+                    workflow_order.append(agent_id)
+                continue
             if agent_id not in stype:
                 order.append(agent_id)
-                stype[agent_id] = row[3] if len(row) > 3 else ""
+                stype[agent_id] = agent_type
         elif verb == "EXPECT" and len(row) > 2:
             # Dedupe by dispatch_id. The writing hook takes a BOUNDED lock,
             # so a double registration that outlasts the budget can append
@@ -605,6 +654,9 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
             continue
         lines.append(f"UNDECLARED\t{agent_id}\t{agent_type}")
         undeclared += 1
+
+    if workflow_order:
+        lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
 
     lines.append(
         f"SUMMARY\tchecked={checked} recognized={recognized} "
@@ -1141,10 +1193,20 @@ def expectations_census(session_id: str) -> LedgerReport:
     EXPECT rows, a ``ROWS`` tally, a ``CLASSIFIED`` tally and a
     ``BLINDSPOT`` line.
 
+    A START whose type is exactly :data:`WORKFLOW_SUBAGENT_TYPE` (nexus-silj0)
+    gets no ``AGENT`` line and never reaches ``all_start``/``order`` --
+    it cannot become ``checked``, ``undeclared`` or a ``no_terminal`` ghost,
+    and it cannot spend another type's EXPECT credit, because it is pulled
+    out before any of that bookkeeping runs. It is still counted: a single
+    ``WORKFLOW\tchecked=<n>`` line (n > 0 only) reports how many, placed
+    before ``ROWS`` so a Workflow-tool-heavy session does not read as "the
+    walk found nothing" merely because its agents are bucketed elsewhere.
+
     Exit codes are 0 and 1 ONLY -- never 2. That vocabulary belongs to
     ``undeclared`` alone, and conflating them is how a census gets read as
     an audit. 1 means the walk examined nothing while the ledger declared
-    dispatches.
+    dispatches -- workflow STARTs never affect this either, since ``checked``
+    excludes them.
 
     A terminal is classified rather than merely recorded, because BLOCKED
     followed by REPORTED is the success path of the whole guard: the agent
@@ -1182,6 +1244,8 @@ def expectations_census(session_id: str) -> LedgerReport:
     listed: set[str] = set()
     all_start: set[str] = set()
     res_immediate = res_later = 0
+    workflow_order: list[str] = []
+    workflow_seen: set[str] = set()
 
     for row in rows:
         exact = "\t".join(row)
@@ -1207,14 +1271,31 @@ def expectations_census(session_id: str) -> LedgerReport:
             expect_rows[who] = expect_rows.get(who, 0) + 1
             credit[who] = credit.get(who, 0) + 1
         elif verb == "START":
-            if who not in all_start:
+            agent_type = row[3] if len(row) > 3 else ""
+            if agent_type == WORKFLOW_SUBAGENT_TYPE:
+                # Its own bucket (nexus-silj0): still tallied into
+                # start_count (so EXPECTED_NO_START stays correct if this
+                # type is ever hand-declared), but never all_start/order --
+                # that is what keeps it out of `checked`/`undeclared`/
+                # `no_terminal`.
+                start_count[agent_type] = start_count.get(agent_type, 0) + 1
+                if who not in workflow_seen:
+                    workflow_seen.add(who)
+                    workflow_order.append(who)
+            elif who not in all_start:
                 all_start.add(who)
-                stype[who] = row[3] if len(row) > 3 else ""
-                start_count[stype[who]] = start_count.get(stype[who], 0) + 1
+                stype[who] = agent_type
+                start_count[agent_type] = start_count.get(agent_type, 0) + 1
                 if who not in listed:
                     order.append(who)
                     listed.add(who)
         elif verb in ("REPORTED", "BLOCKED", "WOULDBLOCK"):
+            if who in workflow_seen:
+                # A terminal for a workflow agent: not part of the
+                # declaration audit's population, and must not fall into
+                # the "no-start ghost" branch below for lack of a stype
+                # entry.
+                continue
             if who not in listed:
                 order.append(who)
                 listed.add(who)
@@ -1254,6 +1335,9 @@ def expectations_census(session_id: str) -> LedgerReport:
                 undeclared += 1
             lines.append(f"AGENT\t{agent_id}\t{agent_type}\t{terminal}\t{declared}")
         cls[terminal] = cls.get(terminal, 0) + 1
+
+    if workflow_order:
+        lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
 
     expected_no_start = 0
     # FIRST-APPEARANCE order, not alphabetical. bash iterates an awk

@@ -609,6 +609,101 @@ class TestUndeclaredCreditAccounting:
         assert summary == "SUMMARY\tchecked=2 recognized=1 unrecognized=1 undeclared=1"
 
 
+# ── nexus-silj0: 'workflow-subagent' gets its own bucket, undeclared side ──
+
+class TestUndeclaredWorkflowSubagentBucket:
+    """Sam's ruling 2026-09-23 (bead nexus-silj0, option 2 of the bead's own
+    candidates): a START whose type is exactly ``workflow-subagent`` is
+    counted and reported, but excluded from the ``undeclared`` deficit and
+    can never spend another type's EXPECT credit. Reproduces the bead's own
+    measured shape (session 2109cc46: 11 workflow STARTs + 2 clean
+    Agent-tool dispatches -> real bash gave rc=2 with SUMMARY
+    checked=13 ... undeclared=11)."""
+
+    def test_the_beads_measured_shape_is_now_clean_and_reports_workflow(self, state):
+        rows = [("EXPECT", "conexus:code-review-expert", "background"),
+                ("EXPECT", "conexus:substantive-critic", "background"),
+                ("START", "r1", "conexus:code-review-expert"),
+                ("START", "r2", "conexus:substantive-critic")]
+        rows += [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(11)]
+        _seed("s", rows)
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("UNDECLARED")]
+        assert "WORKFLOW\tchecked=11" in r.lines
+        assert "SUMMARY\tchecked=2 recognized=2 unrecognized=0 undeclared=0" in r.lines
+
+    def test_a_genuinely_undeclared_agent_still_flags_only_itself(self, state):
+        """Workflow STARTs must not swamp OR hide a real undeclared
+        Agent-tool dispatch mixed into the same ledger."""
+        rows = [("START", "rogue", "conexus:developer")]
+        rows += [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(11)]
+        _seed("s", rows)
+        r = exp.expectations_undeclared("s")
+        assert r.code == 2
+        assert "UNDECLARED\trogue\tconexus:developer" in r.lines
+        assert not [ln for ln in r.lines
+                    if ln.startswith("UNDECLARED") and exp.WORKFLOW_SUBAGENT_TYPE in ln]
+        assert "WORKFLOW\tchecked=11" in r.lines
+        assert "SUMMARY\tchecked=1 recognized=0 unrecognized=1 undeclared=1" in r.lines
+
+    def test_a_workflow_only_session_with_no_expect_rows_is_clean_not_blindspot(self, state):
+        """Nothing Agent-tool-shaped happened, so 0 is correct -- and it is
+        not the false-clean BLINDSPOT shape either, since that needs an
+        EXPECT row with zero STARTs and this ledger has neither."""
+        rows = [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(11)]
+        _seed("s", rows)
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("BLINDSPOT")]
+        assert "WORKFLOW\tchecked=11" in r.lines
+        assert "SUMMARY\tchecked=0 recognized=0 unrecognized=0 undeclared=0" in r.lines
+
+    def test_a_stray_expect_with_no_start_still_trips_blindspot_despite_workflow_starts(self, state):
+        """Workflow STARTs must not paper over a genuine BLINDSPOT: an
+        Agent-tool EXPECT row with zero matching STARTs is still a walk
+        that examined nothing about that type, whatever else ran."""
+        rows = [("EXPECT", "conexus:developer", "background")]
+        rows += [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(11)]
+        _seed("s", rows)
+        r = exp.expectations_undeclared("s")
+        assert r.code == 1
+        assert any(ln.startswith("BLINDSPOT\t") for ln in r.lines)
+        assert "WORKFLOW\tchecked=11" in r.lines
+
+    def test_a_workflow_start_never_spends_another_types_credit(self, state):
+        _seed("s", [("EXPECT", "t", "background"),
+                     ("START", "w1", exp.WORKFLOW_SUBAGENT_TYPE),
+                     ("START", "a1", "t")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0
+        assert "WORKFLOW\tchecked=1" in r.lines
+
+    def test_duplicate_workflow_agent_ids_are_counted_once(self, state):
+        _seed("s", [("START", "w1", exp.WORKFLOW_SUBAGENT_TYPE),
+                     ("START", "w1", exp.WORKFLOW_SUBAGENT_TYPE)])
+        r = exp.expectations_undeclared("s")
+        assert "WORKFLOW\tchecked=1" in r.lines
+
+    def test_no_workflow_line_when_there_are_no_workflow_starts(self, state):
+        """The line is conditional, matching BLINDSPOT's own convention --
+        an all-Agent-tool ledger must not gain a spurious 'checked=0' line."""
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        r = exp.expectations_undeclared("s")
+        assert not [ln for ln in r.lines if ln.startswith("WORKFLOW")]
+
+    def test_the_workflow_line_precedes_summary_so_the_last_line_invariant_holds(self, state):
+        """Pins TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne's
+        'a populated reader always ends with SUMMARY or BLINDSPOT' contract
+        against a ledger that now also carries a WORKFLOW line."""
+        rows = [("EXPECT", "t", "background"), ("START", "a1", "t")]
+        rows += [("START", "w1", exp.WORKFLOW_SUBAGENT_TYPE)]
+        _seed("s", rows)
+        r = exp.expectations_undeclared("s")
+        assert r.lines[-1].startswith("SUMMARY\t")
+        assert r.lines.index("WORKFLOW\tchecked=1") < len(r.lines) - 1
+
+
 # ── owes_report: the consult rule, and both disclosed causes ─────────────
 
 #: Retained for :class:`TestTheDualImplementationParamDiesWithTheLibrary`
@@ -812,6 +907,73 @@ class TestCensus:
     def test_a_missing_ledger_is_code_0_and_silent(self, state):
         r = exp.expectations_census("never-seen")
         assert r.code == 0 and r.lines == []
+
+
+# ── nexus-silj0: 'workflow-subagent' gets its own bucket, census side ─────
+
+class TestCensusWorkflowSubagentBucket:
+    """The same bucketing rule, on the census's own vocabulary: no AGENT
+    line per workflow instance, no contribution to CLASSIFIED's undeclared
+    or no_terminal tallies, and a WORKFLOW checked=<n> line reporting the
+    count instead of letting it vanish."""
+
+    def test_the_beads_measured_shape_reports_workflow_and_classifies_clean(self, state):
+        rows = [("EXPECT", "conexus:code-review-expert", "background"),
+                ("EXPECT", "conexus:substantive-critic", "background"),
+                ("START", "r1", "conexus:code-review-expert"), ("REPORTED", "r1"),
+                ("START", "r2", "conexus:substantive-critic"), ("REPORTED", "r2")]
+        rows += [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(11)]
+        _seed("s", rows)
+        lines = exp.expectations_census("s").lines
+        assert "WORKFLOW\tchecked=11" in lines
+        assert not [ln for ln in lines if ln.startswith("AGENT") and "workflow-subagent" in ln]
+        assert any(
+            "undeclared=0" in ln and "no_terminal=0" in ln
+            for ln in lines if ln.startswith("CLASSIFIED")
+        )
+
+    def test_workflow_starts_do_not_inflate_checked_or_blindspot(self, state):
+        """checked (and BLINDSPOT's tally, and the walked-nothing code=1
+        rule) must key off Agent-tool STARTs only."""
+        rows = [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(11)]
+        _seed("s", rows)
+        r = exp.expectations_census("s")
+        assert r.code == 0, "no EXPECT rows at all, so this is clean, not a blindspot"
+        assert any(ln == "BLINDSPOT\tchecked=0 recognized=0 unrecognized=0" for ln in r.lines)
+        assert "WORKFLOW\tchecked=11" in r.lines
+
+    def test_a_stray_expect_with_no_start_still_trips_census_code_1(self, state):
+        rows = [("EXPECT", "conexus:developer", "background")]
+        rows += [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(11)]
+        _seed("s", rows)
+        r = exp.expectations_census("s")
+        assert r.code == 1
+        assert "WORKFLOW\tchecked=11" in r.lines
+
+    def test_a_workflow_terminal_row_does_not_become_a_no_start_ghost(self, state):
+        """A REPORTED for a workflow agent must not fall into the 'terminal
+        with no matching START' AGENT\t...\t-\t...\tno-start branch."""
+        _seed("s", [("START", "w1", exp.WORKFLOW_SUBAGENT_TYPE), ("REPORTED", "w1")])
+        lines = exp.expectations_census("s").lines
+        assert not [ln for ln in lines if ln.startswith("AGENT\tw1\t-")]
+        assert "WORKFLOW\tchecked=1" in lines
+
+    def test_no_workflow_line_when_there_are_no_workflow_starts(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        lines = exp.expectations_census("s").lines
+        assert not [ln for ln in lines if ln.startswith("WORKFLOW")]
+
+    def test_the_workflow_line_precedes_the_rows_classified_blindspot_tail(self, state):
+        """Pins TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne's rule that
+        only SPACE_*/VERIFY_* lines may follow the last of ROWS/CLASSIFIED/
+        BLINDSPOT -- WORKFLOW must sit before that boundary, not after."""
+        _seed("s", [("START", "w1", exp.WORKFLOW_SUBAGENT_TYPE)])
+        lines = exp.expectations_census("s").lines
+        boundary = max(
+            i for i, ln in enumerate(lines)
+            if ln.startswith(("ROWS\t", "CLASSIFIED\t", "BLINDSPOT\t"))
+        )
+        assert lines.index("WORKFLOW\tchecked=1") < boundary
 
 
 # ── reconcile: the harness's own ground truth ────────────────────────────
