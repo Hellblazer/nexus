@@ -508,6 +508,18 @@ def _unwrap_mineru_font_tags(md: str) -> str:
 _MD_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 _VISUAL_LABEL_RE = re.compile(r"^\s*((?:Table|Figure|Fig\.?)\s*[A-Za-z]?\d+[a-z]?|(?:Table|Figure)\s+[IVXLC]+)\b")
 
+#: Docling's own default markdown image placeholder (docling_core's
+#: ``export_to_markdown(..., image_placeholder="<!-- image -->")``), a
+#: different shape from MinerU's ``![](images/<sha>.jpg)`` -- an HTML
+#: comment with no path to look a content_list entry up by, because
+#: docling emits no content_list at all.
+_DOCLING_IMAGE_PLACEHOLDER_RE = re.compile(r"<!--\s*image\s*-->")
+
+#: How far past a marker's position to look for an adjacent caption line
+#: (nexus-9zly6 GAP 1/2). Generous enough for a caption on the very next
+#: non-blank line without scanning the rest of the page.
+_CAPTION_LOOKAHEAD_CHARS = 200
+
 
 def _visual_label(entry: dict, kind: str) -> str:
     """``"Table 6"`` / ``"Figure 5"`` from the entry's first caption, else the bare kind."""
@@ -517,6 +529,46 @@ def _visual_label(entry: dict, kind: str) -> str:
         if m:
             return m.group(1).strip()
     return kind
+
+
+def _caption_label_after(text: str, pos: int) -> str | None:
+    """The visual label (``"Fig. 2"``, ``"Table 6"``) from the caption line
+    immediately following *pos* in *text*, or ``None``.
+
+    nexus-9zly6 GAP 1: when a content_list lookup misses (or, for docling,
+    never existed at all), the label the query-lands-on-the-gap contract in
+    :func:`_mark_unextracted_visuals` depends on would otherwise be lost.
+    Both MinerU and docling put an unrecognised visual's caption directly
+    under its own reference/placeholder in the page markdown, so the label
+    usually survives in the text even when the structured lookup does not.
+    """
+    tail = text[pos : pos + _CAPTION_LOOKAHEAD_CHARS].lstrip("\r\n \t")
+    first_line = tail.split("\n", 1)[0]
+    m = _VISUAL_LABEL_RE.match(first_line)
+    return m.group(1).strip() if m else None
+
+
+def _generic_visual_marker(label: str | None) -> str:
+    """The bracketed marker for a visual with no content_list entry: the
+    caption-derived *label* in the same shape ``_repl`` below would have
+    produced from a content_list entry, or the bare generic marker when no
+    label could be derived at all."""
+    if label is None:
+        return "[image not indexed as text]"
+    if label.lower().startswith("table"):
+        return f"[{label} not extracted as text; values not indexed]"
+    return f"[{label} is an image; not indexed as text]"
+
+
+def _marker_for_entry(entry: dict) -> str:
+    """The bracketed marker for a content_list *entry*, by its own type."""
+    match entry.get("type"):
+        case "table":
+            return f"[{_visual_label(entry, 'Table')} not extracted as text; values not indexed]"
+        case "image":
+            return f"[{_visual_label(entry, 'Figure')} is an image; not indexed as text]"
+        case _:
+            return "[image not indexed as text]"
 
 
 def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
@@ -533,15 +585,25 @@ def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
     caption label, from the ``content_list`` entry whose ``img_path``
     matches: ``[Table 6 not extracted as text; values not indexed]`` for a
     table without a ``table_body``, ``[Figure 5 is an image; not indexed as
-    text]`` for a figure. A reference with no ``content_list`` entry (the
-    entry was dropped, or the image was never in the layout) gets the
-    generic ``[image not indexed as text]``. Tables MinerU did extract are
-    already HTML in *md* and carry no image reference, so they pass through.
+    text]`` for a figure. A reference with no matching ``content_list``
+    entry falls back to the caption line immediately under the reference in
+    *md* itself (:func:`_caption_label_after`), and only when that also
+    finds nothing gets the bare generic ``[image not indexed as text]``.
+    Tables MinerU did extract are already HTML in *md* and carry no image
+    reference, so they pass through.
+
+    A ``content_list`` entry whose ``img_path`` never appears as a ``![]``
+    reference anywhere in *md* at all (MinerU's markdown and its
+    content_list are two independently produced outputs, so this is
+    reachable, not hypothetical) gets a marker appended at the end of the
+    text -- nexus-9zly6's coverage of what used to be this function's early
+    ``if not md or "![" not in md: return md`` return, under which such an
+    entry vanished with no marker whatsoever.
 
     The marker is text the embedder sees, so a query for "Table 6" lands on
     the chunk that says the values are absent instead of on nothing.
     """
-    if not md or "![" not in md:
+    if not md and not content_list:
         return md
     by_path: dict[str, dict] = {}
     for entry in content_list:
@@ -550,20 +612,55 @@ def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
             by_path[img_path] = entry
             by_path[img_path.rsplit("/", 1)[-1]] = entry
 
+    matched_paths: set[str] = set()
+
     def _repl(m: re.Match) -> str:
         ref = m.group(1)
         entry = by_path.get(ref) or by_path.get(ref.rsplit("/", 1)[-1])
         if entry is None:
-            return "[image not indexed as text]"
-        match entry.get("type"):
-            case "table":
-                return f"[{_visual_label(entry, 'Table')} not extracted as text; values not indexed]"
-            case "image":
-                return f"[{_visual_label(entry, 'Figure')} is an image; not indexed as text]"
-            case _:
-                return "[image not indexed as text]"
+            return _generic_visual_marker(_caption_label_after(md, m.end()))
+        matched_paths.add(entry.get("img_path", ""))
+        return _marker_for_entry(entry)
 
-    return _MD_IMAGE_REF_RE.sub(_repl, md)
+    out = _MD_IMAGE_REF_RE.sub(_repl, md) if md and "![" in md else (md or "")
+
+    trailing: list[str] = []
+    seen: set[str] = set()
+    for entry in content_list:
+        img_path = entry.get("img_path")
+        if not img_path or img_path in matched_paths or img_path in seen:
+            continue
+        if entry.get("type") == "table" and entry.get("table_body"):
+            # Already extracted as HTML -- by design carries no "![...]"
+            # reference anywhere (this function's own docstring), so its
+            # absence from md is the expected shape, not an orphan.
+            continue
+        seen.add(img_path)
+        trailing.append(_marker_for_entry(entry))
+    if trailing:
+        out = f"{out}\n\n" + "\n\n".join(trailing) if out else "\n\n".join(trailing)
+    return out
+
+
+def _mark_unextracted_visuals_docling(md: str) -> str:
+    """The docling sibling of :func:`_mark_unextracted_visuals` (nexus-9zly6
+    GAP 2): ``_extract_with_docling`` never called any marker pass at all,
+    so a docling-extracted PDF's figures vanished with no signal, unlike
+    the MinerU path.
+
+    Docling emits no MinerU-shaped content_list, so there is no structured
+    lookup to try first -- every placeholder goes straight to the same
+    caption-derivation :func:`_caption_label_after` uses for a MinerU
+    reference the content_list lookup missed, sharing that helper rather
+    than duplicating the caption-line regex.
+    """
+    if not md or not _DOCLING_IMAGE_PLACEHOLDER_RE.search(md):
+        return md
+
+    def _repl(m: re.Match) -> str:
+        return _generic_visual_marker(_caption_label_after(md, m.end()))
+
+    return _DOCLING_IMAGE_PLACEHOLDER_RE.sub(_repl, md)
 
 
 _TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.S)
@@ -1389,6 +1486,11 @@ class PDFExtractor:
 
         for p in range(1, page_count + 1):
             page_md = doc.export_to_markdown(page_no=p).strip()
+            # nexus-9zly6: mark unextracted figures HERE, before lengths are
+            # measured below -- page_boundaries / current_pos must describe
+            # the text actually stored, the same ordering rationale
+            # _extract_with_mineru's own marker call follows.
+            page_md = _mark_unextracted_visuals_docling(page_md)
             if page_md:
                 page_boundaries.append(
                     {

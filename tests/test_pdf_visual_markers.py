@@ -79,6 +79,47 @@ class TestMarkUnextractedVisuals:
         assert "![" not in out
         assert out.count("not indexed as text") == 2
 
+    def test_reference_with_no_content_list_entry_but_a_figure_caption_is_labelled(self) -> None:
+        """nexus-9zly6 GAP 1: when the content_list lookup misses, derive
+        the label from the caption line immediately under the image
+        reference in the markdown itself, so the marker reads like the
+        labelled branch instead of the bare generic one."""
+        md = f"{_REF}  \nFig. 2. A chart of per-method average ranks.\n"
+        out = _mark_unextracted_visuals(md, [])
+        assert out == "[Fig. 2 is an image; not indexed as text]  \nFig. 2. A chart of per-method average ranks.\n"
+
+    def test_reference_with_no_content_list_entry_but_a_table_caption_is_labelled(self) -> None:
+        md = f"{_REF}  \nTable 9. Per-method average ranks.\n"
+        out = _mark_unextracted_visuals(md, [])
+        assert "[Table 9 not extracted as text; values not indexed]" in out
+        assert "[image not indexed as text]" not in out
+
+    def test_reference_with_no_content_list_entry_and_no_caption_still_gets_generic_marker(self) -> None:
+        """The existing (unlabelled) behaviour must survive when there is
+        genuinely no caption to derive a label from."""
+        out = _mark_unextracted_visuals(f"a\n{_REF}\nb", [])
+        assert out == "a\n[image not indexed as text]\nb"
+
+    def test_content_list_entry_with_no_markdown_reference_still_gets_a_marker(self) -> None:
+        """nexus-9zly6: covers the 'if not md or \"![\" not in md: return
+        md' early return. MinerU's content_list and its page markdown are
+        two independently produced outputs; content_list can name a visual
+        with NO corresponding '![...]' placeholder anywhere in the page's
+        markdown at all. That used to be a silent, unmarked hole -- worse
+        than the generic marker, since there was not even a bracketed gap
+        to query against."""
+        md = "Plain prose with no image reference at all."
+        out = _mark_unextracted_visuals(md, [_image_entry()])
+        assert "![" not in out
+        assert "[Figure 5 is an image; not indexed as text]" in out
+        assert out.startswith("Plain prose with no image reference at all.")
+
+    def test_content_list_entry_referenced_in_md_is_not_also_appended_as_an_orphan(self) -> None:
+        """Non-vacuity for the orphan-marker pass above: an entry that DID
+        match a reference must not ALSO get a trailing duplicate marker."""
+        out = _mark_unextracted_visuals(_REF, [_image_entry()])
+        assert out.count("not indexed as text") == 1
+
 
 class TestVisualLabel:
     def test_table_arabic(self) -> None:
@@ -102,6 +143,57 @@ def _one_page_pdf_ctx(pages: int = 1) -> MagicMock:
     ctx.__enter__.return_value = doc
     ctx.__exit__.return_value = False
     return ctx
+
+
+def _make_mock_docling(pages: list[str]):
+    mock_doc = MagicMock()
+    mock_doc.num_pages.return_value = len(pages)
+    mock_doc.export_to_markdown.side_effect = pages
+    mock_doc.iterate_items.return_value = iter([])
+    mock_result = MagicMock()
+    mock_result.document = mock_doc
+    mock_converter = MagicMock()
+    mock_converter.convert.return_value = mock_result
+    return mock_converter, mock_doc
+
+
+class TestDoclingExtractionMarksUnextractedFigures:
+    """nexus-9zly6 GAP 2: ``_extract_with_docling`` never called the marker
+    pass at all, so a docling-extracted PDF's figures vanished with no
+    signal, unlike the MinerU path. Docling has no MinerU content_list, and
+    its own documented image placeholder is ``<!-- image -->``
+    (docling_core.types.doc.document's ``export_to_markdown(... ,
+    image_placeholder="<!-- image -->")`` default), not MinerU's
+    ``![](images/<sha>.jpg)`` -- a different shape, mocked here the same
+    way every other docling test in this suite mocks
+    ``doc.export_to_markdown`` rather than booting the real model.
+    """
+
+    def test_docling_page_with_an_image_placeholder_and_caption_is_labelled(self, tmp_path) -> None:
+        page_md = "Prose before.\n\n<!-- image -->\n\nFig. 7. A labelled chart.\n\nProse after."
+        mock_converter, _ = _make_mock_docling([page_md])
+        ext = PDFExtractor()
+        ext._converter_enriched = mock_converter
+
+        with patch.object(ext, "_extract_title", return_value=""):
+            result = ext._extract_with_docling(tmp_path / "doc.pdf")
+
+        assert "<!-- image -->" not in result.text
+        assert "[Fig. 7 is an image; not indexed as text]" in result.text
+        assert "Prose before." in result.text
+        assert "Prose after." in result.text
+
+    def test_docling_page_with_an_image_placeholder_and_no_caption_gets_generic_marker(self, tmp_path) -> None:
+        page_md = "Prose.\n\n<!-- image -->\n\nNo caption follows."
+        mock_converter, _ = _make_mock_docling([page_md])
+        ext = PDFExtractor()
+        ext._converter_enriched = mock_converter
+
+        with patch.object(ext, "_extract_title", return_value=""):
+            result = ext._extract_with_docling(tmp_path / "doc.pdf")
+
+        assert "<!-- image -->" not in result.text
+        assert "[image not indexed as text]" in result.text
 
 
 class TestMineruExtractionCarriesMarkersAndTableRegions:
