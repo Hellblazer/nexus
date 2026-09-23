@@ -85,9 +85,13 @@ replacement: a positive control over synthetic sources, including the
 near-misses that must NOT match.
 
 SCOPE EXCLUDES ``src/nexus/hooks/``, and this is temporary and deliberate.
-Those 24 sites are the ones that can hang a user's session rather than a
-CLI command they can interrupt, so they are the most valuable to convert
-and the first that should come into scope. They are excluded because
+Those 26 sites (counted 2026-09-23, across 15 files) are the ones that can
+hang a user's session rather than a CLI command they can interrupt, so they
+are the most valuable to convert and the first that should come into scope.
+The figure read "24" from this file's first version until nexus-t10nc
+counted it; :func:`test_hooks_exclusion_names_its_reason` now asserts the
+directory still HOLDS watched sites, so the exclusion cannot quietly
+outlive the thing it excludes. They are excluded because
 nexus-t9klx is moving hook entry points between modules as this lands, and
 a per-file ratchet over a directory being restructured reds on the
 restructuring rather than on a defect. ADDING THEM IS OWED once t9klx
@@ -591,11 +595,26 @@ def test_hooks_exclusion_names_its_reason() -> None:
     over the 24 most dangerous sites in the census.
     """
     if _HOOKS_EXCLUSION_IS_TEMPORARY:
-        assert (SRC_ROOT / _EXCLUDED_DIR).is_dir(), (
+        held_out = SRC_ROOT / _EXCLUDED_DIR
+        assert held_out.is_dir(), (
             f"{_EXCLUDED_DIR} is excluded from this lint but no longer exists; "
             "delete the exclusion"
         )
         assert _EXCLUDED_DIR_BEAD, "a temporary exclusion names the bead that ends it"
+        # The exclusion must still be excluding something. If hooks/ reaches
+        # zero on its own, the honest move is to bring it into scope, not to
+        # leave a deferral standing over an empty directory -- and nobody
+        # would notice, because an exclusion never reports what it skipped.
+        sites = sum(
+            len(_capture_with_timeout_calls(f.read_text()))
+            for f in held_out.rglob("*.py")
+            if "__pycache__" not in f.parts
+        )
+        assert sites > 0, (
+            f"{_EXCLUDED_DIR}/ no longer holds any capture+timeout call, so the "
+            f"exclusion is protecting nothing. Bring it into scope: flip "
+            f"_HOOKS_EXCLUSION_IS_TEMPORARY and drop it from _in_scope ({_EXCLUDED_DIR_BEAD})."
+        )
         return
     assert _in_scope(SRC_ROOT / _EXCLUDED_DIR / "__init__.py"), (
         "the hooks exclusion was declared permanent but the directory is still "
