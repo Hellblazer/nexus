@@ -401,6 +401,15 @@ def test_detector_recognises_the_shapes_it_claims_to() -> None:
 #: listed with what was determined by reading it, because the alternative
 #: is that the scan skips them in silence. Found by nexus-t10nc AFTER the
 #: drain reached zero, which is when a funnel stops being invisible.
+#:
+#: This map shrank once already, and by its own guard rather than by
+#: anyone remembering: ``db/pg_provision.py`` was listed here as
+#: "unbounded, a different defect", nexus-9dkxu then bounded it a few
+#: hours later, and the stale-entry assertion in
+#: :func:`test_kwargs_funnels_are_named_not_silently_skipped` failed the
+#: lint bucket until the entry was deleted. That is the behaviour to
+#: preserve if this map is ever refactored -- an exemption that outlives
+#: its reason is how a real funnel gets waved through later.
 _KWARGS_FUNNELS: dict[str, str] = {
     "src/nexus/daemon/installer.py": (
         "_run_manager: the timed branch routes to run_bounded, so the two "
@@ -408,11 +417,6 @@ _KWARGS_FUNNELS: dict[str, str] = {
         "The stock call that remains is the branch taken when a caller "
         "passes NO timeout -- unbounded, a different defect, left for a "
         "bead with a measured bound."
-    ),
-    "src/nexus/db/pg_provision.py": (
-        "_run: sets capture_output but NEVER a timeout, so it is not the "
-        "watched shape. It is unbounded instead -- a worse defect, and a "
-        "different one. Bounding initdb/pg_ctl needs a measured number."
     ),
 }
 
