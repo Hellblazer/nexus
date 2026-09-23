@@ -20,6 +20,7 @@ The package on PyPI is `conexus`. The command it installs is `nx`. The full inst
 | About 600 MB, a few minutes | The first run downloads the service program, a database, and the search model. | |
 | Apple Silicon Mac, or Linux on x86-64 or arm64 | Nexus ships its own PostgreSQL and never uses one you installed. The bundle exists for these three only, so an Intel Mac or Windows cannot run a local install: setup stops with an error rather than falling back. | `uname -sm` |
 | No GPU | Search runs a bundled CPU model. On Linux the installer pins torch to its CPU build, since the default wheel pulls ~4.5 GB of CUDA packages nothing here uses; `NX_TORCH_BACKEND` opts a GPU box back in. | |
+| About 1.2 GB idle, up to about 4.5 GB while indexing | The bundled PostgreSQL is light; the engine process (embedding + reranking model) holds the rest. Measured on an Apple Silicon Mac indexing this repo (~2,500 files, `nx index repo`). | |
 
 ## Install
 
