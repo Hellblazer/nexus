@@ -56,7 +56,7 @@ Other candidates fail the 1-to-1 test: plan→bead matching is asymmetric; chash
 
 The paper's six signals are: label similarity (Jaro-Winkler + token Jaccard), property overlap, parent overlap, instance overlap, semantic embedding, structural embedding. Signals 2–4 are ontology-specific.
 
-Nexus's reranker (`src/nexus/search_engine.py`) uses: vector distance, catalog prefilter (`:303`), topic boost (`:628`), salience boost (`:646`). Different signal classes for a different domain, but the same multi-signal pattern.
+Nexus's reranker (`src/nexus/search_engine.py`) uses: vector distance, catalog prefilter (`:303`), topic boost (`:628`). (A salience boost also lived here through nexus-0hqez, 2026-09-23 — retired: it never took effect in production, both because its composition was overwritten downstream and because nothing ever populated the aspect data it read.) Different signal classes for a different domain, but the same multi-signal pattern.
 
 The **operational lesson from the paper's weight-irrelevance result** is: don't spend engineering effort on reranker weight tuning. Spend it on signal diversity. The sibling Beyond Similarity Search finding agrees on this point from a different angle.
 

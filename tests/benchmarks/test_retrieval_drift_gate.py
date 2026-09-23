@@ -31,8 +31,8 @@ SCOPE (nexus-j46lz, corrected 2026-08-19 — this paragraph used to overclaim):
 it calls ``HttpVectorClient.search`` directly, the same rank ``VectorHandler``
 in the Java service returns before any Python client code runs. It is a real
 gate on the ENGINE's ranking, but it is blind to every CLIENT-side
-re-weighter: ``apply_link_boost``, topic grouping, Ward clustering, the
-topic boost, and the salience boost all run in ``search_engine.py`` on top
+re-weighter: ``apply_link_boost``, topic grouping, Ward clustering, and the
+topic boost all run in ``search_engine.py`` on top
 of what this leg observes, so a regression confined to one of them (e.g.
 nexus-ekn9n: the topic boost totally dead in service mode since the aqbrk
 flip, unnoticed for however long) is invisible here in EITHER direction —
@@ -509,8 +509,8 @@ def test_ndcg_drift_gate_boost_layer(seeded_client, topics_seeded, _service_env)
     assert abs(mean - pinned) <= _BAND, (
         f"BOOST-LAYER RETRIEVAL DRIFT: mean NDCG@3={mean} vs pinned {pinned} "
         f"(|Δ|={abs(mean - pinned):.4f} > band {_BAND}). This leg includes "
-        "apply_link_boost, topic grouping, the topic boost, and the salience "
-        "boost on top of the raw-layer gate above — diagnose which one "
+        "apply_link_boost, topic grouping, and the topic boost on top of "
+        "the raw-layer gate above — diagnose which one "
         "moved, then re-pin deliberately (NX_NDCG_PIN=1) with the cause in "
         "the commit. Worst queries: "
         + ", ".join(

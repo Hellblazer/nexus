@@ -3406,13 +3406,18 @@ def _collect_quota_report() -> dict:
 
     # RDR-188 (nexus-9o6y2.9): reranking runs SERVER-side — the engine scores
     # with Voyage rerank-2.5 (server key) or its ms-marco cross-encoder. The
-    # client substrate check survives only for the salience consumer
-    # (RDR-109 P4; disposition finalized in bead nexus-9o6y2.19).
+    # client substrate check survived the rerank caller's retirement only
+    # for the salience consumer (RDR-109 P4; disposition finalized in bead
+    # nexus-9o6y2.19) — and that consumer is now ALSO retired
+    # (nexus-0hqez, 2026-09-23: the boost's composition bug plus a missing
+    # extraction write-side meant it had never taken effect in production).
+    # No client code calls this substrate any more; the check stays as a
+    # plain availability diagnostic.
     from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
         "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder, RDR-188)",
-        "client_role": "salience-only (nexus.salience; rerank caller retired, nexus-9o6y2.19)",
+        "client_role": "none (rerank caller retired nexus-9o6y2.19; salience caller retired nexus-0hqez)",
         "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
 

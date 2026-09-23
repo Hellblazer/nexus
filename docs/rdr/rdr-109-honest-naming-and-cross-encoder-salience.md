@@ -389,6 +389,75 @@ Caveats:
   docs-1-4 384, rdr-1-2 130) for tractable salience-cache build.
   Larger corpora may exhibit different reordering windows.
 
+## Phase 5 retirement (2026-09-23, nexus-0hqez)
+
+Phase 5's shipped boost never took effect in production, on two
+independent, compounding defects — neither visible from the Phase 4b
+measurement above, because that measurement never exercised the shipped
+wiring (see below):
+
+1. **Composition bug.** `_apply_salience_boost` (`search_engine.py`)
+   ran inside `search_cross_corpus` and wrote `r.hybrid_score = old +
+   boost`. `apply_hybrid_scoring` (`scoring.py`), called from
+   `apply_ranking_boosts` by every consumer (`mcp/core.py`'s
+   `search`/`query` tools, `nx search`) AFTER `search_cross_corpus`
+   returns, unconditionally ASSIGNS `r.hybrid_score` on both its
+   branches — discarding whatever the salience boost had written. This
+   is the exact same failure shape `SearchResult.topic_boost`'s own
+   docstring (`types.py`) already documents and fixed once for the
+   topic boost, by holding that boost's credit in a separate field
+   applied downstream instead of writing straight into `hybrid_score`
+   early; the salience boost was added later and did not follow that
+   pattern.
+2. **No extraction write side.** The `attention-guided-v1` extractor
+   this Phase names was never added to `aspect_extractor.py` /
+   `aspect_worker.py` — the live document-grain aspect-extraction
+   pipeline never calls `extract_salient_sentences` and never
+   populates `document_aspects.salient_sentences` for any document.
+   Measured 2026-09-23: 0 of 89 probed documents in a live
+   `docs__1-4__voyage-context-3__v1` sample carried any salient
+   sentences at all.
+
+Measured live, read-only, against production (`docs__1-4__voyage-
+context-3__v1`, the SAME corpus the Phase 4b table above used, same
+384-doc count): flag-on (the shipped, buggy composition) and flag-off
+are indistinguishable (28/35 hit@5, 0/35 order diffs on
+`data/calibration/rdr-109/qa_docs.jsonl`) — confirming defect 1 by
+measurement, not just by reading the code. A hand-patched fix that
+composes the boost correctly (additive, after `apply_ranking_boosts`,
+mirroring `apply_quality_boost`'s own `+=` pattern) is ALSO
+indistinguishable from flag-off (0/35 order diffs) — because of defect
+2: there is no salience data for the fixed composition to boost with.
+
+**Bearing on the Phase 4b table above**: those numbers came from
+`scripts/rdr-109-calibrate.py`, a standalone harness that reimplements
+its own boost application (`base_score + boost`, correctly additive)
+against `scripts/rdr_109_salience.py`'s prototype `token_overlap_boost`
+and a locally-built salience cache — it never calls
+`_apply_salience_boost`, `apply_ranking_boosts`, or
+`HttpDocumentAspectsStore` at all. The Phase 4b table is therefore
+evidence for the boost mechanism's MATH in isolation, not for the
+shipped, wired feature; it was never capable of catching either
+defect above.
+
+**Disposition**: retire rather than fix. Fixing defect 1 alone ships a
+correctly-composed boost that is still fully inert without defect 2's
+much larger scope (a new document-grain aspect-worker consumer this
+Phase never built and whose design was never revisited after Phase
+4b). Removed: the `attention_guided_v1` config flag and its
+`.nexus.yml` schema entry, `_apply_salience_boost` and its call site
+in `search_cross_corpus`, and the `nexus.salience` module
+(`extract_salient_sentences` / `token_overlap_boost`) plus its two
+dedicated test files — nothing else in `src/nexus` called either
+function. `src/nexus/cross_encoder.py` (the ONNX substrate
+`extract_salient_sentences` used) is left in place: its disposition,
+now that it has no live production consumer at all, is a separate
+decision this retirement does not make. The calibration tooling
+(`scripts/rdr-109-calibrate.py`, `scripts/rdr_109_salience.py`,
+`data/calibration/rdr-109/`) and this RDR's own history above are left
+untouched as the record of what was measured and why it was not
+sufficient.
+
 ## References
 
 - nexus-59vl + GH #667: bug + 3 fix options.

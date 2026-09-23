@@ -1,20 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Local cross-encoder substrate — SALIENCE-ONLY since RDR-188.
+"""Local cross-encoder substrate — NO LIVE PRODUCTION CONSUMER since
+nexus-0hqez (2026-09-23).
 
 Provides ``LocalCrossEncoder`` — an ONNX-runtime cross-encoder for
-(query, document) salience scoring without PyTorch.
+(query, document) scoring without PyTorch.
 
 DESIGN DECISION (RDR-188 P2.6, bead nexus-9o6y2.19 — recorded so a future
 reader knows this file survived on purpose): the RDR's "client
 cross_encoder.py retires with it" shorthand applied to the RERANK
-consumer only. This module's sole surviving consumer is
-:mod:`nexus.salience` (``extract_salient_sentences``, RDR-109 Phase 4) —
-a genuine NON-rerank use. The rerank caller (``scoring.rerank_results``
-/ ``_rerank_local``) is DELETED: local-mode reranking now runs
-SERVER-side in the engine's ms-marco cross-encoder (RDR-188 P1.3),
-requested via ``rerank=true`` on the search request. Do not re-grow a
-client rerank path on this substrate; migrate salience if this module
-ever becomes a burden.
+consumer only. The rerank caller (``scoring.rerank_results`` /
+``_rerank_local``) is DELETED: local-mode reranking now runs SERVER-side
+in the engine's ms-marco cross-encoder (RDR-188 P1.3), requested via
+``rerank=true`` on the search request. This module's other surviving
+consumer at the time, :mod:`nexus.salience` (``extract_salient_sentences``,
+RDR-109 Phase 4/5, the attention-guided-v1 salience boost), was itself
+retired at nexus-0hqez: the boost's write side (populating
+``document_aspects.salient_sentences``) was never wired into the live
+aspect-extraction pipeline, so the read side it fed could never have
+taken effect in production regardless of the composition bug that
+prompted the retirement. ``nx doctor``'s quota report still surfaces
+this module's availability (``cross_encoder_available``) as a
+diagnostic; nothing in ``src/nexus`` calls ``get_local_cross_encoder``
+any more (only ``scripts/rdr_109_salience.py``, the retired calibration
+prototype). Left in place rather than deleted — that disposition is a
+separate decision this bead did not name.
 
 Stack:
 
