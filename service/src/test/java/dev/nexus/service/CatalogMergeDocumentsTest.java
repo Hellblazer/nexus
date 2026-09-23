@@ -16,6 +16,8 @@ import java.sql.Connection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
@@ -414,5 +416,207 @@ class CatalogMergeDocumentsTest {
                     "ALTER TABLE nexus.catalog_links DROP CONSTRAINT ck_merge_link_test_poison");
             }
         }
+    }
+
+    // ── scale (round 2: set-based remapLinksForMerge) ─────────────────────
+
+    @Test
+    void merge_fiveHundredLinks_setBasedRemapStaysCorrect() throws Exception {
+        // A regression to the old per-row loop would still PASS the small
+        // fixtures above -- this exists so it can't hide behind them. 500
+        // touching rows, all three outcomes represented at volume: 200 plain
+        // renames (100 FROM-side, 100 TO-side), 80 collapses (canonical
+        // already holds the matching edge), and 20 self-link drops (20
+        // DISTINCT types between duplicate and canonical, each its own row
+        // under the (tenant, from, to, type) key).
+        String duplicate = register(TENANT_A, "50", "dup", "file:///d50/a.md", "a.md");
+        String canonical = register(TENANT_A, "50", "canonical", null, "b.md");
+
+        String[] fromTargets = new String[100];
+        for (int i = 0; i < 100; i++) {
+            fromTargets[i] = register(TENANT_A, "50", "from-target-" + i, null, "from-" + i + ".md");
+            link(TENANT_A, duplicate, fromTargets[i], "cites", "agent-scale");
+        }
+        String[] toTargets = new String[100];
+        for (int i = 0; i < 100; i++) {
+            toTargets[i] = register(TENANT_A, "50", "to-target-" + i, null, "to-" + i + ".md");
+            link(TENANT_A, toTargets[i], duplicate, "cites", "agent-scale");
+        }
+        String[] collapseTargets = new String[80];
+        for (int i = 0; i < 80; i++) {
+            collapseTargets[i] = register(TENANT_A, "50", "collapse-target-" + i, null, "collapse-" + i + ".md");
+            link(TENANT_A, canonical, collapseTargets[i], "relates", "agent-canonical-" + i);
+            link(TENANT_A, duplicate, collapseTargets[i], "relates", "agent-duplicate-" + i);
+        }
+        for (int i = 0; i < 20; i++) {
+            link(TENANT_A, duplicate, canonical, "self-type-" + i, "agent-self");
+        }
+
+        var result = repo.mergeDocuments(TENANT_A, duplicate, canonical);
+        assertThat(result.get("links_remapped")).isEqualTo(200);
+        assertThat(result.get("links_collapsed")).isEqualTo(80);
+        assertThat(result.get("links_dropped")).isEqualTo(20);
+
+        // Spot-check across the range, not just the first/last -- a
+        // regression to per-row processing that silently drops middle rows
+        // (e.g. a batch-size bug) would still pass a boundary-only check.
+        for (int i : new int[]{0, 1, 49, 50, 98, 99}) {
+            assertThat(getLink(TENANT_A, canonical, fromTargets[i], "cites"))
+                .as("FROM-side remap #" + i).isPresent();
+            assertThat(getLink(TENANT_A, toTargets[i], canonical, "cites"))
+                .as("TO-side remap #" + i).isPresent();
+        }
+        for (int i : new int[]{0, 1, 39, 40, 78, 79}) {
+            var survivor = getLink(TENANT_A, canonical, collapseTargets[i], "relates");
+            assertThat(survivor).as("collapse #" + i).isPresent();
+            assertThat(survivor.get().get("created_by"))
+                .as("collapse #" + i + " keeps the canonical's original creator")
+                .isEqualTo("agent-canonical-" + i);
+            assertThat(String.valueOf(survivor.get().get("metadata")))
+                .as("collapse #" + i + " folds the duplicate's creator into co_discovered_by")
+                .contains("agent-duplicate-" + i);
+        }
+        assertThat(countLinksTouching(TENANT_A, duplicate))
+            .as("nothing touches the duplicate any more").isZero();
+    }
+
+    // ── concurrency (round 3: code review 2026-09-23) ──────────────────────
+
+    /** Release two threads at the same instant: each counts down *ready*
+     *  then blocks on *go*, so both are parked at the starting line before
+     *  either proceeds -- true race timing rather than a head start for
+     *  whichever thread's Thread.start() happened to run first. */
+    private static void runConcurrently(Runnable a, Runnable b) throws InterruptedException {
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+        Thread t1 = new Thread(() -> {
+            ready.countDown();
+            try {
+                go.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            a.run();
+        });
+        Thread t2 = new Thread(() -> {
+            ready.countDown();
+            try {
+                go.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            b.run();
+        });
+        t1.start();
+        t2.start();
+        ready.await();
+        go.countDown();
+        t1.join(30_000);
+        t2.join(30_000);
+    }
+
+    @Test
+    void merge_concurrentMergesOfSameDuplicate_exactlyOneWinsNoLostUpdate() throws Exception {
+        // nexus-z4rpi round 3 (code review 2026-09-23): mergeDocuments takes
+        // no row lock, so two concurrent merges of the SAME duplicate into
+        // DIFFERENT canonicals could both validate against a pre-merge
+        // snapshot under READ COMMITTED and silently lose one's update.
+        // lockDocumentRowsSorted (FOR UPDATE, sorted-tumbler order) closes
+        // this: whichever call acquires the duplicate's lock first runs to
+        // completion; the other blocks until that commit, re-reads
+        // POST-commit state, and refuses cleanly (already-aliased-
+        // elsewhere) instead of corrupting or silently losing anything.
+        String duplicate = register(TENANT_A, "51", "dup", "file:///d51/a.md", "a.md");
+        String canonicalA = register(TENANT_A, "51", "canonical-a", null, "b.md");
+        String canonicalB = register(TENANT_A, "51", "canonical-b", null, "c.md");
+
+        AtomicReference<Object> resultA = new AtomicReference<>();
+        AtomicReference<Object> resultB = new AtomicReference<>();
+        runConcurrently(
+            () -> {
+                try {
+                    resultA.set(repo.mergeDocuments(TENANT_A, duplicate, canonicalA));
+                } catch (Exception e) {
+                    resultA.set(e);
+                }
+            },
+            () -> {
+                try {
+                    resultB.set(repo.mergeDocuments(TENANT_A, duplicate, canonicalB));
+                } catch (Exception e) {
+                    resultB.set(e);
+                }
+            }
+        );
+
+        boolean aSucceeded = resultA.get() instanceof Map;
+        boolean bSucceeded = resultB.get() instanceof Map;
+        assertThat(aSucceeded ^ bSucceeded)
+            .as("exactly one merge must succeed, the other must cleanly refuse: a=%s b=%s",
+                resultA.get(), resultB.get())
+            .isTrue();
+
+        Object failure = aSucceeded ? resultB.get() : resultA.get();
+        assertThat(failure).isInstanceOf(CatalogRepository.MergeRefused.class);
+        assertThat(((Exception) failure).getMessage()).contains("already aliased to");
+
+        // The persisted state matches the WINNER outright -- not a blend,
+        // not a value from neither call (the lost-update shape this test
+        // exists to rule out).
+        String winnerCanonical = aSucceeded ? canonicalA : canonicalB;
+        var dupRow = readRow(TENANT_A, duplicate);
+        assertThat(dupRow.get("alias_of")).isEqualTo(winnerCanonical);
+    }
+
+    @Test
+    void merge_linkUpsertRacingAMerge_linkEndsUpOnCanonical() throws Exception {
+        // nexus-z4rpi round 3 (code review 2026-09-23): remapLinksForMerge
+        // is a one-time snapshot, so a concurrent upsertLink creating a link
+        // TO the duplicate mid-merge could survive unremapped. upsertLink
+        // now locks both endpoints FOR KEY SHARE (the SAME sorted-tumbler
+        // order mergeDocuments locks FOR UPDATE, so the two serialize) and
+        // resolves aliases via resolveAliasTarget AFTER the lock -- so
+        // whichever call wins the race, the link ends up on the canonical:
+        // if the merge commits first, the link write resolves through the
+        // now-live alias directly; if the link write commits first, the
+        // merge's own remapLinksForMerge read sees it (same transaction,
+        // READ COMMITTED) and remaps it in the same pass.
+        String duplicate = register(TENANT_A, "52", "dup", "file:///d52/a.md", "a.md");
+        String canonical = register(TENANT_A, "52", "canonical", null, "b.md");
+        String other = register(TENANT_A, "52", "other", null, "c.md");
+
+        AtomicReference<Object> mergeResult = new AtomicReference<>();
+        AtomicReference<Object> linkResult = new AtomicReference<>();
+        runConcurrently(
+            () -> {
+                try {
+                    mergeResult.set(repo.mergeDocuments(TENANT_A, duplicate, canonical));
+                } catch (Exception e) {
+                    mergeResult.set(e);
+                }
+            },
+            () -> {
+                try {
+                    var lnk = new LinkedHashMap<String, Object>();
+                    lnk.put("from_tumbler", duplicate);
+                    lnk.put("to_tumbler", other);
+                    lnk.put("link_type", "cites");
+                    lnk.put("created_by", "race-agent");
+                    linkResult.set(repo.upsertLink(TENANT_A, lnk));
+                } catch (Exception e) {
+                    linkResult.set(e);
+                }
+            }
+        );
+
+        assertThat(mergeResult.get()).as("merge must succeed: %s", mergeResult.get()).isInstanceOf(Map.class);
+        assertThat(linkResult.get()).as("link upsert must succeed: %s", linkResult.get()).isInstanceOf(Boolean.class);
+
+        assertThat(getLink(TENANT_A, canonical, other, "cites"))
+            .as("the link resolves to the canonical, whichever call won the race").isPresent();
+        assertThat(getLink(TENANT_A, duplicate, other, "cites"))
+            .as("the link must never survive pointing at the duplicate").isEmpty();
     }
 }
