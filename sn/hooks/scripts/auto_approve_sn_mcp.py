@@ -28,6 +28,20 @@ subagent is the shared primary checkout; three incidents wrote there while
 the tool reported success. Detection and the write-tool set live in
 worktree_guard.py, shared with subagent_start.py.
 
+Relocated-session guard (nexus-ebx0s): the check above only catches a call
+whose OWN cwd sits inside a linked worktree. It does not catch a session
+that RELOCATED into a worktree by absolute path without its cwd ever
+actually moving there (the Bash tool resets cwd to the primary after every
+call) -- from cwd alone that call is indistinguishable from a session doing
+legitimate primary work, since both have cwd == the primary. When the
+worktree check does not fire, a second check compares this call's cwd
+against the git working-tree root ``session_start.py`` recorded for this
+session_id at ``startup`` (``worktree_guard.relocated_write_root``); a
+mismatch denies too, regardless of whether either side is a linked
+worktree. Fails OPEN (allows, and logs to stderr) whenever no session_id,
+no recorded root, or an unresolvable cwd makes the comparison itself
+impossible -- see that function's docstring.
+
 Stdlib only: hooks run under system python with no conexus installed.
 """
 from __future__ import annotations
@@ -48,7 +62,14 @@ import _hook_boundary  # noqa: E402 — bundled sibling, resolved by the path in
 # prompts for manual approval, which is noisy and safe; degrading means the
 # guard is silently off, which is quiet and not. Do not "make this consistent"
 # with its sibling — the asymmetry is the decision.
-from worktree_guard import cwd_from_payload, deny_reason, is_linked_worktree, is_serena_write_tool  # noqa: E402
+from worktree_guard import (  # noqa: E402
+    cwd_from_payload,
+    deny_reason,
+    deny_reason_relocated,
+    is_linked_worktree,
+    is_serena_write_tool,
+    relocated_write_root,
+)
 
 CONTEXT7_TOOLS = frozenset({
     "mcp__plugin_sn_context7__resolve-library-id",
@@ -82,8 +103,16 @@ def decide(payload: str, snapshot: pathlib.Path) -> str:
     event = data.get("hook_event_name", "PermissionRequest")
     if is_serena_write_tool(tool_name):
         cwd = cwd_from_payload(payload)
+        reason = None
         if is_linked_worktree(cwd):
             reason = deny_reason(tool_name, cwd)
+        else:
+            session_id = data.get("session_id", "")
+            session_id = session_id if isinstance(session_id, str) else ""
+            recorded = relocated_write_root(cwd, session_id)
+            if recorded is not None:
+                reason = deny_reason_relocated(tool_name, cwd, recorded)
+        if reason is not None:
             if event == "PreToolUse":
                 out = {
                     "hookEventName": "PreToolUse",

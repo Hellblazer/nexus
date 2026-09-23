@@ -16,12 +16,37 @@ made by ``git worktree add``) has a ``.git`` FILE holding ``gitdir: <path>``
 that points under some other repository's ``.git/worktrees/``; the primary
 checkout has a ``.git`` DIRECTORY. That distinction is the whole test.
 
+``is_linked_worktree`` only catches a call whose OWN cwd sits inside a
+linked worktree -- exactly the shape a worktree-dispatched subagent has for
+its whole life. It does not catch a RELOCATED session (nexus-ebx0s): one
+whose cwd stays in the primary throughout (the Bash tool resets cwd to the
+primary after every call, so `cd`-ing into a worktree path does not stick),
+while Serena's server is rooted wherever THAT session's cwd was when it
+started. From cwd alone the two are indistinguishable -- a call from the
+primary asking to write to the primary looks legitimate either way.
+
+``git_toplevel``/``record_startup_root``/``read_recorded_root``/
+``relocated_write_root`` close that gap from the other side: ``session_start.py``
+records, per session_id, the git working-tree root of the session's cwd at
+``startup`` (only ``startup`` -- see ``record_startup_root``'s docstring for
+why the other three SessionStart sources do not write here). A later
+PreToolUse write call compares ITS OWN cwd's working-tree root against that
+record; a mismatch means the write would land somewhere the session's
+current cwd does not point at, regardless of whether that cwd happens to be
+a linked worktree or the primary. This is additive to ``is_linked_worktree``,
+never a replacement for it -- a session started inside a worktree records
+that worktree as its own root, so its writes there must keep working, and
+the pre-existing ``is_linked_worktree`` denial (unconditional on cwd alone)
+is unchanged by anything here.
+
 Stdlib only: hooks run under system python with no conexus installed.
 """
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import sys
 
 SERENA_PREFIX = "mcp__plugin_sn_serena__"
 
@@ -115,3 +140,147 @@ def deny_reason(tool_name: str, cwd: str) -> str:
         "shared primary checkout, not this worktree. Use Edit/Write/Bash with absolute paths under "
         "the worktree, and the built-in LSP tool for navigation. Serena read tools remain available."
     )
+
+
+def deny_reason_relocated(tool_name: str, cwd: str, recorded_root: str) -> str:
+    """Deny reason for a relocated session (nexus-ebx0s): cwd is not itself a linked
+    worktree, but it resolves to a different working tree than the one Serena's
+    server was rooted at when this session started."""
+    short = tool_name[len(SERENA_PREFIX):] if tool_name.startswith(SERENA_PREFIX) else tool_name
+    return (
+        f"sn worktree guard: {short} refused. This session's cwd ({cwd}) resolves to a different "
+        f"git working tree than the one Serena's MCP server was rooted at when this session started "
+        f"({recorded_root}). The write would land in {recorded_root}, not the tree this call's cwd "
+        "names -- Serena's own 'DRY RUN - no changes were applied' report cannot be trusted here "
+        "either (nexus-ebx0s). Use Edit/Write with absolute paths under the tree you intend instead."
+    )
+
+
+# ── Per-session Serena-root record (nexus-ebx0s) ─────────────────────────────
+
+
+def _state_dir() -> pathlib.Path:
+    """Where per-session Serena-root records live.
+
+    ``XDG_STATE_HOME`` when set -- the conventional home for this kind of
+    machine-local, non-config, non-cache record, and the override tests use
+    for isolation -- else ``~/.claude/sn``, since that directory already
+    exists on any box this plugin runs on and this state is Claude-Code-
+    session-shaped, not nexus-shaped: sn has no dependency on nexus's own
+    config directory.
+    """
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = pathlib.Path(xdg) if xdg else pathlib.Path.home() / ".claude"
+    return base / "sn"
+
+
+def _state_file() -> pathlib.Path:
+    return _state_dir() / "serena-roots.json"
+
+
+def git_toplevel(cwd: str | pathlib.Path) -> str | None:
+    """The working-tree root *cwd* belongs to, or None if it is not inside one.
+
+    Unlike ``is_linked_worktree``, this does not classify primary vs.
+    linked -- it names the root of whichever tree *cwd* is in, so two cwds
+    (or a cwd and a recorded root) can be compared for "same working tree"
+    regardless of which kind either one is.
+    """
+    if not cwd:
+        return None
+    here = pathlib.Path(cwd)
+    for candidate in (here, *here.parents):
+        if (candidate / ".git").exists():
+            try:
+                return str(candidate.resolve())
+            except OSError:
+                return str(candidate)
+    return None
+
+
+def record_startup_root(session_id: str, root: str) -> None:
+    """Record *root* (already resolved via ``git_toplevel``) as the Serena root
+    for *session_id*, called only on SessionStart's ``source == "startup"``.
+
+    Serena's server is rooted once, at spawn, from the session's startup cwd
+    (``--project-from-cwd``). Whether Claude Code restarts a session's MCP
+    servers on ``/resume``, ``/clear``, or ``/compact`` is NOT established
+    here (each of those fires SessionStart too, with a different ``source``
+    value) -- so only ``startup`` writes this record. Recording on a source
+    that does not actually respawn the server would silently move the
+    recorded root out from under a server that never moved, turning every
+    subsequent legitimate write in the ORIGINAL tree into a false denial.
+    A record that lags an actual respawn is the safer failure: it degrades
+    to "no mismatch detected" for whatever changed, which is exactly the
+    pre-existing gap this closes only partially, not a new false denial.
+
+    Read-modify-write, not a single-session overwrite: the state file holds
+    one row per session_id, and concurrent sessions on this box (see
+    AGENTS.md "one session, one worktree") must not clobber each other's
+    rows. Best-effort: a write failure costs the guard's precision for this
+    session (it fails open on the next mismatch check), never the session
+    itself -- so failures here are swallowed, not raised.
+    """
+    if not session_id or not root:
+        return
+    path = _state_file()
+    data: dict[str, str] = {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            data = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+    except (OSError, ValueError):
+        data = {}
+    data[session_id] = root
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        print(f"sn worktree guard: could not record Serena root for session {session_id}: {exc}",
+              file=sys.stderr)
+
+
+def read_recorded_root(session_id: str) -> str | None:
+    """The cwd recorded for *session_id* at its last ``startup``, or None."""
+    if not session_id:
+        return None
+    try:
+        data = json.loads(_state_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get(session_id)
+    return value if isinstance(value, str) else None
+
+
+def relocated_write_root(cwd: str, session_id: str) -> str | None:
+    """The recorded Serena root, when it names a DIFFERENT working tree than
+    *cwd*'s own; None when no mismatch is established.
+
+    Fails OPEN (returns None) whenever it cannot establish a mismatch with
+    confidence -- no session_id, no record for this session, or *cwd* itself
+    not inside a git working tree -- and logs each case to stderr, because
+    "nothing recorded" and "checked, and it matches" both return None here,
+    and a caller that only reads the return value cannot tell them apart
+    without the log line.
+    """
+    if not session_id:
+        print("sn worktree guard: no session_id on this call; cannot check for a relocated session",
+              file=sys.stderr)
+        return None
+    recorded = read_recorded_root(session_id)
+    if recorded is None:
+        print(f"sn worktree guard: no recorded Serena root for session {session_id}; allowing",
+              file=sys.stderr)
+        return None
+    current = git_toplevel(cwd)
+    if current is None:
+        print(f"sn worktree guard: cwd {cwd!r} is not inside a git working tree; allowing",
+              file=sys.stderr)
+        return None
+    if current == recorded:
+        return None
+    return recorded
