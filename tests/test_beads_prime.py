@@ -24,14 +24,20 @@ import pytest
 
 from nexus.beads_prime import (
     InstallOutcome,
+    ManageStatus,
     PrimeStatus,
     beads_detected,
     install,
     load_template,
     manage_enabled,
+    manage_status,
     status,
     user_prime_path,
 )
+
+#: Dummy config path for ManageStatus fixtures below that don't care
+#: which path was (would have been) read.
+_DUMMY_CONFIG_PATH = Path("/tmp/dummy-config-path/config.yml")
 
 
 # ── path resolution ──────────────────────────────────────────────────────────
@@ -381,7 +387,10 @@ class TestInstallAndDescribe:
     ) -> None:
         from nexus.beads_prime import install_and_describe
 
-        monkeypatch.setattr("nexus.beads_prime.manage_enabled", lambda: False)
+        monkeypatch.setattr(
+            "nexus.beads_prime.manage_status",
+            lambda: ManageStatus(enabled=False, config_path=_DUMMY_CONFIG_PATH),
+        )
         called: list[str] = []
         monkeypatch.setattr(
             "nexus.beads_prime.beads_detected", lambda **_kw: called.append("x") or (True, "x")
@@ -390,13 +399,44 @@ class TestInstallAndDescribe:
         assert message == "Beads PRIME.md: skipped (beads_prime.manage is set to false)"
         assert called == []
 
+    def test_manage_status_read_error_reports_the_real_cause(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-i4odo follow-up (T2 nexus/critique-wave2-2026-09-23): a
+        config-read FAILURE must never be reported as "beads_prime.manage
+        is set to false" -- that claims a decision the user never made.
+        install_and_describe must distinguish the two manage_status()
+        outcomes and name the real cause + path for the read-failure one."""
+        from nexus.beads_prime import install_and_describe
+
+        monkeypatch.setattr(
+            "nexus.beads_prime.manage_status",
+            lambda: ManageStatus(
+                enabled=False, config_path=_DUMMY_CONFIG_PATH, error="permission denied",
+            ),
+        )
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.beads_prime.beads_detected", lambda **_kw: called.append("x") or (True, "x")
+        )
+        message = install_and_describe()
+        assert message is not None
+        assert "beads_prime.manage is set to false" not in message
+        assert str(_DUMMY_CONFIG_PATH) in message
+        assert "permission denied" in message
+        assert "not managing beads priming until it's fixed" in message
+        assert called == []  # still short-circuits before detection
+
     def test_message_names_path_and_undo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from nexus.beads_prime import install_and_describe
 
         target = tmp_path / "PRIME.md"
-        monkeypatch.setattr("nexus.beads_prime.manage_enabled", lambda: True)
+        monkeypatch.setattr(
+            "nexus.beads_prime.manage_status",
+            lambda: ManageStatus(enabled=True, config_path=_DUMMY_CONFIG_PATH),
+        )
         monkeypatch.setattr(
             "nexus.beads_prime.beads_detected", lambda **_kw: (True, "test")
         )
@@ -412,7 +452,10 @@ class TestInstallAndDescribe:
     def test_not_detected_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from nexus.beads_prime import install_and_describe
 
-        monkeypatch.setattr("nexus.beads_prime.manage_enabled", lambda: True)
+        monkeypatch.setattr(
+            "nexus.beads_prime.manage_status",
+            lambda: ManageStatus(enabled=True, config_path=_DUMMY_CONFIG_PATH),
+        )
         monkeypatch.setattr(
             "nexus.beads_prime.beads_detected", lambda **_kw: (False, "not found")
         )
