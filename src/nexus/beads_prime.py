@@ -293,15 +293,36 @@ def manage_enabled() -> bool:
     """Whether the persisted opt-out (``nx config set beads_prime.manage
     false``) allows this module to detect/install at all.
 
-    Best-effort: any failure reading config is treated as "not declined"
-    (``True``) -- a config-read hiccup must never silently disable a
-    feature the user never explicitly opted out of.
+    Best-effort: any failure reading config is treated as DECLINED
+    (``False``) (nexus-i4odo).
+
+    This used to fail OPEN (``True``) on a read failure, reasoning that a
+    config-read hiccup must never silently disable a feature the user
+    never explicitly opted out of. That reasoning weighed the wrong side:
+    the two failure directions are not symmetric.
+
+    * Never declined, read fails, defaults False: this ONE invocation
+      skips an optional convenience install. Self-healing -- the very
+      next ``nx init``/``nx upgrade`` that CAN read config installs
+      normally. Nothing is lost or created.
+    * Explicitly declined, read fails, defaults True (the old behaviour):
+      :func:`install` sees an ABSENT file and WRITES a fresh
+      ``PRIME.md`` the user is on record not wanting -- a real,
+      persistent violation of a stated preference, not merely inert.
+      :func:`install`'s own "never overwrites a user-authored file"
+      guarantee bounds damage to EXISTING content; it does nothing for
+      the ABSENT case, where fail-open actively creates the very file
+      the decline exists to prevent.
+
+    Defaulting False makes the safe failure mode (skip, retry later) the
+    one a config-read glitch actually produces, and leaves the unsafe one
+    (install against a stated decline) unreachable by a mere read error.
     """
     try:
         from nexus.config import load_config  # noqa: PLC0415 — deferred, avoids CLI-cold-start cost
         value = load_config().get(_MANAGE_CONFIG_SECTION, {}).get(_MANAGE_CONFIG_KEY, True)
-    except Exception:  # noqa: BLE001 — best-effort: an unreadable config is not a decline
-        return True
+    except Exception:  # noqa: BLE001 — best-effort: an unreadable config fails CLOSED (declined)
+        return False
     return value is not False
 
 

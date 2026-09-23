@@ -344,14 +344,22 @@ class TestManageEnabled:
         )
         assert manage_enabled() is True
 
-    def test_config_read_failure_defaults_to_true(
+    def test_config_read_failure_defaults_to_false(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """nexus-i4odo: fails CLOSED (declined), not open. Failing open
+        meant a user who explicitly ran `nx config set beads_prime.manage
+        false` was opted back IN whenever config happened to be
+        unreadable -- and unlike overwriting existing user content
+        (which install() already guards), the ABSENT case has no such
+        guard: a config-read hiccup would install a fresh PRIME.md the
+        user is on record not wanting. Failing closed only ever costs a
+        skipped, self-healing install for a user who never declined."""
         def _boom():
             raise RuntimeError("config unreadable")
 
         monkeypatch.setattr("nexus.config.load_config", _boom)
-        assert manage_enabled() is True
+        assert manage_enabled() is False
 
 
 class TestInstallAndDescribe:
