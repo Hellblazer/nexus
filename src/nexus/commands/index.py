@@ -146,23 +146,36 @@ class _CatalogBackedRegistry:
                     # per registration by the seam) is a documented no-op
                     # on the shared service-catalog handle it wraps.
                     from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
+                        KNOWLEDGE_CORPUS_OPT_IN_MARKER,
                         effective_embedding_model_for_writes,
                         ensure_collection_registered,
                     )
+                    register_kwargs: dict[str, str] = {
+                        "content_type": ct,
+                        "owner_id": owner_id,
+                        "embedding_model": effective_embedding_model_for_writes(ct),
+                        # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
+                        # 'v1' matches parse_conformant_collection_name's
+                        # f'v{ver}' contract; '1' would trip the
+                        # idempotency check + spawn duplicate
+                        # CollectionCreated events.
+                        "model_version": "v1",
+                    }
+                    if ct == "knowledge":
+                        # nexus-l52ms ship-blocker fixup: this is the ONLY
+                        # production write path that routes a repo's docs
+                        # slot to a knowledge__* collection (the --corpus
+                        # knowledge rewrite, GH #451) -- stamp the durable
+                        # opt-in marker so nexus.repos.from_catalog can tell
+                        # this apart from a knowledge collection that merely
+                        # shares this repo's owner_id by coincidence (the
+                        # l52ms incident). See KNOWLEDGE_CORPUS_OPT_IN_MARKER's
+                        # own docstring for the full rationale.
+                        register_kwargs["display_name"] = KNOWLEDGE_CORPUS_OPT_IN_MARKER
                     ensure_collection_registered(
                         new_name,
                         registrar=lambda: self._writer,
-                        kwargs={
-                            "content_type": ct,
-                            "owner_id": owner_id,
-                            "embedding_model": effective_embedding_model_for_writes(ct),
-                            # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
-                            # 'v1' matches parse_conformant_collection_name's
-                            # f'v{ver}' contract; '1' would trip the
-                            # idempotency check + spawn duplicate
-                            # CollectionCreated events.
-                            "model_version": "v1",
-                        },
+                        kwargs=register_kwargs,
                     )
                 except Exception as exc:  # noqa: BLE001 — boundary catch of undocumented catalog/daemon write exceptions; surfaced via log.warning and success=False
                     _log.warning(

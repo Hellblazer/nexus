@@ -185,10 +185,13 @@ class TestFromCatalog:
     def test_docs_wins_over_knowledge_when_both_exist(
         self, cat: Catalog, repo: Path,
     ) -> None:
-        """nexus-l52ms: with both a ``docs__*`` and a ``knowledge__*``
-        collection registered under the repo's owner, the real docs
-        collection wins the docs_collection slot -- a knowledge-typed
-        collection is never a candidate for it, however it sorts."""
+        """nexus-l52ms: with both a ``docs__*`` and an UNTAGGED
+        ``knowledge__*`` collection registered under the repo's owner
+        (no ``KNOWLEDGE_CORPUS_OPT_IN_MARKER`` display_name -- the
+        coincidental-owner-id shape the incident actually hit), the
+        real docs collection wins -- the knowledge collection is never
+        a candidate for the slot without the recorded opt-in, however
+        it sorts."""
         owner_str = _seed_owner_with_collections(
             cat, repo,
             code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
@@ -207,6 +210,39 @@ class TestFromCatalog:
         rec = from_catalog(repo, cat=cat)
         assert rec is not None
         assert rec.docs_collection.startswith("docs__")
+
+    def test_tagged_knowledge_opt_in_wins_over_docs(
+        self, cat: Catalog, repo: Path,
+    ) -> None:
+        """nexus-l52ms ship-blocker fixup (GH #451): a knowledge__*
+        collection carrying the durable KNOWLEDGE_CORPUS_OPT_IN_MARKER
+        (what commands/index.py's --corpus knowledge rewrite stamps at
+        registration time) DOES win the docs slot over a real docs__*
+        row -- restoring the original "most recent explicit intent"
+        precedence, but keyed on the recorded opt-in rather than
+        coincidental owner-id sharing."""
+        from nexus.corpus import KNOWLEDGE_CORPUS_OPT_IN_MARKER
+
+        owner_str = _seed_owner_with_collections(
+            cat, repo,
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
+        )
+        owner_id = owner_str.replace(".", "-")
+        cat.register_collection(
+            f"docs__myrepo-1-2__{_DOCS_MODEL}__v1",
+            content_type="docs", owner_id=owner_id,
+            embedding_model=_DOCS_MODEL, model_version="1",
+        )
+        tagged = f"knowledge__myrepo-1-2__{_DOCS_MODEL}__v1"
+        cat.register_collection(
+            tagged,
+            content_type="knowledge", owner_id=owner_id,
+            embedding_model=_DOCS_MODEL, model_version="1",
+            display_name=KNOWLEDGE_CORPUS_OPT_IN_MARKER,
+        )
+        rec = from_catalog(repo, cat=cat)
+        assert rec is not None
+        assert rec.docs_collection == tagged
 
     def test_superseded_docs_collection_excluded_from_docs_slot(
         self, cat: Catalog, repo: Path,

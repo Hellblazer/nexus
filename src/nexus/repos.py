@@ -23,12 +23,15 @@ Per-decision references:
   resolve_path``. Phase 1.5 backfill incompleteness produces
   legitimate fallback fires during cutover; promotion to WARN
   happens in Phase 2b (``nexus-tts0d.5``) once the threshold is hit.
-- **OQ-5 lock, RETIRED (nexus-l52ms)**: used to prefer a
-  ``knowledge__*`` collection registered to a repo's owner as the
-  canonical ``docs_collection``. A ``docs``-content-type row is the
-  only candidate for that slot now — a knowledge collection sharing
-  the owner id is not necessarily the repo's own docs corpus. See
-  ``from_catalog``'s docstring for the live incident that closed this.
+- **OQ-5 lock, NARROWED (nexus-l52ms, ship-blocker fixup same day)**:
+  used to prefer any ``knowledge__*`` collection registered to a
+  repo's owner as the canonical ``docs_collection``, purely by owner-id
+  sharing. Now requires the collection's ``display_name`` to carry
+  ``nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER`` — the durable signal
+  a genuine ``--corpus knowledge`` opt-in (GH #451) stamps at
+  registration time — before it can win that slot. See
+  ``from_catalog``'s docstring for the live incident and the GH #451
+  regression it created before the marker closed both.
 
 Return shape mirrors ``RepoRegistry.get`` so consumer code can shift
 the import one PR at a time without changing field names.
@@ -105,17 +108,32 @@ def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
     ``repo``. Returns a partial record (only fields the catalog can
     answer for) otherwise.
 
-    OQ-5 lock RETIRED (nexus-l52ms): a ``knowledge__*`` collection is
-    never a candidate for the docs slot, however it sorts. It used to
-    win the docs slot over a real ``docs__*`` collection under the
-    theory that a ``knowledge__*`` name meant the user re-indexed with
-    ``--corpus knowledge`` — but a knowledge collection sharing the
+    OQ-5 lock NARROWED (nexus-l52ms, then its ship-blocker fixup same
+    day): a ``knowledge__*`` collection used to win the docs slot over a
+    real ``docs__*`` collection whenever it merely sorted first, under
+    the theory that a ``knowledge__*`` name meant the user re-indexed
+    with ``--corpus knowledge`` — but a knowledge collection sharing the
     repo's owner id is not necessarily related to the repo's own docs
     corpus at all (e.g. rdr-close post-mortem archival, which shares an
     owner id by coincidence, not intent). Measured live: nexus-repo
     markdown sat in ``knowledge__1-1`` from 2026-09-08 for this exact
-    reason before docs moved to the synth name on 09-10. Only a
-    genuine ``docs``-content-type row can win the docs slot now.
+    reason before docs moved to the synth name on 09-10.
+
+    Retiring the lock unconditionally then broke the DELIBERATE opt-in
+    path it also served (GH #451, ``nx index repo --corpus knowledge``):
+    that command mints a real ``knowledge__*`` collection and announces
+    "Routing prose to ... (--corpus knowledge)", but nothing recorded
+    that THIS collection genuinely was that opt-in, so this reader had
+    no way to admit it after the incident fix landed either. A
+    ``knowledge``-content-type row now wins the docs slot ONLY when its
+    ``display_name`` carries :data:`nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER`
+    — the durable signal ``commands/index.py``'s ``--corpus knowledge``
+    rewrite stamps at registration time. An untagged knowledge
+    collection (the coincidental-owner-id case this bead closed) is
+    still never a candidate, whatever its name. When present, the
+    tagged knowledge collection wins over a plain ``docs__*`` row —
+    restoring the original "most recent intent" precedence, but keyed
+    on the recorded opt-in instead of a name-sharing coincidence.
     """
     from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance (repo_identity)
 
@@ -135,11 +153,14 @@ def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
     # same content_type (post-model-upgrade state).
     # nexus-qnp5s: collections_by_owner() is implemented on both SQLite
     # Catalog and HttpCatalogClient — no raw _db access.
+    from nexus.corpus import KNOWLEDGE_CORPUS_OPT_IN_MARKER  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
     raw_colls = cat.collections_by_owner(owner_id)
     # Sort DESC by name to match the SQLite ORDER BY name DESC semantics.
     rows = sorted(
         [
-            (c.get("name", ""), c.get("content_type", ""), c.get("superseded_by", ""))
+            (c.get("name", ""), c.get("content_type", ""), c.get("superseded_by", ""),
+             c.get("display_name", ""))
             for c in raw_colls
         ],
         key=lambda t: t[0],
@@ -149,7 +170,8 @@ def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
     code = ""
     docs = ""
     rdr = ""
-    for col_name, content_type, superseded_by in rows:
+    knowledge_opt_in = ""
+    for col_name, content_type, superseded_by, display_name in rows:
         # nexus-l52ms: exclude superseded rows from every slot, the same
         # non-live exclusion collectionForTuple already applies engine-side
         # (collections_by_owner's lifecycle_state="live" filter already
@@ -163,8 +185,22 @@ def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
             rdr = col_name
         elif content_type == "docs" and not docs:
             docs = col_name
+        elif (
+            content_type == "knowledge"
+            and not knowledge_opt_in
+            and display_name == KNOWLEDGE_CORPUS_OPT_IN_MARKER
+        ):
+            # nexus-l52ms ship-blocker fixup: ONLY a knowledge collection
+            # carrying the recorded opt-in marker is a docs-slot candidate
+            # — see the docstring above and KNOWLEDGE_CORPUS_OPT_IN_MARKER's
+            # own for why an untagged one (the coincidental-owner-id case)
+            # must never reach here.
+            knowledge_opt_in = col_name
 
-    docs_canonical = docs
+    # A deliberately tagged --corpus knowledge collection wins over a plain
+    # docs__* row (the user's most recent explicit intent); absent that, the
+    # real docs collection is canonical.
+    docs_canonical = knowledge_opt_in or docs
 
     # Fetch head_hash from owners (RDR-137 Phase 1.5b column).
     # nexus-qnp5s: get_owner_by_prefix() is implemented on both SQLite
