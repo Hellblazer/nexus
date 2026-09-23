@@ -44,6 +44,7 @@ from nexus.db.gateway_backoff import (
     _GATEWAY_RETRY_CODES,
     _GATEWAY_RETRY_SLEEPS,
     _is_embed_server_side_write_path,
+    is_non_idempotent_sweep_path,
 )
 from nexus.logging_setup import emit_import_time_warning
 from nexus.redact import redact_credentials
@@ -1254,6 +1255,11 @@ def _request(
     a bounded backoff retry (``_GATEWAY_RETRY_SLEEPS``); all other HTTP
     errors propagate immediately — 4xx/500 are not transient.
 
+    nexus-ll31n: a mutating, non-idempotent sweep/maintenance route
+    (:func:`gateway_backoff.is_non_idempotent_sweep_path` — the GC
+    quarantine/restore/expire moves) is NEVER auto-retried here, gateway
+    code or not — see that function's docstring.
+
     nexus-r46u9: a 504 on a server-side-embedding write route
     (:func:`_is_embed_server_side_write_path`) floors EVERY scheduled sleep
     at :data:`_EMBED_WRITE_504_BACKOFF_FLOOR_S` (30s) instead of the raw
@@ -1277,6 +1283,13 @@ def _request(
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     embed_write_path = _is_embed_server_side_write_path(path)
+    # nexus-ll31n: a mutating, non-idempotent sweep/maintenance route (an
+    # anti-join move/delete, not a content-addressed upsert) must never be
+    # auto-retried on a gateway-transient code — see
+    # gateway_backoff.is_non_idempotent_sweep_path's docstring for why a
+    # blind resend there produced a completed 41,032-row move that read as
+    # a failure.
+    no_auto_retry = is_non_idempotent_sweep_path(path)
 
     def _once_with_gateway_retry() -> Any:
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
@@ -1285,7 +1298,7 @@ def _request(
                     method, path, tenant=tenant, timeout=timeout, body=body
                 )
             except urllib.error.HTTPError as exc:
-                if exc.code not in _GATEWAY_RETRY_CODES or delay is None:
+                if exc.code not in _GATEWAY_RETRY_CODES or delay is None or no_auto_retry:
                     raise
                 floored = exc.code == 504 and embed_write_path
                 sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay

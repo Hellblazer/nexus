@@ -2353,6 +2353,72 @@ class TestGatewayTransientRetry:
         assert len(calls) == 1
 
 
+class TestNonIdempotentSweepNeverAutoRetries:
+    """nexus-ll31n: gc/quarantine-orphans, gc/restore-rereferenced, and
+    gc/expire-quarantine are anti-join MOVE/DELETE sweeps, not
+    content-addressed upserts. A blind gateway-transient auto-retry can
+    resend one AFTER the first attempt already committed server-side
+    (only the RESPONSE was lost at the edge) -- the retry's own anti-join
+    then finds a different, usually much smaller row set, so its own
+    summary misreports what actually happened. Measured 2026-09-16: a
+    completed 41,032-row move read as a failure this way. These three
+    routes must raise on the FIRST gateway-transient error, never sleep
+    or resend."""
+
+    def _http_error(self, code: int, body: bytes = b'{"error":"gw"}'):
+        import io
+        import urllib.error
+        return urllib.error.HTTPError(
+            url="http://svc/v1/x", code=code, msg="err", hdrs={},
+            fp=io.BytesIO(body),
+        )
+
+    @pytest.mark.parametrize("path", [
+        "/v1/vectors/gc/quarantine-orphans",
+        "/v1/vectors/gc/restore-rereferenced",
+        "/v1/vectors/gc/expire-quarantine",
+    ])
+    @pytest.mark.parametrize("code", [502, 503, 504])
+    def test_gateway_code_raises_immediately_never_sleeps(
+        self, monkeypatch, path, code,
+    ):
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        calls: list[int] = []
+        monkeypatch.setattr(
+            hv, "_request_once",
+            lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(code)))[1],
+        )
+        monkeypatch.setattr(hv.time, "sleep", lambda s: pytest.fail("must not sleep/retry"))
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", path, tenant="default", timeout=600, body={})
+        assert len(calls) == 1, "must attempt exactly once -- no auto-retry"
+
+    def test_a_sibling_write_route_still_retries_normally(self, monkeypatch):
+        """Sanity check the exemption is scoped to the three GC routes,
+        not a global regression of TestGatewayTransientRetry's coverage."""
+        import nexus.db.http_vector_client as hv
+
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) < 2:
+                raise self._http_error(503)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        result = hv._request(
+            "POST", "/v1/vectors/upsert-chunks", tenant="default", timeout=600, body={},
+        )
+        assert result == {"ok": True}
+        assert len(calls) == 2
+        assert sleeps == [hv._GATEWAY_RETRY_SLEEPS[0]]
+
+
 class TestEmbedWrite504BackoffFloor:
     """nexus-r46u9: a 504 on a server-side-embedding write route floors every
     gateway-retry sleep at :data:`hv._EMBED_WRITE_504_BACKOFF_FLOOR_S`.

@@ -134,3 +134,48 @@ def _is_embed_server_side_write_path(path: str, body: dict | None = None) -> boo
     if path.endswith(_WRITE_MANY_SUFFIX):
         return bool(body.get("chunks"))
     return True
+
+
+# ── nexus-ll31n: never auto-retry a non-idempotent mutating sweep ──────────
+#
+# Route suffixes for mutating, NON-idempotent sweep/maintenance operations
+# -- an anti-join MOVE/DELETE, not a content-addressed upsert. Every OTHER
+# /v1 write this module retries is safe to resend: upsert-chunks/store-put
+# are keyed on chunk content hash, so a duplicate resend just re-writes the
+# SAME rows to the SAME result. These three instead MUTATE MEMBERSHIP (rows
+# leave/enter a collection via an anti-join over current state), so a
+# retry after the first attempt already committed server-side (only the
+# RESPONSE was lost at the edge -- exactly what a 502/503/504 signals) does
+# NOT repeat the same effect: its own anti-join now finds a different,
+# usually much smaller (often zero) row set, and reports THAT as the
+# outcome.
+#
+# Measured 2026-09-16 (the owner-1.1 cleanup): a completed 41,032-row move
+# read as a failure this way, and a genuinely still-committing collection's
+# retry hit the RDR-191 per-collection sweep gate the FIRST call still
+# held, getting back an opaque 500 -- misread as a rollback for five
+# minutes.
+#
+# THE DEEPER PROBLEM SURVIVES REMOVING THIS RETRY: from outside,
+# committed/in-flight/rolled-back look identical without an idempotency
+# key or a structured 409 naming the in-flight run, and the engine exposes
+# neither for these routes today. That is engine (Java service) API work,
+# tracked separately as a follow-up, not something this client-side leaf
+# module can invent unilaterally. This constant closes only the half that
+# IS purely client-side: never blindly resend one of these on a gateway
+# code. A caller sees the genuine 502/503/504 (and, per its own retry
+# policy, may re-run the sweep or audit afterward) instead of an
+# auto-retried response that may already be stale.
+_NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES: tuple[str, ...] = (
+    "/gc/quarantine-orphans",
+    "/gc/restore-rereferenced",
+    "/gc/expire-quarantine",
+)
+
+
+def is_non_idempotent_sweep_path(path: str) -> bool:
+    """True when *path* is a mutating sweep/maintenance route that must
+    never be auto-retried on a gateway-transient code (nexus-ll31n) --
+    see :data:`_NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES` for why.
+    """
+    return any(path.endswith(suffix) for suffix in _NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES)
