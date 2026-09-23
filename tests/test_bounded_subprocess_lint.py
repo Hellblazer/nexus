@@ -68,8 +68,6 @@ _EXCLUDED_DIR_BEAD = "nexus-t9klx"
 _UNCONVERTED: dict[str, int] = {
     "src/nexus/_install/census_core.py": 1,
     "src/nexus/_install/layout_core.py": 1,
-    "src/nexus/aspect_readers.py": 1,
-    "src/nexus/catalog/orphan_backfill.py": 1,
     "src/nexus/commands/command_context.py": 1,
     "src/nexus/commands/daemon.py": 2,
     "src/nexus/commands/doctor.py": 1,
@@ -81,8 +79,6 @@ _UNCONVERTED: dict[str, int] = {
     "src/nexus/db/diag_connection.py": 1,
     "src/nexus/db/pg_provision.py": 1,
     "src/nexus/db/svc_monitor.py": 1,
-    "src/nexus/devonthink.py": 1,
-    "src/nexus/doc/resolvers.py": 1,
     "src/nexus/formatters.py": 2,
     "src/nexus/health.py": 1,
     "src/nexus/upgrade_finish.py": 6,

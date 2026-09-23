@@ -30,7 +30,6 @@ from __future__ import annotations
 import csv
 import difflib
 import re
-import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +37,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.corpus import split_candidate_collection_name
 from nexus.db.limits import QUOTAS
 
@@ -164,9 +164,9 @@ class DTSearchError(RuntimeError):
 
 
 def _osascript(script: str, *, timeout: int = 30) -> str:
-    r = subprocess.run(
+    r = run_bounded(
         ["osascript", "-e", script],
-        capture_output=True, text=True, timeout=timeout,
+        timeout=timeout,
     )
     if r.returncode != 0:
         raise DTSearchError(

@@ -125,7 +125,7 @@ class TestBeadResolver:
     def test_status_field_routes_to_bd_show_json(self) -> None:
         from nexus.doc.resolvers import BeadResolver
 
-        with patch("subprocess.run") as mock_run:
+        with patch("nexus.doc.resolvers.run_bounded") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps({
@@ -142,7 +142,7 @@ class TestBeadResolver:
     def test_default_field_returns_title(self) -> None:
         from nexus.doc.resolvers import BeadResolver
 
-        with patch("subprocess.run") as mock_run:
+        with patch("nexus.doc.resolvers.run_bounded") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps({"id": "x", "title": "Ship feature", "status": "open"}),
@@ -155,7 +155,7 @@ class TestBeadResolver:
     def test_unknown_bead_raises(self) -> None:
         from nexus.doc.resolvers import BeadResolver, ResolutionError
 
-        with patch("subprocess.run") as mock_run:
+        with patch("nexus.doc.resolvers.run_bounded") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="not found")
             r = BeadResolver()
             with pytest.raises(ResolutionError):
@@ -164,7 +164,7 @@ class TestBeadResolver:
     def test_per_render_cache_avoids_double_subprocess(self) -> None:
         from nexus.doc.resolvers import BeadResolver
 
-        with patch("subprocess.run") as mock_run:
+        with patch("nexus.doc.resolvers.run_bounded") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=json.dumps({"id": "x", "title": "T", "status": "open"}),

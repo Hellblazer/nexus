@@ -46,6 +46,7 @@ import sys
 import structlog
 
 import nexus.aspect_readers as _aspect_readers
+from nexus.bounded_subprocess import run_bounded
 
 __all__ = [
     "DTNotAvailableError",
@@ -112,10 +113,8 @@ def _run_osascript(script: str, timeout: int) -> str:
             operator-friendly so the CLI can surface it without
             additional translation.
     """
-    proc = subprocess.run(  # noqa: S603 - osascript is a system binary
+    proc = run_bounded(
         ["osascript", "-e", script],
-        capture_output=True,
-        text=True,
         timeout=timeout,
     )
     if proc.returncode != 0:
