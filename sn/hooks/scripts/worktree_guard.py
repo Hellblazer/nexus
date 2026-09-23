@@ -189,6 +189,16 @@ _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_-]")
 #: nothing here needs it past this session's lifetime, and an abandoned
 #: worktree's session_id should not accumulate a file forever.
 _STALE_RECORD_MAX_AGE_DAYS = 30
+#: Matches the ``.tmp<pid>`` suffix ``record_startup_root`` appends to a
+#: record's own filename while writing it (e.g. ``s0.json.tmp12345``), so
+#: ``_prune_stale_records`` can find an orphaned one left by a process
+#: killed between the write and the ``replace()`` that makes it live.
+_TMP_FILE_RE = re.compile(r"\.tmp\d+$")
+#: How long an orphaned temp file survives before pruning removes it --
+#: short relative to ``_STALE_RECORD_MAX_AGE_DAYS`` on purpose (see
+#: ``_prune_stale_records``'s docstring): long enough that a live write can
+#: never still be using it, short enough that an orphan does not linger.
+_STALE_TMP_FILE_MAX_AGE_SECONDS = 3600
 
 
 def _state_dir() -> pathlib.Path:
@@ -258,24 +268,49 @@ def _session_root_file(session_id: str) -> pathlib.Path:
 
 
 def _prune_stale_records(max_age_days: int = _STALE_RECORD_MAX_AGE_DAYS) -> None:
-    """Best-effort: delete per-session record files older than *max_age_days*.
+    """Best-effort: delete per-session record files older than *max_age_days*,
+    and orphaned ``*.tmp<pid>`` files older than ``_STALE_TMP_FILE_MAX_AGE_SECONDS``.
 
     Opportunistic, not a scheduled sweep -- called once from
     ``record_startup_root``, itself once per session at startup, so this is
-    a chance to not accumulate one file per session forever rather than a
-    background job. Every failure (the directory listing, a single file's
-    stat or unlink) is swallowed: pruning is housekeeping, never something a
-    SessionStart hook can fail, or even log noisily, over.
+    a chance to not accumulate files forever rather than a background job.
+    Every failure (the directory listing, a single file's stat or unlink)
+    is swallowed: pruning is housekeeping, never something a SessionStart
+    hook can fail, or even log noisily, over.
+
+    The temp-file half (round 4, nexus-ebx0s): ``record_startup_root``
+    writes ``<name>.tmp<pid>`` then ``replace()``s it onto ``<name>``: a
+    process killed between those two steps (the box loses power, the hook
+    hits its 5-second timeout, `kill -9`) leaves the temp file behind, and
+    nothing else in this module ever visits it again -- the ``.json`` sweep
+    above skips it by suffix, and no later `record_startup_root` call for
+    that SAME session_id is guaranteed to happen soon, or ever, to overwrite
+    it. Pruned once it is at least ``_STALE_TMP_FILE_MAX_AGE_SECONDS`` old,
+    a much SHORTER window than the 30-day one above precisely because it
+    must be short enough to matter (an orphan should not linger for a
+    month) while staying long enough that it can never delete a temp file
+    a CONCURRENT, still-in-flight ``record_startup_root`` call is using --
+    that call's write-then-replace is two syscalls, sub-millisecond in
+    practice, so anything still sitting there after a full hour was
+    abandoned, not merely slow.
     """
     try:
         roots_dir = _roots_dir()
         if not roots_dir.is_dir():
             return
-        cutoff = time.time() - max_age_days * 86400
+        now = time.time()
+        cutoff = now - max_age_days * 86400
+        tmp_cutoff = now - _STALE_TMP_FILE_MAX_AGE_SECONDS
         for entry in roots_dir.iterdir():
             try:
-                if entry.is_file() and entry.suffix == ".json" and entry.stat().st_mtime < cutoff:
-                    entry.unlink()
+                if not entry.is_file():
+                    continue
+                if entry.suffix == ".json":
+                    if entry.stat().st_mtime < cutoff:
+                        entry.unlink()
+                elif _TMP_FILE_RE.search(entry.name):
+                    if entry.stat().st_mtime < tmp_cutoff:
+                        entry.unlink()
             except OSError:
                 continue
     except OSError:

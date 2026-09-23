@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -853,6 +854,37 @@ class TestPerSessionRecordStorage:
             record_file = _session_root_file(tmp_path, payload["session_id"])
             assert record_file.exists(), f"session {payload['session_id']} lost its record"
             assert json.loads(record_file.read_text())["root"] == expected_root
+
+    def test_prune_removes_orphaned_temp_files_but_not_recent_ones(self, tmp_path: Path) -> None:
+        """Round 4 (nexus-ebx0s): ``record_startup_root`` writes
+        ``<name>.tmp<pid>`` then ``replace()``s it onto ``<name>`` -- a
+        process killed between those two steps leaves the temp file behind,
+        and nothing else in the module ever revisits it (the ``.json``
+        sweep skips it by suffix). Seed one OLD orphan (older than
+        ``_STALE_TMP_FILE_MAX_AGE_SECONDS``) and one RECENT one (mtime
+        ``now``, standing in for a write genuinely still in flight), then
+        trigger pruning via an unrelated session's own
+        ``record_startup_root`` call and check each is treated correctly:
+        the old one gone, the recent one untouched -- pruning must never be
+        able to delete a temp file a concurrent write could still be using."""
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        roots_dir = tmp_path / "state" / "sn" / "serena-roots"
+        roots_dir.mkdir(parents=True)
+
+        old_tmp = roots_dir / "orphan.json.tmp12345"
+        old_tmp.write_text("{}")
+        old_time = time.time() - 7200  # 2 hours ago: well past the 1-hour cutoff
+        os.utime(old_tmp, (old_time, old_time))
+
+        recent_tmp = roots_dir / "inflight.json.tmp99999"
+        recent_tmp.write_text("{}")  # mtime defaults to now
+
+        start = _run_session_start({"source": "startup", "session_id": "trigger", "cwd": str(primary)}, env)
+        assert start.returncode == 0, start.stderr
+
+        assert not old_tmp.exists(), "an hours-old orphaned temp file must be pruned"
+        assert recent_tmp.exists(), "a temp file that could still be an in-flight write must survive pruning"
 
 
 class TestWorktreeInjection:
