@@ -396,6 +396,11 @@ class AspectWorkerDaemon:
 
     def stop(self, timeout: float = 10.0) -> None:
         """Stop the worker, then relinquish the lease (idempotent)."""
+        # nexus-cd1k0.6 finding (6): captured once, up front, so both the
+        # reclaim-sweep guard below and the later mark/relinquish guard see
+        # the SAME answer even if a heartbeat tick flips `supervisor.fenced`
+        # mid-stop.
+        fenced = self.is_fenced()
         self._stop.set()
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=2.0)
@@ -421,11 +426,22 @@ class AspectWorkerDaemon:
             except Exception as exc:  # noqa: BLE001 - worker stop is best-effort during teardown
                 _log.warning("aspect_worker_daemon.worker_stop_failed", tenant=self._tenant, error=str(exc))
             self._worker = None
-        if self._reclaim_queue is not None:
+        if self._reclaim_queue is not None and not fenced:
             # RDR-173 P5 item 3 (review): a final sweep makes the daemon's death
             # OBSERVABLE — the rows it owned but could not finish — AND resets them
             # to pending for the next daemon (recovery in one). reclaim_stale(0):
             # the worker is already stopped, so any in_progress row is abandoned.
+            #
+            # nexus-cd1k0.6 finding (6): reclaim_stale(0) resets ANY stale
+            # in_progress row in this tenant's scope, not only rows THIS
+            # daemon owned. When this daemon was FENCED -- a newer-generation
+            # owner already won the scope and may already be claiming/working
+            # rows -- an unconditional sweep here can reset the successor's
+            # freshly-claimed in-progress rows back to pending out from
+            # under it. A fenced loser does not own the scope any more (same
+            # reasoning as the mark/relinquish guard below); skip the sweep
+            # entirely and let the successor's own heartbeat/reclaim cadence
+            # own recovery.
             try:
                 undrained = self._reclaim_queue.reclaim_stale(0)
                 if undrained:
@@ -435,6 +451,9 @@ class AspectWorkerDaemon:
                     )
             except Exception as exc:  # noqa: BLE001 - shutdown diagnostic is best-effort
                 _log.warning("aspect_worker_daemon.final_reclaim_failed", tenant=self._tenant, error=str(exc))
+        elif self._reclaim_queue is not None:
+            _log.info("aspect_worker_daemon.reclaim_skipped_fenced", tenant=self._tenant)
+        if self._reclaim_queue is not None:
             try:
                 self._reclaim_queue.close()
             except Exception as exc:  # noqa: BLE001 - queue close is best-effort during teardown
