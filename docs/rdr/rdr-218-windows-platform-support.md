@@ -1271,17 +1271,35 @@ decision surface keeps that open deliberately.
 
 ## Finalization Gate
 
-### Not yet run
+### Run, and passed at round 2
 
-This record is `status: draft`. The finalization gate has not run, and no
-contradiction check is asserted here.
+This section said "Not yet run ... this record is `status: draft`" until
+2026-09-22. It was correct when written and outlived the fact by the length of
+the gate itself. Corrected here rather than deleted, because a stale status
+INSIDE an accepted record is the exact shape this document's own Gap 4 fix was
+about: prose that survives its own premise and is read as current.
 
-That omission is deliberate. RDR-217's own gate section records that its
-no-contradictions clause "has made it twice before and been falsified both
+  round 1  BLOCKED. One Critical ship-blocker, two Significant.
+  round 2  PASSED. 0 Critical, 0 ship-blockers, 1 Significant, since fixed.
+           `nexus_rdr/218-gate-latest`, commit 5ba0cdbfa.
+  accepted 2026-09-22 (Sam, via /conexus:rdr-accept). Frontmatter carries
+           `status: accepted` and `accepted_date`.
+
+THE CAUTION THAT PRECEDED THIS STILL STANDS, and is kept because it was
+vindicated rather than superseded. It read: RDR-217's gate section records that
+its no-contradictions clause "has made it twice before and been falsified both
 times, once by gate round 1 and once by the fix check on that round's diff,
 each of which found a contradiction this section had already declared absent."
-Asserting cleanliness before the gate runs is the failure mode, so this section
-stays empty until `/conexus:rdr-gate` fills it.
+Asserting cleanliness before the gate runs is the failure mode.
+
+That is exactly what happened here. Round 1's ship-blocker was a contradiction
+-- Gap 4 claiming the hook-tool boundary bound covered both hang sites when it
+covers one. Round 2's remaining Significant was another: a measured
+Windows-only finding sitting four paragraphs from an unrevised hedge that said
+the opposite. Both were found by the gate, neither by the drafting. A third
+round of the same kind was found by the fix check on round 2's own diff. Three
+contradictions, in a document whose gate section had been careful enough not to
+claim there were none.
 
 ### Corrections already made during drafting
 
@@ -1376,3 +1394,4 @@ questions rather than from the drafting.
 | 2026-09-22 | Gate round 2 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `5ba0cdbfa`; critique `nexus_rdr/218-gate-critique-2026-09-22-r2`. |
 | 2026-09-22 | Round-2 Significant: replaced the superseded ``not obviously Windows-specific`` hedge in Gap 4, which contradicted the measured `if _mswindows` finding four paragraph blocks later. |
 | 2026-09-22 | Fix check `nexus_rdr/218-fix-check-34a68b628` (three passes, PASS, 0 BLOCKS-PLANNING) closed residual 2; its six OBSERVATIONs fixed here. The `four shapes` figure rested on an unrecorded probe and is now pinned by `test_stock_subprocess_run_does_not_hang_on_posix`; `wait()`'s own untimed-but-finite step is stated; the Windows-only finding is explicitly marked as NOT explaining the 25s block. |
+| 2026-09-22 | Finalization Gate section still read "Not yet run ... `status: draft`" after the gate had run twice and Sam had accepted the record. Corrected; the caution it carried is kept, because three contradictions were then found by the gate and its fix check, which is what that caution predicted. |
