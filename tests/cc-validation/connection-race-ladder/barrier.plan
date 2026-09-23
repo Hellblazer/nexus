@@ -1,0 +1,12 @@
+# nexus-veh77 round 2: barrier re-test plan (run with --barrier, macOS).
+# Scoped subset of full.plan: the controls, the three ladder_s8 submit rungs
+# that missed 4/4 on macOS in round 1 (0/1000/2000 ms), and thresh S=0 as
+# the no-artificial-delay sanity check (proves the barrier does not cost a
+# meaningful wait once the server is genuinely fast).
+# label       server_delay_s submit kind   reps
+pos_control   0     8000  bash   2
+neg_control   0     3000  broken 2
+ladder_s8     8     0     bash   2
+ladder_s8     8     1000  bash   2
+ladder_s8     8     2000  bash   2
+thresh        0     0     bash   2

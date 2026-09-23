@@ -1130,3 +1130,90 @@ registration module on the existing server, and one package.
   Two harness facts: text typed before the input box appears is kept but
   its Enter is dropped (6/6), and on WSL2 an Enter sent 0 ms after the
   status bar appeared was dropped 18/18 (at 100 ms, 5 of 31).
+- 2026-09-23 (nexus-veh77, decision + close-out): Sam's ruling on the design
+  question the entry above left open: a `SessionStart` command-tier verb
+  waits, bounded and fail-open, for `nx-mcp` to connect, rather than
+  twinning every exposed tool-tier entry on the command tier. Shipped as
+  `nx-hook mcp-connect-wait` (`nexus.hooks.mcp_connect_wait`), wired in
+  `conexus/hooks/hooks.json` under the `startup` matcher only.
+  **Readiness signal.** `nexus.mcp.core._t1_lifespan` Branch 0 publishes
+  this session's `t1_session_lease.<session_id>` file (`nexus.db.t1.
+  publish_t1_session_lease`) inside its mint-or-borrow critical section,
+  before the lifespan's own `yield` -- and an MCP server built on the `mcp`
+  SDK's lifespan contract cannot answer `initialize` until that `yield`
+  returns and the transport's request loop starts. So the lease file is
+  written on the causal path to "connected", not sampled after the fact,
+  and its `session_id` is byte-identical to the SessionStart payload's own
+  field (both resolve through `CLAUDE_CODE_SESSION_ID`, harness-set at
+  spawn). The verb polls `read_t1_session_lease` for THIS session's id
+  every 0.2 s.
+  **Which sources wait.** `startup` only. JDR-001 and its own
+  `nexus-ggvi0` falsification establish that the MCP process usually
+  PERSISTS across `/clear`, `/resume`, `/compact` and a fork, so the
+  connection this verb waits for already exists on every other
+  `SessionStart` source; waiting there would only add latency.
+  **The bound.** 15 s, from the ladder's own measurements: the one real
+  `nx-mcp` connect recorded from a live session's debug log was 2.1 s
+  (queued ~0.9 s behind other plugin servers); every `ladder_s8` probe
+  rung connected by design at 8.15 s (macOS) / 8.5 s (WSL2) and is the
+  widest delay this RDR measured. 15 s is a little under 2x the widest
+  measured connect and about 7x the one live-session connect, and stays
+  under `upgrade-auto`'s own 30 s ceiling in the same matcher group.
+  **Fail-open.** Not a ledger verb -- `nx-hook`'s dispatcher forces exit 0
+  regardless -- and a timeout logs one line
+  (`mcp_connect_wait_timed_out`) to the hook log, never stdout, then
+  returns the identical silent result a successful wait returns.
+  **Proof.** Unit tests (`tests/hooks/test_mcp_connect_wait_verb.py`,
+  11 cases): the polling primitive against REAL lease files (ready
+  immediately, ready after N polls via an injected fake clock, never
+  ready and times out, a lease for a DIFFERENT session id never read as
+  ready, an expired lease reads as absent) and the verb's own wiring
+  (only `source=startup` waits, a missing session id is a fast no-op, a
+  timeout still returns a silent exit-0 `HookResult`, the test-only
+  bound/poll env overrides are honoured end to end through `run()`).
+  Then the interactive ladder itself, re-run on macOS with `--barrier`
+  (`tests/cc-validation/connection-race-ladder/run_ladder.py`, the probe
+  now publishing the same lease-file signal at the point in its own
+  timeline that stands in for "connected", the barrier invoking the REAL
+  `nx-hook mcp-connect-wait` verb in-process, both via the worktree's own
+  `.venv` python).
+  **A harness confound, found and fixed before the numbers below are
+  trustworthy.** The barrier's `SessionStart` command entry chains three
+  `;`-separated commands sharing ONE stdin pipe (Claude Code writes the
+  payload once); the first, a command-tier "twin" logger that also does
+  `json.load(sys.stdin)` for its own bookkeeping, drained the payload
+  before the real verb's own `read_payload()` ran second, which then saw
+  an already-EOF stdin, read `None`, and took the `source is None` fast
+  no-op path -- the barrier measured ~50ms elapsed instead of waiting, and
+  the first re-run reproduced round 1's misses unchanged (a false
+  negative on the fix, not evidence against it). Fixed by redirecting
+  `< /dev/null` onto both twin-logger calls in the chain, leaving the
+  shared pipe untouched for the verb's own read. Recorded because it is
+  exactly this RDR's own recurring lesson in miniature: two consumers of
+  one shared resource, one silently starving the other, discovered only
+  by reading the per-run timestamps rather than trusting the summary line.
+  **After (macOS, `barrier.plan`, 2 reps per rung, the SAME `ladder_s8`
+  submit rungs that missed 4/4 in round 1):**
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop | SubagentStop |
+  |---|---|---|---|---|---|---|---|---|---|
+  | pos_control | 0 | 8000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | neg_control (broken) | 0 | 3000 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 |
+  | ladder_s8 | 8 | 0 | on | 2 | **2/0/0** | **2/0/0** | **2/0/0** | **2/0/0** | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | **2/0/0** | **2/0/0** | **2/0/0** | **2/0/0** | 1/0/1 |
+  | ladder_s8 | 8 | 2000 | on | 2 | **2/0/0** | **2/0/0** | **2/0/0** | **2/0/0** | 2/0/0 |
+  | thresh | 0 | 0 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 2/0/0 | 2/0/0 |
+
+  (fired/missed/not\_reached; bold = flipped from round 1's 0/4/0 or 0/3/1
+  to fired.) The controls are unchanged from round 1 (`pos_control` still
+  fires clean, the broken-server `neg_control` still fails open with a
+  normal miss, never a hang), and `thresh` at a genuinely fast, zero-delay
+  connect is unchanged too -- the barrier costs nothing when there is
+  nothing to wait for. Per-run timestamps on three `ladder_s8` reps show
+  the mechanism directly: the verb's own `BarrierBegin`-to-`BarrierEnd`
+  span was 8.29-8.30s (matching the probe's 8s start delay), and each
+  returned 0.22-0.24s after the probe's lease-publish event -- one poll
+  interval, well inside the 15s bound, on the exact rungs round 1 measured
+  missing every tool-tier event 4 times out of 4.
+  WSL2 and `PostCompact`/`StopFailure` remain unmeasured, as the round-1
+  entry above already recorded.

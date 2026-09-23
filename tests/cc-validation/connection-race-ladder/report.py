@@ -39,6 +39,10 @@ def main(path: str) -> None:
         if r.get("ss_sleep_s"):
             parts.append(f"ss={r['ss_sleep_s']:g}(begin={rel(r.get('SessionStartBegin'), t)} "
                          f"end={rel(r.get('SessionStartEnd'), t)})")
+        if r.get("barrier"):
+            parts.append(f"barrier(begin={rel(r.get('BarrierBegin'), t)} "
+                         f"end={rel(r.get('BarrierEnd'), t)} "
+                         f"wait={r.get('barrier_wait_s')})")
         for ev in EVENTS:
             e = r["events"][ev]
             if e["verdict"] == "not_reached":

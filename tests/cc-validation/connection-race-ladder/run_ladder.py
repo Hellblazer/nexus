@@ -39,6 +39,20 @@ credential JSON (tokens live 25-60 min); ``--cred-file`` copies a file.
 ``--oauth-seed`` names a ``.claude.json`` whose ``oauthAccount`` is copied.
 
 Output: ``<out>/results.jsonl`` (one record per run) and ``<out>/summary.txt``.
+
+**Barrier re-test (nexus-veh77 round 2, ``--barrier``).** Injects a REAL
+``SessionStart`` command hook running the actual ``nx-hook mcp-connect-wait``
+verb (``nexus.hooks.mcp_connect_wait``, invoked in-process via
+``nexus._hook_runtime.entry.main`` through ``args.python``, which must be an
+interpreter with this checkout's ``nexus`` package importable -- the
+worktree's own ``.venv`` python satisfies both that and the probe's ``mcp``
+requirement). The probe (``probe_server.py``) is told the same
+``NEXUS_CONFIG_DIR`` via ``PROBE_LEASE_CONFIG_DIR`` and publishes the real
+lease-file readiness signal at the point in its own timeline that stands in
+for "connected" (right after ``PROBE_START_DELAY`` elapses). Two twin
+markers, ``BarrierBegin``/``BarrierEnd``, bracket the verb invocation so the
+wait duration is measured the same way ``ssgate``'s synthetic SessionStart
+sleep already is.
 """
 from __future__ import annotations
 
@@ -137,13 +151,51 @@ def build_home(run_dir: Path, args, server_delay: float, broken: bool,
             {"type": "mcp_tool", "server": "probe", "tool": "probe",
              "input": {"marker": ev, "session_id": "${session_id}"}},
         ]}]
+    session_start_hooks: list[dict] = []
     if ss_sleep:
         # A slow command-tier SessionStart hook, standing in for conexus's own
         # SessionStart verbs: measures whether turn 1 waits for SessionStart.
-        hooks["SessionStart"] = [{"matcher": "", "hooks": [
+        session_start_hooks.append(
             {"type": "command", "timeout": 120,
              "command": f"{args.hook_python} {twin} SessionStartBegin; sleep {ss_sleep}; "
-                        f"{args.hook_python} {twin} SessionStartEnd"}]}]
+                        f"{args.hook_python} {twin} SessionStartEnd"})
+    lease_config_dir = run_dir / "nexus_config"
+    if getattr(args, "barrier", False):
+        # The REAL nx-hook mcp-connect-wait verb, invoked in-process through
+        # the same interpreter the probe runs under (must have this
+        # checkout's `nexus` package importable). Bracketed by twin markers
+        # so the wait duration is measured the same way ss_sleep's synthetic
+        # SessionStart hook already is.
+        barrier_snippet = (
+            "import sys; sys.argv=['nx-hook','mcp-connect-wait']; "
+            "from nexus._hook_runtime.entry import main; main()"
+        )
+        # NEXUS_CONFIG_DIR is set INLINE in the command string, not via an
+        # "env" key on the hook entry (hooks.json's command entries carry no
+        # such key) -- Claude Code spawns "command" hooks through a shell,
+        # which is what already lets ss_sleep's own entry use ";" above.
+        #
+        # `< /dev/null` on BOTH twin.py calls is load-bearing, not cosmetic:
+        # all three `;`-chained commands share ONE stdin pipe (the real
+        # SessionStart JSON payload Claude Code writes once), and twin.py
+        # itself does `json.load(sys.stdin)` to log hook_event_name/
+        # tool_name. Measured without the redirect: BarrierBegin drained the
+        # payload and logged it fine (hook_event_name="SessionStart"), and
+        # the real verb's own read_payload() then saw an already-EOF stdin,
+        # read None, and took the source-is-None fast no-op path -- the
+        # barrier never waited at all, elapsed ~50ms instead of up to 15s.
+        # Starving twin.py of stdin here costs it nothing: these two calls
+        # only need a timestamp, never the payload.
+        session_start_hooks.append(
+            {"type": "command", "timeout": 25,
+             "command": (
+                 f"{args.hook_python} {twin} BarrierBegin < /dev/null; "
+                 f"NEXUS_CONFIG_DIR={shlex.quote(str(lease_config_dir))} "
+                 f"{shlex.quote(args.python)} -c {shlex.quote(barrier_snippet)}; "
+                 f"{args.hook_python} {twin} BarrierEnd < /dev/null"
+             )})
+    if session_start_hooks:
+        hooks["SessionStart"] = [{"matcher": "", "hooks": session_start_hooks}]
     settings = {"skipDangerousModePermissionPrompt": True,
                 "permissions": {"allow": ["Bash", "Agent", "Task", "mcp__probe__*"]},
                 "hooks": hooks}
@@ -151,6 +203,8 @@ def build_home(run_dir: Path, args, server_delay: float, broken: bool,
     env = {"PROBE_LOG": str(probe_log), "PROBE_START_DELAY": str(server_delay)}
     if broken:
         env["PROBE_BROKEN"] = "1"
+    if getattr(args, "barrier", False):
+        env["PROBE_LEASE_CONFIG_DIR"] = str(lease_config_dir)
     mcp = {"mcpServers": {"probe": {"type": "stdio", "command": args.python,
                                     "args": [str(HERE / "probe_server.py"), str(run_dir)],
                                     "env": env}}}
@@ -161,7 +215,9 @@ def build_home(run_dir: Path, args, server_delay: float, broken: bool,
 
 def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: int,
             ss_sleep: float = 0.0) -> dict:
-    run_dir = Path(args.out) / "runs" / f"{label}-S{server_delay:g}-{submit}-{kind}-ss{ss_sleep:g}-{rep}"
+    barrier_tag = "-barrier" if getattr(args, "barrier", False) else ""
+    run_dir = (Path(args.out) / "runs"
+               / f"{label}-S{server_delay:g}-{submit}-{kind}-ss{ss_sleep:g}{barrier_tag}-{rep}")
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
@@ -179,7 +235,7 @@ def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: 
            f"--mcp-config {shlex.quote(str(p['home'] / 'mcp.json'))} --strict-mcp-config "
            f"--dangerously-skip-permissions; sleep 600")
     rec: dict = {"label": label, "server_delay_s": server_delay, "submit": submit,
-                 "ss_sleep_s": ss_sleep,
+                 "ss_sleep_s": ss_sleep, "barrier": getattr(args, "barrier", False),
                  "kind": kind, "rep": rep, "run_dir": str(run_dir)}
     t_launch = time.time()
     tmux(args.sock, "new-session", "-d", "-s", sess, "-x", "200", "-y", "50",
@@ -270,11 +326,15 @@ def analyse(p: dict) -> dict:
                              "twin_all": sorted(tw), "probe_all": sorted(pr),
                              "skipped_lines": skipped}
     out["submitted"] = bool([r for r in twin if r.get("event") == "UserPromptSubmit"])
-    for tag in ("SessionStartBegin", "SessionStartEnd"):
+    for tag in ("SessionStartBegin", "SessionStartEnd", "BarrierBegin", "BarrierEnd"):
         ts = [r["ts"] for r in twin if r.get("event") == tag]
         out[tag] = min(ts) if ts else None
+    if out["BarrierBegin"] is not None and out["BarrierEnd"] is not None:
+        out["barrier_wait_s"] = out["BarrierEnd"] - out["BarrierBegin"]
     serving = [r["ts"] for r in probe if r.get("event") == "serving"]
     out["probe_serving"] = min(serving) if serving else None
+    lease_pub = [r["ts"] for r in probe if r.get("event") == "lease_published"]
+    out["lease_published"] = min(lease_pub) if lease_pub else None
     for ln in debug:
         if "[engine] turn 1 start" in ln and "turn1_ts" not in out:
             out["turn1_ts"] = _debug_ts(ln)
@@ -297,7 +357,8 @@ def _out(text: str) -> None:
 def summarise(records: list[dict]) -> str:
     rows: dict = {}
     for r in records:
-        key = (r["label"], r["server_delay_s"], r["submit"], r["kind"], r.get("ss_sleep_s", 0))
+        key = (r["label"], r["server_delay_s"], r["submit"], r["kind"], r.get("ss_sleep_s", 0),
+               r.get("barrier", False))
         row = rows.setdefault(key, {"runs": 0, "errors": 0, "nosub": 0,
                                     **{ev: [0, 0, 0] for ev in EVENTS}})
         row["runs"] += 1
@@ -312,7 +373,7 @@ def summarise(records: list[dict]) -> str:
             v = r["events"][ev]["verdict"]
             idx = {"fired": 0, "missed": 1, "not_reached": 2}[v]
             row[ev][idx] += 1
-    lines = ["label | S | submit | kind | ss | runs | err | nosub | " +
+    lines = ["label | S | submit | kind | ss | barrier | runs | err | nosub | " +
              " | ".join(f"{ev} f/m/nr" for ev in EVENTS)]
     for key, row in rows.items():
         lines.append(" | ".join(str(x) for x in key) + f" | {row['runs']} | {row['errors']} | {row['nosub']} | "
@@ -333,6 +394,10 @@ def main() -> int:
     ap.add_argument("--plan")
     ap.add_argument("--ready-regex", default=r"bypass permissions on")
     ap.add_argument("--turn-timeout", type=float, default=120)
+    ap.add_argument("--barrier", action="store_true",
+                    help="inject the real nx-hook mcp-connect-wait verb as a SessionStart "
+                         "hook and have the probe publish the same lease-file readiness "
+                         "signal it waits for (nexus-veh77 round 2)")
     ap.add_argument("--reanalyse", action="store_true",
                     help="recompute every record in <out>/results.jsonl from its run dir")
     args = ap.parse_args()
@@ -376,8 +441,7 @@ def main() -> int:
                 f.write(json.dumps(rec) + "\n")
             evs = rec.get("events", {})
             _out(f"{label} S={sdelay} submit={submit} {kind} rep={rep}: "
-                  + (rec.get("error") or " ".join(f"{k}={v['verdict']}" for k, v in evs.items())),
-                  flush=True)
+                  + (rec.get("error") or " ".join(f"{k}={v['verdict']}" for k, v in evs.items())))
     summary = summarise(records)
     (Path(args.out) / "summary.txt").write_text(summary + "\n")
     _out(summary)
