@@ -130,7 +130,10 @@ def test_the_generated_drain_hook_is_the_verb_the_real_manifest_wires() -> None:
         for block in manifest["hooks"]["UserPromptSubmit"]
         for h in block["hooks"]
     ]
-    assert wired == [("nx-hook", ["mailbox-drain"])], wired
+    # Membership, not equality: other UserPromptSubmit verbs (e.g.
+    # mcp-connect-check, nexus-veh77) may sit beside the drain; the harness
+    # only has to run the same drain the manifest does.
+    assert ("nx-hook", ["mailbox-drain"]) in wired, wired
 
 
 def test_the_generated_hooks_json_names_a_verb_the_cli_still_has() -> None:
