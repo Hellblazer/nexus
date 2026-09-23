@@ -17,6 +17,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -288,6 +289,87 @@ class TestMissD:
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "MISS: (d)" in proc.stdout
         assert "SPACE_BLINDSPOT" in proc.stdout
+
+
+class TestRemedyANotFoundListsCandidates:
+    """nexus-7m6uc remedy (a): a ledger-not-found miss lists every ledger
+    that DOES exist, newest first, with mtime and START/REPORTED counts --
+    self-solving, so the runner sees the real candidate immediately instead
+    of re-guessing blind."""
+
+    def test_lists_existing_ledgers_when_named_session_not_found(self, tmp_path) -> None:
+        env = _base_env(tmp_path)
+        other_sid = "sess-other-1234567890"
+        _write_tsv(_ledger_dir(tmp_path) / f"{other_sid}.expectations")
+        proc = _run("sess-does-not-exist", env)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "no ledger file for session 'sess-does-not-exist'" in proc.stderr
+        assert "Ledgers present under" in proc.stderr
+        assert other_sid in proc.stderr
+        assert "start=1 reported=1" in proc.stderr
+
+    def test_no_listing_line_when_nothing_exists_at_all(self, tmp_path) -> None:
+        env = _base_env(tmp_path)
+        _ledger_dir(tmp_path)  # dir created, but holds no ledger at all
+        proc = _run(SID, env)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "Ledgers present under" not in proc.stderr
+
+
+class TestRemedyBAutoDiscovery:
+    """nexus-7m6uc remedy (b): called with no argument, the script picks
+    the sole ledger with recent agent-dispatch activity, and refuses --
+    naming every candidate -- rather than guess on zero or more than one."""
+
+    def test_sole_recent_ledger_is_auto_selected(self, tmp_path) -> None:
+        env = _base_env(tmp_path)
+        _write_tsv(_ledger_dir(tmp_path) / f"{SID}.expectations")
+        proc = _run(None, env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"AUTO-DISCOVERED session_id={SID}" in proc.stderr
+        assert "POST-PUBLISH DISPATCH CHECK PASSED" in proc.stdout
+
+    def test_ambiguous_when_two_ledgers_are_recent(self, tmp_path) -> None:
+        env = _base_env(tmp_path)
+        second_sid = "sess-second-9876543210"
+        d = _ledger_dir(tmp_path)
+        _write_tsv(d / f"{SID}.expectations")
+        _write_tsv(d / f"{second_sid}.expectations")
+        proc = _run(None, env)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "AMBIGUOUS" in proc.stderr
+        assert SID in proc.stderr
+        assert second_sid in proc.stderr
+
+    def test_zero_recent_candidates_lists_what_exists_and_refuses(self, tmp_path) -> None:
+        env = _base_env(tmp_path)
+        env["POST_PUBLISH_DISPATCH_RECENT_SECONDS"] = "1"
+        _write_tsv(_ledger_dir(tmp_path) / f"{SID}.expectations")
+        time.sleep(2)
+        proc = _run(None, env)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "No ledger has agent-dispatch activity in the last" in proc.stderr
+        assert SID in proc.stderr
+
+    def test_no_ledgers_at_all_gives_the_usage_shaped_message(self, tmp_path) -> None:
+        env = _base_env(tmp_path)
+        proc = _run(None, env)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "no ledger files exist at all" in proc.stderr
+        assert "usage" in proc.stderr
+
+    def test_explicit_session_id_skips_auto_discovery_entirely(self, tmp_path) -> None:
+        """A second, unrelated ledger existing must not make an EXPLICIT
+        session_id call ambiguous -- auto-discovery only runs when no
+        argument is given at all."""
+        env = _base_env(tmp_path)
+        d = _ledger_dir(tmp_path)
+        _write_tsv(d / f"{SID}.expectations")
+        _write_tsv(d / "sess-unrelated-0000000000.expectations")
+        proc = _run(SID, env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "AUTO-DISCOVERED" not in proc.stderr
+        assert "AMBIGUOUS" not in proc.stderr
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="posix permission bits only")

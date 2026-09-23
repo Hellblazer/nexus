@@ -46,14 +46,41 @@
 # Run this script AFTER that dispatch's SubagentStop has fired, naming
 # that session's id.
 #
-# USAGE: tests/e2e/post-publish-dispatch-check.sh <session_id>
+# USAGE: tests/e2e/post-publish-dispatch-check.sh [session_id]
+#
+# nexus-7m6uc: the runner has no reliable way to know which of several live
+# session ids on a shared box is the right one to pass (the harness session
+# id, the MCP-leased id the hooks actually write under, the machine-wide
+# `current_session` file, the newest T1 lease -- see JDR-001, four distinct
+# scopes, three of them routinely wrong for this purpose). Two remedies:
+#
+#   (a) SELF-SOLVING FAILURE. When no ledger exists for a GIVEN session_id,
+#       this script lists every ledger file that DOES exist under the
+#       orchestration state dir, newest first, with mtime and START/REPORTED
+#       counts, before exiting 2 -- the runner sees the real candidate
+#       immediately instead of guessing blind.
+#   (b) AUTO-DISCOVERY. Called with NO argument, the script looks for
+#       ledgers with recent agent-dispatch activity (a ledger file write, or
+#       an EXPECT credit-slot symlink -- nx.hooks.expectations._claim_credit
+#       -- within the last $POST_PUBLISH_DISPATCH_RECENT_SECONDS seconds,
+#       default 1800) and uses the session id automatically IF EXACTLY ONE
+#       such ledger exists. Zero or more than one candidate is refused (exit
+#       2), naming every candidate by session id and mtime -- the same
+#       discipline `mailbox_send` uses for a name with more than one live
+#       holder: never guess.
+#
+# Passing session_id explicitly still works exactly as before and skips
+# auto-discovery entirely.
 #
 # EXIT CODES:
 #   0 = POST-PUBLISH DISPATCH CHECK PASSED -- all four checks hold.
 #   1 = POST-PUBLISH DISPATCH CHECK FAILED -- at least one check missed
 #       (the named MISS lines say which).
 #   2 = a prerequisite is absent (no `nx` on PATH, no TSV ledger file for
-#       this session, or no session_id given) -- nothing was checkable.
+#       the given/discovered session, no session_id resolvable at all, or
+#       auto-discovery was ambiguous) -- nothing was checkable. The
+#       candidate listing printed alongside this exit code (see (a)/(b)
+#       above) is the remedy, not a separate failure.
 #
 # BOX-CLASS-AGNOSTIC BY DESIGN: run this identically on a managed-cloud box
 # and a local-supervisor box. Neither box class gets a "not applicable"
@@ -85,10 +112,109 @@ _prereq_fail() {
     exit 2
 }
 
-SID="${1:-}"
-if [[ -z "$SID" ]]; then
-    _prereq_fail "usage: $0 <session_id>"
-fi
+# ── nexus-7m6uc helpers: which ledger, and how to say so ────────────────────
+
+#: How far back "recent agent-dispatch activity" reaches for auto-discovery
+#: (b). Overridable for a slow-dispatch environment; the default is
+#: generous on purpose -- a false NEGATIVE here (a genuinely recent ledger
+#: excluded) silently degrades to the zero-candidate case (2, self-solving);
+#: a false POSITIVE (an old ledger wrongly included) can only ever make
+#: auto-discovery MORE conservative, since it can only turn a would-be
+#: unique candidate into an ambiguous one that refuses rather than guesses.
+POST_PUBLISH_DISPATCH_RECENT_SECONDS="${POST_PUBLISH_DISPATCH_RECENT_SECONDS:-1800}"
+
+# _epoch_mtime PATH -- epoch mtime of PATH, symlink or regular file, without
+# following a symlink (the EXPECT credit-slot files are DANGLING by design
+# -- nexus.hooks.expectations._claim_credit's target is an agent_id
+# identity string, not a real path -- so `stat -L` would fail on every one
+# of them). BSD stat (macOS) first, GNU stat (Linux) second; the same
+# fallback shape tests/e2e/plugin-lockstep-gate.sh already uses.
+_epoch_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
+# _human_mtime EPOCH -- best-effort local-time rendering for a listing line;
+# falls back to the bare epoch rather than failing the check over a display
+# nicety.
+_human_mtime() {
+    date -r "$1" 2>/dev/null || date -d "@$1" 2>/dev/null || echo "epoch:$1"
+}
+
+# _ledger_recency_epoch FILE -- the newest of FILE's own mtime and any of
+# its EXPECT credit-slot symlinks' mtimes (FILE.credit.<type_enc>.<n>). The
+# slot is created at DISPATCH time and can be newer than the ledger file's
+# last START/REPORTED append -- e.g. a background agent whose EXPECT row
+# landed but whose START has not (or, for a still-running dispatch, never
+# will before this check runs).
+_ledger_recency_epoch() {
+    local file="$1" best="" slot cand
+    best="$(_epoch_mtime "$file")" || best=""
+    for slot in "$file".credit.*; do
+        [[ -L "$slot" ]] || continue
+        cand="$(_epoch_mtime "$slot")" || continue
+        if [[ -z "$best" || "$cand" -gt "$best" ]]; then
+            best="$cand"
+        fi
+    done
+    [[ -n "$best" ]] && echo "$best"
+}
+
+# _ledger_listing -- one TAB-separated `epoch<TAB>sid<TAB>start<TAB>reported`
+# line per `*.expectations` ledger under STATE_DIR, newest epoch first.
+# Empty output (no lines at all) when STATE_DIR does not exist or holds no
+# ledgers -- callers check for that, never assume a line exists.
+_ledger_listing() {
+    local f sid epoch start_c rep_c
+    [[ -d "$STATE_DIR" ]] || return 0
+    for f in "$STATE_DIR"/*.expectations; do
+        [[ -f "$f" ]] || continue
+        sid="$(basename "$f" .expectations)"
+        epoch="$(_ledger_recency_epoch "$f")"
+        [[ -n "$epoch" ]] || continue
+        start_c="$(grep -c $'\tSTART\t' "$f" 2>/dev/null || true)"
+        rep_c="$(grep -c $'\tREPORTED\t' "$f" 2>/dev/null || true)"
+        printf '%s\t%s\t%s\t%s\n' "$epoch" "$sid" "${start_c:-0}" "${rep_c:-0}"
+    done | sort -t $'\t' -k1,1 -rn
+}
+
+# _print_ledger_listing LISTING -- render each `_ledger_listing` line as a
+# human line on stderr. Shared by (a)'s not-found diagnostic and (b)'s
+# zero/ambiguous-candidate refusal so the two remedies read identically.
+_print_ledger_listing() {
+    local epoch sid start_c rep_c
+    while IFS=$'\t' read -r epoch sid start_c rep_c; do
+        [[ -n "$sid" ]] || continue
+        echo "  $sid  mtime=$(_human_mtime "$epoch")  start=$start_c reported=$rep_c" >&2
+    done <<<"$1"
+}
+
+# _auto_discover_session_id -- remedy (b). Echoes the sole session id with
+# recent agent-dispatch activity, or exits 2 (via _prereq_fail) naming every
+# candidate -- zero or more than one is refused, never guessed.
+_auto_discover_session_id() {
+    local now cutoff listing candidates n_candidates window_min
+    now="$(date +%s)"
+    cutoff=$((now - POST_PUBLISH_DISPATCH_RECENT_SECONDS))
+    window_min=$((POST_PUBLISH_DISPATCH_RECENT_SECONDS / 60))
+    listing="$(_ledger_listing)"
+    if [[ -z "$listing" ]]; then
+        _prereq_fail "no session_id given (usage: $0 [session_id]) and no ledger files exist at all under $STATE_DIR -- dispatch at least one real agent in a live session first, or pass its session id explicitly"
+    fi
+    candidates="$(awk -F'\t' -v cutoff="$cutoff" '$1 >= cutoff' <<<"$listing")"
+    n_candidates="$(grep -c . <<<"$candidates" 2>/dev/null || true)"
+    n_candidates="${n_candidates:-0}"
+    if [[ -z "$candidates" || "$n_candidates" -eq 0 ]]; then
+        echo "No ledger has agent-dispatch activity in the last ${window_min} minute(s). Ledgers present under $STATE_DIR, newest first:" >&2
+        _print_ledger_listing "$listing"
+        _prereq_fail "no session_id given (usage: $0 [session_id]) and auto-discovery found no recent candidate -- pass one explicitly, e.g. the freshest one listed above"
+    fi
+    if [[ "$n_candidates" -gt 1 ]]; then
+        echo "AMBIGUOUS: $n_candidates ledgers have agent-dispatch activity in the last ${window_min} minute(s) -- refusing to guess. Candidates, newest first:" >&2
+        _print_ledger_listing "$candidates"
+        _prereq_fail "no session_id given and auto-discovery is ambiguous ($n_candidates recent candidates) -- pass one explicitly (see candidates above)"
+    fi
+    awk -F'\t' '{print $2}' <<<"$candidates"
+}
 
 if ! command -v nx >/dev/null 2>&1; then
     _prereq_fail "PATH has no nx -- install/activate the plugin's nx CLI before running this check"
@@ -101,6 +227,14 @@ if ! command -v nx-hook >/dev/null 2>&1; then
     _prereq_fail "nx-hook is not on PATH, though nx is -- this generation predates the nx-hook console script; reinstall/activate a current conexus generation before running this check"
 fi
 
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration"
+
+SID="${1:-}"
+if [[ -z "$SID" ]]; then
+    SID="$(_auto_discover_session_id)"
+    echo "AUTO-DISCOVERED session_id=$SID (sole ledger with agent-dispatch activity in the last $((POST_PUBLISH_DISPATCH_RECENT_SECONDS / 60)) minute(s))" >&2
+fi
+
 # The per-session ledger path, formerly expectations_file(). Same charset
 # guard as nexus.hooks.expectations._SESSION_ID_RE: it is what keeps a
 # session id like '../../evil' from writing outside the state dir.
@@ -108,11 +242,15 @@ if [[ ! "$SID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
     _prereq_fail "invalid session_id '$SID' (path-safe charset only)"
 fi
 
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration"
 TSV_FILE="$STATE_DIR/$SID.expectations"
 LOG_FILE="$STATE_DIR/$SID.tuple-projection.log"
 
 if [[ ! -r "$TSV_FILE" ]]; then
+    LISTING="$(_ledger_listing)"
+    if [[ -n "$LISTING" ]]; then
+        echo "No ledger for '$SID'. Ledgers present under $STATE_DIR, newest first:" >&2
+        _print_ledger_listing "$LISTING"
+    fi
     _prereq_fail "no ledger file for session '$SID' at $TSV_FILE -- dispatch at least one real agent in a live session with this session id, wait for its SubagentStop, then re-run this check"
 fi
 

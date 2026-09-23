@@ -657,7 +657,9 @@ the published-bytes counterpart.
 
 ### 11d. Post-publish: real-dispatch check (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18)
 
-Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh <session_id>` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
+Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
+
+**Where the session id comes from (nexus-7m6uc):** run the script with NO argument first. It auto-discovers the session id from ledgers under `~/.local/state/nexus/orchestration/` with recent agent-dispatch activity, and uses it automatically when exactly one such ledger exists — which is the common case right after a single dispatch. It refuses (exit 2, naming every candidate) rather than guess when the box has more than one recent ledger (a peer session's dispatch, a prior release's leftover), so pass a session id explicitly only then. Do NOT reach for the harness's own session id (the one in its task/output paths) — JDR-001 names three distinct T1 scopes on this box, and the ledger is written under the id leased at MCP-server spawn, which is routinely a different string. If a NAMED session id turns up no ledger, the script lists every ledger that DOES exist, newest first with mtime and START/REPORTED counts, as its own exit-2 diagnostic — read that listing before re-guessing.
 
 ### 12. Reinstall local tool and verify
 

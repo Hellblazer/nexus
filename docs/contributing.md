@@ -569,7 +569,7 @@ Every step below is **required**. Missing any one of them has caused problems in
     plain `-> working tree` here means `NEXUS_TARGET_RELEASE` was not set
     and the loop was not actually closed.
 
-11d. **Post-publish: real-dispatch check** (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18) — dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh <session_id>` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both.
+11d. **Post-publish: real-dispatch check** (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18) — dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both. Run it with NO argument first — it auto-discovers the session id from ledgers with recent agent-dispatch activity and uses it when exactly one exists, refusing (naming every candidate) rather than guess when more than one does. Do not reach for the harness's own session id: JDR-001 names three distinct T1 scopes on this box, and the ledger is written under the id leased at MCP-server spawn, not the harness's task/output-path id (nexus-7m6uc). A named session id that turns up no ledger gets its own diagnostic listing every ledger that does exist.
 
 12. **Reinstall local tool and verify**
     ```bash
