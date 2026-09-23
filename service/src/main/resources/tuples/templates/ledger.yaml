@@ -8,8 +8,8 @@
 # stays unconstrained, "kind:" carries a nested values list.
 #
 # max_body_bytes: 0 (bead nexus-r7xao) -- a ledger row carries no body: the
-# only writer, tuple_ledger_project.py, never sends a "body" field at all
-# (its payload is {subspace, keys, dims} only), and a live census (2026-09-13,
+# only writer, nexus.hooks.tuple_ledger_project, never sends a "body" field
+# at all (its payload is {subspace, keys, dims} only), and a live census (2026-09-13,
 # 2150 rows across 37 subspaces) found every ledger body empty. 0 means
 # null or "" both pass; any non-empty body is refused rather than silently
 # accepted and then never read by anything.

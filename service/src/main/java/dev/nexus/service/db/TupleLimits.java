@@ -13,10 +13,10 @@ import java.nio.charset.StandardCharsets;
  * decision fixed the numbers themselves, so there is no env override and
  * no default-vs-configured split. This class is the single place they
  * live on the engine side; the Python client
- * ({@code nexus.db.t2.http_tuple_store}) and the two stdlib hooks
- * ({@code tuple_ledger_project.py}, {@code mailbox_drain.py}) mirror the
- * same numbers, and {@code test_tuple_size_limits_parity.py} pins all
- * three sides equal by reading this file's own source text.
+ * ({@code nexus.db.t2.http_tuple_store}) mirrors the same numbers, the
+ * wheel's hooks import the client's copy rather than keeping their own,
+ * and {@code test_tuple_size_limits_parity.py} pins the client equal to
+ * this class by reading this file's own source text.
  *
  * <p>A template MAY declare a {@code max_body_bytes} lower than {@link
  * #MAX_BODY_BYTES} ({@link TemplateSchema#maxBodyBytes()}); every other
