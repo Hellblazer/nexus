@@ -350,6 +350,24 @@ class TestProcessExitFailsFast:
 
 
 class TestMigrationFailedMarker:
+    def test_failed_marker_takes_priority_over_process_exit_same_tick(self):
+        """nexus-cd1k0.6 finding (8): an engine that crashes mid-migration
+        exits AND leaves the failure marker in its final log lines in the
+        SAME tick. The marker is the actionable diagnosis and must win
+        over a bare process-exit report, which names only a returncode."""
+        clock = _FakeClock()
+        lr = _ScriptedLogReader()
+        lr.queue("event=schema_migration_start")
+        poll = _ScriptedProcessPoll()
+        monitor, *_ = _make_monitor(clock, log_reader=lr, process_poll=poll)
+        monitor.tick()  # -> MIGRATING
+
+        lr.queue("event=schema_migration_failed changeset=rdr180-001 error=boom")
+        poll.kill(returncode=1)
+        with pytest.raises(ReadinessMigrationFailedError) as exc_info:
+            monitor.tick()
+        assert "schema_migration_failed" in str(exc_info.value)
+
     def test_failed_marker_raises_immediately_not_a_stall(self):
         clock = _FakeClock()
         lr = _ScriptedLogReader()

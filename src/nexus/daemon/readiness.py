@@ -459,16 +459,26 @@ class ReadinessMonitor:
         """
         now = self._clock()
 
-        rc = self._process_poll()
-        if rc is not None:
-            raise ReadinessProcessExitedError(rc)
-
+        # nexus-cd1k0.6 finding (8): read the log BEFORE polling for
+        # process exit. An engine that crashes during a failed migration
+        # exits AND leaves `event=schema_migration_failed` in its last log
+        # lines in the same tick; checking exit first raised
+        # ReadinessProcessExitedError with a bare returncode and the
+        # failure marker — the actual cause — was never consumed or
+        # reported. The migration-failed diagnosis is the more specific,
+        # more actionable one (the same reasoning that already makes exit
+        # take priority over a stalled deadline below), so it must win
+        # over a bare exit code when both are present in one tick.
         lines = self._log_reader()
         waiting_for_lock, saw_failure = self._consume_log_lines(lines, now)
         if saw_failure:
             raise ReadinessMigrationFailedError(
                 self._scanner.failure_line or "event=schema_migration_failed"
             )
+
+        rc = self._process_poll()
+        if rc is not None:
+            raise ReadinessProcessExitedError(rc)
 
         pg_probe_used = self._consume_pg_probe(now)
         health = self._consume_health_probe(now)
