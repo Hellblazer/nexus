@@ -93,5 +93,45 @@ on 2026-09-22. A bullet that wraps is fine; a PATH that wraps is not.
   importer was `mailbox_drain.py`, and a console-script verb has no
   interpreter to choose.
 
+- nexus-t9klx — `conexus/hooks/scripts/routing/README.md`: says the routing
+  framework lives in the wheel as `nexus.hooks._routing_lib` and each rule is
+  an `nx-hook` verb, where it still described a vendored `_lib.py` +
+  `_interpreter.py`. Documentation only.
+
+- nexus-t9klx — `sn/hooks/scripts/_hook_boundary.py`: a docstring reference to
+  conexus's drain hook now names the wheel module. Comment only; sn's
+  behaviour is unchanged.
+
+nexus-z9cz2: the eleven bullets below are DELETIONS of plugin scripts that
+nothing shipped executed any more: hooks.json names none of them since
+nexus-t9klx, and each was superseded by the wheel code named. The one
+plugin script left, which the wheel runs, is divergence-language-scan.py.
+A session on v7.57.0 still carries its own copies until the pin moves, and
+never ran them either.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/t2_prefix_scan.py`: DELETED; superseded by `nexus.hooks.t2_prefix_scan`, which `subagent_start` calls in-process.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/tuple_ledger_project.py`: DELETED; superseded by `nexus.hooks.tuple_ledger_project`, which `tuple_projection` calls in-process.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/rdr_hook.py`: DELETED; superseded by the `rdr` verb.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/session_start_hook.py`: DELETED; superseded by the `session-context` verb.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/stop_failure_hook.py`: DELETED; superseded by `nexus.hooks.stop_failure`.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/subagent-stop-scan.py`: DELETED; superseded by `nexus.hooks.subagent_stop_scans`.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/subagent-stop-writes-scan.py`: DELETED; superseded by `nexus.hooks.subagent_stop_scans`.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/read_verification_config.py`: DELETED; superseded by `nexus.hooks.verification_config`.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/_endpoint_resolve.py`: DELETED; superseded by nothing: a stdlib mirror of the client's endpoint precedence, needed only by the plugin scripts above.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/_tuple_size_limits.py`: DELETED; superseded by nothing: a stdlib mirror of the tuple size caps, needed only by the plugin scripts above.
+
+- nexus-z9cz2 — `conexus/hooks/scripts/_hook_logging.py`: DELETED; superseded by nothing: its one function has a same-name twin in `nexus._hook_runtime._io`.
+
+- nexus-z9cz2 — `conexus/skills/orchestration/SKILL.md`: names the ledger's VERIFY parser as `nexus.hooks.tuple_ledger_project` instead of the deleted plugin copy. Wording only.
+
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)

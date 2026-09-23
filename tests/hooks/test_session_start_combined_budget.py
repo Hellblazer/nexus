@@ -37,18 +37,13 @@ fixture, since that side is fully deterministic already.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
-# Make the hook script importable as a module via path injection (same
-# pattern as tests/hooks/test_session_start_hygiene.py).
-_HOOKS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
-sys.path.insert(0, str(_HOOKS_DIR))
-try:
-    from session_start_hook import _build_capabilities_block, _render_ready_beads  # type: ignore[import-not-found]
-finally:
-    sys.path.remove(str(_HOOKS_DIR))
+# The emitter the bead measured as ``session_start_hook.py`` now runs as
+# ``nexus.hooks.session_context`` (RDR-215 bead nexus-q02nx.21); the plugin
+# copy was deleted at nexus-z9cz2, so the real renders come from the port.
+from nexus.hooks.session_context import _build_capabilities_block, _render_ready_beads
 
 
 #: Representative T2-memory block, sized to match (slightly above) a live
@@ -258,55 +253,3 @@ def test_sessionstart_bounded_components_under_budget(monkeypatch) -> None:
         f"{sn_bytes}B + bd-prime {bd_prime_bytes}B) >= budget "
         f"{_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
     )
-
-
-def test_render_ready_beads_caps_at_five_lines_with_overflow_count() -> None:
-    """Direct unit test of the trimmed cap (was 10 lines/500 chars,
-    uncapped total; now 5 lines/160 chars with an overflow count line)."""
-    rendered = _render_ready_beads(_FIXTURE_READY_RAW)
-    assert rendered[0] == "## Ready Beads"
-    body = [ln for ln in rendered if ln not in ("## Ready Beads", "```", "")]
-    # 5 bead lines + 1 overflow-count line.
-    assert len(body) == 6
-    assert all(len(ln) <= 160 for ln in body[:5]), (
-        "a shown ready-bead line exceeds the 160-char cap"
-    )
-    assert "10 more" in body[5]
-    assert "bd ready" in body[5]
-
-
-def test_render_ready_beads_empty_input_yields_no_section() -> None:
-    assert _render_ready_beads(None) == []
-    assert _render_ready_beads("") == []
-
-
-def test_capabilities_block_preserves_every_distinct_token() -> None:
-    """Trim (nexus-h33x8.5 fix-pass) must drop prose, never a distinct
-    backtick-quoted tool/flag/example token — the coordinator's "DATA
-    stays data" instruction."""
-    text = "\n".join(_build_capabilities_block())
-    for token in (
-        "`search`",
-        'where="KEY>=VALUE"',
-        'cluster_by="semantic"',
-        'topic="Label"',
-        "`chunk_text_hash`",
-        "`query`",
-        "`author`",
-        "`content_type`",
-        "`subtree`",
-        "`follow_links`",
-        "`depth`",
-        "`/conexus:query`",
-        "`plan_save`",
-        "`plan_search`",
-        "`scratch`",
-        "`links`",
-        "`link`",
-        "`chash:`",
-        "`nx enrich bib COLLECTION`",
-        "`nx enrich aspects COLLECTION`",
-        "`offset=N`",
-        "`mcp__plugin_conexus_nexus__`",
-    ):
-        assert token in text, f"capabilities block dropped distinct token {token!r}"

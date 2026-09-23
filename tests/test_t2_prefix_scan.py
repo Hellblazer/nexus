@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for conexus/hooks/scripts/t2_prefix_scan.py — _snippet() and cap algorithm."""
-import sys
-from pathlib import Path
+"""Tests for ``nexus.hooks.t2_prefix_scan`` — ``_snippet()`` and the render caps
+in ``_build_output()``. The HTTP-level behaviour of ``scan()`` is pinned in
+``tests/hooks/test_t2_prefix_scan.py``."""
+from typing import Any
 
-import pytest
-
-# Make t2_prefix_scan importable without installing it as a package
-sys.path.insert(0, str(Path(__file__).parent.parent / "conexus" / "hooks" / "scripts"))
-from t2_prefix_scan import _HARD_CAP, _SNIPPET_LIMIT, _TITLE_LIMIT, _snippet
-
+from nexus.hooks.t2_prefix_scan import (
+    _HARD_CAP,
+    _SNIPPET_LIMIT,
+    _TITLE_LIMIT,
+    _build_output,
+    _snippet,
+)
 
 # ── _snippet ─────────────────────────────────────────────────────────────────
 
@@ -61,133 +63,92 @@ def test_cap_constants_are_consistent() -> None:
     assert _TITLE_LIMIT < _HARD_CAP
 
 
-# ── cap algorithm integration via scan_namespaces helper ─────────────────────
-# We test the cap logic by calling the scan logic directly with a live T2Database.
-
-from nexus.db.t2 import T2Database
-
-
-def _make_db(tmp_path: Path) -> T2Database:
-    return T2Database(tmp_path / "t2_scan_test.db")
+# ── cap algorithm, through the real _build_output ─────────────────────────────
+# _build_output takes its store as a parameter; this one serves fixed rows in
+# insertion order, which is the order the engine's DESC listing would give.
 
 
-def _run_scan(db: T2Database, project_name: str) -> str:
-    """Run the scan logic and capture its stdout equivalent as a string."""
-    # Patch sys.argv and the import, then call main logic inline
-    namespaces = db.get_projects_with_prefix(project_name)
-    if not namespaces:
-        return ""
+class _RowStore:
+    def __init__(self) -> None:
+        self._rows: dict[str, list[dict[str, Any]]] = {}
 
-    lines: list[str] = []
-    total = 0
+    def put(self, project: str, title: str, content: str) -> None:
+        self._rows.setdefault(project, []).append({"title": title, "content": content})
 
-    for ns_row in namespaces:
-        if total >= _HARD_CAP:
-            break
-        ns = ns_row["project"]
-        entries = db.get_all(project=ns)
-        if not entries:
-            continue
+    def get_all(self, project: str) -> list[dict[str, Any]]:
+        return list(self._rows.get(project, []))
 
-        suffix = ns[len(project_name):].lstrip("_") if ns != project_name else ""
-        label = f"T2 Memory ({suffix})" if suffix else "T2 Memory"
-
-        ns_lines: list[str] = []
-        ns_remaining = 0
-        ns_rank = 0
-
-        for entry in entries:
-            if total >= _HARD_CAP:
-                ns_remaining += 1
-                continue
-            ns_rank += 1
-            title = entry.get("title", "(untitled)")
-            if ns_rank <= _SNIPPET_LIMIT:
-                snip = _snippet(entry.get("content", ""))
-                ns_lines.append(f"  {title}" + (f" — {snip}" if snip else ""))
-                total += 1
-            elif ns_rank <= _TITLE_LIMIT:
-                ns_lines.append(f"  {title}")
-                total += 1
-            else:
-                ns_remaining += 1
-
-        if ns_lines:
-            lines.append(f"### {label}")
-            lines.extend(ns_lines)
-            if ns_remaining:
-                lines.append(f"  … ({ns_remaining} more)")
-            lines.append("")
-
-    return "\n".join(lines)
+    def namespaces(self) -> list[dict[str, Any]]:
+        return [{"project": p} for p in self._rows]
 
 
-def test_entries_1_to_5_include_snippet(tmp_path: Path) -> None:
-    """First 5 entries per namespace include ' — snippet' text."""
-    with _make_db(tmp_path) as db:
-        for i in range(1, 6):
-            db.put(project="repo", title=f"entry-{i}.md", content=f"Content of entry {i}")
-        output = _run_scan(db, "repo")
-    assert " — Content of entry" in output
+def _run_scan(store: _RowStore, project_name: str) -> str:
+    return "\n".join(_build_output(store, project_name, store.namespaces()))  # type: ignore[arg-type]
 
 
-def test_entries_snippet_limit_to_title_limit_are_title_only(tmp_path: Path) -> None:
+def test_entries_up_to_snippet_limit_include_snippet() -> None:
+    """The first ``_SNIPPET_LIMIT`` entries per namespace include ' — snippet'."""
+    store = _RowStore()
+    for i in range(1, _SNIPPET_LIMIT + 1):
+        store.put("repo", f"entry-{i}.md", f"Content of entry {i}")
+    output = _run_scan(store, "repo")
+    assert output.count(" — Content of entry") == _SNIPPET_LIMIT
+
+
+def test_entries_snippet_limit_to_title_limit_are_title_only() -> None:
     """``_TITLE_LIMIT - _SNIPPET_LIMIT`` entries per namespace appear
     without a snippet (title-only), out of ``_TITLE_LIMIT`` total.
 
     Derived from the constants themselves (nexus-h33x8.5 fix-pass: the
     caps were retuned 5/8->3/5; a version hardcoding "8"/"5"/"3" would
     have silently pinned the pre-tune values rather than the behavior).
-    We don't assert *which* entries are title-only because all entries
-    share the same second-level timestamp, making SQLite ordering
-    non-deterministic.
     """
-    with _make_db(tmp_path) as db:
-        for i in range(1, _TITLE_LIMIT + 1):
-            db.put(project="repo", title=f"entry-{i}.md", content=f"Content of entry {i}")
-        output = _run_scan(db, "repo")
-    entry_lines = [l for l in output.splitlines() if "entry-" in l]
-    with_snippet = [l for l in entry_lines if " — " in l]
-    without_snippet = [l for l in entry_lines if " — " not in l]
+    store = _RowStore()
+    for i in range(1, _TITLE_LIMIT + 1):
+        store.put("repo", f"entry-{i}.md", f"Content of entry {i}")
+    output = _run_scan(store, "repo")
+    entry_lines = [ln for ln in output.splitlines() if "entry-" in ln]
+    with_snippet = [ln for ln in entry_lines if " — " in ln]
+    without_snippet = [ln for ln in entry_lines if " — " not in ln]
     assert len(with_snippet) == _SNIPPET_LIMIT
     assert len(without_snippet) == _TITLE_LIMIT - _SNIPPET_LIMIT
 
 
-def test_entries_beyond_title_limit_appear_as_count(tmp_path: Path) -> None:
+def test_entries_beyond_title_limit_appear_as_count() -> None:
     """Entries beyond ``_TITLE_LIMIT`` per namespace are summarised as
     '… (N more)' -- N derived from the constant (nexus-h33x8.5 fix-pass;
     was hardcoded "12 entries -> 3 more" against the pre-tune _TITLE_LIMIT=8)."""
     overflow = 3
-    total_entries = _TITLE_LIMIT + overflow
-    with _make_db(tmp_path) as db:
-        for i in range(1, total_entries + 1):
-            db.put(project="repo", title=f"entry-{i}.md", content=f"Content {i}")
-        output = _run_scan(db, "repo")
+    store = _RowStore()
+    for i in range(1, _TITLE_LIMIT + overflow + 1):
+        store.put("repo", f"entry-{i}.md", f"Content {i}")
+    output = _run_scan(store, "repo")
     assert f"… ({overflow} more)" in output
 
 
-def test_hard_cap_across_namespaces(tmp_path: Path) -> None:
+def test_hard_cap_across_namespaces() -> None:
     """Total rendered entries across namespaces must not exceed _HARD_CAP."""
-    with _make_db(tmp_path) as db:
-        # Three namespaces each with 10 entries — would be 30 without cap
-        for ns in ["repo", "repo_rdr", "repo_knowledge"]:
-            for i in range(1, 11):
-                db.put(project=ns, title=f"{ns}-entry-{i}.md", content=f"Content {i}")
-        output = _run_scan(db, "repo")
+    store = _RowStore()
+    # Three namespaces each with 10 entries — would be 30 without cap
+    for ns in ["repo", "repo_rdr", "repo_knowledge"]:
+        for i in range(1, 11):
+            store.put(ns, f"{ns}-entry-{i}.md", f"Content {i}")
+    output = _run_scan(store, "repo")
 
     # Count rendered entries (lines with "  " prefix that are not "… (N more)")
     rendered = [
-        l for l in output.splitlines()
-        if l.startswith("  ") and not l.startswith("  …")
+        ln for ln in output.splitlines()
+        if ln.startswith("  ") and not ln.startswith("  …")
     ]
+    assert rendered, "the cap proves nothing over an empty render"
     assert len(rendered) <= _HARD_CAP
 
 
-def test_namespace_header_appears_per_namespace(tmp_path: Path) -> None:
+def test_namespace_header_appears_per_namespace() -> None:
     """Each non-empty namespace gets its own '### T2 Memory ...' header."""
-    with _make_db(tmp_path) as db:
-        db.put(project="repo", title="main.md", content="main content")
-        db.put(project="repo_rdr", title="rdr.md", content="rdr content")
-        output = _run_scan(db, "repo")
+    store = _RowStore()
+    store.put("repo", "main.md", "main content")
+    store.put("repo_rdr", "rdr.md", "rdr content")
+    output = _run_scan(store, "repo")
     assert "### T2 Memory" in output
     assert "### T2 Memory (rdr)" in output

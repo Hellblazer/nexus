@@ -113,17 +113,18 @@ def _claude_pid() -> int:
     try:
         # nexus-cnzei.2 (S2, fix round 2): bridge structlog to stderr/logfile
         # BEFORE importing nexus.session below, via the SHARED helper (was a
-        # hand-duplicated local try/except; see _hook_logging.py's docstring
-        # for the class-level defect this closes). Structlog's default
+        # hand-duplicated local try/except; see configure_hook_logging's
+        # docstring in nexus._hook_runtime._io for the class-level defect
+        # this closes). Structlog's default
         # PrintLoggerFactory writes to STDOUT, the same channel this
         # PreToolUse hook's own JSON envelope goes out on, and a debug line
         # landing there ahead of (or beside) that JSON would corrupt the
         # payload the harness parses.
         #
-        # _hook_logging.configure_hook_logging() carries its OWN internal
+        # configure_hook_logging() carries its OWN internal
         # best-effort catch (never raises); the outer `except Exception:  # noqa: BLE001 — carried: this hook must reach a verdict, never raise
         # return os.getppid()` below is a SEPARATE, independent guarantee --
-        # it also covers a total absence of _hook_logging itself and the
+        # it also covers a failure of the logging setup itself and the
         # `nexus.session` import/call that follows. See
         # test_claude_pid_survives_a_logging_setup_failure, which asserts
         # the outer catch specifically by bypassing the inner one.

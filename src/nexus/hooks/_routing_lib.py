@@ -299,15 +299,11 @@ def _read_service_lease(config_dir: pathlib.Path) -> dict | None:
     """Best-effort read of the local supervisor's ServiceRegistry lease:
     ``{"host", "port", "token"}``, or ``None``.
 
-    Delegates the raw read to the shared sibling module's
-    :func:`_endpoint_resolve.read_storage_service_lease` (nexus-aginu,
-    replacing the "ported verbatim" copy nexus-gjv9b built from
-    ``t2_prefix_scan.py``'s ``_read_lease``), then applies this caller's
-    own additional requirement: a blank token is treated the same as no
-    lease at all, matching ``t2_prefix_scan.py``'s identical wrapper --
-    ``tests/test_routing_hooks.py``'s ``test_parity_read_service_lease_*``
-    suite still runs both wrappers against the same on-disk fixture and
-    asserts identical return values.
+    Reads the lease file through :class:`LeaseRecord` (nexus-t9klx; it
+    delegated to the plugin's ``_endpoint_resolve`` mirror before that,
+    and the mirror was deleted at nexus-z9cz2), then applies this
+    caller's own additional requirement: a blank token is treated the
+    same as no lease at all.
     """
     from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred, same reason
 
@@ -335,11 +331,9 @@ def _read_service_lease(config_dir: pathlib.Path) -> dict | None:
 
 def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | None:
     """Best-effort read of the client's cached DATA token for *base_url*,
-    tenant-scoped to ``"default"`` (nexus-aginu). Delegates to the shared
-    sibling module. ``tests/test_routing_hooks.py``'s
-    ``test_parity_read_data_token_lease_*`` suite still runs both
-    wrappers against the same on-disk lease fixture and asserts
-    identical return values."""
+    tenant-scoped to ``"default"`` (nexus-aginu), through the client's own
+    :class:`DataTokenManager`. ``tests/test_routing_hooks.py`` pins it
+    directly."""
     from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred, same reason
 
     # A PEEK: fresh_lease_token never mints and never touches the
@@ -354,10 +348,9 @@ def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | Non
 def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
     """``service_url``/``service_token`` from the persisted ``config.yml``.
 
-    ``tests/test_routing_hooks.py``'s
-    ``test_parity_read_config_yml_credentials_*`` suite runs this wrapper
-    and the plugin's stdlib mirror against the same on-disk fixture and
-    asserts identical return values.
+    ``tests/test_routing_hooks.py`` pins it directly. (It used to run this
+    wrapper against the plugin's stdlib mirror; the mirror was deleted at
+    nexus-z9cz2.)
 
     It calls :func:`nexus.config.persisted_credentials`, NOT
     ``get_credential``, and that distinction is the whole of nexus-t9klx's

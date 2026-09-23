@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-205 Phase 2 Step 3 (bead nexus-em75s.11): the async ledger-tuple
-projection body.
+projection body, :func:`nexus.hooks.tuple_ledger_project.project`.
 
-Stdlib-only mirror of ``nexus.db.data_token``'s cross-process lease-file
-format (same pattern as ``tests/hooks/test_t2_prefix_scan.py``'s
-data-token-lease tests) and of ``nexus.daemon.service_registry``'s
-``storage_service_addr.<uid>`` discovery file. Pins:
+Written against the plugin script ``conexus/hooks/scripts/
+tuple_ledger_project.py``; retargeted at its in-wheel port when that script
+was deleted (nexus-z9cz2). The behaviour tests drive ``project`` in a child
+process (:data:`_DRIVER`) so each one gets its own ``NEXUS_CONFIG_DIR`` and
+``XDG_STATE_HOME``, exactly as the script did. The fixtures hand-write
+``nexus.db.data_token``'s cross-process lease-file format and
+``nexus.daemon.service_registry``'s ``storage_service_addr.<uid>`` discovery
+file. Pins:
 
 - NO HOOK MINTS ANYTHING: a missing or near-expiry data-token lease is a
   SKIP (logged), never a fall-back to a static/mint-locked token and
@@ -34,12 +38,19 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "tuple_ledger_project.py"
+from nexus.hooks import tuple_ledger_project
+
+#: Child-process driver: the hook payload arrives as JSON on stdin (the
+#: shape the deleted script read), the kind as argv[1]. ``project`` itself
+#: takes the parsed dict; unparseable stdin reaches it as ``None``.
+_DRIVER = (
+    "import json, sys\n"
+    "from nexus.hooks.tuple_ledger_project import project\n"
+    "try:\n"
+    "    payload = json.loads(sys.stdin.read())\n"
+    "except ValueError:\n"
+    "    payload = None\n"
+    "project(sys.argv[1], payload)\n"
 )
 
 SESSION_ID = "sess-tuple-proj"
@@ -76,7 +87,7 @@ def _run(
     env["XDG_STATE_HOME"] = str(state_dir)
     env.update(env_overrides or {})
     return subprocess.run(
-        [sys.executable, str(SCRIPT), kind],
+        [sys.executable, "-c", _DRIVER, kind],
         input=stdin or _payload(),
         capture_output=True,
         text=True,
@@ -118,8 +129,8 @@ def _write_config_yml(config_dir: Path, credentials: dict[str, str]) -> None:
     actual on-disk shape (nexus-0zsmg) -- verified against a live
     ``~/.config/nexus/config.yml``: a zero-indent ``credentials:`` block
     with each key at a fixed 2-space indent, bare (unquoted) scalar
-    values. This is the shape ``_endpoint_resolve.read_config_yml_credentials``
-    is a narrow mirror of, not a general YAML writer.
+    values, read back through ``nexus.config.get_credential``. Not a
+    general YAML writer.
     """
     config_dir.mkdir(parents=True, exist_ok=True)
     lines = ["credentials:"]
@@ -202,7 +213,7 @@ class _MockTupleEngine:
                     status = 400
                     # The REAL engine's SchemaViolationException/TupleHandler
                     # shape for an undeclared dimension -- see
-                    # tuple_ledger_project.py's _UNDECLARED_DIM_DETAIL_RE,
+                    # nexus.hooks.tuple_ledger_project's _UNDECLARED_DIM_DETAIL_RE,
                     # which this mock's body must match for the fallback
                     # tests below to exercise the real detection logic
                     # rather than a bare-status shortcut (fix round 1, CRE
@@ -611,8 +622,8 @@ def test_engine_returns_429_is_logged_and_exits_zero(tmp_path: Path, mock_engine
 
 def test_engine_down_is_logged_and_exits_zero_fast(tmp_path: Path) -> None:
     """Arm 2 of the Test Plan's 'hook append with the engine down'
-    scenario: the SCRIPT's own exit code and latency stay unaffected by
-    an unreachable engine -- bounded by the curl timeout, never hanging,
+    scenario: the projector's exit code and latency stay unaffected by
+    an unreachable engine -- bounded by the transport timeout, never hanging,
     and the failure is logged rather than raised."""
     import socket
 
@@ -631,7 +642,7 @@ def test_engine_down_is_logged_and_exits_zero_fast(tmp_path: Path) -> None:
 
     assert proc.returncode == 0, proc.stderr
     # nexus-scc9t: loose hang guard, not a precision timing check. This
-    # is a real subprocess (bash -> the projection script) hitting a
+    # is a real subprocess (python -> project()) hitting a
     # refused connection (ECONNREFUSED), which fails near-instantly --
     # the transport's own _POST_TIMEOUT_S is 5s, so 10.0s (2x that) is
     # never reached in correct operation and guards against the
@@ -710,14 +721,8 @@ def test_post_never_follows_a_redirect(tmp_path: Path, mock_engine) -> None:
     redirect names. The attacker/second server must see zero requests;
     the 3xx itself is logged as a plain HTTP status, not silently
     swallowed."""
-    import importlib.util
-    from http.server import BaseHTTPRequestHandler
-
     attacker = mock_engine(status=200)
-
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project_redirect", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = tuple_ledger_project
 
     class _Handler(BaseHTTPRequestHandler):
         def log_message(self, *a: object) -> None:
@@ -730,12 +735,8 @@ def test_post_never_follows_a_redirect(tmp_path: Path, mock_engine) -> None:
             self.send_header("Location", attacker.base_url + "/v1/tuples/out")
             self.end_headers()
 
-    from http.server import ThreadingHTTPServer
-
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    import threading
-
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread =threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         host, port = server.server_address[:2]
@@ -759,7 +760,6 @@ def test_post_ignores_ambient_proxy_env_for_a_local_supervisor_endpoint(
     through an ambient http_proxy/https_proxy -- point the proxy env at
     a port nothing listens on and confirm the POST still reaches the
     real engine directly."""
-    import importlib.util
     import socket
 
     dead_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -771,11 +771,7 @@ def test_post_ignores_ambient_proxy_env_for_a_local_supervisor_endpoint(
     monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead_port}")
 
     engine = mock_engine(status=200)
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project_proxy", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    module._post_via_urllib(
+    tuple_ledger_project._post_via_urllib(
         engine.base_url, "tok",
         {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
         is_local_supervisor=True,
@@ -788,8 +784,8 @@ def test_post_honours_ambient_proxy_env_for_a_non_local_endpoint(
 ) -> None:
     """Fix round on nexus-aginu/nexus-em75s.42 review finding 5: a
     MANAGED (non-local-supervisor) endpoint must honour an ambient
-    http_proxy/https_proxy, matching t2_prefix_scan.py and
-    routing/_lib.py's plain ``urlopen`` -- otherwise a corporate-proxied
+    http_proxy/https_proxy, as the sibling hooks' plain ``urlopen``
+    always did -- otherwise a corporate-proxied
     cloud-mode box loses ledger writes silently while the sibling hooks
     keep working. Point the request at a dead port nothing listens on
     directly, but stand up a real HTTP server as the proxy: the POST
@@ -827,15 +823,7 @@ def test_post_honours_ambient_proxy_env_for_a_non_local_endpoint(
     monkeypatch.delenv("NO_PROXY", raising=False)
 
     try:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "tuple_ledger_project_proxy_honoured", SCRIPT,
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        module._post_via_urllib(
+        tuple_ledger_project._post_via_urllib(
             f"http://{dead_host}:{dead_port}", "tok",
             {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
             is_local_supervisor=False,
@@ -858,7 +846,6 @@ def test_post_bounds_the_whole_call_against_a_listening_but_never_accepting_serv
     that completes the TCP handshake (listen(), never accept()) could
     otherwise keep the call alive past any single recv's timeout. The
     whole POST must still return within roughly _POST_TIMEOUT_S."""
-    import importlib.util
     import socket
     import time as _time
 
@@ -867,9 +854,7 @@ def test_post_bounds_the_whole_call_against_a_listening_but_never_accepting_serv
     sock.listen(1)
     host, port = sock.getsockname()[:2]
 
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project_deadline", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = tuple_ledger_project
     try:
         start = _time.monotonic()
         with pytest.raises(module._Skip):
@@ -886,32 +871,23 @@ def test_post_bounds_the_whole_call_against_a_listening_but_never_accepting_serv
         sock.close()
 
 
-def test_never_mints_never_imports_nexus_package() -> None:
-    """Stdlib-only, like t2_prefix_scan.py / routing/_lib.py. The only
-    route this module ever posts to is ``_ROUTE`` -- pinned to
+def test_never_mints() -> None:
+    """The only route this module ever posts to is ``_ROUTE`` -- pinned to
     ``/v1/tuples/out``, never the mint endpoint (the module docstring
     names ``/v1/data-tokens/mint`` only in prose, to document what this
     module deliberately does NOT call -- ``test_fresh_lease_posts_the_
     ledger_start_tuple`` above is the behavioral proof of the actual
-    POST path)."""
-    src = SCRIPT.read_text()
-    assert "import nexus" not in src
-    assert "from nexus" not in src
-
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module._ROUTE == "/v1/tuples/out"
+    POST path). The stdlib-only half of this test went with the plugin
+    script: the wheel port imports ``nexus`` by design."""
+    assert tuple_ledger_project._ROUTE == "/v1/tuples/out"
 
 
-def test_script_never_spawns_a_subprocess_for_the_post() -> None:
+def test_module_never_spawns_a_subprocess_for_the_post() -> None:
     """nexus-em75s.12 review fix: the bearer must never appear in a
     subprocess argv (readable by any co-resident user via ps/proc for the
     life of the call). The POST goes over stdlib ``urllib.request``, not
     ``curl`` or any other shellout."""
-    src = SCRIPT.read_text()
+    src = Path(tuple_ledger_project.__file__).read_text()
     assert '"curl"' not in src
     assert "import subprocess" not in src
     assert "urllib.request" in src
@@ -922,22 +898,17 @@ def test_bearer_never_appears_in_a_spawned_subprocess(tmp_path: Path, mock_engin
     fail loudly if the script's own process ever calls it, then run the
     real POST path end to end and confirm the token still reaches the
     engine -- via the Authorization header, never via any argv."""
-    import importlib.util
     import subprocess as real_subprocess
 
     engine = mock_engine(status=200)
 
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project_probe", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
     def _forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("tuple_ledger_project.py must never spawn a subprocess to POST")
+        raise AssertionError("the ledger projector must never spawn a subprocess to POST")
 
     monkeypatch.setattr(real_subprocess, "run", _forbidden)
     monkeypatch.setattr(real_subprocess, "Popen", _forbidden)
 
-    module._post_via_urllib(
+    tuple_ledger_project._post_via_urllib(
         engine.base_url, "never-in-argv",
         {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
         is_local_supervisor=True,
@@ -1442,12 +1413,7 @@ def test_oversized_t2_ref_dim_is_dropped_but_row_still_written(
 
 
 def _load_module_directly():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project_verify_unit", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return tuple_ledger_project
 
 
 def test_extract_verify_dims_ignores_a_malformed_commit_value(tmp_path: Path) -> None:

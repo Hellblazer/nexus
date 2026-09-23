@@ -38,9 +38,9 @@ in ``nx-mcp``'s own configured log sink (``<config>/logs/mcp.log`` --
 is ever invoked, so there is no separate "logged to the hook log" step to
 perform here the way a bash-launched Python hook script needs
 ``conexus/hooks/scripts/_hook_logging.py`` to bridge structlog away from
-stdout before its first ``nexus.*`` import; that module lives under the
-plugin directory, is not on ``nx-mcp``'s import path, and solves a problem
-this tier does not have).
+stdout before its first ``nexus.*`` import; that module lived under the
+plugin directory, was never on ``nx-mcp``'s import path, and solved a
+problem this tier does not have. It was deleted at nexus-z9cz2).
 
 **Field names.** A hook module's payload fields are named the way the
 contract map (T2 ``nexus_rdr/215-hook-contract-map``) records them, dotted

@@ -18,7 +18,6 @@ from __future__ import annotations
 import ast
 import json
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -30,10 +29,6 @@ from nexus.hooks import expectations
 from nexus.hooks import subagent_stop as hook
 from nexus.hooks import subagent_stop_scans as scans
 from nexus.mcp.core import _mcp_tool_error
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCAN = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop-scan.py"
-WRITES_SCAN = REPO_ROOT / "conexus" / "hooks" / "scripts" / "subagent-stop-writes-scan.py"
 
 
 class TestTheReasonTextIsWhatAnOperatorReads:
@@ -147,6 +142,12 @@ class TestTheReportScan:
         different things to anyone reading a ledger beside a transcript."""
         assert scans.report_verdict(str(tmp_path / "nope.jsonl")) == "SKIP"
         assert scans.report_verdict("") == "SKIP"
+
+    def test_an_empty_transcript_is_notfound_not_skip(self, tmp_path):
+        """A file that exists but holds no entries is a readable transcript
+        with no report in it (verdict pinned by the deleted script's own
+        output, which the port matched)."""
+        assert scans.report_verdict(str(self._transcript(tmp_path, []))) == "NOTFOUND"
 
     def test_a_directory_is_skip(self, tmp_path):
         """The bash header names a readable DIRECTORY as a real crash input."""
@@ -268,6 +269,9 @@ class TestTheWritesScan:
         contract."""
         assert scans.writes_verdict(str(tmp_path / "nope.jsonl")) == "CLEAN"
 
+    def test_an_empty_transcript_is_clean(self, tmp_path):
+        assert scans.writes_verdict(str(self._transcript(tmp_path, []))) == "CLEAN"
+
     def test_two_failures_across_two_tools_are_named_sorted(self, tmp_path):
         t = self._transcript(
             tmp_path,
@@ -279,61 +283,6 @@ class TestTheWritesScan:
             ],
         )
         assert scans.writes_verdict(str(t)) == "UNLANDED 2 memory_put,store_put"
-
-
-class TestBothScansAgreeWithTheScriptsTheyReplace:
-    """The scripts are still on disk and still invoked by the live bash
-    hook, so every verdict must match. Compared as VERDICT STRINGS, which
-    is what the callers matched on."""
-
-    def _run(self, script: Path, path: str) -> str:
-        return subprocess.run(
-            [sys.executable, str(script), path],
-            capture_output=True, text=True, timeout=60,
-        ).stdout.strip()
-
-    def _write(self, tmp_path: Path, entries: list[dict], name: str) -> Path:
-        p = tmp_path / name
-        p.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
-        return p
-
-    @pytest.mark.parametrize(
-        "entries,label",
-        [
-            ([{"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "id": "t", "name": "SendMessage"}]}}], "reported"),
-            ([{"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "id": "t", "name": "SubagentHandback"}]}}], "handback"),
-            ([{"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "id": "t", "name": "Bash"}]}}], "silent"),
-            ([], "empty transcript"),
-        ],
-    )
-    def test_the_report_verdict_matches(self, tmp_path, entries, label):
-        p = self._write(tmp_path, entries, "r.jsonl")
-        assert scans.report_verdict(str(p)) == self._run(SCAN, str(p)), label
-
-    @pytest.mark.parametrize(
-        "entries,label",
-        [
-            ([
-                {"type": "assistant", "message": {"content": [
-                    {"type": "tool_use", "id": "w", "name": "memory_put", "input": {}}]}},
-                {"type": "user", "message": {"content": [
-                    {"type": "tool_result", "tool_use_id": "w", "content": "Error: x"}]}},
-            ], "one failed write"),
-            ([
-                {"type": "assistant", "message": {"content": [
-                    {"type": "tool_use", "id": "w", "name": "store_put", "input": {}}]}},
-                {"type": "user", "message": {"content": [
-                    {"type": "tool_result", "tool_use_id": "w", "content": "Stored: x"}]}},
-            ], "one clean write"),
-            ([], "empty transcript"),
-        ],
-    )
-    def test_the_writes_verdict_matches(self, tmp_path, entries, label):
-        p = self._write(tmp_path, entries, "w.jsonl")
-        assert scans.writes_verdict(str(p)) == self._run(WRITES_SCAN, str(p)), label
 
 
 class TestTheNoSpawnClaim:

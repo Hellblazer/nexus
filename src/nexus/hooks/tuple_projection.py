@@ -42,11 +42,8 @@ per-session log file).
 ``conexus/hooks/scripts/tuple_ledger_project.py`` was NOT deleted by this
 bead, on the stated ground that ``mailbox_drain.py`` and the ``routing/``
 guards still imported its sibling ``_endpoint_resolve.py``. nexus-t9klx
-ported all three, so that ground is gone and the file stays only until it
-is deleted
-(nexus-q02nx.21's own scope note applies here too: deleting a shared file
-out from under a still-live consumer is worse than leaving an unused one
-behind for one more bead).
+ported all three, and the file and its sibling were deleted at
+nexus-z9cz2.
 
 **ONE PROPERTY PRESERVED FROM THE SUBPROCESS DESIGN, RE-HOMED RATHER THAN
 DROPPED.** The old ``_project`` bounded a wedged SUBPROCESS with

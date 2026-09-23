@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for ``scripts/check_agent_verify_claims.py`` (bead nexus-cnzei.6
 item 3): the orchestrator-side check that a report row's VERIFY claims
-(commit / t2_ref / verify, filled by ``tuple_ledger_project.py``'s item-2
-extension) are actually TRUE, not merely present.
+(commit / t2_ref / verify, filled by ``nexus.hooks.tuple_ledger_project``'s
+item-2 extension) are actually TRUE, not merely present.
 
 Pure-function tests over ``check()`` with planted ``TupleRow``-shaped rows
 (no live tuple-space call — ``_make_store``/``_declared_ledger_dims``/

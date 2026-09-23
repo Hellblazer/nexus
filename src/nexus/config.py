@@ -529,8 +529,8 @@ def get_verification_config(repo_root: Path | None = None) -> dict[str, Any]:
     return {**defaults, **section}
 
 
-# Detection table shared with conexus/hooks/scripts/read_verification_config.py.
-# Keep both tables identical — a cross-validation test enforces this.
+# Detection table shared with nexus.hooks.verification_config.DETECT_TABLE.
+# Keep both tables identical — tests/test_config.py enforces this.
 _DETECT_TABLE: list[tuple[str, str]] = [
     ("pom.xml",          "mvn test"),
     ("build.gradle",     "./gradlew test"),
@@ -1365,8 +1365,8 @@ def persisted_credentials(config_dir: Path) -> dict[str, str]:
     An absent key is ABSENT from the result, never ``""``. A caller
     distinguishing "not configured" from "configured empty" needs that,
     and it is what the plugin's stdlib mirror
-    (``_endpoint_resolve.read_config_yml_credentials``) returns, which
-    ``tests/test_routing_hooks.py``'s parity suite holds the two to.
+    (``_endpoint_resolve.read_config_yml_credentials``, deleted at
+    nexus-z9cz2) returned.
 
     Returns ``{}`` when the file is absent, unreadable, or carries no
     ``credentials:`` block.

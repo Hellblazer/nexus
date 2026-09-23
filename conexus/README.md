@@ -89,11 +89,10 @@ conexus/
 │   └── *.md                 # Slash commands (/conexus:research, /conexus:create-plan, /conexus:review-code, etc.)
 ├── hooks/
 │   ├── hooks.json                     # Hook event → script wiring (source of truth)
-│   └── scripts/                       # Plugin-resident hooks and shared helpers.
-│       │                              # Most hooks now live in the conexus WHEEL
-│       │                              # (nexus.hooks.*) — see the table below.
-│       ├── t2_prefix_scan.py          # Shared helper: T2 multi-namespace prefix scan
-│       └── read_verification_config.py # Shared helper: read .nexus.yml verification block
+│   └── scripts/                       # Every hook lives in the conexus WHEEL
+│       │                              # (nexus.hooks.*) — see the table below;
+│       │                              # one plugin script is left.
+│       └── divergence-language-scan.py # Run by the wheel's divergence-language guard
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
 ├── CHANGELOG.md             # Version history (Keep a Changelog format)

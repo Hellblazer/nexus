@@ -96,13 +96,15 @@ scenario_end
 
 scenario "00 debug-load: SessionStart hook produces expected output"
 
-# Run session_start_hook.py directly with CLAUDE_PROJECT_DIR pointing at repo
-session_hook_out=$(HOME="$TEST_HOME" \
+# Run the session-context hook with CLAUDE_PROJECT_DIR pointing at repo.
+# It was conexus/hooks/scripts/session_start_hook.py until nexus-z9cz2
+# deleted that copy; this drives the wheel port, the code hooks.json runs.
+session_hook_out=$(echo '{}' | HOME="$TEST_HOME" \
     PATH="$TEST_HOME/.local/bin:$PATH" \
     CLAUDE_PROJECT_DIR="$REPO_ROOT" \
-    python3 "$REPO_ROOT/conexus/hooks/scripts/session_start_hook.py" 2>&1 || true)
+    "$REPO_ROOT/tests/e2e/lib/drive_hook.sh" session_context 2>&1 || true)
 
-echo "    --- session_start_hook.py output ---"
+echo "    --- session-context output ---"
 echo "$session_hook_out" | head -20 | sed 's/^/    | /'
 echo "    ---"
 

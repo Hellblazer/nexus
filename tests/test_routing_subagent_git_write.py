@@ -114,8 +114,8 @@ def _isolate_log(tmp_path, monkeypatch):
     # file's _run() invokes the real hook script as a subprocess with an
     # UNMODIFIED os.environ, so without isolating NEXUS_CONFIG_DIR the
     # writer-swapped log_routing_event's endpoint discovery
-    # (conexus/hooks/scripts/routing/_lib.py's _engine_endpoint, ported
-    # from t2_prefix_scan.py) resolves against whatever is REALLY
+    # (nexus.hooks._routing_lib's _engine_endpoint, once the plugin's
+    # routing/_lib.py) resolves against whatever is REALLY
     # configured on the box running the suite -- a live lease, a real
     # service_url/service_token -- and both attempts a real network call
     # AND, on failure, would append to the REAL ~/.config/nexus/

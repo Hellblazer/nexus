@@ -4,28 +4,17 @@
 T2-memory/beads/capabilities/knowledge-map hook ported onto the
 command-tier dispatch mechanism (RDR-215 bead nexus-q02nx.21).
 
-Carries the two existing script-level test files across
-(``tests/hooks/test_session_start_hygiene.py``,
-``tests/hooks/test_session_start_combined_budget.py``) by re-driving their
-pure-function assertions against the NEW module, and adds:
+Carries the script-level hygiene and ready-beads/capabilities assertions
+across by re-driving them against the NEW module (the plugin script and
+its differential tests were deleted at nexus-z9cz2), and adds:
 
-* **Differential tests** against the still-wired script (imported via the
-  same ``sys.path`` injection those two existing files already use) for
-  every pure helper the port carries -- each assertion is a check that the
-  port did not silently drift from what production still runs.
 * **``run()`` composition tests** -- the T2/beads/capabilities/knowledge-map
   assembly order, the ``HookResult`` contract (``stdout=None`` vs a joined
   string), and that ``payload`` is accepted and ignored (the script never
   reads stdin).
-* **``_plugin_root()`` resolution tests** -- this is the one place the port
-  could not be a literal line-for-line carry: the script resolved its
-  sibling ``t2_prefix_scan.py`` via ``Path(__file__).parent`` because both
-  files lived in ``conexus/hooks/scripts/`` together; this module now lives
-  in ``src/nexus/hooks/`` and the sibling has not moved (a separate bead's
-  scope). One test proves the dev-checkout fallback still finds the REAL
-  sibling script on disk; another proves ``CLAUDE_PLUGIN_ROOT`` is honored
-  end-to-end through a real (but fake-content) subprocess call, with no
-  live T2 substrate involved.
+* **In-process T2 section tests** -- the T2 Memory section comes from
+  ``nexus.hooks.t2_prefix_scan.scan()`` in-process (bead nexus-b5ugt), so
+  no plugin path is resolved at all.
 """
 from __future__ import annotations
 
@@ -38,62 +27,7 @@ from pathlib import Path
 from nexus._hook_runtime._io import HookResult
 from nexus.hooks import session_context, t2_prefix_scan
 
-# -- Access to the still-wired script, for differential assertions ----------
-# Same sys.path-injection pattern as tests/hooks/test_session_start_hygiene.py
-# and tests/hooks/test_session_start_combined_budget.py.
-_HOOKS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
-sys.path.insert(0, str(_HOOKS_DIR))
-try:
-    import session_start_hook as _script  # type: ignore[import-not-found]
-finally:
-    sys.path.remove(str(_HOOKS_DIR))
-
-
-# -- Differential: pure helpers, port vs. still-wired script -----------------
-
-
-class TestDifferentialAgainstTheStillWiredScript:
-    """Same fixture in, same rendered lines out -- port vs. production."""
-
-    _FIXTURE_READY_RAW = "\n".join(
-        f"○ nexus-fx{i:03d} ● P1 [bug] fixture bead title {i}" for i in range(12)
-    )
-
-    def test_render_ready_beads_matches(self) -> None:
-        assert session_context._render_ready_beads(self._FIXTURE_READY_RAW) == (
-            _script._render_ready_beads(self._FIXTURE_READY_RAW)
-        )
-
-    def test_render_ready_beads_empty_input_matches(self) -> None:
-        assert session_context._render_ready_beads(None) == _script._render_ready_beads(None)
-        assert session_context._render_ready_beads("") == _script._render_ready_beads("")
-
-    def test_build_capabilities_block_matches(self) -> None:
-        assert session_context._build_capabilities_block() == _script._build_capabilities_block()
-
-    def test_emit_hygiene_block_silent_case_matches(self, tmp_path: Path) -> None:
-        cache = tmp_path / "cache.txt"
-        cache.write_text("fresh\n")
-        port_lines: list[str] = []
-        script_lines: list[str] = []
-        session_context._emit_hygiene_block(port_lines, str(cache))
-        _script._emit_hygiene_block(script_lines, str(cache))
-        assert port_lines == script_lines == []
-
-    def test_emit_hygiene_block_stale_case_matches(self, tmp_path: Path) -> None:
-        cache = tmp_path / "cache.txt"
-        cache.write_text("stale\n")
-        ten_days_ago = _time.time() - (10 * 86400)
-        os.utime(cache, (ten_days_ago, ten_days_ago))
-
-        port_lines: list[str] = []
-        script_lines: list[str] = []
-        session_context._emit_hygiene_block(port_lines, str(cache))
-        _script._emit_hygiene_block(script_lines, str(cache))
-        assert port_lines == script_lines
-
-
-# -- Carried: tests/hooks/test_session_start_hygiene.py, retargeted ---------
+# -- Carried: the plugin script's hygiene tests, retargeted ------------------
 
 
 class TestHygieneBlockCarried:

@@ -118,9 +118,9 @@ VERB_TABLE: dict[str, str] = {
     # Python hooks plugin-resident in python3 exec form, reasoning that each
     # reaches _endpoint_resolve.py, which cannot leave the plugin. nexus-t9klx
     # answered that instead of accepting it: the mirror is not carried across,
-    # the ported module calls the client's own primitives, and _endpoint_resolve
-    # stays behind for t2_prefix_scan.py and tuple_ledger_project.py, which
-    # still import it and are not ported by this epic.
+    # the ported module calls the client's own primitives. _endpoint_resolve
+    # and the two plugin copies that still imported it were then deleted
+    # (nexus-z9cz2): nothing shipped executed them.
     #
     # "session-context", not "session-start": these are two DIFFERENT
     # SessionStart hooks and the good name was already taken above by the

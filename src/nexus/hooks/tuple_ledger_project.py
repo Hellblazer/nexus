@@ -58,8 +58,8 @@ removes that assumption instead.
   module-level copy, single-sourced with the engine's
   ``dev.nexus.service.db.TupleLimits`` by
   ``tests/db/test_tuple_size_limits_parity.py`` -- rather than the plugin's
-  fourth stdlib-only mirror (``_tuple_size_limits.py``), which stays behind
-  for the two hook scripts that still cannot import ``nexus``.
+  fourth stdlib-only mirror (``_tuple_size_limits.py``), deleted at
+  nexus-z9cz2 with the plugin scripts that used it.
 - What did NOT change: the wire shape (``POST /v1/tuples/out`` against the
   ``ledger/<session_id>`` template), the VERIFY-line dims extraction (bead
   nexus-cnzei.6 item 2), the schema-fallback retry for a below-floor engine,

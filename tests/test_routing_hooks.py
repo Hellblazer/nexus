@@ -954,41 +954,20 @@ def test_log_routing_event_unresolvable_endpoint_meters_with_cause_unresolvable(
 
 
 # ---------------------------------------------------------------------------
-# Parity with t2_prefix_scan.py (nexus-gjv9b review fold-in round 3,
-# code-review item 2): _read_service_lease/_read_lease,
-# _read_data_token_lease, and _read_config_yml_credentials were all
-# "ported verbatim" from t2_prefix_scan.py, and one of the three
-# docstrings already CLAIMED this suite existed before it did. The two
-# files use different Path-import conventions (t2_prefix_scan.py:
-# `from pathlib import Path`; routing/_lib.py: `import pathlib`), so a
-# byte-diff of the source would false-positive on that alone -- this
-# runs BOTH implementations against the SAME on-disk lease/config
-# layout instead and asserts identical return values, function by
-# function, across every branch each one documents (fresh, expired,
-# malformed, missing, wrong digest).
+# The three discovery readers, called directly (nexus-gjv9b review fold-in
+# round 3, code-review item 2). These ran as a parity suite against
+# t2_prefix_scan.py's copies until that plugin script was deleted
+# (nexus-z9cz2); what remains pins each wheel reader's own return value
+# across every branch it documents (fresh, expired, malformed, truncated,
+# missing, wrong digest).
 # ---------------------------------------------------------------------------
-
-T2_PREFIX_SCAN_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "t2_prefix_scan.py"
-
-
-def _load_t2_prefix_scan():
-    spec = importlib.util.spec_from_file_location("nx_t2_prefix_scan", T2_PREFIX_SCAN_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
 
 
 def _write_lease(config_dir, *, age: float = 0.0, ttl: float = 60.0) -> None:
     """A lease file of the shape ``ServiceRegistry`` actually writes.
 
-    nexus-t9klx: this used to be a hand-written partial — status,
-    heartbeat_epoch, ttl, endpoint and nothing else, because that is all
-    the plugin's tolerant mirror reads. The wheel's wrapper goes through
-    ``LeaseRecord.from_json``, which requires the whole record, so the
-    partial made the two disagree on an input the supervisor never
-    produces. ``LeaseRecord.to_json`` is the file format; build the
-    fixture from it rather than from what one reader happens to look at.
+    nexus-t9klx: built from ``LeaseRecord.to_json``, the file format, rather
+    than a hand-written partial of the fields one reader happens to look at.
     """
     from nexus.daemon.service_registry import LeaseRecord
 
@@ -1004,36 +983,26 @@ def _write_lease(config_dir, *, age: float = 0.0, ttl: float = 60.0) -> None:
     (config_dir / f"storage_service_addr.{os.getuid()}").write_text(record.to_json())
 
 
-def test_parity_read_service_lease_fresh(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_service_lease_fresh(tmp_path):
     _write_lease(tmp_path)
-    assert lib._read_service_lease(tmp_path) == scan._read_lease(tmp_path)
+    assert _load_lib()._read_service_lease(tmp_path) == {
+        "host": "127.0.0.1", "port": 4242, "token": "tok",
+    }
 
 
-def test_parity_read_service_lease_expired(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_service_lease_expired(tmp_path):
     _write_lease(tmp_path, age=120.0)
-    assert lib._read_service_lease(tmp_path) is None
-    assert scan._read_lease(tmp_path) is None
+    assert _load_lib()._read_service_lease(tmp_path) is None
 
 
-def test_a_truncated_lease_record_is_refused_by_the_wheel_only(tmp_path):
-    """The one place the two readers genuinely differ, named rather than hidden.
+def test_a_truncated_lease_record_is_refused(tmp_path):
+    """The reader validates the whole record through
+    ``LeaseRecord.from_json``, so a lease file missing ``scope_key`` /
+    ``generation`` / ``owner_token`` / ``version`` resolves to ``None``.
 
-    The mirror reads the four fields it needs and ignores the rest; the
-    wheel's wrapper validates the whole record through
-    ``LeaseRecord.from_json``. A lease file missing ``scope_key`` /
-    ``generation`` / ``owner_token`` / ``version`` therefore resolves to an
-    endpoint for one and to ``None`` for the other.
-
-    The supervisor never writes such a file, so this is not a live
-    divergence — and the direction is the safe one either way: ``None``
-    drops the routing event to the meter, where a wrong endpoint would
-    send it somewhere. Pinned so that if the record format ever loses a
-    field, the disagreement surfaces here instead of as a guard that
-    silently stopped logging.
+    The supervisor never writes such a file. ``None`` is the safe
+    direction: it drops the routing event to the meter, where a wrong
+    endpoint would send it somewhere.
     """
     (tmp_path / f"storage_service_addr.{os.getuid()}").write_text(json.dumps({
         "status": "live",
@@ -1042,88 +1011,57 @@ def test_a_truncated_lease_record_is_refused_by_the_wheel_only(tmp_path):
         "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
     }))
     assert _load_lib()._read_service_lease(tmp_path) is None
-    assert _load_t2_prefix_scan()._read_lease(tmp_path) == {
-        "host": "127.0.0.1", "port": 4242, "token": "tok",
-    }
 
 
-def test_parity_read_service_lease_malformed(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text("not json")
-    assert lib._read_service_lease(tmp_path) is None
-    assert scan._read_lease(tmp_path) is None
+def test_read_service_lease_malformed(tmp_path):
+    (tmp_path / f"storage_service_addr.{os.getuid()}").write_text("not json")
+    assert _load_lib()._read_service_lease(tmp_path) is None
 
 
-def test_parity_read_service_lease_missing(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    assert lib._read_service_lease(tmp_path) is None
-    assert scan._read_lease(tmp_path) is None
+def test_read_service_lease_missing(tmp_path):
+    assert _load_lib()._read_service_lease(tmp_path) is None
 
 
-def test_parity_read_data_token_lease_fresh_match(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_data_token_lease_fresh_match(tmp_path):
+    base_url = "http://127.0.0.1:4242"
+    _write_data_token_lease(tmp_path, base_url=base_url, tenant="default", token="tok")
+    assert _load_lib()._read_data_token_lease(tmp_path, base_url) == "tok"
+
+
+def test_read_data_token_lease_wrong_digest(tmp_path):
     _write_data_token_lease(tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok")
+    assert _load_lib()._read_data_token_lease(tmp_path, "http://127.0.0.1:9999") is None
+
+
+def test_read_data_token_lease_expired(tmp_path):
     base_url = "http://127.0.0.1:4242"
-    assert lib._read_data_token_lease(tmp_path, base_url) == "tok"
-    assert scan._read_data_token_lease(tmp_path, base_url) == "tok"
+    _write_data_token_lease(tmp_path, base_url=base_url, tenant="default", token="tok", expires_in=-1.0)
+    assert _load_lib()._read_data_token_lease(tmp_path, base_url) is None
 
 
-def test_parity_read_data_token_lease_wrong_digest(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    _write_data_token_lease(tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok")
-    other_url = "http://127.0.0.1:9999"
-    assert lib._read_data_token_lease(tmp_path, other_url) is None
-    assert scan._read_data_token_lease(tmp_path, other_url) is None
+def test_read_data_token_lease_missing(tmp_path):
+    assert _load_lib()._read_data_token_lease(tmp_path, "http://127.0.0.1:4242") is None
 
 
-def test_parity_read_data_token_lease_expired(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    _write_data_token_lease(
-        tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok", expires_in=-1.0,
-    )
-    base_url = "http://127.0.0.1:4242"
-    assert lib._read_data_token_lease(tmp_path, base_url) is None
-    assert scan._read_data_token_lease(tmp_path, base_url) is None
-
-
-def test_parity_read_data_token_lease_missing(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    base_url = "http://127.0.0.1:4242"
-    assert lib._read_data_token_lease(tmp_path, base_url) is None
-    assert scan._read_data_token_lease(tmp_path, base_url) is None
-
-
-def test_parity_read_config_yml_credentials_present(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_config_yml_credentials_present(tmp_path):
     (tmp_path / "config.yml").write_text(
         "credentials:\n"
         "  service_url: https://api.example.test\n"
         "  service_token: tok-123\n"
     )
-    assert lib._read_config_yml_credentials(tmp_path) == scan._read_config_yml_credentials(tmp_path)
+    assert _load_lib()._read_config_yml_credentials(tmp_path) == {
+        "service_url": "https://api.example.test",
+        "service_token": "tok-123",
+    }
 
 
-def test_parity_read_config_yml_credentials_absent(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    assert lib._read_config_yml_credentials(tmp_path) == {}
-    assert scan._read_config_yml_credentials(tmp_path) == {}
+def test_read_config_yml_credentials_absent(tmp_path):
+    assert _load_lib()._read_config_yml_credentials(tmp_path) == {}
 
 
-def test_parity_read_config_yml_credentials_no_credentials_block(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_config_yml_credentials_no_credentials_block(tmp_path):
     (tmp_path / "config.yml").write_text("install:\n  mode: managed\n")
-    assert lib._read_config_yml_credentials(tmp_path) == {}
-    assert scan._read_config_yml_credentials(tmp_path) == {}
+    assert _load_lib()._read_config_yml_credentials(tmp_path) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1134,8 +1072,7 @@ def test_parity_read_config_yml_credentials_no_credentials_block(tmp_path):
 # cause's pattern table. The hook is stdlib-only (no `nexus` import) and
 # cannot share the literals via a common import, so this is the "honest
 # tool" the code review asked for: read both files' literal sets and
-# assert equality, the same discipline as the discovery-function parity
-# suite above.
+# assert equality.
 # ---------------------------------------------------------------------------
 
 

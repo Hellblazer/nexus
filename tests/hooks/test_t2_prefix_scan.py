@@ -1,34 +1,31 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""nexus-vg6d4 / nexus-8fvp2: ``t2_prefix_scan.py`` must be stdlib-only AND
-must talk to the engine's T2 HTTP API, never the retired SQLite
-``memory.db``.
-
-The plugin's ``_interpreter.reexec_if_needed()`` prefers the installed
-generation's python (nexus-4ti7e) and otherwise probes bare ``python3.13`` /
-``python3.12``. It performs in Python what the retired
-``_run_python_hook.sh`` launcher performed in bash (RDR-215 bead
-nexus-q02nx.21), for the same callers and in the same order. On a
-``uv tool install conexus`` deployment, or a box
-with no generation, the resolved interpreter cannot import the
-``nexus`` package (it lives in conexus's own venv) — this pins that the script runs under a
-vanilla Python with only stdlib available, over a stdlib ``urllib``
-client against a mocked HTTP engine (never a real ``nexus`` import, never
-SQLite).
+"""``nexus.hooks.t2_prefix_scan.scan()`` over the engine's T2 HTTP API.
 
 nexus-8fvp2: T2 moved to Postgres (behind the engine's ``/v1/memory`` HTTP
-API) at RDR-158 P4; the script was frozen reading a dead SQLite file for
-six weeks with zero signal. This suite pins the HTTP-transport rewrite:
-endpoint resolution (env, then the local supervisor's on-disk lease file)
-and the two-arm freshness assert (source-unreachable, and
-freshest-entry-too-old) that replace the old silent failure mode.
+API) at RDR-158 P4; the plugin script this module was ported from was
+frozen reading a dead SQLite file for six weeks with zero signal. The
+behaviour pinned here survived the port (RDR-215 bead nexus-b5ugt) and the
+plugin copy's deletion (nexus-z9cz2): entries render per namespace, a
+reachability failure is a visible warning and never a silent empty, a
+stale freshest entry warns alongside the data, one bad namespace does not
+discard the others, and the namespace count and wall-clock budget bound
+the fetch loop.
+
+Endpoint and credential resolution are not re-pinned here. The plugin
+copy carried its own stdlib re-implementation of them, and its tests went
+with it; the wheel module reaches the shared resolver through
+``HttpMemoryStore``, which has its own suites.
+
+``scan()`` runs in a SUBPROCESS against a mock engine on a real socket, for
+the reason ``test_t2_prefix_scan_stdout.py`` gives: it configures
+structlog on entry, which must not reconfigure this test process.
 """
 from __future__ import annotations
 
 import ast
 import json
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -39,16 +36,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "t2_prefix_scan.py"
-)
-
 _TOKEN = "test-bearer-token"
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+_SCAN_PROBE = (
+    "import sys\n"
+    "from nexus.hooks.t2_prefix_scan import scan\n"
+    "sys.stdout.write(scan(sys.argv[1]))\n"
+)
 
 
 # ── Mock engine ──────────────────────────────────────────────────────────────
@@ -57,9 +52,9 @@ _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 class _MockMemoryEngine:
     """Minimal stand-in for the Java engine's ``/v1/memory`` HTTP surface.
 
-    Serves exactly the two GET routes ``t2_prefix_scan.py`` calls:
-    ``/v1/memory/projects?prefix=`` and ``/v1/memory/all?project=``. Any
-    other path or method is a 404/405 — the script never calls those.
+    Serves exactly the two GET routes ``scan()`` calls through
+    ``HttpMemoryStore``: ``/v1/memory/projects?prefix=`` and
+    ``/v1/memory/all?project=``. Any other path is a 404.
     """
 
     def __init__(
@@ -117,13 +112,8 @@ class _MockMemoryEngine:
         self._thread.start()
 
     @property
-    def host_port(self) -> tuple[str, int]:
-        host, port = self._server.server_address[:2]
-        return host, port
-
-    @property
     def base_url(self) -> str:
-        host, port = self.host_port
+        host, port = self._server.server_address[:2]
         return f"http://{host}:{port}"
 
     def close(self) -> None:
@@ -169,34 +159,38 @@ def _run(
     *,
     config_dir: Path,
     env: dict[str, str] | None = None,
-    interpreter: str = sys.executable,
 ) -> str:
-    """Invoke the script, isolated from any ambient NX_SERVICE_* env the
-    outer test process may be running under (nexus-8fvp2: the whole point
-    of this suite is testing endpoint resolution in isolation)."""
+    """Run ``scan(project_name)`` in a child interpreter and return what it
+    returned. Isolated from any ambient ``NX_SERVICE_*`` env (the suite's
+    own substrate fixtures set it) and from the real config dir and home,
+    so no live engine or lease on this box can answer."""
     full_env = {k: v for k, v in os.environ.items() if not k.startswith("NX_SERVICE_")}
-    full_env.pop("PYTHONPATH", None)  # approximate the bare-interpreter invocation
     full_env["NEXUS_CONFIG_DIR"] = str(config_dir)
+    full_env["HOME"] = str(config_dir)
     full_env.update(env or {})
     result = subprocess.run(
-        [interpreter, str(SCRIPT), project_name],
+        [sys.executable, "-c", _SCAN_PROBE, project_name],
         capture_output=True,
         text=True,
         env=full_env,
         check=False,
-        timeout=15,
+        timeout=60,
     )
     assert result.returncode == 0, (
-        f"script exit {result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+        f"scan exit {result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
     return result.stdout
 
 
-# ── Happy path (HTTP transport) ──────────────────────────────────────────────
+def _engine_env(engine: _MockMemoryEngine, **extra: str) -> dict[str, str]:
+    return {"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN, **extra}
+
+
+# ── Happy path ───────────────────────────────────────────────────────────────
 
 
 def test_runs_over_http_and_surfaces_entries(tmp_path: Path, mock_engine) -> None:
-    """The headline regression: talks HTTP, never SQLite; surfaces entries."""
+    """Talks HTTP, never SQLite; surfaces entries under per-namespace labels."""
     now = _now()
     engine = mock_engine(
         projects=[
@@ -213,21 +207,13 @@ def test_runs_over_http_and_surfaces_entries(tmp_path: Path, mock_engine) -> Non
             ],
         },
     )
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
+    out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine))
     assert "### T2 Memory" in out
     assert "release-5-3-0-validation" in out
     assert "rdr-memory-audit" in out
     assert "### T2 Memory (rdr)" in out
     assert "rdr-129" in out
     assert "WARNING" not in out
-    # Must not have leaked the pre-fix import-error or SQLite-era message.
-    assert "T2 not available" not in out
-    assert "No module named" not in out
-    # Must have actually gone over HTTP, not touched a SQLite file.
     assert any("/v1/memory/projects" in p for p in engine.requests)
     assert any("/v1/memory/all" in p for p in engine.requests)
 
@@ -245,35 +231,30 @@ def test_recency_ordering_within_namespace(tmp_path: Path, mock_engine) -> None:
             ],
         },
     )
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
-    pos_release = out.index("release-5-3-0-validation")
-    pos_audit = out.index("rdr-memory-audit")
-    assert pos_release < pos_audit
-
-
-def test_no_namespaces_means_no_output(tmp_path: Path, mock_engine) -> None:
-    """Reachable engine, zero matching namespaces: clean empty output, no
-    warning — a genuinely empty result is not the same as unreachable."""
-    engine = mock_engine(projects=[])
-    out = _run(
-        "unknown_project_xyz",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
-    assert out == ""
+    out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine))
+    assert out.index("release-5-3-0-validation") < out.index("rdr-memory-audit")
 
 
 # ── Two-arm freshness assert (nexus-8fvp2 enlargement (d)) ──────────────────
 
 
+def test_empty_t2_is_not_confused_with_unreachable(tmp_path: Path, mock_engine) -> None:
+    """nexus-8fvp2 enlargement (b): reachable engine, zero matching
+    namespaces (a fresh install's genuinely empty T2) is a clean empty
+    result, never rendered as (or alongside) an unreachable warning."""
+    engine = mock_engine(projects=[])
+    out = _run("unknown_project_xyz", config_dir=tmp_path, env=_engine_env(engine))
+    assert out == ""
+    assert any("/v1/memory/projects" in p for p in engine.requests), (
+        "empty output proves nothing unless the engine was actually asked"
+    )
+
+
 def test_unreachable_arm_warns_when_no_endpoint_resolvable(tmp_path: Path) -> None:
-    """Arm 1: no env, no lease file (fresh install / no supervisor running)
-    -> a VISIBLE warning line, never a silent no-op."""
-    out = _run("nexus", config_dir=tmp_path, env={})
+    """Arm 1: no env, a config dir that does not exist yet, no lease (fresh
+    install / no supervisor running) -> a VISIBLE warning line, never the
+    pre-fix silent no-op."""
+    out = _run("nexus", config_dir=tmp_path / "does-not-exist-yet", env={})
     assert "WARNING" in out
     assert "unreachable" in out.lower()
 
@@ -281,7 +262,6 @@ def test_unreachable_arm_warns_when_no_endpoint_resolvable(tmp_path: Path) -> No
 def test_unreachable_arm_warns_on_connection_refused(tmp_path: Path) -> None:
     """Arm 1: endpoint resolves (env is set) but nothing is listening ->
     still a visible warning, not a silent empty result."""
-    # Bind a socket to grab a free port, then close it so nothing answers.
     import socket
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -304,21 +284,13 @@ def test_stale_arm_warns_but_still_shows_entries(tmp_path: Path, mock_engine) ->
     stale_ts = _now() - timedelta(days=40)
     engine = mock_engine(
         projects=[{"project": "nexus", "last_updated": _iso(stale_ts)}],
-        entries_by_project={
-            "nexus": [_entry("old-entry", "This is old.", stale_ts)],
-        },
+        entries_by_project={"nexus": [_entry("old-entry", "This is old.", stale_ts)]},
     )
     out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={
-            "NX_SERVICE_URL": engine.base_url,
-            "NX_SERVICE_TOKEN": _TOKEN,
-            "NX_T2_SCAN_STALE_DAYS": "14",
-        },
+        "nexus", config_dir=tmp_path, env=_engine_env(engine, NX_T2_SCAN_STALE_DAYS="14")
     )
     assert "WARNING" in out
-    assert "old" in out.lower()  # the "Nd old" phrasing
+    assert "d old" in out  # the "Nd old" phrasing
     assert "old-entry" in out  # data is still surfaced, not dropped
 
 
@@ -329,399 +301,13 @@ def test_fresh_entries_produce_no_staleness_warning(tmp_path: Path, mock_engine)
         entries_by_project={"nexus": [_entry("fresh-entry", "Recent.", now)]},
     )
     out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={
-            "NX_SERVICE_URL": engine.base_url,
-            "NX_SERVICE_TOKEN": _TOKEN,
-            "NX_T2_SCAN_STALE_DAYS": "14",
-        },
+        "nexus", config_dir=tmp_path, env=_engine_env(engine, NX_T2_SCAN_STALE_DAYS="14")
     )
     assert "WARNING" not in out
     assert "fresh-entry" in out
 
 
-def test_empty_t2_is_not_confused_with_unreachable(tmp_path: Path, mock_engine) -> None:
-    """nexus-8fvp2 enlargement (b): a fresh install's genuinely empty T2
-    must stay silent, never render as (or alongside) an unreachable
-    warning."""
-    engine = mock_engine(projects=[])
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
-    assert out == ""
-    assert "WARNING" not in out
-
-
-# ── Lease-file endpoint resolution (no env vars set) ─────────────────────────
-
-
-def _write_lease(
-    config_dir: Path,
-    *,
-    host: str,
-    port: int,
-    token: str,
-    status: str = "live",
-    heartbeat_age_s: float = 0.0,
-    ttl: float = 15.0,
-) -> None:
-    import time as _time
-
-    record = {
-        "scope_key": str(os.getuid()),
-        "generation": 1,
-        "owner_token": "test-owner",
-        "heartbeat_epoch": _time.time() - heartbeat_age_s,
-        "ttl": ttl,
-        "endpoint": {"host": host, "port": port, "token": token},
-        "version": "test",
-        "payload": {},
-        "status": status,
-        "format_version": 1,
-    }
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / f"storage_service_addr.{os.getuid()}").write_text(json.dumps(record))
-
-
-def test_resolves_endpoint_from_supervisor_lease_with_no_env(tmp_path: Path, mock_engine) -> None:
-    """No NX_SERVICE_* env at all — resolution falls through to the local
-    supervisor's on-disk lease file, exactly like every other T2/T3 HTTP
-    client (nexus.db.service_endpoint.discover_lease)."""
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("lease-resolved", "Via lease file.", now)]},
-        expected_token="lease-token-xyz",
-    )
-    host, port = engine.host_port
-    _write_lease(tmp_path, host=host, port=port, token="lease-token-xyz")
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "lease-resolved" in out
-    assert "WARNING" not in out
-
-
-def test_expired_lease_falls_through_to_unreachable(tmp_path: Path, mock_engine) -> None:
-    """A lease file present but past its TTL is treated exactly like no
-    lease at all — never trusted as a live endpoint."""
-    engine = mock_engine(projects=[])
-    host, port = engine.host_port
-    _write_lease(tmp_path, host=host, port=port, token="lease-token-xyz", heartbeat_age_s=60.0, ttl=15.0)
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "WARNING" in out
-    assert "unreachable" in out.lower()
-
-
-def test_shutting_down_lease_falls_through_to_unreachable(tmp_path: Path, mock_engine) -> None:
-    engine = mock_engine(projects=[])
-    host, port = engine.host_port
-    _write_lease(tmp_path, host=host, port=port, token="lease-token-xyz", status="shutting_down")
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "WARNING" in out
-
-
-def test_env_takes_precedence_over_lease_file(tmp_path: Path, mock_engine) -> None:
-    """An explicit NX_SERVICE_URL must win over a (deliberately wrong)
-    lease file — env is checked first."""
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("env-resolved", "Via env.", now)]},
-        expected_token=_TOKEN,
-    )
-    # Point the lease file at a dead port — must be ignored.
-    _write_lease(tmp_path, host="127.0.0.1", port=1, token="wrong-token")
-
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
-    assert "env-resolved" in out
-    assert "WARNING" not in out
-
-
-# ── config.yml credential resolution (nexus-sdtsx) ───────────────────────────
-
-
-def test_resolves_service_url_and_token_from_config_yml(
-    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The canonical managed-cloud onboarding path (``nx config set
-    service_url``/``service_token``, docs/managed-onboarding.md) and every
-    Desktop ``.mcpb`` install (docs/desktop-deployment.md: the .mcpb reads
-    config.yml, never inherits shell env) persist credentials ONLY in
-    config.yml — no NX_SERVICE_* env is ever set for that population.
-    Pinned against the REAL writer (``nexus.config.set_credential``), not
-    a hand-authored fixture file, so a future change to the persisted
-    shape is caught here rather than silently drifting from what this
-    hook's line-oriented scanner parses."""
-    import nexus.config as nexus_config
-
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("cloud-resolved", "Via config.yml.", now)]},
-        expected_token="config-yml-token",
-    )
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    nexus_config.set_credential("service_url", engine.base_url)
-    nexus_config.set_credential("service_token", "config-yml-token")
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "cloud-resolved" in out
-    assert "WARNING" not in out
-
-
-def test_env_service_url_takes_precedence_over_config_yml(
-    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``NX_SERVICE_URL`` env must still win over a persisted config.yml
-    value — matches ``nexus.config.get_credential``'s env-then-config.yml
-    precedence, which the real client (``resolve_service_endpoint``)
-    follows."""
-    import nexus.config as nexus_config
-
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("env-resolved-over-yml", "Via env.", now)]},
-        expected_token=_TOKEN,
-    )
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    # A deliberately wrong config.yml value — must be ignored when env is set.
-    nexus_config.set_credential("service_url", "http://127.0.0.1:1")
-    nexus_config.set_credential("service_token", "wrong-token")
-
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
-    assert "env-resolved-over-yml" in out
-    assert "WARNING" not in out
-
-
-def test_config_yml_service_url_with_missing_token_warns_actionably(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``service_url`` resolves from config.yml but no token is resolvable
-    anywhere (no env, no config.yml service_token, no lease) — a visible,
-    actionable warning naming the real remedy, never a silent no-op."""
-    import nexus.config as nexus_config
-
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    nexus_config.set_credential("service_url", "https://api.example.com")
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "WARNING" in out
-    assert "token" in out.lower()
-    assert "nx config set service_token" in out
-
-
-def test_final_fallback_warning_names_both_local_and_cloud_remedies(tmp_path: Path) -> None:
-    """nexus-sdtsx: with NO evidence of either topology (no env, no
-    config.yml, no lease), the catch-all unreachable message must not
-    unconditionally push the local-mode-only ``nx daemon service start``
-    remedy — a cloud/mcpb install following it gets nothing, since it has
-    no local storage_service to start. Both remedies must be named."""
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "WARNING" in out
-    assert "nx daemon service start" in out
-    assert "nx config set service_url" in out
-
-
-# ── Multi-namespace fan-out: isolation, cap, budget (nexus-eg6qe/nexus-9xado) ─
-
-
-# ── Data-token lease (nexus-znvjd) ─────────────────────────────────────────
-
-
-def _write_data_token_lease(
-    config_dir: Path,
-    *,
-    base_url: str,
-    token: str,
-    tenant: str = "default",
-    expires_in_s: float = 3600.0,
-) -> Path:
-    """Write the lease exactly as ``DataTokenManager._write_lease`` does,
-    keyed by the REAL ``_lease_key`` (sha256 of ``host[:port]\\x00tenant``)
-    so the hook's stdlib re-derivation is pinned against the client's
-    writer rather than a hand-authored digest."""
-    import time as _time
-
-    from nexus.db.data_token import _lease_key
-
-    digest = _lease_key(base_url, tenant)
-    record = {
-        "format_version": 1,
-        "token": token,
-        "tenant": tenant,
-        "base_url_digest": digest,
-        "expires_at": _time.time() + expires_in_s,
-        "ttl_seconds": 3600.0,
-        "minted_by_pid": os.getpid(),
-    }
-    config_dir.mkdir(parents=True, exist_ok=True)
-    path = config_dir / f"data_token_lease.{digest}"
-    path.write_text(json.dumps(record))
-    return path
-
-
-def test_data_token_lease_wins_over_mint_locked_service_token(
-    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """nexus-znvjd: on an armed pass-through box (RDR-005 step (d)) the
-    persisted ``service_token`` is the scope=mint-locked credential — it
-    can mint data tokens but cannot read data paths, so presenting it to
-    ``/v1/memory/projects`` is a 401 every session. The client mints and
-    caches a data token in ``data_token_lease.<digest>``; the hook must
-    prefer that lease for the resolved host over the static token."""
-    import nexus.config as nexus_config
-
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("armed-box-entry", "Via data token.", now)]},
-        expected_token="minted-data-token",
-    )
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    nexus_config.set_credential("service_url", engine.base_url)
-    nexus_config.set_credential("service_token", "mint-locked-static-credential")
-    _write_data_token_lease(tmp_path, base_url=engine.base_url, token="minted-data-token")
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "armed-box-entry" in out
-    assert "WARNING" not in out
-
-
-def test_data_token_lease_wins_over_env_service_token(tmp_path: Path, mock_engine) -> None:
-    """Mirrors the real client, where ``DataTokenManager.bearer_for`` beats
-    the static token however that token was supplied: a fresh lease for
-    the SAME host is direct evidence the box is armed for it."""
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("env-armed-entry", "Via data token.", now)]},
-        expected_token="minted-data-token",
-    )
-    _write_data_token_lease(tmp_path, base_url=engine.base_url, token="minted-data-token")
-
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": "mint-locked-static"},
-    )
-    assert "env-armed-entry" in out
-    assert "WARNING" not in out
-
-
-def test_expired_data_token_lease_falls_back_and_401_names_the_lease(
-    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An expired lease is not usable (the hook never mints — a mint has
-    no fallback by design), so resolution falls back to the static token
-    exactly as before nexus-znvjd. When THAT is rejected with 401 the
-    warning must name the lease path so the armed-box case is diagnosable
-    instead of reading as a generic bad-token line."""
-    import nexus.config as nexus_config
-
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("never-shown", "x", now)]},
-        expected_token="minted-data-token",
-    )
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    nexus_config.set_credential("service_url", engine.base_url)
-    nexus_config.set_credential("service_token", "mint-locked-static-credential")
-    _write_data_token_lease(
-        tmp_path, base_url=engine.base_url, token="minted-data-token", expires_in_s=-1.0
-    )
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "WARNING: T2 memory unreachable" in out
-    assert "HTTP 401" in out
-    assert "data_token_lease" in out, out
-    assert "never-shown" not in out
-
-
-def test_data_token_lease_for_another_host_is_ignored(
-    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The lease is keyed by ``(host[:port], tenant)`` digest; a lease minted
-    for a different endpoint must never be presented to this one — the
-    static token stays in use and the scan succeeds on it."""
-    import nexus.config as nexus_config
-
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("static-token-entry", "Via static.", now)]},
-        expected_token="static-token",
-    )
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    nexus_config.set_credential("service_url", engine.base_url)
-    nexus_config.set_credential("service_token", "static-token")
-    _write_data_token_lease(
-        tmp_path, base_url="https://other.example.invalid:8443", token="foreign-data-token"
-    )
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "static-token-entry" in out
-    assert "WARNING" not in out
-
-
-def test_data_token_lease_wins_on_the_env_port_leg(tmp_path: Path, mock_engine) -> None:
-    """Leg 2 (``NX_SERVICE_HOST``/``NX_SERVICE_PORT``): the lease for the
-    derived ``http://host:port`` beats the env token, same rule as leg 1."""
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("port-leg-entry", "Via data token.", now)]},
-        expected_token="minted-data-token",
-    )
-    host, port = engine.host_port
-    _write_data_token_lease(tmp_path, base_url=f"http://{host}:{port}", token="minted-data-token")
-
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={
-            "NX_SERVICE_HOST": host,
-            "NX_SERVICE_PORT": str(port),
-            "NX_SERVICE_TOKEN": "mint-locked-static",
-        },
-    )
-    assert "port-leg-entry" in out
-    assert "WARNING" not in out
-
-
-def test_data_token_lease_wins_on_the_supervisor_lease_leg(
-    tmp_path: Path, mock_engine
-) -> None:
-    """Leg 3 (bare local-supervisor lease, no env, no config.yml): a fresh
-    data-token lease for the supervisor's host:port beats the supervisor
-    lease's own root token."""
-    now = _now()
-    engine = mock_engine(
-        projects=[{"project": "nexus", "last_updated": _iso(now)}],
-        entries_by_project={"nexus": [_entry("supervisor-leg-entry", "Via data token.", now)]},
-        expected_token="minted-data-token",
-    )
-    host, port = engine.host_port
-    _write_lease(tmp_path, host=host, port=port, token="supervisor-root-token")
-    _write_data_token_lease(tmp_path, base_url=f"http://{host}:{port}", token="minted-data-token")
-
-    out = _run("nexus", config_dir=tmp_path, env={})
-    assert "supervisor-leg-entry" in out
-    assert "WARNING" not in out
+# ── Bounded, failure-isolated fetch loop ─────────────────────────────────────
 
 
 def test_one_bad_namespace_does_not_discard_others(tmp_path: Path, mock_engine) -> None:
@@ -745,11 +331,7 @@ def test_one_bad_namespace_does_not_discard_others(tmp_path: Path, mock_engine) 
         },
         fail_projects={"nexus_bad"},
     )
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
+    out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine))
     assert "good-entry-before" in out
     assert "good-entry-after" in out
     assert "WARNING" in out
@@ -766,62 +348,28 @@ def test_namespace_count_is_capped(tmp_path: Path, mock_engine) -> None:
         {"project": f"nexus_ns{i}", "last_updated": _iso(now - timedelta(minutes=i))}
         for i in range(8)
     ]
-    entries = {
-        p["project"]: [_entry(f"entry-{p['project']}", "content", now)] for p in projects
-    }
+    entries = {p["project"]: [_entry(f"entry-{p['project']}", "content", now)] for p in projects}
     engine = mock_engine(projects=projects, entries_by_project=entries)
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": _TOKEN},
-    )
+    out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine))
     all_requests = [r for r in engine.requests if "/v1/memory/all" in r]
-    assert len(all_requests) <= 5
+    assert 0 < len(all_requests) <= 5
     assert "not checked" in out
 
 
 def test_scan_budget_stops_the_fetch_loop(tmp_path: Path, mock_engine) -> None:
-    """A near-zero scan budget must stop the per-namespace loop before
-    issuing further requests and say so visibly — proves the wall-clock
-    budget is enforced independent of ``_HARD_CAP`` (nexus-9xado)."""
+    """A zero scan budget must stop the per-namespace loop before issuing
+    any fetch and say so visibly — proves the wall-clock budget is enforced
+    independent of ``_HARD_CAP`` (nexus-9xado)."""
     now = _now()
     projects = [
         {"project": f"nexus_ns{i}", "last_updated": _iso(now - timedelta(minutes=i))}
         for i in range(3)
     ]
-    entries = {
-        p["project"]: [_entry(f"entry-{p['project']}", "content", now)] for p in projects
-    }
+    entries = {p["project"]: [_entry(f"entry-{p['project']}", "content", now)] for p in projects}
     engine = mock_engine(projects=projects, entries_by_project=entries)
-    out = _run(
-        "nexus",
-        config_dir=tmp_path,
-        env={
-            "NX_SERVICE_URL": engine.base_url,
-            "NX_SERVICE_TOKEN": _TOKEN,
-            "NX_T2_SCAN_BUDGET_S": "0",
-        },
-    )
+    out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine, NX_T2_SCAN_BUDGET_S="0"))
     assert "scan budget exceeded" in out
-
-
-# ── Bare-interpreter / no-nexus-import invariant (nexus-vg6d4) ──────────────
-
-
-def test_missing_config_dir_and_no_env_is_visible_not_silent(tmp_path: Path) -> None:
-    """A fresh install (no config dir contents at all) must still surface a
-    WARNING, not the pre-fix silent no-op nexus-8fvp2 exists to close."""
-    empty_dir = tmp_path / "does-not-exist-yet"
-    out = _run("nexus", config_dir=empty_dir, env={})
-    assert "WARNING" in out
-
-
-def test_script_never_imports_nexus_package() -> None:
-    """Static check: no ``import nexus`` / ``from nexus`` anywhere in the
-    script (nexus-vg6d4) — the whole point is running under a bare
-    interpreter that cannot see the ``nexus`` package."""
-    text = SCRIPT.read_text()
-    assert not re.search(r"^\s*(import nexus\b|from nexus\b)", text, re.MULTILINE)
+    assert not [r for r in engine.requests if "/v1/memory/all" in r]
 
 
 # ── NO-SQLITE lint (nexus-8fvp2 enlargement (a); de-vacuated nexus-ozfct) ────
@@ -857,9 +405,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: is REMOVED from this map, never left at zero, because a floor of zero is
 #: satisfied by a walk that sees nothing. There is no ``.sh`` arm: RDR-215
 #: deleted every plugin shell script, and a scan over a directory with none
-#: in it is the vacuous half this lint used to have.
+#: in it is the vacuous half this lint used to have. ``conexus/hooks/scripts``
+#: dropped 12 -> 1 at nexus-z9cz2, which deleted the eleven plugin copies
+#: nothing shipped executed; ``divergence-language-scan.py`` remains.
 _HOOK_CODE_ROOTS: dict[str, int] = {
-    "conexus/hooks/scripts": 12,
+    "conexus/hooks/scripts": 1,
     "sn/hooks/scripts": 5,
     "src/nexus/hooks": 32,
     "src/nexus/_hook_runtime": 4,

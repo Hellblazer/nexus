@@ -32,8 +32,9 @@ _HOOKS_JSON = _ROOT / "conexus" / "hooks" / "hooks.json"
 #: rather than by a whole command string survives both spellings the hook
 #: can carry -- the shell form (`"command": "nx hook session-start"`) and
 #: the exec form RDR-215 moves to (`"command": "nx-hook", "args":
-#: ["session-start"]`) -- and cannot collide with the neighbouring
-#: `session_start_hook.py` entry, which spells it with an UNDERSCORE.
+#: ["session-start"]`) -- and does not collide with the neighbouring
+#: `session-context` verb (formerly `session_start_hook.py`, spelled with
+#: an UNDERSCORE, deleted at nexus-z9cz2).
 _SESSION_START_VERB = "session-start"
 
 

@@ -4,8 +4,8 @@
 
 The file is gitignored by design — ``docs/configuration.md`` says "It is
 gitignored by default" — so there is exactly one per repo and it lives in
-the primary checkout. ``read_verification_config.py`` resolved it from
-the process cwd, so in a linked worktree it found nothing and returned
+the primary checkout. The reader (then ``read_verification_config.py``,
+now ``nexus.hooks.verification_config``) resolved it from the process cwd, so in a linked worktree it found nothing and returned
 DEFAULTS, which for the verification section means ``on_stop`` and
 ``on_close`` both false. The close gate was therefore silently off in
 every worktree, and this project moved every session into one on
@@ -35,8 +35,13 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-READER = REPO_ROOT / "conexus" / "hooks" / "scripts" / "read_verification_config.py"
+#: The wheel reader, run in a fresh interpreter so the cwd is real. The
+#: plugin-resident script it was ported from is deleted (nexus-z9cz2).
+_READER_SRC = (
+    "import json;"
+    "from nexus.hooks.verification_config import read_verification_config;"
+    "print(json.dumps(read_verification_config()))"
+)
 
 _ARMED_YML = """\
 verification:
@@ -51,9 +56,9 @@ def _git(*args: str, cwd: Path) -> None:
 
 
 def _read_config_from(cwd: Path, env: dict[str, str] | None = None) -> dict:
-    """Run the reader as a hook would: a bare subprocess, with a cwd."""
+    """Run the reader as a hook would: a separate process, with a cwd."""
     proc = subprocess.run(
-        [sys.executable, str(READER)],
+        [sys.executable, "-c", _READER_SRC],
         cwd=cwd,
         capture_output=True,
         text=True,

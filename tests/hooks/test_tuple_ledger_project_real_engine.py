@@ -22,8 +22,9 @@ Two things are proven here that the mocked suite cannot:
 
 1. The dev jar's ``ledger.yaml`` really does declare commit/t2_ref/verify
    (nexus-d9k5h) -- a real ``out`` naming them succeeds, end to end,
-   through the actual ``tuple_ledger_project.py`` subprocess reading a
-   real transcript.
+   through :func:`nexus.hooks.tuple_ledger_project.project` in a child
+   process reading a real transcript (the plugin script it replaced was
+   deleted at nexus-z9cz2).
 2. A dim NO template will ever declare really does provoke HTTP 400 from
    the real engine -- confirming ``_post_via_urllib``'s ``status == 400``
    ``_SchemaViolation`` detection matches genuine wire behavior, not an
@@ -43,18 +44,12 @@ from pathlib import Path
 
 import pytest
 
+from nexus.hooks import tuple_ledger_project
 from tests.hooks.test_tuple_ledger_project import (
+    _DRIVER,
     _assistant_text_entry,
     _data_token_digest,
     _write_transcript,
-)
-
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "tuple_ledger_project.py"
 )
 
 SESSION_ID = "sess-tuple-proj-real"
@@ -98,13 +93,13 @@ def _write_data_token_lease(config_dir: Path, *, base_url: str, token: str, tena
 
 def test_real_engine_accepts_the_verify_dims_end_to_end(tmp_path: Path) -> None:
     """The full production path: a real transcript with VERIFY lines, the
-    real ``tuple_ledger_project.py`` subprocess, a real engine booted from
+    real ``project`` in a child process, a real engine booted from
     this worktree's dev jar. Proves the dev jar's ledger.yaml actually
     declares commit/t2_ref/verify (nexus-d9k5h) -- not merely that the
     projector WOULD send them."""
     state = _real_engine_state()
     # HttpTupleStore's DEFAULT_TENANT -- the tenant this script always
-    # resolves to (see tuple_ledger_project.py's _RESOLVED_TENANT).
+    # resolves to (see nexus.hooks.tuple_ledger_project._RESOLVED_TENANT).
     tenant, token = _mint(state)
     # The default tenant name IS what _RESOLVED_TENANT names on the
     # client side; the minted tenant's OWN token is bound to whatever
@@ -113,12 +108,7 @@ def test_real_engine_accepts_the_verify_dims_end_to_end(tmp_path: Path) -> None:
     # by writing the lease keyed on that name -- exercised by is_local_
     # supervisor=False's config.yml leg for a deterministic base_url.
     config_dir = tmp_path / "config"
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project_real", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    resolved_tenant = module._RESOLVED_TENANT
+    resolved_tenant = tuple_ledger_project._RESOLVED_TENANT
     _write_data_token_lease(config_dir, base_url=state["base_url"], token=token, tenant=resolved_tenant)
 
     transcript = _write_transcript(tmp_path, [
@@ -143,7 +133,7 @@ def test_real_engine_accepts_the_verify_dims_end_to_end(tmp_path: Path) -> None:
         "agent_transcript_path": str(transcript),
     })
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT), "report"],
+        [sys.executable, "-c", _DRIVER, "report"],
         input=payload, capture_output=True, text=True, env=env, timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
@@ -165,12 +155,7 @@ def test_real_engine_returns_http_400_for_an_undeclared_dimension(tmp_path: Path
     own three specific dims ever being retired or renamed."""
     state = _real_engine_state()
     tenant, token = _mint(state)
-
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("tuple_ledger_project_real2", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = tuple_ledger_project
 
     body = {
         "subspace": f"ledger/{SESSION_ID}-undeclared-dim-probe",

@@ -408,8 +408,8 @@ def test_sentinel_corrupt_json_denies(tmp_env):
 # ``_claude_pid()``'s ``nexus.session`` import is the ONLY nexus import in
 # this whole file, but every existing scenario test above passes
 # NX_FAKE_CLAUDE_PID, which short-circuits BEFORE that import ever runs --
-# so none of them exercise it. These two tests load the script as a module
-# (mirroring tests/hooks/test_rdr_hook.py's fixture pattern) and call
+# so none of them exercise it. These two tests load the hook module
+# (mirroring tests/hooks/test_rdr_verb.py's fixture pattern) and call
 # ``_claude_pid()`` directly with NX_FAKE_CLAUDE_PID unset, so the real
 # import path executes.
 # ---------------------------------------------------------------------------
@@ -430,7 +430,7 @@ def test_claude_pid_configures_hook_logging_before_importing_nexus_session(
     channel this PreToolUse hook's own JSON envelope goes out on -- a
     debug line from the ``nexus.session`` import landing there ahead of
     (or beside) that JSON would corrupt the payload the harness parses.
-    ``_hook_logging.configure_hook_logging()`` (nexus-cnzei.2 fix round 2:
+    ``nexus._hook_runtime._io.configure_hook_logging()`` (nexus-cnzei.2 fix round 2:
     the shared helper, not a hand-duplicated local block) must run before
     that import, not after it or not at all."""
     monkeypatch.delenv("NX_FAKE_CLAUDE_PID", raising=False)
@@ -443,7 +443,7 @@ def test_claude_pid_configures_hook_logging_before_importing_nexus_session(
 
 def test_claude_pid_survives_a_logging_setup_failure(monkeypatch) -> None:
     """The OUTER ``except Exception: return os.getppid()`` in ``_claude_pid``
-    is a SEPARATE guarantee from ``_hook_logging.configure_hook_logging``'s
+    is a SEPARATE guarantee from ``configure_hook_logging``'s
     own internal best-effort catch (tested directly in
     tests/hooks/test_hook_logging.py). This test bypasses the inner catch
     entirely -- it replaces ``configure_hook_logging`` itself with a
@@ -467,7 +467,7 @@ def test_claude_pid_survives_a_logging_setup_failure(monkeypatch) -> None:
 
 
 def test_subprocess_stdout_is_pure_json_with_the_real_nexus_session_import(tmp_env) -> None:
-    """Genuine SUBPROCESS run (mirrors tests/hooks/test_rdr_hook.py::
+    """Genuine SUBPROCESS run (mirrors tests/hooks/test_rdr_verb.py::
     test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout), not an
     in-process module import: pytest's own ``pytest_configure`` sets
     structlog's ``wrapper_class`` at session start, which can mask a

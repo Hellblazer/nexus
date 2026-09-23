@@ -213,7 +213,7 @@ the script WITH a rationale + bead reference. Leg 8d/10 (nexus-cbo4a) drives
 the real SubagentStart/SubagentStop tuple-ledger-projector hook wrappers
 against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s leg
 G does the same against a live cloud config — together the only pre-tag
-proof that `conexus/hooks/scripts/tuple_ledger_project.py` actually lands a
+proof that the wheel's `nexus.hooks.tuple_ledger_project` actually lands a
 tuple on both install classes (nexus-g2lln / nexus-0zsmg).
 
 **Leg 9/10 (nexus-utpuw.19) — a generation install on that same virgin HOME.**

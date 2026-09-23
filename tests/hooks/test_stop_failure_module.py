@@ -2,17 +2,16 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The ported StopFailure observer (RDR-215 bead nexus-q02nx.21).
 
-Driven against BOTH the plugin script and the port, so every assertion is
-a differential against what production still runs. Drop the "bash" param
-when ``conexus/hooks/scripts/stop_failure_hook.py`` goes.
+Was driven against both the plugin script and the port as a differential;
+the script (``conexus/hooks/scripts/stop_failure_hook.py``) and its own
+exit-code-only test file are deleted (nexus-z9cz2), so this drives the
+port alone.
 
-**Why this file exists at all, given the script already has eleven tests.**
-Every one of those asserts ``returncode == 0`` and nothing else. A script
-whose entire body was replaced by ``sys.exit(0)`` passes all eleven. That
-is fine as a crash guard and it is not evidence the hook does its job, so
-the differential here is carried on the hook's ONE observable: the debug
-trace under ``NX_HOOK_DEBUG=1``. Without that, a port that silently
-dropped the type normalisation or the CLAUDECODE guard would be green.
+The script's old tests asserted ``returncode == 0`` and nothing else, and
+a body replaced by ``sys.exit(0)`` passes that. So the assertions here
+are carried on the hook's ONE observable: the debug trace under
+``NX_HOOK_DEBUG=1``. Without that, a port that silently dropped the type
+normalisation or the CLAUDECODE guard would be green.
 """
 from __future__ import annotations
 
@@ -20,14 +19,8 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
-
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus" / "hooks" / "scripts" / "stop_failure_hook.py"
-)
 
 FAILURE_TYPES = [
     "rate_limit",
@@ -57,18 +50,6 @@ if result.stdout is not None:
 sys.exit(result.exit_code)
 """
 
-_IMPL = "bash"
-
-
-@pytest.fixture(params=["bash", "python"], autouse=True)
-def impl(request):
-    """Run every assertion against BOTH implementations."""
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "bash"
-
-
 def _run_hook(stdin: str, *, env_overrides: dict[str, str] | None = None):
     env = {
         **os.environ,
@@ -76,13 +57,9 @@ def _run_hook(stdin: str, *, env_overrides: dict[str, str] | None = None):
         "CLAUDECODE": "",
         **(env_overrides or {}),
     }
-    argv = (
-        [sys.executable, "-c", _PY_DRIVER]
-        if _IMPL == "python"
-        else [sys.executable, str(SCRIPT)]
-    )
     return subprocess.run(
-        argv, input=stdin, capture_output=True, text=True, timeout=15, env=env
+        [sys.executable, "-c", _PY_DRIVER],
+        input=stdin, capture_output=True, text=True, timeout=15, env=env,
     )
 
 
@@ -96,7 +73,7 @@ def _payload(error: str, details: str | None = "test details") -> str:
 
 
 class TestItNeverFails:
-    """The script's original eleven, carried across unchanged in intent."""
+    """The deleted script's original eleven, carried across in intent."""
 
     @pytest.mark.parametrize("error_type", FAILURE_TYPES)
     def test_exit_zero_for_every_failure_type(self, error_type):

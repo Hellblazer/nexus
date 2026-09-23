@@ -8,12 +8,14 @@ import yaml
 from nexus import config as cfgmod
 from nexus.config import (
     _DEFAULTS,
+    _DETECT_TABLE,
     detect_test_command,
     get_telemetry_config,
     get_verification_config,
     load_config,
     set_config_value,
 )
+from nexus.hooks.verification_config import DETECT_TABLE as _HOOK_DETECT_TABLE
 
 
 @pytest.fixture
@@ -246,14 +248,13 @@ def test_detect_test_command_priority(tmp_path: Path) -> None:
     assert detect_test_command(repo_root=tmp_path) == "uv run pytest"
 
 
-def test_detect_table_matches_reader_script() -> None:
-    import importlib.util
-    from nexus.config import _DETECT_TABLE
-    script = Path(__file__).parents[1] / "conexus" / "hooks" / "scripts" / "read_verification_config.py"
-    spec = importlib.util.spec_from_file_location("reader", script)
-    reader = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(reader)
-    assert _DETECT_TABLE == reader.DETECT_TABLE
+def test_detect_table_matches_hook_reader() -> None:
+    """The hook's verification reader carries its own copy of the table.
+
+    It was the plugin script read_verification_config.py until that was
+    deleted (nexus-z9cz2); the copy now lives in the wheel port.
+    """
+    assert tuple(_DETECT_TABLE) == _HOOK_DETECT_TABLE
 
 
 # ── RDR-087 Phase 2.3: telemetry config toggle ───────────────────────────────

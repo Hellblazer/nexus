@@ -2,10 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The `.nexus.yml` verification block, read IN THE WHEEL (bead nexus-b5ugt).
 
-Port of ``conexus/hooks/scripts/read_verification_config.py``. The script
-stays on disk for now — it is still the thing a bare ``python3`` hook
-could run, and deleting it belongs with the rest of the plugin-resident
-layer — but nothing in the wheel spawns it any more.
+Port of ``conexus/hooks/scripts/read_verification_config.py``, which was
+deleted with the rest of the unexecuted plugin-resident layer at
+nexus-z9cz2.
 
 **Why this had to move, and why moving it is the point.** The script was
 reached by building a path off ``$CLAUDE_PLUGIN_ROOT``. An ``mcp_tool``

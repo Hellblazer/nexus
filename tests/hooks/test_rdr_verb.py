@@ -15,13 +15,8 @@ import model requires; every assertion below is otherwise the original
 pinned behaviour, with ``main()`` calls replaced by ``run(None)`` calls and
 ``capsys``-captured stdout replaced by ``HookResult.stdout``.
 
-The one genuine differential is
-:func:`test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout`: the
-script stays wired in ``hooks.json`` until a later bead re-declares that
-entry, so it is driven via the dual-drive ``impl`` fixture pattern from
-``tests/hooks/test_post_compact_hook.py`` -- both the still-running script
-and the new verb, as real subprocesses, so the assertion is a differential
-against what production still runs.
+The script and its own test file were deleted at nexus-z9cz2 once nothing
+shipped executed it; this file is the only suite for the hook.
 """
 from __future__ import annotations
 
@@ -43,7 +38,6 @@ from nexus.hooks import rdr_verb as rdr_hook_module
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "conexus" / "hooks" / "scripts" / "rdr_hook.py"
 PACKAGE_TABLE_PATH = REPO_ROOT / "src" / "nexus" / "tables" / "rdr-lifecycle.toml"
 
 
@@ -562,7 +556,7 @@ def test_repo_name_reads_the_git_common_dir_in_a_linked_worktree(rdr_hook_mod, t
     assert mod._repo_name(repo) == "myrepo"
 
 
-# ── nexus-cnzei.2 (S2) differential, dual-drive (RDR-215 bead nexus-q02nx.21) ──
+# ── nexus-cnzei.2 (S2): no structlog leak on the hook's stdout ──
 #
 # A genuine SUBPROCESS run, not an in-process module import. This matters:
 # tests/conftest.py's own ``pytest_configure`` calls
@@ -575,15 +569,6 @@ def test_repo_name_reads_the_git_common_dir_in_a_linked_worktree(rdr_hook_mod, t
 # exists to catch. A real subprocess starts with structlog's untouched,
 # unconfigured default (``PrintLoggerFactory`` -> STDOUT) and shows what an
 # actual invocation would print for real.
-#
-# The script (``conexus/hooks/scripts/rdr_hook.py``) stays wired in
-# ``hooks.json`` until a later bead re-declares that entry, so both
-# implementations are driven here -- the assertion is a differential
-# against what production still runs, following the ``impl`` fixture
-# pattern in ``tests/hooks/test_post_compact_hook.py``.
-
-#: Which implementation :func:`_run_hook` drives, set per-test by `impl`.
-_IMPL = "script"
 
 _PY_DRIVER = """
 import sys
@@ -597,27 +582,9 @@ sys.exit(result.exit_code)
 """
 
 
-@pytest.fixture(params=["script", "verb"], autouse=True)
-def impl(request):
-    """Run the differential assertion against BOTH implementations.
-
-    Drop the "script" param once bead nexus-q02nx.21's sibling beads
-    re-declare ``hooks.json`` and delete ``rdr_hook.py``.
-    """
-    global _IMPL
-    _IMPL = request.param
-    yield request.param
-    _IMPL = "script"
-
-
 def _run_hook(cwd: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    argv = (
-        [sys.executable, "-c", _PY_DRIVER]
-        if _IMPL == "verb"
-        else [sys.executable, str(SCRIPT_PATH)]
-    )
     return subprocess.run(
-        argv,
+        [sys.executable, "-c", _PY_DRIVER],
         cwd=cwd,
         env=env,
         capture_output=True,

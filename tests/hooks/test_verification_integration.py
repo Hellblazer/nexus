@@ -19,9 +19,7 @@ from pathlib import Path
 
 import pytest
 
-HOOKS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 HOOKS_JSON = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
-CONFIG_READER = HOOKS_DIR / "read_verification_config.py"
 
 from tests._hook_wiring import matchers_for  # noqa: E402
 
@@ -232,21 +230,9 @@ class TestHooksJsonStructure:
     # empty by construction, the case its own non-vacuity assert named.
 
 
-# ---------------------------------------------------------------------------
-# Script existence and permissions
-# ---------------------------------------------------------------------------
-
-
-class TestScriptPermissions:
-    """The stop/close hooks are the ported Python modules now (RDR-215
-    bead nexus-q02nx.21 deleted stop_verification_hook.sh and
-    pre_close_verification_hook.sh); an importable module needs no
-    existence check the way a script path does. What both ports still
-    shell out to -- ``read_verification_config.py`` -- is unchanged and
-    still worth pinning here."""
-
-    def test_config_reader_exists(self) -> None:
-        assert CONFIG_READER.exists()
+# TestScriptPermissions was deleted at nexus-z9cz2: its one test asserted
+# read_verification_config.py existed, and that script is deleted -- both
+# ports read the config through nexus.hooks.verification_config in-process.
 
 
 # ---------------------------------------------------------------------------

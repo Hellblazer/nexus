@@ -8,7 +8,6 @@
 source "$(dirname "$0")/lib.sh"
 
 REPO=$(git rev-parse --show-toplevel)
-HOOKS="$REPO/conexus/hooks/scripts"
 
 # Fake Claude Code hook env
 export CLAUDE_PLUGIN_ROOT="$REPO/conexus"
@@ -49,11 +48,6 @@ _stop_event() {
 JSON
 }
 
-step "Python hooks"
-run "session_start_hook.py"        bash -c "echo '$(_session_event)' | python3 '$HOOKS/session_start_hook.py'"
-run "rdr_hook.py"                  bash -c "echo '$(_session_event)' | python3 '$HOOKS/rdr_hook.py'"
-run "t2_prefix_scan.py"            bash -c "echo '$(_pre_tool_event)' | python3 '$HOOKS/t2_prefix_scan.py' || true"
-
 # RDR-215 bead nexus-q02nx.21 deleted the bash hooks this step used to run;
 # each is now a module under nexus.hooks, dispatched in production as a
 # `type: mcp_tool` entry in conexus/hooks/hooks.json. tests/e2e/lib/
@@ -75,6 +69,12 @@ step "Hook modules (ported from bash at RDR-215)"
 run "auto_approve"                  bash -c "echo '$(_pre_tool_event)' | '$DRIVE' auto_approve"
 run "divergence_language_guard"     bash -c "echo '$(_prompt_event)' | '$DRIVE' divergence_language_guard"
 run "post_compact"                  bash -c "echo '$(_session_event)' | '$DRIVE' post_compact"
+# The three plugin Python scripts this file used to run directly
+# (session_start_hook.py, rdr_hook.py, t2_prefix_scan.py) were deleted at
+# nexus-z9cz2; these are their ports. t2_prefix_scan runs inside
+# subagent_start below.
+run "session_context"               bash -c "echo '$(_session_event)' | '$DRIVE' session_context"
+run "rdr_verb"                      bash -c "echo '$(_session_event)' | '$DRIVE' rdr_verb"
 run "pre_close_verification"        bash -c "echo '$(_stop_event)' | '$DRIVE' pre_close_verification"
 run "stop_failure"                  bash -c "echo '$(_stop_event)' | '$DRIVE' stop_failure"
 run "stop_verification"             bash -c "echo '$(_stop_event)' | '$DRIVE' stop_verification"

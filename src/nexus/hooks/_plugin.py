@@ -2,11 +2,12 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Where the conexus plugin's own files are, from inside the wheel.
 
-RDR-215 moves hooks from the plugin into the wheel, but several of them
-still reach a plugin-resident sibling that this epic does not port --
+RDR-215 moves hooks from the plugin into the wheel, but one of them still
+reaches a plugin-resident sibling: ``divergence_language_guard`` runs
+``divergence-language-scan.py``. (Three others once did too --
 ``t2_prefix_scan.py``, ``read_verification_config.py``,
-``divergence-language-scan.py``, ``tuple_ledger_project.py``. That is a
-NEW dependency direction: previously plugin reached plugin, and a
+``tuple_ledger_project.py`` -- until their callers moved in-process; the
+copies were deleted at nexus-z9cz2.) That is a NEW dependency direction: previously plugin reached plugin, and a
 ``dirname "${BASH_SOURCE[0]}"`` was always right.
 
 It is no longer always right, and the failure is silent. A ported module
