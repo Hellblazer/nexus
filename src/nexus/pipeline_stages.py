@@ -968,6 +968,7 @@ def pipeline_index_pdf(
     dry_run: bool = False,
     on_doc_registered: Callable[[str, bool], None] | None = None,
     extraction_stats: dict | None = None,
+    title_override: str = "",
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -975,6 +976,13 @@ def pipeline_index_pdf(
     and ``pages_with_text`` from the extraction result once the extract
     stage completes, so ``index_pdf`` can report page coverage without a
     second extraction.
+
+    *title_override* (nexus-1uov1), when non-empty, wins over
+    :func:`~nexus.indexer_utils.resolve_pdf_title`'s guess everywhere
+    this pipeline resolves a title — the catalog-registration hook below
+    and the metadata-enrichment post-pass that stamps every chunk's own
+    ``title``. See :func:`nexus.doc_indexer._pdf_chunks`'s docstring for
+    the motivating case (``nx dt index``).
 
     After the three stages complete, runs post-passes to:
     - Enrich chunk metadata from the ExtractionResult
@@ -1298,7 +1306,10 @@ def pipeline_index_pdf(
     post_pass_ok = True
 
     # 1. Metadata enrichment from ExtractionResult.
-    if not _enrich_metadata_from_extraction(content_hash, extraction_result, pdf_path, t3, col, collection):
+    if not _enrich_metadata_from_extraction(
+        content_hash, extraction_result, pdf_path, t3, col, collection,
+        title_override=title_override,
+    ):
         post_pass_ok = False
 
     # 2. table_regions post-pass.
@@ -1382,7 +1393,7 @@ def pipeline_index_pdf(
     if not dry_run:
         from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
         _meta = getattr(extraction_result, "metadata", None) or {}
-        title = resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
+        title = title_override or resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
         author = str(_meta.get("pdf_author") or _meta.get("author") or "")
         # Extract year from pdf_creation_date or explicit year field
         year_raw = 0
@@ -1454,11 +1465,18 @@ def _enrich_metadata_from_extraction(
     t3: Any,
     col: Any,
     collection: str,
+    *,
+    title_override: str = "",
 ) -> bool:
     """Post-pass: update chunk metadata with fields from ExtractionResult.
 
     Resolves source_title (docling_title → pdf_title → filename) and
     source_author — matching the batch path in doc_indexer._pdf_chunks.
+    *title_override* (nexus-1uov1), when non-empty, wins over that
+    resolution — see :func:`nexus.doc_indexer._pdf_chunks`'s docstring
+    for the DEVONthink motivating case; this is the streaming path's
+    equivalent hook, since streaming discards per-chunk metadata as it
+    flushes and corrects title here, after upload, instead.
 
     RDR-108 Phase 3: ``chunk_count`` was retired from the chunk schema
     (catalog ``document_chunks`` manifest carries it at document scope),
@@ -1471,7 +1489,7 @@ def _enrich_metadata_from_extraction(
     text_len = len(result.text) if result.text else 0
 
     from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 — circular-dep avoidance (nexus.indexer_utils)
-    source_title = resolve_pdf_title(meta, pdf_path, result.text)
+    source_title = title_override or resolve_pdf_title(meta, pdf_path, result.text)
 
     # `title`, `source_author`, (nexus-1oguj) `extraction_method`, and
     # (nexus-wi1uv round-2) `quality_gate_overridden` are the only

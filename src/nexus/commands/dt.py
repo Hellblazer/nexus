@@ -276,6 +276,18 @@ def _index_record(
 
     file_path = Path(path)
     ext = file_path.suffix.lower()
+    # nexus-1uov1: fetched once, before indexing, and reused at the stamp
+    # call below (cached in _FACTS_CACHE, so the second call is free) --
+    # the DT record name is the title of record for this document, per
+    # _stamp_dt_uri_on_entry's own comment ("the catalog title is
+    # DEVONthink's record name ... not the indexer's PDF-derived guess").
+    # Passing it into index_pdf as title_override gets every CHUNK's
+    # title right at write time too, not only the catalog row after the
+    # fact: without this, nx store list --docs and search results
+    # surfaced the extractor's first-H1/first-line guess (often a
+    # truncated fragment) while the catalog title carried the real name.
+    dt_facts = _dt_record_facts(uuid)
+    dt_title = (dt_facts or {}).get("name", "")
     if ext == ".pdf":
         # nexus-pxxyn: thread the operator's --extractor choice through so the
         # documented MinerU-failure recovery ("rerun with --extractor docling")
@@ -285,7 +297,7 @@ def _index_record(
         raw = index_pdf(
             file_path, corpus=corpus, collection_name=collection, extractor=extractor,
             force=force, force_re_embed=force_re_embed, return_metadata=True,
-            source_uri=dt_source_uri,
+            source_uri=dt_source_uri, title_override=dt_title,
         )
         if isinstance(raw, dict):
             chunks = int(raw.get("chunks", 0) or 0)
@@ -304,7 +316,7 @@ def _index_record(
         chunks = raw if isinstance(raw, int) else 0
         pages = None
 
-    stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=_dt_record_facts(uuid))
+    stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=dt_facts)
     return stamped, chunks, pages
 
 

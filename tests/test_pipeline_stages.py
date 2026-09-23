@@ -1426,6 +1426,26 @@ def test_pipeline_data_kept_on_enrichment_failure(db) -> None:
     assert _enrich_metadata_from_extraction("h1", ro, Path("/test.pdf"), t3, col, "docs__test") is False
 
 
+def test_enrich_metadata_title_override_wins_over_resolve_pdf_title() -> None:
+    """nexus-1uov1: the streaming path's post-pass is the OTHER site that
+    stamps every chunk's title (per-chunk metadata is discarded during
+    flush, so title is corrected here after upload) — title_override
+    must win here exactly as it does in doc_indexer._pdf_chunks's
+    small-document path."""
+    t3, col = MagicMock(), MagicMock()
+    col.get.return_value = {"ids": ["id1"], "metadatas": [{"content_hash": "h1"}]}
+    ro = MagicMock(spec=ExtractionResult)
+    ro.text, ro.metadata = "some text", {"page_count": 1, "docling_title": "Fragment Only"}
+    override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
+
+    assert _enrich_metadata_from_extraction(
+        "h1", ro, Path("/test.pdf"), t3, col, "docs__test", title_override=override,
+    ) is True
+
+    written_metas = t3.update_chunks.call_args[0][2]
+    assert all(m["title"] == override for m in written_metas)
+
+
 class TestStreamingCatalogHookTitle:
     """The streaming tail used to read ``metadata["title"]`` / ``["author"]``
     — keys no extractor writes (they are ``docling_title`` / ``pdf_title`` /

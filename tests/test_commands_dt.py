@@ -2196,6 +2196,77 @@ class TestStampDtUriOnEntry:
         )
         assert pdf_kwargs[0].get("force") is True
 
+    def test_index_record_forwards_dt_title_to_index_pdf(
+        self, monkeypatch, tmp_path,
+    ):
+        """nexus-1uov1: the DEVONthink record name must reach index_pdf's
+        title_override, so chunk titles agree with the catalog title
+        _stamp_dt_uri_on_entry stamps after indexing -- before this, the
+        chunk metadata kept the extractor's first-H1/first-line guess
+        while the catalog title carried the full DT name."""
+        from nexus.commands import dt as dt_module
+
+        pdf_kwargs: list[dict] = []
+
+        def fake_index_pdf(*args, **kwargs):
+            pdf_kwargs.append(kwargs)
+            return 3
+
+        monkeypatch.setattr(
+            dt_module, "_dt_record_facts",
+            lambda uuid: {
+                "name": "Self-Aware Vector Embeddings for Retrieval-Augmented "
+                         "Generation: Encoding Relational Knowledge",
+                "url": "", "year": 0, "page_count": 0,
+            },
+        )
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", fake_index_pdf)
+
+        dt_module._index_record(
+            uuid="UUID-DT-TITLE",
+            path=str(tmp_path / "a.pdf"),
+            collection="knowledge__test",
+            corpus="default",
+            dry_run=False,
+        )
+        assert pdf_kwargs[0].get("title_override") == (
+            "Self-Aware Vector Embeddings for Retrieval-Augmented "
+            "Generation: Encoding Relational Knowledge"
+        )
+
+    def test_index_record_dt_facts_unavailable_leaves_title_override_empty(
+        self, monkeypatch, tmp_path,
+    ):
+        """When the DT MCP is unreachable (_dt_record_facts returns None),
+        index_pdf must get an empty title_override -- falling through to
+        its own resolve_pdf_title guess -- never a crash on a missing
+        facts dict."""
+        from nexus.commands import dt as dt_module
+
+        pdf_kwargs: list[dict] = []
+
+        def fake_index_pdf(*args, **kwargs):
+            pdf_kwargs.append(kwargs)
+            return 0
+
+        monkeypatch.setattr(dt_module, "_dt_record_facts", lambda uuid: None)
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: False,
+        )
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", fake_index_pdf)
+
+        dt_module._index_record(
+            uuid="UUID-NO-FACTS",
+            path=str(tmp_path / "a.pdf"),
+            collection="knowledge__test",
+            corpus="default",
+            dry_run=False,
+        )
+        assert pdf_kwargs[0].get("title_override") == ""
+
     def test_index_record_forwards_force_to_index_markdown(
         self, monkeypatch, tmp_path,
     ):

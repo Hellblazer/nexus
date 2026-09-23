@@ -2221,11 +2221,23 @@ def _pdf_chunks(
     doc_id: str = "",
     allow_degraded_extraction: bool = False,
     extraction_stats: dict | None = None,
+    title_override: str = "",
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
     *extraction_stats* (nexus-i0cwh), when given, receives ``page_count``
     and ``pages_with_text`` from the extraction result.
+
+    *title_override* (nexus-1uov1), when non-empty, wins over
+    :func:`~nexus.indexer_utils.resolve_pdf_title`'s own
+    extractor-metadata/first-H1/filename guess for every chunk's stored
+    ``title``. The caller-authoritative case: ``nx dt index`` knows the
+    DEVONthink record name, which is what the catalog row is stamped with
+    after indexing (:func:`nexus.commands.dt._stamp_dt_uri_on_entry`) --
+    without this, the chunk-level title metadata kept the PDF-derived
+    guess (often a truncated first line) while the catalog title carried
+    the full DT name, so ``nx store list --docs`` and search results
+    surfaced the fragment.
 
     *chunk_chars* overrides the default chunk size (1500 chars).  When None
     the PDFChunker default is used.  Pass ``tuning.pdf_chunk_chars`` from
@@ -2293,7 +2305,7 @@ def _pdf_chunks(
     # nexus-8l6 fallback: extractor metadata wins; otherwise derive from
     # first H1 or normalised filename (preserves initialisms like RDR, API).
     from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    source_title = resolve_pdf_title(result.metadata, pdf_path, result.text)
+    source_title = title_override or resolve_pdf_title(result.metadata, pdf_path, result.text)
     bib: dict = {}
     if bib_enrich_enabled:
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
@@ -2443,11 +2455,22 @@ def index_pdf(
     on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
     allow_degraded_extraction: bool = False,
     dry_run: bool = False,
+    title_override: str = "",
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
     By default the collection is ``docs__{corpus}``.  Pass *collection_name*
     to override (e.g. ``knowledge__delos`` for external reference corpora).
+
+    Pass *title_override* (nexus-1uov1) when the caller already knows the
+    document's true title from an authoritative external source (e.g.
+    ``nx dt index``'s DEVONthink record name) — it wins over
+    :func:`~nexus.indexer_utils.resolve_pdf_title`'s extractor-metadata/
+    first-H1/filename guess everywhere this function resolves a title,
+    reaching both the streaming path (``pipeline_stages.pipeline_index_
+    pdf``) and the small-document/incremental path (``_pdf_chunks``), so
+    every chunk's stored title agrees with the catalog document's title
+    instead of only the catalog title being corrected after the fact.
 
     Returns the number of chunks indexed, or 0 if skipped (no credentials or
     content unchanged since last index with the same embedding model).
@@ -2808,6 +2831,7 @@ def index_pdf(
                     source_uri=source_uri,
                     allow_degraded_extraction=allow_degraded_extraction,
                     dry_run=dry_run,
+                    title_override=title_override,
                     on_doc_registered=_note_fallback_mint,
                     extraction_stats=_extraction_stats,
                 )
@@ -3009,7 +3033,7 @@ def index_pdf(
     chunk_fn = partial(
         _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom,
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
-        extraction_stats=_extraction_stats,
+        extraction_stats=_extraction_stats, title_override=title_override,
     )
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:

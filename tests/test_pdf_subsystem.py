@@ -146,6 +146,21 @@ class TestPdfChunksMetadata:
             assert isinstance(chunk_id, str) and chunk_id
             assert isinstance(text, str) and text.strip()
 
+    def test_title_override_wins_over_resolve_pdf_title(self, simple_pdf: Path) -> None:
+        """nexus-1uov1: an explicit title_override must win over
+        resolve_pdf_title's extractor-metadata/first-H1/filename guess
+        for every chunk's stored title -- the DEVONthink motivating case
+        (nx dt index knows the record's real name)."""
+        content_hash = _sha256(simple_pdf)
+        override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
+        result = _pdf_chunks(
+            simple_pdf, content_hash, "voyage-context-3", "2026-01-01T00:00:00", "mybook",
+            title_override=override,
+        )
+        assert result, "Expected at least one chunk from simple.pdf"
+        for _chunk_id, _text, meta in result:
+            assert meta["title"] == override
+
     def test_multipage_pdf_page_numbers(self, multipage_pdf: Path) -> None:
         """AC-S2: page_number values are drawn from {1, 2, 3}; no zeros present."""
         content_hash = _sha256(multipage_pdf)
