@@ -2435,6 +2435,84 @@ class TestUnloadStaleServiceLaunchagent:
         assert "nx daemon service uninstall --autostart" in actions[0]
 
 
+class TestAutostartBackupCollisionProofAndPruning:
+    """nexus-gq1pv follow-up (T2 review-wave2-daemon-2026-09-23): the
+    original backup filename used second-granularity timestamps with no
+    collision check and no pruning. Two converge passes inside the same
+    wall-clock second computed the SAME name, and the second write
+    silently clobbered the first backup -- the exact "nothing an operator
+    wrote is lost" guarantee the backup exists to uphold, defeated by the
+    backup mechanism itself. And with nothing ever removing an old one,
+    every drift-converge pass added one more file forever."""
+
+    def test_collision_is_never_silently_clobbered(self, tmp_path, monkeypatch) -> None:
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "com.nexus.service.plist"
+        dest.write_text("current template\n")
+        existing_backup = dest.with_name(f"{dest.name}.pre-convergence.1000")
+        existing_backup.write_text("FIRST backup content -- must survive")
+
+        # First two candidate timestamps collide with the existing backup;
+        # the third is free.
+        calls = iter([1000, 1000, 2000])
+        monkeypatch.setattr(uf.time, "time_ns", lambda: next(calls))
+
+        result = uf._write_collision_proof_backup(dest, "SECOND backup content")
+
+        assert existing_backup.read_text() == "FIRST backup content -- must survive"
+        assert result != existing_backup
+        assert result.read_text() == "SECOND backup content"
+
+    def test_exhausting_every_retry_raises_oserror(self, tmp_path, monkeypatch) -> None:
+        """A pathological case (every candidate this function will try is
+        already taken) must raise, not loop forever or silently overwrite."""
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "unit.plist"
+        monkeypatch.setattr(uf.time, "time_ns", lambda: 42)
+        dest.with_name(f"{dest.name}.pre-convergence.42").write_text("blocker")
+
+        with pytest.raises(OSError):
+            uf._write_collision_proof_backup(dest, "never written")
+
+    def test_prune_keeps_only_the_newest_n(self, tmp_path) -> None:
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "unit.plist"
+        for i in range(8):
+            dest.with_name(f"{dest.name}.pre-convergence.{1000 + i}").write_text(f"backup {i}")
+
+        uf._prune_old_autostart_backups(dest)
+
+        remaining = sorted(p.name for p in tmp_path.iterdir() if "pre-convergence" in p.name)
+        assert len(remaining) == uf._AUTOSTART_BACKUP_KEEP_COUNT
+        # Keeps the NEWEST (highest-numbered) ones, not an arbitrary subset.
+        assert remaining == [
+            f"unit.plist.pre-convergence.{1000 + i}"
+            for i in range(8 - uf._AUTOSTART_BACKUP_KEEP_COUNT, 8)
+        ]
+
+    def test_write_then_prune_via_the_public_entry_point(self, tmp_path, monkeypatch) -> None:
+        """A real end-to-end sequence through the public function: N real
+        writes, only the newest _AUTOSTART_BACKUP_KEEP_COUNT survive."""
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "unit.plist"
+        n = uf._AUTOSTART_BACKUP_KEEP_COUNT + 2
+        counter = iter(range(1000, 1000 + n))
+        monkeypatch.setattr(uf.time, "time_ns", lambda: next(counter))
+
+        for i in range(n):
+            uf._write_collision_proof_backup(dest, f"content {i}")
+
+        backups = sorted(p for p in tmp_path.iterdir() if "pre-convergence" in p.name)
+        assert len(backups) == uf._AUTOSTART_BACKUP_KEEP_COUNT
+        # The two oldest (content 0, content 1) were pruned.
+        surviving_content = {p.read_text() for p in backups}
+        assert surviving_content == {f"content {i}" for i in range(2, n)}
+
+
 class TestConvergeServiceAutostartUnit:
     """nexus-rlp0v: a drifted local-mode service-tier autostart unit (e.g. a
     stale ProcessType=Background) must converge on `nx daemon restart-stale`

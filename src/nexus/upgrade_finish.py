@@ -2353,6 +2353,105 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
     return True, f"restarted the service directly (`{' '.join(argv)}`)"
 
 
+#: How many pre-convergence backups of a single autostart unit to keep
+#: (nexus-gq1pv follow-up, T2 review-wave2-daemon-2026-09-23). Every
+#: `nx daemon restart-stale` that finds the unit still drifted -- an
+#: operator who re-edits it after each converge, or a template that keeps
+#: changing across releases -- writes one more backup; without a cap they
+#: accumulate forever. 5 keeps a short history (enough to recover from a
+#: recent mistake) without an unbounded pile.
+_AUTOSTART_BACKUP_KEEP_COUNT = 5
+
+
+def _autostart_backup_prefix(dest: Path) -> str:
+    """The filename prefix shared by every pre-convergence backup of *dest*."""
+    return f"{dest.name}.pre-convergence."
+
+
+def _write_collision_proof_backup(dest: Path, content: str) -> Path:
+    """Write *content* to a NEW backup file beside *dest*, guaranteed not
+    to collide with an existing backup, then prune older ones beyond
+    :data:`_AUTOSTART_BACKUP_KEEP_COUNT`.
+
+    nexus-gq1pv follow-up: the original backup name
+    (``<unit>.pre-convergence.<second-granularity-timestamp>``) had two
+    gaps. First, second granularity: two converge passes inside the same
+    wall-clock second (an operator re-running `nx daemon restart-stale`
+    right after a first attempt, or two concurrent invocations) computed
+    the SAME name and the second write silently clobbered the first
+    backup -- the exact "nothing an operator wrote to this file is lost"
+    guarantee this backup exists to uphold, defeated by the backup
+    mechanism itself. Second, no pruning: every drift-converge pass added
+    one more file with nothing ever removing an old one.
+
+    Collision-proof via ``os.O_CREAT | os.O_EXCL`` (an atomic, race-safe
+    "fail if it already exists" — nanosecond timestamps alone narrow the
+    window but do not close it, since two SEPARATE PROCESSES calling this
+    concurrently could still observe the same ``time.time_ns()`` value),
+    not merely via finer-grained timestamps: a raced write is refused and
+    retried under a fresh timestamp rather than silently overwriting an
+    existing backup.
+
+    Raises ``OSError`` when the write genuinely fails (the caller reports
+    this loudly and refuses to converge -- see
+    :func:`converge_service_autostart_unit`). A failure to PRUNE old
+    backups is separately best-effort and never raised: pruning is
+    housekeeping, not the operation this function exists to guarantee.
+    """
+    prefix = _autostart_backup_prefix(dest)
+    last_exc: OSError | None = None
+    for attempt in range(10):
+        candidate = dest.with_name(f"{prefix}{time.time_ns()}")
+        try:
+            fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError as exc:
+            last_exc = exc
+            continue
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(content)
+        except OSError:
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+            raise
+        _prune_old_autostart_backups(dest)
+        return candidate
+    raise OSError(
+        f"could not allocate a unique backup filename beside {dest} after "
+        f"10 attempts (last collision: {last_exc})"
+    )
+
+
+def _prune_old_autostart_backups(dest: Path) -> None:
+    """Delete every pre-convergence backup of *dest* beyond the newest
+    :data:`_AUTOSTART_BACKUP_KEEP_COUNT`. Best-effort: never raises --
+    listing or deleting an old backup failing is logged and swallowed,
+    never a reason to fail the converge that just wrote a NEW backup
+    successfully.
+    """
+    try:
+        prefix = _autostart_backup_prefix(dest)
+        # Nanosecond timestamps sort lexicographically the same as
+        # numerically for the foreseeable future (fixed digit count), so a
+        # plain name sort is also a chronological sort -- oldest first.
+        backups = sorted(
+            p for p in dest.parent.iterdir()
+            if p.is_file() and p.name.startswith(prefix)
+        )
+        stale = backups[:-_AUTOSTART_BACKUP_KEEP_COUNT] if _AUTOSTART_BACKUP_KEEP_COUNT > 0 else backups
+        for old in stale:
+            try:
+                old.unlink()
+            except OSError as exc:
+                _log.warning(
+                    "service_autostart_backup_prune_failed", path=str(old), error=str(exc),
+                )
+    except OSError as exc:
+        _log.warning("service_autostart_backup_prune_scan_failed", dest=str(dest), error=str(exc))
+
+
 def converge_service_autostart_unit(
     config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
 ) -> list[str]:
@@ -2471,14 +2570,12 @@ def converge_service_autostart_unit(
     # names it -- nothing an operator wrote to this file is lost, even
     # though the automatic heal still proceeds. A backup write failure
     # refuses to converge at all rather than proceed without one.
-    backup_path = dest.with_name(f"{dest.name}.pre-convergence.{int(time.time())}")
     try:
-        backup_path.write_text(probe.existing)
+        backup_path = _write_collision_proof_backup(dest, probe.existing)
     except OSError as exc:
         return [
-            f"NEEDS HUMAN: {note}, but backing up the existing unit to "
-            f"{backup_path} before converging it failed ({exc}) -- "
-            f"{manual_fallback}"
+            f"NEEDS HUMAN: {note}, but backing up the existing unit "
+            f"before converging it failed ({exc}) -- {manual_fallback}"
         ]
     note = f"{note} (previous content backed up to {backup_path})"
 
