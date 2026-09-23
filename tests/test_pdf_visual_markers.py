@@ -308,5 +308,6 @@ class TestMineruExtractionCarriesMarkersAndTableRegions:
         assert "Turnitin" in result.text
         # The rendered table on page 2 (0-based batch page 1, rebased from
         # MinerU's batch-relative page_idx 0) is the only table region.
-        assert result.metadata["table_regions"] == [{"page": 2, "html": html}]
+        # nexus-dqe86: 'html' was written here and read nowhere; deleted.
+        assert result.metadata["table_regions"] == [{"page": 2}]
         assert result.metadata["extraction_method"] == "mineru"

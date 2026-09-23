@@ -84,13 +84,24 @@ def test_extract_with_docling_includes_table_regions(tmp_path):
     assert regions[0]["page"] == 2
 
 
-def test_table_regions_contain_required_fields(tmp_path):
-    """Each table_region entry must have 'page' and 'html' keys."""
+def test_table_regions_contain_only_page(tmp_path):
+    """nexus-dqe86: each table_region entry carries only 'page'.
+
+    A 'html' key used to be written here too (and at the MinerU write
+    site, pdf_extractor.py's other table_regions builder) but was never
+    read anywhere — pdf_chunker.py and pipeline_stages.py, the only two
+    consumers, read only ['page']. The dead field cost a real
+    ``export_to_html()`` call per table on the docling path; deleted
+    rather than preserved, per project directive (dead writes get
+    deleted unless an accepted RDR plans a reader — none does; a table
+    HTML validator, nexus-stkek, reads table HTML out of the extracted
+    TEXT, not out of this field). This test now pins the field's
+    ABSENCE so it does not silently come back.
+    """
     pdf_path = tmp_path / "test.pdf"
     pdf_path.write_bytes(b"fake")
 
-    html_str = "<table><tr><td>Data</td></tr></table>"
-    table_item = _make_table_item(page_no=3, html=html_str)
+    table_item = _make_table_item(page_no=3)
     text_item = _make_text_item(page_no=1)
 
     mock_doc = MagicMock()
@@ -113,10 +124,8 @@ def test_table_regions_contain_required_fields(tmp_path):
         result = extractor.extract(pdf_path)
 
     region = result.metadata["table_regions"][0]
-    assert "page" in region
-    assert "html" in region
-    assert region["page"] == 3
-    assert region["html"] == html_str
+    assert region == {"page": 3}
+    table_item.export_to_html.assert_not_called()
 
 
 # ── PDFChunker: chunk_type tagging ───────────────────────────────────────────

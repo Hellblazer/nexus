@@ -1579,14 +1579,7 @@ class PDFExtractor:
                 elif item_type == "TableItem":
                     prov = getattr(item, "prov", [])
                     page_no = prov[0].page_no if prov else 0
-                    html = ""
-                    if callable(getattr(item, "export_to_html", None)):
-                        try:
-                            html = item.export_to_html(doc=doc)
-                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
-                            _log.debug("table_html_export_failed", page=page_no, error=str(exc))
-                            html = ""
-                    table_regions.append({"page": page_no, "html": html})
+                    table_regions.append({"page": page_no})
         else:
             # Non-enriched mode: scan text for LaTeX formula patterns
             # This is 100x faster than running the enrichment pipeline
@@ -1595,14 +1588,7 @@ class PDFExtractor:
                 if type(item).__name__ == "TableItem":
                     prov = getattr(item, "prov", [])
                     page_no = prov[0].page_no if prov else 0
-                    html = ""
-                    if callable(getattr(item, "export_to_html", None)):
-                        try:
-                            html = item.export_to_html(doc=doc)
-                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
-                            _log.debug("table_html_export_failed", page=page_no, error=str(exc))
-                            html = ""
-                    table_regions.append({"page": page_no, "html": html})
+                    table_regions.append({"page": page_no})
 
         if formula_count > 0:
             _log.warning(
@@ -2550,7 +2536,7 @@ class PDFExtractor:
         # to the batch that produced it; _extract_with_mineru rebases it to
         # the document before it lands here (``doc_page_idx``).
         table_regions = [
-            {"page": e.get("doc_page_idx", e.get("page_idx", 0)) + 1, "html": e["table_body"]}
+            {"page": e.get("doc_page_idx", e.get("page_idx", 0)) + 1}
             for e in content_list
             if e.get("type") == "table" and e.get("table_body")
         ]
