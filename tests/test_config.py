@@ -374,6 +374,40 @@ def test_set_config_value_dict_intermediates_merge_not_replace(home: Path) -> No
     assert data["pdf"]["timeout"] == 30  # sibling of the leaf survives
 
 
+def test_set_config_value_survives_concurrent_cross_process_writers(home: Path) -> None:
+    """nexus-cd1k0.16 finding (8): the read-modify-write behind
+    set_config_value / set_credential / unset_credential used to be
+    locked only WITHIN one process (`_config_lock`, a threading.Lock) --
+    the module's own comment claimed the atomic `os.replace()` covered
+    cross-process safety, but that only guards a READER against a torn
+    file, not two WRITERS racing the read-modify-write itself. Real OS
+    processes, real race: N subprocesses each setting a DIFFERENT dotted
+    key concurrently must all survive -- without the fix, each reads the
+    pre-race file, mutates independently, and the LAST os.replace() wins
+    whole, silently discarding every other process's key."""
+    import subprocess
+    import sys
+
+    n = 8
+    script = (
+        "import sys\n"
+        "from nexus.config import set_config_value\n"
+        "set_config_value(sys.argv[1], sys.argv[2])\n"
+    )
+    procs = [
+        subprocess.Popen([sys.executable, "-c", script, f"probe.key{i}", f"value{i}"])
+        for i in range(n)
+    ]
+    for p in procs:
+        assert p.wait(timeout=60) == 0
+
+    cfg = home / ".config" / "nexus" / "config.yml"
+    data = yaml.safe_load(cfg.read_text())
+    probe = data.get("probe") or {}
+    missing = [i for i in range(n) if probe.get(f"key{i}") != f"value{i}"]
+    assert not missing, f"keys {missing} lost to a concurrent writer -- probe={probe}"
+
+
 # ── nexus-m20mf: get_credential's config.yml parse is cached ────────────────
 #
 # WHY: every T2 store construction calls get_credential, which re-parsed

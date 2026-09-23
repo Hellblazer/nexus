@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import contextlib
 import copy
 import os
 import tempfile
@@ -14,12 +15,54 @@ import click
 import structlog
 import yaml
 
+from nexus._locking import lock_fd, unlock_fd
+
 _log = structlog.get_logger(__name__)
 
-# Protects the read-modify-write sequence in set_credential() against concurrent
-# calls within the same process.  Cross-process safety is provided by the atomic
-# os.replace() at the end; in-process safety requires this lock.
+# Protects the read-modify-write sequence in set_config_value() /
+# set_credential() / unset_credential() against concurrent calls WITHIN
+# the same process.
+#
+# nexus-cd1k0.16 finding (8): this comment used to claim cross-process
+# safety came from the atomic os.replace() at the end -- it does not.
+# os.replace() only guarantees a READER never observes a torn/partial
+# file; it says nothing about two WRITERS racing the read-modify-write
+# sequence itself. Two concurrent `nx config set` / `nx auth` invocations
+# (in different processes) can each read the same config.yml, mutate
+# their own in-memory copy, and os.replace() over each other -- the
+# LAST writer silently wins and the other's change is gone, with no
+# error on either side. :func:`_config_write_lock` below closes that
+# window with a real cross-process advisory lock; this threading.Lock
+# now only needs to serialize threads WITHIN one process holding that
+# same file lock's fd (fcntl.flock is per-process, not per-thread, on
+# most platforms, so two threads in this process could otherwise both
+# "hold" the file lock at once).
 _config_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _config_write_lock(path: Path):
+    """Serialize a config.yml read-modify-write across BOTH threads (the
+    in-process ``_config_lock``) and processes (nexus-cd1k0.16 finding (8)).
+
+    Takes an advisory exclusive lock on a sentinel file beside *path*
+    (``<path>.lock``), via the same primitive the daemon lifecycle uses
+    (:mod:`nexus._locking`) -- never a bespoke ``fcntl``/``msvcrt`` call
+    here. A concurrent process blocks until the lock holder's
+    ``os.replace()`` has landed, and then reads the UPDATED file rather
+    than clobbering it. *path*'s parent directory must already exist
+    (every caller below creates it, or the file itself, before locking).
+    """
+    with _config_lock:
+        fd = os.open(str(path.with_name(path.name + ".lock")), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            lock_fd(fd, blocking=True)
+            try:
+                yield
+            finally:
+                unlock_fd(fd)
+        finally:
+            os.close(fd)
 
 # ── TuningConfig ─────────────────────────────────────────────────────────────
 
@@ -1408,7 +1451,7 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     parts = dotted_key.split(".")
-    with _config_lock:
+    with _config_write_lock(path):
         data: dict[str, Any] = {}
         if path.exists():
             data = yaml.safe_load(path.read_text()) or {}
@@ -1450,9 +1493,10 @@ def set_credential(name: str, value: str) -> None:
         raise ValueError(f"Unknown credential '{name}'. Known: {known}")
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Lock covers the entire read-modify-write unit so two concurrent calls in
-    # the same process cannot silently drop each other's change.
-    with _config_lock:
+    # Lock covers the entire read-modify-write unit so two concurrent calls,
+    # in the same process OR a different one (nexus-cd1k0.16 finding (8)),
+    # cannot silently drop each other's change.
+    with _config_write_lock(path):
         data: dict[str, Any] = {}
         if path.exists():
             data = yaml.safe_load(path.read_text()) or {}
@@ -1493,7 +1537,7 @@ def unset_credential(name: str) -> bool:
     path = _global_config_path()
     if not path.exists():
         return False
-    with _config_lock:
+    with _config_write_lock(path):
         data: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
         creds = data.get("credentials")
         if not isinstance(creds, dict) or name not in creds:
