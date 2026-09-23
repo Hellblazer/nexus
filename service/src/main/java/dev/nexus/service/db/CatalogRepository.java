@@ -3392,6 +3392,149 @@ public final class CatalogRepository {
     }
 
     /**
+     * Retry bound for {@link #resolveAndLockLinkEndpoints}'s stale-under-lock
+     * recovery loop. Bounded for the same reason {@link #MAX_ALIAS_HOPS} is:
+     * a chain that never stabilizes is corrupt data or an adversarial
+     * concurrent-merge storm, not a shape to loop on forever.
+     */
+    private static final int MAX_LINK_ENDPOINT_LOCK_ROUNDS = 8;
+
+    /** One document row's alias_of, read under a FOR KEY SHARE lock taken in
+     *  the SAME query — {@code aliasOf} is {@code ""} (never null) when the
+     *  row is not itself an alias. */
+    private record LockedDocRow(String tumbler, String aliasOf) {}
+
+    /**
+     * Lock one {@code catalog_documents} row FOR KEY SHARE and read its
+     * {@code alias_of} in the SAME statement (nexus-z4rpi round 4, batch-4
+     * item 3): one round trip does what {@link #lockDocumentRow} (the lock)
+     * plus a separate {@code alias_of} SELECT plus a liveness existence
+     * check used to take three for — a live row's {@code
+     * WHERE ... DELETED_AT IS NULL} match IS the liveness answer, so a
+     * non-null result already proves liveness with no extra query.
+     *
+     * @return {@code null} when no LIVE row matches *tumbler* in this tenant
+     *         (missing or tombstoned); otherwise the locked row's alias_of
+     */
+    private static LockedDocRow lockAndReadDocRow(DSLContext ctx, String tenant, String tumbler) {
+        if (tumbler == null || tumbler.isBlank()) return null;
+        // fetchOne(Record) — not fetchOne(Field) — because fetchOne(Field)
+        // returns null for BOTH "no row matched" and "the row's alias_of
+        // column is SQL NULL"; those are different outcomes here (the
+        // second one is a live, non-aliased row) and only fetchOne(Record)
+        // (null record = no row; a present record's field = the real value,
+        // possibly null) tells them apart.
+        var rec = ctx.select(CATALOG_DOCUMENTS.ALIAS_OF)
+            .from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .forKeyShare()
+            .fetchOne();
+        if (rec == null) return null;
+        String aliasOf = rec.value1();
+        return new LockedDocRow(tumbler, aliasOf == null ? "" : aliasOf);
+    }
+
+    /**
+     * Lock the DISTINCT, non-blank tumblers among *tumblers* FOR KEY SHARE,
+     * one at a time, in ascending string order — reusing {@link
+     * #lockDocumentRowsSorted}'s exact deadlock-avoidance discipline
+     * (sequential single-row statements, sorted, never one multi-row
+     * statement: Postgres does not guarantee a multi-row {@code FOR KEY
+     * SHARE}'s internal lock-acquisition order follows an {@code ORDER BY},
+     * only its OUTPUT order — relying on that for cross-call ordering would
+     * silently reopen the deadlock this method exists to close). Returns
+     * only the tumblers that resolved to a live row; a missing/tombstoned
+     * tumbler is simply absent from the map, not a null entry.
+     */
+    private static Map<String, LockedDocRow> lockAndReadDocRowsSorted(DSLContext ctx, String tenant, String... tumblers) {
+        var distinct = new java.util.TreeSet<String>();
+        for (String t : tumblers) {
+            if (t != null && !t.isBlank()) distinct.add(t);
+        }
+        Map<String, LockedDocRow> out = new LinkedHashMap<>();
+        for (String t : distinct) {
+            LockedDocRow row = lockAndReadDocRow(ctx, tenant, t);
+            if (row != null) out.put(t, row);
+        }
+        return out;
+    }
+
+    /** {@link #resolveAndLockLinkEndpoints}'s result: each side's RESOLVED
+     *  (post-alias-chain) tumbler, locked FOR KEY SHARE, plus whether that
+     *  resolved row is live. A blank/null input tumbler resolves to itself,
+     *  not-live, with no lock taken (nothing to lock). */
+    private record ResolvedLinkEndpoints(String from, boolean fromLive, String to, boolean toLive) {}
+
+    /**
+     * Resolve BOTH {@code upsertLink} endpoints through their alias chains
+     * AND lock the resolved (not the raw) targets, closing the gap the
+     * simpler raw-endpoint lock left open (nexus-z4rpi round 4, batch-4
+     * code review 2026-09-23): a link whose RAW endpoint is an
+     * already-settled alias pointing at a document concurrently being
+     * merged elsewhere must not commit against the pre-merge target.
+     *
+     * <p><b>Two-phase, retried under contention.</b> Each attempt (1) walks
+     * the alias chain UNLOCKED via {@link #resolveAliasTarget} — cheap, and
+     * correct in the overwhelmingly common uncontended case — to get a
+     * candidate resolved tumbler for each side, then (2) locks BOTH
+     * candidates together via {@link #lockAndReadDocRowsSorted} (sorted,
+     * deadlock-safe against {@link #mergeDocuments}' own up-front sorted
+     * FOR UPDATE pair-lock — see that method's javadoc) and re-reads their
+     * {@code alias_of} in the SAME query. If EITHER locked candidate's
+     * freshly-read {@code alias_of} is non-blank, a concurrent merge raced
+     * us: it aliased our candidate AFTER the unlocked resolve but the walk
+     * never saw it. Re-seed that side from the fresh alias_of and retry —
+     * bounded by {@link #MAX_LINK_ENDPOINT_LOCK_ROUNDS} attempts, each one a
+     * COMPLETE sorted-pair lock (never a partial, cross-attempt lock
+     * accumulation — that would be the multi-round scheme this method
+     * deliberately does NOT use, precisely because a chain whose later hop
+     * resolves to a SMALLER tumbler than an earlier one locked would violate
+     * the sorted-order invariant across attempts and reopen the deadlock).
+     *
+     * <p>Once a round finds both candidates stable under lock (blank
+     * alias_of, or absent = not live), those candidates and their liveness
+     * are the answer: the FOR KEY SHARE lock held for the rest of this
+     * transaction guarantees a concurrent merge cannot re-alias either one
+     * before this call commits (mergeDocuments needs a conflicting FOR
+     * UPDATE lock on the SAME row first).
+     */
+    private static ResolvedLinkEndpoints resolveAndLockLinkEndpoints(
+            DSLContext ctx, String tenant, String rawFrom, String rawTo) {
+        String seedFrom = rawFrom;
+        String seedTo = rawTo;
+        boolean fromBlank = seedFrom == null || seedFrom.isBlank();
+        boolean toBlank = seedTo == null || seedTo.isBlank();
+        for (int attempt = 0; attempt < MAX_LINK_ENDPOINT_LOCK_ROUNDS; attempt++) {
+            String candFrom = fromBlank ? seedFrom : resolveAliasTarget(ctx, tenant, seedFrom);
+            String candTo = toBlank ? seedTo : resolveAliasTarget(ctx, tenant, seedTo);
+
+            Map<String, LockedDocRow> locked = lockAndReadDocRowsSorted(ctx, tenant, candFrom, candTo);
+
+            LockedDocRow fromRow = fromBlank ? null : locked.get(candFrom);
+            LockedDocRow toRow = toBlank ? null : locked.get(candTo);
+            boolean fromLive = !fromBlank && fromRow != null;
+            boolean toLive = !toBlank && toRow != null;
+            boolean fromStale = fromLive && !fromRow.aliasOf().isEmpty();
+            boolean toStale = toLive && !toRow.aliasOf().isEmpty();
+
+            if (!fromStale && !toStale) {
+                return new ResolvedLinkEndpoints(candFrom, fromLive, candTo, toLive);
+            }
+            log.warn("event=link_endpoint_resolve_raced tenant={} attempt={} from_stale={} to_stale={}",
+                tenant, attempt, fromStale, toStale);
+            if (fromStale) seedFrom = fromRow.aliasOf();
+            if (toStale) seedTo = toRow.aliasOf();
+        }
+        throw new IllegalStateException(
+            "link endpoint resolution did not stabilize after " + MAX_LINK_ENDPOINT_LOCK_ROUNDS
+            + " attempts (tenant=" + tenant + ", from=" + rawFrom + ", to=" + rawTo
+            + ") — an unusually persistent run of concurrent merges kept re-aliasing an endpoint"
+            + " out from under this link write.");
+    }
+
+    /**
      * Collapse a duplicate catalog entry into its canonical one in ONE
      * transaction (nexus-z4rpi): the client-side recipe this replaces was
      * three non-atomic {@code /update} calls —
@@ -3538,9 +3681,16 @@ public final class CatalogRepository {
                 cursor = next;
             }
 
+            // deleted_at IS NULL guard is defense in depth, same as the SOURCE_URI
+            // clear below: canonicalTumbler was already confirmed live (and is
+            // locked FOR UPDATE) above, so this can never actually match a
+            // tombstoned row, but the tombstone-filter gate (TombstoneFilterGateTest)
+            // wants every CATALOG_DOCUMENTS read to carry the guard explicitly
+            // rather than lean on a liveness check elsewhere in the method.
             String canonSourceUri = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler)))
+                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .fetchOne(CATALOG_DOCUMENTS.SOURCE_URI);
             boolean dupHasUri = dupSourceUri != null && !dupSourceUri.isBlank();
             boolean canonicalLacksUri = canonSourceUri == null || canonSourceUri.isBlank();
@@ -3837,27 +3987,45 @@ public final class CatalogRepository {
      * nexus-njrcn.3). The {@code (xmax = 0)} RETURNING predicate is the standard Postgres
      * idiom: a freshly inserted row has {@code xmax = 0}; a row reached via DO UPDATE does not.
      *
-     * <p><b>Alias resolution and the merge race (nexus-z4rpi round 3, code
+     * <p><b>Alias resolution and the merge race (nexus-z4rpi rounds 3-4, code
      * review 2026-09-23).</b> {@code from_tumbler}/{@code to_tumbler} are
-     * resolved through {@link #resolveAliasTarget} before anything else — a
-     * link addressed at an ALIAS lands on the CANONICAL target, the same
+     * resolved AND locked together by {@link #resolveAndLockLinkEndpoints} —
+     * a link addressed at an ALIAS lands on the CANONICAL target, the same
      * rule {@code aliasTarget()}/{@link #buildUpdateDocumentQuery} already
      * enforce for {@code /update} (nexus-ekaxn): the write is about the
      * document, not about the specific pointer that named it, so it follows
-     * the chain. Resolution happens AFTER locking both endpoints FOR KEY
-     * SHARE, in the SAME sorted-tumbler order {@link #mergeDocuments} locks
+     * the chain. Round 3 locked the RAW endpoints before resolving; round 4
+     * closed the gap that left open — a raw endpoint that is itself an
+     * already-settled alias pointing at a document concurrently being
+     * merged elsewhere was not serialized against that merge at all, since
+     * the lock sat on the alias row, not the row the merge was about to
+     * touch. {@link #resolveAndLockLinkEndpoints} locks the RESOLVED target
+     * instead (with a bounded re-resolve-and-retry loop for the case where a
+     * merge aliases the candidate between the unlocked resolve and the
+     * lock), in the SAME sorted-tumbler order {@link #mergeDocuments} locks
      * FOR UPDATE — FOR KEY SHARE conflicts with FOR UPDATE, so a link write
-     * racing a merge of one of its endpoints serializes against it: either
-     * this call's lock blocks until the merge commits (and then resolves
-     * the POST-merge alias_of, landing on the canonical — the link never
-     * survives unremapped), or the merge's lock blocks until this call
-     * commits (and {@link #remapLinksForMerge}'s own read then sees the
-     * freshly-written row and remaps it in the same pass). Either
-     * interleaving lands the link on the canonical; neither strands it on
-     * the duplicate. Without the lock, a link write between the merge's
-     * OWN link-remap read and its alias_of commit could resolve against a
-     * pre-merge alias_of (or remap's snapshot could miss a
-     * still-in-flight write) and end up naming the duplicate forever.
+     * racing a merge of one of its endpoints serializes against it either
+     * way: this call's lock blocks until the merge commits (and then
+     * resolves the POST-merge alias_of, landing on the canonical — the link
+     * never survives unremapped), or the merge's lock blocks until this
+     * call commits (and {@link #remapLinksForMerge}'s own read then sees
+     * the freshly-written row and remaps it in the same pass).
+     *
+     * <p><b>Self-links (nexus-z4rpi round 4, batch-4 item 1).</b> Resolution
+     * can make {@code from} and {@code to} equal even when the RAW request
+     * named two different tumblers — a link between a duplicate and its own
+     * canonical, or between two documents both aliased to the same
+     * canonical. This is DELIBERATELY NOT refused: an explicit self-link on
+     * UNRESOLVED input was never refused here either (no {@code from == to}
+     * guard existed before this round, and {@code
+     * ReadShapeViewsTest} seeds a raw self-link as a fixture, so the schema
+     * already treats {@code from == to} as an accepted shape). Refusing it
+     * only after alias resolution would make the SAME logical request
+     * (link these two names) succeed or fail depending on which alias
+     * state happened to be true when it ran — a worse inconsistency than
+     * allowing a self-link. {@link #remapLinksForMerge} already drops
+     * exactly this shape when a LATER merge creates it on an existing link
+     * row; a self-link created directly here is symmetric with that.
      */
     public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
@@ -3866,11 +4034,20 @@ public final class CatalogRepository {
         String rawFrom = s(lnk, "from_tumbler");
         String rawTo = s(lnk, "to_tumbler");
         return tenantScope.withTenant(tenant, ctx -> {
-            lockDocumentRowsSorted(ctx, tenant, false, rawFrom, rawTo);
-            String fromT = resolveAliasTarget(ctx, tenant, rawFrom);
-            String toT = resolveAliasTarget(ctx, tenant, rawTo);
+            ResolvedLinkEndpoints resolved = resolveAndLockLinkEndpoints(ctx, tenant, rawFrom, rawTo);
+            String fromT = resolved.from();
+            String toT = resolved.to();
             if (!allowDangling) {
-                requireLiveEndpoints(ctx, tenant, fromT, toT);
+                List<String> missing = new ArrayList<>(2);
+                if (!resolved.fromLive()) missing.add("from_tumbler");
+                if (!resolved.toLive()) missing.add("to_tumbler");
+                if (!missing.isEmpty()) {
+                    throw new DanglingEndpointException(missing,
+                        "dangling link endpoint: " + String.join(", ", missing)
+                        + " does not resolve to a live catalog document"
+                        + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
+                        + " Pass allow_dangling=true to write the edge anyway.");
+                }
             }
             try {
                 var rec = ctx.insertInto(CATALOG_LINKS,
@@ -3909,13 +4086,13 @@ public final class CatalogRepository {
                    .fetchOne();
                 return rec != null && Boolean.TRUE.equals(rec.value1());
             } catch (org.jooq.exception.DataAccessException e) {
-                // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true skips
-                // requireLiveEndpoints above, but the row still has to satisfy
+                // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true skips the
+                // liveness check above, but the row still has to satisfy
                 // fk_catalog_links_from_document / fk_catalog_links_to_document
                 // (catalog-032-links-tumbler-fk.xml) — a link to a TOMBSTONED
                 // document still writes (the row exists), a link to a tumbler
                 // with NO row at all now raises SQLSTATE 23503 here. Map it to
-                // the SAME DanglingEndpointException requireLiveEndpoints
+                // the SAME DanglingEndpointException the liveness check above
                 // throws, so CatalogHandler's existing catch
                 // (400 {"code":"dangling_endpoint"}) covers both paths with no
                 // handler change, and http_catalog_client.py's translation to
@@ -3939,8 +4116,9 @@ public final class CatalogRepository {
     /**
      * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
      * Two sources, same exception type (nexus-tk070.p1, RDR-194 § D2 added
-     * the second): {@link #requireLiveEndpoints} throws it directly when
-     * {@code allow_dangling} is unset; {@link #upsertLink}'s catch throws it
+     * the second): {@link #upsertLink}'s own inline liveness check (built
+     * from {@link #resolveAndLockLinkEndpoints}'s result) throws it directly
+     * when {@code allow_dangling} is unset; the SAME method's catch throws it
      * when {@code allow_dangling=true} bypassed that check but the write still
      * violated {@code fk_catalog_links_from_document}/{@code _to_document} —
      * a tumbler with NO {@code catalog_documents} row at all, as opposed to a
@@ -3967,40 +4145,6 @@ public final class CatalogRepository {
         public List<String> missing() {
             return missing;
         }
-    }
-
-    /**
-     * Reject a link whose {@code from}/{@code to} does not resolve to a LIVE
-     * (non-tombstoned) document in this tenant (nexus-9ssih).
-     *
-     * <p>Applies to {@link #upsertLink} — the interactive/auto-linker write
-     * path — and NOT to the {@code import*} family, which legitimately writes
-     * edges for documents whose live state the ETL leg does not control (the
-     * same ETL carve-out the manifest write path grants its own {@code
-     * import*} methods — {@link #importChunksBatch}, {@code doImportChunk}).
-     * Callers that genuinely want an unvalidated edge pass
-     * {@code allow_dangling: true}, the parity of the local {@code link}'s own
-     * {@code allow_dangling} flag.
-     */
-    private static void requireLiveEndpoints(DSLContext ctx, String tenant, String fromT, String toT) {
-        List<String> missing = new ArrayList<>(2);
-        if (!liveDocument(ctx, tenant, fromT)) missing.add("from_tumbler");
-        if (!liveDocument(ctx, tenant, toT))   missing.add("to_tumbler");
-        if (missing.isEmpty()) return;
-        throw new DanglingEndpointException(missing,
-            "dangling link endpoint: " + String.join(", ", missing)
-            + " does not resolve to a live catalog document"
-            + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
-            + " Pass allow_dangling=true to write the edge anyway.");
-    }
-
-    private static boolean liveDocument(DSLContext ctx, String tenant, String tumbler) {
-        if (tumbler == null || tumbler.isBlank()) return false;
-        return ctx.fetchExists(
-            ctx.selectOne().from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
-                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
     }
 
     /** Delete a link by (from, to, type). Returns deleted count. */

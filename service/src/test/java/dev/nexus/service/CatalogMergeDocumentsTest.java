@@ -619,4 +619,162 @@ class CatalogMergeDocumentsTest {
         assertThat(getLink(TENANT_A, duplicate, other, "cites"))
             .as("the link must never survive pointing at the duplicate").isEmpty();
     }
+
+    // ── round 4 (batch-4 code review, 2026-09-23) ──────────────────────────
+
+    @Test
+    void upsertLink_allowsSelfLinkWhenBothEndpointsResolveToTheSameCanonical() throws Exception {
+        // batch-4 item 1: alias resolution can make from==to even when the
+        // RAW request named two different tumblers. Decision: ALLOW, not
+        // refuse -- matches upsertLink's own pre-round-4 behavior for an
+        // EXPLICIT self-link on UNRESOLVED input (never guarded either) and
+        // matches the schema itself (no CHECK constraint forbids
+        // from==to; ReadShapeViewsTest already seeds one via raw SQL as a
+        // fixture). remapLinksForMerge DROPS this shape when a LATER merge
+        // creates it on an EXISTING link row (merge_dropsTheSelfLinkThe...
+        // above) -- that is a different call with a different job; this one
+        // proves upsertLink itself never refuses it.
+        String canonical = register(TENANT_A, "60", "canonical", null, "a60.md");
+        String aliasOne = register(TENANT_A, "60", "alias-one", null, "b60.md");
+        String aliasTwo = register(TENANT_A, "60", "alias-two", null, "c60.md");
+        repo.mergeDocuments(TENANT_A, aliasOne, canonical);
+        repo.mergeDocuments(TENANT_A, aliasTwo, canonical);
+
+        var lnk = new LinkedHashMap<String, Object>();
+        lnk.put("from_tumbler", aliasOne);
+        lnk.put("to_tumbler", aliasTwo);
+        lnk.put("link_type", "cites");
+        lnk.put("created_by", "agent-y");
+        boolean created = repo.upsertLink(TENANT_A, lnk);
+
+        assertThat(created).isTrue();
+        assertThat(getLink(TENANT_A, canonical, canonical, "cites"))
+            .as("both raw endpoints resolved to the SAME canonical; the self-link is written, not refused")
+            .isPresent();
+    }
+
+    @Test
+    void setAlias_locksTheRowSoConcurrentWritersResolveDeterministically() throws Exception {
+        // batch-4 item 2: setAlias took no lock. Two concurrent blind
+        // single-statement UPDATEs to the same row are already crash- and
+        // corruption-free under Postgres's own implicit per-statement row
+        // lock (whichever commits last wins, deterministically) -- there is
+        // no multi-statement read-then-write gap here the way mergeDocuments
+        // and upsertLink had, since setAlias never reads alias_of before
+        // writing it. Locking FOR UPDATE first still matters: it gives
+        // setAlias the SAME serialization priority mergeDocuments and
+        // upsertLink already hold, so a setAlias call racing either of
+        // THOSE (which DO take locks) queues behind them instead of
+        // slipping in via an unlocked statement. Proven here against
+        // another setAlias call (the narrowest case setAlias itself can
+        // race); the result must be exactly one of the two attempted
+        // values, never a torn/null state.
+        //
+        // NOTE (premise correction): setAlias is NOT actually the engine
+        // path behind `nx catalog update --alias-of` -- grep of
+        // CatalogHandler's route table shows no route bound to
+        // repo.setAlias(...) at all; the real --alias-of path is
+        // updateDocument/buildUpdateDocumentQuery's alias_of-SET carve-out
+        // (nexus-ekaxn), reached via /update. setAlias has zero production
+        // callers today (Java-level test callers only). The lock is added
+        // here anyway, matching the review's literal ask and keeping intent
+        // consistent for any future caller.
+        String tumbler = register(TENANT_A, "61", "doc", null, "a61.md");
+        String canonicalA = register(TENANT_A, "61", "canonical-a", null, "b61.md");
+        String canonicalB = register(TENANT_A, "61", "canonical-b", null, "c61.md");
+
+        runConcurrently(
+            () -> repo.setAlias(TENANT_A, tumbler, canonicalA),
+            () -> repo.setAlias(TENANT_A, tumbler, canonicalB)
+        );
+
+        var row = readRow(TENANT_A, tumbler);
+        assertThat(row.get("alias_of"))
+            .as("exactly one writer's value persists -- no torn/blended/null state")
+            .isIn(canonicalA, canonicalB);
+    }
+
+    @Test
+    void upsertLink_oneHopStaleAlias_landsOnCanonicalWhenTheAliasTargetIsMergedConcurrently() throws Exception {
+        // batch-4 code review refinement (2026-09-23, "lock the resolved
+        // target, not the raw one"): oldAlias -> x is settled BEFORE the
+        // race starts. resolveAndLockLinkEndpoints must resolve
+        // oldAlias -> x, THEN discover x is concurrently being merged into
+        // y under its OWN lock, and land the link on y regardless of which
+        // call wins -- closing the gap the simpler raw-endpoint lock left
+        // open (a raw endpoint that is itself an already-settled alias
+        // pointing at a document concurrently being merged elsewhere was
+        // not serialized against that merge at all).
+        String x = register(TENANT_A, "62", "x", null, "x62.md");
+        String y = register(TENANT_A, "62", "y", null, "y62.md");
+        String other = register(TENANT_A, "62", "other", null, "other62.md");
+        String oldAlias = register(TENANT_A, "62", "old-alias", null, "old62.md");
+        repo.mergeDocuments(TENANT_A, oldAlias, x);   // oldAlias -> x, settled BEFORE the race
+
+        AtomicReference<Object> mergeResult = new AtomicReference<>();
+        AtomicReference<Object> linkResult = new AtomicReference<>();
+        runConcurrently(
+            () -> {
+                try {
+                    mergeResult.set(repo.mergeDocuments(TENANT_A, x, y));
+                } catch (Exception e) {
+                    mergeResult.set(e);
+                }
+            },
+            () -> {
+                try {
+                    var lnk = new LinkedHashMap<String, Object>();
+                    lnk.put("from_tumbler", oldAlias);
+                    lnk.put("to_tumbler", other);
+                    lnk.put("link_type", "cites");
+                    lnk.put("created_by", "race-agent-2");
+                    linkResult.set(repo.upsertLink(TENANT_A, lnk));
+                } catch (Exception e) {
+                    linkResult.set(e);
+                }
+            }
+        );
+
+        assertThat(mergeResult.get()).as("merge must succeed: %s", mergeResult.get()).isInstanceOf(Map.class);
+        assertThat(linkResult.get()).as("link upsert must succeed: %s", linkResult.get()).isInstanceOf(Boolean.class);
+
+        assertThat(getLink(TENANT_A, y, other, "cites"))
+            .as("the one-hop stale alias resolved through x to the merge's canonical y")
+            .isPresent();
+        assertThat(getLink(TENANT_A, x, other, "cites"))
+            .as("the link must never survive pointing at x, the mid-race duplicate").isEmpty();
+        assertThat(getLink(TENANT_A, oldAlias, other, "cites"))
+            .as("the link must never survive pointing at the raw, already-stale alias either").isEmpty();
+    }
+
+    @Test
+    void upsertLink_1000Writes_timingBenchmark() throws Exception {
+        // batch-4 item 3: numbers captured for the commit message, not
+        // asserted against a threshold (machine/CI variance) -- just
+        // logged and measured before/after against round-3's per-endpoint
+        // lock + resolveAliasTarget + liveDocument shape (~3 queries per
+        // endpoint, ~6-7 total) versus round-4's fold (lockAndReadDocRow
+        // combines lock+alias_of+liveness into ONE query per endpoint per
+        // resolution attempt).
+        int n = 1000;
+        String[] targets = new String[n];
+        for (int i = 0; i < n; i++) {
+            targets[i] = register(TENANT_A, "63", "bench-target-" + i, null, "bench63-" + i + ".md");
+        }
+        String hub = register(TENANT_A, "63", "bench-hub", null, "bench63-hub.md");
+
+        long start = System.nanoTime();
+        for (int i = 0; i < n; i++) {
+            var lnk = new LinkedHashMap<String, Object>();
+            lnk.put("from_tumbler", hub);
+            lnk.put("to_tumbler", targets[i]);
+            lnk.put("link_type", "cites");
+            lnk.put("created_by", "bench-agent");
+            repo.upsertLink(TENANT_A, lnk);
+        }
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        System.out.println("upsertLink " + n + "-write benchmark (nexus-z4rpi round 4 item 3): "
+            + elapsedMs + " ms total, " + (elapsedMs / (double) n) + " ms/call");
+        assertThat(elapsedMs).isGreaterThan(0);
+    }
 }
