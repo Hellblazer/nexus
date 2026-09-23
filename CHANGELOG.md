@@ -32,6 +32,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nx taxonomy reset` keeps cross-collection projections** (nexus-0v0nj).
 - **`nx index repo --corpus knowledge` routing is recorded, not inferred** (nexus-l52ms). A knowledge collection that merely shares the repo's owner id can no longer take the docs slot.
 - **Hand-edited autostart units are backed up before convergence** (nexus-gq1pv), keeping the newest five per unit.
+- **`nx rdr gate` warns on an off-template Implementation Plan** (nexus-r9esy): RDRs after 205 whose plan doesn't use `### Phase N` / `#### Step N` headings get a warning, never a refusal; earlier RDRs are grandfathered.
 - **`beads_prime` fails closed on an unreadable config** (nexus-i4odo) and says the config could not be read instead of claiming priming was declined.
 - **Post-mortems archive to a subject collection** (nexus-vupim), not the repo's own `knowledge__<owner>` collection.
 - **A collection import with no `content_type` gets the field-named 422** (nexus-3fsyx) instead of an opaque 409.
