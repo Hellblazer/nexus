@@ -102,18 +102,56 @@ fi
 # ── container mode: build the image, re-enter this script inside it ─────────
 if [ "$MODE" = container ]; then
     command -v docker >/dev/null || { echo "docker not found; use --host" >&2; exit 2; }
+    STAGED_CLONE=""
+    DCFG="$HOME/.docker/config.json"
+    DCFG_BAK=""
+    _container_prep_cleanup() {
+        [ -n "$STAGED_CLONE" ] && rm -rf "$STAGED_CLONE"
+        if [ -n "$DCFG_BAK" ]; then cp "$DCFG_BAK" "$DCFG"; rm -f "$DCFG_BAK"; fi
+    }
+    trap _container_prep_cleanup EXIT
+    # A linked worktree's .git is a FILE pointing OUTSIDE $SOURCE_REPO (at
+    # the primary checkout's .git/worktrees/<name>), which a read-only bind
+    # mount of $SOURCE_REPO alone cannot reach -- `git clone` inside the
+    # container then fails with "fatal: not a git repository". Under the
+    # project's "one session, one worktree" convention every worktree-
+    # dispatched session hits this, every time, in container mode. Stage a
+    # standalone clone on the HOST first (which CAN see the real gitdir)
+    # and bind-mount that instead.
+    #
+    # A plain `git clone <worktree>` is not enough by itself: its default
+    # refspec (`+refs/heads/*:refs/remotes/origin/*`) maps the SOURCE's
+    # local branches onto the clone's `origin/*` -- and on a shared box a
+    # local `main`/`develop` sitting unused (everyone tracks
+    # `origin/main`/`origin/develop` instead per this project's worktree
+    # convention) can be many releases stale, silently poisoning the
+    # clone's own `origin/main`/`origin/develop`. An explicit fetch of the
+    # SOURCE's own remote-tracking refs (and tags) is what actually mirrors
+    # what this checkout believes is current (nexus-2x3qy rehearsal,
+    # 2026-09-23: a stale local `main` produced a spurious "plugin version
+    # field moved" cut refusal that had nothing to do with the change under
+    # test -- found only because the ref-mapping was reasoned through by
+    # hand, at the cost of two extra rehearsal rounds; this fix means the
+    # next session does not need to).
+    if [ -f "$SOURCE_REPO/.git" ]; then
+        STAGED_CLONE="$(mktemp -d "${TMPDIR:-/tmp}/plugin-cut-rehearsal-worktree-clone.XXXXXX")"
+        echo "== $SOURCE_REPO is a linked worktree; staging a standalone clone at $STAGED_CLONE for the container mount"
+        git clone -q --no-local "$SOURCE_REPO" "$STAGED_CLONE"
+        git -C "$STAGED_CLONE" fetch -q "$SOURCE_REPO" \
+            '+refs/remotes/origin/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+        SOURCE_REPO="$STAGED_CLONE"
+    fi
     # Docker Desktop's credsStore=desktop helper cannot reach a locked login
     # keychain in a non-interactive session, which fails even anonymous base-
     # image resolution at BUILD time (docker run is unaffected). Same
     # workaround as tests/e2e/migration-rehearsal/run.sh: strip credsStore
-    # for the build, restore on exit.
-    DCFG="$HOME/.docker/config.json"
-    DCFG_BAK=""
+    # for the build, restore on exit (via _container_prep_cleanup above,
+    # which also covers STAGED_CLONE -- a second `trap ... EXIT` here would
+    # silently replace rather than stack with the one already set).
     if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
         DCFG_BAK="$(mktemp "${TMPDIR:-/tmp}/docker-config.XXXXXX")"
         cp "$DCFG" "$DCFG_BAK"
         python3 -c "import json,sys;p=sys.argv[1];d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)" "$DCFG"
-        trap 'cp "$DCFG_BAK" "$DCFG"; rm -f "$DCFG_BAK"' EXIT
         echo "   (temporarily stripped credsStore from $DCFG for the build; restored on exit)"
     fi
     echo "== building $IMAGE"
