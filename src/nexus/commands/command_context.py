@@ -83,9 +83,10 @@ def _check_output(cmd: list[str], **kwargs: object) -> str:
     nexus-t10nc: this is a capture+timeout site — ALWAYS, since both
     defaults are set right here — and the lint's AST scan could not see it,
     because the timeout arrives through ``setdefault`` into a ``**kwargs``
-    unpacking rather than as a keyword on the call. It was the single
-    highest-traffic one in the repo: every preamble git/bd/gh/nx call
-    funnels through it. See ``test_bounded_subprocess_lint``'s
+    unpacking rather than as a keyword on the call. Every preamble git,
+    bd, gh and nx call funnels through it, which is what made it worth
+    converting; the call count itself was not measured. See
+    ``test_bounded_subprocess_lint``'s
     ``test_kwargs_funnels_are_named_not_silently_skipped``, which now
     refuses to let a funnel like this pass unexamined.
     """

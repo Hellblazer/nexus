@@ -96,8 +96,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nexus.bounded_subprocess import run_bounded
-
 #: Override the generation root. Absolute paths only; see ``_resolve_dir``.
 TOOLS_DIR_ENV = "NX_TOOLS_DIR"
 
@@ -188,9 +186,9 @@ def declared_console_scripts_detail(
             f"{generation} has no bin/python to ask which console scripts it declares"
         )
     try:
-        proc = run_bounded(  # noqa: S603 -- the generation's own interpreter, fixed argv
+        proc = subprocess.run(  # noqa: S603 -- the generation's own interpreter, fixed argv
             [str(python), "-c", _DECLARED_SCRIPTS_QUERY, dist],
-            timeout=30,
+            capture_output=True, text=True, timeout=30, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LayoutError(

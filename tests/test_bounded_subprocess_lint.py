@@ -21,16 +21,50 @@ one at a time is what produced them in the first place, while converting
 all of them in one change is a large blind diff across daemon, catalog,
 indexer and CLI paths. So the count was pinned at 57 and drained.
 
-IT IS NOW EMPTY. The drain ran as its own deliberate task rather than
-opportunistically, in five reviewed batches grouped by subsystem, each
-with the tests of the modules it touched. That is neither of the two
-things the paragraph above weighed: not a blind flag day, and not drift.
-The objection was to ONE unreviewed diff, not to draining.
+IT IS NOW EMPTY, and the paragraph above is the design that says it
+should not have been. Read this as a DISCLOSURE, not as a justification.
+
+Sam named nexus-t10nc as the next task. That was read as "drain it
+deliberately" and all 57 were converted in one sitting, in subsystem
+batches, each run against the tests of the modules it touched. SAM DID
+NOT CONFIRM THAT READING BEFORE THE WORK; the bead carried no comment
+either way, and the standing critic was right to say so. The cadence
+above was accepted; a dedicated sweep is a change to it, and whether the
+change was wanted is Sam's to settle, not this docstring's. If the answer
+is no, the remedy is a cadence rule, not a revert -- the conversions
+themselves are faithful and reviewed.
+
+What the sweep can claim on its own evidence is narrower than "reviewed
+batches" suggests: it landed as three commits of 12, 7 and 26 files,
+and the 26-file one spans db, daemon, CLI and tests in a single landing.
+That is closer in SHAPE to the blind diff the paragraph above rejected
+than the batching makes it sound. What it had that a blind diff does not
+is a scoped test run per batch, a full suite, and both standing
+reviewers -- and the full suite and the reviewers each caught a real
+defect the scoped runs did not (see _CANNOT_IMPORT_NEXUS and
+_RUN_ALIASES below).
+
+Two files are exempt rather than converted, in
+:data:`_CANNOT_IMPORT_NEXUS`, and the reason is worth reading before
+adding a third: the ``_install`` cores run during an install, with the
+``nexus`` package absent, so importing ``run_bounded`` from it is the
+exact failure their own bootstrap tests exist to refuse. Converting them
+passed every scoped run and 725 targeted tests, and broke 27 assertions
+across five files in the FULL suite. A gate whose subject is "works when
+nexus is not importable" cannot be reached by any selection that runs
+with nexus importable.
 
 An empty map is a STRONGER gate than a drained one, not a retired one:
 every file is now allowed zero, so any new capture+timeout call anywhere
 in scope fails :func:`test_unconverted_subprocess_calls_match_the_ratchet`
 by name. Do not delete this file when you notice the map is empty.
+
+"Allowed zero" is a claim about what this file's SCAN can see, and the
+scan has two known blind spots, both found only after the map emptied and
+there was nothing else left to look at: a call that unpacks ``**kwargs``
+(:data:`_KWARGS_FUNNELS`) and a spawner bound to a name
+(:data:`_RUN_ALIASES`). Each now has its own sweep. Neither was in the
+57.
 
 The ceiling is EXACT EQUALITY, per file, never ``<=``. An inequality
 ceiling silently accepts a file that converted one site and added two, and
@@ -81,6 +115,29 @@ _HOOKS_EXCLUSION_IS_TEMPORARY: bool = True
 _EXCLUDED_DIR = "hooks"
 _EXCLUDED_DIR_BEAD = "nexus-t9klx"
 
+#: Files that CANNOT route through ``run_bounded``, with the reason. This
+#: is not a deferral like ``hooks/`` -- these are permanent, and the
+#: obligation they carry is to stay small and stay explained.
+#:
+#: The ``_install`` cores are sourced by census.sh and the installer, which
+#: run with NOTHING installed. ``run_bounded`` lives in the ``nexus``
+#: package, so importing it is exactly the "simplification" that
+#: ``tests/test_install_*_core_is_bootstrap_safe.py`` exists to refuse:
+#: it works in every test session, because every test session has nexus
+#: importable, and fails only during a real install. nexus-t10nc converted
+#: both, and the full suite caught it -- 27 failures across five bootstrap
+#: files. The sites are left on the stock call deliberately.
+_CANNOT_IMPORT_NEXUS: dict[str, str] = {
+    "src/nexus/_install/census_core.py": (
+        "bootstrap-safe: runs with nexus absent, so it cannot import "
+        "run_bounded. See tests/test_install_census_core_is_bootstrap_safe.py."
+    ),
+    "src/nexus/_install/layout_core.py": (
+        "bootstrap-safe: runs with nexus absent, so it cannot import "
+        "run_bounded. See tests/test_install_layout_core_is_bootstrap_safe.py."
+    ),
+}
+
 #: Exact per-file count of unconverted capture+timeout subprocess calls.
 #: Pinned at 57 across 28 files on 2026-09-22; DRAINED TO ZERO on
 #: 2026-09-23 (nexus-t10nc). Numbers only ever go DOWN. A file that reaches
@@ -89,9 +146,46 @@ _EXCLUDED_DIR_BEAD = "nexus-t9klx"
 _UNCONVERTED: dict[str, int] = {}
 
 
-def _in_scope(path: pathlib.Path) -> bool:
-    rel = path.relative_to(SRC_ROOT)
+def _in_scope(path: pathlib.Path, root: pathlib.Path = SRC_ROOT) -> bool:
+    rel = path.relative_to(root)
     return "__pycache__" not in path.parts and rel.parts[0] != _EXCLUDED_DIR
+
+
+def _aliases_of_subprocess_run(source: str) -> list[int]:
+    """Line numbers where ``subprocess.run``/``check_output`` is bound to a
+    NAME instead of being called.
+
+    ``_capture_with_timeout_calls`` matches the call ``subprocess.run(...)``.
+    It cannot match ``run(...)`` where ``run`` arrived as
+    ``run: Runner = subprocess.run`` -- an injected-spawner default, which
+    is a deliberate and reasonable seam, and which reads at the call site as
+    a bare name with no module on it.
+
+    ``plugin_lockstep`` did exactly that, at four call sites passing
+    capture+timeout, and it was invisible for this lint's whole life. Both
+    standing reviewers found it independently, and only once the ratchet had
+    drained to zero and there was nothing else left to look at. So the
+    binding is what gets watched: an alias is cheap to spot and there are
+    very few of them, where chasing every bare ``run(`` call is neither.
+    """
+    found: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "subprocess"
+            and node.attr in {"run", "check_output"}
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        found.append(node.lineno)
+    # Drop the ones that ARE calls; those are the other detector's job.
+    called = {
+        n.func.lineno
+        for n in ast.walk(ast.parse(source))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    return sorted(set(found) - called)
 
 
 def _capture_with_timeout_calls(source: str) -> list[int]:
@@ -120,19 +214,33 @@ def _capture_with_timeout_calls(source: str) -> list[int]:
     return found
 
 
-def _census() -> dict[str, list[int]]:
+def _census(
+    root: pathlib.Path = SRC_ROOT,
+    rel_to: pathlib.Path = REPO_ROOT,
+    detect=_capture_with_timeout_calls,
+) -> dict[str, list[int]]:
+    """Walk *root* and report every file holding a watched call.
+
+    ``root``/``rel_to``/``detect`` are parameters ONLY so the walk itself
+    can be tested against a synthetic tree — see
+    :func:`test_the_census_walk_finds_a_planted_file`. Production callers
+    pass nothing. Without them the exclusion and reporting logic here was
+    reachable by no test at all, which the standing critic pointed out once
+    ``_UNCONVERTED`` went empty and the real tree stopped exercising the
+    reporting branch.
+    """
     out: dict[str, list[int]] = {}
-    for path in sorted(SRC_ROOT.rglob("*.py")):
-        if not _in_scope(path):
+    for path in sorted(root.rglob("*.py")):
+        if not _in_scope(path, root):
             continue
         try:
-            lines = _capture_with_timeout_calls(path.read_text())
+            lines = detect(path.read_text())
         except (
             SyntaxError
         ):  # pragma: no cover - a syntax error is another test's failure
             continue
         if lines:
-            out[path.relative_to(REPO_ROOT).as_posix()] = lines
+            out[path.relative_to(rel_to).as_posix()] = lines
     return out
 
 
@@ -152,9 +260,50 @@ def test_scan_is_not_vacuous() -> None:
     )
 
 
+def test_bootstrap_safe_files_still_cannot_import_nexus() -> None:
+    """The exemption stays tied to the fact that earns it.
+
+    A file listed in :data:`_CANNOT_IMPORT_NEXUS` is exempt because it must
+    run with the ``nexus`` package absent. If it ever gains a ``nexus``
+    import for some other reason, the exemption has outlived its reason and
+    the site should convert -- so this fails rather than letting a stale
+    entry keep waving the file through.
+    """
+    for rel, reason in _CANNOT_IMPORT_NEXUS.items():
+        path = REPO_ROOT / rel
+        assert path.is_file(), f"{rel} is exempt from this lint but does not exist"
+        assert "bootstrap" in reason, f"{rel}'s exemption does not state its reason"
+        # MODULE SCOPE only, which is the level the exemption is about: a
+        # module-scope import runs at import time, when nexus is absent. A
+        # guarded deferred import inside a function is a different thing and
+        # layout_core legitimately has one (nexus.errors, with a plain-
+        # Exception fallback), so walking the whole tree would fail on the
+        # very file whose own bootstrap test passes.
+        tree = ast.parse(path.read_text())
+        imports_nexus = any(
+            (isinstance(n, ast.Import) and any(a.name.split(".")[0] == "nexus" for a in n.names))
+            or (
+                isinstance(n, ast.ImportFrom)
+                and n.level == 0
+                and (n.module or "").split(".")[0] == "nexus"
+            )
+            for n in tree.body
+        )
+        assert not imports_nexus, (
+            f"{rel} is exempt from routing through run_bounded because it cannot "
+            "import nexus, but it now imports nexus at module scope. Either that "
+            "import is the bootstrap bug its own test guards against, or the "
+            "exemption is stale and the subprocess call should convert."
+        )
+
+
 def test_unconverted_subprocess_calls_match_the_ratchet() -> None:
     """Exact per-file equality against the pinned census."""
-    actual = {path: len(lines) for path, lines in _census().items()}
+    actual = {
+        path: len(lines)
+        for path, lines in _census().items()
+        if path not in _CANNOT_IMPORT_NEXUS
+    }
 
     new_files = sorted(set(actual) - set(_UNCONVERTED))
     assert not new_files, (
@@ -321,6 +470,115 @@ def test_kwargs_funnels_are_named_not_silently_skipped() -> None:
         f"_KWARGS_FUNNELS lists files with no unpacked subprocess call left: {gone}. "
         "Delete the entry -- a stale exemption is how a real funnel gets waved "
         "through later."
+    )
+
+
+#: Files that bind ``subprocess.run``/``check_output`` to a NAME rather
+#: than calling it, with what reading that binding found. An alias is the
+#: one shape :func:`_capture_with_timeout_calls` structurally cannot see,
+#: because the call it produces is a bare ``run(...)``.
+_RUN_ALIASES: dict[str, str] = {}
+
+
+def test_aliases_of_subprocess_run_are_listed() -> None:
+    """An aliased spawner cannot hide the watched shape.
+
+    nexus-t10nc drained this ratchet to zero and BOTH standing reviewers
+    then found, independently, that ``plugin_lockstep`` had been calling
+    the watched shape at four sites the whole time. It took a
+    ``run: Runner = subprocess.run`` default parameter, so every call site
+    read as ``run(...)`` and no ``subprocess`` attribute appeared on any of
+    them. The empty map had claimed "every file in scope is allowed zero",
+    and for that file it was not true.
+
+    Sweeping for the BINDING closes it: an alias is rare and cheap to
+    spot, where resolving every bare ``run(`` call to its origin is
+    neither. Both live aliases were converted (plugin_lockstep's injected
+    Runner, and commands/upgrade's ``_run``), so the expected set is
+    empty; a new one has to be read and listed.
+    """
+    found: dict[str, list[int]] = {}
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        if not _in_scope(path):
+            continue
+        try:
+            lines = _aliases_of_subprocess_run(path.read_text())
+        except SyntaxError:  # pragma: no cover - another test's failure
+            continue
+        if lines:
+            found[path.relative_to(REPO_ROOT).as_posix()] = lines
+
+    unlisted = {p: lines for p, lines in found.items() if p not in _RUN_ALIASES}
+    assert not unlisted, (
+        f"these files bind subprocess.run/check_output to a name: {unlisted}. The "
+        "call sites will read as a bare run(...), which this file's AST scan "
+        "cannot match, so the ratchet's zero does not cover them. Read each one: "
+        "if any call site passes capture+timeout, point the alias at "
+        "nexus.bounded_subprocess.run_bounded; otherwise add it to _RUN_ALIASES "
+        "saying what its call sites actually pass."
+    )
+
+    gone = sorted(set(_RUN_ALIASES) - set(found))
+    assert not gone, f"_RUN_ALIASES lists files with no alias left: {gone}. Delete them."
+
+
+def test_the_alias_detector_reproduces_the_miss() -> None:
+    """Positive control: the shape that got past this lint for its whole life.
+
+    Verbatim from ``plugin_lockstep`` as it stood before nexus-t10nc. If
+    :func:`_aliases_of_subprocess_run` stops matching this, the sweep above
+    passes over the exact defect it was written for.
+    """
+    source = (
+        "import subprocess\n"
+        "from collections.abc import Callable\n"
+        "Runner = Callable[..., subprocess.CompletedProcess[str]]\n"
+        "def converge(*, run: Runner = subprocess.run) -> None:\n"
+        "    run(['claude'], capture_output=True, text=True, timeout=30, check=False)\n"
+    )
+    assert _aliases_of_subprocess_run(source) == [4], (
+        "the alias detector no longer sees an injected subprocess.run default -- "
+        "the exact shape that hid four live capture+timeout call sites"
+    )
+    # And the call inside it is invisible to the OTHER detector, which is
+    # the whole reason this one exists.
+    assert _capture_with_timeout_calls(source) == [], (
+        "if the call detector can see a bare run(...) now, say so here rather "
+        "than keeping two detectors for one shape"
+    )
+    # A plain call must NOT read as an alias.
+    assert _aliases_of_subprocess_run(
+        "import subprocess\nsubprocess.run(a, capture_output=True, timeout=5)\n"
+    ) == []
+
+
+def test_the_census_walk_finds_a_planted_file(tmp_path: pathlib.Path) -> None:
+    """End-to-end over the WALK, not just the matcher.
+
+    :func:`test_detector_recognises_the_shapes_it_claims_to` proves the AST
+    matcher works on a string. It says nothing about ``_census`` reaching
+    files, honouring ``_in_scope``, or reporting the right relative path --
+    and with ``_UNCONVERTED`` empty, the real tree no longer exercises the
+    reporting branch at all, so a regression there would be silent. The
+    standing critic raised exactly that.
+    """
+    root = tmp_path / "nexus"
+    (root / "pkg").mkdir(parents=True)
+    (root / _EXCLUDED_DIR).mkdir()
+    (root / "pkg" / "watched.py").write_text(
+        "import subprocess\nsubprocess.run(a, capture_output=True, timeout=5)\n"
+    )
+    (root / "pkg" / "clean.py").write_text("import subprocess\nsubprocess.run(a)\n")
+    (root / _EXCLUDED_DIR / "held_out.py").write_text(
+        "import subprocess\nsubprocess.run(a, capture_output=True, timeout=5)\n"
+    )
+
+    census = _census(root=root, rel_to=tmp_path)
+
+    assert census == {"nexus/pkg/watched.py": [2]}, (
+        f"the census walk is wrong: {census}. It must find the planted call, skip "
+        f"the clean file, skip everything under {_EXCLUDED_DIR}/, and key the "
+        "result on the path relative to the repo root."
     )
 
 
