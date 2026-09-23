@@ -134,6 +134,13 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # never delivered twice; non-blocking with a budgeted wait, no lease, no
     # heartbeat, no election.
     "hooks/mailbox_drain.py",
+    # config.py's _config_write_lock (nexus-cd1k0.16 finding (8)): serializes
+    # read-modify-write of ~/.config/nexus/config.yml across set_config_value
+    # / set_credential / unset_credential, cross-process. Same shape as
+    # verify_fill_watermark.py above -- a plain critical-section flock on a
+    # sentinel file beside the JSON/YAML it protects, no lease, no
+    # heartbeat, no generation fencing, no daemon-scope election.
+    "config.py",
 })
 
 
