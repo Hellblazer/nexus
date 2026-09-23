@@ -184,14 +184,15 @@ class CatalogHandlerEnvelopeConformanceGateTest {
     }
 
     /** Enumerated honestly from the live switch (see {@link #everySwitchRouteIsClassified}),
-     * post {@code by_doc_id}-removal. 71 routes on the tree as of nexus-dkymw
-     * (69 + {@code /restore} + {@code /trash}, the operator-facing tombstone-
-     * restore pair — 69 = 65 + {@code /purge-trash}, nexus-3ck2g E3; + {@code
-     * /chash/conformance}, nexus-du2dw; + {@code /manifest/chashes_many},
-     * nexus-eslkl; + {@code /descendants}, T2 nexus/chroma-residue-plan-
-     * 2026-08-10 §C1). RDR-191 Phase 6 (nexus-o8dil.33) retired FOUR: {@code
-     * /manifest/backfill}, {@code /manifest/orphans}, {@code /manifest/verify},
-     * {@code /manifest/verify_all} — 65 routes on the tree as of that bead.
+     * post {@code by_doc_id}-removal. 72 routes on the tree as of nexus-29drn
+     * (71 + {@code /ghost-sweep} — 71 = 69 + {@code /restore} + {@code /trash},
+     * the operator-facing tombstone-restore pair — 69 = 65 + {@code
+     * /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance},
+     * nexus-du2dw; + {@code /manifest/chashes_many}, nexus-eslkl; + {@code
+     * /descendants}, T2 nexus/chroma-residue-plan-2026-08-10 §C1). RDR-191
+     * Phase 6 (nexus-o8dil.33) retired FOUR: {@code /manifest/backfill},
+     * {@code /manifest/orphans}, {@code /manifest/verify}, {@code
+     * /manifest/verify_all} — 65 routes on the tree as of that bead.
      * This count is descriptive prose only; {@link #everySwitchRouteIsClassified}
      * self-verifies against the live switch, not this comment. */
     private static final List<RouteSpec> ROUTES = List.of(
@@ -227,6 +228,14 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // body carries only older_than_days/dry_run scalars, no id list
         // (not idListAccepting).
         neither("/purge-trash", "handlePurgeTrash"),
+        // nexus-29drn: same envelope shape as /purge-trash immediately above --
+        // response is a flat scalar map (scanned, ghosts_deleted, marked_dormant,
+        // quarantine_held counts plus ghost_names/dormant_names arrays) in both
+        // dry-run and apply modes, not a JSON array of ITEMS this gate's
+        // collection-returning check cares about (not collectionReturning), and
+        // the request body carries only a dry_run scalar, no id list (not
+        // idListAccepting).
+        neither("/ghost-sweep", "handleGhostSweep"),
         collectionExempt("/resolve", "handleResolve", RESOLVE_BOUNDED),
         neither("/stats", "handleStats"),
 
