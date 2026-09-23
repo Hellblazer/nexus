@@ -216,3 +216,56 @@ def test_apply_sdk_patches_reports_the_offload(_restore_from_function) -> None:
     results = _sdk_patches.apply_sdk_patches()
     assert "sync_tool_offload" in results
     assert not results["sync_tool_offload"].startswith("failed")
+
+
+def _not_offloaded(tools) -> list[str]:
+    """Names of tools whose registered body will not run off the loop.
+
+    A sync ``@mcp.tool()`` body wrapped by ``_offloaded`` is an ``async def``
+    closure, and an already-async body is trivially a coroutine function too
+    -- so ``iscoroutinefunction`` is true for every correctly-registered tool
+    regardless of how its author wrote it. There is no allowlist: the patch
+    wraps unconditionally at the ``Tool.from_function`` registration
+    boundary, so nothing legitimately skips it.
+    """
+    return [t.name for t in tools if not asyncio.iscoroutinefunction(t.fn)]
+
+
+def test_every_registered_core_tool_runs_off_the_loop() -> None:
+    """No NEW sync tool can land un-offloaded (nexus-dgvsz).
+
+    Uses the real, module-level ``nexus.mcp.core.mcp`` instance -- the one
+    the server actually serves from -- so this is a guard on production
+    registration, not a synthetic FastMCP built just for the test. A future
+    sync tool that somehow bypasses ``Tool.from_function`` (or a regression
+    that undoes the patch) fails here instead of surfacing as a live
+    timeout under hook load.
+    """
+    from nexus.mcp.core import mcp
+
+    tools = list(mcp._tool_manager.list_tools())
+    assert tools, "no tools registered on nexus.mcp.core.mcp -- test is checking nothing"
+    missed = _not_offloaded(tools)
+    assert not missed, (
+        f"tool(s) registered on the 'nexus' MCP server whose body will run "
+        f"directly on the event loop instead of a worker thread: {missed}"
+    )
+
+
+def test_every_registered_catalog_tool_runs_off_the_loop() -> None:
+    """Same guard as above, for the ``nexus-catalog`` server (nexus-dgvsz).
+
+    The offload patch is applied once at import time and shared by both
+    servers (the catalog server imports core, which applies it); this pins
+    that the sharing actually reaches catalog.py's own registrations.
+    """
+    from nexus.mcp.catalog import mcp
+
+    tools = list(mcp._tool_manager.list_tools())
+    assert tools, "no tools registered on nexus.mcp.catalog.mcp -- test is checking nothing"
+    missed = _not_offloaded(tools)
+    assert not missed, (
+        f"tool(s) registered on the 'nexus-catalog' MCP server whose body "
+        f"will run directly on the event loop instead of a worker thread: "
+        f"{missed}"
+    )
