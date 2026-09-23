@@ -1312,3 +1312,113 @@ registration module on the existing server, and one package.
 
   Matches round 1's clean result for the same rungs -- the marker-based
   signal preserves the fix exactly.
+- 2026-09-23 (nexus-veh77 round 3, critique burndown, T2
+  `nexus/critique-burndown-batch4-2026-09-23`): four fixes.
+  (1) **Stale docs from round 2's rename.** `entry.py`'s `VERB_TABLE`
+  comment, `conexus/README.md`'s hook-table row, and
+  `conexus/PENDING_RELEASE.md`'s bullets still said the barrier waits on
+  the T1 lease after round 2 switched the signal to the connect marker.
+  Corrected in place; the same class of drift this document's own
+  standing lesson names (round-1 entry above, and its own earlier
+  self-correction entries) -- a decision's prose outlives the code change
+  that invalidated it unless something greps for it.
+  (2) **The accepted residual rested on a false premise.** Round 2's
+  writeup said a timeout was tolerable because `nx-hook preflight`'s ``##
+  nx Preflight: FAILED`` marker already tells the user nexus tooling is
+  broken. FALSE: `preflight` checks only `nx` CLI reachability
+  (`nx --version`), never whether `nx-mcp` itself is disabled or failed to
+  spawn -- a fully healthy `nx` CLI with a broken or absent MCP server
+  produces no preflight signal at all. Fixed: `run()` now returns a short
+  plain-text note in `HookResult.stdout` on timeout (the SessionStart
+  context-injection channel `preflight_verb`/`session_start_verb` already
+  use), naming the bound and that tool-tier hooks will be skipped, so both
+  the model and the user see it -- not just one log line in a file nobody
+  is watching mid-session. Tested:
+  `tests/hooks/test_mcp_connect_wait_verb.py::TestTimeoutMessage` (3
+  cases) and the rewritten
+  `test_never_ready_still_returns_exit_zero_but_a_visible_note`.
+  (3) **Mid-session `nx-mcp` respawn is a residual, not a defect this
+  bead closes.** This barrier fires once, at `SessionStart`, and protects
+  only the START of a session. The 2026-09-20 incident this epic's own
+  history records (a live `nx-mcp` process exited and was respawned mid
+  session, client binding stale ~2 minutes, every `mcp_tool` hook silently
+  unavailable the whole window) is NOT a `SessionStart` event and this
+  verb never runs again to catch it. **No existing surface detects a
+  mid-session disconnect.** Checked: `nexus.upgrade_finish.StaleProcess.
+  restartable` explicitly excludes `mcp-host` from its cycle-eligible set,
+  with its own docstring citing the exact hazard (Claude Code does not
+  auto-reconnect stdio MCP servers -- code.claude.com/docs/en/mcp: remote
+  HTTP/SSE servers back off and retry, local stdio processes are the
+  deliberate exception, so a killed host stays dead until a human runs
+  `/mcp` -> Reconnect) -- that is nexus's own automation being CAREFUL
+  NOT TO TRIGGER this failure mode itself, not a DETECTOR of it happening
+  for any other reason (an OS-level crash, an OOM kill, a manual
+  disconnect/reconnect). The `_t1_handoff_watch_loop` watches for a NEW
+  session id (`/clear`/`/resume`), a different failure mode entirely --
+  same session id, connection merely dropped, is invisible to it. The new
+  connect marker (round 2) WOULD be refreshed by a respawned `nx-mcp`
+  process reaching `_t1_lifespan` again with the same session id, since
+  publish is unconditional per lifespan start -- but nothing polls it
+  after the one-shot `SessionStart` barrier already released, so the
+  refresh happens with no reader watching. Recorded here and via
+  `bd comment nexus-veh77`; not fixed by this bead, and no design for
+  fixing it is proposed here.
+  (4) **The ladder re-verify was incomplete.** Round 1's full `barrier.plan`
+  run (6 rungs, all controls + the 3 `ladder_s8` submit rungs) ran against
+  the T1-lease signal round 2 then discarded; round 2b's re-verify switched
+  to the connect-marker signal but covered only 2 of those 6 rungs, macOS
+  only. WSL2 was measured BROKEN in the original no-barrier ladder
+  (round-1 entry above) and never re-verified fixed on either signal. A
+  full re-verify against the SHIPPED connect-marker signal, the full rung
+  set, both host shapes, follows below.
+
+  **Round 4 full re-verify (macOS, `barrier.plan`, 2 reps/rung, the SHIPPED
+  connect-marker signal, `mcp-connect-wait`'s real timeout note active):**
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop |
+  |---|---|---|---|---|---|---|---|---|
+  | pos_control | 0 | 8000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | neg_control (broken) | 0 | 3000 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 |
+  | ladder_s8 | 8 | 0 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 2000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | thresh | 0 | 0 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+
+  Every rung clean, every rep. `thresh` (the zero-artificial-delay sanity
+  check) fired 2/2 here too -- an improvement over round 2b's own
+  same-rung result (0/2/0 UPS/Pre/Post there), ordinary run-to-run timing
+  variance at that literal 0 ms submit edge, not a regression signal.
+
+  **Round 4 full re-verify (WSL2, qwentescence, `nexus` user,
+  `barrier-wsl2.plan`, 2 reps/rung, same signal).** Own directory
+  (`/home/nexus/veh77-r4`, this checkout's `src/nexus` + a fresh `uv sync`
+  venv transferred in, never touching `/home/nexus/veh77`, the round-1
+  measurement's own directory) and own tmux socket (`veh77-r4`). Credential
+  freshly picked from this Mac's keychain, copied over, and deleted from
+  the box afterward (`find -iname '*cred*' -delete` under the run
+  directory, then the whole `/home/nexus/veh77-r4` directory removed
+  entirely once the run completed; both temp files on the Windows side
+  removed too). Round 1 measured a 0 ms submit dropping the Enter keypress
+  18/18 on this host, so every rung here starts at the 100 ms floor round
+  1's own `thresh100`/`ladder_s8`-100 rungs already used, never 0 ms:
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop |
+  |---|---|---|---|---|---|---|---|---|
+  | pos_control | 0 | 8000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | neg_control (broken) | 0 | 3000 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 |
+  | ladder_s8 | 8 | 100 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 2000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | thresh100 | 0 | 100 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+
+  Every rung clean here too. Round 1's raw WSL2 measurement for these
+  exact rungs with no barrier: `ladder_s8|8|100|...|0/4/0|0/4/0|0/4/0|0/4/0`,
+  `ladder_s8|8|1000|...|0/4/0|0/4/0|0/4/0|0/4/0`,
+  `ladder_s8|8|2000|...|0/4/0|0/4/0|0/4/0|0/4/0` -- every tool-tier event
+  missed on every run. With the barrier: 2/2 fired on every event, every
+  rung. WSL2 is confirmed fixed, not merely assumed fixed by analogy to
+  macOS.
+
+  Both host shapes now fully re-verified against the shipped signal, full
+  rung set, controls included. `PostCompact`/`StopFailure` and mid-session
+  respawn (item 3 above) remain the standing, explicitly-recorded gaps.

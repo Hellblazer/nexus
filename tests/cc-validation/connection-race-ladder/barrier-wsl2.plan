@@ -1,0 +1,12 @@
+# nexus-veh77 round 4: full barrier re-verify on WSL2 (qwentescence), against
+# the shipped connect-marker signal. submit=100 (not 0) throughout: round 1's
+# WSL2 leg measured a 0 ms submit dropping the Enter keypress 18/18, so every
+# rung here starts at the WSL2-safe 100 ms floor that round 1's own
+# thresh100/ladder_s8-100 rungs already used.
+# label       server_delay_s submit kind   reps
+pos_control   0     8000  bash   2
+neg_control   0     3000  broken 2
+ladder_s8     8     100   bash   2
+ladder_s8     8     1000  bash   2
+ladder_s8     8     2000  bash   2
+thresh100     0     100   bash   2
