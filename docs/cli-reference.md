@@ -1156,14 +1156,21 @@ repoints an entry whose recorded path is dead (moved/renamed on disk)
 updated independently.
 
 `--alias-of TUMBLER` (nexus-bt8w8) points this entry at its canonical
-duplicate — recovery path for the DUPLICATE case, beside `--source-uri`'s
-recovery path for a moved/expired identity. The catalog follows the alias
-chain on resolve/show, so `nx catalog show` on the aliased tumbler
-afterward returns the canonical entry instead of the duplicate; this keeps
-the link graph intact instead of leaving a second entry in search results
-or deleting it and orphaning the links pointing at it. Rejected as a
-`ClickException` (no traceback) if the target is not a well-formed
-tumbler.
+duplicate. The catalog follows the alias chain on resolve/show, so `nx
+catalog show` on the aliased tumbler afterward returns the canonical
+entry instead of the duplicate.
+
+**This sets ONLY the alias pointer.** It does NOT move `source_uri` onto
+the canonical and does NOT remap the duplicate's links onto it — used by
+itself, the duplicate's identity URI stays where it is (which can still
+collide with a fresh re-index) and its links keep pointing at the alias
+rather than the canonical. **Use `nx catalog merge DUPLICATE CANONICAL`
+instead** (see below) for the atomic path that moves `source_uri` and
+remaps every link in one transaction — that is the actual recovery path
+for a duplicate registration. `--alias-of` is for the rarer case where
+the pointer alone is what's wanted, e.g. scripting the same three-step
+recipe `merge` now automates. Rejected as a `ClickException` (no
+traceback) if the target is not a well-formed tumbler.
 
 ### nx catalog merge
 

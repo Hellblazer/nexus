@@ -697,12 +697,14 @@ def register_cmd(
     "alias_of",
     default="",
     help="Canonical tumbler this entry is a duplicate of (nexus-bt8w8). "
-         "Recovery path for the DUPLICATE case, beside --source-uri's "
-         "recovery path for a moved/expired identity: the catalog follows "
-         "the alias chain on resolve/show, so aliasing a duplicate onto its "
-         "canonical entry keeps the graph intact instead of leaving a "
-         "second entry in search results or deleting it and orphaning its "
-         "links.",
+         "Sets ONLY the alias pointer — it does NOT move source_uri and "
+         "does NOT remap this entry's links onto the canonical, so a "
+         "second entry can still surface in search results and its links "
+         "still point at the alias. For the atomic path that does both "
+         "in one transaction, use `nx catalog merge <dup> <canonical>` "
+         "instead (nexus-z4rpi); reach for --alias-of only when you want "
+         "the pointer set by itself, e.g. scripting the three-step "
+         "recipe merge automates.",
 )
 @click.option("--owner", default="", help="Batch: update all entries for this owner")
 @click.option("--search", "search_query", default="", help="Batch: update all entries matching this search")
@@ -725,11 +727,18 @@ def update_cmd(
     repoint an entry whose recorded path is dead (moved/renamed on disk)
     without touching its source_uri identity.
 
-    --alias-of points this entry at its canonical duplicate. Use this to
-    recover from a re-registration of the same document (e.g. after a
-    source_uri was lost and re-indexing minted a second entry): a show on
+    --alias-of points this entry at its canonical duplicate: a show on
     this tumbler afterward returns the canonical entry instead of the
-    duplicate.
+    duplicate. It sets ONLY the alias pointer, in this one call — it does
+    NOT move source_uri onto the canonical and does NOT remap this
+    entry's links, so used alone it can leave the duplicate's identity
+    URI orphaned and its links still pointing at the alias rather than
+    the canonical. For the atomic path that does all three in one
+    transaction (the recipe this flag existed to let an operator hand-
+    assemble), use `nx catalog merge <dup> <canonical>` instead
+    (nexus-z4rpi) — that is the recovery path for a duplicate
+    registration; reach for --alias-of by itself only when you
+    deliberately want just the pointer set.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
