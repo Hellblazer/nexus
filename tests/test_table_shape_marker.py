@@ -207,3 +207,73 @@ def test_a_table_whose_own_prose_mentions_the_marker_is_still_flagged() -> None:
     marked, defects = mark_misshapen_tables(sneaky)
     assert [d["kind"] for d in defects] == ["header_column_mismatch"], defects
     assert marked.startswith("<table>[table structure suspect")
+
+
+# ── nexus-8eg4w: code in a table cell mis-recognized as LaTeX math ──────────
+#
+# Measured on the KnowFeat paper's TABLE V Code row: MinerU's formula model
+# classified plain Python as LaTeX math and rendered it with every
+# identifier underscore escaped. The source text cannot be recovered here
+# (MinerU's model already destroyed it before this module ever sees the
+# table), so the only honest move is the same one _table_shape_defects
+# already makes for a structural defect: name the cell as suspect, touch
+# nothing.
+
+# A trimmed, single-cell version of the real corruption:
+# "mode_counts['fan_out'] / n" rendered as escaped-underscore math.
+KNOWFEAT_TABLE_V_CODE_ROW = (
+    "<table><tr><td>Case 1</td><td>Case 2</td></tr>"
+    "<tr><td>Code</td>"
+    r"<td>$\Gamma_{}\mathrm{{mode\_counts\Gamma}[^{\prime}\fan\_out^{\prime}]}~/~\Gamma_{}\mathrm{{n}}}}$</td>"
+    "</tr></table>"
+)
+
+GENUINE_MATH_TABLE = (
+    "<table><tr><td>Symbol</td><td>Definition</td></tr>"
+    r"<tr><td>$x_i$</td><td>the $i$-th sample, $y_j = \sum_i x_i w_{ij}$</td></tr>"
+    "</table>"
+)
+
+
+def test_code_in_a_cell_mis_recognized_as_math_is_detected_and_marked() -> None:
+    marked, defects = mark_misshapen_tables(KNOWFEAT_TABLE_V_CODE_ROW)
+    assert [d["kind"] for d in defects] == ["code_like_math"], defects
+    assert defects[0]["cells"] == 1
+    assert "may be code" in marked
+    assert "mis-recognized as math" in marked
+
+
+def test_code_like_math_table_bytes_are_never_rewritten() -> None:
+    """The suspect content is never edited, only prefixed -- rewriting an
+    already-unrecoverable cell would be a second unverifiable
+    transformation on top of the first (mark_misshapen_tables's own
+    docstring, extended here to the content signal)."""
+    marked, defects = mark_misshapen_tables(KNOWFEAT_TABLE_V_CODE_ROW)
+    assert defects
+    assert _without_marker(marked) == KNOWFEAT_TABLE_V_CODE_ROW.replace(
+        "<table>", "<table>",
+    )
+    assert r"mode\_counts" in marked, "original (garbled) cell text must survive verbatim"
+
+
+def test_genuine_math_with_subscripts_is_not_flagged() -> None:
+    """Non-vacuity, false-positive direction: ordinary LaTeX subscripts
+    (bare underscore, never escaped) must not trip the detector -- this is
+    the Algorithm-1-survives-fine contrast the bead itself calls out."""
+    marked, defects = mark_misshapen_tables(GENUINE_MATH_TABLE)
+    assert marked == GENUINE_MATH_TABLE
+    assert defects == []
+
+
+def test_a_single_row_code_like_math_table_is_still_flagged() -> None:
+    """Unlike the shape defects, this signal needs no header/data
+    disagreement to fire -- a one-row table can still hold a corrupted
+    code cell."""
+    one_row = (
+        "<table><tr><td>Code</td>"
+        r"<td>$\mathrm{ratio\_fi} = \mathrm{f\_i} / (\mathrm{f\_o} + eps)$</td>"
+        "</tr></table>"
+    )
+    marked, defects = mark_misshapen_tables(one_row)
+    assert [d["kind"] for d in defects] == ["code_like_math"], defects
+    assert marked.startswith("<table>[table structure suspect")

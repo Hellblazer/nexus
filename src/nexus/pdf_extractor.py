@@ -737,11 +737,53 @@ def _row_widths(block: str) -> list[list[str]]:
     return rows
 
 
-def _table_shape_defects(block: str) -> list[dict]:
-    """Structural disagreements inside one captured table.
+#: An inline math span containing an ESCAPED underscore. Real LaTeX math
+#: never needs to escape ``_`` -- a bare underscore already means
+#: subscript inside ``$...$`` -- so ``\_`` there is a near-diagnostic
+#: signal that the span started life as a code identifier (MinerU's
+#: formula-recognition model classifying a monospace table cell as math;
+#: nexus-8eg4w) rather than as a mathematical expression.
+_ESCAPED_UNDERSCORE_MATH_RE = re.compile(r"\$[^$]*\\_[^$]*\$")
 
-    Two signals, because the two mechanisms measured on the KnowFeat paper
-    are different and the first cannot see the second:
+
+def _code_like_math_defects(block: str) -> list[dict]:
+    """Table cells whose rendered math is more likely mis-recognized code
+    than genuine LaTeX (nexus-8eg4w).
+
+    Measured on the KnowFeat paper's TABLE V Code row: MinerU's formula
+    model classified plain Python (``mode_counts['fan_out'] / n``) as
+    LaTeX math and rendered it as one, escaping every identifier
+    underscore along the way -- ``mode\\_counts``, ``fan\\_out``. Contrast
+    that keeps this narrow: the SAME extractor renders genuine numbered
+    pseudocode (this paper's Algorithm 1) correctly, so the signal has to
+    single out an actual math/code confusion, not fire on ordinary
+    formulas that legitimately live in a table.
+
+    This is a DETECTION, not a fix. The original cell text is gone the
+    moment MinerU's model replaced it -- there is nothing here to
+    reconstruct from, only something to name as suspect, the same
+    non-rewrite discipline :func:`mark_misshapen_tables`'s docstring
+    states for :func:`_table_shape_defects`.
+    """
+    cells_flagged = sum(
+        1
+        for row in _TR_RE.findall(block)
+        for _tag, _attrs, body in _TD_RE.findall(row)
+        if _ESCAPED_UNDERSCORE_MATH_RE.search(body)
+    )
+    if not cells_flagged:
+        return []
+    return [{"kind": "code_like_math", "cells": cells_flagged}]
+
+
+def _table_shape_defects(block: str) -> list[dict]:
+    """Structural and content disagreements inside one captured table.
+
+    Three signals. The first two are shape mechanisms measured on the
+    KnowFeat paper, different from each other and the first cannot see
+    the second; the third (:func:`_code_like_math_defects`) is a content
+    signal that needs no row structure to fire, so it runs even for a
+    table too small for the other two to say anything:
 
     ``header_column_mismatch``
         The header row's effective width disagrees with the modal data-row
@@ -753,13 +795,16 @@ def _table_shape_defects(block: str) -> list[dict]:
         are labelled. This is the TABLE V row-label merge, where two labels
         fused into one cell and shifted every later row up by one; cell
         counts stay constant, so only the orphaned row betrays it.
+    ``code_like_math``
+        A cell's rendered math looks like an escaped code identifier
+        rather than genuine LaTeX. See :func:`_code_like_math_defects`.
     """
+    defects: list[dict] = list(_code_like_math_defects(block))
     rows = _row_widths(block)
     if len(rows) < 2:
         # A header with no data rows has nothing to disagree with it.
-        return []
+        return defects
     header, data = rows[0], rows[1:]
-    defects: list[dict] = []
     widths = [len(r) for r in data if r]
     if widths:
         modal = max(set(widths), key=widths.count)
@@ -845,12 +890,18 @@ def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
                 case "empty_row_label":
                     n = len(d["rows"])
                     reasons.append(f"{n} row{'s' if n != 1 else ''} with no label")
+                case "code_like_math":
+                    n = d["cells"]
+                    reasons.append(
+                        f"{n} cell{'s' if n != 1 else ''} may be code "
+                        "mis-recognized as math"
+                    )
         label = _table_caption_label(text, m.start())
         found.extend({**d, "label": label} for d in defects)
         named = f" ({label})" if label else ""
         marker = (
             f"{_MARKER_PREFIX}{named}: {'; '.join(reasons)}; "
-            "values may be misaligned]"
+            "values may be misaligned or unreliable]"
         )
         # Just INSIDE the opening tag, not on a line before it. That span is
         # what PDFChunker's _table_header re-injects into every continuation
