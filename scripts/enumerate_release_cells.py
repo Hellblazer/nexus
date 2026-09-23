@@ -1463,8 +1463,23 @@ def drive_precond_main_dispatch(cell: Cell) -> tuple[int, str]:
         captured["ack_client_lag"] = ack_client_lag
         return real_check(engine_tag, ack_client_lag)
 
+    # nexus-iu43o: check() now calls floor.check_data_effect_relay(engine_tag)
+    # for real (this driver's own docstring: "proving the exit code is
+    # genuinely derived, not injected" -- stubbing the relay check outright
+    # would be exactly the fake this driver exists to avoid). Its ONE
+    # environment-dependent input is _previous_engine_tag's git-tag lookup,
+    # which a CI checkout (depth-1, tagless) answers differently than a
+    # full local clone -- pinning it to "no earlier tag" makes
+    # check_data_effect_relay take its real, genuinely-computed NOT-
+    # APPLICABLE branch deterministically everywhere: no earlier tag to
+    # diff against is a true statement in EITHER environment for a
+    # deterministic driver, not an injected result. Verified in a tagless
+    # `git clone --depth 1` (see the commit message) -- without this pin,
+    # the frozen text differs between clones because the real function
+    # sees different git state.
     with patch.object(precond, "check", side_effect=spying_check), \
          patch.dict(precond.ENGINE_CLIENT_PRECONDITIONS, {}, clear=True), \
+         patch.object(floor, "_previous_engine_tag", return_value=None), \
          patch.object(wire_ledger, "parse_ledger", return_value=ledger):
         rc, _out, _err = _capture(precond.main, argv)
     assert captured["engine_tag"] == expected_tag, (cell, captured)

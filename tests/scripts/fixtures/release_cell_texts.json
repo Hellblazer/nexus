@@ -360,8 +360,8 @@
     "out": ""
   },
   "precond_main_dispatch::precond_main_default_tag_no_ack": {
-    "err": "REFUSED: no relay attestation at /Users/hal.hildebrand/git/nexus/.claude/worktrees/agent-a9de5caeca9090eba/docs/data-effect-relay/engine-service-v<FLOOR>.json for engine-service-v<FLOOR-1>..engine-service-v<FLOOR> (1 data-effecting changeset(s) in range: ['pipeline-002-per-row-identity.xml:pipeline-002-2']). run: uv run python scripts/list_data_effects.py engine-service-v<FLOOR-1> engine-service-v<FLOOR> --record-relay-attestation (AFTER pasting its table into the relay)\n",
-    "out": ""
+    "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
+    "out": "NOT-APPLICABLE: engine-service-v<FLOOR> has no earlier published engine-service-v* tag to diff a DATA EFFECT range against.\n"
   },
   "precond_main_dispatch::precond_main_explicit_tag_with_ack": {
     "err": "",
