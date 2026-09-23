@@ -213,7 +213,8 @@ def run_bounded(
     stdin: IO[Any] | int | None = None,
     text: bool = True,
     check: bool = False,
-    stderr: int = subprocess.PIPE,
+    stdout: IO[Any] | int = subprocess.PIPE,
+    stderr: IO[Any] | int = subprocess.PIPE,
 ) -> subprocess.CompletedProcess[Any]:
     """``subprocess.run(capture_output=True, timeout=...)`` that is actually bounded.
 
@@ -227,6 +228,15 @@ def run_bounded(
     this helper is one that already decided how long it was willing to
     wait; a default would let a new site inherit someone else's number.
 
+    ``stdout`` and ``stderr`` default to ``PIPE``, which is the capture
+    shape this exists for. They are overridable — with ``DEVNULL``, or with
+    an open file — because the reason to reach for this helper is the group
+    kill, not the capture: a site that redirects to a file still leaks the
+    descendants of a timed-out child, and that is the POSIX half of the
+    defect. ``nexus-t10nc`` drained one such site
+    (``commands/doctor.py``'s MinerU parse probe, which redirects
+    PRECISELY because a pipe deadlocked against the pool it spawns).
+
     Raises ``subprocess.TimeoutExpired`` on timeout, after the kill and the
     reap, so callers that already handle it keep working unchanged.
     """
@@ -236,7 +246,7 @@ def run_bounded(
     proc = subprocess.Popen(  # noqa: S603 - argv is a sequence, never a shell string
         argv,
         stdin=subprocess.PIPE if input is not None else stdin,
-        stdout=subprocess.PIPE,
+        stdout=stdout,
         stderr=stderr,
         text=text,
         cwd=cwd,

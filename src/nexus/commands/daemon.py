@@ -34,6 +34,7 @@ import click
 import structlog
 
 from nexus import config as _config
+from nexus.bounded_subprocess import run_bounded
 
 _log = structlog.get_logger(__name__)
 
@@ -1035,11 +1036,9 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
 
     try:
         bins = discover_pg_binaries()
-        subprocess.run(
+        run_bounded(
             [str(bins.pg_ctl), "-D", pg_data, "-m", "fast", "stop"],
             check=True,
-            capture_output=True,
-            text=True,
             timeout=30,
         )
     except Exception as exc:  # noqa: BLE001 — boundary catch around PG stop; surfaced via click.echo + exit(2)
@@ -1119,7 +1118,7 @@ def _pgvector_version(creds: dict) -> str | None:
     env = dict(_os.environ)
     env["PGPASSWORD"] = password
     try:
-        result = subprocess.run(
+        result = run_bounded(
             [
                 psql,
                 "-h",
@@ -1137,8 +1136,6 @@ def _pgvector_version(creds: dict) -> str | None:
                 "SELECT extversion FROM pg_extension WHERE extname='vector'",
             ],
             env=env,
-            capture_output=True,
-            text=True,
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):

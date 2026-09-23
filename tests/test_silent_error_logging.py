@@ -112,7 +112,7 @@ def test_current_head_failed_logs_debug():
     """Site 5: _current_head() OSError emits debug-level log."""
     from nexus.indexer import _current_head
 
-    with patch("nexus.indexer.subprocess.run", side_effect=OSError("git not found")):
+    with patch("nexus.indexer.run_bounded", side_effect=OSError("git not found")):
         with capture_logs() as cap:
             result = _current_head(Path("/fake/repo"))
 

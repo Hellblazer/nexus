@@ -210,7 +210,7 @@ class TestStopPgClarity:
         bins = MagicMock()
         bins.pg_ctl = "/fake/pg_ctl"
         with patch("nexus.db.pg_provision.discover_pg_binaries", return_value=bins), \
-             patch("subprocess.run", side_effect=fake_run):
+             patch("nexus.commands.daemon.run_bounded", side_effect=fake_run):
             result = self._invoke_stop(config_dir, ["--with-pg"])
         assert result.exit_code == 0, result.output
         assert "Postgres stopped" in result.output
@@ -326,7 +326,7 @@ class TestProbeImplementations:
             captured["pgpassword"] = env.get("PGPASSWORD")
             return MagicMock(returncode=0, stdout="0.8.2\n")
 
-        with patch("subprocess.run", side_effect=fake_run), \
+        with patch("nexus.commands.daemon.run_bounded", side_effect=fake_run), \
              patch(
                  "nexus.daemon.binary_lifecycle._psql_bin",
                  return_value="/fake/psql",
@@ -351,7 +351,7 @@ class TestProbeImplementations:
             captured["pgpassword"] = env.get("PGPASSWORD")
             return MagicMock(returncode=0, stdout="0.8.2\n")
 
-        with patch("subprocess.run", side_effect=fake_run), \
+        with patch("nexus.commands.daemon.run_bounded", side_effect=fake_run), \
              patch(
                  "nexus.daemon.binary_lifecycle._psql_bin",
                  return_value="/fake/psql",

@@ -732,7 +732,7 @@ class TestRdrClose:
             r.stderr = ""
             return r
 
-        monkeypatch.setattr("nexus.commands.rdr.subprocess.run", _fake_run)
+        monkeypatch.setattr("nexus.commands.rdr.run_bounded", _fake_run)
         result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
         assert result.exit_code == 0, result.output
         assert "WARNING" in result.output
@@ -761,7 +761,7 @@ class TestRdrClose:
             r.stderr = ""
             return r
 
-        monkeypatch.setattr("nexus.commands.rdr.subprocess.run", _fake_run)
+        monkeypatch.setattr("nexus.commands.rdr.run_bounded", _fake_run)
         result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
         assert result.exit_code == 0, result.output
         assert "WARNING" not in result.output
@@ -806,7 +806,7 @@ class TestRdrClose:
             r.stderr = ""
             return r
 
-        monkeypatch.setattr("nexus.commands.rdr.subprocess.run", _capture_run)
+        monkeypatch.setattr("nexus.commands.rdr.run_bounded", _capture_run)
         result = _runner().invoke(
             rdr,
             ["preamble", "rdr-close", "--", "130", "--reason", "implemented",
@@ -895,7 +895,7 @@ class TestRdrResearch:
                 )
             return _sp.CompletedProcess(cmd, 1, stdout="", stderr="unavailable")
 
-        monkeypatch.setattr(rdr_mod.subprocess, "run", _fake_run)
+        monkeypatch.setattr(rdr_mod, "run_bounded", _fake_run)
         result = _runner().invoke(rdr, ["preamble", "rdr-research", "--", "1"])
         assert result.exit_code == 0, result.output
         assert "1-research-1: canned finding" in result.output
@@ -4106,7 +4106,7 @@ class TestRdrResearchKeyShapes:
                 return _sp.CompletedProcess(cmd, 0, stdout=rows, stderr="")
             return _sp.CompletedProcess(cmd, 1, stdout="", stderr="unavailable")
 
-        monkeypatch.setattr(rdr_mod.subprocess, "run", _fake_run)
+        monkeypatch.setattr(rdr_mod, "run_bounded", _fake_run)
 
     def test_listing_finds_zero_padded_titles_for_an_rdr_below_100(self, rdr_env, monkeypatch):
         _write_rdr(rdr_env["rdr_dir"], "rdr-097-z.md", {"title": "Z", "status": "draft"},

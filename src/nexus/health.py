@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Callable
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
 
@@ -3625,8 +3626,8 @@ def _run_psql(
 
     env = _bundle_lib_env(cmd, None)
     env["PGPASSWORD"] = password
-    return subprocess.run(
-        cmd, capture_output=True, text=True, check=False, env=env, timeout=timeout,
+    return run_bounded(
+        cmd, env=env, timeout=timeout,
     )
 
 

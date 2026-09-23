@@ -55,6 +55,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nexus.bounded_subprocess import run_bounded
+
 _LAYOUT: object | None = None
 
 
@@ -133,7 +135,7 @@ def ps_snapshot() -> str:
     leg raises and takes unrelated work down with it.
     """
     try:
-        r = subprocess.run(PS_COMMAND, capture_output=True, text=True, timeout=10)  # noqa: S603
+        r = run_bounded(PS_COMMAND, timeout=10)  # noqa: S603
     except (OSError, subprocess.SubprocessError):
         return ""
     return r.stdout if r.returncode == 0 else ""

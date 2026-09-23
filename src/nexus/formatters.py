@@ -10,6 +10,7 @@ from typing import Any
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -124,9 +125,9 @@ def _extract_context(
 def _is_bat_installed() -> bool:
     """Check if ``bat`` is available on PATH. Result is cached for the session."""
     try:
-        subprocess.run(
+        run_bounded(
             ["bat", "--version"],
-            capture_output=True,
+            text=False,
             timeout=5,
         )
         return True
@@ -231,11 +232,9 @@ def _format_with_bat(
         cmd.append("-")
 
         try:
-            proc = subprocess.run(
+            proc = run_bounded(
                 cmd,
                 input=stdin_text,
-                capture_output=True,
-                text=True,
                 timeout=10,
             )
             if proc.returncode == 0 and proc.stdout:

@@ -10,6 +10,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.redact import redact_credentials
 
 
@@ -1899,10 +1900,11 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
         # holds the file open.
         stderr_path = Path(work_dir) / "stderr.log"
         with stderr_path.open("w") as stderr_f:
-            proc = subprocess.run(
+            proc = run_bounded(
                 [sys.executable, "-c", _MINERU_DOCTOR_PARSE_SCRIPT, str(fixture), str(result_dir)],
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_f,
+                text=False,
                 timeout=timeout_s,
             )
         stderr_text = stderr_path.read_text(errors="replace")

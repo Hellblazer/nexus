@@ -61,6 +61,7 @@ from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
 import structlog
 
 from nexus import _locking
+from nexus.bounded_subprocess import run_bounded
 
 _log = structlog.get_logger(__name__)
 
@@ -1065,9 +1066,9 @@ def _ps_enumerate() -> list[tuple[int, int, str]] | None:
     parses identically on macOS and Linux).
     """
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["ps", "-wweo", "pid,etime,command"],
-            capture_output=True, text=True, timeout=15,
+            timeout=15,
         )
     except FileNotFoundError:
         return None
@@ -1133,9 +1134,9 @@ def process_command(pid: int) -> str:
             return ""
         return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
     try:
-        probe = subprocess.run(
+        probe = run_bounded(
             ["ps", "-ww", "-p", str(pid), "-o", "command="],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return ""
@@ -1199,9 +1200,9 @@ def process_state(pid: int) -> str | None:
         except (ValueError, IndexError):
             return None
     try:
-        probe = subprocess.run(
+        probe = run_bounded(
             ["ps", "-o", "state=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return None

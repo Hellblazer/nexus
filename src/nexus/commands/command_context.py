@@ -24,6 +24,8 @@ from pathlib import Path
 
 import click
 
+from nexus.bounded_subprocess import run_bounded
+
 
 # ---------------------------------------------------------------------------
 # P2.1: project-type detector (unchanged from P2.1 commit)
@@ -77,11 +79,20 @@ def _check_output(cmd: list[str], **kwargs: object) -> str:
 
     Every preamble tool call routes through here so none can hang the
     invocation.  Callers may still override ``timeout``/``stderr``/``text``.
+
+    nexus-t10nc: this is a capture+timeout site — ALWAYS, since both
+    defaults are set right here — and the lint's AST scan could not see it,
+    because the timeout arrives through ``setdefault`` into a ``**kwargs``
+    unpacking rather than as a keyword on the call. It was the single
+    highest-traffic one in the repo: every preamble git/bd/gh/nx call
+    funnels through it. See ``test_bounded_subprocess_lint``'s
+    ``test_kwargs_funnels_are_named_not_silently_skipped``, which now
+    refuses to let a funnel like this pass unexamined.
     """
     kwargs.setdefault("timeout", _PREAMBLE_TIMEOUT)
     kwargs.setdefault("stderr", subprocess.DEVNULL)
     kwargs.setdefault("text", True)
-    return subprocess.check_output(cmd, **kwargs)  # type: ignore[no-any-return,arg-type]
+    return run_bounded(cmd, check=True, **kwargs).stdout  # type: ignore[arg-type,no-any-return]
 
 
 def detect_project_types(root: Path) -> list[str]:
@@ -462,11 +473,10 @@ def nx_doctor_block() -> list[str]:
     heading = "### 2. nx configuration (nx doctor)"
     lines: list[str] = [heading, ""]
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["nx", "doctor"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
             timeout=_PREAMBLE_TIMEOUT,
         )
         lines += proc.stdout.splitlines()

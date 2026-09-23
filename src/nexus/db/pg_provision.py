@@ -98,6 +98,8 @@ from typing import NamedTuple
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger(__name__)
 
 # ── Cluster constants ──────────────────────────────────────────────────────────
@@ -330,12 +332,12 @@ def _pg_config_value(pg_config: Path, flag: str) -> str | None:
     cmd = [str(pg_config), flag]
     try:
         # env is now an os.environ SNAPSHOT (was: inherited live by reference).
-        # subprocess.run is synchronous and os.environ is not mutated mid-call,
+        # run_bounded is synchronous and os.environ is not mutated mid-call,
         # so this is equivalent in practice — the snapshot is to thread the
         # bundle lib path (code-review H2).
-        result = subprocess.run(
+        result = run_bounded(
             cmd,
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
             env=_bundle_lib_env(cmd, None),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

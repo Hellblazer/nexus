@@ -24,6 +24,7 @@ from typing import Any, Final
 import click
 import yaml
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.plans.audit_rounds import (
     BLOCKS_PLANNING,
     DISCOVER_AT_IMPLEMENTATION,
@@ -1760,9 +1761,9 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
     # Active beads (for Related Issues field)
     print("### Active Beads (for Related Issues field)")
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["bd", "list", "--status=in_progress", "--limit=5"],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
         bd_out = (result.stdout or "").strip()
         print(bd_out if bd_out else "No in-progress beads")
@@ -1835,10 +1836,10 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
             t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
             print("### T2 Metadata")
             try:
-                t2_result = subprocess.run(
+                t2_result = run_bounded(
                     ["nx", "memory", "get", "--project", f"{repo_name}_rdr",
                      "--title", t2_key],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 t2_out = (t2_result.stdout or "").strip()
                 print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
@@ -1849,9 +1850,9 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
             # T2 research findings
             print("### T2 Research Findings")
             try:
-                list_result = subprocess.run(
+                list_result = run_bounded(
                     ["nx", "memory", "list", "--project", f"{repo_name}_rdr"],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
                 # `nx memory list` rows are "[id] <project>/<title>  (…)" —
@@ -1872,9 +1873,9 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
             # Linked beads
             print("### Linked Beads")
             try:
-                bd_result = subprocess.run(
+                bd_result = run_bounded(
                     ["bd", "list", "--status=open", "--limit=20"],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 bd_out = (bd_result.stdout or "").strip()
                 matching = [
@@ -2668,9 +2669,9 @@ def _preamble_regate_block(
     if gated_commit:
         rel = os.path.relpath(str(rdr_file), repo_root)
         try:
-            diff = subprocess.run(
+            diff = run_bounded(
                 ["git", "-C", repo_root, "diff", "--stat", f"{gated_commit}..HEAD", "--", rel],
-                capture_output=True, text=True, timeout=20, check=False,
+                timeout=20,
             )
             if diff.returncode != 0:
                 lines.append(
@@ -3190,13 +3191,13 @@ def _fix_check_lines(
             f"Fix check: not required (no change to the RDR file since `{gated_commit}`).",
         ]
     try:
-        log = subprocess.run(
+        log = run_bounded(
             ["git", "-C", repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel],
-            capture_output=True, text=True, timeout=20, check=False,
+            timeout=20,
         )
-        tip = subprocess.run(
+        tip = run_bounded(
             ["git", "-C", repo_root, "log", "-1", "--format=%h", "--", rel],
-            capture_output=True, text=True, timeout=20, check=False,
+            timeout=20,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return [f"Fix check: git log failed ({exc}); list the fix commits by hand."]
@@ -3834,10 +3835,11 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
             # S2: best-effort T1 scratch marker — downstream hook/skill consumes rdr-close-active tag
             # (original rdr_close.py:299-303)
             try:
-                subprocess.run(
+                run_bounded(
                     ["nx", "scratch", "put", t2_key,
                      "--tags", f"rdr-close-active,rdr-{t2_key}"],
-                    capture_output=True, timeout=5,
+                    text=False,
+                    timeout=5,
                 )
             except Exception:  # noqa: BLE001 — best-effort optional lookup; ignored if unavailable
                 pass
@@ -3894,9 +3896,9 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
     has_open_beads = False
     print("### Active Beads")
     try:
-        bd_result = subprocess.run(
+        bd_result = run_bounded(
             ["bd", "list", "--status=open,in_progress", "--limit=20"],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
         bd_out = (bd_result.stdout or "").strip()
         if bd_out and bd_out != "No issues found.":
@@ -4111,9 +4113,9 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
             # T2 research findings
             print("### Existing Research Findings (T2)")
             try:
-                list_result = subprocess.run(
+                list_result = run_bounded(
                     ["nx", "memory", "list", "--project", f"{repo_name}_rdr"],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
                 # `nx memory list` rows are "[id] <project>/<title>  (…)" —
@@ -4189,8 +4191,8 @@ _FIX_RULES: tuple[str, ...] = (
 def _git_out(repo_root: str, *args: str) -> str | None:
     """stdout of a git command, or None when it fails."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", repo_root, *args], capture_output=True, text=True, timeout=20, check=False,
+        proc = run_bounded(
+            ["git", "-C", repo_root, *args], timeout=20,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -6057,14 +6059,15 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
 
     # Write T1 scratch marker (best-effort)
     try:
-        subprocess.run(
+        run_bounded(
             [
                 "nx", "scratch", "put",
                 f"phase-review-gate PASSED: RDR-{rdr_id_label} Phase {phase_arg}",
                 "--tags",
                 f"phase-review-passed,rdr-{rdr_id_label},phase-{phase_arg}",
             ],
-            capture_output=True, timeout=5,
+            text=False,
+            timeout=5,
         )
     except Exception:  # noqa: BLE001 — best-effort sentinel write (RDR-121 P2); ignored on failure
         pass

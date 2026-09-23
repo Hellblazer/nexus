@@ -14,14 +14,23 @@ an ORPHAN LEAK (the timed-out call reaps its direct child and leaves the
 descendants running) while on Windows it is a genuine unbounded HANG. Both
 are worth removing; only one hangs a user's session.
 
-WHY A RATCHET AND NOT A FLAG DAY. The census that produced
-``run_bounded`` found 81 of these in ``src/nexus``, and nexus-t10nc's own
-judgement — which Sam accepted — is that converting them one at a time is
-what produced them in the first place, while converting all of them in one
-change is a large blind diff across daemon, catalog, indexer and CLI paths.
-So the count is pinned and drains. A new site is refused; an existing site
-is fixed when its module is next touched for a reason of its own, and this
-file's number goes down with it.
+WHY A RATCHET AND NOT A FLAG DAY, and what happened to it. The census
+that produced ``run_bounded`` found 81 of these in ``src/nexus``, and
+nexus-t10nc's own judgement — which Sam accepted — is that converting them
+one at a time is what produced them in the first place, while converting
+all of them in one change is a large blind diff across daemon, catalog,
+indexer and CLI paths. So the count was pinned at 57 and drained.
+
+IT IS NOW EMPTY. The drain ran as its own deliberate task rather than
+opportunistically, in five reviewed batches grouped by subsystem, each
+with the tests of the modules it touched. That is neither of the two
+things the paragraph above weighed: not a blind flag day, and not drift.
+The objection was to ONE unreviewed diff, not to draining.
+
+An empty map is a STRONGER gate than a drained one, not a retired one:
+every file is now allowed zero, so any new capture+timeout call anywhere
+in scope fails :func:`test_unconverted_subprocess_calls_match_the_ratchet`
+by name. Do not delete this file when you notice the map is empty.
 
 The ceiling is EXACT EQUALITY, per file, never ``<=``. An inequality
 ceiling silently accepts a file that converted one site and added two, and
@@ -29,6 +38,17 @@ this repo's ratchets (``test_mode_declarations_are_explicit.py``, RDR-109;
 ``test_pipefail_early_exit_consumer_lint.py``) are all exact for that
 reason. Per FILE rather than per line because line numbers move under
 ordinary editing and a line-keyed ratchet reds on a rename.
+
+WHAT THE EMPTY MAP COST, and what pays for it.
+:func:`test_unconverted_subprocess_calls_match_the_ratchet` used to prove
+the detector worked simply by passing: it reproduced 57 counts across 28
+files, which a broken :func:`_capture_with_timeout_calls` could not have
+done. At zero, a detector that silently matched NOTHING would pass exactly
+as loudly. :func:`test_scan_is_not_vacuous` does not close that — it
+proves the scan reached files, not that it recognises the shape inside
+one. :func:`test_detector_recognises_the_shapes_it_claims_to` is the
+replacement: a positive control over synthetic sources, including the
+near-misses that must NOT match.
 
 SCOPE EXCLUDES ``src/nexus/hooks/``, and this is temporary and deliberate.
 Those 24 sites are the ones that can hang a user's session rather than a
@@ -62,27 +82,11 @@ _EXCLUDED_DIR = "hooks"
 _EXCLUDED_DIR_BEAD = "nexus-t9klx"
 
 #: Exact per-file count of unconverted capture+timeout subprocess calls.
-#: Measured 2026-09-22 against develop. Numbers go DOWN. A file that
-#: reaches zero is deleted from this map, and a file absent from it is
-#: allowed zero.
-_UNCONVERTED: dict[str, int] = {
-    "src/nexus/_install/census_core.py": 1,
-    "src/nexus/_install/layout_core.py": 1,
-    "src/nexus/commands/command_context.py": 1,
-    "src/nexus/commands/daemon.py": 2,
-    "src/nexus/commands/doctor.py": 1,
-    "src/nexus/commands/rdr.py": 12,
-    "src/nexus/commands/self_cmd.py": 2,
-    "src/nexus/daemon/installer.py": 1,
-    "src/nexus/daemon/service_registry.py": 3,
-    "src/nexus/db/admin_sql.py": 1,
-    "src/nexus/db/diag_connection.py": 1,
-    "src/nexus/db/pg_provision.py": 1,
-    "src/nexus/db/svc_monitor.py": 1,
-    "src/nexus/formatters.py": 2,
-    "src/nexus/health.py": 1,
-    "src/nexus/upgrade_finish.py": 6,
-}
+#: Pinned at 57 across 28 files on 2026-09-22; DRAINED TO ZERO on
+#: 2026-09-23 (nexus-t10nc). Numbers only ever go DOWN. A file that reaches
+#: zero is deleted from this map, and a file absent from it — which is now
+#: every file in scope — is allowed zero.
+_UNCONVERTED: dict[str, int] = {}
 
 
 def _in_scope(path: pathlib.Path) -> bool:
@@ -177,6 +181,146 @@ def test_unconverted_subprocess_calls_match_the_ratchet() -> None:
         f"(pinned, actual): {improvements}. That is good -- lower the numbers in "
         "_UNCONVERTED to match, or delete the entry if it reached zero, so the "
         "ratchet cannot drift back up."
+    )
+
+
+#: Sources the detector must flag, as (label, source, expected line count).
+#: Every shape here was a real site drained by nexus-t10nc.
+_MUST_MATCH: tuple[tuple[str, str, int], ...] = (
+    ("capture_output", "subprocess.run(a, capture_output=True, timeout=5)\n", 1),
+    ("stdout pipe", "subprocess.run(a, stdout=subprocess.PIPE, timeout=5)\n", 1),
+    ("stdout devnull", "subprocess.run(a, stdout=subprocess.DEVNULL, timeout=5)\n", 1),
+    ("check_output", "subprocess.check_output(a, text=True, timeout=5)\n", 1),
+    (
+        "multiline, kwargs spread over lines",
+        "subprocess.run(\n    argv,\n    capture_output=True,\n    text=True,\n    timeout=10,\n)\n",
+        1,
+    ),
+    (
+        "two in one file",
+        "subprocess.run(a, capture_output=True, timeout=1)\n"
+        "subprocess.check_output(b, timeout=2)\n",
+        2,
+    ),
+)
+
+#: Sources the detector must NOT flag. A detector that matched these would
+#: make the empty ratchet unmaintainable by failing on correct code.
+_MUST_NOT_MATCH: tuple[tuple[str, str], ...] = (
+    ("capture without timeout", "subprocess.run(a, capture_output=True)\n"),
+    ("timeout without capture", "subprocess.run(a, timeout=5)\n"),
+    ("already converted", "run_bounded(a, timeout=5)\n"),
+    ("Popen, not run", "subprocess.Popen(a, stdout=subprocess.PIPE)\n"),
+    ("a different module's run", "other.run(a, capture_output=True, timeout=5)\n"),
+)
+
+
+def test_detector_recognises_the_shapes_it_claims_to() -> None:
+    """Positive control for :func:`_capture_with_timeout_calls`.
+
+    With ``_UNCONVERTED`` drained to ``{}``, a detector that matched
+    nothing at all would make every other test in this file pass. Before
+    the drain the map itself was the proof — reproducing 57 counts across
+    28 files is not something a broken matcher does — and deleting the map
+    deleted that proof with it. This restores it without depending on any
+    site staying unconverted.
+    """
+    for label, source, expected in _MUST_MATCH:
+        found = _capture_with_timeout_calls(source)
+        assert len(found) == expected, (
+            f"the detector missed the {label!r} shape: expected {expected} "
+            f"call(s), found {found}. Every shape in _MUST_MATCH was a real "
+            "site this lint was written to catch, so a miss here means the "
+            "empty ratchet is passing vacuously."
+        )
+
+    for label, source in _MUST_NOT_MATCH:
+        found = _capture_with_timeout_calls(source)
+        assert not found, (
+            f"the detector flagged {label!r}, which is not the watched shape "
+            f"(line {found}). A false positive here fails correct code and is "
+            "how a lint gets deleted rather than fixed."
+        )
+
+
+#: ``subprocess.run``/``check_output`` calls whose kwargs are UNPACKED, so
+#: a static scan cannot read whether they carry capture+timeout. Each is
+#: listed with what was determined by reading it, because the alternative
+#: is that the scan skips them in silence. Found by nexus-t10nc AFTER the
+#: drain reached zero, which is when a funnel stops being invisible.
+_KWARGS_FUNNELS: dict[str, str] = {
+    "src/nexus/daemon/installer.py": (
+        "_run_manager: the timed branch routes to run_bounded, so the two "
+        "activation probes that pass capture_output+timeout are converted. "
+        "The stock call that remains is the branch taken when a caller "
+        "passes NO timeout -- unbounded, a different defect, left for a "
+        "bead with a measured bound."
+    ),
+    "src/nexus/db/pg_provision.py": (
+        "_run: sets capture_output but NEVER a timeout, so it is not the "
+        "watched shape. It is unbounded instead -- a worse defect, and a "
+        "different one. Bounding initdb/pg_ctl needs a measured number."
+    ),
+}
+
+
+def test_kwargs_funnels_are_named_not_silently_skipped() -> None:
+    """A ``**kwargs`` call is unreadable to the scan, so it must be listed.
+
+    :func:`_capture_with_timeout_calls` reads keywords off the call node.
+    A site that assembles its kwargs into a dict and unpacks them -- or
+    takes ``**kwargs`` from its own caller -- presents no ``timeout``
+    keyword to the AST and is skipped, whatever it does at runtime.
+
+    That is not hypothetical. ``command_context._check_output`` was
+    exactly this: it set BOTH ``timeout`` and ``stderr`` via
+    ``setdefault`` and then unpacked, so it was unconditionally the
+    watched shape and the lint never saw it, while every preamble git, bd,
+    gh and nx call in the repo funnelled through it. It was invisible for
+    as long as the ratchet was non-empty, because a non-empty ratchet
+    looks like work remaining rather than like a gap.
+
+    So every funnel in scope is enumerated with what reading it found. A
+    NEW one fails here, which forces the same read rather than allowing
+    the silence back.
+    """
+    found: dict[str, list[int]] = {}
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        if not _in_scope(path):
+            continue
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:  # pragma: no cover - another test's failure
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "subprocess"
+                and func.attr in {"run", "check_output"}
+            ):
+                continue
+            if any(kw.arg is None for kw in node.keywords):
+                rel = path.relative_to(REPO_ROOT).as_posix()
+                found.setdefault(rel, []).append(node.lineno)
+
+    unlisted = {p: lines for p, lines in found.items() if p not in _KWARGS_FUNNELS}
+    assert not unlisted, (
+        "these subprocess calls unpack their kwargs, so this file's scan cannot "
+        f"tell whether they are capture+timeout: {unlisted}. Read each one. If it "
+        "is the watched shape, route it through run_bounded; if it is not, add it "
+        "to _KWARGS_FUNNELS saying what it does instead. Leaving it unlisted means "
+        "the ratchet's zero is not covering it."
+    )
+
+    gone = sorted(set(_KWARGS_FUNNELS) - set(found))
+    assert not gone, (
+        f"_KWARGS_FUNNELS lists files with no unpacked subprocess call left: {gone}. "
+        "Delete the entry -- a stale exemption is how a real funnel gets waved "
+        "through later."
     )
 
 

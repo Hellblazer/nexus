@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.daemon.service_registry import (
     _parse_etime,
     _procfs_enumerate,
@@ -795,10 +796,8 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
             try:
-                subprocess.run(["nx", "mineru", "stop"], capture_output=True,
-                               timeout=60)
-                subprocess.run(["nx", "mineru", "start"], capture_output=True,
-                               timeout=300)
+                run_bounded(["nx", "mineru", "stop"], text=False, timeout=60)
+                run_bounded(["nx", "mineru", "start"], text=False, timeout=300)
                 actions.append(f"cycled MinerU (was pid {proc.pid})")
             except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
                 actions.append(f"mineru cycle failed: {exc}")
@@ -1504,18 +1503,18 @@ def _restart_and_verify(
     # was itself called with, not whatever a bare "nx" re-derives.
     resolved_config_dir = str(config_dir.resolve())
     try:
-        stop = subprocess.run(
+        stop = run_bounded(
             ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
         try:
             sweep_note = _sweep_surviving_stack(config_dir, before)
         except Exception as exc:  # noqa: BLE001 — the sweep is belt, never the reason start doesn't run (review M2)
             _log.warning("restart_stack_sweep_failed", error=str(exc))
             sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
-        start = subprocess.run(
+        start = run_bounded(
             ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir],
-            capture_output=True, text=True, timeout=120,
+            timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
         actions.append(
@@ -2333,7 +2332,7 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
     resolved_config_dir = str(config_dir.resolve())
     argv = ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir]
     try:
-        start = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        start = run_bounded(argv, timeout=120)
     except Exception as exc:  # noqa: BLE001 — best-effort restart; surfaced in the returned clause
         _log.warning(
             "upgrade_autostart_unit_restart",
@@ -2469,9 +2468,9 @@ def converge_service_autostart_unit(
     resolved_config_dir = str(config_dir.resolve())
 
     try:
-        stop = subprocess.run(
+        stop = run_bounded(
             ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort convergence; surfaced in the line
         return [f"NEEDS HUMAN: {note}, but stopping it raised {exc} -- {manual_fallback}"]

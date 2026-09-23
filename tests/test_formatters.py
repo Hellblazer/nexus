@@ -274,14 +274,19 @@ def test_merge_line_ranges(ranges, expected) -> None:
 ])
 def test_is_bat_installed(monkeypatch, side_effect, expected) -> None:
     _is_bat_installed.cache_clear()
+    from nexus import formatters as fm  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    # nexus-t10nc: the probe calls bounded_subprocess.run_bounded, bound in
+    # the formatters module, so patching the shared subprocess module no
+    # longer reaches it.
     if side_effect:
         monkeypatch.setattr(
-            subprocess, "run",
+            fm, "run_bounded",
             lambda *a, **kw: (_ for _ in ()).throw(side_effect),
         )
     else:
         monkeypatch.setattr(
-            subprocess, "run",
+            fm, "run_bounded",
             lambda *a, **kw: subprocess.CompletedProcess(args=["bat"], returncode=0),
         )
     assert _is_bat_installed() is expected
@@ -362,7 +367,7 @@ def test_bat_line_range_is_relative_to_the_stdin_start(monkeypatch) -> None:
         argv_seen.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0, stdout="hl\n", stderr="")
 
-    monkeypatch.setattr(fm.subprocess, "run", _fake_run)
+    monkeypatch.setattr(fm, "run_bounded", _fake_run)
     fm._is_bat_installed.cache_clear()
     monkeypatch.setattr(fm, "_is_bat_installed", lambda: True)
     fm._format_with_bat([_result(content="a\nb\nc", line_start=40)])
