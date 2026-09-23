@@ -684,7 +684,7 @@ def test_registry_parses_as_yaml():
 # ---------------------------------------------------------------------------
 
 
-def _write_data_token_lease(cfg_dir, *, base_url, tenant, token, expires_in=3600.0):
+def _write_data_token_lease(cfg_dir, *, base_url, tenant, token, expires_in=3600.0, ttl_seconds=None):
     host = urllib.parse.urlsplit(base_url).netloc or base_url
     digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
     lease_path = cfg_dir / f"data_token_lease.{digest}"
@@ -694,7 +694,7 @@ def _write_data_token_lease(cfg_dir, *, base_url, tenant, token, expires_in=3600
         "tenant": tenant,
         "base_url_digest": digest,
         "expires_at": _time.time() + expires_in,
-        "ttl_seconds": expires_in,
+        "ttl_seconds": expires_in if ttl_seconds is None else ttl_seconds,
         "minted_by_pid": os.getpid(),
     }))
     return lease_path
@@ -1037,6 +1037,19 @@ def test_read_data_token_lease_expired(tmp_path):
     base_url = "http://127.0.0.1:4242"
     _write_data_token_lease(tmp_path, base_url=base_url, tenant="default", token="tok", expires_in=-1.0)
     assert _load_lib()._read_data_token_lease(tmp_path, base_url) is None
+
+
+def test_read_data_token_lease_in_its_last_fifth_is_still_used(tmp_path):
+    """The plugin mirror accepted any unexpired lease; the client's own
+    reader refuses one within 20% of expiry because a minting caller would
+    refresh it. This reader never mints, so it keeps the mirror's reading
+    (nexus-t9klx review): 60s left of a 3600s lease is still a token."""
+    base_url = "http://127.0.0.1:4242"
+    _write_data_token_lease(
+        tmp_path, base_url=base_url, tenant="default", token="tok",
+        expires_in=60.0, ttl_seconds=3600.0,
+    )
+    assert _load_lib()._read_data_token_lease(tmp_path, base_url) == "tok"
 
 
 def test_read_data_token_lease_missing(tmp_path):

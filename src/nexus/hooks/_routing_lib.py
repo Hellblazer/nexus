@@ -340,7 +340,11 @@ def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | Non
     # in-process cache, which is the read-only contract a PreToolUse guard
     # needs. Tenant is the same literal the client hardcodes everywhere.
     try:
-        return DataTokenManager(config_dir=config_dir).fresh_lease_token(base_url, "default")
+        # 0.0: any unexpired lease, as the plugin mirror read it (nexus-t9klx
+        # review). The client's 20% refresh margin is for callers that mint.
+        return DataTokenManager(config_dir=config_dir).fresh_lease_token(
+            base_url, "default", near_expiry_threshold=0.0,
+        )
     except Exception:  # noqa: BLE001 — best-effort, exactly as the mirror was
         return None
 

@@ -441,11 +441,13 @@ call the same functions.
    the client's own primitives instead, which is what
    `tuple_ledger_project` had already done when this epic ported it. All
    three hooks, and the other two bare-`python3` hooks, are now `nx-hook`
-   verbs with no mirror. The tier outcome stands for other reasons:
-   `phase_review_close_requires_gate` must deny when it crashes,
-   `subagent_git_write_requires_orchestrator` is deliberately fail-open by
-   Sam's 2026-07-25 ruling, and `mailbox_drain` must write its stdout
-   before it returns. See Revision History, 2026-09-23.
+   verbs with no mirror. The tier outcome stands for other reasons.
+   Both routing guards return a deny, and an `mcp_tool` hook cannot return
+   a permission decision (nexus-17i1n measured the close gate inert on the
+   tool tier); `phase_review_close_requires_gate` must also deny when it
+   crashes. `mailbox_drain` must write its stdout before it returns. The
+   git-write guard's fail-OPEN posture is not a tier reason: a crash on
+   the tool tier already reads as allow. See Revision History, 2026-09-23.
 2. **The command tier.** Six of the seven `SessionStart` entries (the
    seventh is item 3) become command hooks in exec form on `nx-hook`, a
    new console script beside

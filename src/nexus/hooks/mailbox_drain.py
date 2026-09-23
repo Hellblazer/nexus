@@ -1076,8 +1076,11 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
 
     try:
         # A peek: never mints, never touches the in-process cache.
+        # Threshold 0.0: any lease not yet expired, as the plugin script read
+        # it. The client's 20% refresh margin would leave a lease-only box
+        # with no mail for the last fifth of every lease.
         data_token = DataTokenManager(config_dir=config_dir).fresh_lease_token(
-            base_url, "default",
+            base_url, "default", near_expiry_threshold=0.0,
         )
     except Exception:  # noqa: BLE001 — best-effort, as the static legs below are the fallback
         data_token = None
