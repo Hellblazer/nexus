@@ -32,8 +32,9 @@ ships no Python package, so it has no console script to ride; it runs its
 own stdlib scripts through `uv`, which it already requires because Serena
 launches via `uvx`, and which installs as `uv.exe` on Windows. The argv is
 pinned whole: `--no-project` keeps uv from syncing whatever project the
-session's cwd is in, and `--no-config` keeps that project's
-`.python-version` from choosing, or downloading, the interpreter.
+session's cwd is in, and `--no-config` keeps a `.python-version` from
+choosing, or downloading, the interpreter. uv 0.8 finds that file above the
+cwd and uv 0.12 above the script's directory, so the flag covers both.
 """
 from __future__ import annotations
 
@@ -458,7 +459,7 @@ SN_REJECTS = [
         _sn("x.py", args=[*SN_UV_ARGV, f"{SN_SCRIPT_PREFIX}session_start.py", "--extra"]),
         id="uv-with-an-argument-after-the-script",
     ),
-    # Without --no-config the session's project `.python-version` picks the
+    # Without --no-config a `.python-version` above the cwd or the plugin picks the
     # interpreter: measured rc=2 against a pin that is not installed.
     pytest.param(
         "SessionStart",

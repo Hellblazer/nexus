@@ -133,7 +133,7 @@ never ran them either.
 
 - nexus-z9cz2 — `conexus/skills/orchestration/SKILL.md`: names the ledger's VERIFY parser as `nexus.hooks.tuple_ledger_project` instead of the deleted plugin copy. Wording only.
 
-- nexus-j4iy0 — `sn/hooks/hooks.json`: all four entries launch through exec-form `uv run --no-project --no-config --quiet <script>` instead of bare `python3`, which stock Windows lacks. uv is already required by Serena's `uvx`; `--no-config` keeps the session project's `.python-version` from choosing the interpreter. A Context7-only user now needs uv for the hooks too.
+- nexus-j4iy0 — `sn/hooks/hooks.json`: all four entries launch through exec-form `uv run --no-project --no-config --quiet <script>` instead of bare `python3`, which stock Windows lacks. uv is already required by Serena's `uvx`; `--no-config` keeps a `.python-version` above the session's cwd (uv 0.8) or above the installed plugin (uv 0.12) from choosing the interpreter. A Context7-only user now needs uv for the hooks too.
 - nexus-j4iy0 — `sn/hooks/scripts/auto_approve_sn_mcp.py`: docstring names the uv launcher. Wording only.
 
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for

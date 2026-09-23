@@ -118,14 +118,17 @@ class TestSnPluginStructure:
 
 
 class TestSnHooksLaunchUnderUv:
-    """The manifest's own argv runs under uv from a hostile cwd (nexus-j4iy0).
+    """The manifest's own argv runs under uv beneath a hostile pin (nexus-j4iy0).
 
     sn hooks used to run under bare ``python3``, which stock Windows does
     not have. They now run through ``uv``, which sn already requires for
-    Serena. The risk that swap brings is the session's cwd: ``uv run``
-    reads the project there, and a ``.python-version`` pinning an
-    interpreter that is not installed made it exit 2 (measured). This runs
-    every manifest entry's real argv, not a retyped copy, from such a cwd.
+    Serena. The risk that swap brings is a ``.python-version`` pinning an
+    interpreter that is not installed: without ``--no-config`` it made the
+    launch exit 2. WHERE uv looks for that file depends on its version:
+    0.8 searches above the cwd, 0.12 above the script's directory (both
+    measured; CI runs the newer one). So the pin here sits above BOTH a
+    copy of the plugin and the cwd, and every manifest entry's real argv,
+    not a retyped copy, runs beneath it.
     """
 
     PAYLOAD = json.dumps({
@@ -136,36 +139,41 @@ class TestSnHooksLaunchUnderUv:
     @staticmethod
     def _uv() -> str:
         # `uv run` exports UV (the uv binary's path); a bare pytest falls
-        # back to PATH. CI and the
-        # dev loop both have uv, so its absence is a failure, not a skip.
+        # back to PATH. CI and the dev loop both have uv, so its absence is
+        # a failure, not a skip.
         uv = os.environ.get("UV") or shutil.which("uv")
         if not uv:
             pytest.fail("uv is not available; sn hooks launch through it")
         return uv
 
     @staticmethod
-    def _hostile_cwd(tmp_path: Path) -> Path:
+    def _hostile_tree(tmp_path: Path) -> tuple[Path, Path]:
+        """``(plugin_root, cwd)``, both under a pin nothing can satisfy."""
         (tmp_path / ".python-version").write_text("3.8.3\n")
-        (tmp_path / "pyproject.toml").write_text(
+        plugin = tmp_path / "plugin"
+        shutil.copytree(SN_DIR, plugin)
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "pyproject.toml").write_text(
             '[project]\nname = "x"\nversion = "0"\nrequires-python = ">=3.14"\n'
         )
-        return tmp_path
+        return plugin, cwd
 
-    def _argvs(self) -> list[list[str]]:
-        data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
+    def _argvs(self, plugin: Path) -> list[list[str]]:
+        data = json.loads((plugin / "hooks" / "hooks.json").read_text())
         out = []
         for hooks in data["hooks"].values():
             for entry in hooks:
                 for h in entry["hooks"]:
                     out.append([
                         self._uv() if h["command"] == "uv" else h["command"],
-                        *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(SN_DIR)) for a in h["args"]),
+                        *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for a in h["args"]),
                     ])
         assert len(out) == 4, out
         return out
 
-    def _run(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "UV_PYTHON_DOWNLOADS": "never", "CLAUDE_PLUGIN_ROOT": str(SN_DIR)}
+    def _run(self, argv: list[str], plugin: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "UV_PYTHON_DOWNLOADS": "never", "CLAUDE_PLUGIN_ROOT": str(plugin)}
         # --no-config gates config FILES only; uv still honours UV_* env
         # vars, and an ambient UV_PYTHON would choose the interpreter here.
         for var in ("VIRTUAL_ENV", "UV_PYTHON", "UV_NO_CONFIG", "UV_CONFIG_FILE"):
@@ -175,10 +183,10 @@ class TestSnHooksLaunchUnderUv:
             capture_output=True, text=True, timeout=60,
         )
 
-    def test_every_entry_runs_from_a_hostile_cwd(self, tmp_path: Path) -> None:
-        cwd = self._hostile_cwd(tmp_path)
-        for argv in self._argvs():
-            result = self._run(argv, cwd)
+    def test_every_entry_runs_beneath_a_hostile_pin(self, tmp_path: Path) -> None:
+        plugin, cwd = self._hostile_tree(tmp_path)
+        for argv in self._argvs(plugin):
+            result = self._run(argv, plugin, cwd)
             assert result.returncode == 0, (argv, result.stderr)
             # The boundary returns 0 on a crash too; a crash leaves a trace
             # (_hook_boundary.guard's traceback.print_exc).
@@ -187,12 +195,13 @@ class TestSnHooksLaunchUnderUv:
                 out = json.loads(result.stdout)
                 assert out["hookSpecificOutput"]["permissionDecision"] == "allow", out
 
-    def test_the_cwd_is_hostile_without_no_config(self, tmp_path: Path) -> None:
-        """Non-vacuity: drop --no-config and the same cwd breaks the launch,
-        so the test above is exercising the flag, not a harmless directory."""
-        cwd = self._hostile_cwd(tmp_path)
-        argv = [a for a in self._argvs()[0] if a != "--no-config"]
-        result = self._run(argv, cwd)
+    def test_the_pin_is_hostile_without_no_config(self, tmp_path: Path) -> None:
+        """Non-vacuity: drop --no-config and the same tree breaks the launch,
+        so the test above is exercising the flag, not a harmless directory.
+        This failed on CI's uv 0.12 when the pin sat above the cwd only."""
+        plugin, cwd = self._hostile_tree(tmp_path)
+        argv = [a for a in self._argvs(plugin)[0] if a != "--no-config"]
+        result = self._run(argv, plugin, cwd)
         assert result.returncode != 0, (argv, result.stdout, result.stderr)
         assert "3.8.3" in result.stderr, result.stderr
 
