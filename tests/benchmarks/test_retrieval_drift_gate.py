@@ -63,7 +63,7 @@ import pytest
 from tests.db._service_fixture import spawn_service, wait_for_service
 
 from tests.benchmarks.test_retrieval_ndcg import ndcg_at_k
-from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
+from tests.db._service_fixture import ENGINE_ADMIN_DB_ENV_KEYS, SERVICE_ROLES_SQL, pg_bin_dir
 
 _BENCH_DIR = Path(__file__).parent
 _REPO_ROOT = _BENCH_DIR.parent.parent
@@ -199,6 +199,10 @@ def java_service(pg_instance):
         "NX_CHROMA_PATH": chroma_data,
     }
     env.pop("NX_STORAGE_BACKEND", None)
+    # Migrate through NX_DB_* above, never through admin creds inherited from
+    # os.environ (tests-db-isolation; see ENGINE_ADMIN_DB_ENV_KEYS).
+    for _k in ENGINE_ADMIN_DB_ENV_KEYS:
+        env.pop(_k, None)
     # nexus-lom9g: FILE-backed output via the shared primitive; the old
     # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
     # output accumulated before the port bound (nexus-j0nec). This file sits

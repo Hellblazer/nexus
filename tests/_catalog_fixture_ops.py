@@ -38,6 +38,7 @@ __all__ = [
     "fk_dropped_for_dangling_seed",
     "only_document",
     "register_real_doc_id",
+    "restore_fk_after_dangling_seeds",
     "seed_manifest_chunks",
     "unroutable_write_target",
 ]
@@ -363,16 +364,25 @@ def fk_dropped_for_dangling_seed():
     worker boots and owns its own PG+JAR — ``tests/_engine_substrate.py``'s
     ``ensure_engine()`` is process-memoized, not machine-shared): no other
     test on this worker can observe the transient constraint-less window.
-    Re-ADD is NOT VALID (not re-validated), so the seeded dangling row is
-    grandfathered in permanently, but every subsequent write inside this
-    worker's session is enforced exactly as before — this is scoped to the
-    handful of call sites whose actual subject is a dangling row, never
-    applied to a shared helper used by correctly-matched fixtures.
+    Re-ADD is NOT VALID (not re-validated), so the seeded dangling row
+    survives the block and the rest of the TEST can observe it, while every
+    later write is enforced exactly as before. Only for the rest of the
+    test: the seed marks the substrate dirty, and the autouse
+    ``_restore_manifest_fk_after_dangling_seed`` fixture in
+    ``tests/conftest.py`` calls :func:`restore_fk_after_dangling_seeds` at
+    that test's teardown, which deletes the dangling rows and VALIDATEs the
+    constraint again (tests-db-isolation, 2026-09-23). Before that restore
+    existed the NOT VALID flag outlived the test for the whole process, and
+    ``tests/db/test_fk_census.py``'s VALIDATED ground truth failed whenever
+    it shared a process with a seeding test. Use this only inside a test
+    body, never in a module- or class-scoped fixture: the restore runs after
+    the first test that follows the seed.
     """
     _run_psql(
         "ALTER TABLE nexus.catalog_document_chunks "
         "DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk;"
     )
+    _DANGLING_SEED_PENDING[0] = True
     try:
         yield
     finally:
@@ -383,6 +393,35 @@ def fk_dropped_for_dangling_seed():
             "REFERENCES nexus.chunks (tenant_id, collection, chash) "
             "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID;"
         )
+
+
+# Set by fk_dropped_for_dangling_seed, cleared by restore_fk_after_dangling_seeds.
+_DANGLING_SEED_PENDING: list[bool] = [False]
+
+
+def restore_fk_after_dangling_seeds() -> None:
+    """Undo what :func:`fk_dropped_for_dangling_seed` left on the
+    process-memoized substrate: delete every manifest row with no backing
+    ``nexus.chunks`` row, then VALIDATE ``fk_catalog_chunks_chunk``, so the
+    schema is again the one Liquibase built. A no-op when no seed ran since
+    the last restore.
+
+    Deleting every dangling row, not a recorded list, is exact here: the FK
+    was VALIDATED before the seed, so any row that fails it now came from a
+    seed. If VALIDATE still fails, psql raises and the calling test's
+    teardown errors, which names the leak instead of passing it on.
+    """
+    if not _DANGLING_SEED_PENDING[0]:
+        return
+    _DANGLING_SEED_PENDING[0] = False
+    _run_psql(
+        "DELETE FROM nexus.catalog_document_chunks d "
+        "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c "
+        "WHERE c.tenant_id = d.tenant_id AND c.collection = d.collection "
+        "AND c.chash = d.chash); "
+        "ALTER TABLE nexus.catalog_document_chunks "
+        "VALIDATE CONSTRAINT fk_catalog_chunks_chunk;"
+    )
 
 
 def unroutable_write_target() -> Any:

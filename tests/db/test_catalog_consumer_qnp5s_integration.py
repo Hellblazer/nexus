@@ -42,6 +42,7 @@ from pathlib import Path
 import pytest
 
 from tests.db._service_fixture import (
+    ENGINE_ADMIN_DB_ENV_KEYS,
     SERVICE_ROLES_SQL,
     pg_bin_dir,
     spawn_service,
@@ -210,6 +211,10 @@ def java_service(pg_instance):
     # Ensure catalog service mode does NOT bleed into the subprocess env
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_STORAGE_BACKEND_CATALOG", None)
+    # Migrate through NX_DB_* above, never through admin creds inherited from
+    # os.environ (tests-db-isolation; see ENGINE_ADMIN_DB_ENV_KEYS).
+    for _k in ENGINE_ADMIN_DB_ENV_KEYS:
+        env.pop(_k, None)
 
     # nexus-lom9g: FILE-backed output via the shared primitive; the old
     # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback

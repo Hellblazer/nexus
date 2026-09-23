@@ -8,8 +8,11 @@ every existing line.
 """
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
+
+import pytest
 
 from nexus.db.pg_provision import (
     _persist_service_token,
@@ -86,7 +89,27 @@ def test_persist_service_token_handles_missing_trailing_newline(tmp_path: Path) 
     assert creds["NX_SERVICE_TOKEN"] == "tok2"
 
 
-def test_load_service_credentials_into_env(tmp_path: Path, monkeypatch) -> None:
+@pytest.fixture
+def restore_environ():
+    """Put ``os.environ`` back exactly as it was.
+
+    ``load_service_credentials_into_env`` writes every ``NX_*``/``PG_*`` key
+    from the credentials file straight into ``os.environ``. ``monkeypatch``
+    cannot undo that for a key that was absent beforehand (``delenv`` on an
+    absent key records nothing), so these tests leaked the file's
+    ``NX_DB_ADMIN_URL=...127.0.0.1:15999`` into the process, and every
+    engine a later test spawned from ``os.environ`` tried to migrate
+    against that dead port (tests-db-isolation, 2026-09-23).
+    """
+    saved = os.environ.copy()
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+def test_load_service_credentials_into_env(
+    tmp_path: Path, monkeypatch, restore_environ
+) -> None:
     # RDR-002 ez5.13: the one-command guided upgrade self-loads pg_credentials.
     from nexus.db.pg_provision import (
         _write_credentials,
@@ -102,13 +125,12 @@ def test_load_service_credentials_into_env(tmp_path: Path, monkeypatch) -> None:
 
     loaded = load_service_credentials_into_env(tmp_path)
     assert loaded is True
-    import os
     assert os.environ["NX_SERVICE_TOKEN"] == "root-token-deadbeef"
     assert os.environ["NX_STORAGE_BACKEND"] == "service"
 
 
 def test_load_service_credentials_does_not_clobber_existing_token(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, restore_environ
 ) -> None:
     from nexus.db.pg_provision import (
         _write_credentials,
@@ -121,13 +143,12 @@ def test_load_service_credentials_does_not_clobber_existing_token(
     monkeypatch.setenv("NX_SERVICE_TOKEN", "user-exported-token")
 
     assert load_service_credentials_into_env(tmp_path) is True
-    import os
     # setdefault: a user-exported token wins over the file's.
     assert os.environ["NX_SERVICE_TOKEN"] == "user-exported-token"
 
 
 def test_load_service_credentials_no_file_reports_token_absence(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, restore_environ
 ) -> None:
     from nexus.db.pg_provision import load_service_credentials_into_env
 

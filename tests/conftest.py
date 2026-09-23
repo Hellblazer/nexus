@@ -1851,6 +1851,73 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
+def _restore_manifest_fk_after_dangling_seed():
+    """Put ``fk_catalog_chunks_chunk`` back to VALIDATED after any test that
+    used ``tests._catalog_fixture_ops.fk_dropped_for_dangling_seed``.
+
+    The seed re-adds the FK NOT VALID on the process-memoized engine
+    substrate so its dangling row can outlive the ``with`` block. Without a
+    restore that state outlived the TEST too, and
+    ``tests/db/test_fk_census.py``'s VALIDATED ground truth failed whenever
+    it ran in the same process after a seeding test (tests-db-isolation,
+    2026-09-23; guard: ``tests/db/test_fk_dangling_seed_restores_fk.py``).
+
+    Reads ``sys.modules`` instead of importing, so a test that never loaded
+    the helper module pays nothing and imports nothing.
+    """
+    import sys as _sys  # noqa: PLC0415 — local, matches this file's convention
+
+    yield
+    ops = _sys.modules.get("tests._catalog_fixture_ops")
+    if ops is not None:
+        ops.restore_fk_after_dangling_seeds()
+
+
+_ENGINE_DB_ENV_KEYS: tuple[str, ...] = (
+    "NX_DB_URL", "NX_DB_USER", "NX_DB_PASS",
+    "NX_DB_ADMIN_URL", "NX_DB_ADMIN_USER", "NX_DB_ADMIN_PASS",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_engine_db_env():
+    """Fail the test that leaves the engine's DB-connection env behind.
+
+    Every engine a later test spawns from ``{**os.environ, ...}`` inherits
+    these keys, and the engine reads ``NX_DB_ADMIN_*`` for its migration
+    pool whenever they are set. ``tests/db/test_pg_provision_token.py``
+    loaded a fake ``pg_credentials`` file into ``os.environ`` and never took
+    it back out, so in a single-process ``pytest tests/db`` every engine
+    booted after it tried to migrate against the file's dead
+    ``127.0.0.1:15999`` and exited on HikariPool fail-fast: 35 setup errors
+    in ``test_xnz0o_commands_integration.py``, hidden under ``-n auto``
+    because the two files usually land on different workers
+    (tests-db-isolation, 2026-09-23).
+
+    Autouse fixtures set up before ``monkeypatch`` and tear down after it,
+    so a key a test sets through ``monkeypatch`` is already restored when
+    this compares. What remains is a raw ``os.environ`` write. The fixture
+    puts the old values back before failing, so one leak does not cascade.
+    """
+    before = {k: os.environ.get(k) for k in _ENGINE_DB_ENV_KEYS}
+    yield
+    leaked = {k: os.environ.get(k) for k in _ENGINE_DB_ENV_KEYS if os.environ.get(k) != before[k]}
+    if leaked:
+        for k in leaked:
+            if before[k] is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = before[k]
+        pytest.fail(
+            "test left engine DB env changed in os.environ (restored now): "
+            f"{sorted(leaked)}. An engine spawned later inherits these; set "
+            "them with monkeypatch, or delenv them before code that writes "
+            "os.environ directly.",
+            pytrace=False,
+        )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_collection_registration_cache() -> None:
     """Clear ``nexus.corpus``'s per-process "known registered" cache
     around every test.
