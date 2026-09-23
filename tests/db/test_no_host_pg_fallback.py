@@ -34,6 +34,9 @@ rule (discovery may not answer one).
 
 from __future__ import annotations
 
+import pathlib
+import re
+
 import ast
 from pathlib import Path
 
@@ -54,13 +57,15 @@ def test_no_host_candidate_directories_remain() -> None:
     # explain what was removed and why, and a substring scan would fire on the
     # explanation rather than on a re-added leg.
     literals = [
-        node.value for node in ast.walk(tree)
+        node.value
+        for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     ]
     code_literals = [s for s in literals if "\n" not in s]
 
     offenders = [
-        s for s in code_literals
+        s
+        for s in code_literals
         if "/opt/homebrew" in s or "/usr/lib/postgresql" in s or "/usr/pgsql" in s
     ]
     assert offenders == [], (
@@ -77,7 +82,8 @@ def test_discovery_never_reaches_for_path() -> None:
     """``shutil.which`` must not be how a PostgreSQL gets chosen."""
     tree = ast.parse(_SOURCE.read_text())
     which_calls = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "which"
@@ -138,8 +144,10 @@ def test_no_host_pg_leg_anywhere_in_product_or_tooling() -> None:
                 isinstance(node, ast.Constant)
                 and isinstance(node.value, str)
                 and "\n" not in node.value
-                and ("/opt/homebrew/opt/postgresql" in node.value
-                     or "/usr/lib/postgresql" in node.value)
+                and (
+                    "/opt/homebrew/opt/postgresql" in node.value
+                    or "/usr/lib/postgresql" in node.value
+                )
             ):
                 offenders.append(f"{rel}:{node.lineno} {node.value!r}")
 
@@ -215,3 +223,53 @@ def test_the_two_sanctioned_legs_still_work(monkeypatch, tmp_path) -> None:
     bins = discover_pg_binaries()
     assert bins.initdb == bundle_bin / "initdb"
     assert bins.all_present()
+
+
+def test_no_module_prose_promises_a_host_postgresql_fallback() -> None:
+    """The DOCS must not describe the leg the tests above prove absent.
+
+    Every other test in this file pins BEHAVIOUR. This one pins PROSE, and it
+    exists because the prose drifted from the behaviour and stayed wrong long
+    enough to cost something.
+
+    GH #1381 / nexus-yv5m4 removed host-PostgreSQL discovery. `pg_bundle.py`
+    went on describing it in five places, including `locate_bundle_archive`'s
+    own ``Returns`` clause, which reads as contract rather than commentary. On
+    2026-09-22 a session building the RDR-218 WSL2 appliance read that clause,
+    believed a `None` would silently substitute a host PostgreSQL for the
+    bundled one, designed around the hazard, and was one message from filing a
+    bead for a defect that does not exist.
+
+    That is the expensive kind of stale text. Wrong-and-INERT prose blocks a
+    reader until someone tests the premise; wrong-and-ACTIONABLE prose does not
+    block them at all -- they build what it told them to, and it surfaces when
+    that ships.
+
+    Deliberately narrow: it forbids the CLAIM, not the words. Text that says
+    host PG is never used is what the fix reads like, so the patterns below
+    match only promissory phrasings, and the module's own corrective sentences
+    pass.
+    """
+    src = pathlib.Path(__file__).parents[2] / "src" / "nexus" / "db" / "pg_bundle.py"
+    text = src.read_text()
+    assert len(text) > 2000, f"{src} is implausibly short; the scan would be vacuous"
+
+    # Promissory shapes only: something FALLING BACK or PROCEEDING to host PG.
+    promises = re.compile(
+        r"(falls?\s+back\s+to\s+host|"
+        r"fall\s+through\s+to\s+.{0,20}host|"
+        r"proceeds?\s+with\s+host|"
+        r"then\s+(?:uses|tries)\s+host)",
+        re.IGNORECASE,
+    )
+    hits = [
+        f"{n}: {line.strip()}"
+        for n, line in enumerate(text.splitlines(), 1)
+        if promises.search(line)
+    ]
+    assert not hits, (
+        "pg_bundle.py prose promises a host-PostgreSQL fallback that was deleted "
+        "at GH #1381 / nexus-yv5m4:\n  " + "\n  ".join(hits) + "\n"
+        "State what the caller ACTUALLY does on a None (nx init downloads the "
+        "signed bundle; discover_pg_binaries raises PgBinaryNotFoundError)."
+    )
