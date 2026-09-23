@@ -492,9 +492,26 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
         )
 
 
-def resolve_knowledge_doc_for_chash(reader, chash: str, *, log_event: str):
+def resolve_knowledge_doc_for_chash(
+    reader, chash: str, *, log_event: str, collection: str | None = None,
+):
     """Resolve *chash* to the single store_put-origin catalog document it
     identifies, or ``None`` if there is no match or the match is ambiguous.
+
+    *collection*, when given, additionally restricts candidates to
+    entries whose ``physical_collection`` equals it (nexus-bb6n2 round 2).
+    ``docs_for_chashes`` is a catalog-WIDE reverse lookup — chash is a
+    pure function of chunk text, collection-independent — so an
+    unscoped call can match a document registered under a DIFFERENT
+    collection whose manifest happens to reference an identical chunk.
+    That is correct for a raw "which document owns this chash" query
+    (the delete-path and tombstone-reap callers, which omit *collection*
+    and keep the original catalog-wide behavior — they act on the chash
+    itself, not on one particular collection's identity), but wrong for
+    a store_put RECONCILE, whose contract is keyed on (collection,
+    title): pass *collection* there so a cross-collection chash
+    coincidence can never be mistaken for "this document already
+    exists in the collection I am writing to."
 
     nexus-5axey: ``by_doc_id`` is a TUMBLER-only lookup on the engine (the
     settled wji11 contract: tumbler is the only document identity); it
@@ -542,7 +559,12 @@ def resolve_knowledge_doc_for_chash(reader, chash: str, *, log_event: str):
     candidates = []
     for tumbler in matches:
         entry = reader.resolve(tumbler)
-        if entry is not None and entry.content_type == "knowledge" and not entry.file_path:
+        if (
+            entry is not None
+            and entry.content_type == "knowledge"
+            and not entry.file_path
+            and (collection is None or entry.physical_collection == collection)
+        ):
             candidates.append(entry)
     if len(candidates) > 1:
         _log.warning(
@@ -698,16 +720,6 @@ def catalog_store_hook_tracked(
         if reader is None:
             return "", False
 
-        # Dedup by chash stored in meta.doc_id. nexus-5axey: by_doc_id is a
-        # TUMBLER-only lookup on the engine and always mismatched this
-        # chash-shaped doc_id; resolve_knowledge_doc_for_chash uses
-        # docs_for_chashes, the chash-appropriate reverse lookup.
-        existing = resolve_knowledge_doc_for_chash(
-            reader, doc_id, log_event="catalog_store_hook_dedup"
-        )
-        if existing is not None:
-            return str(existing.tumbler), False
-
         # nexus-sdp0u: stable, collection-scoped identity for this document.
         # Reuses aspect_readers.uri_for's exact chroma:// convention (the
         # knowledge-collection identity field the reader already resolves
@@ -715,7 +727,52 @@ def catalog_store_hook_tracked(
         # source_path in chunk metadata post-RDR-102 D2) — one URI format,
         # never a second one. Empty title synthesizes nothing: see the
         # docstring for why a title-less URI must not be minted.
+        #
+        # Computed BEFORE the chash dedup below (moved up at nexus-bb6n2
+        # round 2) so a dedup HIT can stamp it too.
         source_uri = uri_for(collection_name, title) if title else None
+
+        # Dedup by chash stored in meta.doc_id. nexus-5axey: by_doc_id is a
+        # TUMBLER-only lookup on the engine and always mismatched this
+        # chash-shaped doc_id; resolve_knowledge_doc_for_chash uses
+        # docs_for_chashes, the chash-appropriate reverse lookup.
+        #
+        # nexus-bb6n2 round 2: scoped to THIS collection. Pre-fix, this
+        # lookup was collection-agnostic — docs_for_chashes is a catalog-
+        # WIDE reverse lookup (chash is a pure function of chunk text,
+        # collection-independent) — so a re-put whose first chunk happened
+        # to byte-match a chunk already manifested under a DIFFERENT
+        # collection's same-titled document silently adopted THAT
+        # document's tumbler here, with NO update to its
+        # physical_collection or source_uri: the catalog row kept
+        # pointing at the old collection while its manifest and T3 chunks
+        # moved to the new one. Measured live 2026-09-23: a 6-chunk split
+        # note re-put into a new collection reconciled onto an existing
+        # document from knowledge__1-1 this way; a 1-chunk unsplit note
+        # re-put the same way did not, only because its single, whole-note
+        # chash happened not to collide with anything catalog-wide — same
+        # code path, no structural difference between "split" and
+        # "unsplit" here. Docstring contract is (collection, title); a
+        # cross-collection chash coincidence must never satisfy it.
+        existing = resolve_knowledge_doc_for_chash(
+            reader, doc_id, log_event="catalog_store_hook_dedup",
+            collection=collection_name,
+        )
+        if existing is not None:
+            # Scoped to collection_name above, so physical_collection
+            # already matches — this stamps meta.doc_id at the new
+            # content's chash and, defensively, source_uri (a legacy row
+            # reachable only via this chash dedup, same shape as the
+            # nexus-sdp0u ghost-reconcile fix-round below, could still
+            # carry a stale/empty one).
+            writer = make_catalog_writer(priority="interactive")
+            writer.update(
+                existing.tumbler,
+                physical_collection=collection_name,
+                meta={"doc_id": doc_id},
+                source_uri=source_uri or "",
+            )
+            return str(existing.tumbler), False
 
         # Get or create "knowledge" curator owner, filtered on owner_type so
         # a same-named REPO owner cannot shadow the intended curator (same

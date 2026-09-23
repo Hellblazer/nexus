@@ -79,11 +79,51 @@ class TestDedupA1:
     def test_same_chash_different_title_dedups(self, tmp_path, monkeypatch):
         """The previously-broken case: by_doc_id(chash) always mismatched,
         and a differing title means ghost-by-title reconciliation cannot
-        mask the bug either -- pre-fix this minted a SECOND document."""
+        mask the bug either -- pre-fix this minted a SECOND document.
+
+        SAME collection for both puts (nexus-bb6n2 round 2, 2026-09-23):
+        this test originally varied collection between the two puts too,
+        incidentally exercising the collection-agnostic chash dedup that
+        round 2 found was itself a bug -- a re-put into a DIFFERENT
+        collection must never adopt another collection's document by
+        chash coincidence (see test_same_chash_different_collection_does_
+        not_dedup below, which now pins that directly). Fixed here to
+        SAME collection so this test keeps proving its own original
+        intent (title does not block dedup) without asserting the
+        now-corrected-away cross-collection behavior.
+        """
         from nexus.catalog.store_hook import catalog_store_hook_tracked
 
         cat = _make_catalog(tmp_path)
         chash = _chash("same-content")
+        collection = "knowledge__test1__bge-base-en-v15-768__v1"
+
+        first_tumbler = _populate_knowledge_doc(
+            cat, title="Doc A", chash=chash, collection=collection,
+        )
+        assert count_documents() == 1
+
+        second_tumbler, created = catalog_store_hook_tracked(
+            title="Doc B",  # deliberately DIFFERENT title
+            doc_id=chash,   # SAME chash
+            collection_name=collection,  # SAME collection
+        )
+
+        assert created is False, "dedup must fire, not mint a new document"
+        assert second_tumbler == first_tumbler
+        assert count_documents() == 1, "no duplicate document was minted"
+
+    def test_same_chash_different_collection_does_not_dedup(self, tmp_path, monkeypatch):
+        """nexus-bb6n2 round 2: a chash match in a DIFFERENT collection
+        must never be adopted -- the reconcile contract is keyed on
+        (collection, title). Found live: a split note's first chunk
+        happened to byte-match a document already manifested under a
+        different collection, silently reconciling onto it and leaving
+        its physical_collection/source_uri stuck on the OLD collection."""
+        from nexus.catalog.store_hook import catalog_store_hook_tracked
+
+        cat = _make_catalog(tmp_path)
+        chash = _chash("same-content-cross-collection")
 
         first_tumbler = _populate_knowledge_doc(
             cat, title="Doc A", chash=chash, collection="knowledge__test1__bge-base-en-v15-768__v1",
@@ -91,14 +131,17 @@ class TestDedupA1:
         assert count_documents() == 1
 
         second_tumbler, created = catalog_store_hook_tracked(
-            title="Doc B",  # deliberately DIFFERENT title
+            title="Doc A",  # SAME title too -- only collection differs
             doc_id=chash,   # SAME chash
             collection_name="knowledge__test2__bge-base-en-v15-768__v1",
         )
 
-        assert created is False, "dedup must fire, not mint a new document"
-        assert second_tumbler == first_tumbler
-        assert count_documents() == 1, "no duplicate document was minted"
+        assert created is True, (
+            "a re-put into a DIFFERENT collection must mint its own "
+            "document, never silently adopt the other collection's"
+        )
+        assert second_tumbler != first_tumbler
+        assert count_documents() == 2, "the new-collection put must be its own document"
 
     def test_different_chash_does_not_dedup(self, tmp_path, monkeypatch):
         """Sanity: distinct content must still register distinct documents."""
