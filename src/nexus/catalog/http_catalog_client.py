@@ -1444,6 +1444,33 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def update(self, tumbler: Tumbler | str, **fields: Any) -> None:
         self._post("/update", {"tumbler": str(tumbler), **fields})
 
+    def merge_documents(self, duplicate: Tumbler | str, canonical: Tumbler | str) -> dict:
+        """Collapse *duplicate* into *canonical* in ONE engine transaction
+        (nexus-z4rpi) — replaces the three non-atomic ``/update`` calls
+        (``update(dup, source_uri='')`` + ``update(canonical,
+        source_uri=<uri>)`` + ``update(dup, alias_of=canonical)``) that
+        ``ux_catalog_documents_live_source_uri`` (catalog-016) forces apart
+        and that a failure between any two calls could tear.
+
+        Moves ``source_uri`` from *duplicate* onto *canonical* only when
+        *canonical* currently lacks a durable one; either way *duplicate*'s
+        own ``source_uri`` is unconditionally freed. Sets *duplicate*'s
+        ``alias_of`` to *canonical* — a show on *duplicate* afterward
+        resolves to *canonical*.
+
+        Returns ``{"duplicate", "canonical", "source_uri_moved"}``.
+
+        Raises :class:`httpx.HTTPStatusError` (409) on a self-merge, either
+        tumbler not found/not visible to this tenant, a duplicate already
+        aliased to some OTHER canonical, or a merge that would close an
+        alias cycle — the server's ``CatalogRepository.MergeRefused``
+        message, unwrapped by the shared ``_raise_for_status`` machinery.
+        """
+        result = self._post(
+            "/merge", {"duplicate": str(duplicate), "canonical": str(canonical)},
+        )
+        return dict(result or {})
+
     def update_many(self, updates: list[dict]) -> list[int]:
         """Batch-update N documents' fields; returns per-entry update counts
         aligned 1:1 with *updates* (nexus-xedhp, duoak.11 follow-up).

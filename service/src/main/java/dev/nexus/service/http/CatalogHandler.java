@@ -35,6 +35,7 @@ import java.util.*;
  *   GET   /v1/catalog/search             FTS search
  *   POST  /v1/catalog/update             update document fields
  *   POST  /v1/catalog/update_many        batch-update fields for N documents (nexus-xedhp)
+ *   POST  /v1/catalog/merge              collapse a duplicate document into its canonical one, one transaction (nexus-z4rpi)
  *   POST  /v1/catalog/delete_many        batch-tombstone N documents (nexus-xedhp)
  *   DELETE /v1/catalog/delete            delete document by tumbler
  *   POST  /v1/catalog/link               upsert link
@@ -151,6 +152,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/search"                -> handleSearch(exchange, tenant, method);
                 case "/update"                -> handleUpdate(exchange, tenant, method);
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
+                case "/merge"                 -> handleMerge(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
                 case "/delete_many"           -> handleDeleteMany(exchange, tenant, method);
                 case "/restore"               -> handleRestore(exchange, tenant, method);
@@ -288,6 +290,11 @@ public final class CatalogHandler implements HttpHandler {
             // reaching an already-torn document. All are REFUSALS with the reason in
             // the message, so they get the 409 CollectionMergeRefused gets above, not
             // the generic 500 that would discard the only text naming the remedy.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.MergeRefused e) {
+            // nexus-z4rpi: POST /merge refused — self-merge, not found/cross-tenant,
+            // an already-aliased duplicate pointing elsewhere, or a would-be alias
+            // cycle. Same 409-with-message shape as the other typed refusals above.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.TombstonedDocumentException e) {
             // nexus-eldyi: a manifest write (write/append/purge) refused a
@@ -609,6 +616,35 @@ public final class CatalogHandler implements HttpHandler {
         }
         var counts = repo.updateDocumentsMany(tenant, updates);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", counts)));
+    }
+
+    /**
+     * POST /v1/catalog/merge — collapse a duplicate document into its
+     * canonical one in ONE transaction (nexus-z4rpi). Replaces the
+     * three-call client recipe ({@code update(dup, source_uri='')} +
+     * {@code update(canonical, source_uri=<uri>)} + {@code update(dup,
+     * alias_of=canonical)}) that {@code ux_catalog_documents_live_source_uri}
+     * forces apart and that a failure between any two calls could tear.
+     *
+     * <p>Body: {"duplicate": "1.1.2", "canonical": "1.1.1"}
+     * Response: {"duplicate", "canonical", "source_uri_moved"} — see
+     * {@link CatalogRepository#mergeDocuments} for the exact semantics and
+     * refusal conditions. A refusal is a {@link CatalogRepository.MergeRefused},
+     * mapped to 409 by the shared catch ladder below.
+     */
+    private void handleMerge(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String duplicate = (String) body.get("duplicate");
+        String canonical = (String) body.get("canonical");
+        if (duplicate == null || duplicate.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'duplicate' required\"}"); return;
+        }
+        if (canonical == null || canonical.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'canonical' required\"}"); return;
+        }
+        var result = repo.mergeDocuments(tenant, duplicate, canonical);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     /**

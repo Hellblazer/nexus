@@ -206,6 +206,10 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionOk("/search", "handleSearch"),
         neither("/update", "handleUpdate"),
         both("/update_many", "handleUpdateMany", POSITIONAL),
+        // nexus-z4rpi: response is a flat scalar map ({"duplicate", "canonical",
+        // "source_uri_moved"}) -- no JSON array (not collectionReturning) and the
+        // request body carries two tumbler scalars, no id list (not idListAccepting).
+        neither("/merge", "handleMerge"),
         neither("/delete", "handleDelete"),
         both("/delete_many", "handleDeleteMany", REPORT_ONLY),
         // nexus-dkymw: response is a flat scalar map ({"restored": 0|1}) --

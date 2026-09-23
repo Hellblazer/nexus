@@ -832,6 +832,66 @@ class TestUpdateCommand:
         assert "Traceback" not in result.output
 
 
+class TestMergeCommand:
+    """nexus-z4rpi: ``nx catalog merge`` goes through the engine's single
+    transactional /merge endpoint instead of the --alias-of three-call
+    recipe TestUpdateCommand above exercises.
+    """
+
+    def test_merge_moves_source_uri_and_resolves_to_canonical(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Duplicate", "--owner", "1.1",
+            "--source-uri", "chroma://knowledge__delos//papers/dup.pdf",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Canonical", "--owner", "1.1",
+        ])
+
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+        assert result.exit_code == 0, result.output
+        assert "source_uri_moved=True" in result.output
+
+        # Assert the alias RESOLVES: show on the duplicate returns the
+        # canonical entry, not merely a stored-but-unfollowed alias_of.
+        show_dup = runner.invoke(main, ["catalog", "show", "1.1.1", "--json"])
+        assert show_dup.exit_code == 0, show_dup.output
+        dup_data = json.loads(show_dup.stdout)
+        assert dup_data["tumbler"] == "1.1.2"
+        assert dup_data["title"] == "Canonical"
+
+        show_canon = runner.invoke(main, ["catalog", "show", "1.1.2", "--json"])
+        canon_data = json.loads(show_canon.stdout)
+        assert canon_data["source_uri"] == "chroma://knowledge__delos//papers/dup.pdf"
+
+    def test_merge_refuses_self_merge_cleanly(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Solo", "--owner", "1.1"])
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.1"])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "itself" in result.output.lower()
+
+    def test_merge_refuses_already_aliased_elsewhere_cleanly(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Dup", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "First", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "Second", "--owner", "1.1"])
+        merged = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+        assert merged.exit_code == 0, merged.output
+
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.3"])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "already aliased" in result.output.lower()
+
+
 class TestDeleteCommand:
     def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
         runner = CliRunner()

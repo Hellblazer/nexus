@@ -1165,6 +1165,32 @@ or deleting it and orphaning the links pointing at it. Rejected as a
 `ClickException` (no traceback) if the target is not a well-formed
 tumbler.
 
+### nx catalog merge
+
+```
+nx catalog merge DUPLICATE CANONICAL
+```
+
+Collapse `DUPLICATE` into `CANONICAL` in ONE engine transaction
+(nexus-z4rpi) — the atomic replacement for `--alias-of`'s manual recipe of
+three separate `nx catalog update` calls (`--source-uri ''` on the
+duplicate, `--source-uri` on the canonical, `--alias-of` on the duplicate),
+which `ux_catalog_documents_live_source_uri` forces apart and which a
+failure between any two calls could tear — leaving a document with no
+identity, or two live rows both claiming the same document with no alias
+between them.
+
+The engine moves `source_uri` from `DUPLICATE` onto `CANONICAL` only when
+`CANONICAL` currently lacks a durable one; either way `DUPLICATE`'s own
+`source_uri` is unconditionally freed. `DUPLICATE`'s `alias_of` is then set
+to `CANONICAL` — either the whole thing lands or nothing does.
+
+Refuses, with a clean error and no traceback, on: a self-merge; either
+tumbler not found (including one belonging to a different tenant, which
+reads identically to "not found" under RLS); a `DUPLICATE` already aliased
+to some OTHER canonical (settle that alias first); or a merge that would
+close an alias cycle.
+
 ### nx catalog gc
 
 ```

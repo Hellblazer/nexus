@@ -3305,6 +3305,185 @@ public final class CatalogRepository {
     }
 
     /**
+     * The merge txn refused a request that would corrupt the identity graph
+     * (a self-merge, a cycle, an already-aliased duplicate pointing
+     * elsewhere, or a tumbler this tenant cannot see — cross-tenant reads
+     * a "not found", which RLS already makes structurally indistinguishable
+     * from a genuinely absent document, and that IS the refusal: neither
+     * tumbler is ever resolved outside the caller's own tenant scope).
+     *
+     * <p>TYPED so the handler can map it to a 409 with this message intact,
+     * mirroring {@link CollectionMergeRefused} / {@link RehomeRefused}.
+     */
+    public static final class MergeRefused extends RuntimeException {
+        public MergeRefused(String message) { super(message); }
+    }
+
+    /**
+     * Collapse a duplicate catalog entry into its canonical one in ONE
+     * transaction (nexus-z4rpi): the client-side recipe this replaces was
+     * three non-atomic {@code /update} calls —
+     * {@code update(dup, source_uri='')}, {@code update(canonical,
+     * source_uri=<uri>)}, {@code update(dup, alias_of=canonical)} — forced
+     * apart by {@code ux_catalog_documents_live_source_uri} (catalog-016),
+     * a partial unique index on {@code (tenant_id, source_uri)} among live
+     * rows. Attempting step 2 before step 1 hits that index (measured: 18
+     * of 19 pairs in the nexus-z0lu4 cleanup); a failure between any two
+     * steps left either a document holding no identity at all, or two live
+     * rows both claiming the same document with no alias between them.
+     *
+     * <p><b>Semantics:</b>
+     * <ul>
+     *   <li>{@code source_uri} moves from *duplicateTumbler* to
+     *       *canonicalTumbler* only when the canonical currently lacks a
+     *       durable one (blank/empty). Either way the duplicate's own
+     *       {@code source_uri} is unconditionally cleared first — mirrors
+     *       the manual recipe's step 1: an alias row must not keep
+     *       occupying the partial unique index once this call returns,
+     *       whether or not its value went anywhere.</li>
+     *   <li>{@code alias_of} is set on the duplicate to *canonicalTumbler*
+     *       unconditionally (once the refusal checks below pass).</li>
+     * </ul>
+     *
+     * <p><b>Refusals</b> (all {@link MergeRefused}, all checked against
+     * THIS transaction's own snapshot before any write):
+     * <ul>
+     *   <li><b>Self-merge:</b> the two tumblers are identical.</li>
+     *   <li><b>Not found:</b> either tumbler resolves to no LIVE row under
+     *       this tenant — covers a genuinely absent document AND, because
+     *       every read here is RLS-scoped to *tenant*, a cross-tenant
+     *       tumbler the caller cannot see at all.</li>
+     *   <li><b>Already-aliased elsewhere:</b> the duplicate's existing
+     *       {@code alias_of} is non-blank and names a DIFFERENT tumbler
+     *       than *canonicalTumbler*. A duplicate already aliased to
+     *       exactly *canonicalTumbler* is the idempotent case and
+     *       proceeds.</li>
+     *   <li><b>Cycle:</b> walking {@code alias_of} from *canonicalTumbler*
+     *       (bounded at {@link #MAX_ALIAS_HOPS}, same cap {@link
+     *       #resolveAliasTarget} uses) reaches *duplicateTumbler* — i.e.
+     *       the canonical is already (transitively) an alias OF the
+     *       duplicate, so pointing the duplicate at it would close a
+     *       loop.</li>
+     * </ul>
+     *
+     * <p>Does NOT remap links from the duplicate onto the canonical — a
+     * real gap the parent bead's own text names ("only half a merge"
+     * without it), left for a follow-up rather than folded in here.
+     *
+     * @return {@code {"duplicate", "canonical", "source_uri_moved"}}
+     */
+    public Map<String, Object> mergeDocuments(
+        String tenant, String duplicateTumbler, String canonicalTumbler
+    ) {
+        if (duplicateTumbler == null || duplicateTumbler.isBlank()
+            || canonicalTumbler == null || canonicalTumbler.isBlank()) {
+            throw new IllegalArgumentException(
+                "merge requires both a non-blank duplicate and canonical tumbler");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            if (duplicateTumbler.equals(canonicalTumbler)) {
+                throw new MergeRefused(
+                    "cannot merge a document with itself: " + duplicateTumbler);
+            }
+            var dup = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.ALIAS_OF)
+                         .from(CATALOG_DOCUMENTS)
+                         .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                         .fetchOne();
+            if (dup == null) {
+                throw new MergeRefused(
+                    "duplicate not found (absent, tombstoned, or not visible to this "
+                    + "tenant): " + duplicateTumbler);
+            }
+            boolean canonicalExists = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+            if (!canonicalExists) {
+                throw new MergeRefused(
+                    "canonical not found (absent, tombstoned, or not visible to this "
+                    + "tenant): " + canonicalTumbler);
+            }
+            String dupSourceUri = dup.value1();
+            String existingAlias = dup.value2();
+            if (existingAlias != null && !existingAlias.isBlank()
+                && !existingAlias.equals(canonicalTumbler)) {
+                throw new MergeRefused(
+                    duplicateTumbler + " is already aliased to " + existingAlias
+                    + "; refusing to re-point it to " + canonicalTumbler
+                    + " (already-aliased duplicate pointing elsewhere — settle the "
+                    + "existing alias first)");
+            }
+
+            // Cycle check: walk alias_of from the CANONICAL side. If that chain
+            // reaches the duplicate, canonical is already (transitively) an alias
+            // of duplicate, and setting duplicate.alias_of=canonical would close
+            // a loop. Bounded and cycle-safe exactly like resolveAliasTarget.
+            String cursor = canonicalTumbler;
+            Set<String> seen = new LinkedHashSet<>();
+            seen.add(cursor);
+            for (int hop = 0; hop < MAX_ALIAS_HOPS; hop++) {
+                String next = ctx.select(CATALOG_DOCUMENTS.ALIAS_OF).from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(cursor))
+                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                    .fetchOne(CATALOG_DOCUMENTS.ALIAS_OF);
+                if (next == null || next.isBlank()) break;
+                if (next.equals(duplicateTumbler)) {
+                    throw new MergeRefused(
+                        "merging " + duplicateTumbler + " -> " + canonicalTumbler
+                        + " would create an alias cycle: " + canonicalTumbler
+                        + " already resolves back to " + duplicateTumbler);
+                }
+                if (!seen.add(next)) break;  // a pre-existing cycle elsewhere; not this merge's problem
+                cursor = next;
+            }
+
+            String canonSourceUri = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler)))
+                .fetchOne(CATALOG_DOCUMENTS.SOURCE_URI);
+            boolean dupHasUri = dupSourceUri != null && !dupSourceUri.isBlank();
+            boolean canonicalLacksUri = canonSourceUri == null || canonSourceUri.isBlank();
+            boolean moveUri = dupHasUri && canonicalLacksUri;
+
+            if (dupHasUri) {
+                // Unconditional free of the duplicate's identity slot — mirrors the
+                // manual recipe's step 1 — so the partial unique index never keeps
+                // it pinned to a row that is about to become a pure alias pointer,
+                // whether or not the value goes anywhere. deleted_at IS NULL guard
+                // is defense in depth: both rows were already confirmed live above,
+                // in this same transaction's snapshot.
+                ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "")
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .execute();
+            }
+            if (moveUri) {
+                ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, dupSourceUri)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .execute();
+            }
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, canonicalTumbler)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .execute();
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("duplicate", duplicateTumbler);
+            result.put("canonical", canonicalTumbler);
+            result.put("source_uri_moved", moveUri);
+            return result;
+        });
+    }
+
+    /**
      * Look up tumbler by (physical_collection, file_path). Returns null if not found.
      *
      * <p>nexus-h77a2: restores the retired local arm's {@code (file_path = ? OR

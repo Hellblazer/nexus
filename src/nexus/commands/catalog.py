@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import click
+import httpx
 
 import structlog
 
@@ -798,6 +799,43 @@ def update_cmd(
         # nexus-fb6x: same UX-cleanup as the batch path.
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Updated: {t}")
+
+
+@catalog.command("merge")
+@click.argument("duplicate")
+@click.argument("canonical")
+def merge_cmd(duplicate: str, canonical: str) -> None:
+    """Collapse DUPLICATE into CANONICAL in one transaction (nexus-z4rpi).
+
+    Replaces the manual three-call recipe (--source-uri '' on the
+    duplicate, --source-uri on the canonical, --alias-of on the duplicate)
+    that ux_catalog_documents_live_source_uri forces apart and that a
+    failure between any two calls could tear. The engine moves the
+    duplicate's source_uri onto the canonical only when the canonical
+    currently lacks a durable one, then aliases the duplicate to the
+    canonical — either the whole thing lands or nothing does.
+
+    Refuses (with a clean error, no traceback) on a self-merge, either
+    tumbler not found (including a tumbler in a different tenant), a
+    duplicate already aliased to some OTHER canonical, or a merge that
+    would close an alias cycle.
+    """
+    cat = _get_catalog()
+    writer = _get_catalog_writer()
+    dup_t = _resolve_tumbler(cat, duplicate)
+    canon_t = _resolve_tumbler(cat, canonical)
+    try:
+        result = writer.merge_documents(dup_t, canon_t)
+    except httpx.HTTPStatusError as exc:
+        # nexus-z4rpi: the engine's typed MergeRefused (self-merge, not
+        # found/cross-tenant, already-aliased-elsewhere, alias cycle)
+        # surfaces here as a 409 whose body IS the clean message — same
+        # convention as the source_uri/alias_of ValueError catches above.
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        writer.close()
+    click.echo(f"Merged: {dup_t} -> {canon_t}"
+               f" (source_uri_moved={result.get('source_uri_moved', False)})")
 
 
 @catalog.command("delete")

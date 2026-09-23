@@ -219,6 +219,9 @@ class CatalogWriter(Protocol):
     def update(self, tumbler, **fields) -> object:  # canonical
         ...
 
+    def merge_documents(self, duplicate, canonical) -> object:  # canonical (nexus-z4rpi)
+        ...
+
     def link(self, from_t, to_t, link_type, created_by, *, from_span=..., to_span=..., allow_dangling=..., **meta) -> object:  # canonical DIVERGENT
         ...
 
@@ -314,6 +317,7 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "register",
     "register_many",
     "update",
+    "merge_documents",
     "link",
     "link_if_absent",
     "unlink",
