@@ -474,11 +474,49 @@ class TestVersionTransitionStampMovesForwardOnly:
     box would flip the stamp BACK and re-run the WHOLE finish pass
     (including engine convergence and daemon restarts), potentially
     converging the engine toward the OLDER release's own pin and undoing
-    the newer session's work."""
+    the newer session's work.
 
-    def test_older_running_version_neither_rewrites_nor_runs_the_finish_pass(
+    Round 4 (review finding): "running older than the stamp" is not ONE
+    shape. A dev checkout is the routine peer/dev topology above -- silent
+    at debug. The INSTALLED GENERATION itself running older is a genuine
+    downgrade, and staying silent there would hide that the engine is
+    stuck converged to the release the user just moved away from -- that
+    shape gets a visible, non-None summary instead."""
+
+    def test_older_dev_checkout_neither_rewrites_nor_runs_the_finish_pass_and_stays_silent(
         self, tmp_path,
     ):
+        """nexus-b2eaw round 4: a dev checkout (running_from_tool_install
+        False, the nexus-i24r4 classification) running older than the
+        stamp is the routine peer/dev shape -- silent (None), not just
+        "no rewrite"."""
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=False,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+        ) as detect:
+            line = check_version_transition(tmp_path)
+        assert line is None
+        detect.assert_not_called()  # the finish pass's first leg never fired
+        # The stamp is untouched -- still the newer value a peer wrote.
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+    def test_older_genuine_downgrade_neither_rewrites_nor_runs_the_finish_pass_but_is_visible(
+        self, tmp_path,
+    ):
+        """nexus-b2eaw round 4 (review finding): the INSTALLED generation
+        itself (running_from_tool_install True) running older than the
+        stamp is a genuine downgrade, not the peer/dev case -- it must
+        still not rewrite the stamp or run the finish pass automatically,
+        but it must NOT be silent: a non-None summary naming both
+        versions, that the engine is not converged, and the manual finish
+        command, surfaced the same way every other summary from this
+        function is (cli.py's caller click.echoes a non-None return to
+        stderr unconditionally)."""
         (tmp_path / "last_seen_version").write_text("6.7.1\n")
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
@@ -489,9 +527,12 @@ class TestVersionTransitionStampMovesForwardOnly:
             "nexus.upgrade_finish.detect_stale_processes",
         ) as detect:
             line = check_version_transition(tmp_path)
-        assert line is None
-        detect.assert_not_called()  # the finish pass's first leg never fired
-        # The stamp is untouched -- still the newer value a peer wrote.
+        assert line is not None
+        assert "6.7.1" in line and "6.7.0" in line
+        assert "not converged to this release's pin" in line
+        assert "nx daemon restart-stale" in line
+        detect.assert_not_called()  # still no automatic finish pass
+        # The stamp is untouched -- a downgrade must not consume it either.
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
 
     def test_older_running_version_logs_at_debug_with_both_versions(self, tmp_path):

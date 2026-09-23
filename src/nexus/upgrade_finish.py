@@ -2806,6 +2806,33 @@ def check_version_transition(
     value nothing can compare against; the truly-empty (never-stamped)
     case is unaffected, handled separately below.
 
+    TWO OLDER SHAPES, NOT ONE (nexus-b2eaw round 4, review finding). "the
+    running version is older than the stamp" covers two situations that
+    must NOT be treated alike:
+
+    * A dev checkout (or otherwise unmanaged process) running older than
+      the stamp — the routine multi-version topology above, happening
+      constantly. Silent at debug only, same posture ``nexus-i24r4``
+      already gives every dev-checkout invocation regardless of version
+      direction.
+    * The INSTALLED GENERATION ITSELF is older than the stamp — a genuine
+      downgrade (a user deliberately pinning back after a bad release).
+      Staying silent here would leave the engine converged to the release
+      the user just moved AWAY from, with no automatic path back to
+      convergence (nothing else re-runs the finish pass until the next
+      FORWARD transition) and no visible trace — a debug line the default
+      WARNING-floor CLI logging (``src/nexus/logging_setup.py``) never
+      shows. This shape returns a non-None one-line summary instead —
+      surfaced the SAME way every other summary from this function is:
+      ``cli.py``'s caller ``click.echo``s a non-None return to stderr
+      (``[upgrade-finish] {summary}``) unconditionally, never a second,
+      new surfacing mechanism — naming both versions, that the engine is
+      not converged to this release's pin, and the manual finish command
+      (``nx daemon restart-stale``, which already runs the WHOLE finish
+      pass unconditionally, independent of any stamp — see its own
+      docstring, "the re-run path for convergence outside a version
+      transition").
+
     This changes NOTHING about `nx doctor`'s own skew surfaces:
     ``_check_process_skew`` and ``_check_engine_convergence`` both call
     :func:`detect_stale_processes`/``detect_engine_convergence`` directly
@@ -2823,6 +2850,14 @@ def check_version_transition(
         seen = ""
     if seen == version:
         return None
+    # nexus-i24r4: a dev-checkout run (uv run nx from a release branch
+    # checked out in the shared tree) used to reach the stamp write below
+    # and record ITS version, so the next managed-install invocation read
+    # 7.34.0 -> 7.33.0 as an upgrade that never happened. Only a managed
+    # install owns the stamp. Resolved ONCE here (moved up from its
+    # original post-older-check position) because the older-branch below
+    # needs it too, to tell a dev checkout apart from a genuine downgrade.
+    is_managed_install = running_from_tool_install()
     if seen:
         from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred import
 
@@ -2832,13 +2867,33 @@ def check_version_transition(
             running_is_older = False  # unparseable stamp: fall through, same as pre-nexus-b2eaw
         if running_is_older:
             _log.debug("version_stamp_older_invocation_skipped", seen=seen, running=version)
-            return None
-    # nexus-i24r4: a dev-checkout run (uv run nx from a release branch
-    # checked out in the shared tree) used to reach the stamp write below
-    # and record ITS version, so the next managed-install invocation read
-    # 7.34.0 -> 7.33.0 as an upgrade that never happened. Only a managed
-    # install owns the stamp; the tool-install check ran after the write.
-    if not running_from_tool_install():
+            if not is_managed_install:
+                # A dev checkout (or peer-adjacent process) running older
+                # than the stamp is the routine, expected shape this
+                # module lives with constantly — silent at debug only,
+                # same posture nexus-i24r4 already gives every dev-checkout
+                # invocation below.
+                return None
+            # nexus-b2eaw round 4 (review finding): a GENUINE downgrade —
+            # the INSTALLED generation itself is older than the stamp, e.g.
+            # a user deliberately pinning back after a bad release. This
+            # is NOT the peer/dev case: nothing else runs the finish pass
+            # for this box until the NEXT forward transition, so silence
+            # here would leave the engine converged to the release the
+            # user just moved away from with no visible trace (a debug
+            # line the default WARNING-floor CLI logging never shows —
+            # src/nexus/logging_setup.py). Surfaced the SAME way every
+            # other summary from this function is: a non-None return,
+            # which cli.py's caller click.echoes to stderr
+            # (`[upgrade-finish] {summary}`) unconditionally — never a
+            # new, second surfacing mechanism.
+            return (
+                f"running {version} is older than the last-seen {seen} "
+                "(installed generation, not a dev checkout) -- engine not "
+                "converged to this release's pin; run "
+                "`nx daemon restart-stale` to finish manually"
+            )
+    if not is_managed_install:
         return None
     if preview is None:
         preview = invocation_is_preview()
