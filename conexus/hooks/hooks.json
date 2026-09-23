@@ -72,6 +72,14 @@
               "version-lockstep"
             ],
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "nx-hook",
+            "args": [
+              "mcp-connect-wait"
+            ],
+            "timeout": 20
           }
         ]
       }

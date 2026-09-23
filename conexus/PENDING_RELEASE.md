@@ -158,5 +158,17 @@ never ran them either.
   file a bead for a Workflow-tool run that the new wheel already buckets
   cleanly. Wording only.
 
+- nexus-veh77 — `conexus/hooks/hooks.json`: new `SessionStart` entry under the
+  `startup` matcher, `nx-hook mcp-connect-wait` (timeout 20). Interactive
+  Claude Code has no MCP connection barrier (measured: every submit rung from
+  0 to 2000 ms missed every tool-tier event, macOS 24/24 runs and WSL2 20/20,
+  T2 `nexus/veh77-interactive-ladder-results-2026-09-23`); this verb waits,
+  bounded (15 s) and fail-open, for THIS session's `nx-mcp` to publish its T1
+  lease before turn 1 can outrun the connection. Sessions on the pinned tag
+  keep running without the barrier until a new pin ships.
+
+- nexus-veh77 — `conexus/README.md`: new hook-table row for `nx-hook
+  mcp-connect-wait`.
+
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)
