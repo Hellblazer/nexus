@@ -5,7 +5,9 @@ import subprocess
 import pytest
 
 from nexus.formatters import (
+    _colon_safe,
     _display_path,
+    _display_path_or_title,
     _extract_context,
     _find_matching_lines,
     _is_bat_installed,
@@ -41,10 +43,10 @@ def test_vimgrep_basic(kwargs, expected) -> None:
 
 
 def test_vimgrep_missing_source_path() -> None:
-    """nexus-cd1k0.16 finding (2): a source-path-less result must still
-    render a non-empty first field -- an id/title stand-in, never a bare
-    leading colon (the old ``:10:0:...`` shape, empty and unusable as a
-    path for editor integration)."""
+    """nexus-1uov1: a source-path-less result must still render a
+    non-empty first field -- an id/title stand-in, never a bare leading
+    colon (the old ``:10:0:...`` shape, empty and unusable as a path for
+    editor integration)."""
     r = _result()
     r.metadata.pop("source_path")
     assert format_vimgrep([r])[0].startswith("r1:10:0:")
@@ -54,6 +56,60 @@ def test_vimgrep_missing_source_path_prefers_title() -> None:
     r = _result(title="Demo Note")
     r.metadata.pop("source_path")
     assert format_vimgrep([r])[0].startswith("Demo Note:10:0:")
+
+
+def test_vimgrep_title_with_colon_does_not_shift_fields() -> None:
+    """nexus-1uov1: a title standing in for a missing path can legitimately
+    carry a colon (a subtitle separator). Unescaped, "Title: Subtitle"
+    would shift line/col/text out from under a vimgrep consumer splitting
+    on ':' -- the parsed "line" field would be " Subtitle" instead of 10.
+    The substituted title must be the WHOLE first field (no real colon
+    anywhere in it), and the line/col/text fields after it must parse
+    exactly as they would for a plain path."""
+    r = _result(
+        title="Self-Aware Vector Embeddings for RAG: Encoding Relational Knowledge",
+    )
+    r.metadata.pop("source_path")
+    line = format_vimgrep([r])[0]
+    path_field, line_field, col_field, text_field = line.split(":", 3)
+    assert ":" not in path_field
+    assert path_field == "Self-Aware Vector Embeddings for RAG： Encoding Relational Knowledge"
+    assert line_field == "10"
+    assert col_field == "0"
+    assert text_field == "line one"
+
+
+# ── nexus-1uov1: _colon_safe / _display_path_or_title (unit) ────────────────
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("no colons here", "no colons here"),
+    ("one:colon", "one：colon"),
+    ("a:b:c", "a：b：c"),
+    ("", ""),
+])
+def test_colon_safe(text, expected) -> None:
+    assert _colon_safe(text) == expected
+
+
+def test_colon_safe_is_non_vacuous() -> None:
+    """The substitution actually changes the string when a colon is
+    present -- guards against a no-op implementation passing the field-
+    count assertions above by coincidence."""
+    assert _colon_safe("a:b") != "a:b"
+
+
+def test_display_path_or_title_prefers_display_path_over_title() -> None:
+    meta = {"source_path": "src/foo.py", "title": "Ignored: Title"}
+    assert _display_path_or_title(meta, "r1") == "src/foo.py"
+
+
+def test_display_path_or_title_falls_back_to_id_with_no_title() -> None:
+    assert _display_path_or_title({}, "chunk-id-123") == "chunk-id-123"
+
+
+def test_display_path_or_title_substitutes_colons_in_title_only() -> None:
+    assert _display_path_or_title({"title": "A: B"}, "r1") == "A： B"
 
 
 # ── nexus-1qed: _display_path priority + formatter integration ──────────────
@@ -205,10 +261,10 @@ def test_context_single_line() -> None:
 
 
 def test_context_missing_source_path_falls_back_to_title_or_id() -> None:
-    """nexus-cd1k0.16 finding (2): with lines_after/lines_before > 0 this
-    function does NOT delegate to format_plain, so it needs the same
-    title-or-id fallback as its sibling formatters -- a missing source_path
-    must not print an empty leading path field."""
+    """nexus-1uov1: with lines_after/lines_before > 0 this function does
+    NOT delegate to format_plain, so it needs the same title-or-id
+    fallback as its sibling formatters -- a missing source_path must not
+    print an empty leading path field."""
     r = _result(content="solo")
     r.metadata.pop("source_path")
     assert format_plain_with_context([r], lines_after=5)[0].startswith("r1:10:")
@@ -216,6 +272,17 @@ def test_context_missing_source_path_falls_back_to_title_or_id() -> None:
     r2 = _result(content="solo", title="Demo Note")
     r2.metadata.pop("source_path")
     assert format_plain_with_context([r2], lines_after=5)[0].startswith("Demo Note:10:")
+
+
+def test_context_title_with_colon_is_substituted() -> None:
+    r = _result(content="solo", title="Ratio 3:1 Results")
+    r.metadata.pop("source_path")
+    line = format_plain_with_context([r], lines_after=5)[0]
+    path_field, line_field, text_field = line.split(":", 2)
+    assert ":" not in path_field
+    assert path_field == "Ratio 3：1 Results"
+    assert line_field == "10"
+    assert text_field == "solo"
 
 
 # ── _find_matching_lines ────────────────────────────────────────────────────
@@ -380,8 +447,8 @@ def test_compact(query, content, expected) -> None:
 
 
 def test_compact_missing_source_path_falls_back_to_title_or_id() -> None:
-    """nexus-cd1k0.16 finding (2): sibling of the vimgrep case above --
-    format_compact must not print an empty leading path field either."""
+    """nexus-1uov1: sibling of the vimgrep case above -- format_compact
+    must not print an empty leading path field either."""
     r = _result()
     r.metadata.pop("source_path")
     assert format_compact([r])[0].startswith("r1:10:")
@@ -389,6 +456,17 @@ def test_compact_missing_source_path_falls_back_to_title_or_id() -> None:
     r2 = _result(title="Demo Note")
     r2.metadata.pop("source_path")
     assert format_compact([r2])[0].startswith("Demo Note:10:")
+
+
+def test_compact_title_with_colon_is_substituted() -> None:
+    r = _result(title="Chapter 2: Results")
+    r.metadata.pop("source_path")
+    line = format_compact([r])[0]
+    path_field, line_field, text_field = line.split(":", 2)
+    assert ":" not in path_field
+    assert path_field == "Chapter 2： Results"
+    assert line_field == "10"
+    assert text_field == "line one"
 
 
 def test_bat_line_range_is_relative_to_the_stdin_start(monkeypatch) -> None:

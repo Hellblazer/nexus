@@ -39,24 +39,47 @@ def _display_path(meta: dict, default: str = "") -> str:
     )
 
 
+def _colon_safe(text: str) -> str:
+    """*text* with every ``:`` replaced by U+FF1A (fullwidth colon).
+
+    nexus-1uov1 follow-up: :func:`_display_path_or_title` can put a
+    TITLE where the vimgrep/compact/context formats expect a path --
+    ``path:line:col:text``. A real path here never carries a colon (POSIX
+    paths; the formatters never see a Windows drive letter), so this
+    substitution costs those callers nothing, but a title is free text
+    and can legitimately carry one (a subtitle separator, a ratio, a
+    time). An unescaped colon there shifts every field after it: a title
+    like "Self-Aware Vector Embeddings for RAG: Encoding Relational
+    Knowledge" standing in for a missing path turns "Knowledge" into
+    what a vimgrep-format consumer reads as the LINE NUMBER. Substitution,
+    not backslash-escaping, because vimgrep/errorformat's ``%f:%l:%c:%m``
+    has no escape convention a consumer is expected to unescape -- an
+    escaped colon would just be a literal backslash plus a still-breaking
+    colon to any real parser. The fullwidth form reads as a colon to a
+    human and is never ``:`` to a field-splitting one.
+    """
+    return text.replace(":", "：")
+
+
 def _display_path_or_title(meta: dict, result_id: str) -> str:
     """``_display_path`` when present, else the title (falling back to
-    *result_id*) as a stand-in "path" column.
+    *result_id*) as a stand-in "path" column, colon-safe (see
+    :func:`_colon_safe`).
 
     nexus-cd1k0.16 finding (2): ``format_plain`` already falls back to
     ``title or id`` for a result with no ``source_path`` (a knowledge/docs
     entry from ``store put``), rendering it in the doc-style
     ``[distance] title`` shape instead of a bare path. The three OTHER
     single-line formatters (``format_compact``, ``format_vimgrep``,
-    ``format_plain_with_context``) called ``_display_path`` directly with
-    no such fallback, so the same result printed with an EMPTY leading
+    ``format_plain_with_context``) call ``_display_path`` directly with no
+    such fallback, so the same result would print with an EMPTY leading
     field -- ``:42:some text`` instead of a usable line. Those formats are
     inherently one colon-joined line, so they cannot switch shape the way
     ``format_plain`` does; the title-as-path stand-in keeps the line
     structurally valid (a real, non-empty first field) while still
     surfacing the ONLY identity the result actually carries.
     """
-    return _display_path(meta) or meta.get("title") or result_id
+    return _colon_safe(str(_display_path(meta) or meta.get("title") or result_id))
 
 
 def _find_matching_lines(chunk_text: str, query: str) -> list[int]:
