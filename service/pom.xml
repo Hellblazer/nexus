@@ -738,6 +738,14 @@
                                         <buildArg>-H:+AllowJRTFileSystem</buildArg>
                                         <buildArg>-H:+ReportExceptionStackTraces</buildArg>
                                         <!-- HTTP server support -->
+                                        <!-- RDR-218 Gap 2 (nexus-ijue9.7): bake
+                                             java.net.preferIPv4Stack=true as a RUNTIME
+                                             default. Neither a setProperty in main nor a
+                                             build-time -D has any effect; only this does.
+                                             Overridable at runtime with
+                                             -Djava.net.preferIPv4Stack=false, which is how
+                                             the deployment gate works. -->
+                                        <buildArg>--features=dev.nexus.service.Ipv4StackFeature</buildArg>
                                         <buildArg>--enable-http</buildArg>
                                         <buildArg>--enable-https</buildArg>
                                         <!-- Logback/SLF4J: initialize at build time -->

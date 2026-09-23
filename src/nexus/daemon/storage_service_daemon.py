@@ -445,6 +445,37 @@ def _find_service_jar() -> Path | None:
 _JAVA_FLOOR: int = 25
 
 
+#: Opt OUT of the image's baked IPv4-only stack. Unset means the baked
+#: default stands, which is what the WSL2 appliance needs; an explicit falsey
+#: value restores dual-stack for a deployment that needs IPv6 outbound.
+IPV4_ONLY_ENV = "NX_SERVICE_IPV4_ONLY"
+
+
+def _ipv4_only_disabled(env_value: str | None) -> bool:
+    """True when the caller explicitly DISABLED the IPv4-only stack.
+
+    Unset or blank is False: the baked default stands. An unrecognised value
+    RAISES rather than being read either way -- both reviewers of
+    nexus-ijue9.7 made the same point independently, that a typo must not
+    silently select a networking posture, because the symptom on the appliance
+    is a service that boots healthy and is unreachable from Windows with no
+    signal anywhere.
+    """
+    if env_value is None or not env_value.strip():
+        return False
+    v = env_value.strip().lower()
+    if v in {"0", "false", "no"}:
+        return True
+    if v in {"1", "true", "yes"}:
+        return False
+    raise ValueError(
+        f"{IPV4_ONLY_ENV} is set to {env_value!r}, which is neither a recognised "
+        "yes (1/true/yes) nor a recognised no (0/false/no). Refusing to guess: "
+        "this selects the socket family the engine binds, and reading it wrongly "
+        "produces a service that looks healthy and is unreachable from Windows."
+    )
+
+
 def _resolve_java_executable() -> str:
     """Return the ``java`` launcher for the JAR path, or fail loud with a remedy.
 
@@ -1060,6 +1091,15 @@ class StorageServiceSupervisor:
         # are accepted at runtime by both GraalVM native-image and the JVM,
         # the same as -Xmx below.
         argv.append("-Duser.timezone=UTC")
+        # RDR-218 Gap 2 (nexus-ijue9.7): the native image bakes
+        # java.net.preferIPv4Stack=true (Ipv4StackFeature), because binding
+        # 127.0.0.1 on Linux otherwise yields a dual-stack AF_INET6 listener on
+        # ::ffff:127.0.0.1 that WSL2's localhost relay will not forward. That
+        # baked value is a DEFAULT, not a lock: this flag overrides it for a
+        # deployment that needs IPv6 outbound (Voyage, EgressProxy). Measured
+        # both directions on GraalVM 25.
+        if _ipv4_only_disabled(os.environ.get(IPV4_ONLY_ENV)):
+            argv.append("-Djava.net.preferIPv4Stack=false")
         # nexus-lz3f2: optional max-heap bound for memory-constrained hosts
         # (e.g. the migration-rehearsal container, where an unbounded native-image
         # heap peak during bge-768 ONNX load + PG + the Python supervisor tripped
