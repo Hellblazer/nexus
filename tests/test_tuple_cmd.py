@@ -702,22 +702,19 @@ def _out(store, addr, *, sender="sender-w", body="hi", kind="note"):
 class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
     """nexus-1kvk3: the engine's ``rd`` orders by created_at ascending, never
     excludes claimed or dead-lettered rows, and caps a page at the hook's own
-    PROBE_N (20, ``mailbox_drain.py``). A live row ranked behind more than
+    PROBE_N (20, ``nexus.hooks.mailbox_drain``). A live row ranked behind more than
     that many dead-lettered rows must still reach this hook -- unlike the
     ``rd``-only watcher (the sibling starvation, nexus-qw386), this hook
     claims via ``/v1/tuples/in``, which is not windowed by any probe page."""
 
-    HOOK = (
-        Path(__file__).resolve().parent.parent
-        / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
-    )
+    HOOK_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", "mailbox-drain"]
 
     def _run_hook(self, addr: str, tmp_path) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["NEXUS_CONFIG_DIR"] = str(tmp_path / "hookcfg")
         env["XDG_STATE_HOME"] = str(tmp_path / "hookstate")
         return subprocess.run(
-            [sys.executable, str(self.HOOK)],
+            self.HOOK_ARGV,
             input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
             capture_output=True, text=True, env=env, timeout=300,
         )
@@ -728,7 +725,7 @@ class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
         store, _tmp = _watch_env(tmp_path)
         addr = _uniq("addr")
         sub = f"mailbox/{addr}"
-        # PROBE_N is 20 in mailbox_drain.py; one more than that dead-lettered
+        # PROBE_N is 20 in the drain verb; one more than that dead-lettered
         # ahead of the live row reproduces the starvation the bead names.
         for i in range(21):
             tid = _out(store, addr, sender="poison", body=f"dead-{i}")

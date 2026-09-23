@@ -149,6 +149,11 @@ VERB_TABLE: dict[str, str] = {
     # it emptied `routing/` of code -- `routing/_lib.py` had no plugin
     # importer left and went with it.
     "subagent-git-write-gate": "nexus.hooks.subagent_git_write_gate",
+    # The last of the five (nexus-t9klx): the UserPromptSubmit mailbox floor.
+    # The only verb that streams its stdout during run() (_io.stream), because
+    # a row it has consumed at the engine must be shown before its recovery
+    # record is dropped.
+    "mailbox-drain": "nexus.hooks.mailbox_drain",
     "rdr": "nexus.hooks.rdr_verb",
     # The two SessionStart entries that carried SHELL LOGIC in their command
     # string -- `nx upgrade --auto 2>/dev/null || echo ... >&2` and `nx self
@@ -361,7 +366,25 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001 — re-raised inside never_fail below
             failed_import = exc
 
-        from nexus._hook_runtime._io import never_fail, read_payload  # noqa: PLC0415 — deferred: only a real dispatch pays this
+        from nexus._hook_runtime._io import (  # noqa: PLC0415 — deferred: only a real dispatch pays this
+            install_stream_sink,
+            never_fail,
+            read_payload,
+        )
+
+        # The real stdout, for the one verb that must write BEFORE it returns
+        # (``_io.stream``; mailbox-drain). fd 1 now points at stderr, so the
+        # sink writes to the saved duplicate of the original, not to fd 1.
+        def _sink(text: str) -> None:
+            data = (text + "\n").encode("utf-8")
+            if saved_stdout_fd is not None:
+                while data:
+                    data = data[os.write(saved_stdout_fd, data):]
+            else:
+                real_stdout.write(text + "\n")
+                real_stdout.flush()
+
+        install_stream_sink(_sink)
 
         def _dispatch():
             if failed_import is not None:
@@ -383,6 +406,11 @@ def main() -> None:
 
         result = never_fail(_dispatch, verb)
     finally:
+        # sys.modules, not a fresh import: an import that failed above would
+        # otherwise run again here, inside a finally.
+        _io_module = sys.modules.get("nexus._hook_runtime._io")
+        if _io_module is not None:
+            _io_module.install_stream_sink(None)
         sys.stdout = real_stdout
         if saved_stdout_fd is not None and guarded_fd is not None:
             sys.stderr.flush()

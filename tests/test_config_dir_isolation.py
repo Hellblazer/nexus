@@ -170,11 +170,6 @@ class TestT2IsolatedUnderOverride:
 
         assert default_db_path() == sandbox_dir / "memory.db"
 
-    def test_hooks_db_path_redirects(self, sandbox_dir: Path):
-        from nexus.hooks import _default_db_path
-
-        assert _default_db_path() == sandbox_dir / "memory.db"
-
 
 class TestCatalogIsolatedUnderOverride:
     def test_catalog_path_redirects(self, sandbox_dir: Path, monkeypatch):

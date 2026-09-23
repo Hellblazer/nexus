@@ -124,15 +124,51 @@ def configure_hook_logging() -> None:
         return
 
 
+#: Where :func:`stream` writes, or ``None`` when nothing installed one.
+#: :func:`nexus._hook_runtime.entry.main` installs a sink bound to the REAL
+#: stdout for the length of one dispatch; outside a dispatch (the tool tier,
+#: a test calling ``run()`` in-process) there is none.
+_stream_sink: Callable[[str], None] | None = None
+
+
+def install_stream_sink(sink: Callable[[str], None] | None) -> None:
+    """Install (or, with ``None``, remove) the sink :func:`stream` writes to."""
+    global _stream_sink  # noqa: PLW0603 — one dispatch per process; entry.main owns the lifetime
+    _stream_sink = sink
+
+
+def stream(text: str) -> bool:
+    """Write *text* to the real stdout NOW, flushed, and return ``True``; or
+    return ``False`` when no sink is installed, leaving the caller to put the
+    text in its :class:`HookResult` instead.
+
+    For the one verb whose stdout is plain injected context rather than a
+    decision envelope, and whose correctness depends on the write happening
+    before the next step: ``mailbox-drain`` consumes a row at the engine and
+    must have shown it before dropping its own recovery record. A
+    ``HookResult`` is written only after ``run()`` returns, so a harness
+    timeout (a kill) in between would lose a message the engine already
+    consumed. A decision hook must not use this: its envelope is one JSON
+    object and belongs in ``HookResult.stdout``.
+    """
+    sink = _stream_sink
+    if sink is None:
+        return False
+    sink(text)
+    return True
+
+
 __all__ = [
     "HookResult",
     "additional_context",
     "configure_hook_logging",
+    "install_stream_sink",
     "never_fail",
     "permission_decision",
     "permission_request",
     "read_payload",
     "stop_decision",
+    "stream",
 ]
 
 

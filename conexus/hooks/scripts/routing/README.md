@@ -17,13 +17,13 @@ removed at a69bea883 (it silently blocked bash greps on code files) and
 the orphaned script, vendored framework, and registry were deleted at
 nexus-jbt5x, so today only nx ships routing rules.
 
-The framework (`_lib.py` + `_interpreter.py`) is canonical in nx
-and is vendored into any plugin that ships a routing rule; with no
-vendored copy left, the byte-equality guard (`tests/test_routing_lib_drift.py`)
-went with sn's copy and should return with the next vendoring. See RDR-125 § A2 / A3 for why vendoring is the
-chosen mechanism (hook scripts run system python with no `conexus`
-venv on `sys.path`; the clean import path is blocked by the stdlib-
-only startup-budget contract).
+The framework lives in the conexus wheel as `nexus.hooks._routing_lib`,
+and each rule is an `nx-hook` verb (nexus-t9klx deleted the plugin-resident
+`_lib.py` and `_interpreter.py`, and the rule scripts with them). Only
+`registry.yaml` remains in this directory. RDR-125 § A2 / A3 chose
+vendoring because hook scripts then ran system python with no `conexus`
+venv on `sys.path`; a console-script verb runs inside that venv, so the
+premise no longer holds and there is nothing left to vendor.
 
 **Ownership rule scope (RDR-125 fix-in-place from gate critique)**:
 the rule is stated for *single-target* hooks (one

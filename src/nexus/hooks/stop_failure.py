@@ -17,12 +17,13 @@ put ``mailbox_drain``, ``subagent_git_write_requires_orchestrator`` and
 reaches ``_endpoint_resolve.py``, which cannot leave the plugin. This one
 imports nothing but the standard library, so it has no closure to drag.
 
-That closure argument no longer holds for two of the three: nexus-t9klx
-ported both routing guards into the wheel, where the mirror is not needed
-at all and they call the client's own primitives. They stay on the command
-tier anyway, for a reason that outlives the closure —
-``phase_review_close_requires_gate`` must still deny when it crashes,
-which the paragraph below explains this tier cannot promise. The
+That closure argument never held: nexus-t9klx ported all three into the
+wheel, where the mirror is not needed at all and they call the client's own
+primitives. They stay on the command tier anyway, each for a reason that
+outlives the closure: ``phase_review_close_requires_gate`` must still deny
+when it crashes, which the paragraph below explains this tier cannot
+promise, and ``mailbox_drain`` fires on ``UserPromptSubmit`` and writes its
+stdout before it returns. The
 distinction this module claims for itself is therefore now the crash
 semantics alone, which is the part that was always doing the work.
 

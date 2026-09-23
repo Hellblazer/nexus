@@ -110,21 +110,26 @@ def test_every_tmux_call_goes_through_the_private_socket_wrapper() -> None:
     assert mvv.count("command tmux -L") == 1
 
 
-def test_run_sh_stages_the_drain_hooks_sibling_imports() -> None:
-    """mailbox_drain.py imports sibling modules at import time, before its own
-    never-raise contract can apply, so staging only the hook file itself makes
-    the container's UserPromptSubmit hook exit 1 on every prompt with a
-    ModuleNotFoundError. Measured 2026-09-18 by running the hook inside the
-    built image. run.sh must stage the whole scripts directory."""
+def test_the_generated_drain_hook_is_the_verb_the_real_manifest_wires() -> None:
+    """The container's trimmed hooks.json must run the same drain the plugin
+    ships: the `mailbox-drain` nx-hook verb (nexus-t9klx), by absolute path
+    since the hook's PATH does not carry the venv. A drift here tests a hook
+    no user runs."""
+    from nexus._hook_runtime.entry import VERB_TABLE  # noqa: PLC0415 -- deferred: this test only
+
     run_sh = (_DIR / "run.sh").read_text(encoding="utf-8")
-    assert 'cp -R "$SRC/hooks/scripts/." "$STAGE/plugin/hooks/scripts/"' in run_sh, (
-        "run.sh must stage the whole hooks/scripts directory, not named files"
+    assert '"command": "/home/nexus/nxenv/bin/nx-hook"' in run_sh
+    assert '"args": ["mailbox-drain"]' in run_sh
+    assert "mailbox-drain" in VERB_TABLE
+    manifest = json.loads(
+        (_ROOT / "conexus" / "hooks" / "hooks.json").read_text(encoding="utf-8"),
     )
-    drain = (_ROOT / "conexus" / "hooks" / "scripts" / "mailbox_drain.py").read_text(encoding="utf-8")
-    siblings = set(re.findall(r"^import (_\w+)", drain, re.M))
-    assert siblings, "expected mailbox_drain.py to import sibling modules"
-    for name in siblings:
-        assert (_ROOT / "conexus" / "hooks" / "scripts" / f"{name}.py").is_file(), name
+    wired = [
+        (h.get("command"), h.get("args"))
+        for block in manifest["hooks"]["UserPromptSubmit"]
+        for h in block["hooks"]
+    ]
+    assert wired == [("nx-hook", ["mailbox-drain"])], wired
 
 
 def test_the_generated_hooks_json_names_a_verb_the_cli_still_has() -> None:

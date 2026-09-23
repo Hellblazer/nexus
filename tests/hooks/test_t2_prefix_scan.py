@@ -834,11 +834,12 @@ def test_script_never_imports_nexus_package() -> None:
 # a mechanized guard for health.py's stranded-install "frozen rollback
 # artifact, not live data" advisory (``_check_stranded_install`` /
 # ``LAST_MIGRATION_CAPABLE``): the advisory's ``ok=True`` claim is a lie if
-# a shipped hook actually opens SQLite. Deliberately narrow in SCOPE too —
-# this lint only ever covers ``conexus/hooks/scripts/*.{py,sh}`` (the
-# shipped-hook surface T2 injection runs through); a hypothetical live
-# SQLite read introduced elsewhere in ``src/nexus/`` is NOT caught here —
-# see the T2 write-back for this session's explicit note on that boundary.
+# a shipped hook actually opens SQLite. Scoped to the shipped-hook surface,
+# which is WHERE THE HOOKS LIVE, not one directory (nexus-44812): it scanned
+# only ``conexus/hooks/scripts/`` while RDR-215 and nexus-t9klx moved every
+# hook but a handful into ``src/nexus/hooks/``, so its coverage shrank to
+# "the hooks not yet ported" with its green unchanged. A hypothetical live
+# SQLite read elsewhere in ``src/nexus/`` is still NOT caught here.
 
 
 #: Stdlib modules that back an embedded/local-file database — the
@@ -847,16 +848,22 @@ def test_script_never_imports_nexus_package() -> None:
 #: kind of on-disk file store T2 retired away from (RDR-158 P4).
 _BANNED_DB_MODULES = frozenset({"sqlite3", "shelve", "dbm"})
 
-#: .sh hooks have no AST to walk — kept as a text regex arm. Word-boundary
-#: on the bare module name catches `sqlite3` in any shell invocation form
-#: (`python3 -c "import sqlite3"`, `command -v sqlite3`, etc.) rather than
-#: only one particular import spelling.
-_SH_BANNED_MODULE_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(m) for m in _BANNED_DB_MODULES) + r")\b"
-)
-#: Any quoted string ending in ``.db`` — not just the exact literal
-#: ``"memory.db"`` — so a renamed local-cache filename doesn't evade this.
-_SH_DB_LITERAL_RE = re.compile(r"""["'][^"'\n]*\.db["']""")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Every directory a shipped hook's code lives in, each with the number of
+#: ``.py`` files measured there (2026-09-23, nexus-44812). A floor, not an
+#: exact count: raise it when a root grows, and read a drop as the walk
+#: going blind before reading it as a deletion. A root emptied on purpose
+#: is REMOVED from this map, never left at zero, because a floor of zero is
+#: satisfied by a walk that sees nothing. There is no ``.sh`` arm: RDR-215
+#: deleted every plugin shell script, and a scan over a directory with none
+#: in it is the vacuous half this lint used to have.
+_HOOK_CODE_ROOTS: dict[str, int] = {
+    "conexus/hooks/scripts": 12,
+    "sn/hooks/scripts": 5,
+    "src/nexus/hooks": 32,
+    "src/nexus/_hook_runtime": 4,
+}
 
 
 def _module_root(dotted: str) -> str:
@@ -917,18 +924,6 @@ def _python_offenders(path: Path) -> list[str]:
     return reasons
 
 
-def _shell_offenders(path: Path) -> list[str]:
-    """Text-regex scan of one ``.sh`` hook script — no AST available."""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    reasons: list[str] = []
-    if _SH_BANNED_MODULE_RE.search(text):
-        reasons.append("mentions a banned db module (sqlite3/shelve/dbm)")
-    match = _SH_DB_LITERAL_RE.search(text)
-    if match:
-        reasons.append(f"*.db string literal: {match.group()!r}")
-    return reasons
-
-
 @pytest.mark.lint
 def test_no_hook_script_reads_memory_db_or_sqlite() -> None:
     """Cheap mechanization for health.py's ``memory.db`` advisory (a
@@ -940,19 +935,21 @@ def test_no_hook_script_reads_memory_db_or_sqlite() -> None:
     regex-import-form + exact-literal-filename gap was concretely
     demonstrated (see module comment above).
     """
-    hooks_dir = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
     offenders: dict[str, list[str]] = {}
-    for path in sorted(hooks_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix == ".py":
+    scanned: dict[str, int] = {}
+    for root, floor in _HOOK_CODE_ROOTS.items():
+        files = sorted(p for p in (_REPO_ROOT / root).rglob("*.py") if p.is_file())
+        scanned[root] = len(files)
+        for path in files:
             reasons = _python_offenders(path)
-        elif path.suffix == ".sh":
-            reasons = _shell_offenders(path)
-        else:
-            continue
-        if reasons:
-            offenders[str(path.relative_to(hooks_dir))] = reasons
+            if reasons:
+                offenders[str(path.relative_to(_REPO_ROOT))] = reasons
+    short = {r: n for r, n in scanned.items() if n < _HOOK_CODE_ROOTS[r]}
+    assert not short, (
+        f"scanned fewer hook files than measured: {short} against floors "
+        f"{_HOOK_CODE_ROOTS}. A clean result over less than was measured "
+        "is not a clean result; rule out the walk going blind first."
+    )
     assert not offenders, (
         f"hook script(s) reference a banned db module or *.db literal: "
         f"{offenders} — T2 is Postgres via the engine's HTTP API in every "

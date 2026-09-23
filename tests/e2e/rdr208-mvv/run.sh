@@ -88,13 +88,8 @@ fi
 # The SessionStart matcher is copied through UNCHANGED from the version
 # under test: it is what step 6's expectation is derived from.
 cp "$SRC/.claude-plugin/plugin.json" "$STAGE/plugin/.claude-plugin/"
-# The WHOLE scripts directory, not just the two files the trimmed hooks.json
-# names: mailbox_drain.py imports sibling modules at import time
-# (_endpoint_resolve, _tuple_size_limits), and a missing sibling is a
-# ModuleNotFoundError BEFORE the hook's own never-raise contract applies, so
-# the hook would exit 1 on every prompt. Staging the directory costs nothing
-# and cannot fire anything: only hooks.json decides what runs.
-cp -R "$SRC/hooks/scripts/." "$STAGE/plugin/hooks/scripts/"
+# No plugin scripts are staged: both hooks under test are console scripts in
+# the wheel under test (nexus-t9klx ported the drain out of hooks/scripts/).
 # Located by the HYPHENATED verb, so both spellings work: the shell form
 # ("nx hook session-start") and the exec form ("nx-hook" + args). The
 # neighbouring session_start_hook.py spells it with an underscore and
@@ -127,21 +122,12 @@ import json, sys
 json.dump({"hooks": {
     "SessionStart": [{"matcher": sys.argv[2], "hooks": [
         {"type": "command", "command": "/home/nexus/nxenv/bin/nx hook session-start", "timeout": 10}]}],
-    # RDR-215 nexus-q02nx.22: exec form, matching the real hooks.json --
-    # the retired `_run_python_hook.sh` bash launcher is gone, and the
-    # interpreter resolution it used to perform now runs in Python,
-    # inside mailbox_drain.py itself (_interpreter.reexec_if_needed()).
-    #
-    # BRACED, like the real manifest: the shell-string form this replaced
-    # was expanded by the bash Claude Code ran it under, which takes either
-    # spelling. Exec form has no shell, so whatever expansion happens is
-    # Claude Code's own -- and the one spelling known to work there is the
-    # one conexus/hooks/hooks.json ships. Guessing the other costs a billed
-    # container run to find out.
+    # Exec form, the verb the real hooks.json wires (nexus-t9klx), at an
+    # ABSOLUTE path for the same PATH reason as session-start above.
     "UserPromptSubmit": [{"matcher": "", "hooks": [
         {"type": "command",
-         "command": "python3",
-         "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"],
+         "command": "/home/nexus/nxenv/bin/nx-hook",
+         "args": ["mailbox-drain"],
          "timeout": 10}]}],
     # The turn-end sentinel (~/git/recording-rig lib/sentinels.sh): the driver
     # waits for a hook signal that the turn ENDED instead of scraping the pane.

@@ -26,6 +26,12 @@ resolver beside `nexus.db.service_endpoint`, which the RDR's own "move,
 do not rewrite" rule forbids. Five conexus hooks stayed plugin-resident
 on bare `python3` for the same reason.
 
+That reason was wrong (corrected 2026-09-23, nexus-t9klx). A wheel module
+does not need the mirror: it can call the client's own primitives, as
+`tuple_ledger_project` already did when this RDR ported it. All five are
+now `nx-hook` verbs. The tier rulings stand on reasons of their own; the
+RDR's Revision History carries them.
+
 *Drift: missing cross-cutting concern.* The dependency direction — what
 may live in the wheel, what must stay in the plugin, and which way
 imports are allowed to point — is a system-wide constraint the design

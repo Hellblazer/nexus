@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""UserPromptSubmit hook: drain this session's RDR-205 mailboxes and inject
-what it finds (bead nexus-6konb.7, MM-2.2; design bead nexus-73vnw).
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""The ``mailbox-drain`` hook verb: drain this session's RDR-205 mailboxes
+on ``UserPromptSubmit`` and inject what it finds (bead nexus-6konb.7, MM-2.2;
+design bead nexus-73vnw; ported from the plugin script at nexus-t9klx).
 
 THE CONSUMER OF RECORD, and now the ONLY push-adjacent mechanism this repo
 ships for mailbox delivery (RDR-211 nexus-rplay.14 deleted the CLI
@@ -60,10 +61,21 @@ hazard RDR-206 Step 1 closed inside the engine, appearing here between
 two HTTP calls where no transaction can close it -- so the fix is to
 trust only what ``ack`` confirmed.
 
-Stdlib only, no ``nexus`` import, endpoint through the shared
-``_endpoint_resolve`` sibling (nexus-aginu): the same constraints the
-``tuple_ledger_project.py`` hook runs under, for the same reason -- a
-hook runs on boxes where the client package may be mid-upgrade.
+WHERE IT RUNS. This was a plugin script launched by a bare ``python3``,
+which stock Windows does not have (nexus-t9klx). As an ``nx-hook`` verb it
+rides the console script the installer writes, and it calls the client's
+own primitives -- endpoint discovery, the data-token lease, the persisted
+credentials, the tuple size caps -- instead of the stdlib mirrors a
+plugin script needed because it could not import ``nexus``. The endpoint
+legs are :mod:`nexus.hooks.tuple_ledger_project`'s, the sibling ported for
+the same reason; only the credential policy differs, see
+:func:`_resolve_endpoint`.
+
+OUTPUT IS STREAMED, not returned. ``nx-hook`` writes a verb's
+:class:`~nexus._hook_runtime._io.HookResult` after ``run()`` returns, and a
+row this verb consumed must be on stdout before its recovery record is
+dropped (see :class:`_Out`), so each block goes out through
+:func:`nexus._hook_runtime._io.stream` the moment its ack lands.
 """
 from __future__ import annotations
 
@@ -80,22 +92,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-# RDR-215 nexus-q02nx.21: hooks.json now launches this script with a bare
-# `python3`, so PATH decides the interpreter. Put back the resolution
-# `_run_python_hook.sh` used to perform, before anything that needs 3.12
-# or `nexus` is imported. See _interpreter.py for what is at stake.
-import _interpreter  # noqa: E402 -- must follow the sys.path insert
-
-_interpreter.reexec_if_needed()
-
-import _endpoint_resolve as _ep  # noqa: E402
-import _tuple_size_limits as _sz  # noqa: E402
+from nexus._hook_runtime._io import HookResult, stream
+from nexus._locking import lock_fd, unlock_fd
 
 #: Whole-call wall-clock bound per HTTP call. A prompt is waiting on this
 #: hook, so the ceiling is tight: a healthy engine answers a zero-timeout
@@ -153,20 +151,29 @@ _CLAIMANT_PID_WIDTH = 10
 #: once instead of spending up to this ceiling regardless.
 _PENDING_LOCK_TIMEOUT_S = 2.0
 
-_TENANT = _ep.DEFAULT_TENANT
 _SAFE_ADDRESS_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
 )
 
 
 class _Skip(Exception):
-    """Any resolution or transport failure. Caught once in main(), printed as
+    """Any resolution or transport failure. Caught in _drain_all(), printed as
     one SKIP line on stderr, exit 0. A hook that cannot reach the engine is
     not an error the prompt should ever see."""
 
 
 def _log_skip(reason: str) -> None:
-    print(f"[mailbox-drain] SKIP: {reason}", file=sys.stderr)  # noqa: T201 — stderr is this hook's only diagnostic surface
+    # stderr is this hook's only diagnostic surface.
+    sys.stderr.write(f"[mailbox-drain] SKIP: {reason}\n")
+
+
+def _check_field_size(field: str, value: str, limit: int) -> str | None:
+    """A SKIP reason when *value*'s UTF-8 length exceeds *limit*, else None.
+    Never includes *value* in the reason (bead nexus-r7xao)."""
+    n = len(value.encode("utf-8"))
+    if n > limit:
+        return f"field '{field}' is {n} bytes, exceeding the limit of {limit} bytes"
+    return None
 
 
 def _valid_address(address: str) -> bool:
@@ -180,7 +187,9 @@ def _valid_address(address: str) -> bool:
 
 
 def _config_dir() -> Path:
-    return _ep.default_config_dir()
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, like every endpoint primitive below
+
+    return Path(nexus_config_dir())
 
 
 def _session_registry_path(config_dir: Path, session_id: str) -> Path:
@@ -246,14 +255,15 @@ def _read_session_registry(config_dir: Path, session_id: str) -> list[str]:
 
 
 def _cleared_record_path(config_dir: Path, session_id: str) -> Path:
-    """``<config>/tuple-watch/cleared.<session_id>``, matching
-    ``nexus.session_marker.cleared_record_path`` -- pinned against drift by
-    :func:`test_rearm_naming_matches_the_wheel`'s sibling in the test module.
-    *session_id* here is the reading session's OWN id: the record this hook
-    reads was written FOR it, naming the mailbox(es) its own ``/clear``
-    stranded (RDR-208 Phase 2 Step 3).
+    """``<config>/tuple-watch/cleared.<session_id>``, from the writer's own
+    :func:`nexus.session_marker.cleared_record_path`. *session_id* here is
+    the reading session's OWN id: the record this hook reads was written FOR
+    it, naming the mailbox(es) its own ``/clear`` stranded (RDR-208 Phase 2
+    Step 3).
     """
-    return config_dir / "tuple-watch" / f"cleared.{session_id}"
+    from nexus.session_marker import cleared_record_path  # noqa: PLC0415 — deferred: most prompts have no record to read
+
+    return cleared_record_path(config_dir, session_id)
 
 
 def _read_cleared_record(config_dir: Path, session_id: str) -> list[str]:
@@ -539,13 +549,10 @@ def _pending_lock(config_dir: Path, address: str, *, deadline: float):
     try:
         while True:
             try:
-                if sys.platform == "win32":
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                else:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_fd(fd, blocking=False)
                 locked = True
                 break
-            except OSError:
+            except OSError:  # BlockingIOError on contention, on both platforms
                 if time.monotonic() >= lock_deadline:
                     break
                 time.sleep(0.02)
@@ -553,10 +560,7 @@ def _pending_lock(config_dir: Path, address: str, *, deadline: float):
     finally:
         if locked:
             try:
-                if sys.platform == "win32":
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                unlock_fd(fd)
             except OSError:
                 pass
         os.close(fd)
@@ -712,18 +716,35 @@ class _Out:
     KILL, so anything consumed-but-unprinted died with the process. Streaming
     makes "acked implies delivered" hold even under a mid-drain SIGKILL, for
     every row already acked at the moment of the kill.
+
+    That still holds under ``nx-hook``, which otherwise writes a verb's
+    output only after ``run()`` returns: each block goes through
+    :func:`nexus._hook_runtime._io.stream`, which writes the real stdout at
+    once. With no sink installed (``run()`` called in-process) the blocks
+    are kept and returned in the :class:`HookResult` instead.
     """
 
     def __init__(self) -> None:
         self._opened = False
+        self._unstreamed: list[str] = []
+
+    def _write(self, text: str) -> None:
+        # stdout IS the product here: a UserPromptSubmit hook's stdout
+        # becomes the injected context. These are not diagnostics.
+        if not stream(text):
+            self._unstreamed.append(text)
 
     def block(self, text: str) -> None:
         if not self._opened:
-            # stdout IS the product here: a UserPromptSubmit hook's stdout
-            # becomes the injected context. These are not diagnostics.
-            print("## Mailbox (RDR-205): delivered at this prompt\n", flush=True)  # noqa: T201
+            self._write("## Mailbox (RDR-205): delivered at this prompt\n")
             self._opened = True
-        print(text, flush=True)  # noqa: T201
+        self._write(text)
+
+    def result(self) -> HookResult:
+        """What ``run()`` returns: nothing when every block was streamed."""
+        if not self._unstreamed:
+            return HookResult()
+        return HookResult(stdout="\n".join(self._unstreamed))
 
 
 def _dims_of(row: dict[str, Any]) -> dict[str, Any]:
@@ -873,11 +894,17 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
     # own limits alone. An oversized address is refused here, before any
     # POST, the same as every other precondition this hook checks before
     # touching the network.
+    from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred: it pulls structlog, which a prompt with no mail never needs
+        _MAX_CLAIMANT_BYTES,
+        _MAX_FIELD_VALUE_BYTES,
+        _MAX_SUBSPACE_BYTES,
+    )
+
     claimant = _drain_claimant(address)
     size_reason = (
-        _sz.check_field_size("subspace", f"mailbox/{address}", _sz.MAX_SUBSPACE_BYTES)
-        or _sz.check_field_size("keys_pattern.to", address, _sz.MAX_FIELD_VALUE_BYTES)
-        or _sz.check_field_size("claimant", claimant, _sz.MAX_CLAIMANT_BYTES)
+        _check_field_size("subspace", f"mailbox/{address}", _MAX_SUBSPACE_BYTES)
+        or _check_field_size("keys_pattern.to", address, _MAX_FIELD_VALUE_BYTES)
+        or _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
     )
     if size_reason is not None:
         _log_skip(f"mailbox/{address}: oversized address, refused before any POST: {size_reason}")
@@ -1033,36 +1060,42 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
 
     A fresh data-token lease for the resolved host still WINS over the static
     token wherever one exists, mirroring the real client's
-    ``DataTokenManager.bearer_for``. Base-URL precedence comes from the shared
-    module (nexus-aginu) rather than being re-derived here, since that
-    precedence is what drifted between three hand-maintained copies before it
-    was factored out.
+    ``DataTokenManager.bearer_for``. Base-URL precedence is the ledger
+    sibling's, called rather than re-derived, since that precedence is what
+    drifted between three hand-maintained copies before it was factored out
+    (nexus-aginu).
     """
+    from nexus.config import persisted_credentials  # noqa: PLC0415 — deferred: a drain with no address never resolves
+    from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred, same reason
+    from nexus.hooks import tuple_ledger_project as _ledger  # noqa: PLC0415 — deferred, same reason
+
     try:
-        base_url, is_local = _ep.resolve_base_url(config_dir)
-    except _ep.EndpointUnresolvable as exc:
+        base_url, is_local = _ledger._resolve_base_url()
+    except _ledger._Skip as exc:
         raise _Skip(str(exc)) from exc
 
-    data_token = _ep.read_data_token_lease(config_dir, base_url)
+    try:
+        # A peek: never mints, never touches the in-process cache.
+        data_token = DataTokenManager(config_dir=config_dir).fresh_lease_token(
+            base_url, "default",
+        )
+    except Exception:  # noqa: BLE001 — best-effort, as the static legs below are the fallback
+        data_token = None
     if data_token:
         return base_url, data_token, is_local
 
-    import os  # noqa: PLC0415 — deferred: only this path reads the environment
-
     token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
     if not token:
-        token = (_ep.read_config_yml_credentials(config_dir) or {}).get(
-            "service_token", "",
-        ).strip()
-    if not token:
-        # Through the module's own accessor, never off the raw lease dict: it
+        token = persisted_credentials(config_dir).get("service_token", "").strip()
+    if not token and hasattr(os, "getuid"):
+        # Through the ledger's accessor, never off the raw lease record: it
         # refuses a lease file that is not owner-only, because the token it
         # carries authorizes real engine writes and a group- or world-readable
-        # lease means another local account could have read it too. Reading the
-        # dict directly would silently skip that audit.
+        # lease means another local account could have read it too. The lease
+        # filename carries the POSIX uid, so there is none to read on Windows.
         try:
-            token = _ep.read_local_supervisor_token(config_dir).strip()
-        except _ep.EndpointUnresolvable:
+            token = _ledger._read_local_supervisor_token(config_dir).strip()
+        except _ledger._Skip:
             token = ""
     if not token:
         raise _Skip(
@@ -1072,46 +1105,27 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     return base_url, token, is_local
 
 
-#: The per-claude-pid session marker, ``tuple-watch/session.<claude pid>``
-#: (nexus.session_marker.session_marker_path). This script cannot import
-#: nexus, so it spells the literal itself, pinned against drift by
-#: tests/test_session_marker.py::TestPathsMatchTheMailboxDrainHookLiterals.
-#: Unused by this hook since RDR-211 nexus-rplay.14 deleted its per-prompt
-#: re-arm (the reader that globbed it went with bead nexus-kdxyv); kept as
-#: the literal that pin reads.
-_SESSION_MARKER_PREFIX = "session."
-
-
-def main() -> int:
-    """The hook entry point. NEVER raises, and never exits non-zero.
+def run(payload: dict | None) -> HookResult:
+    """The hook entry point. NEVER raises.
 
     The guarantee at the top of this file -- one SKIP line on stderr, exit 0 --
     is the whole contract with a waiting prompt, so it is enforced here rather
     than assumed from the per-address handlers below. Those cover the drain
-    itself; this covers everything before and around it (reading the payload,
-    resolving the config directory, reading the registry). A hook that runs on
-    EVERY UserPromptSubmit has no business putting a traceback in front of
-    someone who typed something unrelated.
+    itself; this covers everything before and around it (resolving the config
+    directory, reading the registry). A hook that runs on EVERY
+    UserPromptSubmit has no business putting a traceback in front of someone
+    who typed something unrelated. ``nx-hook``'s own boundary would catch it
+    too, but it would also discard the blocks this drain had not streamed.
     """
+    out = _Out()
     try:
-        return _drain_all()
+        _drain_all(payload if isinstance(payload, dict) else {}, out)
     except Exception as exc:  # noqa: BLE001 — the contract above is the reason
         _log_skip(f"unexpected {type(exc).__name__} before any mailbox was drained: {exc}")
-        return 0
+    return out.result()
 
 
-def _drain_all() -> int:
-    try:
-        raw = sys.stdin.read()
-    except (OSError, ValueError):
-        raw = ""
-    try:
-        payload = json.loads(raw) if raw.strip() else {}
-    except (json.JSONDecodeError, ValueError):
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-
+def _drain_all(payload: dict[str, Any], out: _Out) -> None:
     session_id = str(payload.get("session_id") or "").strip()
 
     config_dir = _config_dir()
@@ -1130,16 +1144,15 @@ def _drain_all() -> int:
     if not addresses:
         _log_skip("no address to drain: the payload carried no usable session id "
                   "and the address registry is empty")
-        return 0
+        return
 
     try:
         base_url, token, is_local = _resolve_endpoint(config_dir)
     except _Skip as exc:
         _log_skip(f"no reachable tuple space: {exc}")
-        return 0
+        return
 
     deadline = time.monotonic() + _TOTAL_BUDGET_S
-    out = _Out()
     for address in addresses:
         if time.monotonic() >= deadline:
             _log_skip(f"drain budget of {_TOTAL_BUDGET_S}s spent before reaching "
@@ -1179,9 +1192,3 @@ def _drain_all() -> int:
             )
         except Exception as exc:  # noqa: BLE001 — never the prompt's problem; the record keeps for the next pass
             _log_skip(f"cleared record for {session_id}: unexpected {type(exc).__name__}: {exc}")
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

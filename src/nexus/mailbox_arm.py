@@ -10,7 +10,7 @@ endpoint, waking the session through the Claude Code channel
 subscribed board topics (see :mod:`nexus.mcp.subscriptions`). Subscribing
 the session's own instance-name mailbox is a request the model can decline
 or forget -- it is never the floor (``nexus-73vnw``'s
-``conexus/hooks/scripts/mailbox_drain.py`` is) -- so this module's only job
+:mod:`nexus.hooks.mailbox_drain` is) -- so this module's only job
 is to put a correct, literal, copy-pasteable subscribe instruction in front
 of the model at the start of every session, and to say nothing when that
 instruction could not possibly succeed.
@@ -24,7 +24,7 @@ asking for the ``tuple_subscribe`` MCP call, plus the setup sentence Sam's
 2026-09-17 decision (T2 nexus_rdr/211-decision-dev-channel-dialog-2026-09-17)
 requires: the channel is a Claude Code research preview, reached only with a
 launch flag and a per-launch confirmation dialog. The ``UserPromptSubmit``
-drain hook (``conexus/hooks/scripts/mailbox_drain.py``) remains the
+drain hook (:mod:`nexus.hooks.mailbox_drain`) remains the
 unconditional floor regardless of whether the channel was ever reached.
 
 Emitted from ``nx hook session-start`` (:func:`nexus.hooks.session_start`),
@@ -37,7 +37,7 @@ Never emitted when it cannot succeed
     (bounded to :data:`PROBE_TIMEOUT_S`, well under this hook's own 10s
     SessionStart budget) and caches the verdict for
     :data:`PROBE_CACHE_TTL_S` under ``<config>/tuple-watch/`` -- the same
-    directory :mod:`nexus.session_marker` and ``mailbox_drain.py`` already
+    directory :mod:`nexus.session_marker` and the drain hook already
     use for their own state files. A below-floor or unreachable engine
     would otherwise make every session run a subscribe instruction that
     404s or hangs forever, which is worse than saying nothing.
@@ -49,7 +49,7 @@ The instance-name mailbox
     that nothing wrote, and on a box running several sessions a populated
     file would have named several candidates with no way to tell whose
     instance any of them is (nexus-6konb.9 defect fix, drained by
-    ``conexus/hooks/scripts/mailbox_drain.py``'s PER-SESSION registry
+    :mod:`nexus.hooks.mailbox_drain`'s PER-SESSION registry
     instead -- see that module's docstring). So this module reads NOTHING
     to guess an instance name. The name exists only in the model's own
     knowledge, from the ``ListAgents`` tool's "This session is <name>"
@@ -72,7 +72,7 @@ _log = structlog.get_logger(__name__)
 #: tests, MM-3.3's future skill rule).
 ARM_MARKER = "MAILBOX SUBSCRIBE"
 
-#: Shared with :mod:`nexus.session_marker` and ``mailbox_drain.py``: one
+#: Shared with :mod:`nexus.session_marker` and the drain hook: one
 #: subdirectory under the config dir for every mailbox-delivery state file.
 _STATE_SUBDIR = "tuple-watch"
 _PROBE_CACHE_NAME = "arm-probe-cache.json"

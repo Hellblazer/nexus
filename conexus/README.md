@@ -92,10 +92,6 @@ conexus/
 │   └── scripts/                       # Plugin-resident hooks and shared helpers.
 │       │                              # Most hooks now live in the conexus WHEEL
 │       │                              # (nexus.hooks.*) — see the table below.
-│       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
-│       ├── _interpreter.py            # Shared helper: re-exec under an interpreter that
-│       │                              # can serve the hook (3.12 floor, and the
-│       │                              # generation python that can import nexus)
 │       ├── t2_prefix_scan.py          # Shared helper: T2 multi-namespace prefix scan
 │       └── read_verification_config.py # Shared helper: read .nexus.yml verification block
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
@@ -270,7 +266,7 @@ and only the ledger verbs have one.
 | `SessionStart` | `nx-hook behaviour-census` | Report the PREVIOUS session's raw thinking and decision counts (nexus-4lnn1) |
 | `SessionStart` (matcher `startup`) | `nx-hook version-lockstep` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
-| `UserPromptSubmit` | `hooks/scripts/mailbox_drain.py` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
+| `UserPromptSubmit` | `nx-hook mailbox-drain` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
 | `SubagentStart` | `hook_subagent_start_tuple` | Project the ledger START tuple, as a sibling of the main hook so its failure does not take the projection with it |
 | `SubagentStop` | `hook_subagent_stop_tuple` | Project the ledger REPORT tuple, same sibling shape |
 | `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |

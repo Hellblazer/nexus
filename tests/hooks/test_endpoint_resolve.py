@@ -112,9 +112,10 @@ _SHARED_MODULE_CONSUMERS = [T2_PREFIX_SCAN_PATH, TUPLE_LEDGER_PATH]
 
 
 def test_the_consumer_list_is_not_empty() -> None:
-    """Non-vacuity floor. The list shrank once and shrinks again when
-    ``mailbox_drain.py`` is ported; at zero this module is deleted rather
-    than left parametrized over nothing."""
+    """Non-vacuity floor. ``mailbox_drain.py`` imported this module too and
+    was never listed here; it is ported (nexus-t9klx) and imports nothing
+    from the plugin now. At zero this module is deleted rather than left
+    parametrized over nothing."""
     assert len(_SHARED_MODULE_CONSUMERS) == 2, (
         "the shared resolver's consumer list changed; say so here rather "
         "than letting the check below cover less in silence"

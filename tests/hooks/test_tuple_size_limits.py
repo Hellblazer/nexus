@@ -3,7 +3,8 @@
 """nexus-r7xao (RDR-205 amendment) -- ``conexus/hooks/scripts/
 _tuple_size_limits.py`` is the stdlib-only, no-``nexus``-import mirror of
 the RDR-205 tuple-space size limits, used by ``tuple_ledger_project.py``
-and ``mailbox_drain.py`` (neither may import ``nexus``). Parity with the
+(which may not import ``nexus``; ``mailbox_drain.py`` was the other user
+until nexus-t9klx moved it into the wheel). Parity with the
 engine's own ``TupleLimits.java`` and the Python client's constants is
 pinned separately by ``tests/db/test_tuple_size_limits_parity.py``; this
 file is the direct unit coverage of the module's own logic,

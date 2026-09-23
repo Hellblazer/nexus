@@ -21,15 +21,13 @@ misreading during planning, so the comparison is equality against a token
 set and `test_the_permitted_commands_are_not_rejected_as_substrings` is
 the fixture that fails if anyone rewrites it as `in`.
 
-WHY THE python3 ALLOWLIST IS BY NAME. Bead .26 was written on 2026-09-18
-and says `python3` is permitted only for `version_lockstep_hook.py`. That
-was true when written and is not true now: bead .21's tier resolution
-(T2 `nexus_rdr/215-tier-resolution-bead-21`) settled FIVE handlers as
-deliberately plugin-resident, and `conexus/PENDING_RELEASE.md` names all
-five. The bead body is stale, not the manifest. Pinning the five by name
-rather than allowing any `.py` is deliberate: each of the five was argued
-for individually, so a sixth appearing is drift the lint should refuse
-until someone argues for it too.
+WHY conexus PERMITS NO python3. Bead .21 left five handlers plugin-resident
+under a bare `python3`, and this lint allowed exactly those five by name.
+nexus-t9klx ported all five to `nx-hook` verbs, because stock Windows has no
+`python3` on PATH and a console script gets an `.exe` shim from the
+installer. A `python3` entry is now simply an unpermitted command. sn is
+different: it ships no Python package, so exec-form `python3` on its own
+scripts is still its one shape.
 """
 from __future__ import annotations
 
@@ -59,21 +57,7 @@ MCP_SERVER = "plugin:conexus:nexus"
 #: Equality targets, never substrings. See the module docstring.
 FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 
-CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "python3"})
-
-#: The five handlers bead .21 resolved as plugin-resident, each for its own
-#: reason (stdlib-only siblings the wheel cannot import; the lockstep, which
-#: must run when the wheel is behind; and the transcript census, which is
-#: plugin-domain). conexus/PENDING_RELEASE.md carries the full reasoning.
-PLUGIN_RESIDENT_SCRIPTS = frozenset(
-    {
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py",
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/phase_review_close_requires_gate.py",
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
-    }
-)
+CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher"})
 
 SN_SCRIPT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/"
 
@@ -176,16 +160,6 @@ def reject_conexus(event: str, entry: dict) -> str | None:
             f"runs `nx-session-end-launcher` with {len(args)} args; it takes "
             f"none, and its empty `args` is what makes the entry exec form."
         )
-    if command == "python3":
-        if len(args) != 1:
-            return f"runs python3 with {len(args)} args; exactly one script path is permitted"
-        if args[0] not in PLUGIN_RESIDENT_SCRIPTS:
-            return (
-                f"runs python3 on {args[0]!r}, which is not one of the five "
-                f"handlers bead .21 resolved as plugin-resident. A sixth "
-                f"needs the same argument the other five got -- see "
-                f"conexus/PENDING_RELEASE.md."
-            )
     return None
 
 
@@ -338,9 +312,9 @@ CONEXUS_REJECTS = [
         {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/a_sixth_script.py"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"],
         },
-        id="unargued-sixth-python3-script",
+        id="python3-command",
     ),
     # The default-branch gap. Each of these was ACCEPTED before
     # nexus-q02nx.29, because anything that was not `mcp_tool` fell
@@ -378,18 +352,6 @@ CONEXUS_REJECTS = [
         "PreToolUse",
         {"type": "command", "command": "perl", "args": ["-e", "1"]},
         id="unpermitted-command-that-is-not-a-forbidden-token",
-    ),
-    pytest.param(
-        "UserPromptSubmit",
-        {
-            "type": "command",
-            "command": "python3",
-            "args": [
-                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
-                "--extra",
-            ],
-        },
-        id="python3-with-two-args",
     ),
 ]
 

@@ -227,46 +227,9 @@ class TestHooksJsonStructure:
         assert "StopFailure" in hooks
         assert "SubagentStart" in hooks
 
-    def test_hooks_json_references_valid_scripts(self) -> None:
-        """All hook commands referencing hooks/scripts/ point to existing
-        files.
-
-        Checks both command shapes: the plain ``"command": "bash
-        .../hooks/scripts/foo.sh"`` string, and the exec-form
-        ``"command": "python3", "args": [".../hooks/scripts/foo.py", ...]``
-        the four routing/version-lockstep hooks now use
-        (RDR-215 bead nexus-q02nx.21's ``_interpreter.reexec_if_needed()``
-        wiring). A run that checked zero references would prove nothing —
-        every mcp_tool-only hooks.json would pass this vacuously — so this
-        asserts it examined at least one, which is what caught this test
-        going quiet in the first place: the twelve now-deleted bash
-        scripts' re-declaration to mcp_tool left the single-string
-        ``"command"`` branch with nothing left to match.
-        """
-        data = json.loads(HOOKS_JSON.read_text())
-        checked = 0
-        for event_name, event_hooks in data["hooks"].items():
-            for hook_group in event_hooks:
-                for hook in hook_group.get("hooks", []):
-                    candidates: list[str] = []
-                    cmd = hook.get("command", "")
-                    if "hooks/scripts/" in cmd:
-                        candidates.append(cmd.split("hooks/scripts/")[-1].split()[0])
-                    for arg in hook.get("args", []):
-                        if "hooks/scripts/" in arg:
-                            candidates.append(arg.split("hooks/scripts/")[-1])
-                    for script_name in candidates:
-                        checked += 1
-                        script_path = HOOKS_DIR / script_name
-                        assert script_path.exists(), (
-                            f"{event_name} references missing script: {script_path}"
-                        )
-        assert checked > 0, (
-            "examined zero hooks/scripts/ references -- either hooks.json "
-            "changed shape again (this test needs a third branch) or "
-            "every hook left that directory entirely; a run that checks "
-            "nothing is not a passing run"
-        )
+    # test_hooks_json_references_valid_scripts was deleted at nexus-t9klx:
+    # hooks.json names no hooks/scripts/ path any more, so its domain is
+    # empty by construction, the case its own non-vacuity assert named.
 
 
 # ---------------------------------------------------------------------------

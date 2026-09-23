@@ -932,7 +932,7 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # session.<claude_pid> on every source and the arm-probe cache, the
     # session's own MCP server writes its per-session instance registration
     # (addresses.d/) on subscribe, and the UserPromptSubmit drain
-    # hook (conexus/hooks/scripts/mailbox_drain.py) keeps its pending and
+    # hook (nexus.hooks.mailbox_drain) keeps its pending and
     # seen files here, all independent of pytest. MEASURED 2026-09-13: with
     # live watchers armed by restarted sessions, every run of
     # tests/test_native_smoke_client_probes.py failed this guard on

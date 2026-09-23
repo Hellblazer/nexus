@@ -436,6 +436,16 @@ call the same functions.
    beside `nexus.db.service_endpoint`, which Approach item 9 forbids as a
    rewrite. Unlike the first exclusion this one is not about fail-closed
    semantics; it is a dependency the tier split cannot cross.
+   CORRECTED 2026-09-23 (nexus-t9klx): THAT REASON WAS WRONG. It assumed a
+   moved script had to carry its mirror with it. A wheel module can call
+   the client's own primitives instead, which is what
+   `tuple_ledger_project` had already done when this epic ported it. All
+   three hooks, and the other two bare-`python3` hooks, are now `nx-hook`
+   verbs with no mirror. The tier outcome stands for other reasons:
+   `phase_review_close_requires_gate` must deny when it crashes,
+   `subagent_git_write_requires_orchestrator` is deliberately fail-open by
+   Sam's 2026-07-25 ruling, and `mailbox_drain` must write its stdout
+   before it returns. See Revision History, 2026-09-23.
 2. **The command tier.** Six of the seven `SessionStart` entries (the
    seventh is item 3) become command hooks in exec form on `nx-hook`, a
    new console script beside
@@ -780,7 +790,9 @@ Assumptions).
    epic. Making them wheel-resident would mean a second copy of a
    449-line resolver beside `nexus.db.service_endpoint`, which Approach
    item 9 forbids as a rewrite. They stay exec-form `python3`; full
-   reasoning in T2 `nexus_rdr/215-tier-resolution-bead-21`. Then
+   reasoning in T2 `nexus_rdr/215-tier-resolution-bead-21`. (That reason
+   was wrong, and all three are now `nx-hook` verbs: see Approach item 1's
+   2026-09-23 correction.) Then
    `preflight.py`,
    `session_start_hook.py` and `rdr_hook.py` re-declared on `nx-hook`;
    `version_lockstep_hook.py` re-declared as exec-form `python3` with its
@@ -992,7 +1004,8 @@ registration module on the existing server, and one package.
   TOOL TIER IS 13, not the 15 the 2026-09-18 entry above records:
   `mailbox_drain.py` and `routing/subagent_git_write_requires_orchestrator.py`
   were both named for the tool tier and both stayed command tier, for the
-  `_endpoint_resolve.py` reason now written into phase item 5. Counted
+  `_endpoint_resolve.py` reason now written into phase item 5 (a reason
+  later shown wrong; see 2026-09-23). Counted
   from the shipped manifest: 13 `mcp_tool` and 12 `command` entries, 25
   total (24 of them this epic's; `behaviour_census.py` arrived from
   nexus-4lnn1). The resolution had existed in T2 since 2026-09-19 and
@@ -1043,3 +1056,17 @@ registration module on the existing server, and one package.
   the test drove a placeholder. None required a code change -- the code
   was already correct in every case, which is exactly what makes this
   class survive: nothing fails, so nothing asks.
+- 2026-09-23: The `_endpoint_resolve.py` reason given for keeping
+  `mailbox_drain.py` and both routing guards plugin-resident was WRONG,
+  corrected in place at Approach item 1, Phase 3 item 5, the 2026-09-19
+  entry above, and the post-mortem. It assumed moving a script meant
+  moving its stdlib mirror, and so a second copy of the resolver. The
+  option nobody re-examined was to drop the mirror and call the client's
+  own primitives, which `tuple_ledger_project` had already done in this
+  same epic. nexus-t9klx did that for all five bare-`python3` hooks; the
+  shipped `hooks.json` names no interpreter and no plugin script. The TIER
+  rulings are unaffected, because each has a reason of its own recorded
+  beside the correction. The reason this entry is written as a correction
+  rather than an update: a constraint's shape outlives its rationale, and
+  a reader who finds a reason recorded next to the decision does not
+  re-derive it.

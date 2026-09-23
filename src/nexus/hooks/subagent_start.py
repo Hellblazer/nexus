@@ -41,9 +41,10 @@ behavioural divergence from the plugin-resident mirror it replaces
 (still present on disk -- see below -- but no longer on this call path).
 
 The plugin-resident ``conexus/hooks/scripts/t2_prefix_scan.py`` file
-itself is NOT deleted by this port -- ``mailbox_drain.py`` and the
-``routing/`` guards are still plugin-resident and out of scope here;
-deleting the now-orphaned script is a later bead.
+itself was NOT deleted by this port, on the stated ground that
+``mailbox_drain.py`` and the ``routing/`` guards were still plugin-resident.
+nexus-t9klx ported all three, so that ground is gone; the file stays only
+until it is deleted.
 
 **``SKIP_T2_SCAN`` is genuinely dead in the bash, and stays dead here.**
 The script declares ``SKIP_T2_SCAN=0`` alongside ``SKIP_STORAGE_DOCS`` and

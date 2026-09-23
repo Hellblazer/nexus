@@ -5,12 +5,11 @@ tuple-watch session-marker contract, rehomed out of the former CLI
 mailbox-watch module ahead of its deletion (RDR-211 nexus-rplay.14).
 
 Pure unit tests, no engine substrate: every function here is a flat-file
-read/write against a `tmp_path`. The on-disk path SHAPE is pinned twice --
-once directly (the literal `tuple-watch/session.<pid>` /
-`tuple-watch/cleared.<session_id>` shapes) and once against
-`conexus/hooks/scripts/mailbox_drain.py`'s own hardcoded copies of those
-same literals, since that plugin script cannot import this package and
-must keep matching it by construction.
+read/write against a `tmp_path`. The on-disk path SHAPE is pinned directly
+(the literal `tuple-watch/session.<pid>` / `tuple-watch/cleared.<session_id>`
+shapes). The mailbox drain once carried its own copies of those literals,
+pinned here too; since nexus-t9klx it is a wheel module that calls
+`cleared_record_path` itself, so there is no second copy to pin.
 """
 from __future__ import annotations
 
@@ -23,12 +22,6 @@ from nexus.session_marker import (
     session_marker_path,
     write_session_marker,
 )
-
-_MAILBOX_DRAIN_SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
-)
-
 
 class TestPathShapes:
     def test_session_marker_path_shape(self, tmp_path: Path) -> None:
@@ -90,35 +83,3 @@ class TestRecordClearAndWriteSessionMarker:
             tmp_path, 4242, "same-sess", record_clear=True,
         )
         assert not cleared_record_path(tmp_path, "same-sess").exists()
-
-
-class TestPathsMatchTheMailboxDrainHookLiterals:
-    """`conexus/hooks/scripts/mailbox_drain.py` cannot import `nexus`, so it
-    carries its own literal copies of the directory name and the
-    `session.<pid>` / `cleared.<session_id>` file-name shapes. Moving this
-    contract to a new module must never move those strings out from under
-    that script.
-    """
-
-    def test_the_script_still_exists_and_carries_the_literals(self) -> None:
-        text = _MAILBOX_DRAIN_SCRIPT.read_text(encoding="utf-8")
-        assert '"tuple-watch"' in text
-        assert '"session."' in text
-        assert 'f"cleared.{session_id}"' in text
-
-    def test_session_marker_path_matches_the_scripts_own_naming(
-        self, tmp_path: Path,
-    ) -> None:
-        # Reproduces the script's own `_session_marker_path`-equivalent
-        # construction (it globs `_SESSION_MARKER_PREFIX + "*"` under
-        # `<config>/tuple-watch/`) directly against this module's output.
-        path = session_marker_path(tmp_path, 4242)
-        assert path.parent == tmp_path / "tuple-watch"
-        assert path.name == "session.4242"
-
-    def test_cleared_record_path_matches_the_scripts_own_naming(
-        self, tmp_path: Path,
-    ) -> None:
-        path = cleared_record_path(tmp_path, "sid-with-dashes.and.dots")
-        assert path.parent == tmp_path / "tuple-watch"
-        assert path.name == "cleared.sid-with-dashes.and.dots"

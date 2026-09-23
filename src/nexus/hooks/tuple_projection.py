@@ -39,9 +39,11 @@ and :mod:`nexus.db.data_token` directly instead of a stdlib-only mirror) and
 what did not (the wire shape, the BEARER PRECEDENCE credential policy, the
 per-session log file).
 
-``conexus/hooks/scripts/tuple_ledger_project.py`` is NOT deleted by this
-bead — ``mailbox_drain.py`` and the ``routing/`` guards still import its
-sibling ``_endpoint_resolve.py``, and retiring that mirror is a later bead
+``conexus/hooks/scripts/tuple_ledger_project.py`` was NOT deleted by this
+bead, on the stated ground that ``mailbox_drain.py`` and the ``routing/``
+guards still imported its sibling ``_endpoint_resolve.py``. nexus-t9klx
+ported all three, so that ground is gone and the file stays only until it
+is deleted
 (nexus-q02nx.21's own scope note applies here too: deleting a shared file
 out from under a still-live consumer is worse than leaving an unused one
 behind for one more bead).

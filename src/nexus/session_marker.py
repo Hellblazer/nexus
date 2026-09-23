@@ -24,15 +24,11 @@ file on disk. Neither is the right layer, so this module is a small,
 single-purpose home for exactly the marker/cleared-record pair.
 
 **On-disk paths are UNCHANGED (byte-identical)** from the former watcher
-module: ``conexus/hooks/scripts/mailbox_drain.py`` is a plugin script that
-cannot import this package, so it keeps its own literal copies of the
-``tuple-watch`` directory name and the ``session.<pid>`` /
-``cleared.<session_id>`` file-name shapes, pinned against drift by
-``tests/hooks/test_mailbox_drain_hook.py`` (which compares those literals
-against this module's ``session_marker_path``/``cleared_record_path``
-directly) and by this module's own
-``tests/test_session_marker.py::TestPathsMatchTheMailboxDrainHookLiterals``.
-Moving this contract must never move those strings.
+module, because files already on disk are read by those names. The drain
+hook used to carry its own literal copies of them, as a plugin script that
+could not import this package; since nexus-t9klx it is
+:mod:`nexus.hooks.mailbox_drain` and calls :func:`cleared_record_path`
+itself, so this module is the only spelling.
 
 The former watcher module re-exported these five names as thin
 pass-throughs while it still existed, so every importer kept working
@@ -125,7 +121,7 @@ def _read_session_marker(state_dir: Path, claude_pid: int) -> str | None:
 def cleared_record_path(state_dir: Path, session_id: str) -> Path:
     """``<state_dir>/tuple-watch/cleared.<session_id>``: the one-time drain
     record RDR-208 Phase 2 Step 3 hands to
-    ``conexus/hooks/scripts/mailbox_drain.py``. *session_id* is the NEW
+    :mod:`nexus.hooks.mailbox_drain`. *session_id* is the NEW
     session's id -- the drain reads its OWN session id's record, never a
     prior one -- and the file's content is the mailbox(es) a ``/clear``
     stranded: one bare session id per line. See

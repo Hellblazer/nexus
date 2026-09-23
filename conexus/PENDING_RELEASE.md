@@ -38,9 +38,9 @@ to it — which is exactly how two of these went undeclared and red'd develop
 on 2026-09-22. A bullet that wraps is fine; a PATH that wraps is not.
 
 - nexus-t9klx — `conexus/hooks/hooks.json`: all five bare-`python3` entries
-  are being re-pointed at `nx-hook` verbs, four of them so far
-  (`behaviour-census`, `version-lockstep`, `phase-review-close-gate`,
-  `subagent-git-write-gate`). Stock
+  are re-pointed at `nx-hook` verbs (`behaviour-census`, `version-lockstep`,
+  `phase-review-close-gate`, `subagent-git-write-gate`, `mailbox-drain`), so
+  the manifest names no interpreter and no plugin script at all. Stock
   Windows has no `python3` on PATH, so those entries could never fire there;
   a console script gets a real `.exe` shim from the installer. Sessions on
   v7.57.0 keep running the old entries against their own copies until a new
@@ -81,6 +81,17 @@ on 2026-09-22. A bullet that wraps is fine; a PATH that wraps is not.
   only — `routing_stats` reads hooks.json, never this file — so nothing
   behaves differently when it goes live; it is declared because it drifted,
   which is the whole contract.
+
+- nexus-t9klx — `conexus/hooks/scripts/mailbox_drain.py`: DELETED, ported to
+  the `mailbox-drain` verb. The last of the five. Its endpoint and size-limit
+  mirrors are replaced by the client's own primitives, and its output still
+  goes to stdout the moment each row is acked (`_io.stream`), because a
+  harness timeout is a kill and a consumed row must already be shown.
+
+- nexus-t9klx — `conexus/hooks/scripts/_interpreter.py`: DELETED. It re-execed
+  a bare `python3` under an interpreter that could import `nexus`; its last
+  importer was `mailbox_drain.py`, and a console-script verb has no
+  interpreter to choose.
 
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)

@@ -307,9 +307,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "nx-hook",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"
+              "mailbox-drain"
             ],
             "timeout": 10
           }
