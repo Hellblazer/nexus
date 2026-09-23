@@ -25,19 +25,27 @@ while Serena's server is rooted wherever THAT session's cwd was when it
 started. From cwd alone the two are indistinguishable -- a call from the
 primary asking to write to the primary looks legitimate either way.
 
-``git_toplevel``/``record_startup_root``/``read_recorded_root``/
-``relocated_write_root`` close that gap from the other side: ``session_start.py``
-records, per session_id, the git working-tree root of the session's cwd at
-``startup`` (only ``startup`` -- see ``record_startup_root``'s docstring for
-why the other three SessionStart sources do not write here). A later
-PreToolUse write call compares ITS OWN cwd's working-tree root against that
-record; a mismatch means the write would land somewhere the session's
-current cwd does not point at, regardless of whether that cwd happens to be
-a linked worktree or the primary. This is additive to ``is_linked_worktree``,
-never a replacement for it -- a session started inside a worktree records
-that worktree as its own root, so its writes there must keep working, and
-the pre-existing ``is_linked_worktree`` denial (unconditional on cwd alone)
-is unchanged by anything here.
+``git_toplevel``/``record_startup_root``/``read_recorded_root`` close that
+gap from the other side: ``session_start.py`` records, per session_id, the
+git working-tree root of the session's cwd at ``startup`` (only ``startup``
+-- see ``record_startup_root``'s docstring for why the other three
+SessionStart sources do not write here). ``write_denial_reason`` is the
+single PreToolUse decision this module exports, and round 2 (nexus-ebx0s)
+changed its ORDER, not just its coverage:
+
+- When this session has a recorded root, the comparison against the call's
+  OWN cwd decides ALONE. A match allows -- including when cwd is itself a
+  linked worktree, because that is exactly what a session that legitimately
+  STARTED inside a worktree looks like (its own server really is rooted
+  there; denying it anyway was round 1's own gap, caught in review). A
+  mismatch denies, naming both trees, regardless of whether either side is
+  a linked worktree.
+- Only when NO comparison is possible (no session_id, or nothing was ever
+  recorded for it) does ``is_linked_worktree`` run at all, as the fallback:
+  deny when cwd itself is a linked worktree (the shape a worktree-dispatched
+  subagent sharing the parent's primary-rooted server has for its whole
+  life), allow otherwise. This is where round 1 left is_linked_worktree as
+  an UNCONDITIONAL check; it is now conditional on having nothing better.
 
 Stdlib only: hooks run under system python with no conexus installed.
 """
@@ -256,31 +264,52 @@ def read_recorded_root(session_id: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def relocated_write_root(cwd: str, session_id: str) -> str | None:
-    """The recorded Serena root, when it names a DIFFERENT working tree than
-    *cwd*'s own; None when no mismatch is established.
+def write_denial_reason(tool_name: str, cwd: str, session_id: str) -> str | None:
+    """The PreToolUse deny reason for a Serena WRITE tool call, or None to allow.
 
-    Fails OPEN (returns None) whenever it cannot establish a mismatch with
-    confidence -- no session_id, no record for this session, or *cwd* itself
-    not inside a git working tree -- and logs each case to stderr, because
-    "nothing recorded" and "checked, and it matches" both return None here,
-    and a caller that only reads the return value cannot tell them apart
-    without the log line.
+    *tool_name* is used only to build the human-readable reason string (via
+    ``deny_reason``/``deny_reason_relocated``) -- callers are expected to have
+    already confirmed ``is_serena_write_tool(tool_name)`` themselves.
+
+    Ordering (nexus-ebx0s round 2, T2 finding from round 1's own report:
+    ``is_linked_worktree`` denied a session that legitimately STARTED inside a
+    worktree, because it never consulted the record that would have cleared
+    it): when this session_id has a recorded root, the comparison against
+    *cwd*'s OWN working tree decides ALONE, and ``is_linked_worktree`` is not
+    consulted at all in this branch -- consulting it here would re-deny the
+    legitimate started-in-a-worktree case the comparison just cleared.
+
+        - match  -> allow (covers both "never left the primary" and
+                    "started inside this worktree and is still in it")
+        - differ -> deny, naming both trees (the relocated-session shape)
+
+    With NO recorded root (no session_id, or nothing was ever recorded for
+    it -- a subagent dispatch carries its PARENT session's session_id per
+    Claude Code's own hook contract, so this branch is reached only when
+    that parent never recorded one either), the comparison cannot be made,
+    so this falls back to the pre-round-2 behaviour: deny when *cwd* itself
+    is a linked worktree (the shape a worktree-dispatched subagent sharing
+    the parent's primary-rooted server has for its whole life), allow
+    otherwise. Fails TOWARD denial for that known hazard shape, same as
+    before this round -- and every fallback path logs to stderr, because
+    "nothing recorded" and "checked, and it matched" both return None here.
     """
-    if not session_id:
-        print("sn worktree guard: no session_id on this call; cannot check for a relocated session",
-              file=sys.stderr)
-        return None
-    recorded = read_recorded_root(session_id)
-    if recorded is None:
-        print(f"sn worktree guard: no recorded Serena root for session {session_id}; allowing",
-              file=sys.stderr)
-        return None
-    current = git_toplevel(cwd)
-    if current is None:
-        print(f"sn worktree guard: cwd {cwd!r} is not inside a git working tree; allowing",
-              file=sys.stderr)
-        return None
-    if current == recorded:
-        return None
-    return recorded
+    recorded = read_recorded_root(session_id) if session_id else None
+    if recorded is not None:
+        current = git_toplevel(cwd)
+        if current is None:
+            print(f"sn worktree guard: cwd {cwd!r} is not inside a git working tree; allowing",
+                  file=sys.stderr)
+            return None
+        if current == recorded:
+            return None
+        return deny_reason_relocated(tool_name, cwd, recorded)
+    if session_id:
+        print(f"sn worktree guard: no recorded Serena root for session {session_id}; "
+              "falling back to the cwd-only worktree check", file=sys.stderr)
+    else:
+        print("sn worktree guard: no session_id on this call; falling back to the "
+              "cwd-only worktree check", file=sys.stderr)
+    if is_linked_worktree(cwd):
+        return deny_reason(tool_name, cwd)
+    return None

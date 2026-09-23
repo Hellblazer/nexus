@@ -415,24 +415,28 @@ things to avoid carefully; they are impossible.
 
 11. **Serena differs between a session STARTED in a worktree and one that
     RELOCATED into it.** A session started there gets its own server rooted
-    at the worktree via `--project-from-cwd` and keeps symbol editing. A
-    session that relocates mid-flight — reaches the worktree by absolute
-    path without its own cwd ever moving there — keeps the server rooted
-    at the primary, so a Serena WRITE tool there is not merely restricted;
-    it can SUCCEED, silently, against the primary instead of the tree you
-    meant (nexus-ebx0s, 2026-09-22: `replace_in_files` reported "DRY RUN -
-    no changes were applied" and had in fact written both occurrences to
-    the primary — the report and the effect disagreed, so the dry run
-    cannot be trusted as a safety check either). Because the session's cwd
-    never actually differs from the primary in that shape, no cwd-only
-    check can catch it by construction; the sn PreToolUse guard closes the
-    general form of this (any call whose cwd resolves to a different git
-    working tree than the one recorded for this session at startup) but
-    the exact reported shape — cwd stays at the primary and so does
-    Serena's root — remains undetectable from cwd alone. Use Edit/Write
-    with absolute worktree paths, never a Serena write tool, whenever you
-    are not certain your session started inside the worktree it is
-    editing.
+    at the worktree via `--project-from-cwd` and keeps symbol editing — the
+    sn PreToolUse guard allows its writes (round 2, nexus-ebx0s: it
+    RECORDS each session's own startup cwd and compares later write calls
+    against that record; a match allows even though the call's cwd is
+    itself a linked worktree, which an earlier version of the guard denied
+    unconditionally, review-caught before it shipped). A session
+    that relocates mid-flight — reaches the worktree by absolute path
+    without its own cwd ever moving there — keeps the server rooted at the
+    primary, so a Serena WRITE tool there is not merely restricted; it can
+    SUCCEED, silently, against the primary instead of the tree you meant
+    (nexus-ebx0s, 2026-09-22: `replace_in_files` reported "DRY RUN - no
+    changes were applied" and had in fact written both occurrences to the
+    primary — the report and the effect disagreed, so the dry run cannot
+    be trusted as a safety check either). Because the session's cwd never
+    actually differs from the primary in that shape, no cwd-only check can
+    catch it by construction; the sn PreToolUse guard closes the general
+    form of this (a recorded-root mismatch denies regardless of which side
+    is the linked worktree) but the exact reported shape — cwd stays at
+    the primary and so does Serena's root — remains undetectable from cwd
+    alone. Use Edit/Write with absolute worktree paths, never a Serena
+    write tool, whenever you are not certain your session started inside
+    the worktree it is editing.
 
 **Moving an in-flight session.** Cherry-pick or apply into the new worktree
 FIRST and verify there, and only then revert the primary — never the

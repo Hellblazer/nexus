@@ -543,8 +543,17 @@ class TestWorktreeDetection:
 
 
 class TestWorktreeGuardHook:
+    """No session_id on any payload here, deliberately: these pin the FALLBACK
+    path (nexus-ebx0s round 2) that runs only when no per-session recorded
+    root exists to compare against -- cwd-is-a-linked-worktree denies, cwd-
+    is-the-primary allows, same as before round 2 ever existed. The record-
+    exists path (comparison decides alone, is_linked_worktree not consulted)
+    is TestRelocatedSessionGuard's territory, including the case this
+    fallback would get WRONG on its own: a session that started inside the
+    worktree it is still writing to."""
+
     @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
-    def test_write_tool_denied_in_worktree(self, tmp_path: Path, event: str) -> None:
+    def test_write_tool_denied_in_worktree_with_no_session_record(self, tmp_path: Path, event: str) -> None:
         _, worktree = _make_repo_with_worktree(tmp_path)
         out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": event,
                                  "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
@@ -558,7 +567,7 @@ class TestWorktreeGuardHook:
             assert hso["decision"]["behavior"] == "deny"
             assert str(worktree) in hso["decision"]["message"]
 
-    def test_every_write_tool_denied_in_worktree(self, tmp_path: Path) -> None:
+    def test_every_write_tool_denied_in_worktree_with_no_session_record(self, tmp_path: Path) -> None:
         _, worktree = _make_repo_with_worktree(tmp_path)
         for name in sorted(SERENA_WRITE_TOOLS):
             out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": "PreToolUse",
@@ -571,7 +580,7 @@ class TestWorktreeGuardHook:
                                  "tool_name": "mcp__plugin_sn_serena__find_symbol"})
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
-    def test_write_tool_allowed_in_primary(self, tmp_path: Path) -> None:
+    def test_write_tool_allowed_in_primary_with_no_session_record(self, tmp_path: Path) -> None:
         primary, _ = _make_repo_with_worktree(tmp_path)
         out = _run_auto_approve({"cwd": str(primary), "hook_event_name": "PreToolUse",
                                  "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
@@ -598,6 +607,15 @@ class TestWorktreeGuardHook:
 # primary on purpose. These drive session_start.py's recording and
 # auto_approve_sn_mcp.py's comparison end to end against real git worktrees,
 # never a fake detector.
+#
+# Round 2 ordering (write_denial_reason): when this session has a recorded
+# root, the comparison decides ALONE -- is_linked_worktree is not consulted,
+# so a session that started inside the worktree it is writing to is allowed
+# even though its cwd genuinely is a linked worktree (test 0 below). Only
+# with NO record does is_linked_worktree run at all, as the fallback
+# (TestWorktreeGuardHook's territory, plus test_no_record_with_worktree_cwd_
+# still_denies_via_fallback below, which pins the SAME session_id-present-
+# but-no-record shape here rather than in the no-session_id class).
 
 
 class TestRelocatedSessionGuard:
@@ -613,13 +631,33 @@ class TestRelocatedSessionGuard:
         )
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
+    def test_session_started_in_a_worktree_is_allowed_a_write(self, tmp_path: Path) -> None:
+        """Round 2 (nexus-ebx0s): this session's OWN startup was inside the
+        worktree, so Serena really is rooted there and the write is
+        legitimate. is_linked_worktree(cwd) is True here too, same as the
+        worktree-dispatched-subagent shape it exists to deny -- and round 1
+        left it unconditional, so it denied this case as well (the coordinator's
+        own finding). The fix is ordering: a matching record decides ALONE
+        and is_linked_worktree is never consulted in this branch. This failed
+        (permissionDecision == "deny") before write_denial_reason existed."""
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        start = _run_session_start({"source": "startup", "session_id": "s0", "cwd": str(worktree)}, env)
+        assert start.returncode == 0, start.stderr
+        out = _run_auto_approve(
+            {"cwd": str(worktree), "hook_event_name": "PreToolUse", "session_id": "s0",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
     def test_relocated_session_denied_even_though_cwd_is_the_primary(self, tmp_path: Path) -> None:
         """The bead's own shape: Serena rooted at a WORKTREE (this session
         started there), a later write call's cwd is the PRIMARY -- not
         itself a linked worktree, so is_linked_worktree alone would allow
         it. Naming this REPRODUCES the reported gap; the assertion below is
         the fix, and it failed (permissionDecision == "allow") before
-        worktree_guard.relocated_write_root existed."""
+        worktree_guard.write_denial_reason existed."""
         _, worktree = _make_repo_with_worktree(tmp_path)
         primary = worktree.parent / "primary"
         env = _isolated_state_env(tmp_path)
@@ -695,6 +733,21 @@ class TestRelocatedSessionGuard:
         assert json.loads(state_file.read_text())["s5"] == git_toplevel(worktree)
         out = _run_auto_approve(
             {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s5",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_no_record_with_worktree_cwd_still_denies_via_fallback(self, tmp_path: Path) -> None:
+        """A session_id IS present but nothing was ever recorded for it (no
+        SessionStart happened in this test) -- the comparison cannot be
+        made, so this pins the fallback firing with a real session_id
+        rather than an absent one (TestWorktreeGuardHook's no-session_id
+        cases already cover that shape)."""
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        out = _run_auto_approve(
+            {"cwd": str(worktree), "hook_event_name": "PreToolUse", "session_id": "never-started-either",
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
             env=env,
         )
