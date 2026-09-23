@@ -24,6 +24,7 @@ interpolated something else entirely.
 from __future__ import annotations
 
 import pathlib
+import re
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -112,4 +113,77 @@ def test_the_probe_actually_removed_the_jvm(
     assert shutil.which("java") is None, (
         "the empty-PATH probe did not hide java, so the message assertion "
         "above would never be reached"
+    )
+
+
+# ── The same drift, in prose ────────────────────────────────────────────────
+#
+# Fixing the runtime message left five hand-typed copies of the old floor in
+# docstrings and a README, all saying 17 against a pom that says 25. Writing
+# 25 into those five places resets the drift; it does not remove it. This
+# pin removes it: any file that states a Java floor in prose must state the
+# pom's, and the sweep is mechanical rather than a promise to remember.
+#
+# A reader who needs the number still reads it where they are, instead of
+# being sent to service/pom.xml. That is the reason for a ratchet here
+# rather than the other obvious fix, which is to delete the numbers and
+# point at the pom.
+
+_PROSE_FLOOR = re.compile(r"Java\s*\(?>=\s*(\d+)\)?")
+
+#: Scanned roots. `service/` is excluded deliberately: Java sources and the
+#: pom state the floor in build syntax, which the parser above would
+#: misread, and the pom IS the source of truth this test reads.
+_PROSE_ROOTS = ("tests", "scripts", "docs", "src")
+_PROSE_SUFFIXES = (".py", ".md", ".sh", ".txt")
+
+
+def _prose_floor_sites() -> list[tuple[pathlib.Path, int, int]]:
+    """``(path, line number, stated floor)`` for every prose Java floor."""
+    root = pathlib.Path(__file__).parents[2]
+    sites: list[tuple[pathlib.Path, int, int]] = []
+    for sub in _PROSE_ROOTS:
+        base = root / sub
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if path.suffix not in _PROSE_SUFFIXES or not path.is_file():
+                continue
+            if any(part in {".venv", "target", "node_modules"} for part in path.parts):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                match = _PROSE_FLOOR.search(line)
+                if match:
+                    sites.append((path, lineno, int(match.group(1))))
+    return sites
+
+
+def test_the_prose_sweep_finds_something() -> None:
+    """Non-vacuity (nexus-moht0).
+
+    A sweep that examines nothing passes for free. The five known sites are
+    the floor: if a rename or a reworded docstring drops this below them,
+    the sweep has stopped covering what it was written for, and that is a
+    finding rather than a pass.
+    """
+    sites = _prose_floor_sites()
+    assert len(sites) >= 5, (
+        f"the prose sweep found only {len(sites)} site(s); it was written "
+        "against 5 known ones, so a smaller number means the pattern or the "
+        "scanned roots stopped matching, not that the repo got tidier"
+    )
+
+
+def test_every_prose_java_floor_matches_the_pom() -> None:
+    """Red on the pre-fix tree, where five sites said 17 and the pom said 25."""
+    expected = _pom_release()
+    wrong = [(p, n, v) for p, n, v in _prose_floor_sites() if v != expected]
+    assert not wrong, (
+        "these state a Java floor that is not service/pom.xml's "
+        f"maven.compiler.release ({expected}):\n"
+        + "\n".join(f"  {p}:{n} says {v}" for p, n, v in wrong)
     )

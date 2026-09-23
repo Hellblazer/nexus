@@ -6,7 +6,7 @@ Phase-4 destructive deletion.  Prod is never written.
 ## Prerequisites
 
 - PostgreSQL 16 binaries (Homebrew: `brew install postgresql@16`)
-- Java >= 17 on PATH or `JAVA_HOME` set
+- Java >= 25 on PATH or `JAVA_HOME` set
 - Maven (`mvn`) for the service build
 - `uv` (Python package manager)
 - The repo root must have `service/target/nexus-service-1.0-SNAPSHOT.jar`

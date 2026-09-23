@@ -34,7 +34,7 @@ job is path-gated so it only runs when relevant files change.
 Prerequisites:
   - ``service/target/nexus-service-1.0-SNAPSHOT.jar`` built and fresh.
   - Docker available and ``pgvector/pgvector:pg17`` pullable.
-  - Java (>= 17) on PATH or JAVA_HOME set.
+  - Java (>= 25) on PATH or JAVA_HOME set.
   - No VOYAGE_API_KEY needed (service runs in LOCAL/ONNX mode).
 
 Run locally:
