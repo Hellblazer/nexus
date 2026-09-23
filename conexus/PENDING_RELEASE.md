@@ -169,9 +169,14 @@ never ran them either.
   visible SessionStart note naming the skip, since `nx-hook preflight` alone
   does not cover a disabled or failed-to-spawn `nx-mcp` (round 3). Sessions
   on the pinned tag keep running without the barrier until a new pin ships.
+  Round 5 adds a second entry to this same file: `UserPromptSubmit`,
+  `nx-hook mcp-connect-check` (timeout 5, sibling to `mailbox-drain`) --
+  warns once per episode on a MID-session disconnect (the barrier above
+  only protects the start), reusing `nexus.daemon.service_registry.
+  pid_alive` against the connect marker's now-recorded pid.
 
-- nexus-veh77 — `conexus/README.md`: new hook-table row for `nx-hook
-  mcp-connect-wait`.
+- nexus-veh77 — `conexus/README.md`: new hook-table rows for `nx-hook
+  mcp-connect-wait` and, round 5, `nx-hook mcp-connect-check`.
 
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)

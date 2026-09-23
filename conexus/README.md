@@ -267,6 +267,7 @@ and only the ledger verbs have one.
 | `SessionStart` (matcher `startup`) | `nx-hook mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, injects a visible note that tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `UserPromptSubmit` | `nx-hook mailbox-drain` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
+| `UserPromptSubmit` | `nx-hook mcp-connect-check` | Warn once per episode when this session's `nx-mcp` connect marker names a pid that is no longer alive, having previously connected (mid-session disconnect detector, RDR-215, nexus-veh77) |
 | `SubagentStart` | `hook_subagent_start_tuple` | Project the ledger START tuple, as a sibling of the main hook so its failure does not take the projection with it |
 | `SubagentStop` | `hook_subagent_stop_tuple` | Project the ledger REPORT tuple, same sibling shape |
 | `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |

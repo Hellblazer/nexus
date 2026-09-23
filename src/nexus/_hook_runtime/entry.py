@@ -207,6 +207,16 @@ VERB_TABLE: dict[str, str] = {
     # ladder measured it doing 24/24 on macOS and 20/20 on WSL2 with no
     # barrier at all.
     "mcp-connect-wait": "nexus.hooks.mcp_connect_wait",
+    # The MID-SESSION half (bead nexus-veh77 round 5): mcp-connect-wait
+    # protects only SessionStart. UserPromptSubmit, sibling to
+    # mailbox-drain rather than folded into it (unrelated concern, no
+    # network, own cost/test budget -- see the module's own docstring):
+    # warns once per disconnect episode when this session's nx-mcp
+    # connect marker names a pid that pid_alive() (the ONE shared
+    # liveness implementation, nexus.daemon.service_registry) no longer
+    # finds alive, having previously been alive. A session that never
+    # connected stays silent -- that is mcp-connect-wait's own job.
+    "mcp-connect-check": "nexus.hooks.mcp_connect_check",
 }
 
 #: Verbs whose exit code nx-hook must propagate from ``run()`` instead of

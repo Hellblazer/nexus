@@ -320,6 +320,14 @@
               "mailbox-drain"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "nx-hook",
+            "args": [
+              "mcp-connect-check"
+            ],
+            "timeout": 5
           }
         ]
       }

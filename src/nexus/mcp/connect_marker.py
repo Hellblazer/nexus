@@ -52,6 +52,30 @@ against a genuinely ancient leftover from a killed process reusing the same
 session id (astronomically unlikely -- session ids are per-conversation
 UUIDs) outliving a fresh process's own wait; it is not a liveness protocol.
 
+**The `pid` field, and why there is no separate `start_time` field (round
+4, nexus-veh77).** ``nexus.hooks.mcp_connect_check`` uses ``pid`` to detect
+a MID-SESSION disconnect -- the marker existing is not enough once a
+session has run for a while, since a crashed `nx-mcp` leaves its marker
+behind (a clean shutdown clears it; a SIGKILL or hard crash does not, and
+neither runs this module's own teardown code). The obvious hardening,
+comparing the recorded pid's OS-level start time against a fresh read at
+check time to rule out pid reuse, was considered and left out: the only
+existing per-pid age sources in this codebase either need `/proc` (Linux
+only) or a `ps` subprocess (tens of ms, and this check runs on every
+`UserPromptSubmit` -- explicitly budgeted at "a stat plus a `kill(pid,
+0)`", no subprocess). ``published_at`` already in this file is captured
+within the process's own early lifespan and is a reasonable proxy if a
+future caller needs one; the reuse window this leaves open is bounded by
+the pid allocator not reusing a freed pid for a long time on every
+platform this ships on, and further bounded by `expires_at` for a truly
+stale leftover. Consistent with this project's own standing doctrine
+(`src/nexus/daemon/AGENTS.md`: "liveness is lease freshness, not pid" for
+the T1/T2/T3 daemon-consumer case) -- lease freshness (`expires_at`) is
+the primary bound here too; `pid_alive` is a secondary, fast-reacting
+signal layered on top, read through the ONE shared implementation
+(`nexus.daemon.service_registry.pid_alive`), never a hand-rolled `os.kill`
+call of this module's own.
+
 **A short-bound heuristic for "`nx-mcp` was never going to start at all"
 (disabled by the user, or a spawn failure) was considered and rejected**
 (Sam's round-2 ask). No signal on this box cleanly discriminates that case
@@ -76,6 +100,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -126,6 +151,48 @@ def publish_mcp_connect_marker(
     os.replace(str(tmp), str(path))
 
 
+@dataclass(frozen=True)
+class ConnectMarkerInfo:
+    """The raw contents of a connect marker, TTL-unaware.
+
+    ``nexus.hooks.mcp_connect_wait`` (the startup barrier) only needs a
+    fresh/stale bool -- :func:`read_mcp_connect_marker` below. ``nexus.
+    hooks.mcp_connect_check`` (the mid-session detector, round 4) needs the
+    ``pid`` itself, and deliberately does NOT gate on ``expires_at``: a
+    long-lived session whose `nx-mcp` has genuinely been serving for over
+    an hour (past the marker's generous default TTL) is still connected,
+    and the detector's own signal for that is ``pid_alive(pid)``, not this
+    file's age.
+    """
+
+    pid: int
+    published_at: float
+    expires_at: float
+
+
+def read_mcp_connect_marker_info(session_id: str, config_dir: Path) -> ConnectMarkerInfo | None:
+    """Read *session_id*'s connect marker's raw fields, ignoring ``expires_at``.
+
+    ``None`` for a missing file or one that fails to parse in the expected
+    shape -- fail-safe, matching :func:`read_mcp_connect_marker`'s own
+    posture, just without the freshness gate that function applies on top.
+    """
+    path = _marker_path(session_id, config_dir)
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+        return ConnectMarkerInfo(
+            pid=int(data["pid"]),
+            published_at=float(data["published_at"]),
+            expires_at=float(data["expires_at"]),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
 def read_mcp_connect_marker(session_id: str, config_dir: Path) -> bool:
     """Has *session_id*'s `nx-mcp` published a fresh connect marker?
 
@@ -133,17 +200,10 @@ def read_mcp_connect_marker(session_id: str, config_dir: Path) -> bool:
     read as ``False`` -- fail-safe, matching
     :func:`nexus.db.t1.read_t1_session_lease`'s own posture.
     """
-    path = _marker_path(session_id, config_dir)
-    try:
-        raw = path.read_text()
-    except OSError:
+    info = read_mcp_connect_marker_info(session_id, config_dir)
+    if info is None:
         return False
-    try:
-        data = json.loads(raw)
-        expires_at = float(data["expires_at"])
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return False
-    return time.time() < expires_at
+    return time.time() < info.expires_at
 
 
 def clear_mcp_connect_marker(session_id: str, config_dir: Path) -> None:
