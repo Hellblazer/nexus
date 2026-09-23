@@ -181,7 +181,7 @@ def session_summary_cmd(since: int) -> None:
       nx catalog session-summary            # files modified in last 24 hours
       nx catalog session-summary --since 48 # last 48 hours
     """
-    import subprocess  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -192,7 +192,7 @@ def session_summary_cmd(since: int) -> None:
         return
 
     try:
-        result = subprocess.run(
+        result = run_bounded(
             [
                 "git", "log",
                 f"--since={since} hours ago",
@@ -200,7 +200,7 @@ def session_summary_cmd(since: int) -> None:
                 "--pretty=format:",
                 "--diff-filter=ACMR",
             ],
-            capture_output=True, text=True, timeout=5,
+            timeout=5,
         )
         files = {f.strip() for f in result.stdout.splitlines() if f.strip()}
     except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller

@@ -29,7 +29,7 @@ def fake_repo(tmp_path) -> Path:
 
 
 def _mock_git(repo: Path, git_common_dir: str | None = None, hooks_path: str | None = None):
-    def _run(cmd, *, cwd=None, capture_output=False, text=False, timeout=None, **kw):
+    def _run(cmd, *, cwd=None, text=True, timeout=None, **kw):
         import subprocess as sp
         class Res:
             stdout = ""; stderr = ""; returncode = 0
@@ -40,13 +40,14 @@ def _mock_git(repo: Path, git_common_dir: str | None = None, hooks_path: str | N
             if hooks_path: r.stdout = hooks_path
             else: r.returncode = 1
         else:
-            return sp.run(cmd, cwd=cwd, capture_output=capture_output, text=text, timeout=timeout)
+            return sp.run(cmd, cwd=cwd, capture_output=True, text=text, timeout=timeout)
         return r
-    # nexus-8g79.10 (V2): subprocess.run call sites are inside
-    # nexus._git_hooks_meta (git_common_dir + effective_hooks_dir);
-    # commands/hooks.py uses them via re-export. Patch the lower-
-    # layer module that actually owns the call.
-    return patch("nexus._git_hooks_meta.subprocess.run", side_effect=_run)
+    # nexus-8g79.10 (V2): the call sites are inside nexus._git_hooks_meta
+    # (git_common_dir + effective_hooks_dir); commands/hooks.py uses them
+    # via re-export. Patch the lower-layer module that actually owns the
+    # call. nexus-t10nc moved both onto bounded_subprocess.run_bounded, so
+    # that is the name bound in this module's namespace.
+    return patch("nexus._git_hooks_meta.run_bounded", side_effect=_run)
 
 
 def _install(runner, repo):

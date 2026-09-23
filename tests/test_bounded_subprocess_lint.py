@@ -66,16 +66,13 @@ _EXCLUDED_DIR_BEAD = "nexus-t9klx"
 #: reaches zero is deleted from this map, and a file absent from it is
 #: allowed zero.
 _UNCONVERTED: dict[str, int] = {
-    "src/nexus/_git_hooks_meta.py": 2,
     "src/nexus/_install/census_core.py": 1,
     "src/nexus/_install/layout_core.py": 1,
     "src/nexus/aspect_readers.py": 1,
     "src/nexus/catalog/orphan_backfill.py": 1,
-    "src/nexus/commands/catalog_cmds/report.py": 1,
     "src/nexus/commands/command_context.py": 1,
     "src/nexus/commands/daemon.py": 2,
     "src/nexus/commands/doctor.py": 1,
-    "src/nexus/commands/index.py": 1,
     "src/nexus/commands/rdr.py": 12,
     "src/nexus/commands/self_cmd.py": 2,
     "src/nexus/daemon/installer.py": 1,
@@ -87,12 +84,7 @@ _UNCONVERTED: dict[str, int] = {
     "src/nexus/devonthink.py": 1,
     "src/nexus/doc/resolvers.py": 1,
     "src/nexus/formatters.py": 2,
-    "src/nexus/frecency.py": 2,
     "src/nexus/health.py": 1,
-    "src/nexus/indexer.py": 4,
-    "src/nexus/indexer_utils.py": 3,
-    "src/nexus/repo_identity.py": 1,
-    "src/nexus/session.py": 2,
     "src/nexus/upgrade_finish.py": 6,
 }
 

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger()
 
 
@@ -24,11 +26,9 @@ def _git_commit_timestamps(
     *timeout* defaults to 30 s; override via TuningConfig.git_log_timeout.
     """
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "log", "--follow", "--format=%ct", "--", str(file)],
             cwd=repo,
-            capture_output=True,
-            text=True,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -100,15 +100,13 @@ def batch_frecency(
     # never appears in a valid file path.
     _MARKER = "|||nxcommit|||"
     try:
-        result = subprocess.run(
+        result = run_bounded(
             # nexus-cd1k0.15: without core.quotePath=false git C-quotes a
             # non-ASCII path ("docs/\303\251.md"), so its key never matched
             # the real path and the file scored 0.0 (the third site of the
             # nexus-6m9zy.4 class).
             ["git", "-c", "core.quotePath=false", "log", f"--format={_MARKER}%ct{_MARKER}", "--name-only"],
             cwd=repo,
-            capture_output=True,
-            text=True,
             timeout=timeout * 2,
         )
     except subprocess.TimeoutExpired:

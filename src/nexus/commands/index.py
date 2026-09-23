@@ -12,6 +12,8 @@ import click
 import structlog
 from tqdm import tqdm
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger()
 
 
@@ -3280,11 +3282,11 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
             # a stalled git (filesystem hang, held .git lock) blocked the index
             # run forever. The except below already treats failure as
             # "fall back to the layout heuristic", so a timeout is free.
-            repo_root = Path(subprocess.check_output(
+            repo_root = Path(run_bounded(
                 ["git", "rev-parse", "--show-toplevel"],
-                cwd=path.parent, text=True, stderr=subprocess.DEVNULL,
+                cwd=path.parent, stderr=subprocess.DEVNULL, check=True,
                 timeout=10,
-            ).strip()).resolve()
+            ).stdout.strip()).resolve()
         except Exception:  # noqa: BLE001 — fallback path: git toplevel resolution failed (non-repo / git absent); recovers via conventional docs/rdr/ layout heuristic
             # Fallback: assume conventional docs/rdr/<file>.md layout.
             if path.parent.name == "rdr" and path.parent.parent.name == "docs":

@@ -28,6 +28,8 @@ from typing import Any
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger()
 
 
@@ -42,11 +44,9 @@ _log = structlog.get_logger()
 @lru_cache(maxsize=128)
 def _resolve_main_repo_cached(repo_str: str) -> str:
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "rev-parse", "--git-common-dir"],
             cwd=repo_str,
-            capture_output=True,
-            text=True,
             timeout=10,
         )
         if result.returncode == 0:

@@ -13,6 +13,8 @@ from uuid import uuid4
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger()
 
 # Flat file written by SessionStart hook with the Claude session ID.
@@ -473,10 +475,10 @@ def _command_name_of(pid: int) -> str:
     caller treats that as "not a match" and keeps walking.
     """
     try:
-        out = subprocess.check_output(
+        out = run_bounded(
             ["ps", "-o", "comm=", "-p", str(pid)],
-            stderr=subprocess.DEVNULL, text=True, timeout=2,
-        ).strip()
+            stderr=subprocess.DEVNULL, check=True, timeout=2,
+        ).stdout.strip()
         return Path(out).name if out else ""
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
             OSError):
@@ -575,10 +577,10 @@ def _list_processes() -> list[tuple[int, int, str]]:
     ``-ww``.
     """
     try:
-        out = subprocess.check_output(
+        out = run_bounded(
             ["ps", "-ww", "-eo", "pid,ppid,args="],
-            stderr=subprocess.DEVNULL, text=True, timeout=5,
-        )
+            stderr=subprocess.DEVNULL, check=True, timeout=5,
+        ).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return []
     result: list[tuple[int, int, str]] = []

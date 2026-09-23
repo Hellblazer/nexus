@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import fnmatch
 import re
-import subprocess
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
@@ -520,10 +520,10 @@ def find_repo_root(path: Path) -> Path | None:
     Uses ``git rev-parse --show-toplevel`` so it works from any subdirectory.
     """
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=path if path.is_dir() else path.parent,
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
             return Path(result.stdout.strip())
@@ -660,8 +660,8 @@ def detect_git_metadata(path: Path) -> dict[str, str]:
 
     def _run(args: list[str]) -> str:
         try:
-            r = subprocess.run(
-                args, cwd=repo, capture_output=True, text=True, timeout=10,
+            r = run_bounded(
+                args, cwd=repo, timeout=10,
             )
         except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             return ""
@@ -761,9 +761,9 @@ def is_gitignored(path: Path, repo_root: Path) -> bool:
     ``.gitignore``, ``.git/info/exclude``, and global gitignore config.
     """
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "check-ignore", "-q", str(path)],
-            cwd=repo_root, capture_output=True, timeout=10,
+            cwd=repo_root, text=False, timeout=10,
         )
         return result.returncode == 0  # 0 = ignored, 1 = not ignored
     except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here

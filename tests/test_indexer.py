@@ -1657,7 +1657,7 @@ def test_git_ls_files_raises_on_failure_in_git_repo(tmp_path):
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "t.py").write_text("x=1\n"); (repo / ".env").write_text("S\n"); (repo / ".gitignore").write_text(".env\n")
     _init_git(repo)
-    with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
+    with patch("nexus.indexer.run_bounded", side_effect=FileNotFoundError("git not found")):
         with pytest.raises(RuntimeError, match="git ls-files failed"): _git_ls_files(repo)
 
 
