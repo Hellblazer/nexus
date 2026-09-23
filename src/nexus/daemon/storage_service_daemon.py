@@ -446,8 +446,10 @@ _JAVA_FLOOR: int = 25
 
 
 #: Opt OUT of the image's baked IPv4-only stack. Unset means the baked
-#: default stands, which is what the WSL2 appliance needs; an explicit falsey
-#: value restores dual-stack for a deployment that needs IPv6 outbound.
+#: default stands, which is what the WSL2 appliance needs and what every
+#: deployment this repo knows of wants: the cloud egress proxy is IPv4 too
+#: (``EgressProxy.java:34``). The opt-out exists for a deployment that turns
+#: out to need a dual-stack listener, not for one already known to.
 IPV4_ONLY_ENV = "NX_SERVICE_IPV4_ONLY"
 
 
@@ -460,6 +462,13 @@ def _ipv4_only_disabled(env_value: str | None) -> bool:
     silently select a networking posture, because the symptom on the appliance
     is a service that boots healthy and is unreachable from Windows with no
     signal anywhere.
+
+    It raises :class:`StorageServiceStartError`, the type every other
+    env-validation failure in this module raises, because that is the type
+    ``nx daemon service start`` and ``nx init`` catch to print ``Error: ...``
+    and exit 2. A bare ``ValueError`` here reached the user as a raw
+    traceback: a typo in an env var answered with a stack dump, which is the
+    opposite of the legible refusal this check exists to give.
     """
     if env_value is None or not env_value.strip():
         return False
@@ -468,7 +477,7 @@ def _ipv4_only_disabled(env_value: str | None) -> bool:
         return True
     if v in {"1", "true", "yes"}:
         return False
-    raise ValueError(
+    raise StorageServiceStartError(
         f"{IPV4_ONLY_ENV} is set to {env_value!r}, which is neither a recognised "
         "yes (1/true/yes) nor a recognised no (0/false/no). Refusing to guess: "
         "this selects the socket family the engine binds, and reading it wrongly "
@@ -1096,8 +1105,10 @@ class StorageServiceSupervisor:
         # 127.0.0.1 on Linux otherwise yields a dual-stack AF_INET6 listener on
         # ::ffff:127.0.0.1 that WSL2's localhost relay will not forward. That
         # baked value is a DEFAULT, not a lock: this flag overrides it for a
-        # deployment that needs IPv6 outbound (Voyage, EgressProxy). Measured
-        # both directions on GraalVM 25.
+        # deployment that turns out to need a dual-stack listener. Not "for
+        # Voyage/EgressProxy", which is what this said until the citation was
+        # checked: EgressProxy.java:34 records the cloud egress proxy as IPv4.
+        # Measured both directions on GraalVM 25.
         # The value is stated EXPLICITLY for both launch kinds rather than
         # relying on the baked default, because the baked default exists only
         # in the native image: a NEXUS_SERVICE_JAR launch is a plain JVM with

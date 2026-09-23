@@ -18,8 +18,10 @@ MEASURED on GraalVM 25 community, linux/amd64, family read from
 
 The baked value is a DEFAULT, not a lock: a runtime
 ``-Djava.net.preferIPv4Stack=false`` overrides it, measured both directions.
-That is the whole mechanism this file tests -- the supervisor passes that flag
-when, and only when, the deployment explicitly opts out.
+That is the whole mechanism this file tests. The supervisor passes the flag on
+EVERY launch, stating ``true`` or ``false`` explicitly rather than passing it
+only on the opt-out: the baked default exists only in the native image, so a
+``NEXUS_SERVICE_JAR`` launch left implicit got the opposite socket family.
 """
 
 from __future__ import annotations
@@ -29,7 +31,11 @@ import inspect
 import pytest
 
 from nexus.daemon import storage_service_daemon as mod
-from nexus.daemon.storage_service_daemon import IPV4_ONLY_ENV, _ipv4_only_disabled
+from nexus.daemon.storage_service_daemon import (
+    IPV4_ONLY_ENV,
+    StorageServiceStartError,
+    _ipv4_only_disabled,
+)
 
 
 def test_unset_keeps_the_baked_default() -> None:
@@ -45,7 +51,14 @@ def test_explicit_yes_keeps_the_baked_default() -> None:
 
 
 def test_explicit_no_disables_it() -> None:
-    """A deployment that needs IPv6 outbound opts out."""
+    """A deployment that turns out to need a dual-stack listener opts out.
+
+    Deliberately NOT "a deployment that needs IPv6 outbound (Voyage,
+    EgressProxy)", which is what this said until the citation was checked:
+    EgressProxy.java:34 records that the cloud egress proxy is IPv4. No
+    deployment this repo knows of needs the opt-out, which is precisely why
+    IPv4-only is the default.
+    """
     for v in ("0", "false", "FALSE", "no", " no "):
         assert _ipv4_only_disabled(v) is True, v
 
@@ -58,10 +71,38 @@ def test_unrecognised_value_raises_rather_than_guessing() -> None:
     symptom of guessing wrong on the appliance is a service that boots
     healthy and is unreachable from Windows, with no signal anywhere -- which
     is the exact defect the flag exists to prevent.
+
+    The TYPE is pinned, not just the raise. Refusing is only half of it: the
+    round-3 review found this raising a bare ValueError while every sibling
+    env-validation in the module raises StorageServiceStartError, which is
+    what `nx daemon service start` and `nx init` catch to print `Error: ...`
+    and exit 2. A refusal that reaches the user as a traceback is not the
+    legible refusal this check exists to give.
     """
     for junk in ("on", "off", "2", "ipv4", "yes please", "TRUEish"):
-        with pytest.raises(ValueError, match=IPV4_ONLY_ENV):
+        with pytest.raises(StorageServiceStartError, match=IPV4_ONLY_ENV):
             _ipv4_only_disabled(junk)
+
+
+def test_the_refusal_type_is_the_one_the_cli_catches() -> None:
+    """Non-vacuity for the type pin above.
+
+    `pytest.raises(StorageServiceStartError)` would also be satisfied if
+    that name were an alias of ValueError or of Exception, in which case the
+    pin would hold while the CLI contract was broken. This asserts the thing
+    that actually matters: the CLI's own except clause catches it.
+    """
+    assert issubclass(StorageServiceStartError, Exception)
+    assert not issubclass(ValueError, StorageServiceStartError), (
+        "if ValueError were a StorageServiceStartError the pin above would "
+        "pass on the pre-fix code"
+    )
+    try:
+        _ipv4_only_disabled("ture")
+    except StorageServiceStartError:
+        pass
+    else:  # pragma: no cover - the test above already covers the no-raise case
+        raise AssertionError("expected a refusal")
 
 
 def test_the_env_var_name_is_the_one_the_supervisor_reads() -> None:

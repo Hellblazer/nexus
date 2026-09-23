@@ -32,9 +32,15 @@ import org.graalvm.nativeimage.hosted.RuntimeSystemProperties;
  * <p><strong>It is a DEFAULT, not a lock.</strong> A runtime
  * {@code -Djava.net.preferIPv4Stack=false} overrides it — measured, both
  * directions. That is what makes the deployment gate possible:
- * {@code storage_service_daemon} passes that flag when
+ * {@code storage_service_daemon} passes {@code =false} when
  * {@code NX_SERVICE_IPV4_ONLY} is explicitly disabled, so a deployment that
- * needs IPv6 outbound (Voyage, EgressProxy) can have it.
+ * turns out to need a dual-stack listener can have one.
+ *
+ * <p>Not "so Voyage and EgressProxy can reach IPv6", which is what this said
+ * until the citation was checked: {@code EgressProxy.java:34} records that
+ * the cloud egress proxy is IPv4. No deployment known to this repository
+ * needs the opt-out, which is why IPv4-only is the default rather than the
+ * thing you opt into.
  *
  * <p><strong>Phase matters.</strong> Registering in {@code afterRegistration}
  * fails the build with {@code ImageSingletons do not contain key

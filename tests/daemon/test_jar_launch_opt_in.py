@@ -149,6 +149,59 @@ def test_jar_argv_is_java_dash_jar(monkeypatch):
     ]
 
 
+# ── the OPT-OUT argv, both launch kinds ─────────────────────────────────────
+#
+# The three tests above assert the DEFAULT (=true). Until the round-3 review
+# of nexus-ijue9.7 nothing asserted the other branch through a real
+# _spawn_service at all: tests/daemon/test_ipv4_stack_gate.py exercises the
+# _ipv4_only_disabled helper and greps the source, neither of which would
+# catch a ternary inversion or a wrong env-var name in the one line that
+# turns the helper's answer into argv. The flag that ships is the one in
+# argv, so that is where the opt-out has to be asserted.
+
+
+def test_native_argv_states_false_when_opted_out(monkeypatch):
+    monkeypatch.setenv(ssd.IPV4_ONLY_ENV, "0")
+    binary = Path("/opt/nexus/nexus-service")
+    argv = _spawn_capture(monkeypatch, launch_kind="native", artifact=binary)
+    assert argv == [
+        str(binary),
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=false",
+    ]
+
+
+def test_jar_argv_states_false_when_opted_out(monkeypatch):
+    monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
+    monkeypatch.setenv(ssd.IPV4_ONLY_ENV, "no")
+    jar = Path("/build/nexus-service.jar")
+    argv = _spawn_capture(monkeypatch, launch_kind="jar", artifact=jar)
+    assert argv == [
+        "/usr/bin/java",
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=false",
+        "-jar",
+        str(jar),
+    ]
+
+
+def test_a_malformed_opt_out_refuses_the_spawn(monkeypatch):
+    """A typo must not silently pick a socket family.
+
+    It must also refuse in the type the CLI catches: `nx daemon service
+    start` and `nx init` both catch StorageServiceStartError to print
+    `Error: ...` and exit 2, so a bare ValueError would have reached the
+    user as a traceback.
+    """
+    monkeypatch.setenv(ssd.IPV4_ONLY_ENV, "ture")
+    with pytest.raises(ssd.StorageServiceStartError, match=ssd.IPV4_ONLY_ENV):
+        _spawn_capture(
+            monkeypatch,
+            launch_kind="native",
+            artifact=Path("/opt/nexus/nexus-service"),
+        )
+
+
 def test_jar_argv_with_heap_orders_xmx_before_jar(monkeypatch):
     monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
     jar = Path("/build/nexus-service.jar")

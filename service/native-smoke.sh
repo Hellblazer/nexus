@@ -103,11 +103,24 @@ done
 # the family (java.net reports Inet4Address for BOTH families, so the Java API
 # cannot see this at all), and it does not exist on macOS. Skipping is stated
 # rather than silent, so a run that could not check says so.
+#
+# COUNTED THE WAY THE JAVA TEST COUNTS: the LOCAL address column, in the
+# LISTEN state, not "the port appears somewhere on the line". A bare grep
+# for the port is wrong in both directions here, and this script creates
+# both cases itself. It probes the service over HTTP, so /proc/net/tcp
+# carries ESTABLISHED rows whose local port IS the service port: those
+# inflate the IPv4 count, so the "at least one IPv4 row" assert can pass
+# without any listener at all, and if a probe connects over v6 they put a
+# row in the IPv6 table, failing the "no IPv6 row" assert on a correctly
+# IPv4-only listener. st=0A is TCP_LISTEN; $2 is local_address.
 if [ -r /proc/net/tcp ] && [ -r /proc/net/tcp6 ]; then
   HEXPORT=$(printf "%04X" "$SVCPORT")
-  V4=$(grep -c ":$HEXPORT " /proc/net/tcp 2>/dev/null || true)
-  V6=$(grep -c ":$HEXPORT " /proc/net/tcp6 2>/dev/null || true)
-  echo "socket family: ipv4_table=$V4 ipv6_table=$V6 (port $SVCPORT / 0x$HEXPORT)"
+  count_listeners() {
+    awk -v port=":$1" 'NR>1 && $4=="0A" && index($2, port) == length($2)-length(port)+1 { n++ } END { print n+0 }' "$2"
+  }
+  V4=$(count_listeners "$HEXPORT" /proc/net/tcp)
+  V6=$(count_listeners "$HEXPORT" /proc/net/tcp6)
+  echo "socket family: ipv4_table=$V4 ipv6_table=$V6 (port $SVCPORT / 0x$HEXPORT, LISTEN rows only)"
   if [ "${V4:-0}" -lt 1 ]; then
     echo "FAIL: listener is not in the IPv4 socket table."
     echo "      Ipv4StackFeature did not take. Check that pom.xml's -Pnative"
