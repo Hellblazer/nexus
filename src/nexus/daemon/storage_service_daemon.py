@@ -58,6 +58,7 @@ supervisor.
 
 No direct-mode fallback — a service/PG outage is always fatal for callers.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -85,6 +86,7 @@ from typing import Any, Callable, Optional
 
 import structlog
 
+from nexus import _locking
 from nexus import pdeathsig as _pdeathsig
 from nexus.daemon import readiness
 from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
@@ -128,6 +130,7 @@ _SERVICE_HOST: str = "127.0.0.1"
 _LIBC = _pdeathsig.LIBC
 _set_pdeathsig_preexec = _pdeathsig.set_pdeathsig_preexec
 
+
 class HealthProbe(Enum):
     """Outcome of a ``GET /health`` probe (nexus-7f7gb).
 
@@ -164,7 +167,9 @@ _READY_TIMEOUT: float = 60.0
 #: 3600s when the PG probe itself is unavailable (managed PG, no local
 #: psql) and log lines are the only evidence. See readiness.py.
 _MIGRATION_STALL_TIMEOUT: float = readiness.DEFAULT_MIGRATION_STALL_TIMEOUT
-_MIGRATION_UNOBSERVABLE_TIMEOUT: float = readiness.DEFAULT_MIGRATION_UNOBSERVABLE_TIMEOUT
+_MIGRATION_UNOBSERVABLE_TIMEOUT: float = (
+    readiness.DEFAULT_MIGRATION_UNOBSERVABLE_TIMEOUT
+)
 
 #: Interval between /health polls during startup.
 _READY_POLL_INTERVAL: float = 0.5
@@ -385,6 +390,7 @@ def _find_service_binary(config_dir: Path) -> Path | None:
         )
 
     from nexus.daemon.binary_lifecycle import well_known_binary_path  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
     well_known = well_known_binary_path(config_dir)
     if well_known.is_file():
         return _require_executable(well_known, "nexus-service")
@@ -431,6 +437,14 @@ def _find_service_jar() -> Path | None:
     )
 
 
+#: Minimum JDK for the JVM-fallback launch. MUST equal
+#: ``maven.compiler.release`` in ``service/pom.xml`` (the property, not the
+#: maven-compiler-plugin's retyped copy). The wheel does not ship the pom, so
+#: the runtime cannot read it; ``tests/daemon/test_java_floor_matches_pom.py``
+#: is what keeps the two equal, and it reads the pom rather than this value.
+_JAVA_FLOOR: int = 25
+
+
 def _resolve_java_executable() -> str:
     """Return the ``java`` launcher for the JAR path, or fail loud with a remedy.
 
@@ -448,8 +462,8 @@ def _resolve_java_executable() -> str:
         return found
     raise StorageServiceStartError(
         "NEXUS_SERVICE_JAR launch requires a Java runtime, but no 'java' was "
-        "found on PATH or via JAVA_HOME. Install a JDK (>= 21), or unset "
-        "NEXUS_SERVICE_JAR to use the native binary."
+        f"found on PATH or via JAVA_HOME. Install a JDK (>= {_JAVA_FLOOR}), or "
+        "unset NEXUS_SERVICE_JAR to use the native binary."
     )
 
 
@@ -468,8 +482,8 @@ def _resolve_launch_artifact(config_dir: Path) -> tuple[Path, str]:
             jar=str(jar),
             verified=False,
             note="launching the UNVERIFIED dev/test JAR via NEXUS_SERVICE_JAR, "
-                 "not the cosign-signed native binary (RDR-161). For production "
-                 "use the installed native binary.",
+            "not the cosign-signed native binary (RDR-161). For production "
+            "use the installed native binary.",
         )
         return jar, "jar"
     binary = _find_service_binary(config_dir)
@@ -515,7 +529,9 @@ def requested_launch_artifact_if_explicit(config_dir: Path) -> tuple[Path, str] 
     return _resolve_launch_artifact(config_dir)
 
 
-def _raise_or_warn_on_artifact_mismatch(config_dir: Path, endpoint: dict[str, Any]) -> None:
+def _raise_or_warn_on_artifact_mismatch(
+    config_dir: Path, endpoint: dict[str, Any]
+) -> None:
     """Shared mismatch check (nexus-4e96a) for BOTH short-circuit layers:
     :meth:`StorageServiceSupervisor._start_locked` (the ``--foreground`` /
     OS-unit path) and ``commands.daemon.ensure_storage_supervisor`` (the
@@ -563,8 +579,8 @@ def _raise_or_warn_on_artifact_mismatch(config_dir: Path, endpoint: dict[str, An
             requested_artifact=str(requested_path),
             requested_kind=requested_kind,
             msg="the live lease predates artifact-identity tracking "
-                "(nexus-4e96a); cannot verify it matches the explicitly "
-                "requested artifact — allowing the short-circuit.",
+            "(nexus-4e96a); cannot verify it matches the explicitly "
+            "requested artifact — allowing the short-circuit.",
         )
         return
     if lease_artifact != str(requested_path):
@@ -665,7 +681,9 @@ class _LogTailer:
         return [line.decode("utf-8", errors="replace") for line in lines]
 
 
-def _default_engine_liveness_scan(config_dir: Path, binary_path: Path) -> list[tuple[int, str]]:
+def _default_engine_liveness_scan(
+    config_dir: Path, binary_path: Path
+) -> list[tuple[int, str]]:
     """Real engine-liveness scan (nexus-8vp0i review round 2, substantive-
     critic Critical 1): ``[(pid, command)]`` for engine processes belonging
     to *config_dir* that are ACTUALLY ALIVE right now — the precondition
@@ -725,6 +743,7 @@ def _daemon_version() -> str:
     """Return the conexus package version for the lease."""
     try:
         from importlib.metadata import version  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
         return version("conexus")
     except Exception:  # noqa: BLE001 — best-effort version probe; falls back to 0.0.0
         return "0.0.0"
@@ -773,7 +792,8 @@ class StorageServiceSupervisor:
         launch_kind: str = "native",
         lease_clock: Callable[[], float] = time.time,
         supervised: bool = False,
-        engine_liveness_scan: Callable[[Path, Path], list[tuple[int, str]]] | None = None,
+        engine_liveness_scan: Callable[[Path, Path], list[tuple[int, str]]]
+        | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         # RDR-161: the cosign-verified native binary is the production launch
@@ -794,8 +814,7 @@ class StorageServiceSupervisor:
         self._binary_path = binary_path
         self._launch_kind = launch_kind
         self._svc_log_name = (
-            "storage_service_jar" if launch_kind == "jar"
-            else "storage_service_native"
+            "storage_service_jar" if launch_kind == "jar" else "storage_service_native"
         )
         self._pg_port = pg_port
         self._service_port = service_port
@@ -808,7 +827,9 @@ class StorageServiceSupervisor:
         # terminating/releasing anything — injectable so tests cover both
         # the "live engine found, skip" and "none found, proceed" branches
         # deterministically. Defaults to the real process-table scan.
-        self._engine_liveness_scan = engine_liveness_scan or _default_engine_liveness_scan
+        self._engine_liveness_scan = (
+            engine_liveness_scan or _default_engine_liveness_scan
+        )
         self._scope = str(os.getuid())
         self._proc: subprocess.Popen[bytes] | None = None
         # nexus-8vp0i: the byte offset into the engine log at the moment THIS
@@ -906,8 +927,12 @@ class StorageServiceSupervisor:
         # self._creds anywhere between the two, would silently spawn the JVM
         # on stale credentials — don't do that.
         for k in (
-            "NX_DB_URL", "NX_DB_USER", "NX_DB_PASS",
-            "NX_DB_ADMIN_URL", "NX_DB_ADMIN_USER", "NX_DB_ADMIN_PASS",
+            "NX_DB_URL",
+            "NX_DB_USER",
+            "NX_DB_PASS",
+            "NX_DB_ADMIN_URL",
+            "NX_DB_ADMIN_USER",
+            "NX_DB_ADMIN_PASS",
         ):
             if k in self._creds:
                 env[k] = self._creds[k]
@@ -991,6 +1016,7 @@ class StorageServiceSupervisor:
                 local_embed_model_choice,
                 local_embed_model_is_voyage,
             )
+
             embed_choice = local_embed_model_choice() or ""
             # nexus-35ok4: this condition and corpus.effective_embedding_model_for_writes'
             # local-mode branch both dispatch off local_embed_model_is_voyage() — the
@@ -1001,13 +1027,15 @@ class StorageServiceSupervisor:
                     "storage_service_voyage_key_not_plumbed",
                     configured_embed_model=embed_choice,
                     reason="local.embed_model configures a non-voyage embedder; "
-                           "set NX_VOYAGE_API_KEY explicitly to override",
+                    "set NX_VOYAGE_API_KEY explicitly to override",
                 )
             else:
                 voyage_key = get_credential("voyage_api_key")
                 if voyage_key:
                     env["NX_VOYAGE_API_KEY"] = voyage_key
-                    _log.info("storage_service_voyage_key_resolved", source="credential_chain")
+                    _log.info(
+                        "storage_service_voyage_key_resolved", source="credential_chain"
+                    )
                 else:
                     _log.warning(
                         "storage_service_no_voyage_key",
@@ -1117,6 +1145,7 @@ class StorageServiceSupervisor:
         try:
             import urllib.error  # noqa: PLC0415 — deferred import — branch-local
             import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
                 return HealthProbe.OK if resp.status == 200 else HealthProbe.UNREADY
@@ -1150,6 +1179,7 @@ class StorageServiceSupervisor:
         try:
             import urllib.error  # noqa: PLC0415 — deferred import — branch-local
             import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=_LIVEZ_TIMEOUT):
                 return True
@@ -1220,7 +1250,13 @@ class StorageServiceSupervisor:
             # readiness wait, so an unresponsive local psql must not make
             # stop_check invisible for longer than _PG_PROBE_TIMEOUT.
             proc = _run_psql(
-                psql_bin, host, port, dbname, user, password, sql,
+                psql_bin,
+                host,
+                port,
+                dbname,
+                user,
+                password,
+                sql,
                 timeout=_PG_PROBE_TIMEOUT,
             )
             if proc.returncode != 0:
@@ -1229,7 +1265,9 @@ class StorageServiceSupervisor:
                 n = int(proc.stdout.strip())
             except ValueError:
                 return readiness.PgActivity.UNAVAILABLE
-            return readiness.PgActivity.EXECUTING if n > 0 else readiness.PgActivity.IDLE
+            return (
+                readiness.PgActivity.EXECUTING if n > 0 else readiness.PgActivity.IDLE
+            )
         except Exception:  # noqa: BLE001 — best-effort probe; unavailable is a valid, expected outcome
             return readiness.PgActivity.UNAVAILABLE
 
@@ -1286,7 +1324,9 @@ class StorageServiceSupervisor:
             return
 
         try:
-            alive_engine_pids = self._engine_liveness_scan(self._config_dir, self._binary_path)
+            alive_engine_pids = self._engine_liveness_scan(
+                self._config_dir, self._binary_path
+            )
         except Exception as exc:  # noqa: BLE001 — a scan failure must not be read as "confirmed dead"
             _log.warning(
                 "storage_service_lock_cleanup_liveness_scan_failed",
@@ -1364,7 +1404,9 @@ class StorageServiceSupervisor:
                 "datname = current_database() AND usename = current_user AND "
                 "state != 'idle' AND pid != pg_backend_pid();"
             )
-            terminated = _run_psql(psql_bin, host, port, dbname, user, password, terminate_sql)
+            terminated = _run_psql(
+                psql_bin, host, port, dbname, user, password, terminate_sql
+            )
             terminated_pids: list[int] = []
             if terminated.returncode == 0:
                 for line in terminated.stdout.strip().splitlines():
@@ -1376,7 +1418,9 @@ class StorageServiceSupervisor:
                 "UPDATE databasechangeloglock SET locked=false, lockgranted=NULL, "
                 "lockedby=NULL WHERE id=1 AND locked=true;"
             )
-            released = _run_psql(psql_bin, host, port, dbname, user, password, release_sql)
+            released = _run_psql(
+                psql_bin, host, port, dbname, user, password, release_sql
+            )
             if released.returncode == 0:
                 _log.warning(
                     "storage_service_stale_changelog_lock_released",
@@ -1386,7 +1430,9 @@ class StorageServiceSupervisor:
                     terminated_pids=terminated_pids,
                 )
         except Exception as exc:  # noqa: BLE001 — best-effort cleanup; never blocks a service start
-            _log.warning("storage_service_lock_cleanup_failed", reason=reason, error=str(exc))
+            _log.warning(
+                "storage_service_lock_cleanup_failed", reason=reason, error=str(exc)
+            )
 
     def _kill_after_readiness_failure(self, proc: subprocess.Popen[bytes]) -> None:
         """SIGTERM + grace window + SIGKILL, matching ``_stop_service`` (not
@@ -1405,6 +1451,7 @@ class StorageServiceSupervisor:
         """
         with contextlib.suppress(Exception):
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
             safe_killpg(proc.pid, signal.SIGTERM)
             try:
                 proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
@@ -1475,7 +1522,9 @@ class StorageServiceSupervisor:
         monitor = readiness.ReadinessMonitor(
             log_reader=log_reader,
             pg_probe=self._migration_pg_probe,
-            health_probe=lambda: _readiness_health_answer(self._probe_service_health(port)),
+            health_probe=lambda: _readiness_health_answer(
+                self._probe_service_health(port)
+            ),
             process_poll=proc.poll,
             pre_migration_timeout=timeout,
             post_migration_timeout=timeout,
@@ -1523,7 +1572,12 @@ class StorageServiceSupervisor:
                 "Check service logs for details."
             ) from exc
         except readiness.ReadinessMigrationFailedError as exc:
-            _log.warning("storage_service_migration_failed", port=port, pid=proc.pid, line=exc.raw_line)
+            _log.warning(
+                "storage_service_migration_failed",
+                port=port,
+                pid=proc.pid,
+                line=exc.raw_line,
+            )
             self._kill_after_readiness_failure(proc)
             self._release_stale_changelog_lock(reason="migration_failed")
             raise StorageServiceStartError(
@@ -1657,7 +1711,9 @@ class StorageServiceSupervisor:
     # -- Public lifecycle API -----------------------------------------------
 
     def start(
-        self, *, stop_requested: threading.Event | None = None,
+        self,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Acquire spawn lock, ensure PG is up, spawn service, publish lease.
 
@@ -1670,17 +1726,17 @@ class StorageServiceSupervisor:
         invisible for the rest of a potentially 20+ minute migration wait
         — see ``readiness.ReadinessStopRequestedError``.
         """
-        import fcntl  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-
         self._config_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._config_dir / _SPAWN_LOCK_FILE
         lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _locking.lock_fd(
+                lock_fd, blocking=True
+            )  # lifecycle-gate-allow: spawn serialisation, not a lifecycle election
             return self._start_locked(stop_requested=stop_requested)
         finally:
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                _locking.unlock_fd(lock_fd)
             except OSError:
                 pass
             try:
@@ -1689,7 +1745,9 @@ class StorageServiceSupervisor:
                 pass
 
     def _start_locked(
-        self, *, stop_requested: threading.Event | None = None,
+        self,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Inner start, called under the spawn lock."""
         # Short-circuit: a live lease already exists (parallel caller won the race).
@@ -1700,7 +1758,10 @@ class StorageServiceSupervisor:
         )
         existing = registry.discover(self._scope)
         if existing is not None and reclaim_lease_if_dead_owner(
-            registry, existing, log=_log, event="storage_service_dead_lease_reclaim",
+            registry,
+            existing,
+            log=_log,
+            event="storage_service_dead_lease_reclaim",
         ):
             # nexus-cd1k0.17: a TTL-fresh lease held by a DEAD supervisor
             # (hard crash — OOM-kill / SIGKILL with no relinquish) must
@@ -1825,6 +1886,7 @@ class StorageServiceSupervisor:
             _log.info("storage_service_starting_pg", port=self._pg_port)
             try:
                 from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
                 pg_data_str = self._creds.get("PG_DATA", "")
                 if not pg_data_str:
                     raise StorageServiceStartError(
@@ -1868,6 +1930,7 @@ class StorageServiceSupervisor:
         # behavior this replaces.
         try:
             from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
             creds_path = self._config_dir / CREDENTIALS_FILENAME
             if creds_path.exists():
                 self._creds = _read_pg_credentials(creds_path)
@@ -1939,11 +2002,12 @@ class StorageServiceSupervisor:
             _log.debug(
                 "storage_service_provision_backfill_skipped",
                 reason="no PG_DATA in pg_credentials — managed/BYO Postgres, "
-                       "not the bundled cluster this supervisor owns",
+                "not the bundled cluster this supervisor owns",
             )
             return
         try:
             from nexus.db.pg_provision import provision  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
             provision(config_dir=self._config_dir)
         except Exception as exc:  # noqa: BLE001 — best-effort preflight; see docstring
             _log.warning("storage_service_provision_backfill_failed", error=str(exc))
@@ -1974,8 +2038,8 @@ class StorageServiceSupervisor:
                     ttl_s=ttl,
                     phases_s={k: round(v, 3) for k, v in phases.items()},
                     msg="one heartbeat tick took at least the lease TTL: the lease "
-                        "expired under a live service and every client resolved "
-                        "'endpoint not resolvable' until the next stamp",
+                    "expired under a live service and every client resolved "
+                    "'endpoint not resolvable' until the next stamp",
                 )
             elif elapsed >= _HEARTBEAT_SLOW_S:
                 _log.warning(
@@ -2058,7 +2122,9 @@ class StorageServiceSupervisor:
                 "storage_service_exit_detected",
                 pid=self._proc.pid,
                 returncode=rc,
-                service_log=str(self._config_dir / "logs" / f"{self._svc_log_name}.log"),
+                service_log=str(
+                    self._config_dir / "logs" / f"{self._svc_log_name}.log"
+                ),
             )
             return False, False  # process exited; signal the run loop to exit
 
@@ -2083,7 +2149,7 @@ class StorageServiceSupervisor:
                 pg_ok=pg_ok,
                 port=self._service_port,
                 msg="/health answered non-200 — alive, dependency unhappy; "
-                    "not counting toward restart",
+                "not counting toward restart",
             )
             return True, pg_ok
 
@@ -2099,8 +2165,8 @@ class StorageServiceSupervisor:
                     pg_ok=pg_ok,
                     port=self._service_port,
                     msg="/health silent but /livez answered — the process is "
-                        "alive and its pool is contended; NOT a restart reason. "
-                        "Lease not re-stamped, so discoverers age it out.",
+                    "alive and its pool is contended; NOT a restart reason. "
+                    "Lease not re-stamped, so discoverers age it out.",
                 )
                 return True, pg_ok
 
@@ -2194,6 +2260,7 @@ class StorageServiceSupervisor:
 def _load_credentials(config_dir: Path) -> dict[str, str]:
     """Read pg_credentials; raise StorageServiceStartError if absent."""
     from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
     creds_path = config_dir / CREDENTIALS_FILENAME
     if not creds_path.exists():
         raise StorageServiceStartError(
@@ -2208,6 +2275,7 @@ def _load_credentials(config_dir: Path) -> dict[str, str]:
     if not creds.get("NX_SERVICE_TOKEN"):
         import secrets  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         from nexus.db.pg_provision import _persist_service_token  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
         _persist_service_token(creds_path, secrets.token_hex(32))
         creds = _read_pg_credentials(creds_path)
     return creds
@@ -2227,6 +2295,7 @@ def start_storage_service(
     """
     if config_dir is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
         config_dir = nexus_config_dir()
 
     creds = _load_credentials(config_dir)
@@ -2282,6 +2351,7 @@ def run_storage_supervisor(
     """
     if config_dir is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
         config_dir = nexus_config_dir()
 
     # nexus-ovbr7: route structlog to <config_dir>/logs/storage_service.log
@@ -2388,8 +2458,10 @@ def _supervise_until_stopped(
     # would misread self._proc is None as "process died" and force exit(3))
     # — exit 0 now instead of entering the heartbeat loop.
     if exit_if_process_unowned(
-        sup, flush_logging,
-        log=_log, event="storage_service_already_running_healthy",
+        sup,
+        flush_logging,
+        log=_log,
+        event="storage_service_already_running_healthy",
     ):
         return 0
 
@@ -2597,6 +2669,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
 
     if config_dir is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
         config_dir = nexus_config_dir()
 
     registry = ServiceRegistry(dir=config_dir, tier=_REGISTRY_TIER)
@@ -2618,9 +2691,15 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
 
         # Only trust supervisor_pid from a FRESH lease (guaranteed above by
         # discover()'s TTL reap), and only when the process is still alive.
-        if isinstance(supervisor_pid, int) and supervisor_pid > 0 and _pid_is_alive(supervisor_pid):
+        if (
+            isinstance(supervisor_pid, int)
+            and supervisor_pid > 0
+            and _pid_is_alive(supervisor_pid)
+        ):
             source = "lease"
-            _log.info("storage_service_stopping_supervisor", supervisor_pid=supervisor_pid)
+            _log.info(
+                "storage_service_stopping_supervisor", supervisor_pid=supervisor_pid
+            )
             try:
                 os.kill(supervisor_pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
@@ -2655,6 +2734,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
         elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
             source = "lease"
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
             safe_killpg(pid_to_signal, signal.SIGTERM)
             # Clean up the lease record. Bounded (nexus-cd1k0 review round 3
             # finding 6): this is the OUTER ``stop_storage_service`` caller
@@ -2673,11 +2753,15 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
     # on a lease MISS (a miss proves nothing about liveness, nexus-oyo2g).
     matcher = storage_service_stack_matcher(config_dir)
     sweep = sweep_matching_processes(
-        matcher, exclude_pid=os.getpid(), grace_s=_GRACEFUL_STOP_TIMEOUT,
+        matcher,
+        exclude_pid=os.getpid(),
+        grace_s=_GRACEFUL_STOP_TIMEOUT,
     )
 
     if not sweep.available:
-        _log.warning("storage_service_stop_process_table_unavailable", error=sweep.error)
+        _log.warning(
+            "storage_service_stop_process_table_unavailable", error=sweep.error
+        )
         if not signalled:
             _log.info(
                 "storage_service_stop_noop",
@@ -2685,11 +2769,17 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
                 lease_seen=lease_seen,
             )
             return StopOutcome(
-                pids=(), stubborn=(), source="process_table_unavailable",
-                lease_seen=lease_seen, sweep_verified=False,
+                pids=(),
+                stubborn=(),
+                source="process_table_unavailable",
+                lease_seen=lease_seen,
+                sweep_verified=False,
             )
         return StopOutcome(
-            pids=tuple(signalled), stubborn=(), source=source, lease_seen=lease_seen,
+            pids=tuple(signalled),
+            stubborn=(),
+            source=source,
+            lease_seen=lease_seen,
             sweep_verified=False,
         )
 
@@ -2712,28 +2802,37 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
             sweep_reason = "lease_confirmed_absent"
         _log.info(
             "storage_service_stop_process_table_sweep",
-            pids=list(sweep.pids), stubborn=list(sweep.stubborn),
+            pids=list(sweep.pids),
+            stubborn=list(sweep.stubborn),
             reason=sweep_reason,
         )
         if sweep.stubborn:
             _log.warning(
-                "storage_service_stop_stubborn_survivors", pids=list(sweep.stubborn),
+                "storage_service_stop_stubborn_survivors",
+                pids=list(sweep.stubborn),
             )
         signalled.extend(p for p in sweep.pids if p not in signalled)
 
     if not signalled:
         _log.info(
             "storage_service_stop_noop",
-            reason="lease_present_but_unusable_no_processes" if lease_seen
+            reason="lease_present_but_unusable_no_processes"
+            if lease_seen
             else "no_live_lease_no_processes",
             lease_seen=lease_seen,
         )
         return StopOutcome(
-            pids=(), stubborn=(), source="none", lease_seen=lease_seen,
+            pids=(),
+            stubborn=(),
+            source="none",
+            lease_seen=lease_seen,
             sweep_verified=True,
         )
 
     return StopOutcome(
-        pids=tuple(signalled), stubborn=sweep.stubborn, source=source,
-        lease_seen=lease_seen, sweep_verified=True,
+        pids=tuple(signalled),
+        stubborn=sweep.stubborn,
+        source=source,
+        lease_seen=lease_seen,
+        sweep_verified=True,
     )
