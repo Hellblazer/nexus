@@ -522,7 +522,7 @@ else
 
   if [[ -z "$_nx_bin" ]]; then
     echo "PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX only a dev-checkout/venv nx is on PATH; the installed generation was not found."
-    echo "A dev-checkout nx refuses every real tuple-space write (the nexus-a2qhz production-write guard), which otherwise"
+    echo "The nexus-a2qhz production-write guard refuses every real tuple-space write from a dev-checkout CLI, which otherwise"
     echo "reads identically to an unreachable tuple space -- refusing outright here instead so the two are never confused."
     echo "Fix PATH so the installed generation resolves first (avoid 'uv run' / an activated venv for this script), or"
     echo "reinstall it: scripts/reinstall-tool.sh."
