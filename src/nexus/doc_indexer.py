@@ -629,15 +629,42 @@ def _repo_owner_document_for(reader, abs_path):
     forked against a chunk_count=0 row). Detection after the fact cannot
     close this; the lookup has to.
 
+    nexus-7or3f: canonicalizes a nested-worktree ``abs_path``
+    (``<primary>/.claude/worktrees/<agent>/<rel>``) to its primary mirror
+    BEFORE computing the repo-relative path — mirroring what
+    ``_repo_home_for`` (the PRE-FLIGHT probe, ``_register_or_lookup_doc_id``)
+    already does via ``canonicalize_worktree_path``. Without this, a file
+    reached through its worktree path resolved ``rel`` as the
+    worktree-PREFIXED path (``.claude/worktrees/<agent>/<rel>``), which never
+    matches the repo-owned Document's true ``file_path`` (registered by
+    ``nx index repo`` as bare ``<rel>``) — so this lookup always missed for a
+    worktree-invoked single-file index, even though the pre-flight
+    (``_repo_home_for``) had already converged the SAME call's doc_id onto
+    the correct repo-owned row moments earlier. The result was a curator-
+    owned duplicate minted on top of an already-correct repo-owned
+    registration: the exact double-registration nexus-19 measured
+    2026-09-15 running ``nx index rdr
+    <repo>/.claude/worktrees/rdr207-idx/docs/rdr/....md``.
+
     BEST-EFFORT BY CONSTRUCTION: every failure returns ``None`` and the caller
     proceeds exactly as before. A cross-owner probe that raises must never be
     able to break indexing — this is a lookup widening, not a new gate.
     """
     try:
         from pathlib import Path as _Path  # noqa: PLC0415 — stdlib, deferred
-        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance
+            _repo_identity_with_main,
+            canonicalize_worktree_path,
+        )
 
-        p = _Path(abs_path)
+        p = _Path(abs_path).resolve()
+        # nexus-7or3f: same worktree-mirror rewrite _repo_home_for applies —
+        # only when the primary-repo mirror genuinely exists on disk (pure
+        # path arithmetic otherwise; never invent an identity for a
+        # worktree-unique file with no primary counterpart).
+        mirror = _Path(canonicalize_worktree_path(str(p)))
+        if mirror != p and mirror.is_file():
+            p = mirror.resolve()
         probe = p.parent if p.parent != p else p
         _name, repo_hash, main_repo = _repo_identity_with_main(probe)
         owner = reader.owner_for_repo(repo_hash)
