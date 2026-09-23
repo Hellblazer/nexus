@@ -947,6 +947,20 @@ def store_put_manifest_direct(
 
     Does not replace the fire_batch manifest hook for other producers;
     the store_put re-write it implies is an idempotent replace.
+
+    SAME-CALL SUPERSEDE REAP (nexus-bb6n2): a re-put that changes a
+    note's content (this replace's *chunks* differ from what the
+    document's manifest referenced before it) writes new chunk(s) under
+    new content-derived chashes and repoints the manifest at them here —
+    but the OLD chunk row, now referenced by nothing, used to simply
+    stay in T3, still returned by raw vector search, competing with its
+    own replacement (the ``_sweep_superseded_vectors`` mechanism that
+    reaps this class for the indexer's ``atomic_manifest_replace`` path
+    was never reachable from here — this function bypasses that generic
+    ``fire_batch`` chain entirely, by design, per the docstring above).
+    The manifest read BEFORE the replace below, diffed against the
+    replace's own *chunks*, is what lets this call reap its own drop
+    without a separate sweep pass ever needing to run.
     """
     if not catalog_doc_id:
         return
@@ -969,6 +983,28 @@ def store_put_manifest_direct(
             "metadatas — nothing to catalog"
         )
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    # nexus-bb6n2: capture what this document's manifest referenced BEFORE
+    # the replace, so the chunk(s) a supersede drops can be reaped in this
+    # same call. Best-effort — a read failure here means the reap below
+    # simply has nothing to compare against (empty `before`), never that
+    # the manifest write itself is blocked; no sweep beats a wrong sweep.
+    before_reader = make_catalog_reader()
+    before: set[str] = set()
+    if before_reader is not None:
+        try:
+            before = {row.chash for row in before_reader.get_manifest(catalog_doc_id) if row.chash}
+        except Exception:  # noqa: BLE001 — no sweep beats a wrong sweep
+            _log.warning(
+                "store_put_supersede_before_read_failed",
+                doc_id=catalog_doc_id, collection=collection, exc_info=True,
+            )
+            before = set()
+        finally:
+            try:
+                before_reader._db.close()
+            except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
+                pass
 
     writer = make_catalog_writer(priority="interactive")
     try:
@@ -1002,6 +1038,99 @@ def store_put_manifest_direct(
             f"{len(missing)} of {len(expected)} chunk hashes missing "
             f"after write (e.g. {sorted(missing)[0][:16]}…)"
         )
+
+    # nexus-bb6n2: reap what the supersede dropped, same call, so no new
+    # orphan is minted between this write and whatever sweep might
+    # otherwise have found it. A fresh reader — the verify reader above is
+    # already closed, and this reap is a distinct, best-effort step that
+    # must not be entangled with the fail-loud verify above.
+    dropped = before - expected
+    if dropped:
+        reap_reader = make_catalog_reader()
+        try:
+            _reap_superseded_note_chunks(
+                reap_reader, catalog_doc_id, dropped, collection=collection,
+            )
+        finally:
+            if reap_reader is not None:
+                try:
+                    reap_reader._db.close()
+                except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
+                    pass
+
+
+def _reap_superseded_note_chunks(
+    reader, catalog_doc_id: str, dropped: set[str], *, collection: str,
+) -> None:
+    """Delete T3 chunk rows a store_put supersede just dropped from
+    *catalog_doc_id*'s manifest (nexus-bb6n2).
+
+    Called from :func:`store_put_manifest_direct` right after its
+    ``atomic_manifest_replace`` has landed and verified — the *dropped*
+    set is what the document's manifest referenced before this replace
+    minus what it references now. Content-addressed chunk text (CLAUDE.md
+    § catalog/T3 split) collapses identical text from different documents
+    onto ONE T3 row, so "not in THIS document's manifest any more" is not
+    "unreferenced": deleting on that basis alone would remove a chunk
+    another live document still depends on. This reuses the exact same two
+    guards ``mcp_infra._sweep_superseded_vectors`` uses for the indexer's
+    own supersede path:
+
+    1. The union guard (:func:`nexus.indexer_utils.orphaned_chashes`) —
+       keeps any candidate a DIFFERENT live document's manifest still
+       references.
+    2. The note guard (:func:`nexus.indexer_utils.live_note_chashes` over
+       :func:`nexus.indexer_utils.catalog_documents_for_collection`) —
+       keeps any candidate that is itself a manifest-less note's own
+       identity elsewhere in *collection*.
+
+    Fail-open and best-effort throughout: a lookup failure or a delete
+    failure is logged and swallowed, never raised — store_put's own
+    success must never hinge on whether the OLD chunk could be reaped.
+    Over-retention is recoverable (a later re-put, or ``nx t3 gc``,
+    catches it); over-deletion is not.
+    """
+    if not dropped or not collection:
+        return
+    from nexus.indexer_utils import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+        catalog_documents_for_collection,
+        live_note_chashes,
+        orphaned_chashes,
+    )
+
+    orphaned = orphaned_chashes(reader, catalog_doc_id, dropped, collection=collection)
+    if not orphaned:
+        return
+    try:
+        documents = catalog_documents_for_collection(reader, collection)
+        notes = live_note_chashes(documents)
+    except Exception:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
+        _log.warning(
+            "store_put_supersede_reap_skipped_note_lookup_failed",
+            doc_id=catalog_doc_id, collection=collection, candidates=len(orphaned),
+            exc_info=True,
+        )
+        return
+    orphaned = [h for h in orphaned if h not in notes]
+    if not orphaned:
+        return
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
+
+        result = make_t3().get_collection(collection).delete(ids=orphaned)
+    except Exception:  # noqa: BLE001 — store_put's own success must not depend on cleanup
+        _log.warning(
+            "store_put_supersede_reap_failed",
+            doc_id=catalog_doc_id, collection=collection, orphans=len(orphaned),
+            exc_info=True,
+        )
+        return
+    actual = result if isinstance(result, int) else len(orphaned)
+    _log.info(
+        "store_put_supersede_reaped",
+        doc_id=catalog_doc_id, collection=collection, deleted=actual,
+        requested=len(orphaned),
+    )
 
 
 def _retract_manifest_rows_for_chash(
