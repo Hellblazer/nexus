@@ -1451,6 +1451,38 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     longer tracks while the ledger still calls it outstanding is a silent
     death the ledger alone could never detect.
 
+    A START whose type is exactly :data:`WORKFLOW_SUBAGENT_TYPE` (nexus-silj0)
+    is pulled out of the STRANDED population, counted, and reported on its
+    own ``WORKFLOW\tchecked=<n>`` line instead, matching :func:`expectations_undeclared`
+    and :func:`expectations_census`. MEASURED, not assumed (see the
+    nexus-silj0 follow-up): a Workflow-tool container run is tracked by the
+    harness's own ``background_tasks`` (if at all) as ONE task distinct from
+    any spawned agent's own ``agent_id`` -- the bead's own measured run,
+    ``wf_baae5a4e-bfd``, is the shape of that identity. Under that shape the
+    unmodified check produced STRANDED for every workflow-subagent still
+    mid-flight whenever reconcile ran WHILE the Workflow tool call was
+    still executing -- a perfectly healthy run misread as several silent
+    deaths (exit 4, the module's own worst case), because the check can
+    never tell "this specific agent died" from "the harness only tracks the
+    workflow at container granularity" -- neither the crashed case nor the
+    healthy one ever has its own ``agent_id`` in ``harness_ids``. The check
+    was therefore never a reliable per-agent liveness signal for this class
+    to begin with, so excluding it loses no signal that was trustworthy.
+
+    STILL AN OPEN GAP, left alone rather than guessed at: the container
+    task's own identity (``wf_baae5a4e-bfd``-shaped) still fails to match
+    any START's ``agent_id`` and so still surfaces as ``UNDECLARED_TASK``
+    whenever the harness reports one -- confirmed by direct measurement, not
+    inferred. Suppressing that would need a reliable way to recognise "this
+    harness task IS the Workflow container" from the payload, and this
+    codebase has no confirmed field for that (no fixture, test or measured
+    payload names one; `_TASK_ID_KEYS`'s own doc already flags the shape as
+    unstable/mixed). A guessed discriminator risks being silently
+    ineffective (wrong field/value, so nothing changes) or too broad
+    (masking a genuine undeclared background task in any session that also
+    ran a workflow) -- either failure mode is worse than the documented gap.
+    Needs a real harness payload to close, which this repo cannot capture.
+
     Exit codes: 0 clean, 2 undeclared tasks, 4 STRANDED. **4 takes priority
     over 2** -- a silent death outranks a bookkeeping gap.
     """
@@ -1471,12 +1503,22 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     order: list[str] = []
     stype: dict[str, str] = {}
     terminated: set[str] = set()
+    workflow_order: list[str] = []
+    workflow_seen: set[str] = set()
     for row in rows:
         verb = row[1] if len(row) > 1 else ""
         who = row[2] if len(row) > 2 else ""
-        if verb == "START" and who not in stype:
-            stype[who] = row[3] if len(row) > 3 else ""
-            order.append(who)
+        if verb == "START" and who not in stype and who not in workflow_seen:
+            agent_type = row[3] if len(row) > 3 else ""
+            if agent_type == WORKFLOW_SUBAGENT_TYPE:
+                # Its own bucket (nexus-silj0): never checked for STRANDED,
+                # since the check can't tell a healthy mid-flight instance
+                # from a dead one for this class -- see the docstring.
+                workflow_seen.add(who)
+                workflow_order.append(who)
+            else:
+                stype[who] = agent_type
+                order.append(who)
         elif verb in ("REPORTED", "BLOCKED", "WOULDBLOCK"):
             terminated.add(who)
 
@@ -1492,9 +1534,18 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
 
     undeclared_tasks = 0
     for ident in harness_order:  # first appearance; see census's note
-        if ident not in stype:
+        # `ident not in workflow_seen` is not a fix, only a guard against a
+        # false positive when the harness DOES expose per-agent identities
+        # for this class (a shape this module has never measured, but the
+        # check should not fight it if it exists): a workflow-subagent's own
+        # agent_id, if the harness ever reports one, is accounted for here
+        # rather than misread as an undeclared task.
+        if ident not in stype and ident not in workflow_seen:
             lines.append(f"UNDECLARED_TASK\t{ident}")
             undeclared_tasks += 1
+
+    if workflow_order:
+        lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
 
     lines.append(
         f"SUMMARY\toutstanding={outstanding} harness_tasks={len(harness_ids) + unidentified} "

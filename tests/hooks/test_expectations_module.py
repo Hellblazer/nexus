@@ -1053,6 +1053,125 @@ class TestReconcile:
         assert "harness_tasks=2 unidentified=1" in summary
 
 
+# ── nexus-silj0 follow-up: measured, 'workflow-subagent' on reconcile ─────
+
+def _workflow_rows(n=11, reported=None):
+    """n workflow-subagent STARTs; ``reported`` (default: all) get a
+    REPORTED terminal row too."""
+    reported = range(n) if reported is None else reported
+    rows = [("START", f"w{i}", exp.WORKFLOW_SUBAGENT_TYPE) for i in range(n)]
+    rows += [("REPORTED", f"w{i}") for i in reported]
+    return rows
+
+
+class TestReconcileWorkflowSubagentBucket:
+    """MEASURED (not assumed) via constructed ledgers + harness payload
+    shapes mirroring the existing TestReconcile fixtures, per the follow-up
+    to Sam's nexus-silj0 ruling. Two distinct findings:
+
+    (1) A Workflow-tool run whose STARTs are still mid-flight (not yet
+    REPORTED) when reconcile happens to run gets falsely STRANDED -- every
+    one of them, at the module's WORST severity (code 4) -- because the
+    check can never tell 'this agent died' from 'the harness only tracks
+    the workflow at container granularity, so no per-agent id was ever
+    going to appear'. FIXED here: workflow-subagent STARTs are excluded
+    from the STRANDED population, exactly as they are from undeclared/
+    census, and counted on their own WORKFLOW line instead.
+
+    (2) The Workflow tool's own container-level harness task (the bead's
+    own measured id shape, 'wf_baae5a4e-bfd') still fails to match any
+    START's agent_id and so still surfaces as UNDECLARED_TASK whenever the
+    harness reports one. NOT fixed: this codebase has no confirmed field to
+    reliably recognise 'this harness task IS the Workflow container' (see
+    the reconcile docstring), and guessing risks being silently ineffective
+    or masking a real undeclared task. Pinned here as a KNOWN, documented
+    gap so a future change to it is deliberate.
+    """
+
+    def test_mid_flight_workflow_starts_are_no_longer_falsely_stranded(self, state):
+        """The bug: a healthy, still-running workflow misread as several
+        silent deaths purely because the harness tracks it at container
+        granularity, not per agent."""
+        _seed("s", _workflow_rows(11, reported=range(8)))  # w8, w9, w10 still running
+        r = exp.expectations_reconcile(
+            "s", _payload({"id": "wf_baae5a4e-bfd", "type": "workflow"})
+        )
+        assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
+        assert "WORKFLOW\tchecked=11" in r.lines
+        assert "SUMMARY\toutstanding=0 harness_tasks=1 unidentified=0 stranded=0 undeclared_tasks=1" in r.lines
+
+    def test_mid_flight_workflow_starts_are_not_stranded_even_with_zero_harness_tasks(self, state):
+        """The harness reporting nothing at all (container gone too) must
+        not turn into per-agent STRANDED lines either -- the signal was
+        never reliable enough to act on for this class either way."""
+        _seed("s", _workflow_rows(11, reported=range(10)))  # w10 never reported
+        r = exp.expectations_reconcile("s", _payload())
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
+        assert "WORKFLOW\tchecked=11" in r.lines
+
+    def test_a_clean_workflow_run_is_not_stranded_and_the_container_task_is_the_only_residual(self, state):
+        """All 11 reported, harness tracks the container as one task:
+        STRANDED is gone entirely; the container's own UNDECLARED_TASK is
+        the one documented, unfixed residual."""
+        _seed("s", _workflow_rows(11))
+        r = exp.expectations_reconcile(
+            "s", _payload({"id": "wf_baae5a4e-bfd", "type": "workflow"})
+        )
+        assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
+        assert r.code == 2
+        assert "UNDECLARED_TASK\twf_baae5a4e-bfd" in r.lines
+        assert "WORKFLOW\tchecked=11" in r.lines
+
+    def test_the_known_undeclared_task_gap_for_the_container_id_is_pinned_not_silently_fixed(self, state):
+        """Documents finding (2) precisely: even with every workflow agent
+        cleanly REPORTED (nothing wrong at all), a harness-tracked container
+        task still trips code=2. This is the residual named in the
+        docstring, not an oversight -- if a future change closes it, this
+        assertion is the one to update."""
+        _seed("s", _workflow_rows(11))
+        r = exp.expectations_reconcile(
+            "s", _payload({"id": "wf_baae5a4e-bfd", "type": "workflow"})
+        )
+        assert r.code == 2
+        assert "UNDECLARED_TASK\twf_baae5a4e-bfd" in r.lines
+
+    def test_the_harness_own_per_agent_id_for_a_workflow_start_is_not_undeclared(self, state):
+        """Guards the OTHER direction: if the harness ever DOES expose a
+        workflow-subagent's own agent_id (a shape this module has never
+        measured), it must be recognised, not misread as undeclared."""
+        _seed("s", _workflow_rows(3, reported=range(2)))  # w2 still running
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": "wf_baae5a4e-bfd", "type": "workflow"},
+                {"agent_id": "w2"},
+            ),
+        )
+        assert "UNDECLARED_TASK\tw2" not in r.lines
+        assert "UNDECLARED_TASK\twf_baae5a4e-bfd" in r.lines
+
+    def test_a_genuinely_undeclared_non_workflow_task_still_flags_amid_workflow_starts(self, state):
+        """Workflow STARTs in the ledger must not suppress a real undeclared
+        task belonging to something else entirely."""
+        _seed("s", _workflow_rows(11) + [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}, {"id": "ghost-real"}))
+        assert r.code == 2
+        assert "UNDECLARED_TASK\tghost-real" in r.lines
+        assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
+
+    def test_no_workflow_line_when_there_are_no_workflow_starts(self, state):
+        _seed("s", [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}))
+        assert not [ln for ln in r.lines if ln.startswith("WORKFLOW")]
+
+    def test_the_workflow_line_precedes_summary_so_the_last_line_invariant_holds(self, state):
+        _seed("s", _workflow_rows(1) + [("START", "a1", "t")])
+        r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}))
+        assert r.lines[-1].startswith("SUMMARY\t")
+        assert r.lines.index("WORKFLOW\tchecked=1") < len(r.lines) - 1
+
+
 class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:
     """A no-ledger result must not be structurally narrower than a
     populated one, or a consumer reading it unconditionally breaks only
