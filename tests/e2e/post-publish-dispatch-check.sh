@@ -169,8 +169,23 @@ _ledger_listing() {
     for f in "$STATE_DIR"/*.expectations; do
         [[ -f "$f" ]] || continue
         sid="$(basename "$f" .expectations)"
-        epoch="$(_ledger_recency_epoch "$f")"
-        [[ -n "$epoch" ]] || continue
+        # nexus-7m6uc round 2 (review finding, IMPORTANT): UNGUARDED under
+        # `set -euo pipefail` (line 89), this command substitution's
+        # non-zero exit -- which `_ledger_recency_epoch` returns whenever
+        # BOTH the file's own stat and every credit-slot stat fail, e.g. a
+        # TOCTOU race where a peer session's ledger is reaped between the
+        # glob above and this call -- used to abort the WHOLE SCRIPT
+        # silently: no message, exit 1, indistinguishable from a genuine
+        # MISS to a caller reading this script's own contract. Confirmed by
+        # repro: an unguarded `var=$(failing_fn)` under this exact `set`
+        # line prints nothing past that point. `|| epoch=""` makes the
+        # race a graceful skip instead, exactly like `_epoch_mtime`'s own
+        # callers three lines above this function.
+        epoch="$(_ledger_recency_epoch "$f")" || epoch=""
+        if [[ -z "$epoch" ]]; then
+            echo "  (skipping $f: vanished or became unreadable mid-scan)" >&2
+            continue
+        fi
         start_c="$(grep -c $'\tSTART\t' "$f" 2>/dev/null || true)"
         rep_c="$(grep -c $'\tREPORTED\t' "$f" 2>/dev/null || true)"
         printf '%s\t%s\t%s\t%s\n' "$epoch" "$sid" "${start_c:-0}" "${rep_c:-0}"

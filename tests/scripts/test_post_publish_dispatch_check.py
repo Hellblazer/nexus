@@ -14,6 +14,7 @@ session_id.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -24,6 +25,25 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "tests" / "e2e" / "post-publish-dispatch-check.sh"
+
+
+def _extract_bash_functions(*names: str) -> str:
+    """Pull the named top-level ``name() { ... }`` function bodies out of
+    the REAL script's source, verbatim, in the order given. Used to unit
+    test a helper function's actual text directly (with a controlled
+    dependency override) rather than a reimplementation that could drift
+    from what the script really runs. Every function in this script
+    follows the same style throughout (opening brace on the def line,
+    closing brace alone at column 0), so a non-greedy match up to the
+    first column-0 ``}`` is exact for all of them."""
+    text = SCRIPT.read_text()
+    out = []
+    for name in names:
+        m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?\n\}}\n", text, re.M | re.S)
+        assert m, f"could not find function {name!r} in {SCRIPT}; extraction regex may have rotted"
+        out.append(m.group(0))
+    return "\n".join(out)
+
 
 SID = "sess-pp-dispatch-check"
 AGENT_ID = "adispatch1234567890abc"
@@ -389,3 +409,77 @@ class TestExactCounts:
         )
         proc = _run(SID, env)
         assert "COUNT tsv_start=2 tsv_reported=1" in proc.stdout, proc.stdout
+
+
+class TestLedgerListingSurvivesAVanishingLedger:
+    """nexus-7m6uc round 2 (review finding, IMPORTANT): a TOCTOU race --
+    the ledger file existed at the glob/``-f`` check but is gone (or
+    otherwise unstattable) by the time ``_epoch_mtime`` runs on it, e.g. a
+    peer session's ledger reaped mid-scan -- used to abort the WHOLE
+    SCRIPT silently under ``set -euo pipefail``: no message, exit 1,
+    indistinguishable from a genuine MISS.
+
+    Drives the REAL ``_ledger_recency_epoch`` and ``_ledger_listing``
+    function bodies, extracted verbatim from the script (never
+    reimplemented), with a deterministic failure injection: ``_epoch_mtime``
+    is overridden to fail for exactly one named path. This tests the actual
+    fixed code with no dependency on winning a real race, so it cannot be
+    flaky -- the injection point is code, not timing.
+    """
+
+    def _run_extracted(self, tmp_path: Path, *, failing_glob: str) -> subprocess.CompletedProcess[str]:
+        functions_src = _extract_bash_functions("_ledger_recency_epoch", "_ledger_listing")
+        script = f"""
+set -euo pipefail
+STATE_DIR={tmp_path!s}
+
+{functions_src}
+
+# Deterministic race injection (test-only): fails for the one path being
+# raced, succeeds for every other -- see the class docstring for why this
+# replaces a true concurrent race.
+_real_stat_mtime() {{
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}}
+_epoch_mtime() {{
+    case "$1" in
+        {failing_glob}) return 1 ;;
+        *) _real_stat_mtime "$1" ;;
+    esac
+}}
+
+_ledger_listing
+"""
+        return subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=30,
+        )
+
+    def test_a_vanished_ledger_is_skipped_with_a_note_not_a_silent_abort(self, tmp_path) -> None:
+        good_sid = "sess-good-1111111111"
+        vanished_sid = "sess-vanished-2222222222"
+        _write_tsv(tmp_path / f"{good_sid}.expectations")
+        _write_tsv(tmp_path / f"{vanished_sid}.expectations")
+        proc = self._run_extracted(tmp_path, failing_glob=f"*{vanished_sid}*")
+        assert proc.returncode == 0, (
+            "the scan aborted instead of skipping the vanished ledger: "
+            f"rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        )
+        assert good_sid in proc.stdout
+        assert vanished_sid not in proc.stdout
+        assert "vanished or became unreadable mid-scan" in proc.stderr
+
+    def test_the_good_ledger_alone_still_produces_a_correct_listing_line(self, tmp_path) -> None:
+        """Non-vacuity: the skip must not ALSO eat the survivor's own
+        counts -- a broken split could skip everything and still exit 0."""
+        good_sid = "sess-good-3333333333"
+        vanished_sid = "sess-vanished-4444444444"
+        _write_tsv(tmp_path / f"{good_sid}.expectations")
+        _write_tsv(tmp_path / f"{vanished_sid}.expectations")
+        proc = self._run_extracted(tmp_path, failing_glob=f"*{vanished_sid}*")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 1, f"expected exactly one surviving listing line, got: {lines!r}"
+        # _ledger_listing's own raw TSV shape: epoch, sid, start count, reported count.
+        fields = lines[0].split("\t")
+        assert fields[1] == good_sid, fields
+        assert fields[2] == "1" and fields[3] == "1", fields
