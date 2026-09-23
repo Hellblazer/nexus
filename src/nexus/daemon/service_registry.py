@@ -1403,6 +1403,31 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     """
     engine_path = str(config_dir / "service" / "nexus-service")
     target = str(config_dir)
+    # nexus-cd1k0.6 finding (9): an engine launched via an EXPLICIT
+    # NEXUS_SERVICE_BIN / NEXUS_SERVICE_JAR override (the dev/test opt-in
+    # storage_service_daemon.py's _resolve_launch_artifact honours) runs
+    # from a path OUTSIDE <config_dir>/service/nexus-service, so the
+    # well-known-path check above never matched its process-table row —
+    # every caller of this matcher (the changelog-lock liveness gate that
+    # gates `_release_stale_changelog_lock`, `stop`, `restart-stale`'s
+    # sweep) saw no engine at all and could treat a genuinely alive,
+    # possibly-migrating engine as dead. These overrides are read from
+    # THIS process's own environment, same as the launch that resolved
+    # them (`_resolve_launch_artifact` reads the identical env vars), and
+    # canonicalized the same way (`Path(...).resolve(strict=False)`) so
+    # the comparison matches what actually landed in the spawned argv.
+    # Native (argv[0] = binary path): same position-anchored check as the
+    # well-known path. JVM (argv = java ... -jar <jar> ...): the jar path
+    # is a mid-command token after `-jar `, so it is a substring check
+    # instead, mirroring the ``--config-dir`` substring checks below.
+    bin_override = os.environ.get("NEXUS_SERVICE_BIN", "").strip()
+    engine_override_path = (
+        str(Path(bin_override).resolve(strict=False)) if bin_override else None
+    )
+    jar_override = os.environ.get("NEXUS_SERVICE_JAR", "").strip()
+    jar_override_marker = (
+        f"-jar {Path(jar_override).resolve(strict=False)}" if jar_override else None
+    )
     # The literal default a FLAGLESS process resolves to on its own
     # (nexus.config.nexus_config_dir()'s fallback branch) — NOT that
     # function itself, so this never depends on this process's own
@@ -1413,6 +1438,13 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
 
     def _match(command: str) -> bool:
         if command == engine_path or command.startswith(engine_path + " "):
+            return True
+        if engine_override_path is not None and (
+            command == engine_override_path
+            or command.startswith(engine_override_path + " ")
+        ):
+            return True
+        if jar_override_marker is not None and jar_override_marker in command:
             return True
         if "daemon service start" not in command:
             return False
