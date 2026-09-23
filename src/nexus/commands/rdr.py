@@ -1941,6 +1941,51 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
 # preamble rdr-gate
 # ---------------------------------------------------------------------------
 
+# nexus-r9esy: RDRs numbered at or below this are grandfathered out of the
+# Layer 1 plan-grammar check below (their Implementation Plan predates the
+# template's `### Phase N` / `#### Step N` heading grammar, or was never
+# required to follow it) -- Sam's ruling, 2026-09-23.
+_LAYER1_PLAN_GRAMMAR_GRANDFATHER_MAX = 205
+
+_LAYER1_PLAN_PHASE_HEADING_RE = re.compile(
+    r"^(#{2,4})[ \t]+Phase[ \t]+\d+(?:\.\d+)?\b", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _gate_layer1_plan_grammar_conformant(text: str) -> bool:
+    """True when RDR *text*'s Implementation Plan section follows the
+    template's ``### Phase N`` / ``#### Step N`` heading grammar
+    (``conexus/resources/rdr/TEMPLATE.md``) -- every ``Phase N`` heading
+    found has at least one sub-heading exactly one level deeper. A section
+    with no ``Phase N`` heading at all (a plain numbered list, RDR-204's
+    shape; or plain prose) is NOT conformant.
+
+    Deliberately independent of :func:`_prg_parse_plan_phase_items`'s
+    three-layer TOLERANT parser -- that parser's own job is to keep
+    phase-review-gate working across every shape existing RDRs already
+    use, growing a fallback layer per deviation (nexus-w5gma). This is the
+    STRICTER, gate-time check nexus-r9esy asks for so growing tolerance in
+    the parser stops being the only way an off-template plan gets noticed;
+    the two must stay uncoupled, or tightening this check would silently
+    change what phase-review-gate accepts on content that already shipped.
+    """
+    plan_text = _prg_extract_implementation_plan_section(text)
+    if not plan_text:
+        return False
+    matches = list(_LAYER1_PLAN_PHASE_HEADING_RE.finditer(plan_text))
+    if not matches:
+        return False
+    phase_depth = len(matches[0].group(1))
+    same_depth = [m for m in matches if len(m.group(1)) == phase_depth]
+    step_re = re.compile(rf"^#{{{phase_depth + 1}}}[ \t]+\S", re.MULTILINE)
+    bounds = [m.start() for m in same_depth] + [len(plan_text)]
+    for i in range(len(same_depth)):
+        block = plan_text[bounds[i] : bounds[i + 1]]
+        if not step_re.search(block):
+            return False
+    return True
+
+
 @preamble.command("rdr-gate")
 @click.argument("args", nargs=-1)
 def preamble_rdr_gate(args: tuple[str, ...]) -> None:
@@ -2037,6 +2082,31 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
         print(
             f"> **Note**: RDR-{t2_key} predates the gap-structure convention (id < 65) — "
             "skipping the Layer 1 gap check."
+        )
+        print()
+
+    # nexus-r9esy: plan-grammar WARNING, never a block -- the phase-review-
+    # gate parser already tolerates the shapes named below; this only flags
+    # a NEW off-template plan for the author to notice, it never stops the
+    # gate.
+    if _rdr_id_int > _LAYER1_PLAN_GRAMMAR_GRANDFATHER_MAX:
+        if not _gate_layer1_plan_grammar_conformant(text):
+            print(
+                f"> **WARNING** (Layer 1 — plan grammar): RDR-{t2_key}'s Implementation "
+                "Plan does not follow the template's `### Phase N` / `#### Step N` "
+                "heading grammar (`conexus/resources/rdr/TEMPLATE.md`)."
+            )
+            print(
+                "> This does not block the gate. Growing tolerance for a new shape in "
+                "the phase-review-gate parser is debt, not a feature — prefer "
+                "conforming the plan to the template instead."
+            )
+            print()
+    elif not _gate_layer1_plan_grammar_conformant(text):
+        print(
+            f"> **Note**: RDR-{t2_key} predates the Phase/Step plan-grammar convention "
+            f"(id ≤ {_LAYER1_PLAN_GRAMMAR_GRANDFATHER_MAX}) — skipping the Layer 1 "
+            "plan-grammar check."
         )
         print()
 

@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from nexus.commands.rdr import rdr
+from nexus.commands.rdr import _gate_layer1_plan_grammar_conformant, rdr
 from nexus.db.t2 import T2Database
 from nexus.plans.audit_rounds import BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION
 
@@ -352,6 +352,68 @@ class TestRdrShow:
 # ---------------------------------------------------------------------------
 
 
+class TestLayer1PlanGrammarConformant:
+    """Pure-function unit tests for `_gate_layer1_plan_grammar_conformant`
+    (nexus-r9esy) -- no CLI, no T2, so these run with no substrate at all."""
+
+    # A leading "\n" precedes every fixture: _prg_extract_implementation_plan_
+    # section's own heading regex requires a preceding newline (it scans for
+    # a heading mid-document, never document-initial) -- these are section
+    # bodies handed the way the real RDR file's full text would, never the
+    # very first bytes of a file.
+    _CONFORMANT = (
+        "\n## Implementation Plan\n\n"
+        "### Phase 1: Do the thing\n\n"
+        "#### Step 1: First step\n\nInstructions.\n\n"
+        "#### Step 2: Second step\n\nMore instructions.\n\n"
+        "### Phase 2: Do another thing\n\n"
+        "#### Step 1: Only step\n\nInstructions.\n"
+    )
+
+    def test_conformant_plan_is_true(self) -> None:
+        assert _gate_layer1_plan_grammar_conformant(self._CONFORMANT) is True
+
+    def test_plain_numbered_list_is_false(self) -> None:
+        """RDR-204's shape: a Phase heading with no Step sub-headings."""
+        text = (
+            "\n## Implementation Plan\n\n"
+            "### Phase 1: Do the thing\n\n"
+            "1. First step.\n"
+            "2. Second step.\n"
+        )
+        assert _gate_layer1_plan_grammar_conformant(text) is False
+
+    def test_no_phase_heading_at_all_is_false(self) -> None:
+        text = "\n## Implementation Plan\n\nJust prose, no phases.\n"
+        assert _gate_layer1_plan_grammar_conformant(text) is False
+
+    def test_no_implementation_plan_section_is_false(self) -> None:
+        text = "\n## Approach\n\n1. Do a thing.\n2. Do another.\n"
+        assert _gate_layer1_plan_grammar_conformant(text) is False
+
+    def test_one_phase_with_steps_and_one_without_is_false(self) -> None:
+        """EVERY phase must have at least one step sub-heading -- a mix is
+        still non-conformant."""
+        text = (
+            "\n## Implementation Plan\n\n"
+            "### Phase 1: Has steps\n\n"
+            "#### Step 1: Fine\n\nOK.\n\n"
+            "### Phase 2: No steps\n\n"
+            "Just prose here.\n"
+        )
+        assert _gate_layer1_plan_grammar_conformant(text) is False
+
+    def test_deeper_heading_depth_is_still_conformant(self) -> None:
+        """#### Phase N / ##### Step N (one level deeper than the template's
+        own ### / ####) is still internally consistent -- conformant."""
+        text = (
+            "\n## Implementation Plan\n\n"
+            "#### Phase 1: Do the thing\n\n"
+            "##### Step 1: First step\n\nInstructions.\n"
+        )
+        assert _gate_layer1_plan_grammar_conformant(text) is True
+
+
 class TestRdrGate:
     """Tests for ``nx rdr preamble rdr-gate``."""
 
@@ -418,6 +480,89 @@ class TestRdrGate:
         assert "Gap1" in result.output
         assert "Gap2" in result.output
         assert "gap heading(s) present" in result.output
+
+    # -- nexus-r9esy: Layer 1 plan-grammar WARNING, grandfathered at id <= 205 --
+
+    _NONCONFORMANT_PLAN_BODY = (
+        "## Problem Statement\n\n"
+        "#### Gap 1: Something\nSomething is wrong.\n\n"
+        "## Approach\n\nDo things.\n\n"
+        "## Implementation Plan\n\n"
+        "### Phase 1: Do the thing\n\n"
+        "1. First step, no heading, a plain numbered list (RDR-204's shape).\n"
+        "2. Second step.\n"
+    )
+    _CONFORMANT_PLAN_BODY = (
+        "## Problem Statement\n\n"
+        "#### Gap 1: Something\nSomething is wrong.\n\n"
+        "## Approach\n\nDo things.\n\n"
+        "## Implementation Plan\n\n"
+        "### Phase 1: Do the thing\n\n"
+        "#### Step 1: First step\n\nInstructions.\n\n"
+        "#### Step 2: Second step\n\nMore instructions.\n"
+    )
+
+    def test_rdr_gate_warns_on_nonconformant_plan_above_the_grandfather_boundary(
+        self, rdr_env
+    ):
+        """id = 206, one past the boundary: a plain numbered-list plan
+        (never ### Phase / #### Step sub-headings) gets a WARNING, never a
+        block -- the gate's exit code and the rest of its output are
+        unaffected."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-206-example.md",
+            {"title": "Example", "status": "draft", "type": "decision", "priority": "P1"},
+            body=self._NONCONFORMANT_PLAN_BODY,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "206"])
+        assert result.exit_code == 0, result.output
+        assert "WARNING" in result.output
+        assert "plan grammar" in result.output.lower()
+        assert "Phase N" in result.output and "Step N" in result.output
+        # Never a block: Section Structure still prints after the warning.
+        assert "Section Structure" in result.output
+
+    def test_rdr_gate_at_the_grandfather_boundary_is_silent(self, rdr_env):
+        """id = 205, exactly the boundary: grandfathered -- a note, not a
+        warning."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-205-example.md",
+            {"title": "Example", "status": "draft", "type": "decision", "priority": "P1"},
+            body=self._NONCONFORMANT_PLAN_BODY,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "205"])
+        assert result.exit_code == 0, result.output
+        assert "WARNING" not in result.output
+        assert "predates" in result.output.lower()
+        assert "plan-grammar" in result.output.lower() or "plan grammar" in result.output.lower()
+
+    def test_rdr_gate_one_below_the_boundary_is_also_silent(self, rdr_env):
+        """id = 204 (the actual RDR-204 numbered-list shape named in the
+        bead): grandfathered, no warning."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "decision", "priority": "P1"},
+            body=self._NONCONFORMANT_PLAN_BODY,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        assert "WARNING" not in result.output
+
+    def test_rdr_gate_no_warning_on_a_conformant_plan_above_the_boundary(self, rdr_env):
+        """id = 206 but the plan DOES follow ### Phase / #### Step: no
+        warning, regardless of the grandfather boundary."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-207-example.md",
+            {"title": "Example", "status": "draft", "type": "decision", "priority": "P1"},
+            body=self._CONFORMANT_PLAN_BODY,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "207"])
+        assert result.exit_code == 0, result.output
+        assert "WARNING" not in result.output
 
 
 # ---------------------------------------------------------------------------
