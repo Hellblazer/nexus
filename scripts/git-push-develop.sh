@@ -39,6 +39,37 @@
 #   NX_PUSH_SKIP_SCOPE_AUDIT
 #                    Set to a REASON string to skip the scope audit. Logged
 #                    in the output; there is no silent skip.
+#   NX_PUSH_SKIP_LOCK
+#                    Set to a REASON string to push without taking the
+#                    lock/ci-develop-push tuple-space lock. Logged in the
+#                    output; there is no silent skip. Same shape as
+#                    NX_PUSH_SKIP_SCOPE_AUDIT above.
+#
+# Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
+# poll: the gap between looking and pushing is where two sessions collide,
+# and a careful session that keeps checking yields indefinitely to a
+# careless one that does not. The tuple space's lock/<resource> template
+# (RDR-211) is exactly the primitive this needs: `take.enabled`, one row
+# per resource, a 900s max lease that expires on its own so a dead session
+# cannot wedge the queue.
+#
+# Scope: claim immediately before `git push`, release immediately after,
+# whether the push succeeded or failed. This is deliberately NOT held
+# through the pushed sha's CI run. The lock answers WHO GOES NEXT; the
+# verdict rule (rule 7) answers WHEN -- a session that wants to hold its
+# place while waiting on its own CI verdict does that itself, directly
+# with `nx tuple in` / `nx tuple release` on this same subspace, before
+# and after its wait -- this script's job is only to serialize the push
+# call itself, never a whole review-and-wait workflow. Holding the lock
+# for the duration of a CI run from INSIDE this script would need a lease
+# that outlives the script's own process (a background renewal loop), and
+# the template's 900s lease cap is already shorter than most CI runs, so
+# that scope would need machinery this push helper has no business owning.
+# Claim-push-release is the simple, correct-sized answer.
+#
+# Failure policy: if the tuple space cannot be reached, this refuses
+# rather than pushing unguarded or wedging every push -- same shape as the
+# scope audit's NX_PUSH_SKIP_SCOPE_AUDIT escape above.
 #
 # Scope audit (nexus-bbriq). Vouching is by SHA, so it answers "did you make
 # this commit" and says nothing about WHAT IS IN IT. On 2026-09-17 a peer had
@@ -79,8 +110,83 @@
 #   7  PUSH_REFUSED_SCOPE       an outbound commit touches a file outside
 #                               NX_PUSH_ALLOWED_PATHS, or that variable is
 #                               unset while the range is non-empty
+#   8  PUSH_REFUSED_LOCK_HELD   lock/ci-develop-push is held by another
+#                               claimant; the refusal names the holder and
+#                               the lease expiry
+#   9  PUSH_REFUSED_LOCK_UNREACHABLE
+#                               the tuple space could not be reached to
+#                               claim the lock, and NX_PUSH_SKIP_LOCK is
+#                               unset
 
 set -euo pipefail
+
+# Claimant identity for the push lock (nexus-agctp): the active Claude
+# session id, plus this host and this process's own pid, so a refusal
+# names something a human can act on. This mirrors two of
+# nexus.session.resolve_active_session_id's tiers (NX_SESSION_ID /
+# CLAUDE_CODE_SESSION_ID, then the ~/.config/nexus/current_session flat
+# file) rather than shelling out to it: this script's cwd is not always
+# the nexus checkout (a detached worktree, or -- in the test suite below
+# -- a throwaway fixture repo), so `uv run python -c "from nexus.session
+# import ..."` would fail to resolve the package there. The two tiers
+# reproduced here are the ones documented as stable in AGENTS.md; a miss
+# falls back to "unknown", the same fallback resolve_active_session_id's
+# own callers already substitute.
+#
+# NX_SESSION_ID / CLAUDE_CODE_SESSION_ID are preferred OVER the flat file
+# and tried first: the file is machine-wide and last-writer-wins, so on a
+# shared box it can name a DIFFERENT session than the one actually
+# running this push (a second top-level Claude Code session overwrites
+# it unconditionally on its own SessionStart). The two env vars are
+# per-process and cannot be clobbered by a sibling session. When
+# resolution still falls through to the file (or finds nothing at all),
+# the claimant string says so -- "(current_session file)" or
+# "(unresolved)" -- so a PUSH_REFUSED_LOCK_HELD naming this claimant
+# tells its reader the identity came from the weaker source, not the
+# session that actually holds the claim.
+_lock_session_source="env"
+_lock_session="${NX_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+if [[ -z "$_lock_session" ]]; then
+  _lock_session_source="current_session file"
+  _cfg_dir="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
+  if [[ -r "$_cfg_dir/current_session" ]]; then
+    _lock_session="$(cat "$_cfg_dir/current_session" 2>/dev/null || true)"
+  fi
+fi
+if [[ -z "$_lock_session" ]]; then
+  _lock_session="unknown"
+  _lock_session_source="unresolved"
+fi
+_lock_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)"
+if [[ "$_lock_session_source" == "env" ]]; then
+  _lock_claimant="${_lock_session}@${_lock_host}#$$"
+else
+  _lock_claimant="${_lock_session}@${_lock_host}#$$ (${_lock_session_source})"
+fi
+_lock_subspace="lock/ci-develop-push"
+_lock_resource="ci-develop-push"
+# Set ONLY from this invocation's OWN successful `nx tuple in` claim (see
+# the `_lock_claim_id=` assignment below, inside the lock-acquisition
+# block) -- never from a peer's claim id. So the release below can only
+# ever release a claim THIS process made; it cannot touch a lock another
+# session holds, whether this invocation never claimed at all (stays
+# empty) or was refused because a peer already held it (also stays
+# empty, since the failed `in` branch never assigns it).
+_lock_claim_id=""
+
+# Released on every exit path (success, any refusal, or a signal) so a
+# claim taken right before `git push` never outlives this process. A safe
+# no-op before the lock is ever claimed, since _lock_claim_id starts empty.
+_release_push_lock() {
+  if [[ -n "$_lock_claim_id" ]]; then
+    local out
+    if ! out="$(nx tuple release "$_lock_claim_id" --claimant "$_lock_claimant" 2>&1)"; then
+      echo "PUSH_LOCK_RELEASE_FAILED could not release $_lock_subspace claim $_lock_claim_id: $out" >&2
+      echo "Its 900s lease will expire on its own; no action needed unless a push is waiting right now." >&2
+    fi
+  fi
+}
+trap _release_push_lock EXIT
 
 remote="${NX_PUSH_REMOTE:-origin}"
 branch="${NX_PUSH_BRANCH:-develop}"
@@ -283,6 +389,52 @@ elif read -r -a _allowed_paths <<< "$(printf '%s' "${NX_PUSH_ALLOWED_PATHS}" | t
   echo "A foreign file in your commit is the nexus-bbriq class: a peer's staged work swept in by a"
   echo "whole-index commit. Do not widen the allowlist to unblock yourself — check what you committed."
   exit 7
+fi
+
+# ── Push lock (nexus-agctp) ──────────────────────────────────────────────
+# Runs after every other gate, right before the push itself: a refusal
+# above this point is about the commits, not about who else is pushing,
+# and costs nothing extra by happening first.
+if [[ -n "${NX_PUSH_SKIP_LOCK:-}" ]]; then
+  echo "PUSH_LOCK_SKIPPED reason=${NX_PUSH_SKIP_LOCK}" >&2
+else
+  # `out` is idempotent (id_from: keys) and doubles as the reachability
+  # probe: it always succeeds against a live tuple space, whether the
+  # resource row already exists, is free, or is expired (the lock flag
+  # resets an expired row to available rather than leaving it dead).
+  if ! _lock_out_msg="$(nx tuple out "$_lock_subspace" --key "resource=$_lock_resource" 2>&1)"; then
+    echo "PUSH_REFUSED_LOCK_UNREACHABLE could not reach the tuple space to claim $_lock_subspace:"
+    echo "$_lock_out_msg"
+    echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
+    exit 9
+  fi
+
+  if _lock_in_json="$(nx tuple in "$_lock_subspace" --pattern "resource=$_lock_resource" \
+       --claimant "$_lock_claimant" --lease-s 900 --timeout-s 0 --json 2>/dev/null)"; then
+    _lock_claim_id="$(printf '%s' "$_lock_in_json" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print(d.get("claim_id") or "")')"
+  else
+    # The `out` above just proved the tuple space is reachable, so a
+    # failed claim here means the row is held by someone else (or, more
+    # rarely, was consumed/re-raced between the two calls) -- read it
+    # without claiming to name who, and until when.
+    if _lock_rows_json="$(nx tuple rd "$_lock_subspace" --pattern "resource=$_lock_resource" --json 2>/dev/null)"; then
+      _lock_holder="$(printf '%s' "$_lock_rows_json" | python3 -c 'import json,sys
+rows = json.load(sys.stdin)
+if rows:
+    r = rows[0]
+    print("claimant=%s lease_until=%s claim_state=%s" % (r.get("claimant"), r.get("lease_until"), r.get("claim_state")))
+else:
+    print("no row found -- the lock may have been released between the claim attempt and this read")')"
+    else
+      _lock_holder="(could not read the lock row to name the holder -- the tuple space may have become unreachable)"
+    fi
+    echo "PUSH_REFUSED_LOCK_HELD $_lock_subspace is not available: $_lock_holder"
+    echo "Wait for the lease to lapse or the holder to release it, then retry."
+    echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
+    exit 8
+  fi
 fi
 
 git push -q "$remote" "$tip:refs/heads/$branch"

@@ -9,9 +9,11 @@ two clones standing in for two sessions of one checkout.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -54,7 +56,15 @@ def _run(work: Path, *vouch: str, env: dict | None = None) -> subprocess.Complet
     audit is given an allow-everything pathspec: these tests are about
     VOUCHING, and every one of them would otherwise refuse at the scope gate
     for a reason that has nothing to do with what it is testing. The scope
-    gate has its own class below."""
+    gate has its own class below.
+
+    Same shape for the nexus-agctp push lock: every test in this file
+    EXCEPT ``TestPushLock`` predates the lock and has no opinion on it, so
+    it gets the named skip by default too -- a caller that sets
+    ``NX_SERVICE_PORT`` (``TestPushLock`` pointing at a real, per-test
+    engine substrate) is deliberately exercising the lock and must not
+    have it silently skipped out from under it.
+    """
     merged = {**os.environ, **(env or {})}
     if "NX_PUSH_ALLOWED_PATHS" not in merged:
         # The NAMED skip, not a wildcard allowlist: a wildcard is refused
@@ -63,6 +73,8 @@ def _run(work: Path, *vouch: str, env: dict | None = None) -> subprocess.Complet
         # VOUCHING, so they say so rather than faking a scope they do not
         # care about.
         merged.setdefault("NX_PUSH_SKIP_SCOPE_AUDIT", "vouching test, scope not under test")
+    if "NX_SERVICE_PORT" not in merged:
+        merged.setdefault("NX_PUSH_SKIP_LOCK", "pre-existing test, lock not under test")
     return subprocess.run(
         [str(SCRIPT), *vouch], cwd=work, env=merged,
         capture_output=True, text=True, timeout=60,
@@ -333,6 +345,7 @@ class TestScopeAudit:
         sha = _commit(work, "mine.txt")
         env = {k: v for k, v in os.environ.items() if k != "NX_PUSH_ALLOWED_PATHS"}
         env["NX_PUSH_SKIP_SCOPE_AUDIT"] = "rebuilding an index git mangled"
+        env["NX_PUSH_SKIP_LOCK"] = "scope-audit test, lock not under test"
         proc = subprocess.run(
             [str(SCRIPT), sha], cwd=work, env=env,
             capture_output=True, text=True, timeout=60,
@@ -418,6 +431,7 @@ class TestScopeAudit:
         env = {k: v for k, v in os.environ.items()
                if k not in ("NX_PUSH_ALLOWED_PATHS", "NX_PUSH_SKIP_SCOPE_AUDIT")}
         env["NX_PUSH_ALLOWED_PATHS"] = "one.txt\ntwo.txt"
+        env["NX_PUSH_SKIP_LOCK"] = "scope-audit test, lock not under test"
         proc = subprocess.run(
             [str(SCRIPT), sha], cwd=work, env=env,
             capture_output=True, text=True, timeout=60,
@@ -442,3 +456,164 @@ class TestScopeAudit:
         assert proc.returncode == 7, proc.stdout + proc.stderr
         assert "matches every file" in proc.stdout
         assert _remote_tip(origin) == before
+
+
+class TestPushLock:
+    """nexus-agctp: the tuple-space mutex the script takes on
+    ``lock/ci-develop-push`` immediately before ``git push`` and releases
+    right after, whether the push succeeded or failed.
+
+    Real engine substrate, not a mock (test-authoring's fixture-MVV-is-not-
+    the-live-path rule): the script shells out to the installed ``nx``
+    binary, and only a real tuple-space round trip proves the CLI flags
+    and the JSON shapes this script parses (``claim_id``, ``claimant``,
+    ``lease_until``, ``claim_state``) actually line up.
+
+    Every test points ``nx tuple`` at a FRESH, per-test tenant on that
+    substrate (never the box's own ambient ``lock/ci-develop-push`` row,
+    which real sessions may hold) via a minted tenant-bound token --
+    tenant isolation (RLS) keeps two tenants' rows of the identical
+    resource name from colliding, verified directly against the
+    substrate before this class was written: a second tenant's ``rd`` of
+    a first tenant's ``lock/<resource>`` row returned nothing. Each test
+    also points ``NEXUS_CONFIG_DIR`` at an isolated, empty directory, so
+    the CLI's own self-heal (config.yml / a running local daemon's
+    lease) can never quietly re-resolve to this box's REAL ambient
+    service out from under a deliberately bad ``NX_SERVICE_PORT`` --
+    confirmed necessary here: an earlier hand probe with a bogus port but
+    the real ``NEXUS_CONFIG_DIR`` silently succeeded against this box's
+    live daemon instead of failing.
+    """
+
+    @staticmethod
+    def _engine_state() -> dict:
+        from tests._engine_substrate import ensure_engine
+        from tests.db._service_fixture import jar_freshness_skip_reason
+
+        reason = jar_freshness_skip_reason()
+        if reason is not None:
+            pytest.skip(f"engine substrate: {reason}")
+        try:
+            return ensure_engine()
+        except RuntimeError as exc:
+            pytest.skip(f"engine substrate unavailable: {exc}")
+
+    @staticmethod
+    def _mint(state: dict) -> tuple[str, str]:
+        from tests._engine_substrate import mint_test_tenant
+
+        return mint_test_tenant(state)
+
+    @staticmethod
+    def _without_this_worktrees_venv(env: dict) -> dict:
+        """Strip this worktree's own ``.venv/bin`` from PATH.
+
+        ``uv run pytest`` prepends the worktree's venv to PATH for the
+        pytest process itself, and a subprocess env built from
+        ``os.environ`` inherits it -- so a bare ``nx`` there resolves to
+        THIS worktree's own editable install, not the installed
+        generation a real invocation of this script (never run through
+        ``uv run``) would find. That editable install IS a dev-checkout
+        process, so the nexus-a2qhz production-write guard refuses its
+        write outright -- confirmed directly: these tests failed with
+        ``ProductionWriteGuardError`` before this strip was added, even
+        though every write here targets the throwaway engine substrate.
+        Removing the worktree's venv from PATH makes the subprocess `nx`
+        resolve the same way a real push does.
+        """
+        venv_bin = str(REPO_ROOT / ".venv" / "bin")
+        parts = [p for p in env.get("PATH", "").split(os.pathsep) if p != venv_bin]
+        return {**env, "PATH": os.pathsep.join(parts)}
+
+    @classmethod
+    def _lock_env(cls, state: dict, token: str, tmp_path: Path, *, label: str) -> dict:
+        parsed = urlparse(state["base_url"])
+        cfg_dir = tmp_path / f"nexus-config-isolated-{label}"
+        cfg_dir.mkdir(exist_ok=True)
+        env = cls._without_this_worktrees_venv({**os.environ})
+        env["NEXUS_CONFIG_DIR"] = str(cfg_dir)
+        env["NX_SERVICE_HOST"] = parsed.hostname or "127.0.0.1"
+        env["NX_SERVICE_PORT"] = str(parsed.port)
+        env["NX_SERVICE_TOKEN"] = token
+        env["NX_PUSH_SKIP_SCOPE_AUDIT"] = "lock test, scope not under test"
+        return env
+
+    def test_a_lock_held_by_another_claimant_refuses_and_names_the_holder(
+        self, repos, tmp_path,
+    ) -> None:
+        origin, work = repos
+        state = self._engine_state()
+        _tenant, token = self._mint(state)
+        env = self._lock_env(state, token, tmp_path, label="held")
+
+        out = subprocess.run(
+            ["nx", "tuple", "out", "lock/ci-develop-push", "--key", "resource=ci-develop-push"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert out.returncode == 0, out.stdout + out.stderr
+        claim = subprocess.run(
+            ["nx", "tuple", "in", "lock/ci-develop-push", "--pattern", "resource=ci-develop-push",
+             "--claimant", "peer-session", "--lease-s", "900", "--timeout-s", "0"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert claim.returncode == 0, claim.stdout + claim.stderr
+
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        proc = _run(work, sha, env=env)
+        assert proc.returncode == 8, proc.stdout + proc.stderr
+        assert proc.stdout.startswith("PUSH_REFUSED_LOCK_HELD")
+        assert "peer-session" in proc.stdout
+        assert "lease_until=" in proc.stdout
+        assert _remote_tip(origin) == before, "a held lock must not let the push through"
+
+    def test_a_free_lock_allows_the_push_and_is_released_afterward(
+        self, repos, tmp_path,
+    ) -> None:
+        origin, work = repos
+        state = self._engine_state()
+        _tenant, token = self._mint(state)
+        env = self._lock_env(state, token, tmp_path, label="free")
+
+        sha = _commit(work, "mine.txt")
+        proc = _run(work, sha, env=env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
+        assert _remote_tip(origin) == sha
+
+        rd = subprocess.run(
+            ["nx", "tuple", "rd", "lock/ci-develop-push", "--pattern", "resource=ci-develop-push", "--json"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert rd.returncode == 0, rd.stdout + rd.stderr
+        rows = json.loads(rd.stdout)
+        assert rows, "the script's own `out` must have created the lock row"
+        assert rows[0]["claim_state"] is None, (
+            f"the lock must be released (claim_state null) after a successful push: {rows[0]}"
+        )
+
+    def test_an_unreachable_tuple_space_refuses_unless_the_skip_is_set(
+        self, repos, tmp_path,
+    ) -> None:
+        origin, work = repos
+        cfg_dir = tmp_path / "nexus-config-isolated-unreachable"
+        cfg_dir.mkdir(exist_ok=True)
+        env = self._without_this_worktrees_venv({**os.environ})
+        env["NEXUS_CONFIG_DIR"] = str(cfg_dir)
+        env["NX_SERVICE_HOST"] = "127.0.0.1"
+        env["NX_SERVICE_PORT"] = "1"  # nothing listens: connection refused
+        env["NX_SERVICE_TOKEN"] = "bogus"
+        env["NX_PUSH_SKIP_SCOPE_AUDIT"] = "lock test, scope not under test"
+
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        proc = _run(work, sha, env=env)
+        assert proc.returncode == 9, proc.stdout + proc.stderr
+        assert proc.stdout.startswith("PUSH_REFUSED_LOCK_UNREACHABLE")
+        assert _remote_tip(origin) == before, "an unreachable lock must not let the push through"
+
+        env["NX_PUSH_SKIP_LOCK"] = "tuple space unreachable in this test, verifying the escape"
+        proc2 = _run(work, sha, env=env)
+        assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+        assert proc2.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
+        assert _remote_tip(origin) == sha

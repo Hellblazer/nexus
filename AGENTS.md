@@ -376,6 +376,11 @@ things to avoid carefully; they are impossible.
    from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`
    in; `git -C` does not cover it. Direct to `develop` per the project
    rule; the feature branch is a local name that never reaches origin.
+   The script itself now takes the `lock/ci-develop-push` tuple-space
+   lock immediately before the push and releases it right after
+   (nexus-agctp) — a `PUSH_REFUSED_LOCK_HELD` names the holder and lease
+   expiry; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape when the
+   tuple space is unreachable.
 
 9. **Whoever pushes to `develop` fast-forwards the primary in the same
    breath.** `cd` to the primary and `git merge --ff-only origin/develop`.
