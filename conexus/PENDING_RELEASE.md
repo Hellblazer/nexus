@@ -178,5 +178,22 @@ never ran them either.
 - nexus-veh77 — `conexus/README.md`: new hook-table rows for `nx-hook
   mcp-connect-wait` and, round 5, `nx-hook mcp-connect-check`.
 
+- nexus-vupim — `conexus/skills/rdr-close/SKILL.md`: post-mortem archival
+  (Step 6, the Abandoned flow's mirror of it, and the Agent Invocation /
+  Success Criteria / PRODUCE references to the same write) no longer
+  resolves its target collection via `nx catalog collection-name
+  --content-type knowledge`. That resolution renders the OWNER-ID-shaped
+  name for the calling repo's own tumbler (`knowledge__<repo-tumbler>__...`)
+  for every content type, knowledge included — correct for code/docs/rdr,
+  which are genuinely repo-owned, but wrong for a post-mortem, which is
+  catalog-owned by the knowledge curator, not the repo, and which
+  docs/collections.md Rule 1 requires land in a SUBJECT collection, never
+  an owner-id one. The target is now the bare subject `{repo}-rdr-research`.
+  Three post-mortems (RDR-203 twice, RDR-215) archived under the old
+  resolution landed in `knowledge__1-1__...` on the nexus repo; see
+  nexus-vupim for the re-home record. Sessions on the pinned tag keep
+  misrouting post-mortems into their repo's own tumbler collection until a
+  new pin ships.
+
 (The previous entry, `conexus/hooks/scripts/preflight.py`'s deletion for
 nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)

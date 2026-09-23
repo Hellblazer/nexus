@@ -224,25 +224,26 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 
 The main RDR was already semantically indexed at accept time (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
-Per RDR-103 the post-mortem lands in the same conformant knowledge collection as every other knowledge document for this repo, with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
+Per docs/collections.md Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
 
-Resolve the conformant target via the catalog (run from the repo root):
+**Correction (2026-09-23, nexus-vupim).** This step used to resolve the target via `nx catalog collection-name --content-type knowledge`, which renders the OWNER-ID-shaped name for the repo's own tumbler (e.g. `knowledge__1-7__...`) — exactly the non-subject shape Rule 1 forbids, and a name a curator-owned document (post-mortems are catalog-owned by the knowledge curator, not the repo) has no business landing in. Three post-mortems archived that way before the fix landed in `knowledge__1-1__...` on the nexus repo itself; see nexus-vupim for the re-home record.
 
+Check for an existing subject before writing (Rule 2, reuse before create):
 ```bash
-KNOWLEDGE_COLL=$(nx catalog collection-name --content-type knowledge)
-# → e.g. knowledge__1-7__voyage-context-3__v1
+nx collection list | grep "{repo}-rdr-research"
 ```
+If it exists, reuse it — pass its bare subject name to `store_put` below regardless; the catalog resolves the rest.
 
 Seed link-context so the post-mortem auto-links to the RDR:
 ```
 mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-close"}', tags="link-context")
 ```
 
-Archive the post-mortem directly (substitute `$KNOWLEDGE_COLL` from above):
+Archive the post-mortem directly:
 ```
 mcp__plugin_conexus_nexus__store_put(
     content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md),
-    collection="<$KNOWLEDGE_COLL>",
+    collection="{repo}-rdr-research",
     title="PREFIX-NNN Title (post-mortem)",
     tags="rdr,post-mortem,{drift-categories}",
     category="rdr_postmortem"
@@ -251,15 +252,15 @@ mcp__plugin_conexus_nexus__store_put(
 
 Post-mortems are then queryable as a slice of the knowledge collection:
 ```
-mcp__plugin_conexus_nexus__search(query="...", corpus="<$KNOWLEDGE_COLL>", where='category=rdr_postmortem')
+mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge__{repo}-rdr-research", where='category=rdr_postmortem')
 ```
 
-#### One-time migration (legacy `knowledge__rdr_postmortem__<repo>` collections)
+#### One-time migration (legacy `knowledge__rdr_postmortem__<repo>` or owner-id-shaped `knowledge__<owner-id>__...` collections)
 
-Operators that previously closed RDRs under the old shape can roll the legacy collection into the conformant target with `nx catalog rename-collection`. Run once per affected repo:
+Operators that previously closed RDRs under either superseded shape — the old 3-segment `rdr_postmortem` name, or the owner-id-shaped name nexus-vupim found landing post-mortems in the repo's own tumbler collection — can roll the legacy collection into the conformant subject target with `nx catalog rename-collection`. Find the subject's own rendered name first (mint it with one `store_put` if it does not exist yet), then run once per affected repo:
 
 ```bash
-NEW=$(nx catalog collection-name --content-type knowledge)
+NEW=$(nx collection list | awk '$4=="{repo}-rdr-research"{print $1; exit}')
 nx catalog rename-collection "knowledge__rdr_postmortem__<repo>" "$NEW" --yes
 ```
 
@@ -274,7 +275,7 @@ Renamed documents do not automatically gain `category="rdr_postmortem"` on their
 3. Update T2 record with close reason — record the reason text (e.g. "reverted") even though the file status written in step 4 is always `abandoned`.
 4. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):** run `nx rdr set-status NNN abandoned`. Code-enforced — same ledger-drift fix as the Implemented flow. (`reverted` is not a valid `set-status` target — the CLI exits 2 on it; the T2 reason from step 3 is where "reverted" is recorded.)
 5. **Scoped conditional reindex** — if the RDR body changed, run `nx index rdr docs/rdr/rdr-NNN-<slug>.md` (single-file form). A frontmatter-only `status: abandoned` flip does not warrant a reindex. Apply the same diff check from Step 4 of the Implemented flow.
-6. Archive post-mortem (if created) to the conformant knowledge collection via Step 6 of the Implemented flow: same `nx catalog collection-name --content-type knowledge` lookup, same `category="rdr_postmortem"` stamp.
+6. Archive post-mortem (if created) to the conformant knowledge collection via Step 6 of the Implemented flow: same `{repo}-rdr-research` subject, same `category="rdr_postmortem"` stamp.
 7. (README index row is updated by `set-status` in step 4 — no separate regen.)
 
 ## Flow: Superseded
@@ -308,12 +309,12 @@ The close operation performs multiple state mutations. If any step fails:
 
 **Only one agent is dispatched by this skill:** `substantive-critic` (Step 1.75, implemented close only). All other operations use MCP tools directly (RDR-080).
 
-Post-mortem archival calls `mcp__plugin_conexus_nexus__store_put` directly (RDR-080, no agent spawn needed). Resolve the conformant target collection via `nx catalog collection-name --content-type knowledge` (Step 6) and stamp `category="rdr_postmortem"` so the post-mortem is queryable as a slice of the knowledge collection:
+Post-mortem archival calls `mcp__plugin_conexus_nexus__store_put` directly (RDR-080, no agent spawn needed). The target collection is the bare subject `{repo}-rdr-research` (Step 6 — never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution, see the nexus-vupim correction there), stamped `category="rdr_postmortem"` so the post-mortem is queryable as a slice of the knowledge collection:
 
 ```
 mcp__plugin_conexus_nexus__store_put(
     content=(read $RDR_DIR/post-mortem/NNN-kebab-title.md),
-    collection="<knowledge collection from `nx catalog collection-name --content-type knowledge`>",
+    collection="{repo}-rdr-research",
     title="RDR-NNN: {title} (post-mortem)",
     tags="rdr,post-mortem,{comma-separated drift-categories}",
     category="rdr_postmortem"
@@ -332,7 +333,7 @@ Seed link-context before the store_put call (Step 6) to ensure auto-linker conne
 - [ ] Beads NOT auto-closed — human decides
 - [ ] T2 record updated with close reason, date, epic bead ID, and archived flag
 - [ ] T3 semantic index refreshed via `nx index rdr` **only if the RDR body changed during close** (divergence notes added, cross-link notes inserted, etc.) — skipped for frontmatter-only closes
-- [ ] Post-mortem archived to the conformant knowledge collection (resolved via `nx catalog collection-name --content-type knowledge`) with `category="rdr_postmortem"` (if exists)
+- [ ] Post-mortem archived to the conformant knowledge collection (the `{repo}-rdr-research` subject) with `category="rdr_postmortem"` (if exists)
 - [ ] README index regenerated
 - [ ] Idempotent: re-running skips completed steps
 
@@ -345,7 +346,7 @@ Outputs produced by this skill directly:
 - **T3 semantic index**: Conditionally refreshed via `nx index rdr` (CCE embeddings, section-level chunks) — only when the RDR body changed during close; frontmatter-only edits are skipped
 - **Filesystem**: Post-mortem at `$RDR_DIR/post-mortem/NNN-kebab-title.md`, updated README
 
-- **T3 knowledge**: Post-mortem archive via `mcp__plugin_conexus_nexus__store_put`: content=(post-mortem contents), collection=(conformant knowledge collection resolved via `nx catalog collection-name --content-type knowledge`), title="RDR-NNN: {title} (post-mortem)", category="rdr_postmortem" (RDR-080, called directly, no agent spawn)
+- **T3 knowledge**: Post-mortem archive via `mcp__plugin_conexus_nexus__store_put`: content=(post-mortem contents), collection="{repo}-rdr-research" (the subject collection, never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution), title="RDR-NNN: {title} (post-mortem)", category="rdr_postmortem" (RDR-080, called directly, no agent spawn)
 
 ## Does NOT
 
