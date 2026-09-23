@@ -128,6 +128,12 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     "indexer.py",                        # per-repo index PID lock
     # The former CLI mailbox-watch module's entry (its per-address flock)
     # was removed — RDR-211 nexus-rplay.14 deleted that module outright.
+    # The UserPromptSubmit drain's per-address pending-file lock (nexus-t9klx
+    # moved it into the wheel from the plugin, where this scan never looked).
+    # It serializes two drain passes on one mailbox so a consumed row is
+    # never delivered twice; non-blocking with a budgeted wait, no lease, no
+    # heartbeat, no election.
+    "hooks/mailbox_drain.py",
 })
 
 
