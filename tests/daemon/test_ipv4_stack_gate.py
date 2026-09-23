@@ -72,6 +72,28 @@ def test_the_env_var_name_is_the_one_the_supervisor_reads() -> None:
         "the spawn path no longer calls _ipv4_only_disabled; this file tests a "
         "helper nothing uses"
     )
-    assert "-Djava.net.preferIPv4Stack=false" in source, (
-        "the spawn path no longer passes the override flag; the gate is inert"
+    assert "-Djava.net.preferIPv4Stack=" in source, (
+        "the spawn path no longer passes the flag; the gate is inert"
+    )
+
+
+def test_both_launch_kinds_get_an_explicit_value() -> None:
+    """The JVM path has no baked default, so the flag must be explicit.
+
+    The Feature bakes the property into the NATIVE image only. A
+    NEXUS_SERVICE_JAR launch is a plain JVM with no Feature, so relying on the
+    baked default gave the two launch kinds different socket families. The
+    supervisor therefore states the value for both, and the argv says what the
+    process will actually do.
+    """
+    source = inspect.getsource(mod.StorageServiceSupervisor._spawn_service)
+    # The append must NOT sit inside the jar/native branch.
+    assert 'argv.append(f"-Djava.net.preferIPv4Stack={_ipv4}")' in source, (
+        "the flag is no longer appended unconditionally for both launch kinds"
+    )
+    branch = source.index('if self._launch_kind == "jar":')
+    flag = source.index("-Djava.net.preferIPv4Stack")
+    assert flag > branch, (
+        "the flag is appended before the launch-kind branch; it must come "
+        "after so it applies to both argv shapes"
     )

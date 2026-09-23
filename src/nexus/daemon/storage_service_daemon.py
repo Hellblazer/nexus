@@ -1098,8 +1098,18 @@ class StorageServiceSupervisor:
         # baked value is a DEFAULT, not a lock: this flag overrides it for a
         # deployment that needs IPv6 outbound (Voyage, EgressProxy). Measured
         # both directions on GraalVM 25.
-        if _ipv4_only_disabled(os.environ.get(IPV4_ONLY_ENV)):
-            argv.append("-Djava.net.preferIPv4Stack=false")
+        # The value is stated EXPLICITLY for both launch kinds rather than
+        # relying on the baked default, because the baked default exists only
+        # in the native image: a NEXUS_SERVICE_JAR launch is a plain JVM with
+        # no Feature, so leaving it implicit gave the two launch kinds
+        # DIFFERENT socket families. Stating it means the argv says what the
+        # process will do, and the two mechanisms cannot disagree -- both
+        # derive from this one env var, and an explicit -D always wins over
+        # the baked value (measured both directions).
+        _ipv4 = (
+            "false" if _ipv4_only_disabled(os.environ.get(IPV4_ONLY_ENV)) else "true"
+        )
+        argv.append(f"-Djava.net.preferIPv4Stack={_ipv4}")
         # nexus-lz3f2: optional max-heap bound for memory-constrained hosts
         # (e.g. the migration-rehearsal container, where an unbounded native-image
         # heap peak during bge-768 ONNX load + PG + the Python supervisor tripped
