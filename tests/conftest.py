@@ -451,6 +451,7 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
+    global _this_session_conexus_version
     _is_controller_or_serial = not _is_xdist_worker(session)
     if _is_controller_or_serial:
         _gate_on_build_lease()
@@ -498,6 +499,7 @@ def pytest_sessionstart(session):
         # regardless of xdist mode.
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
+        _this_session_conexus_version = _resolve_this_session_conexus_version()
     _warn_if_service_jar_is_stale()
 
 
@@ -694,19 +696,39 @@ def _split_appends_from_state(
     changed: list[_DiffEntry],
     before: dict[str, tuple[int, int]],
     after: dict[str, tuple[int, int]],
+    *,
+    last_seen_version_content: str | None = None,
+    this_session_version: str | None = None,
 ) -> tuple[list[_DiffEntry], list[_DiffEntry]]:
     """Split :func:`_diff_config_dir_snapshots` entries (``(verb, rel_path)``
     pairs) into (state_mutations, benign_appends), preserving each entry
     verbatim in whichever list it lands.
 
-    Two ways to be benign. (1) The path lives under a directory a live daemon
-    owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is ambient
-    output rather than suite behaviour. (2) Its basename is a known
-    append-only log, it existed before, and its size strictly GREW.
-    A log that SHRANK or was rewritten in place is a truncation, which is a
-    state mutation and still fails -- that is the case worth catching, and
-    size alone distinguishes it without reading content (which this guard
-    deliberately never does; the directory can hold a live user's real data).
+    Three ways to be benign. (1) The path lives under a directory a live
+    daemon owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is
+    ambient output rather than suite behaviour. (2) Its basename is a known
+    append-only log, it existed before, and its size strictly GREW. A log
+    that SHRANK or was rewritten in place is a truncation, which is a state
+    mutation and still fails -- that is the case worth catching, and size
+    alone distinguishes it without reading content (which this guard
+    deliberately never does for most files; the directory can hold a live
+    user's real data). (3) nexus-b2eaw: it is ``last_seen_version``, and its
+    CONTENT is a version THIS session could not have written -- see
+    *last_seen_version_content* / *this_session_version* below.
+
+    *last_seen_version_content* / *this_session_version* are the ONE
+    deliberate exception to "never read content": ``last_seen_version``
+    holds a bare version string, not user data, and is the one file this
+    guard has always named as a still-fails case rather than allowlisted
+    (see ``tests/test_pfuns_ambient_daemon_logs.py``, which refuses to
+    treat it as benign on size/mtime alone). Both default to ``None``,
+    which keeps the PRE-nexus-b2eaw behaviour exactly (``last_seen_version``
+    always classified as state) -- this keeps every caller that does not
+    pass them, including every existing unit test feeding this function
+    synthetic (mtime, size) data with no real file behind it, working
+    unchanged: attribution only activates when the real caller
+    (:func:`_check_real_config_dir_mutations`) supplies both the actual
+    post-session stamp content and this session's own resolved version.
     """
     state: list[_DiffEntry] = []
     appends: list[_DiffEntry] = []
@@ -730,6 +752,17 @@ def _split_appends_from_state(
             # Ambient daemon output: exempt from the state verdict in every
             # direction (create, grow, rotate), because rotation is a create
             # plus a shrink and a daemon may do either at any moment.
+            appends.append(entry)
+        elif (
+            name == "last_seen_version"
+            and last_seen_version_content is not None
+            and this_session_version is not None
+            and last_seen_version_content != this_session_version
+        ):
+            # A rewrite to a version THIS session's own `nx` invocation
+            # could not have produced (its own resolved conexus version) is
+            # another process's write to the same machine-wide stamp, not a
+            # test in this session writing to the real config dir.
             appends.append(entry)
         elif name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
             appends.append(entry)
@@ -769,6 +802,39 @@ def _snapshot_real_config_dir() -> dict[str, tuple[int, int]]:
 
 
 _real_config_dir_baseline: dict[str, tuple[int, int]] = {}
+
+#: nexus-b2eaw: this pytest session's own conexus package version, resolved
+#: once at session start (mirrors ``_real_config_dir_baseline``'s
+#: set-once-at-start shape). ``last_seen_version`` is rewritten to the
+#: RUNNING ``nx`` version on every invocation
+#: (``upgrade_finish.check_version_transition``), so on a multi-session box
+#: a PEER process running ``nx`` from a differently-versioned tree flips the
+#: same machine-wide stamp -- and the guard's before/after (mtime_ns, size)
+#: diff cannot distinguish that write from a test in THIS session writing to
+#: the real config dir; both look like "the file changed". The stamp's
+#: CONTENT does distinguish them: this session's own write, if it happened,
+#: would land on exactly this value. ``None`` when unresolvable (a
+#: frozen/broken env) -- a failure to decide must never silently exempt a
+#: real mutation, so every consumer treats ``None`` as "cannot attribute"
+#: and keeps the guard's pre-existing strict behaviour (always state).
+_this_session_conexus_version: str | None = None
+
+
+def _resolve_this_session_conexus_version() -> str | None:
+    """Exactly what ``upgrade_finish.install_dist_info`` reads
+    (``importlib.metadata.distribution("conexus").version``) -- what a
+    ``uv run nx`` invocation from THIS checkout's venv during THIS session
+    would also write to ``last_seen_version``. See
+    :data:`_this_session_conexus_version` for why this is the attribution
+    signal and what ``None`` means to callers.
+    """
+    import importlib.metadata as _md  # noqa: PLC0415 — session-start only
+
+    try:
+        return _md.version("conexus")
+    except _md.PackageNotFoundError:
+        return None
+
 
 #: Allowlist of relative-path PREFIXES under the real ``~/.config/nexus/``
 #: that legitimate, ambient, non-test processes touch during a normal unit
@@ -1025,8 +1091,29 @@ def _diff_config_dir_snapshots(
 def _format_diff_entry(entry: _DiffEntry) -> str:
     """Render a ``(verb, rel_path)`` pair as the ``"<VERB> <path>"`` text
     the guard prints -- the ONLY place that string shape is constructed
-    (nexus-wjkc7); every internal consumer works on the tuple."""
+    (nexus-wjkc7); every internal consumer works on the tuple.
+
+    nexus-b2eaw remedy (c): ``last_seen_version`` additionally names its
+    current value against this session's own resolved version, in BOTH the
+    NOTE and FAIL print paths (this function is the one place both call
+    through) -- a bare ``MODIFIED last_seen_version`` cost two 5.5-minute
+    lint runs and a wrong prediction before the two values were compared by
+    hand. This is purely a display enrichment: it reads the CURRENT on-disk
+    stamp (which is the same content the caller already read this session,
+    barring a concurrent write in the print window) rather than threading
+    the snapshot content through the tuple, so the entry shape itself
+    (verb, rel_path) is untouched.
+    """
     verb, rel = entry
+    if rel == "last_seen_version":
+        try:
+            stamp_now = (_real_config_dir_for_guard() / rel).read_text().strip()
+        except OSError:
+            stamp_now = None
+        return (
+            f"{verb} {rel} (reads {stamp_now!r}, this session is "
+            f"{_this_session_conexus_version!r})"
+        )
     return f"{verb} {rel}"
 
 
@@ -1073,10 +1160,22 @@ def _check_real_config_dir_mutations(session) -> None:
     changed = _diff_config_dir_snapshots(_real_config_dir_baseline, after)
     if not changed:
         return
+    # nexus-b2eaw: read the stamp's actual post-session content so
+    # _split_appends_from_state can attribute a last_seen_version rewrite to
+    # this session (or not) by content rather than by mtime/size alone. See
+    # _this_session_conexus_version's docstring for why this is safe to read
+    # (a bare version string, not user data) where the rest of this guard
+    # deliberately never reads content.
+    try:
+        _stamp_content = (_real_config_dir_for_guard() / "last_seen_version").read_text().strip()
+    except OSError:
+        _stamp_content = None
     # nexus-pfuns follow-on: an append to a known append-only log is untidy,
     # not a state leak. Report it, do not redden the run over it.
     changed, benign_appends = _split_appends_from_state(
         changed, _real_config_dir_baseline, after,
+        last_seen_version_content=_stamp_content,
+        this_session_version=_this_session_conexus_version,
     )
     if benign_appends:
         print(
