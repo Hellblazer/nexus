@@ -1624,6 +1624,31 @@ class CatalogRepositoryTest {
             .isNull();
     }
 
+    @Test @Order(60)
+    void importCollection_missingContentType_refused422_notGeneric409() {
+        // nexus-3fsyx: importCollection (the single-row ETL path, POST
+        // /v1/catalog/import/collection) used to let a missing content_type
+        // reach hygiene-002-1's non-empty CHECK constraint unguarded, surfacing
+        // as an opaque CheckViolation (23514 -> generic 409) instead of the
+        // field-named 422 upsertCollection already gives for the identical
+        // input (collection_upsert_noProfileAndNoModelNamed_refused422NamingEmbeddingModel
+        // above). Same EmbeddingProfileConflictException contract, applied to
+        // the import path too.
+        String name = "code__cat-import-noctype__voyage-code-3__v1";
+
+        assertThatThrownBy(() -> repo.importCollection(TENANT_A, Map.of(
+                "name", name,
+                "owner_id", "cat-import-noctype-owner",
+                "embedding_model", "voyage-code-3")))
+            .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
+            .hasMessageContaining(name)
+            .hasMessageContaining("content_type");
+
+        assertThat(repo.getCollection(TENANT_A, name))
+            .as("a refused import must not leave a row behind")
+            .isNull();
+    }
+
     @Test @Order(61)
     void collection_list() {
         var colls = repo.listCollections(TENANT_A);
@@ -3758,6 +3783,37 @@ class CatalogRepositoryTest {
                 .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.LIFECYCLE_STATE);
             assertThat(lifecycleState).as("a fresh INSERT must carry a valid lifecycle_state").isEqualTo("live");
         }
+    }
+
+    @Test @Order(225)
+    void importCollectionsBatch_missingContentType_refused422_notGeneric409_noPartialInsert() {
+        // nexus-3fsyx: same guard as importCollection_missingContentType above,
+        // for the multi-row ETL batch path (POST /v1/catalog/import/collection
+        // with a list body -> CatalogRepository#importCollectionsBatch). Before
+        // this fix a blank content_type reached hygiene-002-1's non-empty CHECK
+        // unguarded inside the batch INSERT, surfacing as an opaque 23514 ->
+        // generic 409 instead of the field-named 422 upsertCollection gives for
+        // the identical input. The guard runs over the WHOLE deduped batch
+        // before any chunk's INSERT executes, so a bad row anywhere in the
+        // batch refuses the batch atomically rather than partially landing the
+        // rows that precede it in iteration order.
+        String tenant = "etl-batch-coll-noctype-tenant";
+        String goodName = "code__batch-noctype-good__voyage-code-3__v1";
+        String badName  = "code__batch-noctype-bad__voyage-code-3__v1";
+
+        assertThatThrownBy(() -> repo.importCollectionsBatch(tenant, List.of(
+                Map.of("name", goodName, "content_type", "code", "owner_id", "nexus-1-1",
+                       "embedding_model", "voyage-code-3", "model_version", "v1"),
+                Map.of("name", badName, "owner_id", "nexus-1-1",
+                       "embedding_model", "voyage-code-3", "model_version", "v1"))))
+            .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
+            .hasMessageContaining(badName)
+            .hasMessageContaining("content_type");
+
+        assertThat(repo.getCollection(tenant, goodName))
+            .as("a refused batch must not partially land the rows preceding the bad one")
+            .isNull();
+        assertThat(repo.getCollection(tenant, badName)).isNull();
     }
 
     @Test @Order(226)

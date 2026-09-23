@@ -9949,6 +9949,19 @@ public final class CatalogRepository {
             for (var coll : rows) unique.put(s(coll, "name"), coll);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
+            // nexus-3fsyx: validate the WHOLE deduped batch before any chunk's INSERT
+            // executes, mirroring doImportCollection's single-row guard -- a batch with
+            // a bad row anywhere in it refuses atomically (nothing lands) rather than
+            // letting rows preceding the bad one land in an earlier chunk before a later
+            // chunk's CheckViolation aborts the call.
+            for (var coll : deduped) {
+                String batchContentType = s(coll, "content_type");
+                if (batchContentType == null || batchContentType.isBlank()) {
+                    throw new EmbeddingProfileConflictException(
+                        "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
+                }
+            }
+
             final int cols = 12;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
@@ -10005,6 +10018,19 @@ public final class CatalogRepository {
         // method's caller's javadoc for why the old conditional stub-upgrade DO UPDATE
         // was retired). nexus-xtmtf: single-row delegate of the importCollectionsBatch
         // DSL shape.
+        //
+        // nexus-3fsyx: refuse loud, naming the missing field, before the INSERT runs --
+        // mirrors upsertCollection's identical content_type guard. Without this, a
+        // missing content_type reached hygiene-002-1's non-empty CHECK unguarded on a
+        // fresh row, surfacing as an opaque CheckViolation (23514) that CatalogHandler's
+        // generic catch turns into a 409 with no field named, instead of the uniform
+        // EmbeddingProfileConflictException 422 the interactive registration path gives
+        // for the identical input.
+        String importContentType = s(coll, "content_type");
+        if (importContentType == null || importContentType.isBlank()) {
+            throw new EmbeddingProfileConflictException(
+                "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
+        }
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
