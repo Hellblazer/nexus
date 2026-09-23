@@ -428,23 +428,30 @@ class TestLedgerListingSurvivesAVanishingLedger:
     """
 
     def _run_extracted(self, tmp_path: Path, *, failing_glob: str) -> subprocess.CompletedProcess[str]:
+        # nexus-7m6uc round 3: extract the REAL (now-portable, python3-based)
+        # _epoch_mtime too, renamed to _real_epoch_mtime so the injection
+        # wrapper below can dispatch to it for every non-raced path --
+        # never a hand-duplicated reimplementation that could drift from
+        # the production function (which is exactly what this class's own
+        # docstring promises for the other two extracted functions).
+        epoch_mtime_src = _extract_bash_functions("_epoch_mtime").replace(
+            "_epoch_mtime()", "_real_epoch_mtime()", 1,
+        )
         functions_src = _extract_bash_functions("_ledger_recency_epoch", "_ledger_listing")
         script = f"""
 set -euo pipefail
 STATE_DIR={tmp_path!s}
 
+{epoch_mtime_src}
 {functions_src}
 
 # Deterministic race injection (test-only): fails for the one path being
 # raced, succeeds for every other -- see the class docstring for why this
 # replaces a true concurrent race.
-_real_stat_mtime() {{
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
-}}
 _epoch_mtime() {{
     case "$1" in
         {failing_glob}) return 1 ;;
-        *) _real_stat_mtime "$1" ;;
+        *) _real_epoch_mtime "$1" ;;
     esac
 }}
 

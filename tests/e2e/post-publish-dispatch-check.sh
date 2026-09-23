@@ -127,10 +127,47 @@ POST_PUBLISH_DISPATCH_RECENT_SECONDS="${POST_PUBLISH_DISPATCH_RECENT_SECONDS:-18
 # following a symlink (the EXPECT credit-slot files are DANGLING by design
 # -- nexus.hooks.expectations._claim_credit's target is an agent_id
 # identity string, not a real path -- so `stat -L` would fail on every one
-# of them). BSD stat (macOS) first, GNU stat (Linux) second; the same
-# fallback shape tests/e2e/plugin-lockstep-gate.sh already uses.
+# of them).
+#
+# nexus-7m6uc round 3 (release-battery finding, URGENT -- burned develop
+# at 635faefb3, CI run 35900352343 shard 2/4): the `stat -f %m ... ||
+# stat -c %Y ...` BSD/GNU fallback (the same shape
+# tests/e2e/plugin-lockstep-gate.sh and scripts/lib/build-lease.sh use)
+# is unsound for THIS purpose. On GNU coreutils, `-f` is a boolean flag
+# ("filesystem status", no argument) rather than BSD's "-f FORMAT", so
+# `%m` becomes a second, bogus positional FILE argument. GNU `stat` still
+# prints the full human-readable dump for the REAL path before failing on
+# the bogus one, and a `||`-guarded command substitution captures BOTH
+# commands' combined stdout regardless of which one ultimately fails --
+# so `$best` ends up multi-line (dump lines mixed with the real epoch),
+# not empty. Confirmed by direct repro on GNU coreutils 9.7: `_epoch_mtime`
+# returned six lines ("Inodes: Total: ...", "Block size: ...", etc.) with
+# the real epoch only as the LAST line. That corruption alone reproduces
+# BOTH symptoms the CI run showed: `_ledger_listing`'s `printf` embeds the
+# garbage lines in what should be one TSV row, so line-based stdout
+# parsing sees extra "lines"; and `_auto_discover_session_id`'s awk filter
+# (`$1 >= cutoff`) does a STRING comparison on any non-numeric-looking
+# field per POSIX awk rules, under which "Inodes: Total: ..." >
+# "<epoch-as-string>" lexicographically (an uppercase letter's ASCII code
+# exceeds a digit's) -- so several of the garbage lines pass the recency
+# filter and inflate the candidate count to 3-4, misread as leaked ledgers
+# from other tests rather than corrupted output from one.
+#
+# FIX: a small python3 fallback (python3 is already a hard dependency of
+# this script -- see the JSON-parsing calls below) sidesteps the BSD/GNU
+# dialect split entirely. `os.lstat` (never `os.stat`) is the direct
+# analogue of `stat -f`/`stat -c` WITHOUT following a symlink, so the
+# dangling-credit-slot contract above is preserved. On any real failure
+# (path vanished mid-scan, permission denied) this prints nothing and
+# exits 1, cleanly -- no partial output, unlike the shell-stat shape.
 _epoch_mtime() {
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+    python3 -c '
+import os, sys
+try:
+    print(int(os.lstat(sys.argv[1]).st_mtime))
+except OSError:
+    sys.exit(1)
+' "$1" 2>/dev/null
 }
 
 # _human_mtime EPOCH -- best-effort local-time rendering for a listing line;
