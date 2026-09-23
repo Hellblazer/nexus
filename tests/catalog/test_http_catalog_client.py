@@ -672,6 +672,18 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json(resp)
         elif op == "/unlink":
             self._send_json({"deleted": 1})
+        elif op == "/merge":
+            # nexus-z4rpi: mirrors CatalogHandler.handleMerge's real response
+            # shape — repo.mergeDocuments(...) serialized verbatim, a flat
+            # scalar map with the link-remap counts alongside the move flag.
+            self._send_json({
+                "duplicate": body.get("duplicate"),
+                "canonical": body.get("canonical"),
+                "source_uri_moved": True,
+                "links_remapped": 0,
+                "links_collapsed": 0,
+                "links_dropped": 0,
+            })
         elif op == "/traverse":
             self._send_json({"nodes": [_entry_dict()], "edges": [{"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}]})
         elif op == "/manifest/write":
