@@ -201,6 +201,42 @@ def test_enrich_null_references_and_authors():
 
 # ── nexus-ov5tc (2026-08-19): S2 backend gets the same title guard as OpenAlex ──
 
+def test_enrich_null_author_entry_within_a_nonempty_list():
+    """nexus-cd1k0.16 finding (6): unlike the whole-field-None case above,
+    a NULL ENTRY WITHIN an otherwise-populated authors list raised
+    AttributeError on `.get` -- outside the (httpx/ValueError) exception
+    tuple `enrich` catches -- and crashed instead of degrading to {}."""
+    from nexus.bib_enricher import enrich
+
+    paper = dict(
+        _VALID_PAPER,
+        authors=[{"authorId": "1", "name": "Real Author"}, None],
+        references=[{"paperId": "x"}, None, "not-a-dict-ref"],
+    )
+    mock_resp = _make_response(200, {"data": [paper]})
+
+    with patch("httpx.get", return_value=mock_resp):
+        result = enrich("Attention Is All You Need")
+
+    assert result["authors"] == "Real Author"
+    assert result["references"] == ["x"]
+
+
+def test_enrich_non_dict_candidate_before_the_real_match():
+    """Sibling of the case above at the CANDIDATE level: `data` containing
+    a non-dict entry (S2 returning a bare string/null in the results
+    array) before the real match must be skipped, not crash the search."""
+    from nexus.bib_enricher import enrich
+
+    real = dict(_VALID_PAPER, paperId="good")
+    mock_resp = _make_response(200, {"data": [None, "not-a-paper", real]})
+
+    with patch("httpx.get", return_value=mock_resp):
+        result = enrich("Attention Is All You Need")
+
+    assert result["semantic_scholar_id"] == "good"
+
+
 def test_enrich_rejects_title_mismatch():
     """S2 ranks SOMETHING first for every query; a vocabulary stranger must not be stamped."""
     from nexus.bib_enricher import enrich
