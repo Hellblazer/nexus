@@ -2777,6 +2777,40 @@ def check_version_transition(
     pending" independent of whether any CLI trigger has fired — so a
     human path to detection always exists even when no automatic trigger
     does.
+
+    THE STAMP ONLY EVER MOVES FORWARD (nexus-b2eaw round 3). Before this,
+    ANY string difference between ``seen`` and the running version counted
+    as "a transition", direction included. On a box where two versions are
+    routinely alive at once — peer sessions, a dev checkout beside a
+    managed install, two installed generations mid-upgrade — that meant
+    every ALTERNATING invocation saw a transition and re-ran the WHOLE
+    finish pass, including :func:`converge_engine` and daemon restarts:
+    the newer invocation stamps forward and converges toward its own
+    engine pin; the next OLDER invocation (a peer's session, unrelated to
+    this one) then sees ``seen`` (the newer version) differ from ITS OWN
+    running version, stamps the box BACK, and re-runs the finish pass
+    again — converging the engine toward the OLDER release's own pin and
+    undoing the newer session's work, with the two flip-flopping for as
+    long as both keep running. A same-version invocation is silent
+    (``seen == version`` above), so this was invisible in the common case
+    and only ever fired on the routine multi-version topology this module
+    otherwise expects. An invocation whose running version is OLDER than
+    what is already stamped therefore now does NEITHER: it does not
+    rewrite the stamp and does not run the finish pass (logged at debug,
+    naming both versions, so the skip is observable without being noisy).
+    Same-or-newer keeps today's behaviour exactly — an equal comparison is
+    caught by the string check above already, and a genuinely newer
+    version is exactly the transition this function exists to finish. An
+    UNPARSEABLE non-empty stamp falls through to the pre-nexus-b2eaw
+    behaviour (proceed as a transition) rather than wedging the box on a
+    value nothing can compare against; the truly-empty (never-stamped)
+    case is unaffected, handled separately below.
+
+    This changes NOTHING about `nx doctor`'s own skew surfaces:
+    ``_check_process_skew`` and ``_check_engine_convergence`` both call
+    :func:`detect_stale_processes`/``detect_engine_convergence`` directly
+    and never read this stamp, so an older invocation that stays silent
+    here still shows up there.
     """
     try:
         _, version = install_mtime_and_version()
@@ -2789,6 +2823,16 @@ def check_version_transition(
         seen = ""
     if seen == version:
         return None
+    if seen:
+        from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred import
+
+        try:
+            running_is_older = Version(version) < Version(seen)
+        except InvalidVersion:
+            running_is_older = False  # unparseable stamp: fall through, same as pre-nexus-b2eaw
+        if running_is_older:
+            _log.debug("version_stamp_older_invocation_skipped", seen=seen, running=version)
+            return None
     # nexus-i24r4: a dev-checkout run (uv run nx from a release branch
     # checked out in the shared tree) used to reach the stamp write below
     # and record ITS version, so the next managed-install invocation read

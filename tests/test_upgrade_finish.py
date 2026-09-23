@@ -464,6 +464,109 @@ class TestVersionTransition:
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
 
 
+class TestVersionTransitionStampMovesForwardOnly:
+    """nexus-b2eaw round 3 (review finding): the stamp only ever moves
+    FORWARD. Before this, ANY string difference between the stamp and the
+    running version counted as "a transition", direction included -- on a
+    box where two versions are routinely alive at once (peer sessions, a
+    dev checkout beside a managed install, two installed generations), an
+    OLDER invocation running after a NEWER one had already stamped the
+    box would flip the stamp BACK and re-run the WHOLE finish pass
+    (including engine convergence and daemon restarts), potentially
+    converging the engine toward the OLDER release's own pin and undoing
+    the newer session's work."""
+
+    def test_older_running_version_neither_rewrites_nor_runs_the_finish_pass(
+        self, tmp_path,
+    ):
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+        ) as detect:
+            line = check_version_transition(tmp_path)
+        assert line is None
+        detect.assert_not_called()  # the finish pass's first leg never fired
+        # The stamp is untouched -- still the newer value a peer wrote.
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+    def test_older_running_version_logs_at_debug_with_both_versions(self, tmp_path):
+        """Asserted by patching the module's own ``_log`` (the same
+        pattern ``test_restart_helper_emits_a_structured_log_line`` uses),
+        not ``structlog.testing.capture_logs()`` -- this repo's
+        ``configure_logging`` installs a level-FILTERING wrapper_class
+        (WARNING by default for CLI-mode processes), which silently
+        swallows a ``.debug()`` call before ``capture_logs()``'s own
+        processor ever runs."""
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish._log",
+        ) as mock_log:
+            check_version_transition(tmp_path)
+        mock_log.debug.assert_called_once_with(
+            "version_stamp_older_invocation_skipped", seen="6.7.1", running="6.7.0",
+        )
+
+    def test_unparseable_stamp_falls_through_to_a_transition(self, tmp_path):
+        """An unparseable stamp (not a valid version) cannot be compared,
+        so it is handled exactly as it was before this change: proceed as
+        a transition, rather than wedge the box forever on a value nothing
+        can compare against."""
+        (tmp_path / "last_seen_version").write_text("not-a-version\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded not-a-version -> 6.7.1; no stale processes"
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+    def test_newer_and_equal_running_versions_are_unaffected(self, tmp_path):
+        """Non-regression, in one place for a reader of this class: a
+        newer running version still transitions exactly as before
+        (TestVersionTransition.test_transition_runs_finish_and_summarizes
+        is the fuller version of this), and an equal one is still a silent
+        no-op (TestVersionTransition.test_same_version_is_silent_noop)."""
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ):
+            assert check_version_transition(tmp_path) is None
+
+
 class TestCheckVersionTransitionBackfillsInstallMode:
     """nexus-g7ijj: the real (non-preview) path best-effort backfills a
     missing ``install.mode`` record, gated on the one-shot stamp claim
