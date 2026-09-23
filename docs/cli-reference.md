@@ -1185,6 +1185,18 @@ The engine moves `source_uri` from `DUPLICATE` onto `CANONICAL` only when
 `source_uri` is unconditionally freed. `DUPLICATE`'s `alias_of` is then set
 to `CANONICAL` — either the whole thing lands or nothing does.
 
+Also remaps every catalog link touching `DUPLICATE` onto `CANONICAL`, in
+the same transaction — a merge that moved identity but stranded the link
+graph would be only half a merge. A link is renamed in place; a link whose
+rewrite would collide with one already on `CANONICAL` is collapsed into it
+(the same co-discovery metadata fold `nx catalog link` performs when a
+link already exists — the surviving link keeps its original creator, the
+other's creator folds into its `co_discovered_by`); a link the rewrite
+would turn into a self-link (e.g. a pre-existing `DUPLICATE`↔`CANONICAL`
+edge) is dropped rather than written. The command reports
+`links_remapped`, `links_collapsed`, and `links_dropped` alongside
+`source_uri_moved`.
+
 Refuses, with a clean error and no traceback, on: a self-merge; either
 tumbler not found (including one belonging to a different tenant, which
 reads identically to "not found" under RLS); a `DUPLICATE` already aliased

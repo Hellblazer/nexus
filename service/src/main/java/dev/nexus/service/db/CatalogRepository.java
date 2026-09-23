@@ -3343,6 +3343,10 @@ public final class CatalogRepository {
      *       whether or not its value went anywhere.</li>
      *   <li>{@code alias_of} is set on the duplicate to *canonicalTumbler*
      *       unconditionally (once the refusal checks below pass).</li>
+     *   <li>Every {@code catalog_links} row whose {@code from_tumbler} or
+     *       {@code to_tumbler} is *duplicateTumbler* is rewritten to
+     *       *canonicalTumbler* — see {@link #remapLinksForMerge} for the
+     *       exact collapse/drop rules.</li>
      * </ul>
      *
      * <p><b>Refusals</b> (all {@link MergeRefused}, all checked against
@@ -3366,11 +3370,13 @@ public final class CatalogRepository {
      *       loop.</li>
      * </ul>
      *
-     * <p>Does NOT remap links from the duplicate onto the canonical — a
-     * real gap the parent bead's own text names ("only half a merge"
-     * without it), left for a follow-up rather than folded in here.
+     * <p>Remaps every {@code catalog_links} row touching the duplicate onto
+     * the canonical in the SAME transaction — a merge that moves identity
+     * but strands the graph is only half a merge (see
+     * {@link #remapLinksForMerge}).
      *
-     * @return {@code {"duplicate", "canonical", "source_uri_moved"}}
+     * @return {@code {"duplicate", "canonical", "source_uri_moved",
+     *         "links_remapped", "links_collapsed", "links_dropped"}}
      */
     public Map<String, Object> mergeDocuments(
         String tenant, String duplicateTumbler, String canonicalTumbler
@@ -3475,12 +3481,146 @@ public final class CatalogRepository {
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .execute();
 
+            LinkRemapCounts linkCounts = remapLinksForMerge(ctx, tenant, duplicateTumbler, canonicalTumbler);
+
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("duplicate", duplicateTumbler);
             result.put("canonical", canonicalTumbler);
             result.put("source_uri_moved", moveUri);
+            result.put("links_remapped", linkCounts.remapped());
+            result.put("links_collapsed", linkCounts.collapsed());
+            result.put("links_dropped", linkCounts.dropped());
             return result;
         });
+    }
+
+    /** Per-merge link-rewrite outcome: see {@link #remapLinksForMerge}. */
+    public record LinkRemapCounts(int remapped, int collapsed, int dropped) {}
+
+    /**
+     * Rewrite every {@code catalog_links} row touching *duplicateTumbler*
+     * onto *canonicalTumbler*, inside the CALLER's transaction (nexus-z4rpi
+     * follow-up: a merge that moves identity but strands the graph is only
+     * half a merge — the nexus-z0lu4 cleanup that motivated this bead had to
+     * remap 47 edges by hand).
+     *
+     * <p>For every row where {@code from_tumbler} or {@code to_tumbler}
+     * equals *duplicateTumbler* (both directions, and regardless of whether
+     * the OTHER endpoint is duplicate, canonical, or a third document):
+     * <ul>
+     *   <li>Substitute *canonicalTumbler* for *duplicateTumbler* in that
+     *       row's endpoint(s).</li>
+     *   <li><b>Self-link:</b> if the rewrite makes {@code from_tumbler ==
+     *       to_tumbler}, the row is DELETED (dropped), never rewritten into
+     *       a self-referencing edge — covers both a duplicate-to-canonical
+     *       edge (the two documents being merged already linked to each
+     *       other) and a pre-existing duplicate-to-duplicate self-link.</li>
+     *   <li><b>Collision:</b> if a link already exists at the rewritten
+     *       {@code (from_tumbler, to_tumbler, link_type)} key (a DIFFERENT
+     *       row — the canonical already links to/from the same target), the
+     *       two are collapsed exactly the way {@link #upsertLink} merges a
+     *       {@code created=False} duplicate: {@code from_span}/{@code
+     *       to_span} take the rewritten row's values, {@code created_by} is
+     *       NOT overwritten (the existing link's original creator is kept),
+     *       and the rewritten row's {@code created_by}/metadata fold into
+     *       the survivor's {@code metadata['co_discovered_by']} via the
+     *       SAME {@link #LNK_META_FOLD} SQL fragment {@code upsertLink}
+     *       uses. The doomed row is then deleted.</li>
+     *   <li><b>Otherwise:</b> a plain in-place rename of the row's
+     *       endpoint(s) — no collision, nothing to collapse.</li>
+     * </ul>
+     *
+     * <p>Runs entirely on *ctx* — the SAME transaction {@link
+     * #mergeDocuments} is already inside — so a failure anywhere in this
+     * method rolls back every link change together with the document
+     * writes around it, not just the ones already applied.
+     *
+     * @return per-outcome counts: how many rows were plainly remapped,
+     *         collapsed into an existing link, or dropped as a self-link
+     */
+    private LinkRemapCounts remapLinksForMerge(
+        DSLContext ctx, String tenant, String duplicateTumbler, String canonicalTumbler
+    ) {
+        var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN,
+                CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+            .from(CATALOG_LINKS)
+            .where(CATALOG_LINKS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_LINKS.FROM_TUMBLER.eq(duplicateTumbler)
+                        .or(CATALOG_LINKS.TO_TUMBLER.eq(duplicateTumbler))))
+            // Deterministic order (insertion order, since ID is BIGSERIAL) —
+            // no correctness dependency, but makes a forced-failure test's
+            // "this row committed before that one failed" assertion reliable.
+            .orderBy(CATALOG_LINKS.ID)
+            .fetch();
+
+        int remapped = 0, collapsed = 0, dropped = 0;
+        for (var row : rows) {
+            long id = row.get(CATALOG_LINKS.ID);
+            String fromT = row.get(CATALOG_LINKS.FROM_TUMBLER);
+            String toT = row.get(CATALOG_LINKS.TO_TUMBLER);
+            String newFrom = duplicateTumbler.equals(fromT) ? canonicalTumbler : fromT;
+            String newTo = duplicateTumbler.equals(toT) ? canonicalTumbler : toT;
+
+            if (newFrom.equals(newTo)) {
+                // The rewrite would make this a self-link -- drop it rather
+                // than write a from==to edge (covers a duplicate<->canonical
+                // link between the two documents being merged, AND a
+                // pre-existing duplicate<->duplicate self-link).
+                ctx.deleteFrom(CATALOG_LINKS).where(CATALOG_LINKS.ID.eq(id)).execute();
+                dropped++;
+                continue;
+            }
+
+            String linkType = row.get(CATALOG_LINKS.LINK_TYPE);
+            boolean collidesWithExisting = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_LINKS)
+                   .where(CATALOG_LINKS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_LINKS.FROM_TUMBLER.eq(newFrom))
+                          .and(CATALOG_LINKS.TO_TUMBLER.eq(newTo))
+                          .and(CATALOG_LINKS.LINK_TYPE.eq(linkType))
+                          .and(CATALOG_LINKS.ID.ne(id))));
+
+            if (collidesWithExisting) {
+                // Collapse onto the existing canonical-side link via the SAME
+                // upsert path upsertLink uses for its created=False merge —
+                // co_discovered_by tracking, created_by preserved on the
+                // survivor, spans taken from this (the doomed) row.
+                ctx.insertInto(CATALOG_LINKS,
+                        CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                        CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN,
+                        CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                   .values(DSL.val(tenant), DSL.val(newFrom), DSL.val(newTo), DSL.val(linkType),
+                           DSL.val(nne(row.get(CATALOG_LINKS.FROM_SPAN))),
+                           DSL.val(nne(row.get(CATALOG_LINKS.TO_SPAN))),
+                           DSL.val(nne(row.get(CATALOG_LINKS.CREATED_BY))),
+                           DSL.val(row.get(CATALOG_LINKS.CREATED_AT)),
+                           jsonbVal(row.get(F_LNK_META)))
+                   .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                               CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                   .doUpdate()
+                   .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
+                   .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
+                   .set(F_LNK_META, LNK_META_FOLD)
+                   .execute();
+                ctx.deleteFrom(CATALOG_LINKS).where(CATALOG_LINKS.ID.eq(id)).execute();
+                collapsed++;
+            } else {
+                // No collision -- a plain in-place rename of this row's
+                // endpoint(s). Both SETs always apply: a no-op assignment to a
+                // field that did not name the duplicate is cheaper than an
+                // extra branch, and correct either way (newFrom/newTo already
+                // carry the untouched endpoint's original value when that
+                // endpoint was not the duplicate).
+                ctx.update(CATALOG_LINKS)
+                   .set(CATALOG_LINKS.FROM_TUMBLER, newFrom)
+                   .set(CATALOG_LINKS.TO_TUMBLER, newTo)
+                   .where(CATALOG_LINKS.ID.eq(id))
+                   .execute();
+                remapped++;
+            }
+        }
+        return new LinkRemapCounts(remapped, collapsed, dropped);
     }
 
     /**

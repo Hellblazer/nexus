@@ -1458,7 +1458,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``alias_of`` to *canonical* — a show on *duplicate* afterward
         resolves to *canonical*.
 
-        Returns ``{"duplicate", "canonical", "source_uri_moved"}``.
+        Also remaps every ``catalog_links`` row touching *duplicate* onto
+        *canonical*, in the SAME transaction (a merge that moves identity
+        but strands the link graph is only half a merge): a link whose
+        rewritten ``(from_tumbler, to_tumbler, link_type)`` collides with
+        one already on *canonical* is collapsed into it via the SAME
+        co_discovered_by fold :meth:`link`'s ``created=False`` merge uses
+        (the surviving link's ``created_by`` is kept; the doomed link's
+        creator is folded into ``metadata['co_discovered_by']``); a link
+        the rewrite would turn into a self-link (e.g. a pre-existing
+        *duplicate* <-> *canonical* edge) is dropped rather than written;
+        every other touched link is renamed in place.
+
+        Returns ``{"duplicate", "canonical", "source_uri_moved",
+        "links_remapped", "links_collapsed", "links_dropped"}``.
 
         Raises :class:`httpx.HTTPStatusError` (409) on a self-merge, either
         tumbler not found/not visible to this tenant, a duplicate already

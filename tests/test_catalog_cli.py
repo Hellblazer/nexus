@@ -891,6 +891,32 @@ class TestMergeCommand:
         assert "Traceback" not in result.output
         assert "already aliased" in result.output.lower()
 
+    def test_merge_remaps_a_link_and_reports_the_count(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nexus-z4rpi follow-up: the merge must not strand the link graph.
+        A link FROM the duplicate must resolve to the canonical afterward,
+        and the CLI output must name the count."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Duplicate", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "Canonical", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "Other", "--owner", "1.1"])
+        linked = runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.3", "--type", "cites"])
+        assert linked.exit_code == 0, linked.output
+
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+        assert result.exit_code == 0, result.output
+        assert "links_remapped=1" in result.output, result.output
+        assert "links_collapsed=0" in result.output, result.output
+        assert "links_dropped=0" in result.output, result.output
+
+        links = runner.invoke(main, ["catalog", "links", "1.1.2", "--json"])
+        assert links.exit_code == 0, links.output
+        graph = json.loads(links.stdout)
+        assert any(
+            e["from"] == "1.1.2" and e["to"] == "1.1.3" for e in graph["edges"]
+        ), graph
+
 
 class TestDeleteCommand:
     def test_delete_by_tumbler(self, initialized_catalog, catalog_env):

@@ -815,6 +815,14 @@ def merge_cmd(duplicate: str, canonical: str) -> None:
     currently lacks a durable one, then aliases the duplicate to the
     canonical — either the whole thing lands or nothing does.
 
+    Also remaps every catalog link touching the duplicate onto the
+    canonical, in the SAME transaction: a link is renamed in place, folded
+    into an existing canonical-side link (the same co_discovered_by merge
+    `nx catalog link` performs when a link already exists) if the rewrite
+    collides with one, or dropped if the rewrite would make it a self-link.
+    A merge that moved identity but stranded the link graph would be only
+    half a merge.
+
     Refuses (with a clean error, no traceback) on a self-merge, either
     tumbler not found (including a tumbler in a different tenant), a
     duplicate already aliased to some OTHER canonical, or a merge that
@@ -834,8 +842,13 @@ def merge_cmd(duplicate: str, canonical: str) -> None:
         raise click.ClickException(str(exc)) from exc
     finally:
         writer.close()
-    click.echo(f"Merged: {dup_t} -> {canon_t}"
-               f" (source_uri_moved={result.get('source_uri_moved', False)})")
+    click.echo(
+        f"Merged: {dup_t} -> {canon_t}"
+        f" (source_uri_moved={result.get('source_uri_moved', False)},"
+        f" links_remapped={result.get('links_remapped', 0)},"
+        f" links_collapsed={result.get('links_collapsed', 0)},"
+        f" links_dropped={result.get('links_dropped', 0)})"
+    )
 
 
 @catalog.command("delete")
