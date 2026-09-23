@@ -161,9 +161,25 @@ code; ``1`` BLOCKED -- one or more commits touch code and are covered by
 nothing at all, not even an in-flight run (names them; takes priority over
 the out-of-scope tail in the same window); ``2`` CANNOT VERIFY -- the
 absent-dependency cases only (missing token/repo, API/git error, no
-completed code-exercised run found within the scanned window) -- "could
-not verify" is never "must be fine", but an in-flight covering run is no
-longer one of these cases (see ROUND 3 CORRECTION above).
+completed code-exercised run found within the scanned window, a scanned
+window that does not reach the audited head, or a completed run whose jobs
+could not be read) -- "could not verify" is never "must be fine", but an
+in-flight covering run is no longer one of these cases (see ROUND 3
+CORRECTION above).
+
+ROUND 4, the unreadable window (2026-09-23, run 35862641493). The check
+reported 1257 commits BLOCKED; a rerun over the IDENTICAL head reported 97,
+from a different floor. Two different answers to one question is a
+malfunction whichever is nearer the truth, and both were false: the same
+script, same API, same head, run from a workstation chose the correct floor
+two commits back every time. The loop had two silent paths that could
+produce a wrong floor without saying so -- a completed run whose jobs came
+back empty was indistinguishable from one that skipped pytest, and a run
+rejected as not-code-exercised printed nothing at all. Both are now loud:
+empty jobs is CANNOT VERIFY, and every rejection prints the pytest job
+conclusions it actually saw. :func:`window_reaches_head` adds the guard that
+makes a wrong floor unreachable rather than merely diagnosable, by checking
+the one thing that must be true of a window that reaches the present.
 """
 
 from __future__ import annotations
@@ -300,6 +316,29 @@ def find_uncovered_commits(commits_since_h: list[CommitInfo]) -> list[CommitInfo
     pytest against a tree containing them (rule (a) does not apply either).
     """
     return [c for c in commits_since_h if not is_docs_only_commit(c.changed_files)]
+
+
+def window_reaches_head(raw_runs: list[dict], head_sha: str) -> bool:
+    """True iff *raw_runs* contains a run for *head_sha* itself.
+
+    THE SANITY CHECK THE ANCHOR SEARCH LACKED. :func:`check` treats the
+    scanned window as "the recent runs" and walks it for a coverage floor.
+    Nothing verified that assumption, so a window that did not actually
+    reach the present still produced a floor -- just a very old one, with
+    every commit since reported BLOCKED. Measured 2026-09-23 on run
+    35862641493: the first invocation chose a floor 1257 commits back, the
+    rerun over the IDENTICAL head chose a different one 97 commits back,
+    while the same script against the same API from a workstation chose the
+    correct floor two commits back every time.
+
+    The invariant that makes this checkable: this audit is push-triggered on
+    the same branch as ``ci.yml``, so the push being audited necessarily
+    started a ``ci.yml`` run for this exact sha. That run must be in any
+    window that genuinely reaches the present. Its absence is decisive
+    evidence about the WINDOW, which is why the caller returns CANNOT VERIFY
+    rather than picking a floor out of it.
+    """
+    return any(r.get("head_sha") == head_sha for r in raw_runs)
 
 
 def run_is_in_flight(raw_run: dict) -> bool:
@@ -564,6 +603,25 @@ def check(
         )
         return 2
 
+    if not window_reaches_head(raw_runs, head_sha):
+        newest = raw_runs[0].get("head_sha", "<none>")
+        print(
+            f"CANNOT VERIFY: the scanned window of {len(raw_runs)} "
+            f"{workflow_file} run(s) does not contain a run for {head_sha}, "
+            f"the very commit being audited (newest run in the window is for "
+            f"{newest}). Every push to {branch!r} starts a {workflow_file} "
+            "run for that same sha, so the head's own run missing from the "
+            "window means the window is not the recent history this audit "
+            "assumes -- it is stale, filtered, or truncated. Choosing a "
+            "coverage floor from it would name a commit hundreds of pushes "
+            "back and report everything since as BLOCKED, which is a false "
+            "alarm, not a finding (measured twice on run 35862641493, "
+            "2026-09-23: two invocations over the identical head chose two "
+            "different ancient floors and reported 1257 and 97 commits).",
+            file=sys.stderr,
+        )
+        return 2
+
     last_covering_run: RunRecord | None = None
     in_flight_head_shas: list[str] = []
     for raw in raw_runs:
@@ -598,7 +656,42 @@ def check(
                 file=sys.stderr,
             )
             return 2
+        if not jobs:
+            # An absent dependency, not a verdict. A completed run ALWAYS
+            # has jobs; an empty mapping means the jobs endpoint gave this
+            # invocation nothing -- a permission it lacks, a truncated
+            # response, an eventual-consistency gap. Walking past it
+            # silently is how the anchor search ended up hundreds of pushes
+            # back (nexus-moht0: absence of the dependency is never a pass,
+            # and it is not a "this run did not exercise code" either).
+            print(
+                f"CANNOT VERIFY: the jobs endpoint returned no jobs for "
+                f"completed run {run_id} (head {candidate_sha}). A completed "
+                "run always has jobs, so this is a failure to read the "
+                "evidence, not evidence that the run skipped pytest.",
+                file=sys.stderr,
+            )
+            return 2
         if not run_is_code_exercised(jobs):
+            # Say WHY, so a wrong floor can be diagnosed from the log
+            # instead of reproduced. The first version of this loop was
+            # silent here, which is why two CI invocations that chose two
+            # different ancient floors left nothing to read.
+            pytest_jobs = {
+                name: conclusion
+                for name, conclusion in jobs.items()
+                if any(name.startswith(p) for p in CODE_EXERCISED_JOB_PREFIXES)
+            }
+            detail = (
+                ", ".join(f"{n}={c}" for n, c in sorted(pytest_jobs.items()))
+                if pytest_jobs
+                else f"no pytest-prefixed jobs among {len(jobs)} job(s)"
+            )
+            print(
+                f"note: run {run_id} ({candidate_sha}) did not exercise code "
+                f"-- {detail}",
+                file=sys.stderr,
+            )
             continue
         if not git_commit_exists(repo_path, candidate_sha):
             print(

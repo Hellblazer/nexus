@@ -828,3 +828,145 @@ def test_annotation_not_emitted_when_github_actions_is_not_literally_true(
         [_annot_commit("a" * 40, ("src/nexus/x.py",))], ["c" * 40]
     )
     assert capsys.readouterr().out == ""
+
+
+# ── ROUND 4: the unreadable window (2026-09-23, run 35862641493) ───────────
+#
+# The check reported 1257 commits BLOCKED, and a rerun over the IDENTICAL
+# head reported 97 from a different floor, while the same script against the
+# same API from a workstation chose the correct floor two commits back every
+# time. Two different answers to one question is a malfunction whichever is
+# nearer the truth, and both were false.
+#
+# Three defects, each independently sufficient: a completed run whose jobs
+# came back empty was indistinguishable from one that skipped pytest; a run
+# rejected as not-code-exercised printed nothing, so a wrong floor left
+# nothing to read; and nothing checked that the scanned window reached the
+# present before a floor was chosen out of it.
+
+
+def test_window_reaches_head_true_when_the_head_has_a_run() -> None:
+    runs = [{"head_sha": "b" * 40}, {"head_sha": "a" * 40}]
+    assert gate.window_reaches_head(runs, "b" * 40)
+    assert gate.window_reaches_head(runs, "a" * 40)
+
+
+def test_window_reaches_head_false_when_the_window_stops_short() -> None:
+    """The measured shape: a window of old runs, none of them the head's."""
+    runs = [{"head_sha": "1" * 40}, {"head_sha": "2" * 40}]
+    assert not gate.window_reaches_head(runs, "9" * 40)
+
+
+def test_check_cannot_verify_when_the_window_does_not_reach_the_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A window that stops short must not yield a floor at all.
+
+    Reconstructs 35862641493: an old code-exercised run sits in the window
+    and MANY code commits follow it, so the pre-fix script had everything it
+    needed to emit a confident BLOCKED. The only thing wrong is the window,
+    and the head's own run missing from it is what says so.
+    """
+    repo = _init_repo(tmp_path)
+    ancient_sha = _commit(repo, "src/nexus/base.py", "base", "ancient floor")
+    for i in range(5):
+        _commit(repo, f"src/nexus/m{i}.py", f"code{i}", f"code {i}")
+    tip_sha = _commit(repo, "src/nexus/tip.py", "tip", "the audited head")
+
+    router = _RunRouter(
+        runs_page=[{"id": 1, "head_sha": ancient_sha, "status": "completed"}],
+        jobs_by_run_id={1: _SUCCESS_JOBS},
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 2, "a window that does not reach the head must be CANNOT VERIFY"
+    err = capsys.readouterr().err
+    assert "does not contain a run for" in err
+    assert tip_sha in err
+
+
+def test_falsification_the_window_guard_is_what_prevents_the_false_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity for the test above: with the guard disabled, the SAME
+    inputs produce the false BLOCKED that shipped.
+
+    Without this, the test above would pass for any reason at all -- a
+    router that raised, a repo that failed to build -- and prove nothing
+    about the guard.
+    """
+    repo = _init_repo(tmp_path)
+    ancient_sha = _commit(repo, "src/nexus/base.py", "base", "ancient floor")
+    for i in range(5):
+        _commit(repo, f"src/nexus/m{i}.py", f"code{i}", f"code {i}")
+    tip_sha = _commit(repo, "src/nexus/tip.py", "tip", "the audited head")
+
+    router = _RunRouter(
+        runs_page=[{"id": 1, "head_sha": ancient_sha, "status": "completed"}],
+        jobs_by_run_id={1: _SUCCESS_JOBS},
+    )
+    monkeypatch.setattr(gate, "window_reaches_head", lambda runs, head: True)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 1, (
+        "with the guard neutered these inputs must reproduce the shipped "
+        "false BLOCKED; if they do not, the test above is not exercising it"
+    )
+
+
+def test_check_cannot_verify_when_a_completed_runs_jobs_come_back_empty(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Empty jobs is a failure to read evidence, not evidence of a skip.
+
+    A completed run always has jobs. Treating an empty mapping as "this run
+    did not exercise code" is what let the anchor search walk silently past
+    the correct floor.
+    """
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "floor")
+    tip_sha = _commit(repo, "src/nexus/tip.py", "tip", "head")
+    router = _RunRouter(
+        runs_page=[
+            {"id": 2, "head_sha": tip_sha, "status": "completed"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={2: {}, 1: _SUCCESS_JOBS},
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 2, "unreadable jobs must be CANNOT VERIFY, never a silent walk-past"
+    assert "returned no jobs for completed run 2" in capsys.readouterr().err
+
+
+def test_a_rejected_run_says_which_pytest_jobs_it_saw(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The floor choice must be diagnosable from the log.
+
+    The original loop rejected a run silently, so two CI invocations that
+    chose two different ancient floors left nothing to read about why.
+    """
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "floor")
+    tip_sha = _commit(repo, "docs/a.md", "doc", "docs only head")
+    router = _RunRouter(
+        runs_page=[
+            {"id": 2, "head_sha": tip_sha, "status": "completed"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={2: _SKIPPED_JOBS, 1: _SUCCESS_JOBS},
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "run 2" in err and "did not exercise code" in err
+    assert "pytest (lint markers)=skipped" in err, (
+        "the note must carry the conclusions it actually read, not just "
+        "that it rejected the run"
+    )
