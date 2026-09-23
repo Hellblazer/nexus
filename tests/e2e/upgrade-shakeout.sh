@@ -631,7 +631,16 @@ if [ -f "$REPO_ROOT/mcpb/manifest.json" ]; then
     rm -f conexus.mcpb
     npx -y @anthropic-ai/mcpb@latest pack . conexus.mcpb >/dev/null 2>&1 \
         || _die "mcpb pack failed in $REPO_ROOT/mcpb"
-    BUNDLE_SIZE=$(stat -f%z conexus.mcpb 2>/dev/null || stat -c%s conexus.mcpb 2>/dev/null)
+    # nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked
+    # -- a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status
+    # dump into BUNDLE_SIZE on Linux, corrupting the size-bound check below
+    # (see tests/e2e/post-publish-dispatch-check.sh's fix for the full
+    # writeup).
+    if stat --version >/dev/null 2>&1; then
+        BUNDLE_SIZE=$(stat -c%s conexus.mcpb 2>/dev/null)
+    else
+        BUNDLE_SIZE=$(stat -f%z conexus.mcpb 2>/dev/null)
+    fi
     rm -f conexus.mcpb
     cd - >/dev/null
     # nexus-x8fuq item E: bounded on BOTH sides now — an empty/near-empty

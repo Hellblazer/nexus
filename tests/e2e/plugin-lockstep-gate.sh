@@ -78,8 +78,23 @@ PREV_TAG="${TAGS[0]}"; NEW_TAG="${TAGS[1]}"
 PREV="${PREV_TAG#v}"; NEW="${NEW_TAG#v}"
 echo "gate: previous client tag $PREV_TAG -> newest $NEW_TAG"
 
+# nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked --
+# a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status dump
+# into the captured value on Linux, which can make the REAL_MTIME ==
+# NOW_MTIME isolation check below compare garbage against garbage rather
+# than a real epoch (see tests/e2e/post-publish-dispatch-check.sh's fix
+# for the full writeup).
+_real_mtime() {
+    [ -f "$1" ] || { echo none; return; }
+    if stat --version >/dev/null 2>&1; then
+        stat -c %Y "$1" 2>/dev/null || echo none
+    else
+        stat -f %m "$1" 2>/dev/null || echo none
+    fi
+}
+
 REAL_REGISTRY="$HOME/.claude/plugins/installed_plugins.json"
-REAL_MTIME="$( [ -f "$REAL_REGISTRY" ] && stat -f %m "$REAL_REGISTRY" 2>/dev/null || stat -c %Y "$REAL_REGISTRY" 2>/dev/null || echo none )"
+REAL_MTIME="$(_real_mtime "$REAL_REGISTRY")"
 
 SB="$WORK/home"; mkdir -p "$SB"
 CLONE="$WORK/marketplace-src"
@@ -124,7 +139,7 @@ echo "── 4/9 assert the registry moved and the output named it ──"
 grep -q "^Plugin update: conexus@nexus-plugins $PREV -> $NEW$" "$OUT" || _fail "no conexus lockstep line in output"
 grep -q "^Plugin update: sn@nexus-plugins $PREV -> $NEW$" "$OUT" || _fail "no sn lockstep line in output"
 grep -q "^Plugin update: restart the Claude Code session" "$OUT" || _fail "no restart line in output"
-NOW_MTIME="$( [ -f "$REAL_REGISTRY" ] && stat -f %m "$REAL_REGISTRY" 2>/dev/null || stat -c %Y "$REAL_REGISTRY" 2>/dev/null || echo none )"
+NOW_MTIME="$(_real_mtime "$REAL_REGISTRY")"
 [ "$NOW_MTIME" = "$REAL_MTIME" ] || _fail "the REAL registry $REAL_REGISTRY changed during the gate (isolation broken)"
 
 echo "── 5/9 skew: the $NEW plugin's lockstep hook against a $PREV CLI ──"

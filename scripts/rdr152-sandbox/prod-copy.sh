@@ -39,8 +39,22 @@ source "${SANDBOX_ENV}"
 PROD_MEMORY_DB="${PROD_CONFIG}/memory.db"
 PROD_CATALOG_DIR="${PROD_CONFIG}/catalog"
 
-# Helper: portable mtime (macOS stat -f "%m", Linux stat -c "%Y").
-_mtime() { stat -f "%m" "$1" 2>/dev/null || stat -c "%Y" "$1" 2>/dev/null || echo ""; }
+# Helper: portable mtime, BSD or GNU stat, dialect detected ONCE so the
+# wrong-dialect command is never invoked (nexus-7m6uc: a blind
+# `stat -f ... || stat -c ...` is unsound -- GNU's `-f` is a no-argument
+# "filesystem status" flag, not BSD's "-f FORMAT", so the format string
+# becomes a bogus second positional FILE argument, and GNU stat prints
+# its full dump for the real path before erroring on the bogus one;
+# `||` reacts only to the exit code, so the dump leaks into the captured
+# value. See tests/e2e/post-publish-dispatch-check.sh's fix for the full
+# writeup).
+_mtime() {
+    if stat --version >/dev/null 2>&1; then
+        stat -c "%Y" "$1" 2>/dev/null || echo ""
+    else
+        stat -f "%m" "$1" 2>/dev/null || echo ""
+    fi
+}
 
 echo "[prod-copy] Recording prod file mtimes before copy..."
 MTIME_BEFORE_MEMORY=""
