@@ -268,6 +268,48 @@ class TestDiscover:
         assert registry.discover("42") is None
 
 
+class TestReadRecordCorruptShapes:
+    """nexus-cd1k0.6 finding (8): _read_record used to let TypeError /
+    UnicodeDecodeError escape discover/publish/heartbeat for valid JSON of
+    the wrong shape, or non-UTF-8 bytes -- crash-looping the supervisor
+    instead of treating the record as absent/corrupt like a JSON syntax
+    error already was."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="json-list"),
+            pytest.param(b"null", id="json-null"),
+            pytest.param(
+                b'{"scope_key":"42","generation":1,"owner_token":"t",'
+                b'"heartbeat_epoch":1,"ttl":3,"endpoint":5,"version":"1"}',
+                id="endpoint-not-a-mapping",
+            ),
+            pytest.param(b"\xff\xfe", id="non-utf8-bytes"),
+        ],
+    )
+    def test_discover_treats_malformed_record_as_absent(
+        self, registry: ServiceRegistry, body: bytes,
+    ) -> None:
+        registry._record_path("42").write_bytes(body)
+        assert registry.discover("42") is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="json-list"),
+            pytest.param(b"null", id="json-null"),
+            pytest.param(b"\xff\xfe", id="non-utf8-bytes"),
+        ],
+    )
+    def test_publish_over_malformed_record_does_not_raise(
+        self, registry: ServiceRegistry, body: bytes,
+    ) -> None:
+        registry._record_path("42").write_bytes(body)
+        rec = registry.publish("42", endpoint=_endpoint(), version="1", owner_token="A")
+        assert rec.generation == 1
+
+
 # ---------------------------------------------------------------------------
 # relinquish: own-record-only deletion (CA-4 shutdown ordering)
 # ---------------------------------------------------------------------------

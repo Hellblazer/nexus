@@ -381,9 +381,26 @@ class ServiceRegistry:
             text = path.read_text()
         except OSError:
             return None
+        except UnicodeDecodeError as exc:
+            # nexus-cd1k0.6 finding (8): a UnicodeDecodeError is a ValueError
+            # subclass, not an OSError, so the OSError clause above never
+            # caught it -- a non-UTF-8 record raised straight out of
+            # discover/publish/heartbeat and crash-looped the supervisor.
+            # Treated the same as a corrupt-JSON record: log and report "no
+            # lease here" rather than let the reader see raw garbage.
+            _log.warning(
+                "service_registry_corrupt_record", path=str(path), error=str(exc)
+            )
+            return None
         try:
             return LeaseRecord.from_json(text)
-        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+            # TypeError (nexus-cd1k0.6 finding (8)): valid JSON of the wrong
+            # SHAPE -- `null`, a bare list, or a dict whose "endpoint" is not
+            # itself a mapping -- raises TypeError out of from_json's field
+            # access/dict() coercion, not one of the exceptions formerly
+            # caught here. Same corrupt-record handling as a JSON syntax
+            # error: this is valid JSON, just not a valid LeaseRecord.
             _log.warning(
                 "service_registry_corrupt_record", path=str(path), error=str(exc)
             )
