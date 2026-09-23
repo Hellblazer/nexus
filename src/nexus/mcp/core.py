@@ -1416,6 +1416,54 @@ async def _t1_lifespan(_app: Any):
     # (mirrors the multiple yield/return sites this lifespan already has).
     _start_t1_handoff_watch_task()
 
+    # nexus-veh77 round 2: the MCP connect-readiness marker (nexus.mcp.
+    # connect_marker), resolved and published UNCONDITIONALLY -- independent
+    # of which T1 routing branch fires below, and in particular independent
+    # of whether T1 mint succeeds at all. See that module's docstring for
+    # the enumerated "connects fine, T1 lease never published" cases this
+    # replaces a T1-lease-keyed readiness signal to fix. Resolved via the
+    # SAME function every T1-routing branch below uses for its own session
+    # id (`resolve_active_session_id`), so this marker's session id is
+    # byte-identical to whatever `_decision.session_id` would be -- and to
+    # the SessionStart hook payload's own `session_id` field, which is what
+    # `nexus.hooks.mcp_connect_wait` polls for.
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred for startup cost; mirrors resolve_t1_routing_tiers's own per-call import below
+    _connect_marker_session_id = resolve_active_session_id() or ""
+    if _connect_marker_session_id == "unknown":
+        _connect_marker_session_id = ""
+
+    def _mark_connected() -> None:
+        """Best-effort, idempotent: publish this session's connect marker.
+
+        Never allowed to fail the lifespan -- a publish failure here costs
+        only the barrier's own fail-open timeout, exactly as a T1 mint
+        failure costs only T1.
+        """
+        if not _connect_marker_session_id:
+            return
+        try:
+            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost
+            from nexus.mcp.connect_marker import publish_mcp_connect_marker  # noqa: PLC0415 — deferred for startup cost
+
+            publish_mcp_connect_marker(_connect_marker_session_id, nexus_config_dir())
+        except Exception as exc:  # noqa: BLE001 — best-effort marker publish must never fail the lifespan
+            _svc_log.warning(
+                "mcp_connect_marker_publish_failed",
+                session_id=_connect_marker_session_id, error=str(exc),
+            )
+
+    def _unmark_connected() -> None:
+        """Best-effort teardown counterpart to :func:`_mark_connected`."""
+        if not _connect_marker_session_id:
+            return
+        try:
+            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost
+            from nexus.mcp.connect_marker import clear_mcp_connect_marker  # noqa: PLC0415 — deferred for startup cost
+
+            clear_mcp_connect_marker(_connect_marker_session_id, nexus_config_dir())
+        except Exception:  # noqa: BLE001 — best-effort cleanup must never fail teardown
+            pass
+
     # nexus-1si7z: tiers 1-2 (inherited-wins, then borrow-a-fresh-lease)
     # are the SAME decision get_t1_database() makes for the bare-CLI/
     # detached-process path (db/t1.py) -- both now call the ONE shared
@@ -1505,9 +1553,11 @@ async def _t1_lifespan(_app: Any):
             session_id=_os.environ.get("NX_T1_SESSION_ID", "").strip(),
         )
         _start_channel_waiter()
+        _mark_connected()
         yield
         await _cancel_channel_waiter_task()
         await _cancel_t1_handoff_watch_task()
+        _unmark_connected()
         return
 
     if _decision.action == T1RoutingAction.USE_LEASED:
@@ -1515,9 +1565,11 @@ async def _t1_lifespan(_app: Any):
         _os.environ["NX_T1_SESSION_ID"] = _decision.session_id
         _svc_log.info("t1_session_leased_no_mint", session_id=_decision.session_id)
         _start_channel_waiter()
+        _mark_connected()
         yield
         await _cancel_channel_waiter_task()
         await _cancel_t1_handoff_watch_task()
+        _unmark_connected()
         return
 
     # T1RoutingAction.MINT. Phase D (bead nexus-gmiaf.32.4): mint a
@@ -1671,9 +1723,11 @@ async def _t1_lifespan(_app: Any):
                 "t1_session_leased_after_mint_race", session_id=_t1_session_id
             )
             _start_channel_waiter()
+            _mark_connected()
             yield
             await _cancel_channel_waiter_task()
             await _cancel_t1_handoff_watch_task()
+            _unmark_connected()
             return
 
         else:
@@ -1723,6 +1777,7 @@ async def _t1_lifespan(_app: Any):
             )
 
     _start_channel_waiter()
+    _mark_connected()
     try:
         yield
     finally:
@@ -1739,6 +1794,10 @@ async def _t1_lifespan(_app: Any):
         # `finally` block already applies to the T1 session refresh task
         # and the handoff watcher just below.
         await _cancel_channel_waiter_task()
+        # nexus-veh77 round 2: clear the connect marker early in teardown,
+        # same reasoning -- it is decoupled from T1 by design, so it need
+        # not wait on any T1-specific cleanup below.
+        _unmark_connected()
         # nexus-brw1s: clear any startup-deferred mint state + unregister
         # the retry hook so nothing dangles past this lifespan. No-op when
         # the deferred mint completed mid-session (the hook cleared both)

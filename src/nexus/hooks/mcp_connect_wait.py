@@ -29,34 +29,42 @@ skipped even after the connection completes seconds later.
 session's ``nx-mcp`` to be up, so the barrier headless gets by accident
 becomes deliberate for interactive too.
 
-**The readiness signal.** ``nexus.mcp.core._t1_lifespan`` Branch 0 (T1
-service path) mints this session's T1 token and calls
-``nexus.db.t1.publish_t1_session_lease`` -- inside the same mint-or-borrow
-critical section, before the lifespan's own ``yield`` -- and an MCP server
-built on the ``mcp`` SDK's lifespan contract cannot answer ``initialize``
-(the handshake Claude Code waits on before it will call any tool, and the
-event this module's own callers read as "connected") until that ``yield``
-returns and the transport's request loop starts. So on ``NEXUS_CONFIG_DIR``,
-a fresh, non-expired ``t1_session_lease.<session_id>`` file existing for
-THIS session's id is available no later than the moment ``nx-mcp`` can
-begin serving -- it is written on the causal path to that moment, not a
-proxy sampled after the fact. ``session_id`` here is Claude Code's own
-SessionStart payload field, byte-identical to what ``nx-mcp`` itself
-resolves at spawn via ``CLAUDE_CODE_SESSION_ID`` (``nexus.session.
-resolve_active_session_id``'s tier 3, "harness-provided means correct AT
-SPAWN") -- so waiting on THIS session's lease file, keyed on THIS payload's
-id, cannot be satisfied by a stale lease left over from an unrelated prior
-process; a lease for a DIFFERENT session id is simply never read (see
-:class:`TestMcpConnectWait`'s wrong-session-id case).
+**The readiness signal is ``nexus.mcp.connect_marker``, NOT the T1 lease
+(round 2, same day).** The first cut of this verb polled
+``nexus.db.t1.read_t1_session_lease`` -- published inside
+``nexus.mcp.core._t1_lifespan``'s T1 mint-or-borrow critical section, before
+that lifespan's ``yield``. That reasoning holds only on the path where T1
+mint SUCCEEDS. Enumerated (Sam's round-2 review) from every branch of
+``_t1_lifespan`` that still reaches ``yield`` and serves every non-T1 tool
+WITHOUT ever publishing a T1 lease: an inherited already-live token
+(``USE_INHERITED``, no mint attempted), a no-resolvable-session-id process,
+and -- the sharpest case -- a DEFERRED mint (nexus-brw1s: the storage
+service is unreachable at MCP boot, so the mint is deferred to first T1 use
+and the server starts anyway). That last one fires on precisely the boxes
+already least healthy: a fresh install before ``nx daemon service start``
+has ever run, a crashed or not-yet-ready local service, a cloud-mode box
+with a transient auth or network failure. A T1-lease-keyed barrier would
+have cost every one of those boxes the FULL 15 s bound on EVERY session
+start, forever, until T1 was fixed -- even though ``nx-mcp`` itself connects
+in well under a second on every one of them. That is backwards: it waits
+for "T1 is healthy", not "``nx-mcp`` is serving".
 
-The one gap this signal has: ``_t1_lifespan``'s DEFERRED-mint branch (the
-storage service was unreachable at MCP startup, nexus-brw1s) never
-publishes a lease at all, and the server still proceeds to serve every
-non-T1 tool. A wait keyed on this signal times out on that box exactly as
-it would on a genuinely dead server -- which is the correct, fail-open
-answer for BOTH: this hook has no way to distinguish "server is slow" from
-"server came up degraded" and does not need to; either way capping the wait
-and moving on is right.
+So this verb now polls :func:`nexus.mcp.connect_marker.read_mcp_connect_marker`,
+a signal published UNCONDITIONALLY -- independent of T1 mint outcome -- from
+every branch of ``_t1_lifespan`` right before its own ``yield``. See that
+module's docstring for the full enumeration and the file format. A missing
+T1 lease now never costs this barrier more than the actual connect time.
+
+**A short-bound heuristic for "``nx-mcp`` was never going to start at all"
+(disabled by the user, or a spawn failure) was considered and rejected.**
+See ``nexus.mcp.connect_marker``'s docstring for the reasoning: no signal on
+this box cleanly discriminates that case from a legitimately slow first
+boot, and the two need opposite treatment. The residual -- a genuinely
+disabled or never-spawning ``nx-mcp`` still pays the full 15 s bound once
+per session -- is accepted; that same session already gets a louder,
+independent signal today (``nx-hook preflight``'s ``## nx Preflight:
+FAILED`` marker, same matcher group) that nexus tooling is not working here
+at all.
 
 **Which SessionStart sources wait.** Only ``startup``. JDR-001
 (``docs/rdr/joint/JDR-001-t1-three-scopes.md``) and its own
@@ -80,7 +88,7 @@ was 2.1 s (queued about 0.9 s behind other plugin servers), and every
 room. 15 s is a little under 2x the widest measured connect (8.5 s) and
 about 7x the one live-session connect (2.1 s) -- generous enough that a
 merely-slow connect is covered, short enough that a genuinely dead or
-deferred-mint server does not hold up a session start for anywhere near
+never-spawning server does not hold up a session start for anywhere near
 ``upgrade-auto``'s own 30 s ceiling in the same ``SessionStart`` matcher
 group. ``conexus/hooks/hooks.json``'s entry for this verb carries a timeout
 above the bound (RDR-215 Contracts: the manifest timeout must exceed the
@@ -113,9 +121,9 @@ from pathlib import Path
 
 from nexus._hook_runtime._io import HookResult, configure_hook_logging
 
-#: How long, in seconds, this verb waits for THIS session's T1 lease to
-#: appear before giving up and failing open. See the module docstring for
-#: the measured justification.
+#: How long, in seconds, this verb waits for THIS session's connect marker
+#: to appear before giving up and failing open. See the module docstring
+#: for the measured justification.
 _BOUND_SECONDS: float = 15.0
 
 #: Poll interval while waiting. Independent of (and much tighter than)
@@ -154,29 +162,30 @@ def _resolve_poll_interval_seconds() -> float:
     return _float_override(_TEST_POLL_OVERRIDE_ENV, _POLL_INTERVAL_SECONDS)
 
 
-def _default_read_lease(session_id: str, config_dir: Path) -> str | None:
-    from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred for startup cost; only a startup dispatch that actually waits pays this
+def _default_read_ready(session_id: str, config_dir: Path) -> bool:
+    from nexus.mcp.connect_marker import read_mcp_connect_marker  # noqa: PLC0415 — deferred for startup cost; only a startup dispatch that actually waits pays this
 
-    return read_t1_session_lease(session_id, config_dir)
+    return read_mcp_connect_marker(session_id, config_dir)
 
 
-def wait_for_t1_lease(
+def wait_for_mcp_connect_marker(
     session_id: str,
     config_dir: Path,
     *,
     bound_seconds: float,
     poll_interval_seconds: float,
-    read_lease: Callable[[str, Path], str | None] = _default_read_lease,
+    read_ready: Callable[[str, Path], bool] = _default_read_ready,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[bool, float]:
-    """Poll *read_lease* for *session_id* until it returns a token or *bound_seconds* elapses.
+    """Poll *read_ready* for *session_id* until it returns ``True`` or *bound_seconds* elapses.
 
-    Returns ``(ready, elapsed_seconds)``. *read_lease* is
-    :func:`nexus.db.t1.read_t1_session_lease` by default, which already
-    treats a lease past its stored ``expires_at`` -- or one for a session id
-    that never had one published -- as absent, so a stale or unrelated lease
-    file is never mistaken for readiness (see that function's own docstring).
+    Returns ``(ready, elapsed_seconds)``. *read_ready* is
+    :func:`nexus.mcp.connect_marker.read_mcp_connect_marker` by default,
+    published UNCONDITIONALLY from ``nexus.mcp.core._t1_lifespan`` --
+    independent of T1 mint/lease outcome -- so a T1-only degradation never
+    shows up here as a missing signal (see that module's docstring for the
+    enumerated cases this decoupling fixes).
 
     *sleep* and *monotonic* are injected so a test can drive the whole loop
     without touching the wall clock: a fake ``monotonic`` that advances by
@@ -185,8 +194,7 @@ def wait_for_t1_lease(
     """
     start = monotonic()
     while True:
-        token = read_lease(session_id, config_dir)
-        if token:
+        if read_ready(session_id, config_dir):
             return True, monotonic() - start
         elapsed = monotonic() - start
         if elapsed >= bound_seconds:
@@ -202,7 +210,7 @@ def run(payload: dict | None) -> HookResult:
     stdin contract). A no-op -- no wait, no log line -- for any ``source``
     other than ``startup`` (see the module docstring's "which sources wait"
     section) and for a payload carrying no usable ``session_id`` (nothing to
-    key a lease lookup on).
+    key a marker lookup on).
     """
     session_id: str | None = None
     source: str | None = None
@@ -220,7 +228,7 @@ def run(payload: dict | None) -> HookResult:
 
     bound = _resolve_bound_seconds()
     poll = _resolve_poll_interval_seconds()
-    ready, elapsed = wait_for_t1_lease(
+    ready, elapsed = wait_for_mcp_connect_marker(
         session_id,
         nexus_config_dir(),
         bound_seconds=bound,
