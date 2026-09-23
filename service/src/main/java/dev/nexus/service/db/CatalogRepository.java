@@ -3296,12 +3296,44 @@ public final class CatalogRepository {
         );
     }
 
-    /** Set alias_of for a document. Guarded — silent 0-row no-op on a tombstoned target (nexus-eldyi; see updateDocumentCollection). */
+    /**
+     * Set alias_of for a document. Guarded — silent 0-row no-op on a
+     * tombstoned target (nexus-eldyi; see updateDocumentCollection).
+     *
+     * <p><b>Locking (nexus-z4rpi round 4, batch-4 item 2).</b> Takes {@link
+     * #lockDocumentRow} FOR UPDATE on *tumbler* before writing, giving this
+     * write the SAME serialization priority {@link #mergeDocuments} and
+     * {@link #upsertLink} already hold on the same row — a concurrent
+     * merge of this document now waits for this call (or vice versa)
+     * instead of racing an unlocked statement. This is belt-and-braces
+     * rather than closing a lost-update gap: a bare single-statement
+     * {@code UPDATE} has no read-then-decide-then-write sequence to
+     * corrupt (Postgres's own implicit per-statement row lock already
+     * makes two concurrent blind UPDATEs to the same row resolve
+     * deterministically, last-committer-wins, with no torn state possible
+     * either way) — the lock's value is ordering priority against
+     * mergeDocuments' lock-then-validate sequence, not correctness of this
+     * statement alone.
+     *
+     * <p><b>Premise note:</b> despite the name, this method is NOT the
+     * engine path behind {@code nx catalog update --alias-of} — grep of
+     * {@code CatalogHandler}'s route table shows no route bound to {@code
+     * setAlias}. The real {@code --alias-of} path is {@link
+     * #updateDocument}/{@link #buildUpdateDocumentQuery}'s alias_of-SET
+     * carve-out (nexus-ekaxn), reached via {@code /update}; that path is a
+     * single-row blind write too (alias_of-SET always targets *tumbler*
+     * itself, never hops), so the SAME reasoning applies there without a
+     * separate lock. setAlias has zero production (HTTP-reachable)
+     * callers today — Java-level test callers only — but the lock is
+     * added here regardless, both because it was explicitly asked for and
+     * to keep intent consistent for any future caller.
+     */
     public int setAlias(String tenant, String tumbler, String aliasOf) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf))
-               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
-        );
+        return tenantScope.withTenant(tenant, ctx -> {
+            lockDocumentRow(ctx, tenant, tumbler, true);
+            return ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf))
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute();
+        });
     }
 
     /**
