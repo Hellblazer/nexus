@@ -55,8 +55,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: A DROP means either entries were removed or the walker stopped
 #: recognising how they are declared; rule out the second reading first.
 #: 24 -> 25 at 7ad666ebb (bead .22), which gave `behaviour_census.py` its
-#: own SessionStart entry.
-EXPECTED_CONEXUS_ENTRIES = 25
+#: own SessionStart entry. 25 -> 26 at nexus-veh77: the interactive MCP
+#: connection barrier (`nx-hook mcp-connect-wait`), `startup` matcher only.
+EXPECTED_CONEXUS_ENTRIES = 26
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
