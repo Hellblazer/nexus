@@ -1278,9 +1278,19 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # has not yet been registered (backfill_repos runs first
                 # but the registry may have stale entries). Curator is
                 # the legitimate fallback for orphan rdr__* collections.
-                owner = _get_or_create_curator(
-                    cat, col_name.replace("rdr__", ""), writer=w,
-                )
+                #
+                # nexus-emrsy: a single fixed curator name, NOT
+                # col_name.replace("rdr__", "") -- for a conformant RDR-103
+                # name (rdr__<owner_id>__<model>__v<n>) that strip left the
+                # owner_id/model/version segments intact, minting a curator
+                # literally named "1-1__voyage-context-3__v1" or
+                # "1-20__voyage-context-3__v1" (junk owners 1.25/1.26 on the
+                # live catalog) -- a tumbler-form string that only LOOKS like
+                # an owner name because nothing validated it. Every orphan
+                # rdr__* collection now collapses onto the same "orphaned-rdrs"
+                # curator, mirroring "standalone-pdfs"/"standalone-docs" for
+                # the other content types.
+                owner = _get_or_create_curator(cat, "orphaned-rdrs", writer=w)
 
             for path, title in seen_paths.items():
                 if dry_run:
