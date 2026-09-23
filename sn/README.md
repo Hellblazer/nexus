@@ -21,6 +21,7 @@ Subagents spawned by Claude Code don't see your CLAUDE.md instructions. They hav
 ### Prerequisites
 
 - **Serena**: requires `uvx` ([uv](https://docs.astral.sh/uv/) must be installed)
+- **Hooks**: run through `uv run`, the same uv Serena needs, so no separate `python3` on PATH is required (stock Windows has none)
 - **Context7**: requires `npx` ([Node.js](https://nodejs.org/) must be installed)
 - **Serena project config**: each project needs a `.serena/project.yml`. Auto-generate one with:
   ```bash

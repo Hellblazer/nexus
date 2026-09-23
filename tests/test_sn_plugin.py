@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -45,8 +46,8 @@ class TestSnPluginStructure:
         hooks = data["hooks"]["SubagentStart"]
         assert len(hooks) >= 1
         # Exec form (RDR-215 bead nexus-q02nx.23): ``command`` is the
-        # interpreter and the script is an ``args`` entry, so a
-        # ``command``-only walk sees the bare word ``python3`` and matches
+        # launcher and the script is an ``args`` entry, so a
+        # ``command``-only walk sees the bare word ``uv`` and matches
         # nothing while the entry still names whatever it likes. Join both,
         # the same reassembly ``_extract_hooks_json`` does in
         # tests/test_release_artifact_verb_rot.py.
@@ -55,7 +56,7 @@ class TestSnPluginStructure:
             for entry in hooks
             for h in entry["hooks"]
         ]
-        assert any(ln.startswith("python3 ") and ln.endswith("/subagent_start.py") for ln in lines), lines
+        assert any(ln.startswith("uv run ") and ln.endswith("/subagent_start.py") for ln in lines), lines
 
     def test_mcp_json_exists(self) -> None:
         assert (SN_DIR / ".mcp.json").exists()
@@ -64,7 +65,7 @@ class TestSnPluginStructure:
         assert (SN_DIR / "README.md").exists()
 
     def test_every_hook_script_named_by_hooks_json_exists(self) -> None:
-        """Exec form runs ``python3 <path>``, so the +x bit the bash wrappers
+        """Exec form runs ``uv run ... <path>``, so the +x bit the bash wrappers
         needed is no longer part of the contract — asserting it would be a
         check whose domain no longer contains the claim. What still has to
         hold is that every path the manifest names is a file that is there.
@@ -72,12 +73,14 @@ class TestSnPluginStructure:
         expands to for an installed sn.
         """
         data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
+        # The script is the LAST arg; the ones before it are uv's own flags,
+        # pinned by tests/test_hooks_json_shape_lint.py (nexus-j4iy0).
         named = [
-            arg
+            h["args"][-1]
             for hooks in data["hooks"].values()
             for entry in hooks
             for h in entry["hooks"]
-            for arg in h.get("args", [])
+            if h.get("args")
         ]
         assert len(named) == 4, f"expected 4 exec-form script paths, got {named}"
         for arg in named:
@@ -108,10 +111,85 @@ class TestSnPluginStructure:
             for h in entry["hooks"]
             if "command" in h
         ]
-        assert commands and set(commands) == {"python3"}, commands
+        assert commands and set(commands) == {"uv"}, commands
 
 
 # ── MCP configuration ────────────────────────────────────────────────────────
+
+
+class TestSnHooksLaunchUnderUv:
+    """The manifest's own argv runs under uv from a hostile cwd (nexus-j4iy0).
+
+    sn hooks used to run under bare ``python3``, which stock Windows does
+    not have. They now run through ``uv``, which sn already requires for
+    Serena. The risk that swap brings is the session's cwd: ``uv run``
+    reads the project there, and a ``.python-version`` pinning an
+    interpreter that is not installed made it exit 2 (measured). This runs
+    every manifest entry's real argv, not a retyped copy, from such a cwd.
+    """
+
+    PAYLOAD = json.dumps({
+        "tool_name": "mcp__plugin_sn_context7__query-docs",
+        "hook_event_name": "PreToolUse",
+    })
+
+    @staticmethod
+    def _uv() -> str:
+        # `uv run` exports UV; a bare pytest falls back to PATH. CI and the
+        # dev loop both have uv, so its absence is a failure, not a skip.
+        uv = os.environ.get("UV") or shutil.which("uv")
+        if not uv:
+            pytest.fail("uv is not available; sn hooks launch through it")
+        return uv
+
+    @staticmethod
+    def _hostile_cwd(tmp_path: Path) -> Path:
+        (tmp_path / ".python-version").write_text("3.8.3\n")
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "x"\nversion = "0"\nrequires-python = ">=3.14"\n'
+        )
+        return tmp_path
+
+    def _argvs(self) -> list[list[str]]:
+        data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
+        out = []
+        for hooks in data["hooks"].values():
+            for entry in hooks:
+                for h in entry["hooks"]:
+                    out.append([
+                        self._uv() if h["command"] == "uv" else h["command"],
+                        *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(SN_DIR)) for a in h["args"]),
+                    ])
+        assert len(out) == 4, out
+        return out
+
+    def _run(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "UV_PYTHON_DOWNLOADS": "never", "CLAUDE_PLUGIN_ROOT": str(SN_DIR)}
+        env.pop("VIRTUAL_ENV", None)
+        return subprocess.run(
+            argv, input=self.PAYLOAD, cwd=cwd, env=env,
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def test_every_entry_runs_from_a_hostile_cwd(self, tmp_path: Path) -> None:
+        cwd = self._hostile_cwd(tmp_path)
+        for argv in self._argvs():
+            result = self._run(argv, cwd)
+            assert result.returncode == 0, (argv, result.stderr)
+            # The boundary returns 0 on a crash too; a crash leaves a trace.
+            assert "Traceback" not in result.stderr, (argv, result.stderr)
+            if argv[-1].endswith("auto_approve_sn_mcp.py"):
+                out = json.loads(result.stdout)
+                assert out["hookSpecificOutput"]["permissionDecision"] == "allow", out
+
+    def test_the_cwd_is_hostile_without_no_config(self, tmp_path: Path) -> None:
+        """Non-vacuity: drop --no-config and the same cwd breaks the launch,
+        so the test above is exercising the flag, not a harmless directory."""
+        cwd = self._hostile_cwd(tmp_path)
+        argv = [a for a in self._argvs()[0] if a != "--no-config"]
+        result = self._run(argv, cwd)
+        assert result.returncode != 0, (argv, result.stdout, result.stderr)
+        assert "3.8.3" in result.stderr, result.stderr
 
 
 class TestSnMcpConfig:
@@ -602,7 +680,7 @@ class TestSnSessionStart:
             for entry in data["hooks"]["SessionStart"]
             for h in entry["hooks"]
         ]
-        assert any(ln.startswith("python3 ") and ln.endswith("/session_start.py") for ln in lines), lines
+        assert any(ln.startswith("uv run ") and ln.endswith("/session_start.py") for ln in lines), lines
 
 
 class TestSnHookErrorBoundary:

@@ -25,9 +25,15 @@ WHY conexus PERMITS NO python3. Bead .21 left five handlers plugin-resident
 under a bare `python3`, and this lint allowed exactly those five by name.
 nexus-t9klx ported all five to `nx-hook` verbs, because stock Windows has no
 `python3` on PATH and a console script gets an `.exe` shim from the
-installer. A `python3` entry is now simply an unpermitted command. sn is
-different: it ships no Python package, so exec-form `python3` on its own
-scripts is still its one shape.
+installer. A `python3` entry is now simply an unpermitted command.
+
+sn left `python3` for the same reason (nexus-j4iy0) by a different route. It
+ships no Python package, so it has no console script to ride; it runs its
+own stdlib scripts through `uv`, which it already requires because Serena
+launches via `uvx`, and which installs as `uv.exe` on Windows. The argv is
+pinned whole: `--no-project` keeps uv from syncing whatever project the
+session's cwd is in, and `--no-config` keeps that project's
+`.python-version` from choosing, or downloading, the interpreter.
 """
 from __future__ import annotations
 
@@ -60,6 +66,9 @@ FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher"})
 
 SN_SCRIPT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/"
+
+#: Everything before the script path, in order. See the module docstring.
+SN_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
 
 REGISTERED_TOOLS = frozenset(f"hook_{spec.name}" for spec in HOOK_TOOLS)
 
@@ -167,9 +176,9 @@ def reject_sn(event: str, entry: dict) -> str | None:
     """``None`` if the sn entry is a permitted shape, else why it is not.
 
     sn ships no Python package and no server, so it has one shape only:
-    exec-form `python3` on a script inside sn itself. That independence is
-    an RDR-215 Cross-Cutting Concern, which is why there is no tool tier
-    here to fall back to.
+    exec-form `uv` with :data:`SN_UV_ARGV` then one script inside sn itself.
+    That independence is an RDR-215 Cross-Cutting Concern, which is why
+    there is no tool tier here to fall back to.
     """
     if "async" in entry:
         return "carries an `async` key; sn has no async tier"
@@ -188,14 +197,20 @@ def reject_sn(event: str, entry: dict) -> str | None:
         )
     if "args" not in entry:
         return "is command tier with no `args` key"
-    if entry.get("command") != "python3":
-        return f"runs command {entry.get('command')!r}; sn permits only `python3`"
+    if entry.get("command") != "uv":
+        return (
+            f"runs command {entry.get('command')!r}; sn permits only `uv`. "
+            f"`python3` is not on PATH on stock Windows (nexus-j4iy0)."
+        )
     args = entry.get("args", [])
-    if len(args) != 1:
-        return f"runs python3 with {len(args)} args; exactly one script path is permitted"
-    script = args[0]
+    if tuple(args[:-1]) != SN_UV_ARGV or not args:
+        return (
+            f"runs uv with {args!r}; the argv must be exactly "
+            f"{list(SN_UV_ARGV)} followed by one script path"
+        )
+    script = args[-1]
     if not script.startswith(SN_SCRIPT_PREFIX) or not script.endswith(".py"):
-        return f"runs python3 on {script!r}, which is not a .py under {SN_SCRIPT_PREFIX}"
+        return f"runs uv on {script!r}, which is not a .py under {SN_SCRIPT_PREFIX}"
     return None
 
 
@@ -367,6 +382,16 @@ def test_the_conexus_lint_rejects_what_it_exists_to_reject(
     )
 
 
+def _sn(script: str, **extra: object) -> dict:
+    """A permitted sn entry for *script*, with *extra* keys laid over it."""
+    return {
+        "type": "command",
+        "command": "uv",
+        "args": [*SN_UV_ARGV, f"{SN_SCRIPT_PREFIX}{script}"],
+        **extra,
+    }
+
+
 SN_REJECTS = [
     pytest.param(
         "SessionStart",
@@ -375,11 +400,7 @@ SN_REJECTS = [
     ),
     pytest.param(
         "SessionStart",
-        {
-            "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session-start.sh"],
-        },
+        _sn("session-start.sh"),
         id="dot-sh-in-args",
     ),
     pytest.param(
@@ -389,26 +410,22 @@ SN_REJECTS = [
     ),
     pytest.param(
         "PreToolUse",
-        {"type": "command", "command": "python3", "args": ["/etc/elsewhere.py"]},
+        _sn("x.py", args=[*SN_UV_ARGV, "/etc/elsewhere.py"]),
         id="script-outside-sn",
     ),
     pytest.param(
         "PreToolUse",
-        {"type": "command", "command": "python3"},
+        {"type": "command", "command": "uv"},
         id="no-args-key",
     ),
     pytest.param(
         "SessionStart",
-        {"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/x.py"]},
+        {k: v for k, v in _sn("x.py").items() if k != "type"},
         id="no-type-key-at-all",
     ),
     pytest.param(
         "SessionStart",
-        {
-            "type": "weird",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/x.py"],
-        },
+        _sn("x.py", type="weird"),
         id="bogus-type",
     ),
     # The conexus side had an `async-key` fixture from the start and sn's
@@ -418,12 +435,7 @@ SN_REJECTS = [
     # Cross-Cutting Concerns single out.
     pytest.param(
         "SubagentStart",
-        {
-            "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/subagent_start.py"],
-            "async": True,
-        },
+        _sn("subagent_start.py", **{"async": True}),
         id="async-key",
     ),
     pytest.param(
@@ -431,17 +443,32 @@ SN_REJECTS = [
         {"type": "command", "command": "node", "args": ["x.js"]},
         id="unpermitted-command-that-is-not-a-forbidden-token",
     ),
+    # The shape sn shipped until nexus-j4iy0. Stock Windows has no python3.
     pytest.param(
         "SessionStart",
         {
             "type": "command",
             "command": "python3",
-            "args": [
-                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session_start.py",
-                "--extra",
-            ],
+            "args": [f"{SN_SCRIPT_PREFIX}session_start.py"],
         },
-        id="python3-with-two-args",
+        id="python3-command",
+    ),
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=[*SN_UV_ARGV, f"{SN_SCRIPT_PREFIX}session_start.py", "--extra"]),
+        id="uv-with-an-argument-after-the-script",
+    ),
+    # Without --no-config the session's project `.python-version` picks the
+    # interpreter: measured rc=2 against a pin that is not installed.
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["run", "--no-project", "--quiet", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-without-no-config",
+    ),
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=[]),
+        id="uv-with-empty-args",
     ),
 ]
 
@@ -451,6 +478,13 @@ def test_the_sn_lint_rejects_what_it_exists_to_reject(event: str, entry: dict) -
     assert reject_sn(event, entry) is not None, (
         f"the sn lint ACCEPTED {entry!r} on {event}."
     )
+
+
+def test_the_sn_fixture_builder_is_itself_permitted() -> None:
+    """Every sn fixture above is `_sn(...)` with one thing broken. If the
+    base it breaks were itself rejected, each fixture would pass on that
+    and prove nothing about its own clause."""
+    assert reject_sn("SessionStart", _sn("session_start.py")) is None
 
 
 def test_the_permitted_commands_are_not_rejected_as_substrings() -> None:

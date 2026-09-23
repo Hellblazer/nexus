@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Auto-approve sn plugin MCP tools (Serena + Context7) by explicit full name.
 
-Declared in exec form (RDR-215 bead nexus-q02nx.23) as
-``python3 ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/auto_approve_sn_mcp.py``, with
+Declared in exec form (RDR-215 bead nexus-q02nx.23; launcher nexus-j4iy0) as
+``uv run --no-project --no-config --quiet
+${CLAUDE_PLUGIN_ROOT}/hooks/scripts/auto_approve_sn_mcp.py``, with
 the hook payload on stdin and no argv, so the snapshot resolves to the
 sibling serena-tools.txt. The bash wrapper it replaces passed that path
 explicitly AND ended in an unconditional ``exit 0`` that hid a Python crash
