@@ -51,10 +51,13 @@ Stdlib only: hooks run under system python with no conexus installed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
+import re
 import sys
+import time
 
 SERENA_PREFIX = "mcp__plugin_sn_serena__"
 
@@ -165,6 +168,27 @@ def deny_reason_relocated(tool_name: str, cwd: str, recorded_root: str) -> str:
 
 
 # ── Per-session Serena-root record (nexus-ebx0s) ─────────────────────────────
+#
+# ONE FILE PER SESSION, deliberately (round 3 review finding): a single
+# shared ``serena-roots.json`` read-modify-written by every session on the
+# box is a race -- two sessions starting together can each read the file
+# before the other's write lands, and one record is silently lost, exactly
+# contrary to the "concurrent sessions... must not clobber each other's
+# rows" claim round 2's docstring made without earning it. The fix is not a
+# lock: sn now runs on native Windows too (nexus-j4iy0), where ``fcntl``
+# does not exist, so a Unix-only lock would either not build there or
+# silently not protect anything there. Splitting the shared file into one
+# file per session_id removes the shared mutable state instead -- two
+# sessions writing their OWN, DIFFERENT files never contend for anything,
+# on any platform, with no lock of any kind required.
+
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_-]")
+#: How long a per-session record is kept before opportunistic pruning
+#: removes it (``_prune_stale_records``). A real Claude Code session_id is a
+#: UUID that lives far longer than this in the harness's own history, but
+#: nothing here needs it past this session's lifetime, and an abandoned
+#: worktree's session_id should not accumulate a file forever.
+_STALE_RECORD_MAX_AGE_DAYS = 30
 
 
 def _state_dir() -> pathlib.Path:
@@ -182,8 +206,80 @@ def _state_dir() -> pathlib.Path:
     return base / "sn"
 
 
-def _state_file() -> pathlib.Path:
-    return _state_dir() / "serena-roots.json"
+def _roots_dir() -> pathlib.Path:
+    return _state_dir() / "serena-roots"
+
+
+def _sanitized_session_filename(session_id: str) -> str:
+    """A filesystem-safe basename for *session_id*'s record file.
+
+    Every character outside ``[A-Za-z0-9_-]`` becomes ``_`` -- a real
+    session_id is a UUID, which is already entirely in that set and so
+    passes through unchanged (readable on disk); anything else, including
+    an adversarial ``"../../../etc/passwd"``, has every ``.`` and ``/``
+    replaced, leaving no path-traversal segment standing to interpret. The
+    caller still joins this against ``_roots_dir()`` with a plain ``/``, so
+    there is no directory component left in the result for that join to
+    honour even if the regex above were ever wrong.
+
+    A result that is ALL underscores (the input was entirely unsafe
+    characters, e.g. ``"////"``) falls back to a content hash of the
+    ORIGINAL session_id instead, so two different all-unsafe inputs of the
+    same length still land on two different files rather than colliding on
+    one shared ``"____.json"``. This is defence in depth for a malformed or
+    adversarial session_id, not a collision-free general hash -- two
+    different malformed inputs that sanitise to the same MIXED string
+    (retaining some safe characters) can still collide; that residual risk
+    is accepted because a real session_id never exercises it.
+    """
+    safe = _SAFE_FILENAME_RE.sub("_", session_id)[:200]
+    if not safe.strip("_"):
+        digest = hashlib.sha256(session_id.encode("utf-8", "surrogateescape")).hexdigest()
+        safe = f"sha256-{digest}"
+    return safe + ".json"
+
+
+def _session_root_file(session_id: str) -> pathlib.Path:
+    """The per-session record file for *session_id*, guaranteed inside ``_roots_dir()``.
+
+    Belt and suspenders on top of the sanitisation above: refuses a
+    filename containing a path separator (either slash, so this also holds
+    on native Windows) or a bare ``.``/``..`` before any caller reads or
+    writes it, so a defect in the sanitiser would raise here rather than
+    silently escape the directory. Unreachable given the regex above
+    (neither character survives it), which is the point -- a provably-dead
+    check costs nothing and catches a future regression in the sanitiser
+    itself.
+    """
+    filename = _sanitized_session_filename(session_id)
+    if "/" in filename or "\\" in filename or filename in (".", "..", ".json", "..json"):
+        raise ValueError(f"sanitised session filename is unsafe: {filename!r}")
+    return _roots_dir() / filename
+
+
+def _prune_stale_records(max_age_days: int = _STALE_RECORD_MAX_AGE_DAYS) -> None:
+    """Best-effort: delete per-session record files older than *max_age_days*.
+
+    Opportunistic, not a scheduled sweep -- called once from
+    ``record_startup_root``, itself once per session at startup, so this is
+    a chance to not accumulate one file per session forever rather than a
+    background job. Every failure (the directory listing, a single file's
+    stat or unlink) is swallowed: pruning is housekeeping, never something a
+    SessionStart hook can fail, or even log noisily, over.
+    """
+    try:
+        roots_dir = _roots_dir()
+        if not roots_dir.is_dir():
+            return
+        cutoff = time.time() - max_age_days * 86400
+        for entry in roots_dir.iterdir():
+            try:
+                if entry.is_file() and entry.suffix == ".json" and entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
 
 
 def git_toplevel(cwd: str | pathlib.Path) -> str | None:
@@ -222,45 +318,68 @@ def record_startup_root(session_id: str, root: str) -> None:
     to "no mismatch detected" for whatever changed, which is exactly the
     pre-existing gap this closes only partially, not a new false denial.
 
-    Read-modify-write, not a single-session overwrite: the state file holds
-    one row per session_id, and concurrent sessions on this box (see
-    AGENTS.md "one session, one worktree") must not clobber each other's
-    rows. Best-effort: a write failure costs the guard's precision for this
-    session (it fails open on the next mismatch check), never the session
-    itself -- so failures here are swallowed, not raised.
+    Writes ONLY this session's own file (round 3, nexus-ebx0s): no read,
+    no merge, no other session's data anywhere in this call, so two
+    sessions recording concurrently touch two different files and neither
+    can observe or clobber the other's write. `os.replace`/`Path.replace`
+    is atomic within one directory on every platform this plugin ships to,
+    POSIX and native Windows alike (unlike the file-per-session choice
+    itself, this one predates and is unrelated to nexus-j4iy0's Windows
+    support -- `Path.replace` has always been the cross-platform primitive
+    here). Best-effort: a write failure costs the guard's precision for
+    this session (it fails open on the next mismatch check), never the
+    session itself -- so failures here are swallowed, not raised, only
+    logged.
+
+    Also prunes stale per-session files opportunistically (best-effort,
+    see ``_prune_stale_records``) -- this is the one place in the module
+    that runs at all reliably once per session, so it is the natural home
+    for that housekeeping even though it has nothing to do with root
+    recording itself.
     """
     if not session_id or not root:
         return
-    path = _state_file()
-    data: dict[str, str] = {}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            data = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
-    except (OSError, ValueError):
-        data = {}
-    data[session_id] = root
+        path = _session_root_file(session_id)
+    except ValueError as exc:
+        print(f"sn worktree guard: could not record Serena root for session {session_id}: {exc}",
+              file=sys.stderr)
+        return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.write_text(json.dumps({"root": root}), encoding="utf-8")
         tmp.replace(path)
     except OSError as exc:
         print(f"sn worktree guard: could not record Serena root for session {session_id}: {exc}",
               file=sys.stderr)
+    _prune_stale_records()
 
 
 def read_recorded_root(session_id: str) -> str | None:
-    """The cwd recorded for *session_id* at its last ``startup``, or None."""
+    """The cwd recorded for *session_id* at its last ``startup``, or None.
+
+    Reads ONLY this session's own file -- no other session's record is ever
+    opened, so this cannot observe a partial write from a concurrent
+    ``record_startup_root`` call for a DIFFERENT session_id (there is
+    nothing shared to observe). A concurrent write for the SAME session_id
+    is not a case this module defends against: two processes racing to
+    record the SAME session's OWN startup root is not a shape SessionStart
+    produces (one hook invocation per session start).
+    """
     if not session_id:
         return None
     try:
-        data = json.loads(_state_file().read_text(encoding="utf-8"))
+        path = _session_root_file(session_id)
+    except ValueError:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
-    value = data.get(session_id)
+    value = data.get("root")
     return value if isinstance(value, str) else None
 
 

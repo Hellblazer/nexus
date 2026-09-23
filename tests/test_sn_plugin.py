@@ -431,6 +431,7 @@ class TestSnHookOutput:
 sys.path.insert(0, str(SN_DIR / "hooks" / "scripts"))
 from worktree_guard import (  # noqa: E402
     SERENA_WRITE_TOOLS,
+    _sanitized_session_filename,
     git_toplevel,
     is_linked_worktree,
     is_serena_write_tool,
@@ -491,8 +492,18 @@ def _run_session_start(payload: dict, env: dict[str, str]) -> subprocess.Complet
 
 def _isolated_state_env(tmp_path: Path) -> dict[str, str]:
     """A fresh ``XDG_STATE_HOME`` so a test's recorded Serena root never touches,
-    or is affected by, the real ``~/.claude/sn/serena-roots.json`` on this box."""
+    or is affected by, the real ``~/.claude/sn/serena-roots/`` on this box."""
     return {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
+
+
+def _session_root_file(tmp_path: Path, session_id: str) -> Path:
+    """The per-session record file ``_isolated_state_env``'s XDG_STATE_HOME
+    resolves *session_id* to (round 3, nexus-ebx0s: one file per session, not
+    a shared serena-roots.json), built from the module's OWN sanitiser
+    (``_sanitized_session_filename``) rather than reimplemented by hand, so a
+    sanitisation-format change fails this helper's own callers before it
+    fails a caller guessing wrong."""
+    return tmp_path / "state" / "sn" / "serena-roots" / _sanitized_session_filename(session_id)
 
 
 class TestWorktreeDetection:
@@ -729,8 +740,8 @@ class TestRelocatedSessionGuard:
         _run_session_start({"source": "startup", "session_id": "s5", "cwd": str(worktree)}, env)
         resumed = _run_session_start({"source": "resume", "session_id": "s5", "cwd": str(primary)}, env)
         assert resumed.returncode == 0, resumed.stderr
-        state_file = tmp_path / "state" / "sn" / "serena-roots.json"
-        assert json.loads(state_file.read_text())["s5"] == git_toplevel(worktree)
+        record_file = _session_root_file(tmp_path, "s5")
+        assert json.loads(record_file.read_text())["root"] == git_toplevel(worktree)
         out = _run_auto_approve(
             {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s5",
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
@@ -752,6 +763,96 @@ class TestRelocatedSessionGuard:
             env=env,
         )
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ── Per-session record storage (nexus-ebx0s round 3) ─────────────────────────
+#
+# Round 2's record lived in ONE shared ``serena-roots.json``, read-modify-
+# written with no lock, on the claim (its own docstring) that "concurrent
+# sessions... must not clobber each other's rows" -- a claim the code never
+# earned: two sessions starting together could each read the file before
+# the other's write landed, and one record would be silently lost. The fix
+# is not a lock (sn now runs on native Windows too, nexus-j4iy0, where
+# fcntl does not exist) but removing the shared mutable state: one file per
+# session_id, so two sessions writing their OWN files never contend for
+# anything on any platform.
+
+
+class TestPerSessionRecordStorage:
+    def test_session_id_is_sanitised_before_use_as_a_filename(self, tmp_path: Path) -> None:
+        """An adversarial session_id must not escape the roots directory, and
+        the record must still be readable back by the exact (unsanitised)
+        session_id afterward -- sanitisation is transparent to callers."""
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        malicious = "../../../etc/passwd"
+        start = _run_session_start({"source": "startup", "session_id": malicious, "cwd": str(primary)}, env)
+        assert start.returncode == 0, start.stderr
+
+        roots_dir = tmp_path / "state" / "sn" / "serena-roots"
+        files = list(roots_dir.iterdir())
+        assert len(files) == 1, files
+        assert files[0].parent.resolve() == roots_dir.resolve()
+        assert "/" not in files[0].name and "\\" not in files[0].name
+        assert not (tmp_path / "etc").exists(), "the malicious session_id escaped the roots directory"
+
+        out = _run_auto_approve(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": malicious,
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_different_all_unsafe_session_ids_do_not_collide(self, tmp_path: Path) -> None:
+        """Two session_ids that are ENTIRELY unsafe characters (so the
+        sanitiser's hash fallback fires for both) must still land on two
+        distinct files, not one overwriting the other."""
+        primary, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        _run_session_start({"source": "startup", "session_id": "////", "cwd": str(primary)}, env)
+        _run_session_start({"source": "startup", "session_id": "....", "cwd": str(worktree)}, env)
+        roots_dir = tmp_path / "state" / "sn" / "serena-roots"
+        assert len(list(roots_dir.iterdir())) == 2
+
+    def test_concurrent_session_starts_do_not_clobber_each_other(self, tmp_path: Path) -> None:
+        """The round-2 bug this round fixes, reproduced with real subprocess-
+        level concurrency: every ``session_start.py`` launched BEFORE any of
+        them is waited on, so their file writes genuinely overlap rather than
+        being serialised by the test itself. Every one of N sessions'
+        records must survive with its own root, not just SOME of them."""
+        primary, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        n = 12
+        payloads = [
+            {"source": "startup", "session_id": f"conc-{i}",
+             "cwd": str(primary if i % 2 == 0 else worktree)}
+            for i in range(n)
+        ]
+        procs = []
+        for payload in payloads:
+            proc = subprocess.Popen(
+                [sys.executable, str(SESSION_START)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=str(REPO_ROOT), env=env,
+            )
+            proc.stdin.write(json.dumps(payload))
+            proc.stdin.close()
+            procs.append(proc)
+        # Not proc.communicate(): its own internal flush of self.stdin raises
+        # ValueError on an already-closed pipe -- read stdout/stderr and wait
+        # directly instead. Output here is a few hundred bytes at most (the
+        # section text, or nothing on stderr), well under the OS pipe buffer,
+        # so this cannot deadlock the way an unbounded communicate() would.
+        for proc, payload in zip(procs, payloads):
+            stdout, stderr = proc.stdout.read(), proc.stderr.read()
+            proc.wait(timeout=15)
+            assert proc.returncode == 0, (payload["session_id"], stdout, stderr)
+
+        for i, payload in enumerate(payloads):
+            expected_root = git_toplevel(primary if i % 2 == 0 else worktree)
+            record_file = _session_root_file(tmp_path, payload["session_id"])
+            assert record_file.exists(), f"session {payload['session_id']} lost its record"
+            assert json.loads(record_file.read_text())["root"] == expected_root
 
 
 class TestWorktreeInjection:
