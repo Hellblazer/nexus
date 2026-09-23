@@ -749,6 +749,7 @@ nexus-441p5
 nexus-441p5.1
 nexus-446yl
 nexus-44812
+nexus-44812.1
 nexus-44lw2
 nexus-44lw2.1
 nexus-45i92
@@ -3750,6 +3751,7 @@ nexus-j43k
 nexus-j46lz
 nexus-j4gl6
 nexus-j4i31
+nexus-j4iy0
 nexus-j4o
 nexus-j54kv
 nexus-j5diu
@@ -5693,6 +5695,7 @@ nexus-t952k
 nexus-t952k.1
 nexus-t9dgf
 nexus-t9klx
+nexus-t9klx.1
 nexus-t9oy4
 nexus-t9qvl
 nexus-t9rmg
@@ -6875,6 +6878,7 @@ nexus-z7s5r
 nexus-z8xfo
 nexus-z8xfo.1
 nexus-z9cz2
+nexus-z9cz2.1
 nexus-z9qt5
 nexus-z9wa0
 nexus-za6e6
