@@ -57,7 +57,10 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: 24 -> 25 at 7ad666ebb (bead .22), which gave `behaviour_census.py` its
 #: own SessionStart entry. 25 -> 26 at nexus-veh77: the interactive MCP
 #: connection barrier (`nx-hook mcp-connect-wait`), `startup` matcher only.
-EXPECTED_CONEXUS_ENTRIES = 26
+#: 26 -> 27 at nexus-veh77 round 5: the mid-session disconnect detector
+#: (`nx-hook mcp-connect-check`), `UserPromptSubmit`, sibling to
+#: `mailbox-drain`.
+EXPECTED_CONEXUS_ENTRIES = 27
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"

@@ -11,10 +11,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
+
 from nexus.mcp.connect_marker import (
     clear_mcp_connect_marker,
     publish_mcp_connect_marker,
     read_mcp_connect_marker,
+    read_mcp_connect_marker_info,
 )
 
 
@@ -47,6 +50,37 @@ class TestPublishAndRead:
         path = tmp_path / "mcp_connect_marker.sess-D"
         path.write_text("not json")
         assert read_mcp_connect_marker("sess-D", tmp_path) is False
+
+
+class TestReadInfo:
+    """The TTL-unaware raw read (round 5, nexus.hooks.mcp_connect_check's signal)."""
+
+    def test_published_marker_yields_this_process_pid(self, tmp_path: Path) -> None:
+        publish_mcp_connect_marker("sess-G", tmp_path, ttl_seconds=3600)
+        info = read_mcp_connect_marker_info("sess-G", tmp_path)
+        assert info is not None
+        assert info.pid == os.getpid()
+
+    def test_missing_marker_yields_none(self, tmp_path: Path) -> None:
+        assert read_mcp_connect_marker_info("sess-never-published", tmp_path) is None
+
+    def test_malformed_marker_yields_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "mcp_connect_marker.sess-H"
+        path.write_text("not json")
+        assert read_mcp_connect_marker_info("sess-H", tmp_path) is None
+
+    def test_expired_marker_STILL_yields_info_unlike_the_bool_read(
+        self, tmp_path: Path,
+    ) -> None:
+        """The whole point of this function: TTL expiry does not hide the
+        pid from the mid-session detector, which has its own liveness
+        signal (pid_alive) and must not confuse a merely-old marker with a
+        dead process."""
+        publish_mcp_connect_marker("sess-I", tmp_path, ttl_seconds=-10.0)
+        assert read_mcp_connect_marker("sess-I", tmp_path) is False  # the bool read says stale
+        info = read_mcp_connect_marker_info("sess-I", tmp_path)
+        assert info is not None  # but the raw info is still there
+        assert info.pid == os.getpid()
 
 
 class TestClear:

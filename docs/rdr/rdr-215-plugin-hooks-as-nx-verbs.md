@@ -1422,3 +1422,83 @@ registration module on the existing server, and one package.
   Both host shapes now fully re-verified against the shipped signal, full
   rung set, controls included. `PostCompact`/`StopFailure` and mid-session
   respawn (item 3 above) remain the standing, explicitly-recorded gaps.
+- 2026-09-23 (nexus-veh77 round 5): the mid-session respawn residual
+  (round 3 item 3, also `bd comment nexus-veh77`) is now DETECTED, not
+  merely recorded as unprotected. New verb `nx-hook mcp-connect-check`
+  (`nexus.hooks.mcp_connect_check`), wired on `UserPromptSubmit` as a
+  sibling to `mailbox-drain` rather than folded into it -- considered and
+  rejected: `mailbox_drain.py` is a 1200-line module with one documented
+  contract (the RDR-205 mailbox-delivery floor), a real network round trip
+  bounded by its own budget, and an extensive existing test suite built
+  around that one concern; this check is unrelated (session MCP-connection
+  health), touches no network (two file reads, one syscall), and hooks
+  under one event already run in parallel, so separating them costs no
+  latency and keeps each verb's own cost/test/failure story legible on its
+  own.
+  **Signal.** The connect marker (round 2) already recorded a `pid` field;
+  a new `nexus.mcp.connect_marker.read_mcp_connect_marker_info` exposes it
+  (TTL-unaware -- a long session whose `nx-mcp` has genuinely run past the
+  marker's 1-hour default TTL is still connected, and this detector's own
+  liveness signal is the pid, not the file's age). The verb checks: marker
+  exists AND `nexus.daemon.service_registry.pid_alive(pid)` -- the ONE
+  shared liveness implementation ("Daemon-lifecycle fixes land in the
+  shared primitive, never one tier's copy," AGENTS.md), never a hand-rolled
+  `os.kill`.
+  **Pid-reuse hardening was considered and left out.** Comparing the
+  recorded pid's OS-level start time against a fresh read at check time
+  would need `/proc` (Linux only) or a `ps` subprocess (tens of ms) --
+  ruled out by the hot-path budget below. Consistent with this project's
+  own "liveness is lease freshness, not pid" doctrine
+  (`src/nexus/daemon/AGENTS.md`): the marker's `expires_at` is the primary
+  bound, `pid_alive` a secondary fast-reacting signal layered on top
+  through the shared primitive -- exactly the pattern that doctrine
+  endorses, not a new hand-rolled check it exists to forbid.
+  **Cost, on the path that runs on every prompt.** One file read (the
+  marker), one file read/write (a small per-session warn-once state file,
+  deliberately separate from the marker itself), one `pid_alive` call --
+  no subprocess, no network, unlike `mailbox-drain`'s own engine round
+  trip.
+  **Warn-once-per-episode**, via that state file: silent for a session
+  that never connected (the startup barrier's own job); silent while
+  connected; one visible note the first time a previously-connected
+  session's marker goes missing or names a dead pid; silent on every
+  later prompt until a live sighting resets the flag, at which point a
+  LATER disconnect warns again. Message: "nx-mcp is not connected to this
+  session; conexus tool-tier hooks are being skipped. Restart Claude Code
+  to reconnect." -- same SessionStart-style context channel
+  `preflight_verb`/`session_start_verb`/round-3's own `mcp-connect-wait`
+  timeout note already use.
+  **Native Windows, honestly recorded rather than assumed.** RDR-218
+  measured `nx-mcp` running as a genuine native Windows stdio process, so
+  `pid_alive`'s Windows behavior is not academic here, but it was not
+  independently re-verified for this call site (no native Windows Python
+  was reachable to test against during this round). Per Python's
+  documented `os.kill` semantics, signal 0 on Windows collides with
+  `signal.CTRL_C_EVENT`, restricted to processes sharing the SAME console;
+  `nx-hook` and `nx-mcp` are unrelated, separately-spawned processes, so
+  the call most likely raises an `OSError` that `pid_alive`'s own
+  ambiguous-error-is-alive default reads as "alive" regardless of the real
+  state -- meaning this detector most likely degrades to SILENT on native
+  Windows (never fires) rather than dangerous (`TerminateProcess` is never
+  reached for signal 0). That is the EXISTING behavior of the shared
+  `pid_alive` primitive, already relied on by other consumers
+  (`nexus.upgrade_finish`); sharpening it belongs in
+  `nexus.daemon.service_registry` per the hot rule above, out of scope
+  here. The WSL2 appliance -- the shipped Windows direction, Linux under
+  the hood -- is unaffected.
+  **Proof.** `tests/hooks/test_mcp_connect_check_verb.py`: the pure
+  `_decide` state machine against all four named cases (live marker
+  silent; dead pid warns once then silent; missing marker after a prior
+  one warns; never-connected stays silent, plus a reconnect-rearms case),
+  the state-file round trip, and `run()` wiring against REAL files -- a
+  live marker under this test process's own `os.getpid()`, a dead one
+  under the same `999999999` convention `test_index_lock.py` already
+  uses for an unallocated pid -- through the real, unmocked `pid_alive`.
+  `tests/mcp/test_connect_marker.py` gained the `read_mcp_connect_marker_info`
+  coverage. A real regression was caught and fixed in the same round:
+  importing `nexus.mcp.connect_marker` at MODULE scope in the new verb
+  tripped `tests/hooks/test_hook_runtime_thin.py::
+  test_the_real_verb_modules_import_no_structlog` (`nexus/mcp/__init__.py`
+  eagerly imports the whole heavy `core.py` before any submodule is
+  reachable) -- fixed by deferring the import into `run()`, the same
+  pattern `mcp-connect-wait` already used for the identical reason.
