@@ -177,7 +177,7 @@ def test_every_pg_subprocess_refuses_as_root(monkeypatch: pytest.MonkeyPatch) ->
         lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire("subprocess spawned")),
     )
     with pytest.raises(PgRootUserError):
-        pg_provision._run(["/bin/true"])
+        pg_provision._run(["/bin/true"], timeout=pg_provision._PSQL_TIMEOUT_S)
 
 
 def test_run_still_spawns_for_an_unprivileged_user(
@@ -185,7 +185,7 @@ def test_run_still_spawns_for_an_unprivileged_user(
 ) -> None:
     """Non-vacuity: with only the euid changed, _run reaches subprocess.run."""
     monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
-    out = pg_provision._run(["/bin/echo", "ok"])
+    out = pg_provision._run(["/bin/echo", "ok"], timeout=pg_provision._PSQL_TIMEOUT_S)
     assert out.returncode == 0
 
 

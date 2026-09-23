@@ -158,7 +158,10 @@ def test_infer_repo_git_failed_logs_debug():
     """Site 8: _infer_repo() git failure emits debug-level log."""
     from nexus.hooks import _infer_repo
 
-    with patch("nexus.hooks.subprocess.run", side_effect=RuntimeError("git broken")):
+    # nexus-zptvf: hooks spawn through bounded_subprocess.run_bounded now,
+    # imported inside the spawning function, so the name resolves from the
+    # source module at call time rather than nexus.hooks' namespace.
+    with patch("nexus.bounded_subprocess.run_bounded", side_effect=RuntimeError("git broken")):
         with capture_logs() as cap:
             result = _infer_repo()
 
