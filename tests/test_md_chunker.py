@@ -200,6 +200,28 @@ def test_split_large_section_keeps_all_of_an_oversized_part_with_overlap():
         assert len(chunk.text) <= budget
 
 
+def test_split_large_section_first_part_too_big_never_emits_header_only_chunk():
+    """nexus-cd1k0.16 finding (1): when a section's FIRST content part alone
+    does not fit alongside the header, the old flush gate (`if current_parts:`,
+    true even when current_parts holds only the header) emitted a
+    HEADER-ONLY chunk, then built the next chunk's overlap tail from that
+    empty body -- an empty element in current_parts that doubled the
+    blank-line join ("header\n\n\n\ncontent"). Neither should happen: the
+    header must wait for real content, and no chunk's join should carry a
+    quadruple newline."""
+    chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=3)
+    section = {
+        "level": 2, "header": "Big", "header_path": ["Big"],
+        "content_parts": [{"type": "text", "content": " ".join(_WORDS), "is_code_block": False}],
+    }
+    chunks = chunker._split_large_section(section, {}, start_index=0)
+    assert len(chunks) > 1
+    header_line = "## Big"
+    for c in chunks:
+        assert c.text.strip() != header_line, "a header-only chunk was emitted"
+        assert "\n\n\n\n" not in c.text, f"doubled blank-line join in {c.text[:60]!r}"
+
+
 def test_a_paragraph_longer_than_max_chars_is_stored_whole():
     """nexus-2s91y, through the public path at the default size. The
     paragraph is about three times max_chars; every sentence must appear

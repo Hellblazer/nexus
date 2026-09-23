@@ -366,6 +366,17 @@ class SemanticMarkdownChunker:
         current_parts: list[str] = []
         current_tokens = 0.0
         chunk_index = start_index
+        # nexus-cd1k0.16 finding (1): tracks whether `current_parts` holds
+        # any REAL body content yet, as opposed to just the header seeded
+        # below. `if current_parts:` used to gate the flush, and a header
+        # alone makes that list non-empty -- so a section whose FIRST
+        # content part does not fit (with the header) flushed a
+        # HEADER-ONLY chunk, then built the next chunk's overlap tail from
+        # that header-only chunk's (empty) body, producing an empty
+        # `current_parts` element and a doubled blank-line join. Gating on
+        # `has_content` instead means the header waits for real content
+        # before anything is emitted.
+        has_content = False
 
         header_text = "#" * section["level"] + " " + section["header"] if section["header"] else ""
         if header_text:
@@ -399,8 +410,9 @@ class SemanticMarkdownChunker:
                 current_parts.append(part_text)
                 current_tokens += part_tokens
                 current_end_char = part_end_char
+                has_content = True
             else:
-                if current_parts:
+                if has_content:
                     emitted_text = "\n\n".join(current_parts)
                     chunks.append(
                         self._make_chunk(
@@ -444,6 +456,7 @@ class SemanticMarkdownChunker:
                     current_parts = [header_text, part_text] if header_text else [part_text]
                 current_tokens = sum(len(p) for p in current_parts) / _CHARS_PER_TOKEN
                 current_end_char = part_end_char
+                has_content = True
 
         if current_parts:
             chunks.append(
