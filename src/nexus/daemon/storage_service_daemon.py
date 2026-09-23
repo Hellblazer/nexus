@@ -437,6 +437,39 @@ def _find_service_jar() -> Path | None:
     )
 
 
+def jar_launch_stack_marker() -> str | None:
+    """The process-table argv substring that identifies an engine launched
+    via the explicit ``NEXUS_SERVICE_JAR`` opt-in, or ``None`` when unset.
+
+    nexus-cd1k0.6 finding (9) follow-up (T2 review-wave2-daemon): this
+    used to live inline in ``service_registry.storage_service_stack_
+    matcher`` -- but RDR-161's amendment confines every literal
+    JVM-launch-argv identifier to THIS module (the sanctioned file the
+    ``tests/daemon/test_rdr161_native_only_gate.py`` inverse-grep gate
+    allows), and that inline construction put the literal token in
+    ``service_registry.py`` too. Hosting it here and having the matcher
+    call this function keeps the gate's contract intact -- the JVM
+    launch identifier appears in exactly one file -- without changing
+    what the matcher actually matches.
+
+    Deliberately NOT :func:`_find_service_jar`: that function is the
+    LAUNCH-time resolver and fails loud (raises
+    ``StorageServiceStartError``) when the override names a missing
+    file, which is correct for "am I about to launch this" but wrong for
+    "does this argv belong to an ALREADY-RUNNING engine" -- a caller
+    matching against the live process table (the stop path, the
+    changelog-lock liveness gate, ``restart-stale``'s sweep) must never
+    raise merely because the override file was since removed or renamed;
+    it should simply not match. Canonicalized the same way
+    (``Path(...).resolve(strict=False)``) so the comparison matches what
+    actually landed in the spawned argv.
+    """
+    jar_override = os.environ.get("NEXUS_SERVICE_JAR", "").strip()
+    if not jar_override:
+        return None
+    return f"-jar {Path(jar_override).resolve(strict=False)}"
+
+
 #: Minimum JDK for the JVM-fallback launch. MUST equal
 #: ``maven.compiler.release`` in ``service/pom.xml`` (the property, not the
 #: maven-compiler-plugin's retyped copy). The wheel does not ship the pom, so

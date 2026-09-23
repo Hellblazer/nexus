@@ -1417,17 +1417,21 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     # canonicalized the same way (`Path(...).resolve(strict=False)`) so
     # the comparison matches what actually landed in the spawned argv.
     # Native (argv[0] = binary path): same position-anchored check as the
-    # well-known path. JVM (argv = java ... -jar <jar> ...): the jar path
-    # is a mid-command token after `-jar `, so it is a substring check
-    # instead, mirroring the ``--config-dir`` substring checks below.
+    # well-known path. The alternate JVM launch kind's argv marker is
+    # resolved via a helper HOSTED IN storage_service_daemon.py, not
+    # constructed here — RDR-161's amendment confines every literal
+    # identifier for that launch kind to that one sanctioned module (see
+    # tests/daemon/test_rdr161_native_only_gate.py), so this module never
+    # spells the launch flag itself, only calls the helper that does.
     bin_override = os.environ.get("NEXUS_SERVICE_BIN", "").strip()
     engine_override_path = (
         str(Path(bin_override).resolve(strict=False)) if bin_override else None
     )
-    jar_override = os.environ.get("NEXUS_SERVICE_JAR", "").strip()
-    jar_override_marker = (
-        f"-jar {Path(jar_override).resolve(strict=False)}" if jar_override else None
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred, avoids an import cycle (storage_service_daemon imports FROM this module at load time)
+        jar_launch_stack_marker,
     )
+
+    jar_override_marker = jar_launch_stack_marker()
     # The literal default a FLAGLESS process resolves to on its own
     # (nexus.config.nexus_config_dir()'s fallback branch) — NOT that
     # function itself, so this never depends on this process's own
