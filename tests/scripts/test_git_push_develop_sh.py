@@ -531,6 +531,18 @@ class TestPushLock:
         cfg_dir = tmp_path / f"nexus-config-isolated-{label}"
         cfg_dir.mkdir(exist_ok=True)
         env = cls._without_this_worktrees_venv({**os.environ})
+        # tests/conftest.py's own autouse engine-substrate fixture sets
+        # NX_SERVICE_URL in THIS pytest process's os.environ (for in-process
+        # T2 store construction) -- and NX_SERVICE_URL outranks NX_SERVICE_
+        # HOST/PORT in resolve_service_endpoint's real precedence, so left
+        # in place it silently overrides the HOST/PORT override below and
+        # makes these tests exercise a leg they never intended to. An empty
+        # string, NOT a pop: `_run()` merges `{**os.environ, **env}`, so a
+        # key ABSENT from `env` leaves whatever `os.environ` already has
+        # untouched -- only a key genuinely PRESENT in `env` (even "") wins
+        # the merge (confirmed directly: popping alone left the leaked
+        # NX_SERVICE_URL in the subprocess's env).
+        env["NX_SERVICE_URL"] = ""
         env["NEXUS_CONFIG_DIR"] = str(cfg_dir)
         env["NX_SERVICE_HOST"] = parsed.hostname or "127.0.0.1"
         env["NX_SERVICE_PORT"] = str(parsed.port)
@@ -565,6 +577,13 @@ class TestPushLock:
         assert proc.stdout.startswith("PUSH_REFUSED_LOCK_HELD")
         assert "peer-session" in proc.stdout
         assert "lease_until=" in proc.stdout
+        # Review finding 1: mutual exclusion only holds if every pusher
+        # resolves the SAME tuple-space service and tenant -- the refusal
+        # must name what THIS invocation resolved, so a split-brain (two
+        # sessions pointed at different services) is visible from the
+        # message alone.
+        assert f"endpoint={env['NX_SERVICE_HOST']}:{env['NX_SERVICE_PORT']}" in proc.stdout, proc.stdout
+        assert "tenant=" in proc.stdout
         assert _remote_tip(origin) == before, "a held lock must not let the push through"
 
     def test_a_free_lock_allows_the_push_and_is_released_afterward(
@@ -580,6 +599,12 @@ class TestPushLock:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert proc.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
         assert _remote_tip(origin) == sha
+        # Review finding 1: the claimed/released diagnostics go to stderr
+        # (stdout stays the PUSH_OK machine-readable contract) and name
+        # what this invocation resolved, on both outcomes.
+        assert "PUSH_LOCK_CLAIMED" in proc.stderr, proc.stderr
+        assert "PUSH_LOCK_RELEASED" in proc.stderr, proc.stderr
+        assert f"endpoint={env['NX_SERVICE_HOST']}:{env['NX_SERVICE_PORT']}" in proc.stderr, proc.stderr
 
         rd = subprocess.run(
             ["nx", "tuple", "rd", "lock/ci-develop-push", "--pattern", "resource=ci-develop-push", "--json"],
@@ -599,6 +624,7 @@ class TestPushLock:
         cfg_dir = tmp_path / "nexus-config-isolated-unreachable"
         cfg_dir.mkdir(exist_ok=True)
         env = self._without_this_worktrees_venv({**os.environ})
+        env["NX_SERVICE_URL"] = ""  # see _lock_env's comment: pop alone does not survive _run()'s merge
         env["NEXUS_CONFIG_DIR"] = str(cfg_dir)
         env["NX_SERVICE_HOST"] = "127.0.0.1"
         env["NX_SERVICE_PORT"] = "1"  # nothing listens: connection refused
@@ -610,6 +636,10 @@ class TestPushLock:
         proc = _run(work, sha, env=env)
         assert proc.returncode == 9, proc.stdout + proc.stderr
         assert proc.stdout.startswith("PUSH_REFUSED_LOCK_UNREACHABLE")
+        # Review finding 1: named even on the unreachable path -- the
+        # endpoint this invocation TRIED is still resolvable from env,
+        # independent of whether the tuple space itself answered.
+        assert "endpoint=127.0.0.1:1" in proc.stdout, proc.stdout
         assert _remote_tip(origin) == before, "an unreachable lock must not let the push through"
 
         env["NX_PUSH_SKIP_LOCK"] = "tuple space unreachable in this test, verifying the escape"
@@ -617,3 +647,128 @@ class TestPushLock:
         assert proc2.returncode == 0, proc2.stdout + proc2.stderr
         assert proc2.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
         assert _remote_tip(origin) == sha
+
+    # Stub `nx` for the malformed-claim regression below: a genuinely
+    # successful claim (rc 0) whose JSON response this script cannot parse
+    # a claim_id out of. No real engine is involved -- this test is about
+    # the SCRIPT's own response-parsing robustness, not the tuple space.
+    _MALFORMED_CLAIM_STUB_NX = """#!/usr/bin/env bash
+set -euo pipefail
+log="${STUB_NX_LOG:?}"
+printf '%s\\n' "$*" >> "$log"
+case "${1:-} ${2:-}" in
+  "tuple out")
+    echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    ;;
+  "tuple in")
+    echo '{"tuple": {"id": "deadbeef", "claim_state": "claimed"}}'
+    ;;
+  "tuple release")
+    echo "STUB_NX: release must never be called with no parseable claim id" >&2
+    exit 1
+    ;;
+  "tuple rd")
+    echo '[]'
+    ;;
+  "config get")
+    echo "not set"
+    ;;
+  "daemon service")
+    echo "no lease" >&2
+    exit 1
+    ;;
+  *)
+    echo "stub-nx: unhandled invocation: $*" >&2
+    exit 1
+    ;;
+esac
+"""
+
+    def test_a_malformed_claim_response_fails_loud_without_orphaning_or_releasing(
+        self, repos, tmp_path,
+    ) -> None:
+        """Ship-blocker (code-review round N, scripts/git-push-develop.sh
+        ~412-416): a bare `x="$(cmd)"` claim-id-parse assignment aborts the
+        WHOLE script under `set -e` the instant `cmd` is nonzero -- which
+        happens BEFORE `_lock_claim_id` is ever set, so the EXIT trap finds
+        it empty and releases nothing, even though `nx tuple in` really did
+        succeed and a live claim now exists server-side. That orphans the
+        lock for its full 900s lease and blocks every push on the box, with
+        only a raw traceback to show for it.
+
+        A stub `nx` earlier on PATH stands in for that exact response shape
+        -- `tuple in` exits 0 (a genuine claim) but its JSON carries no
+        `claim_id` -- proving the fix guards the RESPONSE SHAPE, not
+        whatever the real engine happens to return today. Asserts: (a) a
+        clean, named failure (not a traceback), (b) `git push` never runs,
+        and (c) `nx tuple release` is NEVER called with a garbage/empty
+        claim id -- the log line-per-invocation record must contain no
+        "release" call at all.
+        """
+        origin, work = repos
+        stub_dir = tmp_path / "stub-nx-bin"
+        stub_dir.mkdir()
+        stub_log = tmp_path / "stub-nx.log"
+        stub = stub_dir / "nx"
+        stub.write_text(self._MALFORMED_CLAIM_STUB_NX)
+        stub.chmod(0o755)
+
+        env = {**os.environ}
+        env["PATH"] = f"{stub_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["STUB_NX_LOG"] = str(stub_log)
+        env["NX_PUSH_SKIP_SCOPE_AUDIT"] = "lock test, scope not under test"
+        env["NX_SERVICE_PORT"] = "0"  # any value: only to opt OUT of _run()'s pre-existing-test auto-skip
+
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        proc = _run(work, sha, env=env)
+        assert proc.returncode == 11, proc.stdout + proc.stderr
+        assert "PUSH_LOCK_RELEASE_FAILED" in proc.stdout
+        assert "claim id could not be parsed" in proc.stdout
+        assert _remote_tip(origin) == before, "a claim whose id could not be parsed must not let the push through"
+
+        log_text = stub_log.read_text() if stub_log.exists() else ""
+        assert "release" not in log_text, (
+            f"nx tuple release must never be called with no parseable claim id:\n{log_text}"
+        )
+        assert "tuple in" in log_text, f"the stub must have actually been asked to claim:\n{log_text}"
+
+    def test_only_a_dev_checkout_or_venv_nx_on_path_refuses_distinctly(
+        self, repos, tmp_path,
+    ) -> None:
+        """Review finding 2: `uv run` / an activated venv put a checkout's
+        own `.venv/bin` ahead of the installed generation on PATH, so a
+        bare `nx` there resolves to a DEV-CHECKOUT editable install --
+        which the nexus-a2qhz production-write guard refuses to write
+        through, reading identically to a genuinely unreachable tuple
+        space (PUSH_REFUSED_LOCK_UNREACHABLE) and teaching operators to
+        reach for NX_PUSH_SKIP_LOCK for the wrong reason.
+
+        PATH here is the REAL ambient PATH with every directory that
+        contains an `nx` file removed, plus a `.venv/bin/nx` stub
+        prepended -- so the only `nx` this process can find is
+        disqualified, deterministically, regardless of what genuinely is
+        or is not installed on the host running this test.
+        """
+        origin, work = repos
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        stub = venv_bin / "nx"
+        stub.write_text("#!/usr/bin/env bash\necho stub-nx-should-never-run\nexit 1\n")
+        stub.chmod(0o755)
+
+        kept_dirs = [
+            d for d in os.environ.get("PATH", "").split(os.pathsep)
+            if d and not (Path(d) / "nx").exists()
+        ]
+        env = {**os.environ}
+        env["PATH"] = os.pathsep.join([str(venv_bin), *kept_dirs])
+        env["NX_PUSH_SKIP_SCOPE_AUDIT"] = "lock test, scope not under test"
+        env["NX_SERVICE_PORT"] = "0"  # any value: only to opt OUT of _run()'s pre-existing-test auto-skip
+
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        proc = _run(work, sha, env=env)
+        assert proc.returncode == 10, proc.stdout + proc.stderr
+        assert proc.stdout.startswith("PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX")
+        assert _remote_tip(origin) == before, "no qualifying nx must not let the push through"

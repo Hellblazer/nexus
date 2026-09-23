@@ -71,6 +71,30 @@
 # rather than pushing unguarded or wedging every push -- same shape as the
 # scope audit's NX_PUSH_SKIP_SCOPE_AUDIT escape above.
 #
+# Scope visibility (review finding 1). Mutual exclusion only holds if every
+# pusher resolves the SAME tuple-space service and tenant -- two sessions
+# each correctly serialized against a DIFFERENT service would never see
+# each other's claim at all. So every lock outcome line (claimed, released,
+# held, unreachable) names the resolved endpoint and tenant this invocation
+# used, read via the SAME `nx` this script already calls (`nx config get
+# service_url`/`mint_tenant`, or `nx daemon service status` for a local
+# supervisor lease when neither is configured) -- never a bash-side re-parse
+# of config.yml or a lease file. A miss at every step prints "(unresolvable)"
+# / "(unknown)" rather than aborting: this is a diagnostic label, never a gate.
+#
+# Installed nx only (review finding 2). `uv run` and an activated venv both
+# prepend a checkout's OWN `.venv/bin` to PATH ahead of the installed
+# generation (`~/.local/bin/nx`, normally first on PATH otherwise), so a bare
+# `nx` there resolves to a DEV-CHECKOUT editable install. That install trips
+# the nexus-a2qhz production-write guard on every real tuple-space write --
+# indistinguishable from a genuinely unreachable tuple space
+# (PUSH_REFUSED_LOCK_UNREACHABLE), which teaches operators to reach for
+# NX_PUSH_SKIP_LOCK for the wrong reason. So this script walks every `nx` on
+# PATH (`command -v -a nx`) and uses the first one that is NOT under a
+# `.venv/` directory and NOT under this checkout's own toplevel; if none
+# qualifies it refuses with a distinct, accurate message
+# (PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX) instead of the generic unreachable one.
+#
 # Scope audit (nexus-bbriq). Vouching is by SHA, so it answers "did you make
 # this commit" and says nothing about WHAT IS IN IT. On 2026-09-17 a peer had
 # staged a 740-line docs/rdr/rdr-212-*.md draft in the shared index; an accept
@@ -117,6 +141,14 @@
 #                               the tuple space could not be reached to
 #                               claim the lock, and NX_PUSH_SKIP_LOCK is
 #                               unset
+#  10  PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX
+#                               only a dev-checkout/venv `nx` is on PATH;
+#                               the installed generation was not found, and
+#                               NX_PUSH_SKIP_LOCK is unset
+#  11  PUSH_LOCK_RELEASE_FAILED a claim was taken (nx tuple in succeeded)
+#                               but its claim id could not be parsed from
+#                               the response -- the claim is left for its
+#                               900s lease to self-expire, on the record
 
 set -euo pipefail
 
@@ -173,16 +205,79 @@ _lock_resource="ci-develop-push"
 # empty) or was refused because a peer already held it (also stays
 # empty, since the failed `in` branch never assigns it).
 _lock_claim_id=""
+# The installed `nx` this invocation uses for every lock call (resolved
+# below, inside the lock-acquisition block, before the first `nx tuple`
+# call -- see "Installed nx only" in the header). Declared here, empty,
+# so the release trap below never trips `set -u` on an unset var when the
+# lock was skipped entirely (NX_PUSH_SKIP_LOCK) and this never gets set.
+_nx_bin=""
+# "endpoint=... tenant=..." this invocation resolved the lock's tuple
+# space against (see "Scope visibility" in the header) -- resolved once,
+# alongside `_nx_bin`, and reused on every outcome line so two sessions
+# with a still-crossed lock can be told apart by what each actually
+# points at.
+_lock_scope_desc=""
+
+# Endpoint + tenant this invocation resolved (review finding 1). Reads
+# ONLY through `nx` itself (never a bash-side re-parse of config.yml or a
+# lease file), in the same priority nexus.db.service_endpoint.
+# resolve_service_endpoint documents: an explicit NX_SERVICE_URL/HOST/PORT
+# override this process already has in its own environment (no call
+# needed), else the persisted config.yml `service_url` credential, else a
+# local supervisor's live lease. Every read is individually guarded so a
+# resolution failure degrades to "(unresolvable)"/"(unknown)" and NEVER
+# aborts the script under `set -e` -- this is a diagnostic label, not a
+# gate, and must never be able to orphan a lock or block a push by itself.
+_lock_describe_scope() {
+  local nxbin="$1" endpoint="" tenant="" cfg status host port
+  if [[ -n "${NX_SERVICE_URL:-}" ]]; then
+    endpoint="$NX_SERVICE_URL"
+  else
+    cfg="$("$nxbin" config get service_url --show 2>/dev/null || true)"
+    if [[ -n "$cfg" && "$cfg" != "service_url: not set" ]]; then
+      endpoint="$cfg"
+    elif [[ -n "${NX_SERVICE_HOST:-}" && -n "${NX_SERVICE_PORT:-}" ]]; then
+      endpoint="${NX_SERVICE_HOST}:${NX_SERVICE_PORT}"
+    else
+      status="$("$nxbin" daemon service status --json 2>/dev/null || true)"
+      host=""
+      port=""
+      if [[ -n "$status" ]]; then
+        host="$(printf '%s' "$status" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print(d.get("host") or "")' 2>/dev/null || true)"
+        port="$(printf '%s' "$status" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print(d.get("port") or "")' 2>/dev/null || true)"
+      fi
+      if [[ -n "$host" && -n "$port" ]]; then
+        endpoint="${host}:${port}"
+      fi
+    fi
+  fi
+  [[ -z "$endpoint" ]] && endpoint="(unresolvable)"
+
+  tenant="$("$nxbin" config get mint_tenant --show 2>/dev/null || true)"
+  if [[ -z "$tenant" || "$tenant" == "mint_tenant: not set" ]]; then
+    tenant="(unknown)"
+  fi
+
+  printf 'endpoint=%s tenant=%s' "$endpoint" "$tenant"
+}
 
 # Released on every exit path (success, any refusal, or a signal) so a
 # claim taken right before `git push` never outlives this process. A safe
-# no-op before the lock is ever claimed, since _lock_claim_id starts empty.
+# no-op before the lock is ever claimed, since _lock_claim_id starts empty
+# (including when the lock was skipped, or when nx-resolution or the
+# reachability probe refused before any claim was attempted).
 _release_push_lock() {
   if [[ -n "$_lock_claim_id" ]]; then
     local out
-    if ! out="$(nx tuple release "$_lock_claim_id" --claimant "$_lock_claimant" 2>&1)"; then
-      echo "PUSH_LOCK_RELEASE_FAILED could not release $_lock_subspace claim $_lock_claim_id: $out" >&2
+    if ! out="$("$_nx_bin" tuple release "$_lock_claim_id" --claimant "$_lock_claimant" 2>&1)"; then
+      echo "PUSH_LOCK_RELEASE_FAILED could not release $_lock_subspace claim $_lock_claim_id ($_lock_scope_desc): $out" >&2
       echo "Its 900s lease will expire on its own; no action needed unless a push is waiting right now." >&2
+    else
+      echo "PUSH_LOCK_RELEASED $_lock_subspace ($_lock_scope_desc) claimant=$_lock_claimant" >&2
     fi
   fi
 }
@@ -398,39 +493,109 @@ fi
 if [[ -n "${NX_PUSH_SKIP_LOCK:-}" ]]; then
   echo "PUSH_LOCK_SKIPPED reason=${NX_PUSH_SKIP_LOCK}" >&2
 else
+  # Resolve the INSTALLED nx generation deliberately (review finding 2;
+  # see "Installed nx only" in the header): the first `nx` on PATH that is
+  # neither under a `.venv/` directory nor under this checkout's own
+  # toplevel. Walks $PATH by hand rather than `command -v -a` -- bash's
+  # `command` builtin has NO `-a` flag (that is a zsh-ism; under bash it
+  # is a hard "invalid option" error, confirmed directly), so that call
+  # would have found nothing on every real bash and refused every push.
+  _repo_toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  _nx_path_ifs="$IFS"
+  IFS=':' read -r -a _nx_path_dirs <<< "$PATH"
+  IFS="$_nx_path_ifs"
+  for _nx_dir in "${_nx_path_dirs[@]+"${_nx_path_dirs[@]}"}"; do
+    [[ -z "$_nx_dir" ]] && continue
+    _nx_candidate="$_nx_dir/nx"
+    [[ -x "$_nx_candidate" ]] || continue
+    _nx_cand_dir="$(cd -- "$_nx_dir" 2>/dev/null && pwd -P)" || continue
+    _nx_resolved="$_nx_cand_dir/nx"
+    case "$_nx_resolved" in
+      */.venv/*) continue ;;
+    esac
+    if [[ -n "$_repo_toplevel" && "$_nx_resolved" == "$_repo_toplevel"/* ]]; then
+      continue
+    fi
+    _nx_bin="$_nx_candidate"
+    break
+  done
+
+  if [[ -z "$_nx_bin" ]]; then
+    echo "PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX only a dev-checkout/venv nx is on PATH; the installed generation was not found."
+    echo "A dev-checkout nx refuses every real tuple-space write (the nexus-a2qhz production-write guard), which otherwise"
+    echo "reads identically to an unreachable tuple space -- refusing outright here instead so the two are never confused."
+    echo "Fix PATH so the installed generation resolves first (avoid 'uv run' / an activated venv for this script), or"
+    echo "reinstall it: scripts/reinstall-tool.sh."
+    echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
+    exit 10
+  fi
+
+  _lock_scope_desc="$(_lock_describe_scope "$_nx_bin")"
+
   # `out` is idempotent (id_from: keys) and doubles as the reachability
   # probe: it always succeeds against a live tuple space, whether the
   # resource row already exists, is free, or is expired (the lock flag
   # resets an expired row to available rather than leaving it dead).
-  if ! _lock_out_msg="$(nx tuple out "$_lock_subspace" --key "resource=$_lock_resource" 2>&1)"; then
-    echo "PUSH_REFUSED_LOCK_UNREACHABLE could not reach the tuple space to claim $_lock_subspace:"
+  if ! _lock_out_msg="$("$_nx_bin" tuple out "$_lock_subspace" --key "resource=$_lock_resource" 2>&1)"; then
+    echo "PUSH_REFUSED_LOCK_UNREACHABLE could not reach the tuple space to claim $_lock_subspace ($_lock_scope_desc):"
     echo "$_lock_out_msg"
     echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
     exit 9
   fi
 
-  if _lock_in_json="$(nx tuple in "$_lock_subspace" --pattern "resource=$_lock_resource" \
+  if _lock_in_json="$("$_nx_bin" tuple in "$_lock_subspace" --pattern "resource=$_lock_resource" \
        --claimant "$_lock_claimant" --lease-s 900 --timeout-s 0 --json 2>/dev/null)"; then
-    _lock_claim_id="$(printf '%s' "$_lock_in_json" | python3 -c 'import json,sys
+    # The claim id extraction is its OWN guarded step (ship-blocker,
+    # code-review): a bare `x="$(cmd)"` assignment aborts the WHOLE
+    # script under `set -e` the instant cmd's exit status is nonzero --
+    # skipping past the point where `_lock_claim_id` would be set, so the
+    # EXIT trap finds it empty and releases nothing, even though `nx
+    # tuple in` just succeeded and a real claim now lives server-side.
+    # Wrapping this in `if` is what keeps that failure from ever
+    # bypassing the trap: `set -e` does not fire inside an `if` test.
+    if _lock_claim_parse_out="$(printf '%s' "$_lock_in_json" | python3 -c 'import json,sys
 d = json.load(sys.stdin)
-print(d.get("claim_id") or "")')"
+cid = d.get("claim_id") or ""
+if not cid:
+    raise SystemExit(1)
+print(cid)' 2>&1)"; then
+      _lock_claim_id="$_lock_claim_parse_out"
+      echo "PUSH_LOCK_CLAIMED $_lock_subspace ($_lock_scope_desc) claimant=$_lock_claimant" >&2
+    else
+      # A live claim already exists under $_lock_claimant -- it cannot be
+      # released without its claim id, which this branch could not parse.
+      # Never orphan it SILENTLY: name the claimant and subspace, and
+      # exit nonzero rather than proceeding to push in an unknown state.
+      # The 900s lease is the actual bound on how long this wedges the
+      # queue for everyone else.
+      echo "PUSH_LOCK_RELEASE_FAILED nx tuple in for $_lock_subspace ($_lock_scope_desc) as $_lock_claimant SUCCEEDED but its claim id could not be parsed:"
+      echo "$_lock_claim_parse_out"
+      echo "raw response: $_lock_in_json"
+      echo "A live claim now exists under this claimant and cannot be released without its claim id -- it will self-expire from its 900s lease."
+      exit 11
+    fi
   else
     # The `out` above just proved the tuple space is reachable, so a
     # failed claim here means the row is held by someone else (or, more
     # rarely, was consumed/re-raced between the two calls) -- read it
     # without claiming to name who, and until when.
-    if _lock_rows_json="$(nx tuple rd "$_lock_subspace" --pattern "resource=$_lock_resource" --json 2>/dev/null)"; then
-      _lock_holder="$(printf '%s' "$_lock_rows_json" | python3 -c 'import json,sys
+    if _lock_rows_json="$("$_nx_bin" tuple rd "$_lock_subspace" --pattern "resource=$_lock_resource" --json 2>/dev/null)"; then
+      # Guarded the same way as the claim-id parse above (code-review,
+      # same class): a python failure here must degrade to a clean
+      # PUSH_REFUSED_LOCK_HELD, never a raw traceback that skips it.
+      if ! _lock_holder="$(printf '%s' "$_lock_rows_json" | python3 -c 'import json,sys
 rows = json.load(sys.stdin)
 if rows:
     r = rows[0]
     print("claimant=%s lease_until=%s claim_state=%s" % (r.get("claimant"), r.get("lease_until"), r.get("claim_state")))
 else:
-    print("no row found -- the lock may have been released between the claim attempt and this read")')"
+    print("no row found -- the lock may have been released between the claim attempt and this read")' 2>&1)"; then
+        _lock_holder="(a row exists but its details could not be parsed: $_lock_holder)"
+      fi
     else
       _lock_holder="(could not read the lock row to name the holder -- the tuple space may have become unreachable)"
     fi
-    echo "PUSH_REFUSED_LOCK_HELD $_lock_subspace is not available: $_lock_holder"
+    echo "PUSH_REFUSED_LOCK_HELD $_lock_subspace ($_lock_scope_desc) is not available: $_lock_holder"
     echo "Wait for the lease to lapse or the holder to release it, then retry."
     echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
     exit 8
