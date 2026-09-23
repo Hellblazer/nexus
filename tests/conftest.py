@@ -1886,8 +1886,10 @@ def _no_leaked_engine_db_env():
     Every engine a later test spawns from ``{**os.environ, ...}`` inherits
     these keys, and the engine reads ``NX_DB_ADMIN_*`` for its migration
     pool whenever they are set. ``tests/db/test_pg_provision_token.py``
-    loaded a fake ``pg_credentials`` file into ``os.environ`` and never took
-    it back out, so in a single-process ``pytest tests/db`` every engine
+    loaded a fake ``pg_credentials`` file into ``os.environ`` through
+    ``pg_provision.load_service_credentials_into_env`` (since deleted, it had
+    no production caller) and never took it back out, so in a
+    single-process ``pytest tests/db`` every engine
     booted after it tried to migrate against the file's dead
     ``127.0.0.1:15999`` and exited on HikariPool fail-fast: 35 setup errors
     in ``test_xnz0o_commands_integration.py``, hidden under ``-n auto``
