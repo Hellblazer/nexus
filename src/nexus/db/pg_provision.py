@@ -516,9 +516,18 @@ def _bundle_lib_env(cmd: list[str], env: dict | None) -> dict:
 #:
 #: The loaded column is 24 CPU burners against 16 cores, which doubled
 #: initdb and createdb and left the rest flat -- so CPU is not the tail.
-#: The tail is I/O: initdb is fsync-bound, and a WSL2, CI-runner,
-#: encrypted or network-backed data directory is plausibly tens of times
-#: slower than anything measured here. Hence the headroom.
+#:
+#: THE MULTIPLIERS ARE A JUDGEMENT, NOT A DERIVATION, and the first
+#: version of this comment blurred that. The measurement says what a fast
+#: box does; it does not calibrate a slow one. The only filesystem effect
+#: actually measured here is 1.65x (0.82 s internal vs 1.35 s external
+#: NVMe), and nothing was measured on WSL2, a CI runner, an encrypted
+#: volume or a network mount -- the cases the headroom is FOR. So read
+#: 180 s for initdb as "far above anything we have seen, chosen because
+#: the cost of being too generous is a longer wait on a box that is
+#: already broken, while the cost of being too tight is breaking
+#: provisioning on a slow box that works". A standing critic flagged the
+#: original wording for presenting 63x as measurement-derived.
 _INITDB_TIMEOUT_S: float = 180.0
 _CREATEDB_TIMEOUT_S: float = 60.0
 _PSQL_TIMEOUT_S: float = 60.0
@@ -554,9 +563,14 @@ def _redacted(cmd: list[str]) -> list[str]:
     altogether, which also hides them from ``ps``. It is not equivalent:
     ``psql -c "a; b"`` sends both statements as ONE query in one implicit
     transaction, where stdin is read as a script and each statement
-    auto-commits. Several call sites here pass multi-statement strings and
-    DO blocks that rely on the first shape. Converting them needs its own
-    change and its own tests.
+    auto-commits. Two call sites in this module genuinely pass
+    multi-statement SQL that depends on the first shape. Converting them
+    needs its own change and its own tests.
+
+    (An earlier wording also cited DO blocks as an example. That was
+    imprecise and a standing critic caught it: a DO block is a SINGLE
+    statement to the parser however it is delivered, so it is unaffected
+    either way. The multi-statement sites are the real constraint.)
     """
     return [redact_credentials(str(part)) for part in cmd]
 
@@ -567,7 +581,7 @@ def _run(
     check: bool = True,
     capture: bool = True,
     env: dict | None = None,
-    timeout: float = _PSQL_TIMEOUT_S,
+    timeout: float,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess, raising on non-zero exit when *check* is True.
 
@@ -592,8 +606,17 @@ def _run(
 
     ``timeout`` is a BACKSTOP, not a budget -- see the module constants
     above for the measurements behind each value and why they are loose.
-    It defaults to the psql bound because psql is the overwhelming
-    majority of calls through here; the three slower verbs pass their own.
+
+    It is REQUIRED and has no default, for the reason
+    :func:`~nexus.bounded_subprocess.run_bounded` gives for its own:
+    "a default would let a new site inherit someone else's number". This
+    function shipped with ``timeout: float = _PSQL_TIMEOUT_S`` for a few
+    hours and the standing critic pointed out that it reproduced exactly
+    the anti-pattern the helper was designed against -- roughly twenty
+    call sites reached it through ``_psql``/``_psql_tuples``, which
+    exposed no timeout parameter at all, and silently inherited 60 s with
+    no way to override. The psql default now lives on those two helpers,
+    where psql IS the verb and the number is therefore about something.
     Raises ``subprocess.TimeoutExpired`` when it fires. Every known caller
     of ``provision`` and ``_start_cluster`` already catches broadly
     (``commands/init.py``, ``storage_service_daemon`` in two places), so
@@ -627,11 +650,15 @@ def _run(
         ) from None
 
 
-def _psql(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> subprocess.CompletedProcess:
+def _psql(
+    bins: PgBinaries, port: int, db: str, user: str, sql: str,
+    *, timeout: float = _PSQL_TIMEOUT_S,
+) -> subprocess.CompletedProcess:
     """Execute *sql* via psql against the local cluster."""
     return _run(
         [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-c", sql],
+        timeout=timeout,
     )
 
 
@@ -668,7 +695,10 @@ def bootstrap_superuser() -> str:
     return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
 
 
-def _psql_tuples(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> str:
+def _psql_tuples(
+    bins: PgBinaries, port: int, db: str, user: str, sql: str,
+    *, timeout: float = _PSQL_TIMEOUT_S,
+) -> str:
     """Execute *sql* via psql in tuple-only, unaligned mode (``-t -A``).
 
     Unlike :func:`_psql` (human ``-c`` output, used for existence probes via
@@ -679,6 +709,7 @@ def _psql_tuples(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> s
     res = _run(
         [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
+        timeout=timeout,
     )
     return res.stdout.strip()
 

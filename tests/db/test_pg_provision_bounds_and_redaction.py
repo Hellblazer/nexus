@@ -76,11 +76,48 @@ def test_the_bounds_are_backstops_not_budgets() -> None:
         )
 
 
+def test_run_refuses_to_supply_a_timeout_for_you() -> None:
+    """``_run``'s ``timeout`` is required, with no default.
+
+    run_bounded states the rule this follows: "a default would let a new
+    site inherit someone else's number". _run shipped WITH a default
+    (``_PSQL_TIMEOUT_S``) for a few hours, and the standing critic pointed
+    out it reproduced the exact anti-pattern -- about twenty sites reached
+    it through _psql/_psql_tuples, which took no timeout at all, so they
+    inherited 60 s silently and could not override it.
+
+    Unfixed, this test passes trivially because the default absorbs the
+    missing argument. The psql bound now lives on _psql/_psql_tuples,
+    where psql is the verb and 60 s is a statement about something.
+    """
+    import inspect
+
+    sig = inspect.signature(pp._run)
+    assert sig.parameters["timeout"].default is inspect.Parameter.empty, (
+        "_run grew a default timeout again. Put the number on the helper "
+        "whose verb it describes, not on the choke point every verb shares."
+    )
+    for helper in (pp._psql, pp._psql_tuples):
+        d = inspect.signature(helper).parameters["timeout"].default
+        assert d == pp._PSQL_TIMEOUT_S, (
+            f"{helper.__name__} should default to the psql bound, got {d!r}"
+        )
+
+
 def test_a_hung_spawn_is_bounded_rather_than_forever(monkeypatch) -> None:
     """The load-bearing one: a child that never exits must not block.
 
-    Unfixed, ``_run`` called ``subprocess.run`` with no timeout and this
-    test hung until pytest's own timeout killed it.
+    Unfixed, ``_run`` called ``subprocess.run`` with no timeout, so this
+    blocks for the child's FULL 30 s and then fails DID NOT RAISE. It does
+    not get killed by a timeout mechanism -- this repo configures no
+    pytest-timeout -- which matters if you are reverting the fix to check
+    this test: expect a 30 s pause and then a failure, not a hang and not
+    an abort. (An earlier version of this docstring said "hung until
+    pytest's own timeout killed it", which named a plugin that is not
+    installed; a standing reviewer caught it.)
+
+    The 30 s sleep is deliberately far above the 0.5 s bound so the
+    failure is unambiguous rather than a race against scheduling.
     """
     monkeypatch.setattr(pp, "refuse_root", lambda: None)
     monkeypatch.setattr(pp, "_bundle_lib_env", lambda _cmd, _env: None)
@@ -135,7 +172,7 @@ def test_the_debug_log_line_carries_no_password(monkeypatch) -> None:
         lambda *_a, **_kw: subprocess.CompletedProcess([], 0, "", ""),
     )
 
-    pp._run(_psql_argv_with_password(), check=False)
+    pp._run(_psql_argv_with_password(), check=False, timeout=pp._PSQL_TIMEOUT_S)
 
     assert seen, "the debug line did not fire; this test is asserting nothing"
     assert _SECRET not in str(seen[0]), f"password reached the debug log: {seen[0]}"
@@ -177,7 +214,7 @@ def test_no_exception_carries_the_password_into_its_message(
     monkeypatch.setattr(pp, "run_bounded", _boom)
 
     with pytest.raises(type(raised)) as caught:
-        pp._run(_psql_argv_with_password(), check=True)
+        pp._run(_psql_argv_with_password(), check=True, timeout=pp._PSQL_TIMEOUT_S)
 
     assert _SECRET not in str(caught.value), (
         f"{type(raised).__name__}.__str__ leaked the password: {caught.value}"
