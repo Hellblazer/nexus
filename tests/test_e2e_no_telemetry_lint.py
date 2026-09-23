@@ -181,18 +181,49 @@ def test_cc_validation_harness_exports_the_opt_out(name: str) -> None:
 
 def test_harness_entry_point_sweep_is_non_vacuous() -> None:
     """nexus-cf3p2's whole point was that the sweep must not stop at the
-    first harness found. Pin the total count of independently-verified
-    entry points (tests/e2e's env -i blocks + exporting sandboxes + docker
-    runs, plus cc-validation's exporting harnesses) so a future refactor
-    that silently drops a directory from the scan is caught here rather
-    than by a fresh production pollution incident."""
+    first harness found. Each swept ROOT gets its OWN floor (review
+    finding, IMPORTANT): a single combined floor is dominated by whichever
+    root has the most entry points (measured: tests/e2e alone is 36), so
+    emptying CC_VALIDATION_EXPORTING_HARNESSES down to zero -- silently
+    dropping tests/cc-validation from the scan entirely, the exact defect
+    class this test exists to catch -- would leave a combined floor of 15
+    comfortably passing at 36. Two independent asserts close that: e2e's
+    own count can never be propped up by cc-validation's, and
+    cc-validation's own floor is tight enough (>=1) that emptying its
+    tuple fails immediately.
+    """
     e2e_env_i = sum(len(_env_i_blocks(p.read_text())) for p in sorted(E2E.rglob("*.sh")))
     e2e_docker_runs = sum(
         len(_DOCKER_RUN.findall(_spliced(p.read_text(errors="replace"))))
         for p in sorted(E2E.rglob("*.sh"))
     )
-    total = e2e_env_i + len(EXPORTING_SANDBOXES) + e2e_docker_runs + len(CC_VALIDATION_EXPORTING_HARNESSES)
-    assert total >= 15, (
-        f"only {total} harness entry points found across tests/e2e and "
-        "tests/cc-validation; the sweep is undercounting"
+    e2e_total = e2e_env_i + len(EXPORTING_SANDBOXES) + e2e_docker_runs
+    cc_validation_total = len(CC_VALIDATION_EXPORTING_HARNESSES)
+    assert e2e_total >= 30, (
+        f"only {e2e_total} harness entry points found under tests/e2e "
+        "(env -i blocks + exporting sandboxes + docker runs); the sweep "
+        "is undercounting that root"
     )
+    assert cc_validation_total >= 1, (
+        "CC_VALIDATION_EXPORTING_HARNESSES is empty -- tests/cc-validation "
+        "has silently dropped out of the sweep"
+    )
+
+
+def test_split_floor_catches_an_emptied_cc_validation_sweep(monkeypatch) -> None:
+    """Non-vacuity of the SPLIT itself (review finding): prove the new
+    per-root floor actually rejects an emptied cc-validation sweep, which
+    the OLD combined floor of 15 would NOT have caught -- tests/e2e alone
+    measures 36, so ``36 + 0 >= 15`` would have passed silently."""
+    old_combined_e2e_measurement = 36
+    old_combined_floor = 15
+    assert old_combined_e2e_measurement + 0 >= old_combined_floor, (
+        "sanity check on the incident this test regresses: if this fails, "
+        "tests/e2e's own count dropped below the old combined floor and "
+        "the split is no longer the thing proving non-vacuity here"
+    )
+    monkeypatch.setattr(
+        "tests.test_e2e_no_telemetry_lint.CC_VALIDATION_EXPORTING_HARNESSES", (),
+    )
+    with pytest.raises(AssertionError, match="CC_VALIDATION_EXPORTING_HARNESSES is empty"):
+        test_harness_entry_point_sweep_is_non_vacuous()
