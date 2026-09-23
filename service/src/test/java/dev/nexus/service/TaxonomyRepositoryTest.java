@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.*;
 import static org.assertj.core.data.Offset.offset;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -488,14 +489,17 @@ class TaxonomyRepositoryTest {
     }
 
     /** Raw count of a (topic_id, source_collection) topic_assignments row, bypassing the
-     *  repository's own read surface so this pins the physical row, not a cached view. */
+     *  repository's own read surface so this pins the physical row, not a cached view.
+     *  Typed DSL (nexus-cbo4a/nexus-zrcj7 raw-SQL house rule) over the generated
+     *  TOPIC_ASSIGNMENTS table -- same conversion shape as every other typed count in
+     *  this file. */
     private int getAssignmentCount(String tenant, long topicId, String sourceCollection) {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = '" + tenant
-                + "' AND topic_id = " + topicId + " AND source_collection = '" + sourceCollection + "'");
-            rs.next();
-            return rs.getInt(1);
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
+                        .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId))
+                        .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection)));
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

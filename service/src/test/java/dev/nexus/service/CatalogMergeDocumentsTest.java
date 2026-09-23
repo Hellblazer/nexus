@@ -333,9 +333,14 @@ class CatalogMergeDocumentsTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES).execute(
-                "ALTER TABLE nexus.catalog_documents ADD CONSTRAINT ck_merge_test_poison "
-                + "CHECK (alias_of <> '" + canonical + "')");
+            // nexus-cbo4a/nexus-zrcj7 (raw-SQL house rule): typed DSL, not a
+            // string-SQL execute() -- DSL.constraint(...).check(...) is
+            // jOOQ's own ALTER TABLE ADD CHECK form (Context7-confirmed,
+            // jOOQ 3.21 manual, ALTER TABLE .. ADD CHECK).
+            DSL.using(su, SQLDialect.POSTGRES)
+               .alterTable(CATALOG_DOCUMENTS)
+               .add(DSL.constraint("ck_merge_test_poison").check(CATALOG_DOCUMENTS.ALIAS_OF.ne(canonical)))
+               .execute();
         }
         try {
             assertThatThrownBy(() -> repo.mergeDocuments(TENANT_A, duplicate, canonical))
@@ -352,8 +357,10 @@ class CatalogMergeDocumentsTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                DSL.using(su, SQLDialect.POSTGRES).execute(
-                    "ALTER TABLE nexus.catalog_documents DROP CONSTRAINT ck_merge_test_poison");
+                DSL.using(su, SQLDialect.POSTGRES)
+                   .alterTable(CATALOG_DOCUMENTS)
+                   .dropConstraint("ck_merge_test_poison")
+                   .execute();
             }
         }
     }
@@ -382,9 +389,15 @@ class CatalogMergeDocumentsTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES).execute(
-                "ALTER TABLE nexus.catalog_links ADD CONSTRAINT ck_merge_link_test_poison "
-                + "CHECK (NOT (from_tumbler = '" + canonical + "' AND link_type = 'relates'))");
+            // nexus-cbo4a/nexus-zrcj7: typed DSL, same ADD CHECK form as the
+            // sibling test above -- DSL.not(...) composes the NOT(a AND b)
+            // condition typed rather than as string-concatenated SQL text.
+            DSL.using(su, SQLDialect.POSTGRES)
+               .alterTable(CATALOG_LINKS)
+               .add(DSL.constraint("ck_merge_link_test_poison").check(
+                   DSL.not(CATALOG_LINKS.FROM_TUMBLER.eq(canonical)
+                       .and(CATALOG_LINKS.LINK_TYPE.eq("relates")))))
+               .execute();
         }
         try {
             assertThatThrownBy(() -> repo.mergeDocuments(TENANT_A, duplicate, canonical))
@@ -412,8 +425,10 @@ class CatalogMergeDocumentsTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                DSL.using(su, SQLDialect.POSTGRES).execute(
-                    "ALTER TABLE nexus.catalog_links DROP CONSTRAINT ck_merge_link_test_poison");
+                DSL.using(su, SQLDialect.POSTGRES)
+                   .alterTable(CATALOG_LINKS)
+                   .dropConstraint("ck_merge_link_test_poison")
+                   .execute();
             }
         }
     }
