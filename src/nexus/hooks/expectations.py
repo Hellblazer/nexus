@@ -1454,34 +1454,69 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     A START whose type is exactly :data:`WORKFLOW_SUBAGENT_TYPE` (nexus-silj0)
     is pulled out of the STRANDED population, counted, and reported on its
     own ``WORKFLOW\tchecked=<n>`` line instead, matching :func:`expectations_undeclared`
-    and :func:`expectations_census`. MEASURED, not assumed (see the
-    nexus-silj0 follow-up): a Workflow-tool container run is tracked by the
-    harness's own ``background_tasks`` (if at all) as ONE task distinct from
-    any spawned agent's own ``agent_id`` -- the bead's own measured run,
-    ``wf_baae5a4e-bfd``, is the shape of that identity. Under that shape the
-    unmodified check produced STRANDED for every workflow-subagent still
-    mid-flight whenever reconcile ran WHILE the Workflow tool call was
-    still executing -- a perfectly healthy run misread as several silent
-    deaths (exit 4, the module's own worst case), because the check can
-    never tell "this specific agent died" from "the harness only tracks the
-    workflow at container granularity" -- neither the crashed case nor the
-    healthy one ever has its own ``agent_id`` in ``harness_ids``. The check
-    was therefore never a reliable per-agent liveness signal for this class
-    to begin with, so excluding it loses no signal that was trustworthy.
+    and :func:`expectations_census`.
+
+    MEASURED AGAINST THE REAL TRANSCRIPT, not assumed (nexus-silj0
+    follow-up round 2): session ``2109cc46-2876-4409-b4f1-ac730d1cc5ed``'s
+    own persisted Workflow state,
+    ``<project>/2109cc46-.../workflows/wf_baae5a4e-bfd.json``, carries BOTH
+    identities the tool uses for this one run -- ``"runId": "wf_baae5a4e-bfd"``
+    (the ``^wf_[a-z0-9-]{6,}$``-shaped id the Workflow tool's own
+    ``resumeFromRunId`` takes) AND ``"taskId": "w2bole9id"`` (a SEPARATE,
+    opaque id with no ``wf_`` prefix). The transcript's own
+    ``<task-notification>`` for this run, ``.jsonl`` line 604 (enqueue) /
+    606 (delivered), carries ``<task-id>w2bole9id</task-id>`` -- the taskId,
+    never the runId -- with
+    ``<summary>Dynamic workflow "..." completed</summary>``, ONE
+    notification for the whole 11-agent run, not one per agent. So the
+    identity the harness would put in ``background_tasks`` for a live
+    Workflow run is ``w2bole9id``-shaped: an opaque id in the SAME shape as
+    an ordinary background bash task (line 602's ``bhuty03r9``) or an
+    ordinary background Agent-tool dispatch (line 456's
+    ``aca1589669650829e``) -- **not** the ``wf_``-prefixed runId an earlier
+    round of this fix wrongly assumed was the harness-visible identity
+    (corrected here; the runId is purely the tool's own internal
+    resume-token, invisible outside the persisted workflow-state file and
+    the tool's own return value).
+
+    Under the corrected (``w2bole9id``-shaped) identity the finding is
+    unchanged in substance: that id still never equals any workflow-subagent
+    START's own ``agent_id``, so the unmodified check produced STRANDED for
+    every workflow-subagent still mid-flight whenever reconcile ran WHILE
+    the Workflow tool call was still executing -- a perfectly healthy run
+    misread as several silent deaths (exit 4, the module's own worst case),
+    because the check can never tell "this specific agent died" from "the
+    harness only tracks the workflow at container granularity" -- neither
+    the crashed case nor the healthy one ever has its own ``agent_id`` in
+    ``harness_ids``. The check was therefore never a reliable per-agent
+    liveness signal for this class to begin with, so excluding it loses no
+    signal that was trustworthy.
 
     STILL AN OPEN GAP, left alone rather than guessed at: the container
-    task's own identity (``wf_baae5a4e-bfd``-shaped) still fails to match
-    any START's ``agent_id`` and so still surfaces as ``UNDECLARED_TASK``
-    whenever the harness reports one -- confirmed by direct measurement, not
-    inferred. Suppressing that would need a reliable way to recognise "this
-    harness task IS the Workflow container" from the payload, and this
-    codebase has no confirmed field for that (no fixture, test or measured
-    payload names one; `_TASK_ID_KEYS`'s own doc already flags the shape as
-    unstable/mixed). A guessed discriminator risks being silently
-    ineffective (wrong field/value, so nothing changes) or too broad
-    (masking a genuine undeclared background task in any session that also
-    ran a workflow) -- either failure mode is worse than the documented gap.
-    Needs a real harness payload to close, which this repo cannot capture.
+    task's own identity still fails to match any START's ``agent_id`` and so
+    still surfaces as ``UNDECLARED_TASK`` whenever the harness reports one.
+    A `type` field DOES exist on real ``background_tasks`` entries --
+    confirmed independently by nexus-q02nx.6 (``tests/mcp/test_hook_tools.py
+    ::test_a_list_valued_field_survives_a_mixed_population``, a real
+    measured ``Stop`` payload: ``{"id": "bm72q9d6v", "type": "shell", ...}``
+    / ``{"id": "a1ea45d8d324ca24a", "type": "subagent", ...}``), and the
+    harness's three DISTINCT notification-summary templates observed above
+    ("Background command ... completed" / "Agent \"...\" finished" /
+    "Dynamic workflow \"...\" completed") make a third, Workflow-specific
+    ``type`` value plausible. But that 2026-09-19 measurement predates this
+    session's 2026-09-21 workflow run and captured only the shell/subagent
+    pair -- no source available to this repo shows the LITERAL string a
+    Workflow task's ``type`` field carries, and the transcript (which never
+    logs the raw hook-input JSON, only the human-rendered notification text)
+    cannot supply it either. Coding a comparison against a guessed literal
+    risks being silently ineffective (wrong value, so nothing changes and
+    the gap looks closed when it is not) or too broad if guessed as a
+    catch-all (masking a genuine undeclared background task in any session
+    that also ran a workflow) -- either failure mode is worse than the
+    documented, visible gap. Closing this needs one more real, captured
+    ``background_tasks`` payload from a session whose Stop hook fired while
+    a Workflow tool call was still outstanding -- this repo has no capture
+    mechanism for that.
 
     Exit codes: 0 clean, 2 undeclared tasks, 4 STRANDED. **4 takes priority
     over 2** -- a silent death outranks a bookkeeping gap.

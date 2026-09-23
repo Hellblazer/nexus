@@ -1064,6 +1064,22 @@ def _workflow_rows(n=11, reported=None):
     return rows
 
 
+#: The harness-visible identity for THE bead's own measured Workflow run,
+#: confirmed by directly reading session 2109cc46-2876-4409-b4f1-ac730d1cc5ed's
+#: transcript and its persisted workflow state (nexus-silj0 follow-up round
+#: 2; see the expectations_reconcile docstring for the full citation).
+#: ``<project>/2109cc46-.../workflows/wf_baae5a4e-bfd.json`` carries BOTH
+#: ``"runId": "wf_baae5a4e-bfd"`` (the tool's own ^wf_[a-z0-9-]{6,}$
+#: resume-token) and ``"taskId": "w2bole9id"`` (a SEPARATE, opaque id, no
+#: ``wf_`` prefix); the transcript's own delivered task-notification
+#: (.jsonl lines 604/606) carries ``<task-id>w2bole9id</task-id>``, never
+#: the runId, with one ``<summary>Dynamic workflow "..." completed</summary>``
+#: line for the whole 11-agent run. THIS is the id a Workflow container task
+#: would carry in a real ``background_tasks`` entry -- an earlier round of
+#: this fix used the runId here, which was wrong (corrected).
+_WORKFLOW_CONTAINER_TASK_ID = "w2bole9id"
+
+
 class TestReconcileWorkflowSubagentBucket:
     """MEASURED (not assumed) via constructed ledgers + harness payload
     shapes mirroring the existing TestReconcile fixtures, per the follow-up
@@ -1078,14 +1094,18 @@ class TestReconcileWorkflowSubagentBucket:
     from the STRANDED population, exactly as they are from undeclared/
     census, and counted on their own WORKFLOW line instead.
 
-    (2) The Workflow tool's own container-level harness task (the bead's
-    own measured id shape, 'wf_baae5a4e-bfd') still fails to match any
-    START's agent_id and so still surfaces as UNDECLARED_TASK whenever the
-    harness reports one. NOT fixed: this codebase has no confirmed field to
+    (2) The Workflow tool's own container-level harness task (identity
+    confirmed by direct transcript read, see
+    :data:`_WORKFLOW_CONTAINER_TASK_ID`) still fails to match any START's
+    agent_id and so still surfaces as UNDECLARED_TASK whenever the harness
+    reports one. NOT fixed: this codebase has no confirmed field/value to
     reliably recognise 'this harness task IS the Workflow container' (see
-    the reconcile docstring), and guessing risks being silently ineffective
-    or masking a real undeclared task. Pinned here as a KNOWN, documented
-    gap so a future change to it is deliberate.
+    the reconcile docstring's full account of what nexus-q02nx.6 DID
+    confirm -- a `type` field exists on real entries -- and what it did
+    NOT -- the literal string for a Workflow task's `type`), and guessing
+    risks being silently ineffective or masking a real undeclared task.
+    Pinned here as a KNOWN, documented gap so a future change to it is
+    deliberate.
     """
 
     def test_mid_flight_workflow_starts_are_no_longer_falsely_stranded(self, state):
@@ -1094,7 +1114,7 @@ class TestReconcileWorkflowSubagentBucket:
         granularity, not per agent."""
         _seed("s", _workflow_rows(11, reported=range(8)))  # w8, w9, w10 still running
         r = exp.expectations_reconcile(
-            "s", _payload({"id": "wf_baae5a4e-bfd", "type": "workflow"})
+            "s", _payload({"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"})
         )
         assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
         assert "WORKFLOW\tchecked=11" in r.lines
@@ -1116,11 +1136,11 @@ class TestReconcileWorkflowSubagentBucket:
         the one documented, unfixed residual."""
         _seed("s", _workflow_rows(11))
         r = exp.expectations_reconcile(
-            "s", _payload({"id": "wf_baae5a4e-bfd", "type": "workflow"})
+            "s", _payload({"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"})
         )
         assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
         assert r.code == 2
-        assert "UNDECLARED_TASK\twf_baae5a4e-bfd" in r.lines
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
         assert "WORKFLOW\tchecked=11" in r.lines
 
     def test_the_known_undeclared_task_gap_for_the_container_id_is_pinned_not_silently_fixed(self, state):
@@ -1131,10 +1151,10 @@ class TestReconcileWorkflowSubagentBucket:
         assertion is the one to update."""
         _seed("s", _workflow_rows(11))
         r = exp.expectations_reconcile(
-            "s", _payload({"id": "wf_baae5a4e-bfd", "type": "workflow"})
+            "s", _payload({"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"})
         )
         assert r.code == 2
-        assert "UNDECLARED_TASK\twf_baae5a4e-bfd" in r.lines
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
 
     def test_the_harness_own_per_agent_id_for_a_workflow_start_is_not_undeclared(self, state):
         """Guards the OTHER direction: if the harness ever DOES expose a
@@ -1144,12 +1164,12 @@ class TestReconcileWorkflowSubagentBucket:
         r = exp.expectations_reconcile(
             "s",
             _payload(
-                {"id": "wf_baae5a4e-bfd", "type": "workflow"},
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
                 {"agent_id": "w2"},
             ),
         )
         assert "UNDECLARED_TASK\tw2" not in r.lines
-        assert "UNDECLARED_TASK\twf_baae5a4e-bfd" in r.lines
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
 
     def test_a_genuinely_undeclared_non_workflow_task_still_flags_amid_workflow_starts(self, state):
         """Workflow STARTs in the ledger must not suppress a real undeclared
@@ -1170,6 +1190,17 @@ class TestReconcileWorkflowSubagentBucket:
         r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}))
         assert r.lines[-1].startswith("SUMMARY\t")
         assert r.lines.index("WORKFLOW\tchecked=1") < len(r.lines) - 1
+
+    def test_the_harness_container_id_is_NOT_the_runid_an_earlier_round_wrongly_assumed(self, state):
+        """Pins the round-2 correction itself, so a future edit cannot
+        silently regress the fixture back to the wrong identity. Confirmed
+        by direct read of session 2109cc46's transcript (.jsonl lines
+        604/606: <task-id>w2bole9id</task-id>) and its persisted workflow
+        state (workflows/wf_baae5a4e-bfd.json: "taskId": "w2bole9id" vs
+        "runId": "wf_baae5a4e-bfd") -- the two are DIFFERENT identities, and
+        only the taskId is what a background_tasks entry would carry."""
+        assert not _WORKFLOW_CONTAINER_TASK_ID.startswith("wf_")
+        assert _WORKFLOW_CONTAINER_TASK_ID == "w2bole9id"
 
 
 class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:
