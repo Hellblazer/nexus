@@ -35,7 +35,11 @@ import pytest
 
 from nexus._hook_runtime import entry
 from nexus.db.t1 import read_t1_session_lease
-from nexus.hooks.mcp_connect_wait import run, wait_for_mcp_connect_marker
+from nexus.hooks.mcp_connect_wait import (
+    _timeout_message,
+    run,
+    wait_for_mcp_connect_marker,
+)
 from nexus.mcp.connect_marker import publish_mcp_connect_marker
 
 # -- wait_for_mcp_connect_marker: the polling primitive, against real files -
@@ -162,21 +166,38 @@ class TestRunWaitsOnStartup:
         assert result.exit_code == 0
         assert result.crashed is False
 
-    def test_never_ready_still_returns_a_silent_exit_zero_result(
+    def test_never_ready_still_returns_exit_zero_but_a_visible_note(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """Fail-open: a timeout produces exactly the same HookResult shape
-        as success. entry.main forces exit 0 for non-ledger verbs regardless,
-        so this asserts the property at the level that matters -- run()
-        never turns "the barrier gave up" into a stdout envelope or a
-        raised exception."""
+        """Fail-open: entry.main forces exit 0 for non-ledger verbs
+        regardless of what run() returns, so a timeout never crashes the
+        session or blocks it past the bound. But (round 3, Sam's review)
+        it must not be SILENT: the earlier "nx-hook preflight already
+        covers this" mitigation was false (preflight checks nx CLI
+        reachability only, never nx-mcp specifically), so a timeout now
+        surfaces a short plain-text note in the SessionStart context
+        channel, naming both the bound and that tool-tier hooks will be
+        skipped -- visible to the model and, per the SessionStart context
+        contract, the user."""
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("_NX_HOOK_TEST_MCP_CONNECT_WAIT_BOUND_S", "0.2")
         monkeypatch.setenv("_NX_HOOK_TEST_MCP_CONNECT_WAIT_POLL_S", "0.05")
         result = run({"session_id": "sess-H", "source": "startup"})
-        assert result.stdout is None
+        assert result.stdout is not None
+        assert "did not connect" in result.stdout
+        assert "0.2" in result.stdout
+        assert "skipped" in result.stdout
         assert result.exit_code == 0
         assert result.crashed is False
+
+    def test_ready_case_stays_silent(self, tmp_path, monkeypatch) -> None:
+        """The success path is unchanged: no note, nothing to say."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("_NX_HOOK_TEST_MCP_CONNECT_WAIT_BOUND_S", "2.0")
+        monkeypatch.setenv("_NX_HOOK_TEST_MCP_CONNECT_WAIT_POLL_S", "0.05")
+        publish_mcp_connect_marker("sess-J", tmp_path, ttl_seconds=3600)
+        result = run({"session_id": "sess-J", "source": "startup"})
+        assert result.stdout is None
 
     def test_bound_and_poll_overrides_are_actually_honoured(
         self, tmp_path, monkeypatch,
@@ -190,6 +211,22 @@ class TestRunWaitsOnStartup:
         started = time.monotonic()
         run({"session_id": "sess-I", "source": "startup"})
         assert time.monotonic() - started < 2.0  # nowhere near the real 15 s default
+
+
+class TestTimeoutMessage:
+    def test_names_the_bound(self) -> None:
+        assert "15" in _timeout_message(15.0)
+        assert "0.2" in _timeout_message(0.2)
+
+    def test_names_what_is_skipped(self) -> None:
+        msg = _timeout_message(15.0)
+        assert "did not connect" in msg
+        assert "skipped" in msg
+
+    def test_is_a_single_short_line(self) -> None:
+        msg = _timeout_message(15.0)
+        assert "\n" not in msg
+        assert len(msg) < 200
 
 
 class TestRegisteredInTheRealVerbTable:

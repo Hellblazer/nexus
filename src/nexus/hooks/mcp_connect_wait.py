@@ -61,10 +61,14 @@ See ``nexus.mcp.connect_marker``'s docstring for the reasoning: no signal on
 this box cleanly discriminates that case from a legitimately slow first
 boot, and the two need opposite treatment. The residual -- a genuinely
 disabled or never-spawning ``nx-mcp`` still pays the full 15 s bound once
-per session -- is accepted; that same session already gets a louder,
-independent signal today (``nx-hook preflight``'s ``## nx Preflight:
-FAILED`` marker, same matcher group) that nexus tooling is not working here
-at all.
+per session -- is accepted, but is now SAID OUT LOUD (round 3): the
+original mitigation claimed here, that ``nx-hook preflight``'s ``## nx
+Preflight: FAILED`` marker already covers this case, is FALSE -- that verb
+checks only ``nx`` CLI reachability, never whether ``nx-mcp`` itself is
+disabled or failed to spawn, so a healthy ``nx`` with a broken MCP server
+produced no preflight signal at all. See :func:`_timeout_message` and the
+"Fail-open" section below for the actual fix: the timeout itself now emits
+a visible note.
 
 **Which SessionStart sources wait.** Only ``startup``. JDR-001
 (``docs/rdr/joint/JDR-001-t1-three-scopes.md``) and its own
@@ -95,14 +99,21 @@ above the bound (RDR-215 Contracts: the manifest timeout must exceed the
 verb's own, or Claude Code kills the process before it can fail open on its
 own terms).
 
-**Fail-open, always.** This verb is not in
-:data:`nexus._hook_runtime.entry.LEDGER_VERBS`, so ``entry.main`` forces
-exit 0 regardless of what :func:`run` returns -- there is no verdict here to
-propagate, only a wait. A timeout logs one line (``mcp_connect_wait_timed_out``,
-via the hook log ``configure_hook_logging`` points at, never stdout -- stdout
-is the decision channel) naming the session id and how long it waited, and
-returns exactly the same :class:`~nexus._hook_runtime._io.HookResult` the
-ready-in-time path returns.
+**Fail-open, always -- but a timeout is now VISIBLE (round 3, Sam's
+review).** This verb is not in :data:`nexus._hook_runtime.entry.LEDGER_VERBS`,
+so ``entry.main`` forces exit 0 regardless of what :func:`run` returns --
+there is no pass/fail verdict here, only a wait, and the session always
+starts either way. A timeout logs one line (``mcp_connect_wait_timed_out``,
+via the hook log ``configure_hook_logging`` points at) naming the session id
+and how long it waited, AND -- unlike round 2 -- returns a short plain-text
+note (:func:`_timeout_message`) in ``HookResult.stdout``, the SessionStart
+context-injection channel every other SessionStart verb here already uses
+for visible output (``preflight_verb``, ``session_start_verb``). The earlier
+posture (silent on timeout, relying on ``nx-hook preflight`` to have already
+said something) rested on a false premise: ``preflight`` checks only ``nx``
+CLI reachability, never whether ``nx-mcp`` itself is disabled or failed to
+spawn, so a healthy ``nx`` install with a broken or absent MCP server
+produced no signal at all. See :func:`_timeout_message`'s own docstring.
 
 **Test-only bound/poll overrides.** :data:`_TEST_BOUND_OVERRIDE_ENV` and
 :data:`_TEST_POLL_OVERRIDE_ENV` let a test (or the connection-race ladder
@@ -160,6 +171,29 @@ def _resolve_bound_seconds() -> float:
 
 def _resolve_poll_interval_seconds() -> float:
     return _float_override(_TEST_POLL_OVERRIDE_ENV, _POLL_INTERVAL_SECONDS)
+
+
+def _timeout_message(bound_seconds: float) -> str:
+    """The visible SessionStart note a timeout emits (round 3, Sam's review).
+
+    The accepted residual in this module's own docstring -- "a genuinely
+    disabled or never-spawning nx-mcp still pays the full bound, and that
+    session already gets a louder signal today via nx-hook preflight" --
+    rested on a false premise: ``preflight`` checks only ``nx --version``
+    (CLI) reachability, never whether ``nx-mcp`` itself is disabled or
+    failed to spawn. A user or a fully healthy ``nx`` install tells nothing
+    about the MCP server specifically, so a timeout here was previously
+    SILENT to both the model and the user beyond one warning line in a log
+    file nobody is watching mid-session. This message is the fix: plain
+    text in the SessionStart context channel (the same channel
+    ``nexus.hooks.preflight_verb``/``session_start_verb`` already use for
+    session-start context, never JSON -- see those modules for the
+    precedent), so both the model and the user see it at session start.
+    """
+    return (
+        f"nx-mcp did not connect within {bound_seconds:g} s; conexus "
+        "tool-tier hooks will be skipped until it does."
+    )
 
 
 def _default_read_ready(session_id: str, config_dir: Path) -> bool:
@@ -243,4 +277,5 @@ def run(payload: dict | None) -> HookResult:
             waited_seconds=round(elapsed, 2),
             bound_seconds=bound,
         )
+        return HookResult(stdout=_timeout_message(bound))
     return HookResult(stdout=None)
