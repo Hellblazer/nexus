@@ -96,6 +96,33 @@ import java.util.regex.Pattern;
  * allowlist entry (an entry that can never fire is exactly the un-falsifiable
  * rot class {@link #test_realTree_zeroUnusedExemptEntries} exists to
  * reject). Delete this note the day a writer sets one.
+ *
+ * <p><b>Known coverage gap (nexus-571e6): a table addressed through the
+ * {@code COLLECTION_SCOPED_TABLES} loop is structurally invisible to this
+ * whole gate.</b> Every check above keys off the literal Java identifier
+ * {@code CATALOG_DOCUMENTS}/{@code CATALOG_DOCUMENT_CHUNKS} sitting beside a
+ * jOOQ initiator in the SAME statement (or, for the WIDEN entries, the same
+ * method). A write that instead addresses its target table through a loop
+ * variable — {@code t.table()}/{@code t.collection()} iterating {@code
+ * COLLECTION_SCOPED_TABLES} — never contains that literal token, so no scan
+ * here can attribute, excuse, or flag it: not {@link #scanDocAndChunkSites}
+ * (no literal token in scope), not a {@link #TOMBSTONE_EXEMPT} entry (an
+ * entry naming such a method is refused by {@link
+ * #test_realTree_zeroUnusedExemptEntries} as unreproducible-by-scan, which is
+ * the gate correctly refusing to let a table-loop site borrow coverage it
+ * cannot verify). {@code renameCollectionTxn}'s step-2 re-home loop and
+ * {@code moveScopedTable} (nexus-wsx4l) are the two known instances; both are
+ * deliberately tombstone-INCLUSIVE by design (a rename/re-home must move
+ * every row under the old collection name, tombstoned or not — see each
+ * method's own definition-site comment) and are not live defects. A green
+ * run of this class proves nothing about a {@code COLLECTION_SCOPED_TABLES}-
+ * driven write's tombstone handling either way; verify those by reading the
+ * loop body directly. Closing this gap needs either (a) modelling the table
+ * list so the scan can resolve which tables a loop instance covers, or (b) a
+ * third, hand-maintained registry category (distinct from {@link
+ * #TOMBSTONE_EXEMPT} and {@link #WIDEN}) naming every such loop site and
+ * asserted non-empty so it cannot silently rot to zero — an open design
+ * choice, not decided by this note.
  */
 class TombstoneFilterGateTest {
 
