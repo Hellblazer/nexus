@@ -524,8 +524,13 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
 
             elif path == "/v1/taxonomy/purge_collection":
                 # Mirror the Java cascade: links touching doomed, assignments by
-                # topic OR source_collection, topics, meta.
+                # topic (always) OR source_collection (scope="full" only,
+                # nexus-0v0nj — TaxonomyRepository.purgeCollection's default,
+                # matching every caller before this bead; scope="taxonomy_only"
+                # leaves a cross-collection projection FROM this collection
+                # intact, exactly as a rebuild of it would).
                 collection = body["collection"]
+                scope = body.get("scope", "full")
                 doomed = {tid for tid, t in _TOPICS.items() if t["collection"] == collection}
                 links_n = len([
                     lk for lk in _LINKS
@@ -535,13 +540,15 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                     lk for lk in _LINKS
                     if lk["from_topic_id"] not in doomed and lk["to_topic_id"] not in doomed
                 ]
+                def _by_source(a: dict) -> bool:
+                    return scope == "full" and a.get("source_collection") == collection
                 assigns_n = len([
                     a for a in _ASSIGNMENTS
-                    if a["topic_id"] in doomed or a.get("source_collection") == collection
+                    if a["topic_id"] in doomed or _by_source(a)
                 ])
                 _ASSIGNMENTS[:] = [
                     a for a in _ASSIGNMENTS
-                    if a["topic_id"] not in doomed and a.get("source_collection") != collection
+                    if a["topic_id"] not in doomed and not _by_source(a)
                 ]
                 for tid in doomed:
                     del _TOPICS[tid]
@@ -1650,6 +1657,35 @@ class TestPersist:
         assert out["topics"] == 1
         assert out["assignments"] == 1
         assert client.get_all_topics(collection="c") == []
+
+    def test_purge_collection_taxonomy_only_scope_leaves_cross_collection_projection(
+        self, client,
+    ) -> None:
+        """nexus-0v0nj: scope="taxonomy_only" must not delete a
+        topic_assignments row whose ONLY tie to the purged collection is
+        being its projection SOURCE (a rebuild of that collection would
+        never touch it either)."""
+        target_ids = client.persist_discovered_topics(
+            "target", [{"label": "t", "doc_count": 0, "terms": "[]",
+                        "assigned_by": "hdbscan", "doc_ids": []}])
+        client.persist_assignments([
+            {"doc_id": "src-doc", "topic_id": target_ids[0], "assigned_by": "projection",
+             "similarity": 0.9, "source_collection": "src", "assigned_at": None},
+        ])
+        out = client.purge_collection("src", scope="taxonomy_only")
+        assert out["assignments"] == 0, "src owns no topics of its own here"
+        assert client.get_all_topics(collection="target") != [], (
+            "target's topic must survive -- src never owned it"
+        )
+        assert client.get_assignments_for_docs(["src-doc"]) == {"src-doc": target_ids[0]}, (
+            "the cross-collection projection itself must survive a taxonomy-only purge of its source"
+        )
+
+        # FULL scope (the default) DOES remove it -- proves the above is a
+        # real scoping difference, not an accident of this fixture.
+        out_full = client.purge_collection("src", scope="full")
+        assert out_full["assignments"] == 1
+        assert client.get_assignments_for_docs(["src-doc"]) == {}
 
     def test_read_rebuild_old_state_composes_and_reshapes(self, client) -> None:
         # T2 half: two topics in 'c' + one manual + one hdbscan assignment.

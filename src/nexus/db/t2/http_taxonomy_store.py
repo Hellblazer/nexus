@@ -1376,19 +1376,28 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "old_centroid_ids": old_centroid_ids,
         }
 
-    def purge_collection(self, collection: str) -> dict[str, int]:
-        """Cascade-purge the four taxonomy tables for a collection (mirrors
+    def purge_collection(self, collection: str, *, scope: str = "full") -> dict[str, int]:
+        """Cascade-purge the taxonomy tables for a collection (mirrors
         CatalogTaxonomy.purge_collection).
 
         Routes to the transactional /purge_collection endpoint. Returns the
         4-key count dict ``{topics, assignments, links, meta}``. The centroid
         cleanup is the caller's responsibility (centroid-port purge), matching
         the oracle's "call this after the Chroma delete" contract.
+
+        ``scope`` (nexus-0v0nj): ``"full"`` (the default, and the only
+        behavior before this bead) additionally deletes ``topic_assignments``
+        rows keyed by ``source_collection`` — this collection's documents'
+        projections onto OTHER collections' topics, which a rebuild of THIS
+        collection never touches. ``"taxonomy_only"`` omits that delete,
+        purging exactly what a rebuild of this collection would replace.
+        See ``TaxonomyRepository.purgeCollection``'s javadoc for the exact
+        scoping rule.
         """
-        return self._post("/purge_collection", {"collection": collection})
+        return self._post("/purge_collection", {"collection": collection, "scope": scope})
 
     def reset_collection(self, collection: str) -> dict[str, int]:
-        """Discard a collection's taxonomy entirely: T2 rows AND its centroids.
+        """Discard a collection's OWN taxonomy: T2 rows AND its centroids.
 
         :meth:`purge_collection` deliberately leaves the centroid half to the
         caller, which is right for the orchestrators that already hold the
@@ -1401,8 +1410,15 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         nexus-dtqd7: this is the verb the cross-space rebuild refusal names.
         Without it the refusal pointed at a remedy that did not exist, and the
         only reachable purge destroyed the collection's documents too.
+
+        nexus-0v0nj: purges with ``scope="taxonomy_only"`` — a reset used to
+        ALSO delete this collection's documents' projections onto OTHER
+        collections' topics (the engine's SOURCE_COLLECTION delete), making
+        reset strictly more destructive than the rebuild it was offered as
+        the alternative to. Scoped to exactly what a rebuild of this
+        collection would replace, matching the operation it stands in for.
         """
-        counts = dict(self.purge_collection(collection))
+        counts = dict(self.purge_collection(collection, scope="taxonomy_only"))
         counts["centroids"] = int(self._centroid.purge(collection))
         return counts
 

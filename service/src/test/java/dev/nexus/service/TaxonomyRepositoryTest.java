@@ -431,6 +431,76 @@ class TaxonomyRepositoryTest {
         assertThat(repo.getLastDiscoverDocCount(TENANT_A, tempCol)).isEmpty();
     }
 
+    /**
+     * nexus-0v0nj: {@code purgeCollection}'s FULL scope (the pre-existing,
+     * two-arg-overload default) deletes {@code topic_assignments} rows by
+     * {@code source_collection} as well as by topic id — so purging a
+     * collection also destroys THAT collection's documents' projections
+     * onto OTHER collections' topics, which a rebuild of the purged
+     * collection would never touch. This pins the scoping fix: {@link
+     * TaxonomyRepository#PURGE_SCOPE_TAXONOMY_ONLY} must leave that
+     * cross-collection row alone, and {@link
+     * TaxonomyRepository#PURGE_SCOPE_FULL} must still remove it (the
+     * pre-existing behavior, unchanged for every caller that does not
+     * opt in).
+     */
+    @Test @Order(165)
+    void purgeCollection_taxonomyOnlyScope_leavesCrossCollectionProjectionIntact() {
+        String sourceCol = "knowledge__purge-scope-src";
+        String targetCol = "knowledge__purge-scope-target";
+        registerReal(TENANT_A, sourceCol);
+        registerReal(TENANT_A, targetCol);
+        long targetTopicId = repo.insertTopic(
+            TENANT_A, "purge-scope-target-topic", null, targetCol, 0, null, null);
+        String chash = hexChash("purge-scope-cross-doc");
+        seedChunk(TENANT_A, sourceCol, chash);
+        // sourceCol owns no topic of its own here -- this row's ONLY tie to
+        // sourceCol is being its projection SOURCE.
+        repo.assignTopic(TENANT_A, chash, targetTopicId, "projection", 0.9, sourceCol, null);
+
+        Map<String, Integer> scopedCounts = repo.purgeCollection(
+            TENANT_A, sourceCol, TaxonomyRepository.PURGE_SCOPE_TAXONOMY_ONLY);
+        assertThat(scopedCounts.get("assignments"))
+            .as("sourceCol owns no topics of its own, so a taxonomy-only purge of it touches no assignments")
+            .isEqualTo(0);
+
+        assertThat(repo.getTopicById(TENANT_A, targetTopicId))
+            .as("targetCol's topic is untouched -- sourceCol never owned it").isPresent();
+        assertThat(getAssignmentCount(TENANT_A, targetTopicId, sourceCol))
+            .as("the cross-collection projection itself survives a taxonomy-only purge of its source")
+            .isEqualTo(1);
+
+        // FULL scope (the pre-existing default) DOES remove it -- proves the
+        // taxonomy-only result above is a real scoping difference, not an
+        // accident of this fixture.
+        Map<String, Integer> fullCounts = repo.purgeCollection(TENANT_A, sourceCol, TaxonomyRepository.PURGE_SCOPE_FULL);
+        assertThat(fullCounts.get("assignments")).isEqualTo(1);
+        assertThat(getAssignmentCount(TENANT_A, targetTopicId, sourceCol))
+            .as("FULL scope removes the cross-collection projection, the pre-existing behavior")
+            .isEqualTo(0);
+    }
+
+    @Test @Order(166)
+    void purgeCollection_unknownScope_rejected() {
+        assertThatThrownBy(() -> repo.purgeCollection(TENANT_A, COL_A, "bogus-scope"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("unknown scope");
+    }
+
+    /** Raw count of a (topic_id, source_collection) topic_assignments row, bypassing the
+     *  repository's own read surface so this pins the physical row, not a cached view. */
+    private int getAssignmentCount(String tenant, long topicId, String sourceCollection) {
+        try (Connection su = pg.createConnection("")) {
+            var rs = su.createStatement().executeQuery(
+                "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = '" + tenant
+                + "' AND topic_id = " + topicId + " AND source_collection = '" + sourceCollection + "'");
+            rs.next();
+            return rs.getInt(1);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     @Test @Order(17)
     void renameCollection_updatesAllRows() {
         String oldCol = "knowledge__rename-old-" + System.nanoTime();

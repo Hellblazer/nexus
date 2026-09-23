@@ -123,20 +123,20 @@ def test_reset_requires_confirmation_and_reports_what_it_will_discard(wired) -> 
     assert "documents and chunks are not touched" in result.output, result.output
 
 
-def test_reset_discloses_that_it_reaches_beyond_this_collection(wired) -> None:
-    """The engine's purge deletes topic_assignments by SOURCE_COLLECTION as well
-    as by topic id (TaxonomyRepository.purgeCollection), so it removes this
-    collection's documents' projections onto OTHER collections' topics — which a
-    rebuild would have kept. reset is therefore strictly more destructive than
-    the operation it is offered as the alternative to, and the operator has to
-    be told BEFORE the prompt, not discover it from the counts afterwards.
+def test_reset_no_longer_reaches_beyond_this_collection(wired) -> None:
+    """nexus-0v0nj: reset now purges with scope="taxonomy_only"
+    (HttpTaxonomyStore.reset_collection -> engine's purgeCollection with
+    PURGE_SCOPE_TAXONOMY_ONLY), which omits the SOURCE_COLLECTION delete —
+    so it no longer removes this collection's documents' projections onto
+    OTHER collections' topics, and the disclosure that used to warn about
+    that widening is gone with it. This replaces
+    test_reset_discloses_that_it_reaches_beyond_this_collection, which
+    pinned the OLD (strictly-more-destructive-than-a-rebuild) behavior this
+    bead fixed.
     """
     result = CliRunner().invoke(taxonomy, ["reset", "-c", "c"], input="n\n")
-    assert "cross-collection projections" in result.output, result.output
-    assert "other collections' topics" in result.output, result.output
-    # and the way to rebuild them, since naming a loss without a remedy is the
-    # dead end this whole verb exists to avoid
-    assert "nx taxonomy project" in result.output, result.output
+    assert "cross-collection projections" not in result.output, result.output
+    assert "other collections' topics" not in result.output, result.output
 
 
 def test_reset_proceeds_on_yes_and_reports_counts(wired) -> None:
@@ -152,19 +152,24 @@ def test_reset_with_no_topics_still_discloses_and_prompts(wired) -> None:
 
     Round 3 gave it its own branch: reset_collection called unconditionally,
     no disclosure, no prompt (--yes had nothing to skip), centroids-only
-    reporting. purgeCollection deletes topic_assignments by SOURCE_COLLECTION
-    whether or not this collection owns topics, so a collection with zero
-    topics can still have outbound projections to destroy — and that branch
-    destroyed them silently, reproducing in new code the defect the rest of
-    this command exists to fix (round-4 review). One path now.
+    reporting. Pre-nexus-0v0nj, purgeCollection ALSO deleted topic_assignments
+    by SOURCE_COLLECTION whether or not this collection owned topics, so a
+    collection with zero topics could still have outbound projections to
+    destroy — and that branch destroyed them silently, reproducing in new
+    code the defect the rest of this command exists to fix (round-4 review).
+    One path now, and it still prompts even with nothing of its own to show:
+    an interrupted prior reset can leave partial state behind regardless of
+    topic count.
+
+    nexus-0v0nj: the SOURCE_COLLECTION widening this test's docstring
+    described is gone (reset purges with scope="taxonomy_only" now), so the
+    disclosure it used to require no longer applies here either.
     """
     result = CliRunner().invoke(taxonomy, ["reset", "-c", "empty"], input="n\n")
     assert result.exit_code != 0, "declining must not reset"
     assert wired.reset_calls == [], "a declined reset must touch nothing"
     assert "owns no topics" in result.output, result.output
-    # the widening is disclosed HERE too, not only on the has-topics path
-    assert "cross-collection projections" in result.output, result.output
-    assert "nx taxonomy project" in result.output, result.output
+    assert "cross-collection projections" not in result.output, result.output
 
 
 def test_reset_with_no_topics_reports_every_count_not_just_centroids(wired) -> None:
@@ -201,12 +206,15 @@ def test_reset_collection_clears_both_halves() -> None:
         def _centroid(self):  # type: ignore[override]
             return _Centroid()
 
-        def purge_collection(self, collection: str) -> dict[str, int]:
-            calls.append(f"t2:{collection}")
+        def purge_collection(self, collection: str, *, scope: str = "full") -> dict[str, int]:
+            calls.append(f"t2:{collection}:{scope}")
             return {"topics": 1, "assignments": 2, "links": 0, "meta": 1}
 
     store = object.__new__(_Store)
     out = store.reset_collection("c")
-    assert calls == ["t2:c", "centroid:c"], calls
+    # nexus-0v0nj: reset_collection purges with the taxonomy-only scope, not
+    # the (pre-existing) full default -- it must not reach beyond this
+    # collection's own topics.
+    assert calls == ["t2:c:taxonomy_only", "centroid:c"], calls
     assert out["centroids"] == 3
     assert out["topics"] == 1
