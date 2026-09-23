@@ -145,14 +145,19 @@ def test_prune_uv_cache_flag_runs_uv_cache_prune(bed, monkeypatch) -> None:
     gens = _five_generations(tools)
     monkeypatch.setattr(sys, "prefix", str(gens[-1]))
     calls: list[list[str]] = []
-    real_run = subprocess.run
+    # nexus-t10nc: prune_uv_cache calls bounded_subprocess.run_bounded, bound
+    # in the self_cmd module. The passthrough has to be run_bounded too: it
+    # always pipes, where subprocess.run only captures when asked, and this
+    # command reads .stdout.
+    from nexus.bounded_subprocess import run_bounded as real_run  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+    from nexus.commands import self_cmd  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     def _record(cmd, *a, **kw):
         if isinstance(cmd, (list, tuple)):
             calls.append([str(c) for c in cmd])
         return real_run(cmd, *a, **kw)
 
-    monkeypatch.setattr(subprocess, "run", _record)
+    monkeypatch.setattr(self_cmd, "run_bounded", _record)
 
     result = CliRunner().invoke(self_group, ["gc", "--prune-uv-cache"])
 

@@ -38,6 +38,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from nexus.daemon import service_registry
 from tests import _engine_substrate as sub
 
 
@@ -75,6 +76,11 @@ class TestSidecarWrittenBeforeTcpWait:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
+        # which now spawns through run_bounded. The shared-module patch above
+        # used to cover it by accident; name it, or run_bounded builds a real
+        # Popen and gets the _FakePopen below, which has no communicate().
+        monkeypatch.setattr(service_registry, "run_bounded", _fake_run)
 
         class _FakePopen:
             def __init__(self, *_args, **_kwargs) -> None:
@@ -140,6 +146,11 @@ class TestSidecarWrittenBeforeTcpWait:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
+        # which now spawns through run_bounded. The shared-module patch above
+        # used to cover it by accident; name it, or run_bounded builds a real
+        # Popen and gets the _FakePopen below, which has no communicate().
+        monkeypatch.setattr(service_registry, "run_bounded", _fake_run)
 
         class _FakePopen:
             def __init__(self, *_args, **_kwargs) -> None:
@@ -233,6 +244,11 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
+        # which now spawns through run_bounded. The shared-module patch above
+        # used to cover it by accident; name it, or run_bounded builds a real
+        # Popen and gets the _FakePopen below, which has no communicate().
+        monkeypatch.setattr(service_registry, "run_bounded", _fake_run)
 
         observed: dict[str, bool | None] = {"dir_exists_at_acquire": None}
 
@@ -291,6 +307,11 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(sub.subprocess, "run", _fake_run)
+        # nexus-t10nc: _write_sidecar reaches service_registry.process_command,
+        # which now spawns through run_bounded. The shared-module patch above
+        # used to cover it by accident; name it, or run_bounded builds a real
+        # Popen and gets the _FakePopen below, which has no communicate().
+        monkeypatch.setattr(service_registry, "run_bounded", _fake_run)
 
         sub._boot()
 

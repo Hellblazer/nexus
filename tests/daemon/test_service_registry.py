@@ -827,7 +827,7 @@ class TestProcessState:
         with patch(
             "nexus.daemon.service_registry._procfs_available", return_value=False,
         ), patch(
-            "nexus.daemon.service_registry.subprocess.run",
+            "nexus.daemon.service_registry.run_bounded",
             return_value=SimpleNamespace(stdout="S+\n", returncode=0),
         ):
             assert process_state(4321) == "S"
@@ -836,7 +836,7 @@ class TestProcessState:
         with patch(
             "nexus.daemon.service_registry._procfs_available", return_value=False,
         ), patch(
-            "nexus.daemon.service_registry.subprocess.run",
+            "nexus.daemon.service_registry.run_bounded",
             side_effect=FileNotFoundError("no ps"),
         ):
             assert process_state(4321) is None
