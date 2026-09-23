@@ -450,15 +450,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # rather than touching ``self._client`` directly, so every call site
     # gets self-heal for free with no signature changes.
 
-    def _get(self, path: str, **params: Any) -> Any:
+    def _get(self, path: str, *, idempotent: bool = True, **params: Any) -> Any:
+        """``idempotent`` (nexus-ll31n sibling, T2 review-wave2-daemon):
+        forwarded to the mixin's ``_get`` unchanged — default ``True``
+        preserves every existing call site (a GET is ordinarily safe to
+        retry). No current call site passes ``False``; added so this
+        override is not the next ``HttpCatalogClient._post``-shaped trap
+        (missing the kwarg entirely) the moment one needs to.
+        """
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
-        return super()._get(f"/v1/catalog{path}", params=filtered)
+        return super()._get(f"/v1/catalog{path}", params=filtered, idempotent=idempotent)
 
     def _post(
         self,
         path: str,
         body: dict | None = None,
         *,
+        idempotent: bool = True,
         timeout: float | None = None,
         retry_read_timeout: bool = True,
         mutates: bool = True,
@@ -487,10 +495,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``mutates=True`` caller once the mixin required it) would have hit
         a ``TypeError`` on every call, the identical regression class
         caught in ``HttpTokenStore.list_tokens`` during review.
+
+        ``idempotent`` (nexus-ll31n sibling, T2 review-wave2-daemon):
+        forwarded to the mixin's ``_post`` unchanged — default ``True``
+        preserves every existing call site's behavior; ``purge_trash`` and
+        ``rename_collection_cascade`` pass ``False`` (population-discovery
+        sweeps, not caller-supplied-id mutations). This override was
+        MISSING the kwarg entirely until this fix, which is exactly the
+        silently-mismatched-signature regression class the ``mutates``
+        paragraph above already names: a caller passing ``idempotent=``
+        through THIS override hit a bare ``TypeError`` on every call
+        (caught here by the real-transport round-trip test, not by a
+        mock, which is why this override is tested at all).
         """
         return super()._post(
             f"/v1/catalog{path}",
             body or {},
+            idempotent=idempotent,
             timeout=timeout,
             retry_read_timeout=retry_read_timeout,
             mutates=mutates,
@@ -1713,11 +1734,27 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``httpx.HTTPStatusError`` like any other read/write call in this
         class, so the CLI verb can tell "engine too old" apart from "engine
         answered."
+
+        ``idempotent=False`` (nexus-ll31n sibling, T2 review-wave2-daemon):
+        this is a physical DELETE-shaped sweep, not a natural-id
+        upsert/read — the same class ``gateway_backoff.
+        is_non_idempotent_sweep_path`` exempts on the T3/vector client. A
+        lost RESPONSE after a real ``dry_run=False`` commit means the
+        default ``idempotent=True`` gateway-retry loop
+        (``_once_with_gateway_retry``) would resend the SAME purge
+        request; the resend's own sweep then reports a different, usually
+        much smaller (often zero) count against the now-already-purged
+        population, misreporting a completed purge as having done little
+        or nothing — the ll31n incident shape, here for a route that
+        physically deletes rows rather than moving them. purge-trash is
+        armed live, so this closes a real, not merely theoretical,
+        window.
         """
-        return self._post("/purge-trash", {
-            "older_than_days": older_than_days,
-            "dry_run": dry_run,
-        }) or {}
+        return self._post(
+            "/purge-trash",
+            {"older_than_days": older_than_days, "dry_run": dry_run},
+            idempotent=False,
+        ) or {}
 
     def gc_audit_list(
         self,
@@ -3102,7 +3139,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         body: dict[str, Any] = {"old_name": old, "new_name": new}
         if cross_model:
             body["cross_model"] = True
-        result = self._post("/collections/rename", body)
+        # idempotent=False (nexus-ll31n sibling): a cascade rename over
+        # EVERY row matching `old` across a dozen tables is a
+        # population-discovery sweep, not a caller-supplied-id mutation. A
+        # lost response after a real commit means a retry's own predicate
+        # ("everything still named `old`") finds nothing left to rename,
+        # so it reports an all-zero `renamed` map for a rename that fully
+        # succeeded -- the same misreport class purge_trash closes above.
+        result = self._post("/collections/rename", body, idempotent=False)
         renamed = (result or {}).get("renamed", {}) or {}
         return {k: int(v) for k, v in renamed.items()}
 

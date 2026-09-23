@@ -287,22 +287,39 @@ class TestAdopterOverridesForwardIdempotent:
         import inspect
         import pkgutil
 
+        import nexus.catalog as catalogpkg
         import nexus.db as dbpkg
         from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
-        for mod in pkgutil.walk_packages(dbpkg.__path__, prefix="nexus.db."):
-            # Import failures FAIL the walk (critic 2026-07-22): a
-            # silently-skipped module could hide the exact regression
-            # this tripwire exists to catch, without breaching the
-            # count floor below.
-            m = importlib.import_module(mod.name)
-            for _, cls in inspect.getmembers(m, inspect.isclass):
-                if (
-                    issubclass(cls, RefreshableHttpStoreMixin)
-                    and cls is not RefreshableHttpStoreMixin
-                    and cls.__module__ == mod.name
-                ):
-                    yield cls
+        # nexus-ll31n sibling (T2 review-wave2-daemon-2026-09-23): this used
+        # to walk nexus.db ONLY. HttpCatalogClient lives in
+        # nexus.catalog.http_catalog_client -- a DIFFERENT package tree --
+        # so it was structurally invisible to this gate despite being a
+        # genuine RefreshableHttpStoreMixin adopter with its own ``_post``
+        # override. That override's ``_post`` was missing ``idempotent``
+        # entirely (the exact TypeError class this test exists to catch)
+        # and only surfaced via a real-transport round-trip test
+        # (``test_rename_collection_journey``), not this structural gate,
+        # which is precisely backwards for a gate whose own docstring says
+        # it inspects EVERY adopter. Walk both package trees now.
+        packages = [
+            (dbpkg, "nexus.db."),
+            (catalogpkg, "nexus.catalog."),
+        ]
+        for pkg, prefix in packages:
+            for mod in pkgutil.walk_packages(pkg.__path__, prefix=prefix):
+                # Import failures FAIL the walk (critic 2026-07-22): a
+                # silently-skipped module could hide the exact regression
+                # this tripwire exists to catch, without breaching the
+                # count floor below.
+                m = importlib.import_module(mod.name)
+                for _, cls in inspect.getmembers(m, inspect.isclass):
+                    if (
+                        issubclass(cls, RefreshableHttpStoreMixin)
+                        and cls is not RefreshableHttpStoreMixin
+                        and cls.__module__ == mod.name
+                    ):
+                        yield cls
 
     def test_every_transport_verb_override_accepts_and_forwards(self) -> None:
         import inspect
@@ -311,7 +328,11 @@ class TestAdopterOverridesForwardIdempotent:
 
         verbs = ("_send", "_post", "_get", "_delete")
         adopters = list(self._adopters())
-        assert len(adopters) >= 5, f"adopter discovery broke: {adopters}"
+        # nexus-ll31n sibling: 12 as of widening the scan to nexus.catalog
+        # (11 nexus.db adopters + HttpCatalogClient) -- a regression to 11
+        # would mean the catalog leg of the walk silently stopped finding
+        # anything, the same vacuous-gate failure mode a loose floor hides.
+        assert len(adopters) >= 12, f"adopter discovery broke: {adopters}"
         offenders = []
         for cls in adopters:
             for verb in verbs:

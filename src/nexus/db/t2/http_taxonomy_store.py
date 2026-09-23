@@ -713,9 +713,16 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         cosine is below *min_similarity*. Returns the removed count. The
         recovery path for a pass that admitted weak matches: persist is a
         prefer-higher upsert, so nothing else lowers or removes a row."""
+        # idempotent=False (nexus-ll31n sibling): a threshold-predicate
+        # sweep ("everything below min_similarity") over a discovered
+        # population. A retry after a lost response re-evaluates the SAME
+        # predicate against the now-already-pruned state and finds fewer
+        # (often zero) rows, misreporting a completed prune as having
+        # removed little or nothing.
         r = self._post(
             "/assignments/prune_projection",
             {"source_collection_prefix": source_collection_prefix, "min_similarity": float(min_similarity)},
+            idempotent=False,
         )
         return int(r.get("removed", 0)) if isinstance(r, dict) else 0
 
@@ -1393,8 +1400,15 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         purging exactly what a rebuild of this collection would replace.
         See ``TaxonomyRepository.purgeCollection``'s javadoc for the exact
         scoping rule.
+
+        ``idempotent=False`` (nexus-ll31n sibling): a full cascade-purge
+        over every row matching *collection* is a discovered population,
+        not a caller-supplied id set -- same misreport risk as
+        :meth:`HttpCatalogClient.purge_trash`.
         """
-        return self._post("/purge_collection", {"collection": collection, "scope": scope})
+        return self._post(
+            "/purge_collection", {"collection": collection, "scope": scope}, idempotent=False,
+        )
 
     def reset_collection(self, collection: str) -> dict[str, int]:
         """Discard a collection's OWN taxonomy: T2 rows AND its centroids.

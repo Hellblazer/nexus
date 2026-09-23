@@ -531,7 +531,12 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         as a deleted one was; ``nx memory restore <id>`` (Phase 2) brings it
         back.
         """
-        resp = self._post("/v1/memory/expire", {})
+        # idempotent=False (nexus-ll31n sibling): a TTL sweep over a
+        # discovered population. A retry after a lost response
+        # re-evaluates the same heat-weighted-TTL predicate against rows
+        # already quarantined by attempt 1 and reports fewer (often zero)
+        # -- misreporting a completed sweep as having done little.
+        resp = self._post("/v1/memory/expire", {}, idempotent=False)
         return MemoryExpireResult(
             deleted_ids=[int(i) for i in resp.get("deleted_ids", [])],
             quarantined_ids=[int(i) for i in resp.get("quarantined_ids", [])],
@@ -550,7 +555,9 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         and there is no age horizon. The engine runs no taxonomy cascade; a
         caller that wants one runs it from the rows it listed before reaping.
         """
-        resp = self._post("/v1/memory/reap", {})
+        # idempotent=False (nexus-ll31n sibling): "every marked-quarantined
+        # row" is a discovered population, not a caller-supplied id set.
+        resp = self._post("/v1/memory/reap", {}, idempotent=False)
         return [int(i) for i in resp.get("deleted_ids", [])]
 
     def restore(self, id: int) -> bool:
