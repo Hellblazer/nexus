@@ -978,8 +978,11 @@ class TestCensusWorkflowSubagentBucket:
 
 # ── reconcile: the harness's own ground truth ────────────────────────────
 
-def _payload(*tasks) -> str:
-    return json.dumps({"background_tasks": list(tasks)})
+def _payload(*tasks, transcript_path: str | None = None) -> str:
+    data: dict = {"background_tasks": list(tasks)}
+    if transcript_path is not None:
+        data["transcript_path"] = transcript_path
+    return json.dumps(data)
 
 
 class TestReconcile:
@@ -1079,33 +1082,102 @@ def _workflow_rows(n=11, reported=None):
 #: this fix used the runId here, which was wrong (corrected).
 _WORKFLOW_CONTAINER_TASK_ID = "w2bole9id"
 
+#: The Workflow run's own runId (filename stem of its persisted state), as
+#: opposed to its taskId above -- kept distinct in every fixture that uses
+#: both, so a test can never accidentally collapse the two identities the
+#: round-2 correction exists to keep apart.
+_WORKFLOW_RUN_ID = "wf_baae5a4e-bfd"
+
+
+def _measured_workflow_state(task_id: str = _WORKFLOW_CONTAINER_TASK_ID,
+                              run_id: str = _WORKFLOW_RUN_ID) -> dict:
+    """A trimmed copy of session 2109cc46's own real
+    ``workflows/wf_baae5a4e-bfd.json`` -- every top-level key that file
+    carries (runId, timestamp, taskId, script, scriptPath, args, result,
+    agentCount, logs, durationMs, summary, workflowName, status, startTime,
+    phases, defaultModel, workflowProgress, totalTokens, totalToolCalls),
+    with the bulky script/logs/result/phases/workflowProgress payloads
+    shortened to a marker per the nexus-silj0 round-4 measured-shape
+    instruction. agentCount=11, durationMs=505313, totalTokens=1580374,
+    totalToolCalls=90, status="completed" are the real measured values;
+    only script/logs/result/phases/workflowProgress are trimmed.
+    """
+    return {
+        "runId": run_id,
+        "timestamp": "2026-09-21T21:31:10.402Z",
+        "taskId": task_id,
+        "script": "// dead-wire-census.js (trimmed for the test fixture)",
+        "scriptPath": "/private/tmp/.../scratchpad/dead-wire-census.js",
+        "args": {"surface": "every MCP tool ...", "scopeHints": None},
+        "result": {"surface": "trimmed", "itemCount": 0, "rows": [],
+                    "droppedIds": [], "unverifiedCandidateIds": [], "complete": True},
+        "agentCount": 11,
+        "logs": [],
+        "durationMs": 505313,
+        "summary": (
+            'Enumerate a surface (MCP tools, CLI verbs, skills, or HTTP '
+            'routes), trace each item to its consumers, adversarially '
+            're-check every "dead" verdict, and return an evidence-backed '
+            "census table."
+        ),
+        "workflowName": "dead-wire-census",
+        "status": "completed",
+        "startTime": 1790025765076,
+        "phases": [],
+        "defaultModel": "claude-opus-5",
+        "workflowProgress": [],
+        "totalTokens": 1580374,
+        "totalToolCalls": 90,
+    }
+
+
+def _seed_workflow_container_file(tmp_path: Path, session: str,
+                                   task_id: str = _WORKFLOW_CONTAINER_TASK_ID,
+                                   run_id: str = _WORKFLOW_RUN_ID,
+                                   state_json: dict | None = None) -> str:
+    """Writes a Workflow run's persisted state to
+    ``<tmp_path>/<session>/workflows/<run_id>.json`` -- the real, measured
+    location (nexus-silj0 round 4) -- and returns the ``transcript_path``
+    a Stop-hook payload for that session would carry:
+    ``<tmp_path>/<session>.jsonl``, a SIBLING path the reader never opens.
+    """
+    workflows_dir = tmp_path / session / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    payload = state_json if state_json is not None else _measured_workflow_state(task_id, run_id)
+    (workflows_dir / f"{run_id}.json").write_text(json.dumps(payload))
+    return str(tmp_path / f"{session}.jsonl")
+
 
 class TestReconcileWorkflowSubagentBucket:
     """MEASURED (not assumed) via constructed ledgers + harness payload
     shapes mirroring the existing TestReconcile fixtures, per the follow-up
-    to Sam's nexus-silj0 ruling. Two distinct findings:
+    to Sam's nexus-silj0 ruling. Three rounds of findings:
 
     (1) A Workflow-tool run whose STARTs are still mid-flight (not yet
     REPORTED) when reconcile happens to run gets falsely STRANDED -- every
     one of them, at the module's WORST severity (code 4) -- because the
     check can never tell 'this agent died' from 'the harness only tracks
     the workflow at container granularity, so no per-agent id was ever
-    going to appear'. FIXED here: workflow-subagent STARTs are excluded
-    from the STRANDED population, exactly as they are from undeclared/
-    census, and counted on their own WORKFLOW line instead.
+    going to appear'. FIXED (round 2): workflow-subagent STARTs are
+    excluded from the STRANDED population, exactly as they are from
+    undeclared/census, and counted on their own WORKFLOW line instead.
 
-    (2) The Workflow tool's own container-level harness task (identity
-    confirmed by direct transcript read, see
-    :data:`_WORKFLOW_CONTAINER_TASK_ID`) still fails to match any START's
-    agent_id and so still surfaces as UNDECLARED_TASK whenever the harness
-    reports one. NOT fixed: this codebase has no confirmed field/value to
-    reliably recognise 'this harness task IS the Workflow container' (see
-    the reconcile docstring's full account of what nexus-q02nx.6 DID
-    confirm -- a `type` field exists on real entries -- and what it did
-    NOT -- the literal string for a Workflow task's `type`), and guessing
-    risks being silently ineffective or masking a real undeclared task.
-    Pinned here as a KNOWN, documented gap so a future change to it is
-    deliberate.
+    (2)/(3) The Workflow tool's own container-level harness task (identity
+    confirmed by direct transcript read, see :data:`_WORKFLOW_CONTAINER_TASK_ID`)
+    still fails to match any START's agent_id and so would surface as
+    UNDECLARED_TASK whenever the harness reports one. CLOSED (round 4) via
+    session-directory discovery, NOT a guessed `type` value: the Stop-hook
+    payload's own `transcript_path` (see :func:`nexus.hooks.expectations._payload_transcript_path`)
+    names the session's sibling directory, whose `workflows/*.json` files
+    carry a `taskId` field that is EXACTLY the identity a real
+    `background_tasks` entry uses for that run --
+    :func:`nexus.hooks.expectations._workflow_container_task_ids` reads
+    them and the reconcile function excludes any match from UNDECLARED_TASK,
+    counting it on the WORKFLOW line's `containers=<m>` field instead. The
+    fail-safe fallback (no `transcript_path`, no session dir, no
+    `workflows/` subdir, an unreadable/unparseable file) keeps TODAY'S
+    behaviour -- the pre-round-4 tests below that never wire a
+    `transcript_path` exercise exactly that fallback, deliberately.
     """
 
     def test_mid_flight_workflow_starts_are_no_longer_falsely_stranded(self, state):
@@ -1117,7 +1189,7 @@ class TestReconcileWorkflowSubagentBucket:
             "s", _payload({"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"})
         )
         assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
-        assert "WORKFLOW\tchecked=11" in r.lines
+        assert "WORKFLOW\tchecked=11 containers=0" in r.lines
         assert "SUMMARY\toutstanding=0 harness_tasks=1 unidentified=0 stranded=0 undeclared_tasks=1" in r.lines
 
     def test_mid_flight_workflow_starts_are_not_stranded_even_with_zero_harness_tasks(self, state):
@@ -1128,12 +1200,13 @@ class TestReconcileWorkflowSubagentBucket:
         r = exp.expectations_reconcile("s", _payload())
         assert r.code == 0
         assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
-        assert "WORKFLOW\tchecked=11" in r.lines
+        assert "WORKFLOW\tchecked=11 containers=0" in r.lines
 
-    def test_a_clean_workflow_run_is_not_stranded_and_the_container_task_is_the_only_residual(self, state):
-        """All 11 reported, harness tracks the container as one task:
-        STRANDED is gone entirely; the container's own UNDECLARED_TASK is
-        the one documented, unfixed residual."""
+    def test_a_clean_workflow_run_without_discovery_still_trips_the_fallback(self, state):
+        """No transcript_path wired: the fail-safe fallback applies, so the
+        container's own UNDECLARED_TASK still fires -- this is the
+        pre-round-4 (fallback) behaviour, pinned deliberately, not a
+        regression."""
         _seed("s", _workflow_rows(11))
         r = exp.expectations_reconcile(
             "s", _payload({"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"})
@@ -1141,20 +1214,146 @@ class TestReconcileWorkflowSubagentBucket:
         assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
         assert r.code == 2
         assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
-        assert "WORKFLOW\tchecked=11" in r.lines
+        assert "WORKFLOW\tchecked=11 containers=0" in r.lines
 
-    def test_the_known_undeclared_task_gap_for_the_container_id_is_pinned_not_silently_fixed(self, state):
-        """Documents finding (2) precisely: even with every workflow agent
-        cleanly REPORTED (nothing wrong at all), a harness-tracked container
-        task still trips code=2. This is the residual named in the
-        docstring, not an oversight -- if a future change closes it, this
-        assertion is the one to update."""
+    def test_the_container_task_is_now_excluded_when_discovered_via_transcript_path(self, state, tmp_path):
+        """THE round-4 fix, built from the measured shape
+        (:func:`_measured_workflow_state`): with a real
+        workflows/<runId>.json on disk and transcript_path wired through
+        the payload, the SAME container id that round 3 could only pin as
+        an open residual is now excluded from UNDECLARED_TASK entirely and
+        counted on the WORKFLOW line instead."""
+        transcript_path = _seed_workflow_container_file(tmp_path, "s")
+        _seed("s", _workflow_rows(11))
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
+                transcript_path=transcript_path,
+            ),
+        )
+        assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
+        assert not [ln for ln in r.lines if ln.startswith("UNDECLARED_TASK")]
+        assert r.code == 0
+        assert "WORKFLOW\tchecked=11 containers=1" in r.lines
+
+    def test_discovery_does_not_mask_a_genuinely_undeclared_harness_task(self, state, tmp_path):
+        """The discovered container id excludes ONLY itself -- a second,
+        unrelated harness identity with no matching START must still trip
+        UNDECLARED_TASK even with transcript_path wired."""
+        transcript_path = _seed_workflow_container_file(tmp_path, "s")
+        _seed("s", _workflow_rows(11))
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
+                {"id": "ghost-real"},
+                transcript_path=transcript_path,
+            ),
+        )
+        assert r.code == 2
+        assert "UNDECLARED_TASK\tghost-real" in r.lines
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" not in r.lines
+
+    def test_a_missing_transcript_path_excludes_nothing(self, state, tmp_path):
+        """Fail-safe axis 1: transcript_path absent from the payload."""
+        _seed_workflow_container_file(tmp_path, "s")  # file exists...
         _seed("s", _workflow_rows(11))
         r = exp.expectations_reconcile(
             "s", _payload({"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"})
-        )
-        assert r.code == 2
+        )  # ...but transcript_path is never passed
         assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
+        assert "WORKFLOW\tchecked=11 containers=0" in r.lines
+
+    def test_a_transcript_path_with_no_session_dir_excludes_nothing(self, state, tmp_path):
+        """Fail-safe axis 2: transcript_path points somewhere with no
+        sibling session directory at all."""
+        _seed("s", _workflow_rows(11))
+        transcript_path = str(tmp_path / "no-such-session.jsonl")
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
+                transcript_path=transcript_path,
+            ),
+        )
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
+
+    def test_a_session_dir_with_no_workflows_subdir_excludes_nothing(self, state, tmp_path):
+        """Fail-safe axis 3: the session dir exists (e.g. subagent
+        transcripts live there) but has no workflows/ subdirectory."""
+        (tmp_path / "s").mkdir()
+        _seed("s", _workflow_rows(11))
+        transcript_path = str(tmp_path / "s.jsonl")
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
+                transcript_path=transcript_path,
+            ),
+        )
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
+
+    def test_an_unreadable_workflow_file_excludes_nothing_and_does_not_raise(self, state, tmp_path):
+        """Fail-safe axis 4: a workflows/*.json file that fails to parse
+        must be skipped, not raise and not block the stop."""
+        workflows_dir = tmp_path / "s" / "workflows"
+        workflows_dir.mkdir(parents=True)
+        (workflows_dir / f"{_WORKFLOW_RUN_ID}.json").write_text("{not valid json")
+        _seed("s", _workflow_rows(11))
+        transcript_path = str(tmp_path / "s.jsonl")
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
+                transcript_path=transcript_path,
+            ),
+        )
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
+
+    def test_a_workflow_file_with_no_taskId_field_is_skipped_not_matched(self, state, tmp_path):
+        """A malformed-but-parseable state file (e.g. an older format with
+        no taskId) contributes no identity, so the container id it would
+        have carried is still not excluded."""
+        state_json = _measured_workflow_state()
+        del state_json["taskId"]
+        _seed_workflow_container_file(tmp_path, "s", state_json=state_json)
+        _seed("s", _workflow_rows(11))
+        transcript_path = str(tmp_path / "s.jsonl")
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
+                transcript_path=transcript_path,
+            ),
+        )
+        assert f"UNDECLARED_TASK\t{_WORKFLOW_CONTAINER_TASK_ID}" in r.lines
+
+    def test_multiple_workflow_runs_in_one_session_all_excluded(self, state, tmp_path):
+        """More than one Workflow tool call in the same session persists
+        more than one workflows/*.json -- every discovered taskId is
+        honoured, not just the first."""
+        session_dir = tmp_path / "s" / "workflows"
+        session_dir.mkdir(parents=True)
+        (session_dir / f"{_WORKFLOW_RUN_ID}.json").write_text(
+            json.dumps(_measured_workflow_state())
+        )
+        (session_dir / "wf_second-run.json").write_text(
+            json.dumps(_measured_workflow_state(task_id="second-task-id", run_id="wf_second-run"))
+        )
+        _seed("s", _workflow_rows(11))
+        transcript_path = str(tmp_path / "s.jsonl")
+        r = exp.expectations_reconcile(
+            "s",
+            _payload(
+                {"id": _WORKFLOW_CONTAINER_TASK_ID, "type": "workflow"},
+                {"id": "second-task-id", "type": "workflow"},
+                transcript_path=transcript_path,
+            ),
+        )
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("UNDECLARED_TASK")]
+        assert "WORKFLOW\tchecked=11 containers=2" in r.lines
 
     def test_the_harness_own_per_agent_id_for_a_workflow_start_is_not_undeclared(self, state):
         """Guards the OTHER direction: if the harness ever DOES expose a
@@ -1189,7 +1388,7 @@ class TestReconcileWorkflowSubagentBucket:
         _seed("s", _workflow_rows(1) + [("START", "a1", "t")])
         r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}))
         assert r.lines[-1].startswith("SUMMARY\t")
-        assert r.lines.index("WORKFLOW\tchecked=1") < len(r.lines) - 1
+        assert r.lines.index("WORKFLOW\tchecked=1 containers=0") < len(r.lines) - 1
 
     def test_the_harness_container_id_is_NOT_the_runid_an_earlier_round_wrongly_assumed(self, state):
         """Pins the round-2 correction itself, so a future edit cannot
@@ -1198,9 +1397,19 @@ class TestReconcileWorkflowSubagentBucket:
         604/606: <task-id>w2bole9id</task-id>) and its persisted workflow
         state (workflows/wf_baae5a4e-bfd.json: "taskId": "w2bole9id" vs
         "runId": "wf_baae5a4e-bfd") -- the two are DIFFERENT identities, and
-        only the taskId is what a background_tasks entry would carry."""
+        only the taskId is what a background_tasks entry would carry.
+
+        Round 4 makes this more than a naming nit: _workflow_container_task_ids
+        (nexus.hooks.expectations) reads taskId out of workflows/*.json and
+        matches it against background_tasks identities to exclude a real
+        container task from UNDECLARED_TASK. Had this constant stayed
+        wrong (the runId), that matching would silently never fire --
+        every discovery test above would still pass its own assertions in
+        isolation, but the mechanism would be checking a string the harness
+        never sends."""
         assert not _WORKFLOW_CONTAINER_TASK_ID.startswith("wf_")
         assert _WORKFLOW_CONTAINER_TASK_ID == "w2bole9id"
+        assert _WORKFLOW_RUN_ID.startswith("wf_")
 
 
 class TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne:

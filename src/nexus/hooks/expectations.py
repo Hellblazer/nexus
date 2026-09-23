@@ -1438,6 +1438,76 @@ def _harness_task_ids(payload: str) -> list[str] | None:
     return identities
 
 
+def _payload_transcript_path(payload: str) -> str | None:
+    """The Stop-hook payload's own ``transcript_path``, or None.
+
+    Confirmed present on Stop/SubagentStop payloads (RDR-184 finding 5,
+    cc-validation scenario 21a: "observed payload fields: session_id,
+    transcript_path, cwd, ..."), and independently on every other hook
+    event this repo has a captured fixture for (e.g.
+    ``tests/hooks/test_post_compact_hook.py``'s PostCompact payload) --
+    it is part of Claude Code's common hook envelope, not event-specific.
+    Never raises: a junk or absent payload returns None, same fail-open
+    posture as :func:`_harness_task_ids`.
+    """
+    try:
+        data = json.loads(payload)
+    except Exception:  # noqa: BLE001 — a junk payload must never block a stop
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("transcript_path")
+    return value if isinstance(value, str) and value else None
+
+
+def _workflow_container_task_ids(transcript_path: str | None) -> set[str]:
+    """The harness ``taskId`` of every Workflow run this SESSION has
+    persisted state for (nexus-silj0 round 4).
+
+    The Workflow tool persists each run's state at
+    ``<session_dir>/workflows/<runId>.json`` beside the session's own
+    ``<session_dir>.jsonl`` transcript -- confirmed by direct read of
+    session 2109cc46-2876-4409-b4f1-ac730d1cc5ed's own
+    ``workflows/wf_baae5a4e-bfd.json``, whose ``taskId`` field
+    (``w2bole9id``) is exactly the identity that session's
+    ``<task-notification>`` used, never the ``runId`` in the filename. So
+    ``<session_dir>`` is ``transcript_path`` with its ``.jsonl`` suffix
+    dropped, a SIBLING of the transcript file, not a subdirectory of it.
+
+    FAIL-SAFE BY DESIGN, never raises: this reader is pure decoration --
+    it exists only to keep a genuine Workflow container task from reading
+    as UNDECLARED_TASK -- so a missing ``transcript_path``, a missing or
+    unreadable session/``workflows/`` directory, or any individual file
+    that fails to open or parse contributes NOTHING rather than raising.
+    "Exclude nothing, keep today's behaviour" is always the safe default
+    here; the caller's job (a real undeclared task must still be caught)
+    is what a raise or an over-eager exclusion would put at risk.
+    """
+    if not transcript_path:
+        return set()
+    path = Path(transcript_path)
+    if path.suffix != ".jsonl":
+        return set()
+    workflows_dir = path.with_suffix("") / "workflows"
+    try:
+        files = sorted(workflows_dir.glob("*.json"))
+    except OSError:
+        return set()
+
+    ids: set[str] = set()
+    for file in files:
+        try:
+            data = json.loads(file.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        task_id = data.get("taskId")
+        if isinstance(task_id, str) and task_id:
+            ids.add(task_id)
+    return ids
+
+
 def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     """Cross-check outstanding STARTs against the harness's own ground truth.
 
@@ -1492,31 +1562,40 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     liveness signal for this class to begin with, so excluding it loses no
     signal that was trustworthy.
 
-    STILL AN OPEN GAP, left alone rather than guessed at: the container
-    task's own identity still fails to match any START's ``agent_id`` and so
-    still surfaces as ``UNDECLARED_TASK`` whenever the harness reports one.
-    A `type` field DOES exist on real ``background_tasks`` entries --
-    confirmed independently by nexus-q02nx.6 (``tests/mcp/test_hook_tools.py
-    ::test_a_list_valued_field_survives_a_mixed_population``, a real
-    measured ``Stop`` payload: ``{"id": "bm72q9d6v", "type": "shell", ...}``
+    THE UNDECLARED_TASK RESIDUAL, CLOSED without guessing a ``type`` value
+    (nexus-silj0 round 4): the container task's own identity never equals
+    any START's ``agent_id``, so a discriminator keyed on the LEDGER alone
+    could never recognise it. A `type` field does exist on real
+    ``background_tasks`` entries (nexus-q02nx.6,
+    ``tests/mcp/test_hook_tools.py::test_a_list_valued_field_survives_a_mixed_population``,
+    a real measured ``Stop`` payload: ``{"id": "bm72q9d6v", "type": "shell", ...}``
     / ``{"id": "a1ea45d8d324ca24a", "type": "subagent", ...}``), and the
-    harness's three DISTINCT notification-summary templates observed above
-    ("Background command ... completed" / "Agent \"...\" finished" /
-    "Dynamic workflow \"...\" completed") make a third, Workflow-specific
-    ``type`` value plausible. But that 2026-09-19 measurement predates this
-    session's 2026-09-21 workflow run and captured only the shell/subagent
-    pair -- no source available to this repo shows the LITERAL string a
-    Workflow task's ``type`` field carries, and the transcript (which never
-    logs the raw hook-input JSON, only the human-rendered notification text)
-    cannot supply it either. Coding a comparison against a guessed literal
-    risks being silently ineffective (wrong value, so nothing changes and
-    the gap looks closed when it is not) or too broad if guessed as a
-    catch-all (masking a genuine undeclared background task in any session
-    that also ran a workflow) -- either failure mode is worse than the
-    documented, visible gap. Closing this needs one more real, captured
-    ``background_tasks`` payload from a session whose Stop hook fired while
-    a Workflow tool call was still outstanding -- this repo has no capture
-    mechanism for that.
+    harness's three DISTINCT notification-summary templates ("Background
+    command ... completed" / "Agent \"...\" finished" / "Dynamic workflow
+    \"...\" completed") make a third value plausible -- but no source
+    available to this repo shows its LITERAL string, so it stays unused: a
+    comparison against a guessed value risks being silently ineffective or,
+    guessed as a catch-all, masking a genuine undeclared background task.
+
+    Instead the discriminator comes from a SECOND, INDEPENDENT source: the
+    Stop-hook payload's own ``transcript_path`` (confirmed present, see
+    :func:`_payload_transcript_path`) names the session's transcript file,
+    and the Workflow tool persists every run's state as
+    ``<session_dir>/workflows/<runId>.json`` beside it -- ``<session_dir>``
+    being ``transcript_path`` with its ``.jsonl`` suffix dropped, a SIBLING
+    directory, not a subdirectory of the transcript. Each such file's own
+    ``taskId`` field (see :func:`_workflow_container_task_ids`) is
+    EXACTLY the identity the harness notification used for that run
+    (measured: session 2109cc46's ``workflows/wf_baae5a4e-bfd.json`` has
+    ``"taskId": "w2bole9id"``, and its transcript's delivered
+    ``<task-notification>`` carries ``<task-id>w2bole9id</task-id>`` --
+    the SAME string). So a harness ``background_tasks`` identity found
+    among these ``taskId`` values is a Workflow container with certainty,
+    not a guess: it is excluded from ``UNDECLARED_TASK`` and counted on the
+    ``WORKFLOW`` line's ``containers=<m>`` field instead. FAIL-SAFE: a
+    missing ``transcript_path``, session dir or ``workflows/`` subdirectory,
+    or any unreadable/unparseable file, excludes nothing -- today's
+    behaviour, never a raise, never an over-eager exclusion.
 
     Exit codes: 0 clean, 2 undeclared tasks, 4 STRANDED. **4 takes priority
     over 2** -- a silent death outranks a bookkeeping gap.
@@ -1534,6 +1613,7 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     harness_ids = {i for i in identities if i}
     harness_order = list(dict.fromkeys(i for i in identities if i))
     unidentified = sum(1 for i in identities if not i)
+    workflow_container_ids = _workflow_container_task_ids(_payload_transcript_path(payload))
 
     order: list[str] = []
     stype: dict[str, str] = {}
@@ -1568,7 +1648,15 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
             stranded += 1
 
     undeclared_tasks = 0
+    workflow_containers_excluded = 0
     for ident in harness_order:  # first appearance; see census's note
+        if ident in workflow_container_ids:
+            # A Workflow container task, confirmed by session-directory
+            # discovery (nexus-silj0 round 4) -- not a guess, and never
+            # ledger-derived, so this branch runs whether or not the
+            # ledger has any workflow-subagent STARTs of its own.
+            workflow_containers_excluded += 1
+            continue
         # `ident not in workflow_seen` is not a fix, only a guard against a
         # false positive when the harness DOES expose per-agent identities
         # for this class (a shape this module has never measured, but the
@@ -1579,8 +1667,10 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
             lines.append(f"UNDECLARED_TASK\t{ident}")
             undeclared_tasks += 1
 
-    if workflow_order:
-        lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
+    if workflow_order or workflow_containers_excluded:
+        lines.append(
+            f"WORKFLOW\tchecked={len(workflow_order)} containers={workflow_containers_excluded}"
+        )
 
     lines.append(
         f"SUMMARY\toutstanding={outstanding} harness_tasks={len(harness_ids) + unidentified} "
