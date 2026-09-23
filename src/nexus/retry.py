@@ -10,6 +10,7 @@ soft voyageai.error.
 from __future__ import annotations
 
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -219,8 +220,15 @@ def reset_retry_stats() -> None:
 
 # ── ChromaDB transient-error retry ───────────────────────────────────────────
 
-_RETRYABLE_FRAGMENTS: frozenset[str] = frozenset({
-    "502", "503", "504", "429",
+#: nexus-cd1k0.16 finding (7): the fallback used to match the bare digit
+#: strings "429"/"502"/"503"/"504" as plain substrings, so ANY exception
+#: message containing those digits ANYWHERE -- a byte count, a port, a
+#: line number, a millisecond duration ("...after 15029ms", "port 8429
+#: refused") -- read as a retryable gateway status. A word-boundary regex
+#: keeps the intent (find a genuine 3-digit status token in free text)
+#: without matching digits embedded in a longer number.
+_RETRYABLE_STATUS_PATTERN: re.Pattern[str] = re.compile(r"\b(429|502|503|504)\b")
+_RETRYABLE_TEXT_FRAGMENTS: frozenset[str] = frozenset({
     "bad gateway", "service unavailable", "gateway time-out", "too many requests",
 })
 _RETRYABLE_HTTP_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
@@ -291,7 +299,9 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
         return True
     # 4. Fallback: scan the message body for retryable status tokens.
     msg = str(exc).lower()
-    return any(fragment in msg for fragment in _RETRYABLE_FRAGMENTS)
+    if _RETRYABLE_STATUS_PATTERN.search(msg):
+        return True
+    return any(fragment in msg for fragment in _RETRYABLE_TEXT_FRAGMENTS)
 
 
 class VectorUpsertTimeoutError(RuntimeError):
