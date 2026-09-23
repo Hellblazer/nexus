@@ -271,6 +271,13 @@ def read_handoff_marker(mcp_pid: int, config_dir: Path) -> HandoffMarker | None:
         raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
+    except UnicodeDecodeError:
+        # nexus-cd1k0.6 finding (12): a UnicodeDecodeError is a ValueError
+        # subclass, not an OSError, so the OSError clause above never caught
+        # it -- a non-UTF-8 marker raised straight out of this function
+        # instead of reading as the "malformed marker" its caller already
+        # handles.
+        return None
     return _parse_marker_bytes(raw)
 
 
@@ -324,6 +331,14 @@ def read_claimed_marker(claimed_path: Path) -> HandoffMarker | None:
     try:
         raw = Path(claimed_path).read_text(encoding="utf-8")
     except OSError:
+        return None
+    except UnicodeDecodeError:
+        # nexus-cd1k0.6 finding (12): same gap as read_handoff_marker above,
+        # with a worse consequence here -- this file has already been
+        # claimed (renamed off the live path), so an uncaught raise here
+        # meant the caller's malformed-marker handling (which calls
+        # consume_claimed_marker on a None return) never ran, and the
+        # claimed file was left on disk forever.
         return None
     return _parse_marker_bytes(raw)
 

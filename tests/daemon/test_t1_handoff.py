@@ -70,6 +70,17 @@ def test_read_malformed_json_returns_none(tmp_path: Path) -> None:
     assert read_handoff_marker(111, tmp_path) is None
 
 
+def test_read_non_utf8_marker_returns_none(tmp_path: Path) -> None:
+    """nexus-cd1k0.6 finding (12): UnicodeDecodeError is a ValueError
+    subclass, not an OSError -- the OSError-only clause let a non-UTF-8
+    marker raise straight out of this function instead of reading as a
+    malformed marker like every other corrupt shape above."""
+    path = handoff_marker_path(111, tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe{}")
+    assert read_handoff_marker(111, tmp_path) is None
+
+
 def test_read_missing_field_returns_none(tmp_path: Path) -> None:
     path = handoff_marker_path(111, tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -212,6 +223,19 @@ def test_read_claimed_marker_malformed_returns_none(tmp_path: Path) -> None:
     claimed_path = claimed_marker_path(111, tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
     claimed_path.write_text("not json {{", encoding="utf-8")
+    assert read_claimed_marker(claimed_path) is None
+
+
+def test_read_claimed_marker_non_utf8_returns_none(tmp_path: Path) -> None:
+    """nexus-cd1k0.6 finding (12): worse than the live-path sibling above --
+    this file has ALREADY been claimed (renamed off the live path), so an
+    uncaught raise here meant the caller's malformed-marker handling (which
+    consumes the claimed file on a None return) never ran, and the claimed
+    file was left on disk forever. Must read as malformed, like any other
+    corrupt shape."""
+    claimed_path = claimed_marker_path(111, tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    claimed_path.write_bytes(b"\xff\xfe{}")
     assert read_claimed_marker(claimed_path) is None
 
 
