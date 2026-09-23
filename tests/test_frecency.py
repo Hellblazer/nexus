@@ -211,3 +211,31 @@ def test_batch_frecency_scores_a_non_ascii_path(tmp_path) -> None:
     )
     scores = batch_frecency(repo)
     assert scores.get(target, 0.0) > 0.9, scores
+
+
+def test_batch_frecency_resolves_the_real_git_top_level_when_repo_is_a_subdir(tmp_path) -> None:
+    """nexus-cd1k0.16 finding (5): `git log --name-only` reports every path
+    relative to the repo's GIT TOP-LEVEL, regardless of `cwd` -- joining
+    against `repo` directly is only correct when `repo` IS the top level.
+    A caller indexing a SUBDIRECTORY of a larger repo (`nx index repo
+    <subdir>`) used to get a doubled, nonexistent path
+    (`<subdir>/<subdir>/file.py`) for every file, silently zeroing every
+    score. Real git, real subdirectory."""
+    import subprocess  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    root = tmp_path / "monorepo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subdir = root / "subproj"
+    subdir.mkdir()
+    target = subdir / "mod.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"],
+        check=True,
+    )
+    scores = batch_frecency(subdir)
+    assert scores.get(target, 0.0) > 0.9, scores
