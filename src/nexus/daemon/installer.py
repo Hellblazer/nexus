@@ -963,7 +963,12 @@ def _probe_survivors(*, tier: str) -> tuple[str, ...]:
     out: list[str] = []
     lease = _discover_service_lease()
     if lease is not None:
-        pid = getattr(lease, "supervisor_pid", None)
+        # nexus-cd1k0.6 finding (7): LeaseRecord carries no top-level
+        # `supervisor_pid` attribute -- the supervisor stamps it into
+        # `payload` (storage_service_daemon.py's publish call), so the old
+        # `getattr(lease, "supervisor_pid", None)` always fell through to
+        # its default and the survivor line never showed a pid.
+        pid = lease.payload.get("supervisor_pid")
         where = f" (pid {pid})" if pid else ""
         out.append(
             f"storage service{where} is still running — the autostart entry is "

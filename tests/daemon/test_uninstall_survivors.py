@@ -126,12 +126,22 @@ class TestProbeSurvivors:
         sweep — the lifecycle gate exists to keep exactly that from being
         reinvented per tier."""
         from nexus.daemon import installer
+        from nexus.daemon.service_registry import LeaseRecord
 
-        class _Lease:
-            supervisor_pid = 4242
-            port = 8899
+        # nexus-cd1k0.6 finding (7): a real LeaseRecord carries no
+        # top-level `supervisor_pid` attribute -- the supervisor stamps it
+        # into `payload`. A hand-rolled fake with `supervisor_pid` as a
+        # bare class attribute (the shape this test used to use) masked
+        # exactly this bug: `getattr(lease, "supervisor_pid", None)`
+        # always fell through to its default against the real shape, and
+        # the survivor line never showed a pid.
+        lease = LeaseRecord(
+            scope_key="s", generation=1, owner_token="t", heartbeat_epoch=0.0,
+            ttl=30.0, endpoint={"port": 8899}, version="1",
+            payload={"supervisor_pid": 4242},
+        )
 
-        with patch.object(installer, "_discover_service_lease", return_value=_Lease()), \
+        with patch.object(installer, "_discover_service_lease", return_value=lease), \
                 patch.object(installer, "_probe_live_postgres", return_value=None):
             out = installer._probe_survivors(tier="service")
 
