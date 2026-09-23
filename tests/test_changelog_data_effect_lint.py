@@ -156,6 +156,72 @@ def test_census_predicate_keeps_real_string_literals():
     assert reasons[0].statement == "UPDATE nexus.widgets SET status = 'archived' WHERE owner = 'legacy'"
 
 
+@pytest.mark.parametrize(
+    "sql,expected_kinds",
+    [
+        # nexus-kjecx (1): _DELETE_RE/_UPDATE_RE anchor at statement start,
+        # so a CTE-led statement bypassed the classifier entirely.
+        (
+            "WITH stale AS (SELECT id FROM nexus.widgets WHERE flag) "
+            "DELETE FROM nexus.widgets WHERE id IN (SELECT id FROM stale);",
+            {"delete"},
+        ),
+        (
+            "WITH stale AS (SELECT id FROM nexus.widgets WHERE flag) "
+            "UPDATE nexus.widgets SET note = '' WHERE id IN (SELECT id FROM stale);",
+            {"update"},
+        ),
+        # RECURSIVE, and a CTE body containing its own nested parens --
+        # balanced-paren scanning, not a fixed-depth regex.
+        (
+            "WITH RECURSIVE tree AS ("
+            "SELECT id FROM nexus.widgets WHERE parent_id IS NULL "
+            "UNION ALL "
+            "SELECT w.id FROM nexus.widgets w JOIN tree t ON (w.parent_id = t.id)"
+            ") DELETE FROM nexus.widgets WHERE id IN (SELECT id FROM tree);",
+            {"delete"},
+        ),
+        # Two CTEs, comma-separated.
+        (
+            "WITH a AS (SELECT 1), b AS (SELECT 2) "
+            "DELETE FROM nexus.widgets WHERE id = 1;",
+            {"delete"},
+        ),
+    ],
+)
+def test_classify_sql_text_detects_cte_led_dml(sql, expected_kinds):
+    reasons = classify_changeset(sql, structured_tags=[])
+    assert {r.kind for r in reasons} == expected_kinds, reasons
+
+
+def test_classify_sql_text_reports_a_second_table_of_the_same_kind():
+    """nexus-kjecx (2): reasons were deduplicated by KIND alone, so a second
+    DELETE (or UPDATE, ...) on a DIFFERENT table in the same changeset left
+    that second table unreported to check_data_effect_structure."""
+    sql = (
+        "DELETE FROM nexus.widgets WHERE stale = true; "
+        "DELETE FROM nexus.gadgets WHERE stale = true;"
+    )
+    reasons = classify_changeset(sql, structured_tags=[])
+    assert {r.kind for r in reasons} == {"delete"}
+    assert {r.table for r in reasons} == {"nexus.widgets", "nexus.gadgets"}
+    # A DATA EFFECT line naming only the first table must still be flagged
+    # for the second, unmentioned one.
+    comment = "DATA EFFECT: DELETEs nexus.widgets rows where stale is true; irreversible."
+    problems = check_data_effect_structure(comment, reasons)
+    assert any("nexus.gadgets" in p for p in problems), problems
+
+
+def test_classify_sql_text_still_dedups_a_true_repeat_on_the_same_table():
+    sql = (
+        "DELETE FROM nexus.widgets WHERE stale = true; "
+        "DELETE FROM nexus.widgets WHERE also_stale = true;"
+    )
+    reasons = classify_changeset(sql, structured_tags=[])
+    assert len(reasons) == 1
+    assert reasons[0].table == "nexus.widgets"
+
+
 def test_extract_table_populates_reason_table_field():
     cases = [
         ("DELETE FROM nexus.widgets WHERE stale = true;", "nexus.widgets"),
@@ -173,6 +239,23 @@ def test_extract_table_populates_reason_table_field():
         reasons = classify_changeset(sql, structured_tags=[])
         assert len(reasons) == 1, (sql, reasons)
         assert reasons[0].table == expected_table, (sql, reasons)
+
+
+@pytest.mark.parametrize(
+    "sql,expected_table",
+    [
+        # nexus-kjecx: _extract_table no-op'd on DELETE FROM ONLY (a
+        # partitioned/inherited-table qualifier) and on a quoted identifier.
+        ("DELETE FROM ONLY nexus.widgets WHERE stale = true;", "nexus.widgets"),
+        ('DELETE FROM "Widgets" WHERE stale = true;', "Widgets"),
+        ("UPDATE ONLY nexus.widgets SET name = 'x' WHERE id = 1;", "nexus.widgets"),
+        ("TRUNCATE ONLY nexus.widgets;", "nexus.widgets"),
+    ],
+)
+def test_extract_table_handles_only_qualifier_and_quoted_identifiers(sql, expected_table):
+    reasons = classify_changeset(sql, structured_tags=[])
+    assert len(reasons) == 1, (sql, reasons)
+    assert reasons[0].table == expected_table, (sql, reasons)
 
 
 # ---------------------------------------------------------------------------
