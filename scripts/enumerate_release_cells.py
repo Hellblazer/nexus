@@ -1006,10 +1006,14 @@ def drive_check_floor_paired_explicit(cell: Cell) -> tuple[int, str]:
             return _caps(".".join(str(p) for p in _BELOW_FLOOR))
         return _caps(".".join(str(p) for p in _ABOVE_FLOOR))
 
+    # nexus-iu43o: floor.check_data_effect_relay runs inside the paired
+    # battery now (real git-tag + filesystem I/O); neutralized here too --
+    # these cells are about the probe/battery/pin_currency inputs, not it.
     with patch.object(wire_ledger, "parse_ledger", return_value=ledger), \
          patch.object(floor, "_tag_exists_in_git", return_value=exists_value), \
          patch.object(floor, "_paired_tag_published", return_value=(True, "")), \
          patch.object(floor, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(floor, "check_data_effect_relay", return_value=0), \
          patch.object(floor, "probe_managed_service", side_effect=probe_side_effect):
         rc, out, err = _capture(
             floor.check_floor, url="https://example.test", newest=REQUIRED_ENGINE_VERSION,
@@ -1093,6 +1097,7 @@ def drive_check_floor_auto_paired(cell: Cell) -> tuple[int, str]:
          patch.object(floor, "_tag_exists_in_git", return_value=exists_value), \
          patch.object(floor, "_paired_tag_published", return_value=(True, "")), \
          patch.object(floor, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(floor, "check_data_effect_relay", return_value=0), \
          patch.object(floor, "probe_managed_service", side_effect=probe_side_effect):
         rc, out, err = _capture(
             floor._check_floor_auto_paired, url="https://example.test", newest=newest,
@@ -1351,6 +1356,11 @@ def drive_check_composite(cell: Cell) -> tuple[int, str]:
     ledger, ack = _ledger_fixture(ledger_label) if ledger_label else (wire_ledger.Ledger(unshipped={}), None)
     patches.append(patch.object(wire_ledger, "parse_ledger", return_value=ledger))
     patches.append(patch.dict(precond.ENGINE_CLIENT_PRECONDITIONS, table, clear=True))
+    # nexus-iu43o: check() now calls floor.check_data_effect_relay(engine_tag)
+    # FIRST -- real git-tag + filesystem I/O this enumeration has no business
+    # driving; every cell here is about the hand-table/ledger precondition
+    # sources below it, so a clean pass keeps that the ONLY thing varying.
+    patches.append(patch.object(floor, "check_data_effect_relay", return_value=0))
 
     with contextlib.ExitStack() as stack:
         for p in patches:
