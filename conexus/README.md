@@ -264,7 +264,7 @@ and only the ledger verbs have one.
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
 | `SessionStart` | `nx-hook behaviour-census` | Report the PREVIOUS session's raw thinking and decision counts (nexus-4lnn1) |
 | `SessionStart` (matcher `startup`) | `nx-hook version-lockstep` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
-| `SessionStart` (matcher `startup`) | `nx-hook mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its T1 lease before turn 1 can outrun the connection (RDR-215, nexus-veh77) |
+| `SessionStart` (matcher `startup`) | `nx-hook mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, injects a visible note that tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `UserPromptSubmit` | `nx-hook mailbox-drain` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
 | `SubagentStart` | `hook_subagent_start_tuple` | Project the ledger START tuple, as a sibling of the main hook so its failure does not take the projection with it |

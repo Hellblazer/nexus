@@ -163,9 +163,12 @@ never ran them either.
   Claude Code has no MCP connection barrier (measured: every submit rung from
   0 to 2000 ms missed every tool-tier event, macOS 24/24 runs and WSL2 20/20,
   T2 `nexus/veh77-interactive-ladder-results-2026-09-23`); this verb waits,
-  bounded (15 s) and fail-open, for THIS session's `nx-mcp` to publish its T1
-  lease before turn 1 can outrun the connection. Sessions on the pinned tag
-  keep running without the barrier until a new pin ships.
+  bounded (15 s) and fail-open, for THIS session's `nx-mcp` to publish its
+  connect marker (`nexus.mcp.connect_marker`, decoupled from T1 health round
+  2) before turn 1 can outrun the connection. On timeout it also injects a
+  visible SessionStart note naming the skip, since `nx-hook preflight` alone
+  does not cover a disabled or failed-to-spawn `nx-mcp` (round 3). Sessions
+  on the pinned tag keep running without the barrier until a new pin ships.
 
 - nexus-veh77 — `conexus/README.md`: new hook-table row for `nx-hook
   mcp-connect-wait`.

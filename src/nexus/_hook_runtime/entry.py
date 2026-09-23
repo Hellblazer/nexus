@@ -198,11 +198,14 @@ VERB_TABLE: dict[str, str] = {
     "auto-approve": "nexus.hooks.auto_approve",
     # The interactive MCP connection barrier (bead nexus-veh77, Sam's
     # 2026-09-23 ruling). SessionStart, `startup` matcher only: waits,
-    # bounded and fail-open, for THIS session's nx-mcp to publish its T1
-    # lease -- the readiness signal published on the causal path to
-    # `nx-mcp` answering `initialize` -- before turn 1 can outrun the
-    # connection the way the interactive ladder measured it doing 24/24 on
-    # macOS and 20/20 on WSL2 with no barrier at all.
+    # bounded and fail-open, for THIS session's nx-mcp to publish its
+    # connect marker (nexus.mcp.connect_marker) -- published unconditionally
+    # from every branch of nexus.mcp.core._t1_lifespan right before its own
+    # yield, independent of T1 mint/lease outcome (round 2: a T1-lease-keyed
+    # signal stalled every session on a T1-degraded box for the full bound)
+    # -- before turn 1 can outrun the connection the way the interactive
+    # ladder measured it doing 24/24 on macOS and 20/20 on WSL2 with no
+    # barrier at all.
     "mcp-connect-wait": "nexus.hooks.mcp_connect_wait",
 }
 
