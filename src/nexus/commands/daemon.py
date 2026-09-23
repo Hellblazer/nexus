@@ -33,7 +33,6 @@ from xml.sax.saxutils import escape as _xml_escape
 import click
 import structlog
 
-from nexus import _locking
 from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
@@ -282,112 +281,6 @@ def _discovery_record_pid(data: dict) -> int | None:
 _T2_SERVICE_MODE_STATUS_MESSAGE = (
     "service mode — T2 daemon intentionally not running (storage is the engine service)"
 )
-
-
-# RDR-128 P0b (RF-4): bounded timeout for the pre-cycle DB-acquirability
-# probe. Matches the startup-migration busy_timeout (db/t2/__init__.py
-# _BOOTSTRAP_BUSY_TIMEOUT_MS) — there is no point cycling to a daemon whose
-# first act (the startup migration) would block longer than this. Module
-# constant so tests can shrink it without waiting the full 30s.
-_T2_CYCLE_DB_PROBE_TIMEOUT_MS: int = 30000
-
-# RDR-129 A2 (nexus-kwqhd): how long ``ensure-running`` waits for a SIGTERM'd
-# stale daemon to FULLY EXIT before cold-spawning its replacement. The wait
-# polls the predecessor's PID liveness, not the discovery file: stop() now
-# holds the spawn lock until process exit (defer-release-to-exit) but unlinks
-# the discovery file early, so a discovery-file poll would see "gone" while the
-# lock is still held and cold-spawn into an EAGAIN -> zero daemons. If the
-# predecessor outlives this window the cycle aborts and leaves it up (RDR-128
-# RF-4: never trade a working daemon for none). Module constant so tests can
-# shrink it.
-_T2_CYCLE_EXIT_TIMEOUT: float = 10.0
-
-# RDR-140 P2.2 (nexus-fkhe2): safety margin added on top of the holder's
-# worst-case hold time to derive how long a waiter blocks on the single-flight
-# election lock. The wait is computed DYNAMICALLY (see
-# ``_election_wait_for``) rather than fixed: the holder keeps the lock across
-# its whole discover→spawn→reachability path, whose worst case is
-# ``_T2_CYCLE_DB_PROBE_TIMEOUT_MS/1000`` (stale-version write-lock probe) +
-# ``_T2_CYCLE_EXIT_TIMEOUT`` (predecessor exit poll) + ``timeout`` (reachability
-# poll). A fixed wait shorter than that hold reproduces the pre-P2 thundering
-# herd on timeout (code-review H-1 / critic S-1): every waiter times out at
-# once, re-discovers the stale/absent daemon unguarded, and all cold-spawn.
-# Deriving the wait from the same budgets guarantees a waiter never gives up
-# before the holder releases, on any ``--timeout``. Releasing the lock earlier
-# (before the reachability poll) is NOT an option: a waiter acquiring it during
-# the winner's migration window would re-discover no live daemon and spawn too,
-# defeating single-flight. Margin is a module constant so tests can shrink it.
-_T2_ELECTION_WAIT_MARGIN: float = 5.0
-
-
-def _election_wait_for(timeout: float) -> float:
-    """Waiter election-lock budget: must exceed the holder's worst-case hold so
-    waiters block until the winner is reachable, then attach rather than
-    redundantly spawn (RDR-140 P2.2)."""
-    return (
-        _T2_CYCLE_DB_PROBE_TIMEOUT_MS / 1000.0
-        + _T2_CYCLE_EXIT_TIMEOUT
-        + timeout
-        + _T2_ELECTION_WAIT_MARGIN
-    )
-
-
-def _election_lock_path_for_db(db_path: Path) -> Path:
-    """Election-coordination lock path for *db_path*.
-
-    RDR-140 P2.2: a sibling of the data file (``<db>.election_lock``) so stacks
-    started from different ``config_dir``s against the same data file contend
-    on one election. DISTINCT from the daemon's lifetime spawn lock
-    (``<db>.spawn_lock`` / ``t2_spawn.lock``): if ``ensure-running`` held the
-    daemon's own spawn lock, the spawned ``t2 start`` child would hit EAGAIN on
-    its ``_acquire_spawn_lock`` and exit, leaving zero daemons.
-    """
-    return db_path.parent / f"{db_path.name}.election_lock"
-
-
-def _acquire_election_lock(db_path: Path, timeout: float) -> int | None:
-    """Blocking-with-timeout ``LOCK_EX`` on the election lock. Returns the held
-    fd, or ``None`` if the timeout elapsed (caller proceeds unguarded).
-
-    Blocking (not ``LOCK_NB``-fail-fast) so waiters queue then re-discover; the
-    daemon's ``_acquire_spawn_lock`` uses ``LOCK_NB`` and must not, hence the
-    distinct lock file. Auto-releases on holder death (the OS drops the fd's
-    lock), so a holder that crashes mid-spawn never deadlocks the waiters.
-    """
-    path = _election_lock_path_for_db(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            _locking.lock_fd(
-                fd, blocking=False
-            )  # lifecycle-gate-allow: election lock, acquired via the shared primitive
-            return fd
-        except BlockingIOError:
-            # Contended. The shim raises exactly this on both platforms, which
-            # is why there is no errno branch here: a non-blocking flock that
-            # loses signals EAGAIN/EWOULDBLOCK, which CPython already maps to
-            # BlockingIOError, and the Windows leg maps its OSError to the
-            # same type. The previous code also tested errno.EACCES, which is
-            # `lockf` behaviour that `flock` never produces.
-            if time.monotonic() >= deadline:
-                os.close(fd)
-                return None
-            time.sleep(0.05)
-
-
-def _release_election_lock(fd: int | None) -> None:
-    if fd is None:
-        return
-    try:
-        _locking.unlock_fd(fd)
-    except OSError:
-        pass
-    try:
-        os.close(fd)
-    except OSError:
-        pass
 
 
 # RDR-140 P4.2 (nexus-hrrpz) Gap 5: bounded crash-loop guard. Cold respawns are
