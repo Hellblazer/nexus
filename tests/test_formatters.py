@@ -41,9 +41,19 @@ def test_vimgrep_basic(kwargs, expected) -> None:
 
 
 def test_vimgrep_missing_source_path() -> None:
+    """nexus-cd1k0.16 finding (2): a source-path-less result must still
+    render a non-empty first field -- an id/title stand-in, never a bare
+    leading colon (the old ``:10:0:...`` shape, empty and unusable as a
+    path for editor integration)."""
     r = _result()
     r.metadata.pop("source_path")
-    assert format_vimgrep([r])[0].startswith(":10:0:")
+    assert format_vimgrep([r])[0].startswith("r1:10:0:")
+
+
+def test_vimgrep_missing_source_path_prefers_title() -> None:
+    r = _result(title="Demo Note")
+    r.metadata.pop("source_path")
+    assert format_vimgrep([r])[0].startswith("Demo Note:10:0:")
 
 
 # ── nexus-1qed: _display_path priority + formatter integration ──────────────
@@ -192,6 +202,20 @@ def test_context_zero_delegates_to_plain() -> None:
 
 def test_context_single_line() -> None:
     assert format_plain_with_context([_result(content="solo")], lines_after=5) == ["src/foo.py:10:solo"]
+
+
+def test_context_missing_source_path_falls_back_to_title_or_id() -> None:
+    """nexus-cd1k0.16 finding (2): with lines_after/lines_before > 0 this
+    function does NOT delegate to format_plain, so it needs the same
+    title-or-id fallback as its sibling formatters -- a missing source_path
+    must not print an empty leading path field."""
+    r = _result(content="solo")
+    r.metadata.pop("source_path")
+    assert format_plain_with_context([r], lines_after=5)[0].startswith("r1:10:")
+
+    r2 = _result(content="solo", title="Demo Note")
+    r2.metadata.pop("source_path")
+    assert format_plain_with_context([r2], lines_after=5)[0].startswith("Demo Note:10:")
 
 
 # ── _find_matching_lines ────────────────────────────────────────────────────
@@ -353,6 +377,18 @@ def test_vimgrep_without_query_uses_line_start() -> None:
 def test_compact(query, content, expected) -> None:
     lines = format_compact([_result(content=content)], query=query)
     assert lines[0] == expected
+
+
+def test_compact_missing_source_path_falls_back_to_title_or_id() -> None:
+    """nexus-cd1k0.16 finding (2): sibling of the vimgrep case above --
+    format_compact must not print an empty leading path field either."""
+    r = _result()
+    r.metadata.pop("source_path")
+    assert format_compact([r])[0].startswith("r1:10:")
+
+    r2 = _result(title="Demo Note")
+    r2.metadata.pop("source_path")
+    assert format_compact([r2])[0].startswith("Demo Note:10:")
 
 
 def test_bat_line_range_is_relative_to_the_stdin_start(monkeypatch) -> None:
