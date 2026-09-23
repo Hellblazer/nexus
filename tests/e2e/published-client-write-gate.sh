@@ -136,6 +136,22 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# nexus-jspsn: step 1's `nx init --service` PROVISIONS the candidate engine
+# via THIS CHECKOUT's own `uv run nx` (see the header's WHAT IT DOES §1) —
+# a dev-checkout process, deliberately, so it can install a not-yet-published
+# NEXUS_SERVICE_TAG. That write target is $ENGINE_HOME, a throwaway scratch
+# NEXUS_CONFIG_DIR this script alone created a few lines below — never
+# production — so it needs the identical reasoned opt-in
+# tests/e2e/local-service-gate.sh already carries for the same shape.
+# Without it, the nexus-a2qhz guard silently refuses the provisioner's
+# builtin plan-template seed write (event=init_plan_seed_failed, a WARNING
+# the harness logs and continues past) on every run — invisible to the
+# gate's own PASS/FAIL verdict (which is about the LATER, separately
+# provisioned published-client steps, §2-4), so three green runs (v0.1.122-
+# v0.1.124) all carried it. Never mistake this init step for the published
+# client under test: it is the provisioner, not the subject.
+export NX_ALLOW_PROD_WRITE="published-client-write-gate: step 1 provisions the candidate engine via this checkout's own nx, against its own throwaway scratch NEXUS_CONFIG_DIR, never production (nexus-jspsn)"
+
 # The bead this ack names, and the version its fix ships in. Hand-updated —
 # see the KNOWN-INCOMPATIBLE WINDOW header note above. History: nexus-sh9v2
 # (fixed in 7.7.0) held this slot until 2026-09-08; RDR-204 Phase 1
