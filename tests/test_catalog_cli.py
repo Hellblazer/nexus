@@ -781,6 +781,56 @@ class TestUpdateCommand:
         assert "imaginary-scheme" in result.output
         assert "Traceback" not in result.output
 
+    def test_update_alias_of_resolves_to_canonical(
+        self, initialized_catalog, catalog_env,
+    ):
+        """``nx catalog update <tumbler> --alias-of <canonical>`` is the
+        recovery path for a DUPLICATE entry (nexus-bt8w8) — the answer to
+        the Credo-paper case: a second registration of the same document,
+        left over from a lost source_uri.
+
+        Assert the alias RESOLVES, not merely that it was stored: showing
+        the duplicate must now return the canonical entry, because the
+        catalog walks the alias chain on resolve. A stored-but-unfollowed
+        alias would pass a field-equality check while doing nothing (the
+        same lesson pinned for the MCP tool's
+        ``test_update_sets_alias_of``).
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Canonical", "--owner", "1.1",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Duplicate", "--owner", "1.1",
+        ])
+
+        result = runner.invoke(main, [
+            "catalog", "update", "1.1.2", "--alias-of", "1.1.1",
+        ])
+        assert result.exit_code == 0, result.output
+
+        show = runner.invoke(main, ["catalog", "show", "1.1.2", "--json"])
+        assert show.exit_code == 0, show.output
+        data = json.loads(show.stdout)
+        assert data["tumbler"] == "1.1.1", data
+        assert data["title"] == "Canonical", data
+
+    def test_update_alias_of_rejects_malformed_target(
+        self, initialized_catalog, catalog_env,
+    ):
+        """``--alias-of`` is parsed as a Tumbler, so a non-tumbler is
+        refused here rather than discovered later on a resolve — the same
+        clean-error convention as ``--source-uri`` (nexus-fb6x)."""
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Canonical", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, [
+            "catalog", "update", "1.1.1", "--alias-of", "not-a-tumbler",
+        ])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+
 
 class TestDeleteCommand:
     def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
@@ -2179,9 +2229,12 @@ class TestVerifyCommand:
             Tumbler.parse("1.1"), "Alias Doc",
             content_type="knowledge", physical_collection=coll,
         )
-        # nexus-iltyk: set_alias mutates but is NOT on CATALOG_WRITE_OPS, so
+        # nexus-iltyk: alias_of mutates but is NOT on CATALOG_WRITE_OPS, so
         # the typed writer will not forward it. No single object does both.
-        unroutable_write_target().set_alias(alias_tumbler, Tumbler.parse("1.1.1"))
+        # nexus-bt8w8: set_alias was deleted (dead through the writer
+        # factory, byte-identical to update(t, alias_of=...) which IS
+        # whitelisted) — call update() directly on the raw client instead.
+        unroutable_write_target().update(alias_tumbler, alias_of=str(Tumbler.parse("1.1.1")))
 
         # T3 reports nothing present — the canonical doc is damaged.
         self._patch_t3(monkeypatch, {coll: []})

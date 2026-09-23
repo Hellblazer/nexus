@@ -272,11 +272,14 @@ class TestFollowAliasAtThisCallSite:
             cat, title="Canonical Home", chash=_chash("other"),
             collection="knowledge__new__bge-base-en-v15-768__v1",
         )
-        # set_alias is not on CATALOG_WRITE_OPS (nexus-iltyk) — use the
-        # fixture ops' documented escape hatch for un-whitelisted writes.
+        # alias_of via update() is not on the typed writer's ergonomic
+        # surface (nexus-iltyk) — use the fixture ops' documented escape
+        # hatch for un-whitelisted writes. nexus-bt8w8: the standalone
+        # set_alias() client method was deleted (byte-identical to
+        # update(t, alias_of=...), which IS whitelisted).
         from tests._catalog_fixture_ops import unroutable_write_target
 
-        unroutable_write_target().set_alias(alias_tumbler, canonical_tumbler)
+        unroutable_write_target().update(alias_tumbler, alias_of=str(canonical_tumbler))
 
         entry = resolve_knowledge_doc_for_chash(
             active_reader(), chash, log_event="test_alias",

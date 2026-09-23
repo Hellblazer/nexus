@@ -488,15 +488,19 @@ class TestItem21LinkMergeCoDiscoveredBy:
 
 
 class TestItem19AliasOfPopulation:
-    """set_alias() writes alias_of on the engine and the entry surfaces it.
+    """``update(..., alias_of=...)`` writes alias_of on the engine and the
+    entry surfaces it.
 
     # nexus-i711w.1 item 19
     The local projector populated ``alias_of`` from DocumentAliased events;
     that machinery dies with the src. The service write path is
-    ``HttpCatalogClient.set_alias`` -> POST /update {tumbler, alias_of}
-    (http_catalog_client.py:1142-1143), and the read side maps the column
-    back at ``_to_entry`` (:194). This pins exactly that round trip —
-    population, not following.
+    ``HttpCatalogClient.update`` -> POST /update {tumbler, alias_of}, and
+    the read side maps the column back at ``_to_entry``. This pins exactly
+    that round trip — population, not following.
+
+    nexus-bt8w8: the standalone ``set_alias`` client method was deleted —
+    it was byte-identical to ``update(tumbler, alias_of=str(canonical))``,
+    which is the whitelisted surface the CLI and MCP tool both call.
     """
 
     def test_set_alias_populates_alias_of_on_the_entry(self, cat, owner):
@@ -518,7 +522,7 @@ class TestItem19AliasOfPopulation:
             f"pre-state: expected empty alias_of, got {before.alias_of!r}"
         )
 
-        cat.set_alias(src, canonical)
+        cat.update(src, alias_of=str(canonical))
 
         # follow_alias=False: this test pins POPULATION (the src row itself
         # carries alias_of), not FOLLOWING. cat.resolve()'s default

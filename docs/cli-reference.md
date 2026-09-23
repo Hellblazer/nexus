@@ -1137,7 +1137,7 @@ unmeasured pass.
 ### nx catalog update
 
 ```
-nx catalog update [TUMBLER] [--title TEXT] [--author TEXT] [--year N] [--corpus TEXT] [--meta JSON] [--source-uri URI] [--file-path PATH]
+nx catalog update [TUMBLER] [--title TEXT] [--author TEXT] [--year N] [--corpus TEXT] [--meta JSON] [--source-uri URI] [--file-path PATH] [--alias-of TUMBLER]
 nx catalog update --owner PREFIX --corpus TEXT    # batch update all entries under an owner
 nx catalog update --search QUERY --corpus TEXT    # batch update all entries matching search
 ```
@@ -1154,6 +1154,16 @@ allowlist as register-time.
 repoints an entry whose recorded path is dead (moved/renamed on disk)
 *without* touching its `source_uri` identity; the two are separate columns
 updated independently.
+
+`--alias-of TUMBLER` (nexus-bt8w8) points this entry at its canonical
+duplicate — recovery path for the DUPLICATE case, beside `--source-uri`'s
+recovery path for a moved/expired identity. The catalog follows the alias
+chain on resolve/show, so `nx catalog show` on the aliased tumbler
+afterward returns the canonical entry instead of the duplicate; this keeps
+the link graph intact instead of leaving a second entry in search results
+or deleting it and orphaning the links pointing at it. Rejected as a
+`ClickException` (no traceback) if the target is not a well-formed
+tumbler.
 
 ### nx catalog gc
 

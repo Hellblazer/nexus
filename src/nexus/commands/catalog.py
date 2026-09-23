@@ -691,11 +691,23 @@ def register_cmd(
          "export) — the engine's UPDATABLE_DOC_COLUMNS already accepted this "
          "column; this flag exposes it on the CLI.",
 )
+@click.option(
+    "--alias-of",
+    "alias_of",
+    default="",
+    help="Canonical tumbler this entry is a duplicate of (nexus-bt8w8). "
+         "Recovery path for the DUPLICATE case, beside --source-uri's "
+         "recovery path for a moved/expired identity: the catalog follows "
+         "the alias chain on resolve/show, so aliasing a duplicate onto its "
+         "canonical entry keeps the graph intact instead of leaving a "
+         "second entry in search results or deleting it and orphaning its "
+         "links.",
+)
 @click.option("--owner", default="", help="Batch: update all entries for this owner")
 @click.option("--search", "search_query", default="", help="Batch: update all entries matching this search")
 def update_cmd(
     tumbler: str, title: str, author: str, year: int, corpus: str, meta: str,
-    source_uri: str, file_path: str, owner: str, search_query: str,
+    source_uri: str, file_path: str, alias_of: str, owner: str, search_query: str,
 ) -> None:
     """Update catalog entry metadata. TUMBLER can be a tumbler or title.
 
@@ -711,6 +723,12 @@ def update_cmd(
     --file-path sets or replaces the catalog file_path column. Use this to
     repoint an entry whose recorded path is dead (moved/renamed on disk)
     without touching its source_uri identity.
+
+    --alias-of points this entry at its canonical duplicate. Use this to
+    recover from a re-registration of the same document (e.g. after a
+    source_uri was lost and re-indexing minted a second entry): a show on
+    this tumbler afterward returns the canonical entry instead of the
+    duplicate.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -729,6 +747,14 @@ def update_cmd(
         fields["source_uri"] = source_uri
     if file_path:
         fields["file_path"] = file_path
+    if alias_of:
+        try:
+            fields["alias_of"] = str(Tumbler.parse(alias_of))
+        except ValueError as exc:
+            # nexus-bt8w8: same clean-error convention as source_uri
+            # (nexus-fb6x) — a malformed alias target is refused here
+            # rather than discovered later on a resolve.
+            raise click.ClickException(str(exc)) from exc
     if not fields:
         raise click.ClickException("No fields to update")
 

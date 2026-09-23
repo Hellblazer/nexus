@@ -388,11 +388,16 @@ def fk_dropped_for_dangling_seed():
 def unroutable_write_target() -> Any:
     """A target for a catalog WRITE that is not on ``CATALOG_WRITE_OPS``.
 
-    ``set_alias`` is the known case (nexus-iltyk): it mutates, but it is not
-    whitelisted, so ``CatalogWriter.__getattr__`` will not forward it on the
-    SQLite arm — while in service mode ``_SharedServiceCatalogHandle`` proxies
-    every attribute and therefore performs the write through what the factory
-    calls a READER.
+    The historical case was ``set_alias`` (nexus-iltyk): a dedicated method
+    that mutated but was never whitelisted, so ``CatalogWriter.__getattr__``
+    would not forward it on the SQLite arm. nexus-bt8w8 deleted that method
+    (it was byte-identical to ``update(tumbler, alias_of=...)``, which IS
+    whitelisted) — callers wanting to write ``alias_of`` now call ``update``
+    directly, still through this helper for parity with the substrate split
+    below, though ``update`` itself would in fact route through the typed
+    writer today. In service mode ``_SharedServiceCatalogHandle`` proxies
+    every attribute and therefore performs any write through what the
+    factory calls a READER.
 
     So there is no single object that can do it on both substrates:
       - service: the shared handle, which proxies it (and is what production

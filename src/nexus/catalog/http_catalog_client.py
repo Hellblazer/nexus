@@ -2027,9 +2027,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._get("/descendants", prefix=prefix)
         return result.get("documents", []) if result else []
 
-    def set_alias(self, tumbler: Tumbler | str, canonical: Tumbler | str) -> None:
-        self._post("/update", {"tumbler": str(tumbler), "alias_of": str(canonical)})
-
     def resolve_alias(self, tumbler: Tumbler | str, *, max_hops: int = 16) -> Tumbler:
         """Resolve *tumbler* to its canonical (alias-followed) target.
 
