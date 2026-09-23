@@ -284,6 +284,36 @@ g fetch -q origin
 git -C "$SOURCE_REPO" rev-parse --verify --quiet "$BASE_TAG^{commit}" >/dev/null || _die "base tag $BASE_TAG does not resolve in the source"
 echo "   main=$(g rev-parse --short main) develop=$(g rev-parse --short develop) tags=$(g tag -l | wc -l | tr -d ' ')"
 
+_step "inject a synthetic straddling-and-deferred change onto develop (nexus-2x3qy: a straddling bead, deferred, must not refuse the cut)"
+# The regression case the bead asks for: a bead's commit couples an
+# allowlisted channel path to wheel content (the nexus-0fw11 shape that
+# started this bead) -- but its ledger entry is DEFERRED, so the cut
+# must proceed, holding the channel half back too, never shipping
+# either half until the deferral is lifted.
+PROBE_CHANNEL_PATH="conexus/skills/rehearsal-deferral-probe/SKILL.md"
+PROBE_WHEEL_PATH="src/nexus/_rehearsal_deferral_probe.py"
+mkdir -p "$(dirname "$CLONE/$PROBE_CHANNEL_PATH")" "$(dirname "$CLONE/$PROBE_WHEEL_PATH")"
+printf 'rehearsal deferral probe -- channel half\n' > "$CLONE/$PROBE_CHANNEL_PATH"
+printf '# rehearsal deferral probe -- wheel half, must never ship on a plugin cut\n' > "$CLONE/$PROBE_WHEEL_PATH"
+g add -- "$PROBE_CHANNEL_PATH" "$PROBE_WHEEL_PATH"
+g commit -q -m "feat: rehearsal deferral probe, channel+wheel straddle (nexus-rhrsl1)"
+python3 - "$CLONE/conexus/PENDING_RELEASE.md" "$PROBE_CHANNEL_PATH" <<'PY'
+import sys
+path, probe = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+entry = f"- `{probe}`: straddles wheel content, deferred (nexus-rhrsl1)\n"
+heading = "## Deferred to the next client release"
+if heading not in text:
+    text = text.rstrip("\n") + "\n\n" + heading + "\n\n" + entry
+else:
+    text = text.rstrip("\n") + "\n" + entry
+open(path, "w", encoding="utf-8").write(text)
+PY
+g add -- conexus/PENDING_RELEASE.md
+g commit -q -m "docs: defer nexus-rhrsl1's straddling entry (nexus-rhrsl1)"
+g push -q origin develop
+echo "   probe on develop: $PROBE_CHANNEL_PATH (channel, deferred) + $PROBE_WHEEL_PATH (wheel, never ships) under nexus-rhrsl1"
+
 _step "uv sync --group dev in the clone"
 (cd "$CLONE" && uv sync -q --group dev) || _die "uv sync failed"
 
@@ -300,6 +330,14 @@ BRANCH="$(printf '%s' "$CUT_LINE" | sed -E 's/^cut: (plugin-v[^ ]+) on (plugin-r
 CUT_HEAD="$(g rev-parse HEAD)"
 echo "   cut $TAG on $BRANCH at ${CUT_HEAD:0:9}"
 g diff --stat origin/main | tail -3
+# Deferral regression (nexus-2x3qy): the cut above did NOT refuse despite
+# nexus-rhrsl1 straddling wheel content -- confirm the deferred channel
+# half was held back too (neither half ships) and the entry still
+# declares it, exactly as atomic_split_check's docstring promises.
+[ ! -e "$CLONE/$PROBE_WHEEL_PATH" ] || _die "deferral regression: wheel probe $PROBE_WHEEL_PATH shipped on the cut branch"
+[ ! -e "$CLONE/$PROBE_CHANNEL_PATH" ] || _die "deferral regression: deferred channel probe $PROBE_CHANNEL_PATH shipped on the cut branch despite deferral"
+grep -qF "$PROBE_CHANNEL_PATH" "$CLONE/conexus/PENDING_RELEASE.md" || _die "deferral regression: the deferred entry vanished from the ledger on the cut branch"
+echo "   deferral regression verified: nexus-rhrsl1's straddling entry did not refuse the cut, its channel path stayed held back, and the ledger still declares it"
 
 _step "the cut PR's CI: refs/pull/1/merge at depth 1, the drift-ledger workflow's tag fetch, pull_request payload, pin-reading checks"
 g push -q -u origin "$BRANCH"

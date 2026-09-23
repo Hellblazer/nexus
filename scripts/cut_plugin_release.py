@@ -39,7 +39,13 @@ Phases 1 and 2 to main, this script refuses, naming every missing piece.
 
 The atomic-split check (bead .9) runs BEFORE the import and refusal
 aborts before any branch or file is written. Deferral via the ledger is
-the only path past a straddling entry; there is no flag.
+the only path past a straddling entry; there is no flag. The mechanism
+(nexus-2x3qy): move the entry under PENDING_RELEASE.md's "## Deferred
+to the next client release" heading; ``atomic_split_check`` then skips
+it (the straddle is acknowledged, not scanned) and the import holds its
+channel path(s) back from THIS cut too (``_hold_back_deferred_paths``),
+restoring them to origin/main's content so the whole bead ships
+together at the next client release rather than split across two.
 """
 
 from __future__ import annotations
@@ -238,6 +244,62 @@ def path_entries(ledger_text: str) -> list[str]:
     ]
 
 
+#: The ledger heading that marks the deferral section (nexus-2x3qy).
+#: Membership is by the LAST "## " heading seen before an entry -- any
+#: other heading, or none yet, means the entry is not deferred. Matched
+#: on the heading's own text (after "## "), so a bead-scoped suffix a
+#: human appends does not break recognition.
+DEFERRED_SECTION_HEADING = "Deferred to the next client release"
+
+_HEADING_RE = re.compile(r"^##\s+(.*\S)\s*$")
+
+
+def _deferred_entries(ledger_text: str) -> list[str]:
+    """Path-carrying entries sitting under :data:`DEFERRED_SECTION_HEADING`.
+
+    A deferred entry's straddling bead is exempt from
+    :func:`atomic_split_check` -- that is the whole point of deferring
+    it -- and :func:`deferred_paths` reads the same set to hold its
+    channel path(s) back from the cut's import. Reuses
+    ``_ledger_blocks`` so section membership and entry boundaries agree
+    with :func:`path_entries` by construction: both walk the identical
+    grouping, so an entry recognised here is byte-identical to the one
+    ``path_entries`` produces, and set membership between the two is a
+    safe string comparison.
+    """
+    deferred: list[str] = []
+    in_section = False
+    for is_bullet, lines in _ledger_blocks(ledger_text):
+        if not is_bullet:
+            for line in lines:
+                heading = _HEADING_RE.match(line.rstrip("\n"))
+                if heading:
+                    in_section = heading.group(1).strip() == DEFERRED_SECTION_HEADING
+            continue
+        text = "".join(lines)
+        has_path = any("/" in span for span in re.findall(r"`([^`]+)`", text))
+        if in_section and has_path:
+            deferred.append(text)
+    return deferred
+
+
+def deferred_paths(ledger_text: str) -> set[str]:
+    """Channel paths a DEFERRED entry says must not ship on this cut.
+
+    Only allowlisted (channel) spans count -- a deferred entry's wheel
+    half was never going to ship regardless of deferral, and a bare
+    prefix root in prose (``conexus/``) is not a path, mirroring the
+    same filter :func:`_rewrite_ledger` applies to its own spans.
+    """
+    paths: set[str] = set()
+    for entry in _deferred_entries(ledger_text):
+        for span in re.findall(r"`([^`]+)`", entry):
+            span = span.strip()
+            if "/" in span.strip("/") and _is_allowlisted(span):
+                paths.add(span)
+    return paths
+
+
 def attribute_entry(entry: str) -> str:
     """One bead per entry, by the rule that needs no interpreting.
 
@@ -268,8 +330,19 @@ def atomic_split_check(repo: Path, base_tag: str, allowlisted: list[str]) -> Non
     granularity: it cannot ship an entry's allowlisted paths while
     holding back the same entry's wheel-surface paths, so a straddling
     entry makes the cut impossible to perform correctly — not risky,
-    impossible. The only path forward is editing PENDING_RELEASE.md to
-    DEFER that entry, a reviewable change a human makes deliberately.
+    impossible. The only path forward is moving that entry under the
+    ledger's "## Deferred to the next client release" heading
+    (:data:`DEFERRED_SECTION_HEADING`, nexus-2x3qy): a reviewable change
+    a human makes deliberately, never a flag. A deferred entry is
+    skipped in the scan below -- its straddle is acknowledged, not
+    resolved -- and :func:`perform_cut` then holds its channel path(s)
+    back from THIS cut too (``_hold_back_deferred_paths``), restoring
+    them to origin/main's content so the whole bead ships together at
+    the next client release rather than split across two.
+    :func:`_rewrite_ledger` never empties a deferred entry, and the
+    release-window "ledger must be empty" contract in
+    ``tests/test_plugin_release_drift_ledger.py`` exempts deferred paths
+    for the same reason: still declared is correct there, not stale.
     There is no override flag and no warn mode. Runs BEFORE the branch
     exists; a raise leaves branch and working-tree state untouched (only
     the fetch's remote-tracking/tag refresh has happened — .8's seam
@@ -292,8 +365,11 @@ def atomic_split_check(repo: Path, base_tag: str, allowlisted: list[str]) -> Non
     shown = _git(repo, "show", f"origin/develop:{LEDGER}", check=False)
     if shown.returncode != 0:
         return  # no ledger on develop; the drift contract owns that state
+    deferred_entry_texts = set(_deferred_entries(shown.stdout))
     problems: list[str] = []
     for entry in path_entries(shown.stdout):
+        if entry in deferred_entry_texts:
+            continue  # DEFERRED: the whole bead is held back from this cut
         bead = attribute_entry(entry)
         # -F: fixed-string matching. The default BRE would let the dot in
         # an id like nexus-a2wmi.5 match any character (R2 finding —
@@ -365,11 +441,24 @@ def _rewrite_ledger(repo: Path) -> None:
     (a2wmi.12 spike on nexus-znvjd, 2026-08-30). An entry naming a
     wheel half (split delivery) or no channel path at all survives
     untouched.
+
+    DEFERRED entries (nexus-2x3qy) are never emptied here, regardless of
+    the covered heuristic: an entry under "## Deferred to the next
+    client release" names only its channel path by design (the straddle
+    that got it deferred lives in the bead's commit, not the entry
+    text), so without this exemption it would read as "covered" (an
+    allowlisted span, no wheel span on the entry itself) and be erased
+    on the very cut that is deliberately NOT shipping it.
     """
     ledger = repo / LEDGER
+    text = ledger.read_text(encoding="utf-8")
+    deferred_entry_texts = set(_deferred_entries(text))
     kept: list[str] = []
-    for is_bullet, lines in _ledger_blocks(ledger.read_text(encoding="utf-8")):
+    for is_bullet, lines in _ledger_blocks(text):
         if is_bullet:
+            if "".join(lines) in deferred_entry_texts:
+                kept.extend(lines)
+                continue
             # A span is path-shaped only with a component after its first
             # segment: a bare prefix root in prose (`conexus/`, `sn`) is
             # not a file and must neither cover nor hold back an entry
@@ -388,6 +477,42 @@ def _rewrite_ledger(repo: Path) -> None:
                 continue  # covered: this cut ships it
         kept.extend(lines)
     ledger.write_text("".join(kept), encoding="utf-8")
+
+
+def _hold_back_deferred_paths(repo: Path, paths: list[str]) -> None:
+    """Exclude DEFERRED entries' channel paths from this cut's import.
+
+    Restores each to origin/main's own content -- the cut branch's own
+    base, what the path already was before the wholesale diff-and-apply
+    overlaid develop's content onto it. A path introduced on develop
+    after the branch point (absent from origin/main) is removed
+    outright: holding it back means it does not exist on the cut branch
+    either, the same as if the import had never touched it.
+
+    Runs AFTER the wholesale apply (which does not know about
+    deferral), so this is a targeted undo of exactly the deferred
+    paths, never a broader one. The closing diff --quiet is the PROVE
+    half, mirroring the denied-prefixes restore right after it in
+    perform_cut: a deferral that did not actually hold anything back
+    must refuse, not ship silently.
+    """
+    for path in paths:
+        exists_at_main = _git(
+            repo, "cat-file", "-e", f"origin/main:{path}", check=False
+        ).returncode == 0
+        if exists_at_main:
+            _git(repo, "checkout", "-q", "origin/main", "--", path)
+        else:
+            _git(repo, "rm", "-q", "-f", "--ignore-unmatch", "--", path)
+            target = repo / path
+            if target.exists():
+                target.unlink()
+    stray = _git(repo, "diff", "--quiet", "origin/main", "--", *paths, check=False)
+    if stray.returncode != 0:
+        raise CutRefused(
+            "deferred path(s) still differ from origin/main after the "
+            f"hold-back restore -- the deferral held nothing back: {paths}"
+        )
 
 
 #: Battery steps, each paired with whether it needs the engine substrate
@@ -501,6 +626,17 @@ def perform_cut(
     ).stdout
     if diff:
         _git(repo, "apply", "--index", "-", input_text=diff)
+
+    # DEFERRED ledger entries: hold their channel path(s) back from this
+    # cut too, even though they are allowlisted. Re-reads origin/develop's
+    # ledger rather than threading split_check's copy through, because
+    # split_check is caller-substitutable (DI in tests) and this must run
+    # regardless of what stub was passed.
+    develop_ledger = _git(repo, "show", f"origin/develop:{LEDGER}", check=False)
+    if develop_ledger.returncode == 0:
+        deferred = sorted(deferred_paths(develop_ledger.stdout))
+        if deferred:
+            _hold_back_deferred_paths(repo, deferred)
 
     # Wheel package data never rides a cut: restore and PROVE.
     _git(repo, "checkout", "-q", "origin/main", "--",

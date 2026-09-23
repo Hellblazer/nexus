@@ -429,6 +429,23 @@ def _declared_paths_for(plugin: str) -> set[str]:
     }
 
 
+def _deferred_declared_paths() -> set[str]:
+    """DEFERRED entries' channel paths (nexus-2x3qy) -- exempt from the
+    release-window "ledger must be empty" contract below.
+
+    A deferred entry says its straddling bead is intentionally held back
+    from THIS cut too (`cut_plugin_release._hold_back_deferred_paths`),
+    so it stays declared even while the plugin's pin advances to the tag
+    this branch cuts -- still declared is correct there, not stale.
+    Reuses `cut_plugin_release.deferred_paths`, the one parser of the
+    "## Deferred to the next client release" section, rather than a
+    second copy that could drift from what the cut script itself reads.
+    """
+    from cut_plugin_release import deferred_paths
+
+    return deferred_paths(_ledger_text())
+
+
 def test_every_drifted_file_is_declared_in_the_ledger() -> None:
     """Undeclared drift is the failure -- drift itself is not.
 
@@ -436,17 +453,22 @@ def test_every_drifted_file_is_declared_in_the_ledger() -> None:
     zero drift by construction — its ref IS the content this branch cuts
     — so its contract reduces to "its ledger entries are empty" (the pin
     advance ships them). Every other plugin is checked strictly against
-    its own ref over its own surface (.14's scoping).
+    its own ref over its own surface (.14's scoping). DEFERRED entries
+    are the one exception (nexus-2x3qy): the pin advance does NOT ship
+    them (the cut holds their paths back), so they stay declared.
     """
     _require_or_skip()
     drifted: set[str] = set()
+    deferred = _deferred_declared_paths()
     for plugin, ref in _pinned_refs().items():
         if plugin_in_release_window(plugin, ref):
-            assert not _declared_paths_for(plugin), (
+            assert not (_declared_paths_for(plugin) - deferred), (
                 f"{plugin} is in its release window (ref {ref!r} is the tag "
                 f"this branch cuts) but the PENDING_RELEASE ledger still "
                 f"lists its files — the pin advance ships them, so its "
-                f"entries must be emptied in the cut commit."
+                f"entries must be emptied in the cut commit (or moved under "
+                f"'## Deferred to the next client release' if they were "
+                f"deliberately held back)."
             )
             continue
         drifted |= set(_drifted_paths(plugin, ref))
@@ -477,12 +499,13 @@ def test_the_ledger_has_no_stale_entries() -> None:
     _require_or_skip()
     declared: set[str] = set()
     drifted: set[str] = set()
+    deferred = _deferred_declared_paths()
     for plugin, ref in _pinned_refs().items():
         if plugin_in_release_window(plugin, ref):
-            assert not _declared_paths_for(plugin), (
+            assert not (_declared_paths_for(plugin) - deferred), (
                 f"{plugin} is in its release window: its ledger entries must "
-                f"be EMPTY (see test_every_drifted_file_is_declared_in_the_"
-                f"ledger)."
+                f"be EMPTY, deferred entries aside (see "
+                f"test_every_drifted_file_is_declared_in_the_ledger)."
             )
             continue
         declared |= _declared_paths_for(plugin)
@@ -1095,6 +1118,95 @@ class TestPerPluginDriftScoping:
         self._cut_world(tmp_path, monkeypatch, sn_drift=True)
         with pytest.raises(AssertionError, match=re.escape(self.SN_PROBE)):
             test_every_drifted_file_is_declared_in_the_ledger()
+
+
+class TestDeferralExemptsTheReleaseWindow:
+    """nexus-2x3qy: a DEFERRED entry stays declared even while its plugin's
+    pin advances to the tag THIS branch cuts, because the cut held that
+    entry's content back -- the pin advance does not ship it, so "still
+    declared" is correct there, not the staleness the window contract
+    otherwise demands (test_every_drifted_file_is_declared_in_the_ledger's
+    and test_the_ledger_has_no_stale_entries's own window branches, both
+    exercised here since they share the exemption).
+    """
+
+    @staticmethod
+    def _world(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, *, deferred: bool
+    ) -> pathlib.Path:
+        repo = tmp_path / "windowworld"
+        repo.mkdir()
+
+        def run(*args: str) -> None:
+            subprocess.run(
+                ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+            )
+
+        def write(rel: str, content: str) -> None:
+            target = repo / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+
+        run("init", "-q", "-b", "main")
+        run("config", "user.email", "test@test.invalid")
+        run("config", "user.name", "test")
+        write(
+            ".claude-plugin/marketplace.json",
+            json.dumps(
+                {
+                    "plugins": [
+                        {
+                            "name": "conexus",
+                            "source": {"source": "git-subdir", "ref": "v9.9.0"},
+                        }
+                    ]
+                }
+            ),
+        )
+        ledger = "# Pending\n"
+        if deferred:
+            ledger += (
+                "\n## Deferred to the next client release\n\n"
+                "- `conexus/hooks/held.py`: held back (nexus-zzzzz)\n"
+            )
+        else:
+            ledger += "- `conexus/hooks/held.py`: not deferred (nexus-zzzzz)\n"
+        write("conexus/PENDING_RELEASE.md", ledger)
+        write("pyproject.toml", '[project]\nname = "w"\nversion = "9.9.0"\n')
+        run("add", ".")
+        run("commit", "-q", "-m", "baseline")
+        run("tag", "v9.9.0")
+
+        module = sys.modules[__name__]
+        monkeypatch.setattr(module, "REPO_ROOT", repo)
+        monkeypatch.setattr(
+            module, "MARKETPLACE", repo / ".claude-plugin" / "marketplace.json"
+        )
+        monkeypatch.setattr(module, "LEDGER", repo / "conexus" / "PENDING_RELEASE.md")
+        # The window predicate itself is exercised in TestAnchoredWindow-
+        # Behaviour below; here it is forced True so both tests isolate
+        # the exemption, the thing actually under test.
+        monkeypatch.setattr(module, "plugin_in_release_window", lambda name, ref: True)
+        return repo
+
+    def test_a_deferred_entry_passes_both_window_contracts(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._world(tmp_path, monkeypatch, deferred=True)
+        test_every_drifted_file_is_declared_in_the_ledger()
+        test_the_ledger_has_no_stale_entries()
+
+    def test_a_non_deferred_entry_still_fails_both_window_contracts(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-vacuity: the SAME entry text, only moved out from under the
+        heading, must still be caught -- the exemption is section-scoped,
+        not a blanket pass for any entry naming this path."""
+        self._world(tmp_path, monkeypatch, deferred=False)
+        with pytest.raises(AssertionError, match="release window"):
+            test_every_drifted_file_is_declared_in_the_ledger()
+        with pytest.raises(AssertionError, match="release window"):
+            test_the_ledger_has_no_stale_entries()
 
 
 # ---------------------------------------------------------------------------
