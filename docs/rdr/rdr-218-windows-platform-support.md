@@ -8,7 +8,7 @@ priority: high
 author: Sam
 reviewed-by: self
 created: 2026-09-21
-related_issues: [nexus-sa187, nexus-5dcky, nexus-t9klx, nexus-34f7r, nexus-1vc0n, nexus-fd3zf, nexus-t10nc]
+related_issues: [nexus-sa187, nexus-5dcky, nexus-t9klx, nexus-34f7r, nexus-fd3zf, nexus-t10nc]
 related_rdrs: [RDR-126, RDR-155, RDR-197, RDR-210, RDR-215]
 ---
 
@@ -1395,3 +1395,4 @@ questions rather than from the drafting.
 | 2026-09-22 | Round-2 Significant: replaced the superseded ``not obviously Windows-specific`` hedge in Gap 4, which contradicted the measured `if _mswindows` finding four paragraph blocks later. |
 | 2026-09-22 | Fix check `nexus_rdr/218-fix-check-34a68b628` (three passes, PASS, 0 BLOCKS-PLANNING) closed residual 2; its six OBSERVATIONs fixed here. The `four shapes` figure rested on an unrecorded probe and is now pinned by `test_stock_subprocess_run_does_not_hang_on_posix`; `wait()`'s own untimed-but-finite step is stated; the Windows-only finding is explicitly marked as NOT explaining the 25s block. |
 | 2026-09-22 | Finalization Gate section still read "Not yet run ... `status: draft`" after the gate had run twice and Sam had accepted the record. Corrected; the caution it carried is kept, because three contradictions were then found by the gate and its fix check, which is what that caution predicted. |
+| 2026-09-22 | Dropped `nexus-1vc0n` from related_issues: it is the batched `nx index repo` writer needing an engine-side bulk file_path lookup, and has nothing to do with Windows. Surfaced by the planner, which found no phase for it because there is none. |
