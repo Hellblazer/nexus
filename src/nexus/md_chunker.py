@@ -420,6 +420,20 @@ class SemanticMarkdownChunker:
                         # shorter than overlap_chars.
                         content_text = "\n\n".join(current_parts[1:]) if header_text else emitted_text
                         overlap_tail = content_text[-self.overlap_chars:] if content_text else ""
+                        # nexus-yz7se: overlap_tail is a real slice of the
+                        # source, copied from the END of the chunk just
+                        # flushed -- so the next chunk's content genuinely
+                        # begins len(overlap_tail) chars EARLIER than
+                        # current_end_char, not AT it. Recording the span as
+                        # abutting (the old behaviour) contradicted the text:
+                        # join_manifest_parts requires the window to ADVANCE
+                        # (prev_start < start < prev_end) before it will trim,
+                        # so an abutting span could never trim and the
+                        # rebuild kept the duplicate forever. The header's
+                        # own re-injection is a separate, deliberate repeat
+                        # (kas9u's PDFChunker._table_header precedent) and is
+                        # handled on the read side, not folded into this span.
+                        section_start_char -= len(overlap_tail)
                         if header_text:
                             current_parts = [header_text, overlap_tail, part_text]
                         else:

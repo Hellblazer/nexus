@@ -15,6 +15,7 @@ Callers: ``mcp/core.py`` (MCP ``store_put`` tool),
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 import httpx
@@ -324,6 +325,12 @@ def _span_offset(value: Any) -> int | None:
 #: real overlap, and trimming one would delete text the document needs.
 MIN_VERIFIED_OVERLAP: int = 12
 
+#: A leading markdown ATX heading line (``_split_large_section``'s own
+#: re-injection shape: ``"#" * level + " " + header + "\n\n"``). Matched only
+#: to recognize a DUPLICATE heading already present in `joined`; never used
+#: to strip a heading that has no confirmed span overlap behind it.
+_MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6} .+)\n\n")
+
 
 def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
     """Join ``(text, start_char, end_char)`` manifest parts in position
@@ -399,12 +406,28 @@ def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
             and prev_start < start < prev_end
             else 0
         )
+        append_text = text
         if overlap >= MIN_VERIFIED_OVERLAP:
+            # nexus-yz7se: _split_large_section re-prefixes the section
+            # heading onto every chunk it emits from an oversized section —
+            # deliberate, kas9u's own precedent for PDFChunker._table_header
+            # on a table continuation, so a lone chunk stays independently
+            # readable. The heading is not part of the overlap span (the
+            # writer only backs the span up by the overlap_tail's own
+            # length), so it never confirms against `joined`'s tail; try the
+            # match with a duplicate leading heading stripped FIRST, and
+            # fall back to the untouched text if that does not confirm
+            # either — never strip on the strength of the heading alone.
+            match_text = text
+            heading_match = _MARKDOWN_HEADING_RE.match(text)
+            if heading_match and heading_match.group(0) in joined:
+                match_text = text[heading_match.end():]
             # The match is bounded ABOVE by the recorded overlap: stripping
             # can only ever shorten the agreement, never lengthen it.
-            for k in range(min(overlap, len(text), len(joined)), MIN_VERIFIED_OVERLAP - 1, -1):
-                if joined.endswith(text[:k]):
+            for k in range(min(overlap, len(match_text), len(joined)), MIN_VERIFIED_OVERLAP - 1, -1):
+                if joined.endswith(match_text[:k]):
                     trim = k
+                    append_text = match_text
                     break
             if trim == 0:
                 _log.debug(
@@ -412,7 +435,7 @@ def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
                     part_index=index,
                     recorded_overlap=overlap,
                 )
-        joined += text[trim:]
+        joined += append_text[trim:]
         prev_span = (start, end)
     return joined
 

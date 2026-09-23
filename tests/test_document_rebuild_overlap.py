@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 
 from nexus.catalog.store_hook import join_manifest_parts
+from nexus.md_chunker import SemanticMarkdownChunker
 from nexus.pdf_chunker import PDFChunker
 
 # Distinctive, non-repeating prose: any span repeated in the rebuild came
@@ -174,3 +175,37 @@ def test_an_unconfirmed_overlap_is_left_whole() -> None:
     joined = join_manifest_parts(parts)
     assert joined.count("<tr><td>2</td></tr>") == 1
     assert joined.count("<tr><td>1</td></tr>") == 1
+
+
+def _md_parts_from_chunker(text: str, chunk_size: int = 50, chunk_overlap: int = 10) -> list[tuple[str, int, int]]:
+    chunker = SemanticMarkdownChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    chunks = chunker.chunk(text, {})
+    return [
+        (c.text, c.metadata["chunk_start_char"], c.metadata["chunk_end_char"])
+        for c in chunks
+    ]
+
+
+def test_markdown_section_heading_repeat_rebuilds_to_one_copy() -> None:
+    """nexus-yz7se: _split_large_section re-prefixes the section heading
+    onto every chunk it emits from an oversized section -- deliberate, the
+    same carve-out kas9u documents for PDFChunker._table_header on a table
+    continuation, so a chunk stays independently readable. A whole-document
+    rebuild is a different reader than a lone chunk: it should see the
+    heading once, the way the source markdown had it, with the overlap tail
+    trimmed same as any other seam."""
+    para = "Alpha bravo charlie delta echo foxtrot golf hotel. "
+    text = "## Test\n\n" + "\n\n".join(
+        para + suffix for suffix in ("One.", "Two.", "Three.", "Four.", "Five.")
+    )
+    parts = _md_parts_from_chunker(text)
+    assert len(parts) >= 3, "fixture must force a multi-chunk split, or this test pins nothing"
+    assert sum(p[0].count("## Test") for p in parts) >= 2, (
+        "fixture must force the heading to repeat across chunks, or this test pins nothing"
+    )
+
+    rebuilt = join_manifest_parts(parts)
+    assert rebuilt.count("## Test") == 1, f"heading appeared {rebuilt.count('## Test')} times in the rebuild"
+    for suffix in ("One.", "Two.", "Three.", "Four.", "Five."):
+        needle = para + suffix
+        assert rebuilt.count(needle) == 1, f"{needle!r} appears {rebuilt.count(needle)} times in the rebuild"
