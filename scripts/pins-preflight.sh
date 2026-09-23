@@ -20,14 +20,54 @@ run() {
   echo "== $name"
   if "$@"; then echo "   ok: $name"; else echo "   RED: $name"; reds+=("$name"); fi
 }
+
+# Classify a captured `pytest -m lint` run from its OWN summary line only,
+# never a substring grep across the whole captured output (nexus-aut8g): a
+# transient line elsewhere in the run -- a substrate sweep warning, a
+# captured sub-log -- can contain "N errors " or "N failed " and reds a
+# genuinely clean sweep. Pytest's own final summary line is the only line
+# that reports "in N.NNs" elapsed time, so it is found by grepping for
+# that shape and taking the LAST match (pytest prints exactly one such
+# line per run, at the end); only THAT line is then checked for a real
+# failure/error count. Prints "PASS <line>" / "RED <line-or-reason>" /
+# "VACUOUS <line-or-reason>" on stdout.
+_lint_bucket_verdict() {
+  local outfile="$1" summary
+  summary="$(grep -E '\bin [0-9]+\.[0-9]+s\b' "$outfile" | tail -1)"
+  if [[ -z "$summary" ]]; then
+    echo "RED no pytest summary line found in the captured output"
+    return
+  fi
+  if grep -qE '[0-9]+ (errors?|failed)\b' <<<"$summary"; then
+    echo "RED $summary"
+    return
+  fi
+  if ! grep -qE '[1-9][0-9]{2,} passed' <<<"$summary"; then
+    echo "VACUOUS $summary"
+    return
+  fi
+  echo "PASS $summary"
+}
+
 lint_out="$(mktemp)"
 run "lint bucket" bash -o pipefail -c "uv run pytest -m lint -q -p no:cacheprovider 2>&1 | tee '$lint_out' | tail -3"
-if grep -qE '[0-9]+ (errors?|failed)( |,)' "$lint_out"; then
-  echo "   RED: lint bucket reported failures or setup errors (a stale gate jar errors every substrate test: scripts/build-gate-jar.sh)"; reds+=("lint bucket")
-elif ! grep -qE '[1-9][0-9]{2,} passed' "$lint_out"; then
-  echo "   VACUOUS: lint bucket ran fewer than 100 tests"; rm -f "$lint_out"; exit 2
-fi
-rm -f "$lint_out"
+verdict="$(_lint_bucket_verdict "$lint_out")"
+case "$verdict" in
+  PASS*)
+    rm -f "$lint_out"
+    ;;
+  RED*)
+    echo "   RED: lint bucket -- ${verdict#RED }"
+    echo "   (a stale gate jar errors every substrate test: scripts/build-gate-jar.sh)"
+    echo "   full output kept at $lint_out"
+    reds+=("lint bucket")
+    ;;
+  VACUOUS*)
+    echo "   VACUOUS: lint bucket ran fewer than 100 tests -- ${verdict#VACUOUS }"
+    echo "   full output kept at $lint_out"
+    exit 2
+    ;;
+esac
 run "pin tests" uv run pytest -q -p no:cacheprovider \
   tests/test_engine_version.py tests/test_plugin_release_drift_ledger.py \
   tests/test_ci_release_ledger_gate.py tests/test_pg_bundle_version_parity.py \
