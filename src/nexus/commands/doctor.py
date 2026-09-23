@@ -2147,6 +2147,21 @@ def _run_check_mineru() -> None:
 #                                          | this bead names explicitly):
 #                                          | any nonzero backlog raises
 #                                          | Exit(1) with a ✗ FAIL: marker.
+#   (no --check-tuple-projection    | YES       | local read of THIS session's
+#    flag)                          |           | <session>.tuple-projection.log
+#                                          | (zero network); the RDR-205
+#                                          | ledger projector never raises
+#                                          | on failure, only logs a SKIP
+#                                          | line (nexus.hooks.tuple_ledger_
+#                                          | project), so a persistent SKIP
+#                                          | was otherwise invisible outside
+#                                          | the e2e post-publish-dispatch-
+#                                          | check (nexus-08cfl remedy 3).
+#                                          | Informational, always exit 0 --
+#                                          | same posture as --check-wal-
+#                                          | retention (a handful of SKIPs
+#                                          | early in a session is not
+#                                          | itself a failure).
 #   (no --check-fanout-floor flag)| YES       | ONE list_collections() call
 #                                          | (no per-collection round trip);
 #                                          | always exit 0 (informational,
@@ -2175,7 +2190,7 @@ def _run_check_mineru() -> None:
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
-    "index-failures", "fanout-floor",
+    "index-failures", "fanout-floor", "tuple-projection",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -2214,6 +2229,7 @@ def _run_supplementary_checks() -> None:
         "engine-activity": _run_check_engine_activity,
         "index-failures": _run_check_index_failures,
         "fanout-floor": _run_check_fanout_floor,
+        "tuple-projection": _run_check_tuple_projection,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -3087,6 +3103,63 @@ def _run_check_t1() -> None:
         f"rm {lease_path}"
     )
     raise click.exceptions.Exit(1)
+
+
+def _run_check_tuple_projection() -> None:
+    """Diagnostic: RDR-205 ledger tuple-projection SKIPs for THIS session
+    (nexus-08cfl remedy 3).
+
+    :func:`nexus.hooks.tuple_ledger_project.project` never raises -- every
+    resolution/transport failure is a line appended to
+    ``<state_dir>/nexus/orchestration/<session_id>.tuple-projection.log``
+    and nothing else (that module's own docstring). A misconfigured or
+    below-floor endpoint (missing data-token lease, unresolvable service
+    endpoint, transport failure) is therefore silently dead for the whole
+    session -- the TSV ``.expectations`` ledger keeps working (a
+    completely different write path), so nothing else surfaces this
+    unless the e2e ``tests/e2e/post-publish-dispatch-check.sh`` happens to
+    run. This is the least-invasive existing surface that puts it in
+    front of a human running routine ``nx doctor``: a local file read,
+    zero network, sub-second -- the same cost class as ``--check-t1``,
+    which this check complements (T1 reports THIS session's lease
+    freshness; this reports THIS session's ledger-projection health).
+
+    Informational, always exit 0 (same posture as ``--check-wal-
+    retention``): a handful of SKIPs early in a session (e.g. before the
+    supervisor's lease first publishes) is not itself a failure, and this
+    check cannot tell "transient" from "the whole session was dead"
+    without re-deriving the post-publish-dispatch-check's STOP/START
+    correlation -- that correlation stays the e2e gate's job (leg (c)).
+    """
+    from nexus.hooks.tuple_ledger_project import _default_state_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    session_id = resolve_active_session_id()
+    if not session_id:
+        click.echo("[ ] Tuple projection: no session-id resolves for this process")
+        return
+
+    log_path = _default_state_dir() / f"{session_id}.tuple-projection.log"
+    if not log_path.exists():
+        click.echo(f"[✓] Tuple projection: no SKIPs recorded for session {session_id!r}")
+        return
+
+    try:
+        lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError as exc:
+        click.echo(f"[!] Tuple projection: {log_path} exists but is unreadable ({_exc_detail(exc)})")
+        return
+
+    if not lines:
+        click.echo(f"[✓] Tuple projection: no SKIPs recorded for session {session_id!r}")
+        return
+
+    click.echo(
+        f"[!] Tuple projection: {len(lines)} SKIP(s) recorded for session "
+        f"{session_id!r} -- the RDR-205 ledger has received nothing from "
+        f"this hook this session. Last: {lines[-1]}"
+    )
+    click.echo(f"    Log: {log_path}")
 
 
 def _run_check_collection_shape() -> None:

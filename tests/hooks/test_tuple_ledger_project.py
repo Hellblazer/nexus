@@ -503,6 +503,76 @@ def test_managed_endpoint_never_falls_back_to_a_local_lease_token(
     assert "no fresh data-token lease" in log.read_text()
 
 
+def test_env_pinned_host_port_with_no_data_token_lease_falls_back_to_env_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-08cfl: the documented no-local-supervisor route -- NX_SERVICE_
+    HOST/NX_SERVICE_PORT/NX_SERVICE_TOKEN env, no storage-service lease at
+    all, no mint_token configured -- is NOT the same leg as a managed
+    ``service_url`` (test above): it is service_endpoint.py's own "leg 2,
+    always http" local-style path, and every T2 store on that exact leg
+    (nexus.db.service_endpoint.resolve_service_config) already presents
+    NX_SERVICE_TOKEN directly with no lease involved at all -- which is
+    why `nx memory put`/`get` round-trips fine here while this hook used
+    to SKIP unconditionally. Must post successfully with the env token,
+    no SKIP."""
+    engine = mock_engine(status=200)
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    # No storage-service lease file at all, and no data-token lease.
+
+    proc = _run(
+        "start", tmp_path=tmp_path,
+        env_overrides={
+            "NX_SERVICE_HOST": parsed.hostname,
+            "NX_SERVICE_PORT": str(parsed.port),
+            "NX_SERVICE_TOKEN": "env-pinned-static-token",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer env-pinned-static-token"
+    log = _log_path(tmp_path / "state")
+    assert not log.exists() or "SKIP" not in log.read_text()
+
+
+def test_mint_token_configured_with_no_fresh_lease_skips_never_uses_static_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-08cfl: the corrected BEARER PRECEDENCE discriminator is
+    whether a mint_token credential is configured
+    (DataTokenManager.is_configured()), not "local" vs "managed" -- that
+    IS the discriminator the real client itself applies
+    (RefreshableHttpStoreMixin._apply_data_token_override): a configured
+    mint_token means the real client would now MINT a fresh data token
+    here (a live network call), which this hook never does. Must SKIP
+    even though a perfectly resolvable static NX_SERVICE_TOKEN sits right
+    there and would otherwise be presented (see the sibling test above)."""
+    engine = mock_engine(status=200)
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    # No data-token lease at all.
+
+    proc = _run(
+        "start", tmp_path=tmp_path,
+        env_overrides={
+            "NX_SERVICE_HOST": parsed.hostname,
+            "NX_SERVICE_PORT": str(parsed.port),
+            "NX_SERVICE_TOKEN": "would-be-used-if-mint-token-were-not-configured",
+            "NX_MINT_TOKEN": "a-configured-mint-credential",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    content = log.read_text()
+    assert "SKIP kind=start" in content
+    assert "no fresh data-token lease" in content
+    assert "mint_token" in content
+
+
 def test_cloud_mode_persisted_service_url_resolves_with_no_env_and_no_lease(
     tmp_path: Path, mock_engine
 ) -> None:

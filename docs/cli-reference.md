@@ -2604,9 +2604,15 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
-`aspect-queue`, `t1`, `engine-activity`, `index-failures`, and
-`fanout-floor` (the last has no `--check-fanout-floor` flag; it only runs
-as part of this supplementary set). Before 7.11.0 all fourteen `--check-*` modes were
+`aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
+and `tuple-projection` (the last two have no `--check-fanout-floor` /
+`--check-tuple-projection` flag; they only run as part of this
+supplementary set). `tuple-projection` (nexus-08cfl) reports whether
+this session's RDR-205 ledger tuple projector
+(`nexus.hooks.tuple_ledger_project`) has logged any SKIP lines to its
+per-session log — that projector never raises on failure, so a
+persistent SKIP was otherwise invisible outside the e2e
+`post-publish-dispatch-check.sh` gate. Before 7.11.0 all fourteen `--check-*` modes were
 opt-in only, so a real backlog was invisible unless an operator happened to
 run its exact flag (the motivating case: an aspect-queue throwing hundreds of
 claim failures while nothing in the default run watched it). These are

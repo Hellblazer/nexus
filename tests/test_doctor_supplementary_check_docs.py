@@ -41,7 +41,7 @@ def test_supplementary_check_names_doc_matches_the_constant():
 
     text = _DOC.read_text()
     doc_names = _extract_backtick_tokens(
-        text, "diagnostics inline: ", "(the last has no"
+        text, "diagnostics inline: ", "(the last two have no"
     )
     assert doc_names == _SUPPLEMENTARY_CHECK_NAMES, (
         f"docs/cli-reference.md's supplementary-checks sentence names "
