@@ -92,10 +92,12 @@ def _git_common_root(start: Path) -> Path | None:
     one-per-repo across worktrees — the engine build lease and the
     cached service jar both live in the git common dir for this reason.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        out = subprocess.run(
+        out = run_bounded(
             ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=5.0,
+            timeout=5.0,
         )
     except Exception as exc:  # noqa: BLE001 — no git, not on PATH, timed out
         _emit("debug", "verification_config_git_lookup_failed", error=str(exc))

@@ -291,9 +291,11 @@ def _run_captured(argv: list[str], *, env: dict[str, str], timeout: float) -> st
     the bash never inspects an exit code here either, only whether the
     captured text is non-empty.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, env=env
+        proc = run_bounded(
+            argv, timeout=timeout, env=env
         )
     except Exception:  # noqa: BLE001 — carried: a missing/hanging tool is "no output"
         return ""

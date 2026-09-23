@@ -276,6 +276,8 @@ def _coverage(bead_ids: list[str]) -> dict:
     # overridable via NX_CLOSE_GATE_DEADLINE_SECONDS (test seam, mirrors the
     # push-gate's NX_PUSH_GATE_DEADLINE_SECONDS) so tests can trip it fast and
     # deterministically with a slow stub nx rather than waiting out 3.5s.
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     DEADLINE_SECONDS = float(os.environ.get('NX_CLOSE_GATE_DEADLINE_SECONDS', '3.5') or '3.5')
     _start = time.monotonic()
 
@@ -365,7 +367,7 @@ def _coverage(bead_ids: list[str]) -> dict:
     t1_entries = []
     if shutil.which('nx'):
         try:
-            r = subprocess.run(['nx', 'scratch', 'list'], capture_output=True, text=True, timeout=_clamp_timeout(), env=_nx_env())
+            r = run_bounded(['nx', 'scratch', 'list'], timeout=_clamp_timeout(), env=_nx_env())
             if r.returncode == 0:
                 t1_reachable = True
                 t1_entries = _parse_entries(r.stdout)
@@ -583,12 +585,14 @@ def _active_close_rdr() -> str:
     script reaches for ``nx scratch list`` rather than search because the
     lookup is an exact tag match, not a semantic one.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     if shutil.which("nx") is None:
         return ""
     try:
-        r = subprocess.run(
+        r = run_bounded(
             ["nx", "scratch", "list"],
-            capture_output=True, text=True, timeout=5.0,
+            timeout=5.0,
             env=_nx_env(),
         )
     except Exception:  # noqa: BLE001 — carried: best-effort, absence is not a verdict
@@ -707,6 +711,8 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
     observable instead of producing an audit record nobody can trust and
     nobody was told is missing.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     if not ids:
         return
     if shutil.which("bd") is None:
@@ -715,9 +721,9 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
         return
     for bid in ids:
         try:
-            r = subprocess.run(
+            r = run_bounded(
                 ["bd", "set-state", bid, f"verification={state}", "--reason", reason],
-                capture_output=True, text=True, timeout=5.0,
+                timeout=5.0,
             )
             if r.returncode != 0:
                 _warn(f"could not stamp verification={state} for {bid}")

@@ -380,10 +380,12 @@ def _resolve_ref_sha(install_location: Path, ref: str, timeout: float) -> str | 
     absent, timeout). *timeout* is the caller's REMAINING share of the
     shared ``_GIT_TIMEOUT_S`` budget (nexus-konsk fix round 2), never
     the full constant -- see ``detect_ref_drift``."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["git", "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
-            capture_output=True, text=True, timeout=timeout,
+            timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         debug(f"ref resolve failed for {ref} in {install_location}: {exc}")

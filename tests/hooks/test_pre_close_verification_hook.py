@@ -233,6 +233,26 @@ def fake_bd(tmp_path):
 #: ``os.environ`` is process-global. Driving the port in process would
 #: mean mutating it per test, which is the hazard that made the ledger's
 #: contention seams environment variables in the first place.
+#: nexus-zptvf: the driver GUARDS STDOUT while the verb runs, because every
+#: production dispatch does. hooks.json wires this verb through ``nx-hook``,
+#: and ``nexus._hook_runtime.entry.main`` sets ``sys.stdout = sys.stderr``
+#: AND ``dup2``s the fd for the whole dispatch, writing only the envelope to
+#: the real stdout at the end. This driver used to call ``run()`` naked, which
+#: was indistinguishable from production for as long as nothing in the verb's
+#: path logged.
+#:
+#: That stopped being true when the verb's subprocess moved onto
+#: ``bounded_subprocess.run_bounded``, which emits a structlog warning on
+#: TIMEOUT -- and structlog's unconfigured default is ``PrintLoggerFactory``,
+#: which writes to stdout. The deadline tests below drive a deliberately slow
+#: ``nx`` to force exactly that timeout, so they were the tests that found it,
+#: as a JSONDecodeError parsing an envelope with a log line stuck to it.
+#:
+#: The verb is NOT given ``configure_hook_logging()`` instead, deliberately:
+#: that helper's own docstring says to call it only from a verb that already
+#: pays for structlog, since it costs ~0.06s against ~0.01s of interpreter
+#: startup, and this gate runs on every Bash call. That cost is the whole
+#: reason nexus-br31l exists.
 _PY_DRIVER = """
 import json, sys
 from nexus._hook_runtime._io import never_fail
@@ -245,7 +265,13 @@ except Exception:
     payload = None
 if not isinstance(payload, dict):
     payload = None
-result = never_fail(lambda: pre_close_verification.run(payload), "pre_close_verification")
+
+real_stdout = sys.stdout
+sys.stdout = sys.stderr
+try:
+    result = never_fail(lambda: pre_close_verification.run(payload), "pre_close_verification")
+finally:
+    sys.stdout = real_stdout
 if result.stdout is not None:
     sys.stdout.write(result.stdout + "\\n")
 sys.exit(result.exit_code)

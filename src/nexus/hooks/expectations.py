@@ -983,12 +983,13 @@ def _run_nx_bounded(args: list[str], timeout_s: float) -> tuple[str, int]:
     ``_expectations_run_bounded`` uses, so both fallback branches below key
     on the identical value.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
             timeout=timeout_s,
         )
         return proc.stdout or "", proc.returncode

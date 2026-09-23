@@ -88,10 +88,12 @@ _RDR_STEM_RE = re.compile(r"(?:rdr-?)?(\d+)", re.IGNORECASE)
 
 
 def _repo_root() -> Path | None:
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5,
+            timeout=5,
         )
         if result.returncode == 0:
             return Path(result.stdout.strip())
@@ -105,10 +107,12 @@ def _repo_name(root: Path) -> str:
     same derivation ``nx rdr preamble`` uses (``_preamble_resolve_repo``),
     so a linked worktree reads the repo's T2 project, not one named after
     the worktree directory (nexus-u1jxt.7). Falls back to *root*'s name."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, timeout=5,
+            timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
             return Path(result.stdout.strip()).resolve().parent.name
@@ -275,6 +279,8 @@ def _collection_exists(target: str) -> bool:
     ``threading.Thread(daemon=True)`` has no such handler -- the process
     can exit with it still running, which is exactly the property a
     fire-and-abandon timeout needs."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
         from nexus.db import make_t3  # noqa: PLC0415
 
@@ -299,9 +305,9 @@ def _collection_exists(target: str) -> bool:
     except Exception as exc:  # noqa: BLE001 — the hook must never fail; fall back to the listing
         _log_resolution_error("t3-exists", exc)
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["nx", "collection", "list"],
-            capture_output=True, text=True, timeout=_LISTING_TIMEOUT_S,
+            timeout=_LISTING_TIMEOUT_S,
         )
         if result.returncode == 0:
             return target in result.stdout
@@ -403,6 +409,8 @@ def _load_gated_commits(repo_name: str) -> dict[str, str]:
 
 def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, str], gated: dict[str, str]) -> list[str]:
     """Lines naming draft RDRs whose file tip is past the gated commit."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     lines: list[str] = []
     for path in rdr_files:
         rid = _extract_rdr_id(path)
@@ -422,9 +430,9 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
         if status.lower() not in ("draft", "open"):
             continue
         try:
-            tip = subprocess.run(
+            tip = run_bounded(
                 ["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)],
-                capture_output=True, text=True, timeout=10, check=False,
+                timeout=10,
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             continue

@@ -137,10 +137,12 @@ def _t1_clear_if_owned(t1) -> None:
 
 def _infer_repo() -> str:
     """Detect current repo name from git, or fall back to cwd name."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True, timeout=10,
+            check=True, timeout=10,
         )
         return Path(result.stdout.strip()).name
     except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller

@@ -163,12 +163,14 @@ def _session_start_time(claude_pid: int) -> float | None:
 
 def _bd_show(bead_id: str) -> str:
     """Return raw output of ``bd show <bead_id>``; empty string on failure."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     if not shutil.which("bd"):
         return ""
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["bd", "show", bead_id],
-            capture_output=True, text=True, timeout=5,
+            timeout=5,
         )
         return proc.stdout or ""
     except (subprocess.TimeoutExpired, OSError):

@@ -337,7 +337,7 @@ def test_slow_t3_answer_falls_back_to_the_listing_within_the_hook_budget(
     class _Done:
         returncode = 0
         stdout = "rdr__1-1__voyage-context-3__v1\n"
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", lambda *a, **k: _Done())
 
     started = time.monotonic()
     assert mod._collection_exists("rdr__1-1__voyage-context-3__v1")
@@ -384,7 +384,7 @@ def test_slow_t3_worker_cannot_hold_the_process_past_the_deadline(
     class _Done:
         returncode = 0
         stdout = ""
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", lambda *a, **k: _Done())
 
     before = {t.ident for t in threading.enumerate()}
     started = time.monotonic()

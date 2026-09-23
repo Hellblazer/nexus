@@ -84,19 +84,33 @@ one. :func:`test_detector_recognises_the_shapes_it_claims_to` is the
 replacement: a positive control over synthetic sources, including the
 near-misses that must NOT match.
 
-SCOPE EXCLUDES ``src/nexus/hooks/``, and this is temporary and deliberate.
-Those 26 sites (counted 2026-09-23, across 15 files) are the ones that can
-hang a user's session rather than a CLI command they can interrupt, so they
-are the most valuable to convert and the first that should come into scope.
-The figure read "24" from this file's first version until nexus-t10nc
-counted it; :func:`test_hooks_exclusion_names_its_reason` now asserts the
-directory still HOLDS watched sites, so the exclusion cannot quietly
-outlive the thing it excludes. They are excluded because
-nexus-t9klx is moving hook entry points between modules as this lands, and
-a per-file ratchet over a directory being restructured reds on the
-restructuring rather than on a defect. ADDING THEM IS OWED once t9klx
-closes; :data:`_HOOKS_EXCLUSION_IS_TEMPORARY` exists so that obligation is
-greppable rather than remembered.
+SCOPE IS NOW EVERY ``.py`` UNDER ``src/nexus``. ``hooks/`` was held out
+while nexus-t9klx moved hook entry points between modules, because a
+per-file ratchet over a directory being restructured reds on the
+restructuring rather than on a defect. t9klx closed, nexus-zptvf
+converted the 26 sites there, and the exclusion machinery was DELETED
+rather than switched off: a disabled exclusion is a thing that gets
+re-enabled by accident, and an exclusion never reports what it skipped,
+so nobody would notice.
+
+Those 26 were worth waiting for. They are the sites that hang a user's
+SESSION rather than a CLI command they can interrupt, and they hold the
+only MEASURED instance of the whole defect class:
+``hooks/verification_config.py`` running ``git rev-parse
+--git-common-dir`` with a 5.0 s timeout, wired on Stop, sampled still
+blocked at 25 s on qwentescence — which is why a Windows session answers
+and then sits.
+
+ONE THING DIFFERS IN ``hooks/`` AND A FUTURE CONVERTER WILL TRIP ON IT.
+The import is DEFERRED into the spawning function, not placed at module
+scope like everywhere else in ``src/nexus``. Hooks fire on every tool
+call, and a module-scope
+``from nexus.bounded_subprocess import run_bounded`` pulls structlog and
+about 231 further modules: measured on ``hooks/verification_config``,
+14 ms and 106 modules becomes 62-84 ms and 337. The deferred form pays
+that only on the rare path that actually shells out, and the measurement
+is in the noqa comment at each site so it is not re-litigated from
+memory.
 """
 
 from __future__ import annotations
@@ -110,14 +124,6 @@ pytestmark = pytest.mark.lint
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
-
-#: See the module docstring. Flipping this to False is the t9klx follow-up.
-_HOOKS_EXCLUSION_IS_TEMPORARY: bool = True
-
-#: Directory (relative to ``src/nexus``) held out of scope, with the bead
-#: that has to close before it comes in.
-_EXCLUDED_DIR = "hooks"
-_EXCLUDED_DIR_BEAD = "nexus-t9klx"
 
 #: Files that CANNOT route through ``run_bounded``, with the reason. This
 #: is not a deferral like ``hooks/`` -- these are permanent, and the
@@ -151,8 +157,14 @@ _UNCONVERTED: dict[str, int] = {}
 
 
 def _in_scope(path: pathlib.Path, root: pathlib.Path = SRC_ROOT) -> bool:
-    rel = path.relative_to(root)
-    return "__pycache__" not in path.parts and rel.parts[0] != _EXCLUDED_DIR
+    """Every ``.py`` under *root*. There is no held-out directory any more.
+
+    ``src/nexus/hooks/`` was excluded until nexus-zptvf; the ``root``
+    parameter stays because :func:`test_the_census_walk_finds_a_planted_file`
+    walks a synthetic tree.
+    """
+    del root  # only ``__pycache__`` is filtered now
+    return "__pycache__" not in path.parts
 
 
 def _aliases_of_subprocess_run(source: str) -> list[int]:
@@ -572,12 +584,12 @@ def test_the_census_walk_finds_a_planted_file(tmp_path: pathlib.Path) -> None:
     """
     root = tmp_path / "nexus"
     (root / "pkg").mkdir(parents=True)
-    (root / _EXCLUDED_DIR).mkdir()
     (root / "pkg" / "watched.py").write_text(
         "import subprocess\nsubprocess.run(a, capture_output=True, timeout=5)\n"
     )
     (root / "pkg" / "clean.py").write_text("import subprocess\nsubprocess.run(a)\n")
-    (root / _EXCLUDED_DIR / "held_out.py").write_text(
+    (root / "pkg" / "__pycache__").mkdir()
+    (root / "pkg" / "__pycache__" / "stale.py").write_text(
         "import subprocess\nsubprocess.run(a, capture_output=True, timeout=5)\n"
     )
 
@@ -585,42 +597,36 @@ def test_the_census_walk_finds_a_planted_file(tmp_path: pathlib.Path) -> None:
 
     assert census == {"nexus/pkg/watched.py": [2]}, (
         f"the census walk is wrong: {census}. It must find the planted call, skip "
-        f"the clean file, skip everything under {_EXCLUDED_DIR}/, and key the "
-        "result on the path relative to the repo root."
+        "the clean file, skip __pycache__, and key the result on the path "
+        "relative to the repo root."
     )
 
 
-def test_hooks_exclusion_names_its_reason() -> None:
-    """The temporary hold-out stays greppable and stays honest.
+def test_hooks_is_in_scope_and_stays_there() -> None:
+    """``src/nexus/hooks/`` is watched like everything else (nexus-zptvf).
 
-    Flipping ``_HOOKS_EXCLUSION_IS_TEMPORARY`` to False without bringing
-    ``src/nexus/hooks`` into scope is the failure this pins: that would turn
-    a deliberate, bead-linked deferral into a permanent silent blind spot
-    over the 24 most dangerous sites in the census.
+    It was held out while nexus-t9klx moved hook entry points between
+    modules, because a per-file ratchet over a directory being
+    restructured reds on the restructuring rather than on a defect. That
+    bead closed, the 26 sites converted, and the exclusion machinery was
+    DELETED rather than switched off -- a disabled exclusion is a thing
+    that gets re-enabled by accident, and an exclusion never reports what
+    it skipped, so nobody would notice.
+
+    This pins the outcome rather than the mechanism: the most dangerous
+    files in the census are reachable by the scan. They are the ones that
+    hang a user's SESSION rather than a CLI command they can interrupt --
+    the one measured Windows hang was hooks/verification_config.py, wired
+    on Stop, sampled still blocked at 25 s on a 5.0 s timeout.
     """
-    if _HOOKS_EXCLUSION_IS_TEMPORARY:
-        held_out = SRC_ROOT / _EXCLUDED_DIR
-        assert held_out.is_dir(), (
-            f"{_EXCLUDED_DIR} is excluded from this lint but no longer exists; "
-            "delete the exclusion"
-        )
-        assert _EXCLUDED_DIR_BEAD, "a temporary exclusion names the bead that ends it"
-        # The exclusion must still be excluding something. If hooks/ reaches
-        # zero on its own, the honest move is to bring it into scope, not to
-        # leave a deferral standing over an empty directory -- and nobody
-        # would notice, because an exclusion never reports what it skipped.
-        sites = sum(
-            len(_capture_with_timeout_calls(f.read_text()))
-            for f in held_out.rglob("*.py")
-            if "__pycache__" not in f.parts
-        )
-        assert sites > 0, (
-            f"{_EXCLUDED_DIR}/ no longer holds any capture+timeout call, so the "
-            f"exclusion is protecting nothing. Bring it into scope: flip "
-            f"_HOOKS_EXCLUSION_IS_TEMPORARY and drop it from _in_scope ({_EXCLUDED_DIR_BEAD})."
-        )
-        return
-    assert _in_scope(SRC_ROOT / _EXCLUDED_DIR / "__init__.py"), (
-        "the hooks exclusion was declared permanent but the directory is still "
-        "filtered out of _in_scope"
+    hooks = SRC_ROOT / "hooks"
+    assert hooks.is_dir(), "src/nexus/hooks is gone; this test needs rewriting"
+    assert _in_scope(hooks / "verification_config.py"), (
+        "hooks/ is filtered out of _in_scope again. It holds the only measured "
+        "instance of the defect this lint watches; if it must be held out again, "
+        "say which bead ends the deferral and assert it still excludes something."
+    )
+    scanned = {p.name for p in hooks.rglob("*.py") if _in_scope(p)}
+    assert "verification_config.py" in scanned and len(scanned) > 5, (
+        f"the walk reaches only {len(scanned)} file(s) under hooks/"
     )

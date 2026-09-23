@@ -280,12 +280,14 @@ def uv_receipt_present() -> bool:
     Absence of the receipt means a dev/editable tree (or no uv): SKIP, so we
     never clobber a developer checkout. All edge cases fail-safe to False.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     if shutil.which("uv") is None:
         return False
     try:
-        out = subprocess.run(
+        out = run_bounded(
             ["uv", "tool", "dir"],
-            capture_output=True, text=True, timeout=10, check=True,
+            timeout=10, check=True,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"`uv tool dir` failed: {exc}")
@@ -300,12 +302,14 @@ def installed_nx_version() -> str | None:
     ``nx --version`` prints e.g. ``nx, version 5.7.0``. Returns None when nx
     is absent or the output cannot be parsed.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     if shutil.which("nx") is None:
         return None
     try:
-        out = subprocess.run(
+        out = run_bounded(
             ["nx", "--version"],
-            capture_output=True, text=True, timeout=15, check=True,
+            timeout=15, check=True,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"`nx --version` failed: {exc}")
@@ -347,9 +351,11 @@ def satisfies(installed: str | None, target: str) -> bool:
 
 def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
     """Run a command; return True on exit 0, False otherwise. Never raises."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+        result = run_bounded(
+            cmd, timeout=timeout,
         )
         if DEBUG and result.stdout:
             debug(f"{cmd[0]} stdout: {result.stdout[:500]}")
@@ -379,9 +385,11 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
     upgrade`` itself (the reason is printed instead), so this is a
     durable record of the outcome, not a gate. No CLI binary upgrade and
     no marker write: ref drift is not a CLI-version fact."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        result = subprocess.run(
-            ["nx", "upgrade"], capture_output=True, text=True, timeout=timeout,
+        result = run_bounded(
+            ["nx", "upgrade"], timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"nx upgrade raised for ref-drift reinstall: {exc}")

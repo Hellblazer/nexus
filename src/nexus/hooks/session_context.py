@@ -117,11 +117,11 @@ def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | 
     Run a command and return its stdout, or None on failure.
     Stderr is captured; printed to stderr only when DEBUG is set.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        result = subprocess.run(
+        result = run_bounded(
             args,
-            capture_output=True,
-            text=True,
             timeout=timeout,
             cwd=cwd,
         )

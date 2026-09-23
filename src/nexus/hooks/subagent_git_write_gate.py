@@ -1140,14 +1140,16 @@ def _in_linked_worktree(cwd: str) -> bool | None:
     """True iff ``cwd`` is inside a linked git worktree (not the primary
     checkout). ``None`` when undeterminable (not a repo, git missing,
     timeout) — the caller treats None as fail-open."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+
     try:
-        git_dir = subprocess.run(
+        git_dir = run_bounded(
             ["git", "rev-parse", "--git-dir"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd, timeout=5,
         )
-        common = subprocess.run(
+        common = run_bounded(
             ["git", "rev-parse", "--git-common-dir"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd, timeout=5,
         )
     except Exception:  # noqa: BLE001 — undeterminable: fail open
         return None
