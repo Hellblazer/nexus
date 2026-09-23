@@ -9,6 +9,7 @@ metadata are injectable, no real processes are touched.
 """
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2733,10 +2734,13 @@ class TestConvergeServiceAutostartUnit:
         assert backups[0].read_text() == original_content
         assert str(backups[0]) in actions[0]
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
     def test_backup_write_failure_refuses_to_converge(self, tmp_path):
         """A backup that cannot be written must refuse the whole converge
         rather than proceed and risk destroying the only copy of a
         hand-edited unit."""
+        if os.geteuid() == 0:
+            pytest.skip("permission bits are not enforced against root")
         dest = self._drifted(tmp_path)
         tmp_path.chmod(0o555)
         try:
