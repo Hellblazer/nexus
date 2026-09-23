@@ -1,0 +1,36 @@
+# nexus-veh77 plan, run on each host shape.
+# label       server_delay_s submit kind   reps [sessionstart_sleep_s]
+# Controls: the detector sees a fire when the server is long connected, and a
+# miss when the server can never connect.
+pos_control   0     8000  bash   2
+neg_control   0     3000  broken 2
+# The submit-delay ladder. The server connects ~8 s after launch, so any rung
+# whose hooks fire inside that window tests whether turn 1 waits for it.
+ladder_s8     8     ta    bash   3
+ladder_s8     8     0     bash   4
+ladder_s8     8     100   bash   4
+ladder_s8     8     250   bash   4
+ladder_s8     8     500   bash   4
+ladder_s8     8     1000  bash   4
+ladder_s8     8     2000  bash   4
+# Connect-latency threshold at an instant submit: where each event flips.
+# On WSL2 (qwentescence, 2026-09-23) a 0 ms submit lost the Enter in 18 of 18
+# runs, so the WSL leg ran these rungs, midturn, ssgate and agent at 100 ms.
+thresh        0     0     bash   3
+thresh        0.5   0     bash   3
+thresh        1     0     bash   3
+thresh        1.5   0     bash   3
+thresh        2     0     bash   3
+thresh        3     0     bash   3
+# Undelayed probe: where the first-request window closes.
+edge          0     250   bash   3
+edge          0     500   bash   3
+# Connection lands part way through turn 1 (four Bash calls over ~12 s).
+midturn       3     0     long   3
+# SessionStart gating: a submitted prompt waits for SessionStart hooks.
+ssgate        8     0     bash   2  4
+ssgate        8     0     bash   2  12
+# Subagent events (PreToolUse Agent, SubagentStart, SubagentStop).
+agent         8     0     agent  2
+agent         1     0     agent  2
+agent         8     0     agent  1  12

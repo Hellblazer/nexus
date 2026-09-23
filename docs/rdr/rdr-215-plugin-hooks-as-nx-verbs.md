@@ -1080,3 +1080,53 @@ registration module on the existing server, and one package.
   from `python3` to `uv`, which Serena's `uvx` launch already required; a
   user who runs sn for Context7 alone now needs uv for the hooks. The shape
   lint in `tests/test_hooks_json_shape_lint.py` pins the argv whole.
+- 2026-09-23 (nexus-veh77): the interactive delay ladder that Critical
+  Assumptions required before Phase 2 was run, and it REFUTES "no
+  command-tier twin is needed" for interactive sessions. CLI 2.1.280, macOS
+  (this dev Mac, 67 runs) and WSL2 (qwentescence, `nexus` user, 78 runs).
+  Harness: `tests/cc-validation/connection-race-ladder/` (a probe MCP server
+  with a start delay stands in for `nx-mcp`; each event carries a
+  command-tier twin as ground truth; verdicts come from the twin log, the
+  probe's own log and `--debug-file`, never the pane). Raw results: T2
+  `nexus/veh77-interactive-ladder-results-2026-09-23`.
+  (a) Interactive has NO connection barrier. Headless `claude -p` holds
+  turn 1 until the connection attempt resolves; interactive starts turn 1
+  about 50 ms after submit whatever the server's state. With the server
+  connecting 8 s after launch, every submit rung from 0 to 2000 ms missed
+  every tool-tier event: macOS 24/24 runs, WSL2 20/20 (its 0 ms rung lost the
+  Enter, below). Controls held on both hosts: server connected long before
+  submit, 2/2 fired; server exits before serving, 2/2 missed.
+  (b) The skip is decided per MODEL REQUEST, not per event. A `PreToolUse`
+  or `PostToolUse` from a request that began before the server connected is
+  skipped even when the connection finished seconds earlier: on macOS, with
+  submit at 0 ms and the probe connecting 0.15 to 2.1 s after the input box
+  appeared, the first `PreToolUse` (at +1.8 to +2.7 s) missed 15/15. With four Bash calls spread over 12 s and the server
+  connecting at +3.2 s, the first call's `PreToolUse` and `PostToolUse`
+  missed and every later call's fired (macOS 3/3, WSL2 2/2). `Stop` fires
+  when the turn's last request began after the connection. `SubagentStart`
+  fired whenever the server was connected when the subagent started (3/3);
+  `SubagentStop` for a subagent dispatched by a pre-connection request
+  missed 3/3 even so.
+  (c) The window is short but real. With a probe that needs no start delay,
+  macOS missed first-request hooks at a 0 ms submit (3/3) and fired at
+  250 ms and 500 ms (6/6); WSL2 missed at 100 ms and 250 ms (5/5) and fired
+  at 500 ms (3/3). The input box appears before any server connects.
+  (d) What closes the window today is incidental: a submitted prompt waits
+  for the SessionStart command hooks. A 12 s SessionStart hook against an
+  8 s server fired everything (macOS 3/3, WSL2 3/3); a 4 s hook missed
+  everything (2/2 each). In the one real conexus session with a debug log on
+  this Mac (2026-09-20, CLI 2.1.278) `nx-mcp` connected 2.1 s after launch,
+  its connection queued about 0.9 s behind other plugin servers, and the
+  last SessionStart hook finished at 8.4 s, so that session was covered.
+  The cover is the SessionStart verbs being slow, which this RDR's own
+  timing work pushes the other way.
+  Tool-tier entries exposed: `PreToolUse Agent|Task` (the RDR-184 EXPECT
+  writer), the `SubagentStop` tuple projector, `Stop` verification,
+  `PostToolUse Write|Edit`, and the three `SubagentStart` entries when the
+  server is not up. `PostCompact` and `StopFailure` were not measured. The
+  Risks mitigation is now a design question: twin these entries on the
+  command tier, or make a SessionStart verb wait for `nx-mcp` to connect.
+  Not decided here.
+  Two harness facts: text typed before the input box appears is kept but
+  its Enter is dropped (6/6), and on WSL2 an Enter sent 0 ms after the
+  status bar appeared was dropped 18/18 (at 100 ms, 5 of 31).
