@@ -491,7 +491,14 @@ def get_mineru_configured_fixed_port(repo_root: Path | None = None) -> int | Non
     parsed = urllib.parse.urlparse(configured)
     if parsed.hostname not in ("127.0.0.1", "localhost"):
         return None
-    return parsed.port
+    try:
+        # nexus-cd1k0.16 finding (3): ParseResult.port raises ValueError for
+        # a present-but-unparseable port segment (e.g. "80a0") rather than
+        # returning None -- this function's own docstring documents "an
+        # unparseable URL" as a None case, not a raise.
+        return parsed.port
+    except ValueError:
+        return None
 
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
     return get_pdf_config(repo_root).mineru_table_enable
