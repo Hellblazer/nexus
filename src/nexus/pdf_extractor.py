@@ -515,10 +515,32 @@ _VISUAL_LABEL_RE = re.compile(r"^\s*((?:Table|Figure|Fig\.?)\s*[A-Za-z]?\d+[a-z]
 #: docling emits no content_list at all.
 _DOCLING_IMAGE_PLACEHOLDER_RE = re.compile(r"<!--\s*image\s*-->")
 
+#: The FIGURE-only shape of the caption-adjacency label (round-2 critique
+#: on nexus-9zly6). Deliberately excludes "Table": a bare "![...]" /
+#: "<!-- image -->" reference is presented to the reader as an image, so a
+#: nearby "Table N" caption must never relabel it -- a wrong specific
+#: label ("Table 9 not extracted...") is worse than the generic marker.
+#: "Chart" is included because MinerU/docling captions use it for plots
+#: that are not literally titled "Figure".
+_FIGURE_CAPTION_RE = re.compile(
+    r"^\s*((?:Figure|Fig\.?|Chart)\s*[A-Za-z]?\d+[a-z]?|(?:Figure|Chart)\s+[IVXLC]+)\b"
+)
+
+#: A visual reference/placeholder (either shape) with nothing but
+#: whitespace after it, used to detect "this reference is immediately
+#: preceded by ANOTHER one" -- see :func:`_caption_label_after`.
+_TRAILING_VISUAL_REF_RE = re.compile(
+    r"(?:!\[[^\]]*\]\([^)\s]+\)|<!--\s*image\s*-->)\s*$"
+)
+
 #: How far past a marker's position to look for an adjacent caption line
 #: (nexus-9zly6 GAP 1/2). Generous enough for a caption on the very next
 #: non-blank line without scanning the rest of the page.
 _CAPTION_LOOKAHEAD_CHARS = 200
+
+#: How far back from a reference to look for a preceding, uncaptioned
+#: visual reference (round-2 critique's adjacency guard).
+_PRECEDING_REF_LOOKBACK_CHARS = 200
 
 
 def _visual_label(entry: dict, kind: str) -> str:
@@ -531,9 +553,9 @@ def _visual_label(entry: dict, kind: str) -> str:
     return kind
 
 
-def _caption_label_after(text: str, pos: int) -> str | None:
-    """The visual label (``"Fig. 2"``, ``"Table 6"``) from the caption line
-    immediately following *pos* in *text*, or ``None``.
+def _caption_label_after(text: str, start: int, end: int) -> str | None:
+    """The FIGURE label (``"Fig. 2"``, ``"Chart 4"``) from the caption line
+    immediately following *end* in *text*, or ``None``.
 
     nexus-9zly6 GAP 1: when a content_list lookup misses (or, for docling,
     never existed at all), the label the query-lands-on-the-gap contract in
@@ -541,22 +563,38 @@ def _caption_label_after(text: str, pos: int) -> str | None:
     Both MinerU and docling put an unrecognised visual's caption directly
     under its own reference/placeholder in the page markdown, so the label
     usually survives in the text even when the structured lookup does not.
+
+    Two guards keep a WRONG specific label from ever being worse than the
+    generic marker (round-2 critique):
+
+    - *start* is the reference's own match start. If the text immediately
+      before it (skipping only whitespace) is ANOTHER visual reference,
+      this one is part of an uncaptioned run -- e.g. two images stacked
+      before their captions -- and any caption that follows belongs to
+      that ambiguity, not unambiguously to *this* reference. Refuses
+      outright rather than guess.
+    - Only :data:`_FIGURE_CAPTION_RE` is tried, never the Table-inclusive
+      :data:`_VISUAL_LABEL_RE` -- a "Table N" caption must never label one
+      of these bare references, which are presented to the reader as
+      images.
     """
-    tail = text[pos : pos + _CAPTION_LOOKAHEAD_CHARS].lstrip("\r\n \t")
+    before = text[max(0, start - _PRECEDING_REF_LOOKBACK_CHARS) : start]
+    if _TRAILING_VISUAL_REF_RE.search(before):
+        return None
+    tail = text[end : end + _CAPTION_LOOKAHEAD_CHARS].lstrip("\r\n \t")
     first_line = tail.split("\n", 1)[0]
-    m = _VISUAL_LABEL_RE.match(first_line)
+    m = _FIGURE_CAPTION_RE.match(first_line)
     return m.group(1).strip() if m else None
 
 
 def _generic_visual_marker(label: str | None) -> str:
     """The bracketed marker for a visual with no content_list entry: the
-    caption-derived *label* in the same shape ``_repl`` below would have
-    produced from a content_list entry, or the bare generic marker when no
-    label could be derived at all."""
+    caption-derived *label* (always figure-shaped -- see
+    :func:`_caption_label_after`) in the same shape ``_repl`` below would
+    have produced from an "image" content_list entry, or the bare generic
+    marker when no label could be derived at all."""
     if label is None:
         return "[image not indexed as text]"
-    if label.lower().startswith("table"):
-        return f"[{label} not extracted as text; values not indexed]"
     return f"[{label} is an image; not indexed as text]"
 
 
@@ -618,24 +656,35 @@ def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
         ref = m.group(1)
         entry = by_path.get(ref) or by_path.get(ref.rsplit("/", 1)[-1])
         if entry is None:
-            return _generic_visual_marker(_caption_label_after(md, m.end()))
+            return _generic_visual_marker(_caption_label_after(md, m.start(), m.end()))
         matched_paths.add(entry.get("img_path", ""))
         return _marker_for_entry(entry)
 
     out = _MD_IMAGE_REF_RE.sub(_repl, md) if md and "![" in md else (md or "")
 
     trailing: list[str] = []
-    seen: set[str] = set()
+    seen_paths: set[str] = set()
     for entry in content_list:
+        # nexus-9zly6 round-2 critique: scoped to "table"/"image" entries
+        # ONLY -- an "equation" (or any other) entry never carries an
+        # img_path either, and sweeping it in here would mislabel a
+        # properly-extracted formula as an unindexed image.
+        if entry.get("type") not in ("table", "image"):
+            continue
         img_path = entry.get("img_path")
-        if not img_path or img_path in matched_paths or img_path in seen:
+        if img_path and (img_path in matched_paths or img_path in seen_paths):
             continue
         if entry.get("type") == "table" and entry.get("table_body"):
             # Already extracted as HTML -- by design carries no "![...]"
             # reference anywhere (this function's own docstring), so its
             # absence from md is the expected shape, not an orphan.
             continue
-        seen.add(img_path)
+        # An entry with no img_path can never match a "![...]" reference
+        # by construction, so it is unconditionally an orphan -- every one
+        # gets its own marker, never deduped against img_path (there is
+        # none to dedupe on).
+        if img_path:
+            seen_paths.add(img_path)
         trailing.append(_marker_for_entry(entry))
     if trailing:
         out = f"{out}\n\n" + "\n\n".join(trailing) if out else "\n\n".join(trailing)
@@ -658,7 +707,7 @@ def _mark_unextracted_visuals_docling(md: str) -> str:
         return md
 
     def _repl(m: re.Match) -> str:
-        return _generic_visual_marker(_caption_label_after(md, m.end()))
+        return _generic_visual_marker(_caption_label_after(md, m.start(), m.end()))
 
     return _DOCLING_IMAGE_PLACEHOLDER_RE.sub(_repl, md)
 
