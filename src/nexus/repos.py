@@ -23,11 +23,12 @@ Per-decision references:
   resolve_path``. Phase 1.5 backfill incompleteness produces
   legitimate fallback fires during cutover; promotion to WARN
   happens in Phase 2b (``nexus-tts0d.5``) once the threshold is hit.
-- **OQ-5 lock**: when the catalog has a ``knowledge__*`` collection
-  registered to a repo's owner, that is the canonical
-  ``docs_collection`` — the user's ``--corpus knowledge`` opt-in
-  is the most recent intent and the reader preserves it without
-  any schema change.
+- **OQ-5 lock, RETIRED (nexus-l52ms)**: used to prefer a
+  ``knowledge__*`` collection registered to a repo's owner as the
+  canonical ``docs_collection``. A ``docs``-content-type row is the
+  only candidate for that slot now — a knowledge collection sharing
+  the owner id is not necessarily the repo's own docs corpus. See
+  ``from_catalog``'s docstring for the live incident that closed this.
 
 Return shape mirrors ``RepoRegistry.get`` so consumer code can shift
 the import one PR at a time without changing field names.
@@ -104,10 +105,17 @@ def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
     ``repo``. Returns a partial record (only fields the catalog can
     answer for) otherwise.
 
-    OQ-5 lock: if multiple ``docs``-content-type collections are
-    registered to the owner, prefer a ``knowledge__*`` name over a
-    ``docs__*`` name — the user's ``--corpus knowledge`` opt-in is
-    the canonical intent.
+    OQ-5 lock RETIRED (nexus-l52ms): a ``knowledge__*`` collection is
+    never a candidate for the docs slot, however it sorts. It used to
+    win the docs slot over a real ``docs__*`` collection under the
+    theory that a ``knowledge__*`` name meant the user re-indexed with
+    ``--corpus knowledge`` — but a knowledge collection sharing the
+    repo's owner id is not necessarily related to the repo's own docs
+    corpus at all (e.g. rdr-close post-mortem archival, which shares an
+    owner id by coincidence, not intent). Measured live: nexus-repo
+    markdown sat in ``knowledge__1-1`` from 2026-09-08 for this exact
+    reason before docs moved to the synth name on 09-10. Only a
+    genuine ``docs``-content-type row can win the docs slot now.
     """
     from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance (repo_identity)
 
@@ -130,7 +138,10 @@ def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
     raw_colls = cat.collections_by_owner(owner_id)
     # Sort DESC by name to match the SQLite ORDER BY name DESC semantics.
     rows = sorted(
-        [(c.get("name", ""), c.get("content_type", "")) for c in raw_colls],
+        [
+            (c.get("name", ""), c.get("content_type", ""), c.get("superseded_by", ""))
+            for c in raw_colls
+        ],
         key=lambda t: t[0],
         reverse=True,
     )
@@ -138,19 +149,22 @@ def from_catalog(repo: Path, *, cat: "CatalogReader") -> RepoRecord | None:
     code = ""
     docs = ""
     rdr = ""
-    knowledge = ""
-    for col_name, content_type in rows:
+    for col_name, content_type, superseded_by in rows:
+        # nexus-l52ms: exclude superseded rows from every slot, the same
+        # non-live exclusion collectionForTuple already applies engine-side
+        # (collections_by_owner's lifecycle_state="live" filter already
+        # excludes quarantine rows; superseded_by is a separate axis it does
+        # not cover).
+        if superseded_by:
+            continue
         if content_type == "code" and not code:
             code = col_name
         elif content_type == "rdr" and not rdr:
             rdr = col_name
         elif content_type == "docs" and not docs:
             docs = col_name
-        elif content_type == "knowledge" and not knowledge:
-            knowledge = col_name
 
-    # OQ-5: knowledge wins over docs for the docs_collection slot.
-    docs_canonical = knowledge or docs
+    docs_canonical = docs
 
     # Fetch head_hash from owners (RDR-137 Phase 1.5b column).
     # nexus-qnp5s: get_owner_by_prefix() is implemented on both SQLite
