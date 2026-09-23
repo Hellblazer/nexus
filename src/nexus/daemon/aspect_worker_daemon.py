@@ -463,7 +463,27 @@ class AspectWorkerDaemon:
         if supervisor is not None:
             # A fenced loser does not own the record; mark/relinquish are
             # owner-token-guarded no-ops there, but skip them to avoid noise.
-            if not supervisor.fenced and supervisor.record is not None:
+            #
+            # nexus-cd1k0.6 review-wave2 follow-up: this used to re-read
+            # `supervisor.fenced` LIVE here, while the reclaim-sweep guard
+            # above uses `fenced`, captured ONCE at the top of this method.
+            # A fence transition landing in the window between that
+            # capture and this check (the heartbeat thread's last tick
+            # before it was joined, or -- with the join already done by
+            # this point -- any other path that could still flip the
+            # supervisor's own `fenced` flag) made the two guards
+            # disagree: the reclaim sweep decided under the PRE-fence
+            # answer while this decided under the POST-fence one. Both
+            # guards now use the SAME single captured value, so they can
+            # never disagree with each other -- the only question stop()
+            # answers is "was this daemon fenced when its shutdown
+            # began", not "is it fenced right now at every checkpoint".
+            # Safe even when this races the true state: mark_shutting_down
+            # /relinquish are already owner-token-guarded no-ops on a
+            # record this daemon no longer owns (the comment above), so a
+            # captured-False call against an actually-just-fenced record
+            # costs nothing beyond a redundant round trip.
+            if not fenced and supervisor.record is not None:
                 try:
                     # nexus-cd1k0 review round 3 finding 6 (sibling of the
                     # storage-service fix): both calls previously took no

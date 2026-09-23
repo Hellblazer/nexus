@@ -202,6 +202,55 @@ def test_stop_runs_final_reclaim_when_not_fenced(tmp_path: Path) -> None:
     assert queue.reclaim_calls == calls_before_stop + 1
 
 
+class _FencesDuringStopWorker(_FakeWorker):
+    """A worker whose ``stop()`` simulates a heartbeat tick's fence landing
+    WHILE it drains -- after ``fenced`` was captured at the top of
+    ``AspectWorkerDaemon.stop()``, before the later mark/relinquish guard
+    is reached. ``daemon`` is set post-construction (the daemon does not
+    exist yet when the worker_factory builds this instance)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.daemon: "AspectWorkerDaemon | None" = None
+        self.fenced_applied = False
+
+    def stop(self, timeout: float = 10.0) -> None:
+        super().stop(timeout=timeout)
+        if self.daemon is not None and self.daemon._supervisor is not None:
+            self.daemon._supervisor.fenced = True
+            self.fenced_applied = True
+
+
+def test_mark_relinquish_uses_the_same_captured_fenced_value_as_the_reclaim_sweep(
+    tmp_path: Path,
+) -> None:
+    """nexus-cd1k0.6 review-wave2 follow-up: `fenced` was captured ONCE at
+    the top of stop() for the reclaim-sweep guard, but the later
+    mark/relinquish guard re-read `supervisor.fenced` LIVE -- a fence
+    transition landing in the window between the capture and that later
+    check (e.g. a heartbeat tick completing while the worker drains) made
+    the two guards disagree: the reclaim sweep ran under the PRE-fence
+    answer while mark/relinquish used the POST-fence one. Both guards
+    must use the single value captured at the top, so a daemon that was
+    NOT fenced when stop() started still relinquishes its lease even if
+    it becomes fenced moments later mid-drain."""
+    worker = _FencesDuringStopWorker()
+    queue = _RecordingQueue()
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
+                           worker_factory=lambda: worker, queue_factory=lambda: queue)
+    d.start()
+    worker.daemon = d
+    assert d.is_fenced() is False  # not fenced when stop() will capture it
+
+    d.stop()
+
+    assert worker.fenced_applied is True, "the mid-stop race did not actually fire"
+    assert _registry(tmp_path).discover("tenant-A") is None, (
+        "mark_shutting_down/relinquish must still run, using the captured "
+        "pre-fence value, not the live post-fence one"
+    )
+
+
 def test_cli_spawn_entrypoint_wires_run_with_tenant(tmp_path, monkeypatch) -> None:
     """`nx daemon aspect-worker start --tenant T` is the Phase-1 spawn entrypoint
     (Phase 2's enqueue hook Popens it). It must resolve and call
