@@ -1235,6 +1235,125 @@ class TestCheckTupleProjection:
         assert "agent_id=x" not in out
 
 
+class TestCheckGhostSweep:
+    """Direct unit tests of ``_run_check_ghost_sweep`` (nexus-29drn: Sam's
+    ruling adding an ``nx doctor`` row alongside the ``nx catalog
+    sweep-ghosts`` verb). Same shape as ``TestCheckTupleProjection`` above:
+    no dedicated ``--check-*`` flag, runs only in the default supplementary
+    sweep, called directly (no ``CliRunner``).
+
+    nexus-7zhag doctrine (a NEW doctor row must be not-applicable on a
+    virgin box, never allowlisted in the fresh-install MVV): a box where
+    the catalog writer cannot be resolved or the engine cannot answer this
+    call at all (unreachable, or an engine older than nexus-29drn's route)
+    reads as not-applicable, never a red/warn line.
+    """
+
+    def test_writer_unreachable_is_not_applicable(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        def _boom():
+            raise RuntimeError("no engine configured")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", _boom)
+
+        _run_check_ghost_sweep()
+        out = capsys.readouterr().out
+        assert "not applicable" in out
+        assert "[!]" not in out
+        assert "[✓]" not in out
+
+    def test_zero_ghosts_reads_clean(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        class _Writer:
+            def ghost_sweep(self, *, dry_run):
+                assert dry_run is True
+                return {"scanned": 4, "ghosts_deleted": 0, "marked_dormant": 0,
+                        "quarantine_held": 0, "ghost_names": [], "dormant_names": [],
+                        "dry_run": True}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda: _Writer())
+
+        _run_check_ghost_sweep()
+        out = capsys.readouterr().out
+        assert "[✓]" in out
+        assert "Ghost collections: 0" in out
+
+    def test_nonzero_ghosts_names_the_count_and_the_verb(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        class _Writer:
+            def ghost_sweep(self, *, dry_run):
+                return {"scanned": 10, "ghosts_deleted": 3, "marked_dormant": 1,
+                        "quarantine_held": 0,
+                        "ghost_names": ["a", "b", "c"], "dormant_names": ["d"],
+                        "dry_run": True}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda: _Writer())
+
+        _run_check_ghost_sweep()
+        out = capsys.readouterr().out
+        assert "[!]" in out
+        assert "3" in out
+        assert "sweep-ghosts --apply" in out
+
+    def test_dry_run_true_is_always_passed_never_mutates(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        calls: list[bool] = []
+
+        class _Writer:
+            def ghost_sweep(self, *, dry_run):
+                calls.append(dry_run)
+                return {"scanned": 0, "ghosts_deleted": 0, "marked_dormant": 0,
+                        "quarantine_held": 0, "ghost_names": [], "dormant_names": [],
+                        "dry_run": dry_run}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda: _Writer())
+
+        _run_check_ghost_sweep()
+        assert calls == [True]
+
+
+def test_ghost_sweep_row_registered_in_supplementary_checks() -> None:
+    """Registration proof, mirroring
+    ``test_tuple_projection_row_registered_in_supplementary_checks``."""
+    import inspect
+
+    from nexus.commands.doctor import _SUPPLEMENTARY_CHECK_NAMES, _run_supplementary_checks
+
+    assert "ghost-sweep" in _SUPPLEMENTARY_CHECK_NAMES
+    source = inspect.getsource(_run_supplementary_checks)
+    assert '"ghost-sweep": _run_check_ghost_sweep' in source
+
+
+def test_ghost_sweep_row_absent_from_fresh_install_mvv_allowlist() -> None:
+    """nexus-7zhag doctrine, mirroring
+    ``test_tuple_projection_row_absent_from_fresh_install_mvv_allowlist``:
+    a NEW doctor row must resolve not-applicable/clean on a virgin box,
+    never gaining an entry in ``tests/e2e/fresh-install-mvv.sh``'s doctor
+    warnings allowlist."""
+    import re as _re
+
+    mvv_path = Path(__file__).resolve().parent / "e2e" / "fresh-install-mvv.sh"
+    source = mvv_path.read_text(encoding="utf-8")
+    match = _re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
+    assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
+    allowlist_regex = match.group(1)
+    assert "ghost-sweep" not in allowlist_regex
+    assert "ghost_sweep" not in allowlist_regex
+
+
 def test_tuple_projection_row_registered_in_supplementary_checks() -> None:
     """Registration proof (mirrors ``test_all_three_rows_are_registered_
     in_run_health_checks`` in ``tests/test_health_tuple_doctor_rows.py``,

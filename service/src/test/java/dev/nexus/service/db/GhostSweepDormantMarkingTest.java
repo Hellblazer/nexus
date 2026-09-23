@@ -792,6 +792,99 @@ class GhostSweepDormantMarkingTest {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // nexus-29drn: dry-run mode reuses the SAME classification walk (no
+    // reimplemented predicate) but never mutates. TESTS: a would-be-ghost
+    // row is classified and named, but neither deleted nor evicted; a
+    // would-be-dormant row is classified and named, but its lifecycle_state
+    // is untouched.
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(70)
+    void dryRun_unreferencedRow_classifiedButNotDeleted() throws Exception {
+        String tenant = "ghost-sweep-dryrun-unref";
+        String coll = "knowledge__gs-dryrun-unref__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, coll);
+        }
+        CollectionRegistry.markKnown(tenant, coll,
+            new CollectionRow("knowledge", "gs-dryrun-unref", "minilm-l6-v2-384", 384, "live"));
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant, true);
+
+        assertThat(result.scanned()).isEqualTo(1);
+        assertThat(result.ghostsDeleted())
+            .as("dry-run still COUNTS the would-be ghost -- same predicate as the real sweep")
+            .isEqualTo(1);
+        assertThat(result.markedDormant()).isEqualTo(0);
+        assertThat(result.ghostNames()).containsExactly(coll);
+        assertThat(result.dormantNames()).isEmpty();
+        assertThat(CollectionRegistry.isKnown(tenant, coll))
+            .as("dry-run must NOT evict the registry cache -- nothing actually changed")
+            .isTrue();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))))
+                .as("dry-run must NOT delete the row").isTrue();
+        }
+    }
+
+    @Test @Order(71)
+    void dryRun_referencedNoStatsRow_classifiedButNotMarkedDormant() throws Exception {
+        String tenant = "ghost-sweep-dryrun-dormant";
+        String coll = "knowledge__gs-dryrun-dormant__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
+        }
+        CollectionRegistry.markKnown(tenant, coll,
+            new CollectionRow("knowledge", "gs-dryrun-dormant", "minilm-l6-v2-384", 384, "live"));
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant, true);
+
+        assertThat(result.markedDormant()).isEqualTo(1);
+        assertThat(result.ghostsDeleted()).isEqualTo(0);
+        assertThat(result.dormantNames()).containsExactly(coll);
+        assertThat(result.ghostNames()).isEmpty();
+        assertThat(CollectionRegistry.cached(tenant, coll))
+            .as("dry-run must NOT evict the registry cache").isPresent();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne();
+            assertThat(row.value1()).as("dry-run must NOT write lifecycle_state").isEqualTo("live");
+        }
+    }
+
+    @Test @Order(72)
+    void oneArgOverload_stillMutates_backwardCompatible() throws Exception {
+        // nexus-29drn: the pre-existing 1-arg entry point (ensureGhostSweepRanOnce's
+        // caller) must keep mutating exactly as before -- it delegates to the 2-arg
+        // form with dryRun=false, never silently becoming a preview.
+        String tenant = "ghost-sweep-onearg-still-mutates";
+        String coll = "knowledge__gs-onearg-mutates__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, coll);
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.ghostsDeleted()).isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))))
+                .as("the 1-arg overload must still physically delete").isFalse();
+        }
+    }
+
     // ── fixture helpers (typed jOOQ DSL only, mirrors CatalogRenameCollectionTest) ──
 
     private static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes,

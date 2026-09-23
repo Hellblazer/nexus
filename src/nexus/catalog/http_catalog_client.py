@@ -1756,6 +1756,42 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             idempotent=False,
         ) or {}
 
+    def ghost_sweep(self, *, dry_run: bool = True) -> dict:
+        """POST /v1/catalog/ghost-sweep — the operator-facing caller for the
+        engine's RDR-204 ghost sweep (nexus-29drn, Sam's ruling 2026-09-23:
+        an operator CLI verb, backing ``nx catalog sweep-ghosts``).
+
+        The engine already runs this sweep automatically, at most once per
+        tenant for the life of the estate (``ensureGhostSweepRanOnce``'s
+        durable marker), so any collection that BECOMES a ghost afterwards
+        accumulates with nothing to collect it until the marker's version is
+        deliberately bumped (nexus-29drn). This route gives an operator a
+        way to run the SAME classification on demand, either as a preview
+        or to actually reclaim, without touching that marker at all — an
+        operator-triggered sweep here never marks the automatic trigger as
+        having run, so it fires at most once regardless of how many times
+        this is called.
+
+        ``dry_run=True`` (the default) classifies every collection row
+        exactly as the real sweep would — same predicate, same quarantine
+        hold, same dormant check — WITHOUT mutating anything. ``dry_run=False``
+        physically deletes/marks-dormant. Both modes call the same engine
+        method; there is no separate preview implementation to drift from
+        the real one.
+
+        Wire contract: POST body ``{"dry_run": bool}``; the engine's JSON
+        response — ``{"scanned", "ghosts_deleted", "marked_dormant",
+        "quarantine_held", "ghost_names", "dormant_names", "dry_run"}`` — is
+        returned to the caller verbatim as a ``dict``; this client does not
+        interpret or reshape it.
+
+        A pre-nexus-29drn engine has no matching route and answers 404 —
+        this method does NOT swallow that, mirroring :meth:`purge_trash`;
+        it propagates the raw ``httpx.HTTPStatusError`` so the CLI verb can
+        tell "engine too old" apart from "engine answered".
+        """
+        return self._post("/ghost-sweep", {"dry_run": dry_run}) or {}
+
     def gc_audit_list(
         self,
         *,

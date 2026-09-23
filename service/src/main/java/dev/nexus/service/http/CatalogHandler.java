@@ -158,6 +158,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/restore"               -> handleRestore(exchange, tenant, method);
                 case "/trash"                 -> handleTrash(exchange, tenant, method);
                 case "/purge-trash"           -> handlePurgeTrash(exchange, tenant, method);
+                case "/ghost-sweep"           -> handleGhostSweep(exchange, tenant, method);
                 case "/resolve"               -> handleResolve(exchange, tenant, method);
                 case "/stats"                 -> handleStats(exchange, tenant, method);
 
@@ -800,6 +801,56 @@ public final class CatalogHandler implements HttpHandler {
             ? repo.purgeTrashPreview(tenant, olderThanDays)
             : repo.purgeTrash(tenant, olderThanDays);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
+     * POST /v1/catalog/ghost-sweep (nexus-29drn) — the operator-facing
+     * caller for {@link CatalogRepository#sweepGhostsAndMarkDormant(String,
+     * boolean)}, whose only PRODUCTION caller before this route existed was
+     * {@link CatalogRepository#ensureGhostSweepRanOnce}'s automatic,
+     * at-most-once-per-tenant trigger — there was no way for an operator to
+     * run the sweep on demand once that had already fired (Sam's ruling,
+     * 2026-09-23: an operator CLI verb, dry-run by default, {@code --apply}
+     * to act, backing {@code nx catalog sweep-ghosts}).
+     *
+     * <p>Body: {@code {"dry_run": bool (default true)}} — same shape and
+     * same default-safe posture as {@code /purge-trash} above. Both modes
+     * call the EXACT SAME repository method (no separate preview
+     * implementation): {@code dry_run=true} classifies every collection row
+     * exactly as the real sweep would, without mutating anything; {@code
+     * dry_run=false} physically deletes/marks-dormant.
+     *
+     * <p>Response: {@code {"scanned", "ghosts_deleted", "marked_dormant",
+     * "quarantine_held", "ghost_names", "dormant_names", "dry_run"}}. The
+     * automatic sweep's durable {@code rdr204_ghost_sweep_v1} marker
+     * ({@link CatalogRepository#ensureGhostSweepRanOnce}) is untouched by
+     * this route — an operator-triggered sweep (dry-run OR apply) never
+     * sets it, so the automatic per-tenant trigger still fires at most once
+     * regardless of how many times this route is called.
+     */
+    private void handleGhostSweep(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+
+        boolean dryRun = true;
+        Object dryRunRaw = body.get("dry_run");
+        if (dryRunRaw != null) {
+            if (!(dryRunRaw instanceof Boolean b)) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'dry_run' must be a boolean\"}"); return;
+            }
+            dryRun = b;
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant, dryRun);
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("scanned", result.scanned());
+        payload.put("ghosts_deleted", result.ghostsDeleted());
+        payload.put("marked_dormant", result.markedDormant());
+        payload.put("quarantine_held", result.quarantineHeld());
+        payload.put("ghost_names", result.ghostNames());
+        payload.put("dormant_names", result.dormantNames());
+        payload.put("dry_run", dryRun);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(payload));
     }
 
     /** GET /v1/catalog/resolve?file_path=X or ?source_uri=X or ?title=X&collection=X */

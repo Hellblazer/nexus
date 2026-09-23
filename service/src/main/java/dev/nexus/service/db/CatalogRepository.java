@@ -8672,8 +8672,17 @@ public final class CatalogRepository {
     /**
      * Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead
      * nexus-ft04v.3; {@code quarantineHeld} added by nexus-snm4y).
+     *
+     * <p>{@code ghostNames}/{@code dormantNames} (nexus-29drn) are the
+     * collection names behind {@code ghostsDeleted}/{@code markedDormant} --
+     * added for the operator-facing {@code nx catalog sweep-ghosts} verb's
+     * report, which needs to name WHICH collections, not just how many. In
+     * dry-run mode ({@link #sweepGhostsAndMarkDormant(String, boolean)}) the
+     * counts and names describe what WOULD happen; in the mutating mode they
+     * describe what DID.
      */
-    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant, int quarantineHeld) {}
+    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant, int quarantineHeld,
+                                    List<String> ghostNames, List<String> dormantNames) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
     private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, UNCHANGED }
@@ -8769,6 +8778,28 @@ public final class CatalogRepository {
      * cached entry (if any) is still correct.
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant) {
+        return sweepGhostsAndMarkDormant(tenant, false);
+    }
+
+    /**
+     * {@link #sweepGhostsAndMarkDormant(String)} plus a {@code dryRun} mode
+     * (nexus-29drn, Sam's ruling: an operator CLI verb, {@code nx catalog
+     * sweep-ghosts}, needs a preview). {@code dryRun=true} runs the EXACT
+     * SAME per-row classification walk below — same {@link
+     * #collectionHoldsContent} predicate, same quarantine hold, same
+     * {@code COLLECTION_VECTOR_STATS} dormant check — and reports what it
+     * WOULD do, but skips every {@code DELETE}/{@code UPDATE} and every
+     * {@link CollectionRegistry#evict} call: nothing actually changed, so
+     * there is nothing to invalidate. Deliberately NOT a separate
+     * implementation — a second copy of the predicate is exactly the
+     * "don't reimplement it" trap this bead's own instruction named.
+     * {@code dryRun=false} is byte-for-byte the pre-existing behavior (the
+     * 1-arg overload above delegates here with {@code false}), including
+     * the automatic sweep's call path through {@link
+     * #ensureGhostSweepRanOnce} — the durable one-shot marker there is
+     * untouched by this change.
+     */
+    public GhostSweepResult sweepGhostsAndMarkDormant(String tenant, boolean dryRun) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
             var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                 .from(CATALOG_COLLECTIONS)
@@ -8786,7 +8817,9 @@ public final class CatalogRepository {
                     // gc_expire_quarantine writes its gc_audit row against the SIBLING's
                     // name (gc_quarantine_orphans keys its row to the origin), so a sibling
                     // ever expired from would otherwise never read as empty again.
-                    ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                    if (!dryRun) {
+                        ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                    }
                     out.add(new SweptRow(name, SweepDisposition.DELETED));
                 } else if ("quarantine".equals(lifecycleState)) {
                     // nexus-n060e (refining nexus-snm4y): hygiene-002 Branch B's assignment
@@ -8796,10 +8829,12 @@ public final class CatalogRepository {
                     out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
                 } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
                         .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
-                    ctx.update(CATALOG_COLLECTIONS)
-                       .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
-                       .where(CATALOG_COLLECTIONS.NAME.eq(name))
-                       .execute();
+                    if (!dryRun) {
+                        ctx.update(CATALOG_COLLECTIONS)
+                           .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+                           .where(CATALOG_COLLECTIONS.NAME.eq(name))
+                           .execute();
+                    }
                     out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
                 } else {
                     out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
@@ -8810,23 +8845,32 @@ public final class CatalogRepository {
         int deleted = 0;
         int dormant = 0;
         int held = 0;
+        List<String> ghostNames = new ArrayList<>();
+        List<String> dormantNames = new ArrayList<>();
         for (SweptRow r : rows) {
             switch (r.disposition()) {
                 case DELETED -> {
                     deleted++;
-                    CollectionRegistry.evict(tenant, r.name());
+                    ghostNames.add(r.name());
+                    if (!dryRun) {
+                        CollectionRegistry.evict(tenant, r.name());
+                    }
                 }
                 case MARKED_DORMANT -> {
                     dormant++;
+                    dormantNames.add(r.name());
                     // nexus-ft04v.18 C2: a cached row's lifecycleState is now stale the
                     // instant this UPDATE commits — evict so the next reader re-verifies.
-                    CollectionRegistry.evict(tenant, r.name());
+                    // Skipped in dry-run: no UPDATE ran, so nothing to invalidate.
+                    if (!dryRun) {
+                        CollectionRegistry.evict(tenant, r.name());
+                    }
                 }
                 case HELD_QUARANTINE -> held++; // nothing changed; no eviction needed
                 case UNCHANGED -> { }
             }
         }
-        return new GhostSweepResult(rows.size(), deleted, dormant, held);
+        return new GhostSweepResult(rows.size(), deleted, dormant, held, ghostNames, dormantNames);
     }
 
     /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */

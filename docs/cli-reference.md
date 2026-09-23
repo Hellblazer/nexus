@@ -1553,6 +1553,55 @@ Note: this verb reclaims storage; it is not the search-visibility fix for a dele
 
 **Population (nexus-heizf):** the stranded-chunk count here is EXISTING chunk rows of TOMBSTONED documents with no live parent (direction chunk → parent). RDR-191 Phase 6 (nexus-o8dil.33) retired the instrument this note used to warn against cross-reading (`nx doctor`'s "dangling manifest chashes" warn / `nx catalog manifest-verify --list`, both gone — see [nx catalog manifest-verify — retired](#nx-catalog-manifest-verify--retired)) — the manifest-chunk FK makes that opposite-direction population (LIVE documents' manifest rows with no backing chunk) unreachable, so there is no other instrument left to conflate this one with.
 
+### nx catalog sweep-ghosts
+
+```
+nx catalog sweep-ghosts [--apply] [--json]
+```
+
+Operator-facing sweep for RDR-204 ghost collections (nexus-29drn, Sam's
+2026-09-23 ruling). The engine's ghost sweep
+(`CatalogRepository.sweepGhostsAndMarkDormant`) already runs automatically,
+but at most ONCE PER TENANT for the life of the estate (the durable
+`rdr204_ghost_sweep_v1` marker in `nexus.catalog_meta`): it clears the
+backlog the first time a tenant makes an authenticated request after the
+marker is absent, then disarms itself for that tenant forever. Any
+collection that BECOMES a ghost afterwards — a quarantine sibling finishing
+its drain, a re-home whose source collection empties out — accumulates with
+nothing to collect it. This verb is the on-demand caller for the SAME
+classification (no separate client-side reimplementation) via `POST
+/v1/catalog/ghost-sweep`, and never touches the automatic sweep's durable
+marker — running it, in either mode, does not count as the automatic
+per-tenant sweep having run.
+
+Two dispositions, per row:
+
+- **ghosts** — collections nothing references any more (no live row in any
+  non-audit `COLLECTION_SCOPED_TABLES` entry). `--apply` physically deletes
+  the registry row.
+- **referenced-but-empty (marked dormant)** — collections still referenced
+  somewhere but with no `collection_vector_stats` row (nothing to embed or
+  read). `--apply` flips `lifecycle_state` to `dormant`; the row itself is
+  NOT deleted — `nx doctor`'s "Collections dormant" row (see [nx doctor](#nx-doctor))
+  is how an operator later decides to re-index or remove the references.
+
+A quarantine row still referenced by something is held unconditionally
+(reported as a count only, never a name, since nothing about it changed).
+
+Default is dry-run: reports what the sweep WOULD do without writing. Pass
+`--apply` to actually reclaim/mark; `--json` emits the engine's response
+verbatim.
+
+```
+nx catalog sweep-ghosts          # dry-run report
+nx catalog sweep-ghosts --apply  # actually reclaim/mark
+```
+
+On an engine older than nexus-29drn (no `/v1/catalog/ghost-sweep` route
+yet), the command raises a clear error naming the required engine release
+rather than silently no-op'ing — same posture as `purge-trash`'s engine-floor
+refusal above.
+
 ### nx catalog orphan-backfill
 
 ```
@@ -2660,14 +2709,22 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-and `tuple-projection` (the last two have no `--check-fanout-floor` /
-`--check-tuple-projection` flag; they only run as part of this
-supplementary set). `tuple-projection` (nexus-08cfl) reports whether
+`tuple-projection`, `ghost-sweep` (the last three have no `--check-fanout-floor`
+/ `--check-tuple-projection` / `--check-ghost-sweep` flag; they only run as
+part of this supplementary set).
+`tuple-projection` (nexus-08cfl) reports whether
 this session's RDR-205 ledger tuple projector
 (`nexus.hooks.tuple_ledger_project`) has logged any SKIP lines to its
 per-session log — that projector never raises on failure, so a
 persistent SKIP was otherwise invisible outside the e2e
-`post-publish-dispatch-check.sh` gate. Before 7.11.0 all fourteen `--check-*` modes were
+`post-publish-dispatch-check.sh` gate. `ghost-sweep` (nexus-29drn) reports the
+current RDR-204 ghost-collection count via a dry-run call to the same engine
+route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
+that verb when the count is nonzero — see that section for why this row
+exists (the automatic per-tenant sweep runs at most once for the life of the
+estate). Reads `[ ]` not-applicable, never a red/warn, when the catalog
+writer cannot be resolved, the engine is unreachable, or the engine predates
+the route. Before 7.11.0 all fourteen `--check-*` modes were
 opt-in only, so a real backlog was invisible unless an operator happened to
 run its exact flag (the motivating case: an aspect-queue throwing hundreds of
 claim failures while nothing in the default run watched it). These are

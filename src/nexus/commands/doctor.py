@@ -2190,7 +2190,7 @@ def _run_check_mineru() -> None:
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
-    "index-failures", "fanout-floor", "tuple-projection",
+    "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -2230,6 +2230,7 @@ def _run_supplementary_checks() -> None:
         "index-failures": _run_check_index_failures,
         "fanout-floor": _run_check_fanout_floor,
         "tuple-projection": _run_check_tuple_projection,
+        "ghost-sweep": _run_check_ghost_sweep,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -3160,6 +3161,52 @@ def _run_check_tuple_projection() -> None:
         f"this hook this session. Last: {lines[-1]}"
     )
     click.echo(f"    Log: {log_path}")
+
+
+def _run_check_ghost_sweep() -> None:
+    """Diagnostic: current RDR-204 ghost-collection count (nexus-29drn,
+    Sam's ruling: an operator CLI verb + a doctor row alongside it).
+
+    The engine's ghost sweep (``CatalogRepository.sweepGhostsAndMarkDormant``)
+    runs automatically at most once per tenant for the life of the estate
+    (the durable ``rdr204_ghost_sweep_v1`` marker); a collection that
+    becomes a ghost afterwards accumulates with nothing to collect it. This
+    row surfaces the CURRENT count via a dry-run call to the same ``POST
+    /v1/catalog/ghost-sweep`` route ``nx catalog sweep-ghosts`` uses, and
+    names that verb when the count is nonzero -- never mutates anything
+    itself (``dry_run=True``, always).
+
+    nexus-7zhag doctrine: a NEW doctor row must be not-applicable on a
+    virgin box, never allowlisted in the fresh-install MVV
+    (``tests/e2e/fresh-install-mvv.sh``'s ``ALLOWLIST_REGEX``). A box
+    where the catalog writer cannot be resolved, the engine is
+    unreachable, or the engine predates this route (404) all collapse to
+    the SAME not-applicable line -- this check cannot distinguish those
+    causes from a dry-run call alone, and a virgin/fresh box legitimately
+    has zero collections either way, so there is nothing here worth
+    surfacing as a red or warn line in any of those cases.
+    """
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        writer = make_catalog_writer()
+        try:
+            result = writer.ghost_sweep(dry_run=True)
+        finally:
+            writer.close()
+    except Exception as exc:  # noqa: BLE001 — boundary: unreachable engine / pre-nexus-29drn route / virgin box are all not-applicable here, never a false red/warn
+        click.echo(f"[ ] Ghost collections: not applicable ({_exc_detail(exc)})")
+        return
+
+    ghosts = result.get("ghosts_deleted", 0)
+    if not ghosts:
+        click.echo("[✓] Ghost collections: 0")
+        return
+    click.echo(
+        f"[!] Ghost collections: {ghosts} collection(s) would be reclaimed -- "
+        f"run 'nx catalog sweep-ghosts --apply' to reclaim "
+        f"(preview: 'nx catalog sweep-ghosts')"
+    )
 
 
 def _run_check_collection_shape() -> None:
