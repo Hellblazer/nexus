@@ -451,7 +451,7 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
-    global _this_session_conexus_version
+    global _this_session_conexus_version, _last_seen_version_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
     if _is_controller_or_serial:
         _gate_on_build_lease()
@@ -500,6 +500,7 @@ def pytest_sessionstart(session):
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
+        _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
     _warn_if_service_jar_is_stale()
 
 
@@ -698,6 +699,7 @@ def _split_appends_from_state(
     after: dict[str, tuple[int, int]],
     *,
     last_seen_version_content: str | None = None,
+    last_seen_version_baseline_content: str | None = None,
     this_session_version: str | None = None,
 ) -> tuple[list[_DiffEntry], list[_DiffEntry]]:
     """Split :func:`_diff_config_dir_snapshots` entries (``(verb, rel_path)``
@@ -712,23 +714,41 @@ def _split_appends_from_state(
     mutation and still fails -- that is the case worth catching, and size
     alone distinguishes it without reading content (which this guard
     deliberately never does for most files; the directory can hold a live
-    user's real data). (3) nexus-b2eaw: it is ``last_seen_version``, and its
-    CONTENT is a version THIS session could not have written -- see
-    *last_seen_version_content* / *this_session_version* below.
+    user's real data). (3) nexus-b2eaw, ``last_seen_version`` only -- its
+    baseline and post-session CONTENT are byte-identical, so nothing real
+    happened regardless of whose version it is (see below).
 
-    *last_seen_version_content* / *this_session_version* are the ONE
-    deliberate exception to "never read content": ``last_seen_version``
-    holds a bare version string, not user data, and is the one file this
-    guard has always named as a still-fails case rather than allowlisted
-    (see ``tests/test_pfuns_ambient_daemon_logs.py``, which refuses to
-    treat it as benign on size/mtime alone). Both default to ``None``,
-    which keeps the PRE-nexus-b2eaw behaviour exactly (``last_seen_version``
-    always classified as state) -- this keeps every caller that does not
-    pass them, including every existing unit test feeding this function
-    synthetic (mtime, size) data with no real file behind it, working
-    unchanged: attribution only activates when the real caller
-    (:func:`_check_real_config_dir_mutations`) supplies both the actual
-    post-session stamp content and this session's own resolved version.
+    nexus-b2eaw round 2 (review finding, CRITICAL): an EARLIER version of
+    this function also exempted ``last_seen_version`` whenever its content
+    did not match *this_session_version*, reasoning that a different
+    version could only be a peer's write. That reasoning is FALSE: a test
+    IN THIS SESSION can spawn an INSTALLED ``nx`` from a stale/different
+    generation on PATH without isolating ``NEXUS_CONFIG_DIR`` -- exactly
+    the documented 2026-08-24 incident shape
+    (``tests/test_gate_fences_the_real_config_dir.py``: "last_seen_version
+    stamped 7.16.3 -- the INSTALLED tool's version, not the tree under
+    test"). Content alone cannot tell that shape apart from a genuine peer
+    process, because BOTH produce a version different from
+    *this_session_version*. Exempting on version mismatch was therefore a
+    FALSE NEGATIVE: it could silently swallow the exact defect this guard
+    exists to catch, with zero test coverage of that direction (all of
+    round 1's tests fed synthetic content that never exercised it).
+    ``this_session_version`` is kept as a parameter, but it now feeds ONLY
+    the diagnostic (:func:`_format_diff_entry`), never the classification --
+    a false POSITIVE with an honest message (old content, new content,
+    whether the new content matches this session's own version, left for a
+    human to triage) beats a silent false negative.
+
+    *last_seen_version_content* (post-session) and
+    *last_seen_version_baseline_content* (session-start) default to
+    ``None``, which keeps the PRE-nexus-b2eaw behaviour exactly
+    (``last_seen_version`` always classified as state) -- every caller that
+    does not pass them, including every existing unit test feeding this
+    function synthetic (mtime, size) data with no real file behind it, is
+    unchanged. When both are given and equal, the base (mtime_ns, size)
+    diff's MODIFIED verdict is overridden for this one entry: a stat touch
+    with unchanged bytes is not a real event, independent of anyone's
+    version.
     """
     state: list[_DiffEntry] = []
     appends: list[_DiffEntry] = []
@@ -756,13 +776,14 @@ def _split_appends_from_state(
         elif (
             name == "last_seen_version"
             and last_seen_version_content is not None
-            and this_session_version is not None
-            and last_seen_version_content != this_session_version
+            and last_seen_version_baseline_content is not None
+            and last_seen_version_content == last_seen_version_baseline_content
         ):
-            # A rewrite to a version THIS session's own `nx` invocation
-            # could not have produced (its own resolved conexus version) is
-            # another process's write to the same machine-wide stamp, not a
-            # test in this session writing to the real config dir.
+            # Content-based: the mtime/size diff fired, but the bytes never
+            # changed -- no real event, regardless of anyone's version.
+            # Deliberately the ONLY content-driven exemption left: unlike a
+            # version-mismatch, "before == after byte-for-byte" cannot be
+            # produced by a genuine state mutation, in-session or not.
             appends.append(entry)
         elif name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
             appends.append(entry)
@@ -833,6 +854,44 @@ def _resolve_this_session_conexus_version() -> str | None:
     try:
         return _md.version("conexus")
     except _md.PackageNotFoundError:
+        return None
+
+
+#: nexus-b2eaw follow-up: ``last_seen_version``'s CONTENT at session start,
+#: captured alongside :data:`_this_session_conexus_version`. Two jobs.
+#:
+#: (1) MEASURED: the base real-config-dir diff (:func:`_snapshot_real_config_dir`)
+#: is mtime/size only, never content -- so a write that re-stamps the SAME
+#: bytes (a no-op ``check_version_transition`` re-run is not actually
+#: possible, since that function early-returns when ``seen == version``, but
+#: a touch from some other path is not ruled out) would still register as
+#: MODIFIED. Comparing this baseline against the post-session content
+#: switches THIS ONE entry's change determination from mtime/size to
+#: content, per the standing critique: no real byte-level change means no
+#: real event to attribute at all, independent of whose version it is.
+#:
+#: (2) The diagnostic: showing OLD content alongside NEW is what lets a
+#: reader see the actual transition (e.g. ``7.55.1 -> 7.55.3``) instead of
+#: only the current value, which was the "confidently wrong" shape --
+#: a bare current-value-matches-this-session's-version reads as "this
+#: session wrote it" when it is equally consistent with a PEER who happens
+#: to run the identical conexus version (``check_version_transition`` writes
+#: the RUNNING version regardless of which process is running it, so two
+#: different processes at the same version produce byte-identical writes --
+#: content can prove a write is NOT this session's when the versions differ,
+#: but can never prove it IS, and the diagnostic must not claim otherwise).
+_last_seen_version_baseline_content: str | None = None
+
+
+def _snapshot_last_seen_version_content() -> str | None:
+    """The REAL ``last_seen_version``'s text content right now (session
+    start, called from ``pytest_sessionstart`` alongside the other
+    baselines), or ``None`` if absent/unreadable. See
+    :data:`_last_seen_version_baseline_content`.
+    """
+    try:
+        return (_real_config_dir_for_guard() / "last_seen_version").read_text().strip()
+    except OSError:
         return None
 
 
@@ -1093,16 +1152,26 @@ def _format_diff_entry(entry: _DiffEntry) -> str:
     the guard prints -- the ONLY place that string shape is constructed
     (nexus-wjkc7); every internal consumer works on the tuple.
 
-    nexus-b2eaw remedy (c): ``last_seen_version`` additionally names its
-    current value against this session's own resolved version, in BOTH the
-    NOTE and FAIL print paths (this function is the one place both call
-    through) -- a bare ``MODIFIED last_seen_version`` cost two 5.5-minute
-    lint runs and a wrong prediction before the two values were compared by
-    hand. This is purely a display enrichment: it reads the CURRENT on-disk
-    stamp (which is the same content the caller already read this session,
-    barring a concurrent write in the print window) rather than threading
-    the snapshot content through the tuple, so the entry shape itself
-    (verb, rel_path) is untouched.
+    nexus-b2eaw: ``last_seen_version`` additionally names the OLD content
+    (session-start baseline), the NEW content (current on-disk), this
+    session's own resolved version, and whether the new content matches it
+    -- in BOTH the NOTE and FAIL print paths (this function is the one
+    place both call through). Round 2 (review finding, CRITICAL) replaced
+    an EARLIER shape that showed only the new value and this session's
+    version, which read as an accusation ("this session wrote it") the
+    guard cannot actually prove -- ``check_version_transition`` writes the
+    RUNNING version regardless of which process runs it, so a peer at the
+    identical conexus version produces a byte-identical write, and
+    :func:`_split_appends_from_state` no longer exempts on a version
+    mismatch either (a same-session test hitting a stale installed ``nx``
+    is indistinguishable, by content, from a genuine peer -- see that
+    function's docstring). This renders FACTS only -- old value, new
+    value, this session's version, whether they match -- and leaves the
+    causal judgment to whoever reads it. Purely a display enrichment: it
+    reads the CURRENT on-disk stamp (the same content the caller already
+    read this session, barring a concurrent write in the print window)
+    rather than threading the snapshot content through the tuple, so the
+    entry shape itself (verb, rel_path) is untouched.
     """
     verb, rel = entry
     if rel == "last_seen_version":
@@ -1110,9 +1179,20 @@ def _format_diff_entry(entry: _DiffEntry) -> str:
             stamp_now = (_real_config_dir_for_guard() / rel).read_text().strip()
         except OSError:
             stamp_now = None
+        if stamp_now is not None and _this_session_conexus_version is not None:
+            match_note = (
+                "matches this session's own version"
+                if stamp_now == _this_session_conexus_version
+                else "does NOT match this session's own version -- could be "
+                "a peer process, or this session's own nx on PATH "
+                "resolving a different (stale/installed) generation"
+            )
+        else:
+            match_note = "match against this session's own version unknown"
         return (
-            f"{verb} {rel} (reads {stamp_now!r}, this session is "
-            f"{_this_session_conexus_version!r})"
+            f"{verb} {rel} (was {_last_seen_version_baseline_content!r}, now "
+            f"{stamp_now!r}; this session's own version is "
+            f"{_this_session_conexus_version!r} -- {match_note})"
         )
     return f"{verb} {rel}"
 
@@ -1161,11 +1241,13 @@ def _check_real_config_dir_mutations(session) -> None:
     if not changed:
         return
     # nexus-b2eaw: read the stamp's actual post-session content so
-    # _split_appends_from_state can attribute a last_seen_version rewrite to
-    # this session (or not) by content rather than by mtime/size alone. See
-    # _this_session_conexus_version's docstring for why this is safe to read
-    # (a bare version string, not user data) where the rest of this guard
-    # deliberately never reads content.
+    # _split_appends_from_state can tell a genuine content change from a
+    # spurious stat touch (byte-identical content -- the ONE content-driven
+    # exemption left after round 2's CRITICAL finding removed the
+    # version-mismatch exemption). See _this_session_conexus_version's and
+    # _last_seen_version_baseline_content's docstrings for why reading this
+    # ONE file's content is safe (a bare version string, not user data)
+    # where the rest of this guard deliberately never reads content.
     try:
         _stamp_content = (_real_config_dir_for_guard() / "last_seen_version").read_text().strip()
     except OSError:
@@ -1175,6 +1257,7 @@ def _check_real_config_dir_mutations(session) -> None:
     changed, benign_appends = _split_appends_from_state(
         changed, _real_config_dir_baseline, after,
         last_seen_version_content=_stamp_content,
+        last_seen_version_baseline_content=_last_seen_version_baseline_content,
         this_session_version=_this_session_conexus_version,
     )
     if benign_appends:
