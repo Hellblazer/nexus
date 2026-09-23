@@ -2095,7 +2095,12 @@ def test_devonthink_index_bare_smart_group_name_is_still_a_guess(
     assert 'nx dt index --smart-group "Papers"' in result.output
 
 
-class _FakeCatalogRowsForKnowledgeCollections:
+class _FakeT3ForKnowledgeCollections:
+    """A plain object with ``list_collections()`` -- deliberately NOT an
+    ``HttpVectorClient`` instance, so ``live_collection_rows`` takes its
+    client-side ``is_live_collection_row`` filter path, the same branch a
+    test double (this one) always takes in production."""
+
     def __init__(self, rows):
         self._rows = rows
 
@@ -2103,37 +2108,45 @@ class _FakeCatalogRowsForKnowledgeCollections:
         return list(self._rows)
 
 
-def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
-    """nexus-bgt0r: ``_knowledge_collections`` reads the catalog's own
-    ``list_collections()`` rows (the same query ``nx collection list``
-    uses -- see ``_catalog_collection_rows`` in ``commands/collection.py``)
-    and filters on the row's own ``content_type`` column, never on the
-    collection name. This used to read ``mcp_infra.get_collection_row``
-    (a ``/v1/vectors/stats``-backed cache keyed by name) instead, which
-    printed "(none listed)" against 15 live knowledge collections in
-    service mode -- that cache's own docstring names the exact failure
-    shape: a row missing from the stats response is indistinguishable
-    from "never registered". A row whose NAME merely looks like a
-    knowledge collection but whose catalog content_type says otherwise
-    (and vice versa) is the proof this reads the column, not the string.
+def test_knowledge_collections_filters_by_content_type_and_liveness(monkeypatch) -> None:
+    """nexus-bgt0r / nexus-bc7ps: ``_knowledge_collections`` enumerates via
+    ``live_collection_rows(make_t3())`` -- bulk, live-filtered -- and reads
+    ``content_type`` directly off each returned row, never the name.
+
+    The pre-fix version got the enumeration right (live_collection_rows)
+    but then threw the row's own content_type away and re-fetched it one
+    collection at a time via ``mcp_infra.get_collection_row`` (a
+    ``/v1/vectors/stats``-backed cache keyed by name), which printed
+    "(none listed)" against 15 live knowledge collections in service mode
+    -- that cache's own docstring names the exact failure shape: a row
+    missing from the stats response is indistinguishable from "never
+    registered". A row whose NAME merely looks like a knowledge
+    collection but whose own content_type column says otherwise (and vice
+    versa) is the proof this reads the column, not the string; a
+    quarantine row is the proof it is live-filtered, not just content-
+    type-filtered.
     """
     import nexus.commands.command_context as cc
+    import nexus.db as _db
 
     rows = [
-        {"name": "knowledgefoo__bar", "content_type": "code"},
-        {"name": "code__myrepo", "content_type": "code"},
-        {"name": "bare-legacy-name", "content_type": ""},
-        {"name": "knowledge__delos__model-ctx__v1", "content_type": "knowledge"},
-        {"name": "knowledge__notes", "content_type": "knowledge"},
-        # A name with no knowledge__ prefix at all, but the catalog row
-        # says knowledge: the column decides, not the string.
-        {"name": "legacy-migrated-subject", "content_type": "knowledge"},
+        {"name": "knowledgefoo__bar", "content_type": "code", "lifecycle_state": "live"},
+        {"name": "code__myrepo", "content_type": "code", "lifecycle_state": "live"},
+        {"name": "bare-legacy-name", "content_type": "", "lifecycle_state": "live"},
+        {"name": "knowledge__delos__model-ctx__v1", "content_type": "knowledge", "lifecycle_state": "live"},
+        {"name": "knowledge__notes", "content_type": "knowledge", "lifecycle_state": "live"},
+        # A name with no knowledge__ prefix at all, but the row's own
+        # content_type says knowledge: the column decides, not the string.
+        {"name": "legacy-migrated-subject", "content_type": "knowledge", "lifecycle_state": "live"},
+        # A genuine knowledge row that is NOT live: must be excluded even
+        # though its content_type matches.
+        {"name": "quarantine-knowledge__old-subject", "content_type": "knowledge", "lifecycle_state": "quarantine"},
     ]
-    with patch(
-        "nexus.catalog.factory.make_catalog_reader",
-        return_value=_FakeCatalogRowsForKnowledgeCollections(rows),
-    ):
-        result = cc._knowledge_collections()
+    # _knowledge_collections() does a fresh `from nexus.db import make_t3`
+    # inside its own body every call -- patch the source attribute, not a
+    # module-level name on `cc` (it never binds one).
+    monkeypatch.setattr(_db, "make_t3", lambda: _FakeT3ForKnowledgeCollections(rows))
+    result = cc._knowledge_collections()
     assert result == sorted([
         "knowledge__delos__model-ctx__v1",
         "knowledge__notes",
@@ -2141,24 +2154,14 @@ def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
     ])
 
 
-def test_knowledge_collections_returns_empty_when_catalog_reader_is_none(monkeypatch) -> None:
-    """A ``None`` catalog reader (uninitialised) degrades to an empty
-    list, never a raise -- a preamble probe must not abort the command."""
+def test_knowledge_collections_returns_empty_on_t3_exception(monkeypatch) -> None:
+    """A T3 read failure degrades to an empty list rather than propagating
+    and aborting the preamble."""
     import nexus.commands.command_context as cc
+    import nexus.db as _db
 
-    with patch(
-        "nexus.catalog.factory.make_catalog_reader", return_value=None,
-    ):
-        assert cc._knowledge_collections() == []
-
-
-def test_knowledge_collections_returns_empty_on_catalog_exception(monkeypatch) -> None:
-    """A catalog read failure also degrades to an empty list rather than
-    propagating and aborting the preamble."""
-    import nexus.commands.command_context as cc
-
-    with patch(
-        "nexus.catalog.factory.make_catalog_reader",
-        side_effect=RuntimeError("engine down"),
-    ):
-        assert cc._knowledge_collections() == []
+    monkeypatch.setattr(
+        _db, "make_t3",
+        lambda: (_ for _ in ()).throw(RuntimeError("engine down")),
+    )
+    assert cc._knowledge_collections() == []

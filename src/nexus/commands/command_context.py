@@ -1246,27 +1246,33 @@ def _dt_reachable() -> tuple[bool, str]:
 def _knowledge_collections() -> list[str]:
     """Live ``knowledge__*`` collection names.
 
-    nexus-bgt0r: this used to read each live collection's row via
-    ``mcp_infra.get_collection_row`` (the ``/v1/vectors/stats``-backed
-    cache) and printed "(none listed)" against 15 live knowledge
-    collections in service mode -- that cache's own docstring names the
-    exact failure shape (a row missing from the stats response reads
-    identically to "never registered"). ``nx collection list`` never hits
-    this: it reads collection columns, content_type included, straight
-    from the catalog's own ``list_collections()`` (see
-    :func:`_catalog_collection_rows` in ``commands/collection.py``, the
-    same query this now reuses) instead of the vectors-stats cache.
+    nexus-bgt0r: the pre-fix version enumerated names via
+    ``live_collection_rows(make_t3())`` (correct: bulk, live-filtered)
+    but then made a SEPARATE per-name ``mcp_infra.get_collection_row()``
+    call just to read ``content_type`` -- and that per-name lookup is the
+    one backed by the ``/v1/vectors/stats`` cache whose own docstring
+    names the exact failure shape (a row missing from the stats response
+    reads identically to "never registered"), which is how this printed
+    "(none listed)" against 15 live knowledge collections in service
+    mode. The fix is not a different data source, only not throwing away
+    ``content_type`` the bulk row already carries: read it directly off
+    each row instead of re-fetching it one collection at a time.
+
+    nexus-bc7ps: ``live_collection_rows`` is itself the routing-safe,
+    live-only enumeration (a quarantine/dormant/disputed knowledge
+    collection is not a subject an agent should be told to reuse), so
+    this needs no separate lifecycle filtering of its own.
     """
     try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
+        from nexus.db import make_t3  # noqa: PLC0415 — command-local import (db)
+        from nexus.db.http_vector_client import live_collection_rows  # noqa: PLC0415 — command-local import (http_vector_client)
 
-        cat = make_catalog_reader()
-        if cat is None:
-            return []
         return sorted(
             name
-            for r in cat.list_collections()
-            if r.get("content_type") == "knowledge" and (name := str(r.get("name", "")))
+            for row in live_collection_rows(make_t3())
+            if isinstance(row, dict)
+            and row.get("content_type") == "knowledge"
+            and (name := str(row.get("name", "")))
         )
     except Exception:  # noqa: BLE001 — a preamble probe never aborts the command
         return []
