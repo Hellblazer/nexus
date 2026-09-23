@@ -1244,29 +1244,43 @@ def _dt_reachable() -> tuple[bool, str]:
 
 
 def _knowledge_collections() -> list[str]:
+    """Live ``knowledge__*`` collection names.
+
+    nexus-bgt0r: this used to read each live collection's row via
+    ``mcp_infra.get_collection_row`` (the ``/v1/vectors/stats``-backed
+    cache) and printed "(none listed)" against 15 live knowledge
+    collections in service mode -- that cache's own docstring names the
+    exact failure shape (a row missing from the stats response reads
+    identically to "never registered"). ``nx collection list`` never hits
+    this: it reads collection columns, content_type included, straight
+    from the catalog's own ``list_collections()`` (see
+    :func:`_catalog_collection_rows` in ``commands/collection.py``, the
+    same query this now reuses) instead of the vectors-stats cache.
+    """
     try:
-        # RDR-204 Phase 3 (nexus-ft04v.26), class (c): reads the row
-        # directly (never nexus.corpus's name-parsing primitives) -- one
-        # unregistered/chunkless collection in the list is simply
-        # excluded, matching how a non-"knowledge" row is already
-        # excluded, never a guess from the string.
-        from nexus.db import make_t3  # noqa: PLC0415 — command-local import (db)
-        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — command-local import (mcp_infra)
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
 
-        from nexus.db.http_vector_client import live_collection_rows  # noqa: PLC0415 — command-local import (http_vector_client)
-
+        cat = make_catalog_reader()
+        if cat is None:
+            return []
         return sorted(
             name
-            for c in live_collection_rows(make_t3())
-            if (name := c["name"] if isinstance(c, dict) else str(c))
-            and (row := get_collection_row(name)) is not None
-            and row.get("content_type") == "knowledge"
+            for r in cat.list_collections()
+            if r.get("content_type") == "knowledge" and (name := str(r.get("name", "")))
         )
     except Exception:  # noqa: BLE001 — a preamble probe never aborts the command
         return []
 
 
 _UUID_RE = re.compile(r"[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}")
+
+#: The explicit selector flags ``nx dt index`` accepts, exactly as the
+#: devonthink-index skill's own preamble tells the agent to pass them
+#: (nexus-bgt0r). ``--selection`` is a bare flag (no value); the rest
+#: each take one value token.
+_DT_SELECTOR_FLAGS = frozenset({
+    "--uuid", "--group", "--smart-group", "--tag", "--selection",
+})
 
 
 @command_context.command("devonthink-index")
@@ -1278,15 +1292,27 @@ def devonthink_index(args: tuple[str, ...]) -> None:
     page-coverage rule."""
     tokens = [a for a in args if a.strip() and a != "--"]
     selector = tokens[0] if tokens else ""
-    rest = " ".join(tokens[1:])
-    if _UUID_RE.fullmatch(selector):
-        verb = f"nx dt index --uuid {selector}"
-    elif selector.startswith("/"):
-        verb = f'nx dt index --group "{selector}"'
-    elif selector:
-        verb = f'nx dt index --smart-group "{selector}"'
+    if selector in _DT_SELECTOR_FLAGS:
+        # nexus-bgt0r: an explicit flag form (what the skill itself tells
+        # the agent to pass after ``--``) used to fall through to the
+        # smart-group guess below, which has no way to tell "an unknown
+        # bare name" from "a flag the caller already knows the shape of"
+        # -- ``nx command-context devonthink-index -- --uuid <UUID>``
+        # rendered as ``nx dt index --smart-group "--uuid" <UUID>``.
+        # Recognised verbatim, every token (flag AND value) passed
+        # through unchanged, so ``rest`` below must stay empty.
+        verb = "nx dt index " + " ".join(tokens)
+        rest = ""
     else:
-        verb = 'nx dt index --uuid <UUID> | --group "/Path" | --smart-group "Name" | --tag <tag> | --selection'
+        rest = " ".join(tokens[1:])
+        if _UUID_RE.fullmatch(selector):
+            verb = f"nx dt index --uuid {selector}"
+        elif selector.startswith("/"):
+            verb = f'nx dt index --group "{selector}"'
+        elif selector:
+            verb = f'nx dt index --smart-group "{selector}"'
+        else:
+            verb = 'nx dt index --uuid <UUID> | --group "/Path" | --smart-group "Name" | --tag <tag> | --selection'
     if rest:
         verb += f" {rest}"
     ok, detail = _dt_reachable()

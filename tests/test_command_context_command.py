@@ -18,6 +18,7 @@ No T2/chroma opens; no epsilon-allow needed (RDR-128 lint must stay clean).
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -1993,49 +1994,171 @@ def test_devonthink_index_group_argument_maps_to_group_selector(tmp_path: Path, 
     assert "--uuid" in result.output and "--group" in result.output and "--smart-group" in result.output
 
 
-def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
-    """nexus-ft04v.23: ``_knowledge_collections``'s
-    ``str(c).startswith("knowledge__")`` filter funnelled to
-    ``collection_content_type(str(c)) == "knowledge"``. A boundary name
-    that merely contains "knowledge" but is not the exact prefix, a
-    code__ collection, and a legacy-bare name with no "__" at all all
-    stay excluded, byte-identical to the pre-funnel filter.
+# nexus-bgt0r: an explicit --uuid/--group/--smart-group/--tag/--selection
+# selector, passed after "--" exactly as the devonthink-index skill's own
+# preamble tells the agent to, used to be misread by the smart-group
+# fallback -- "nx command-context devonthink-index -- --uuid <UUID>"
+# rendered as `nx dt index --smart-group "--uuid" <UUID>`, since the
+# parser had no way to tell an unrecognised bare name from a flag the
+# caller already knew the shape of.
 
-    Neutral model token on purpose (RDR-109 mode lint): a realistic
-    collection-NAME fixture in a hand-rolled fake list_collections();
-    nexus.mcp_infra.get_collection_row is stubbed directly below, never
-    a real embedder.
+
+def test_devonthink_index_explicit_uuid_flag_is_passed_through_verbatim(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    import nexus.commands.command_context as cc
+
+    monkeypatch.setattr(cc, "_dt_reachable", lambda: (True, "http"))
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: [])
+    from nexus.cli import main
+
+    result = CliRunner().invoke(
+        main,
+        ["command-context", "devonthink-index", "--", "--uuid", "6BCD2BC1-8421-4134-BA67-A5F3E658AA95"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "nx dt index --uuid 6BCD2BC1-8421-4134-BA67-A5F3E658AA95" in result.output
+    assert "--smart-group" not in result.output.split("### Invocation")[1].split("###")[0]
+
+
+def test_devonthink_index_explicit_smart_group_flag_is_passed_through_verbatim(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    import nexus.commands.command_context as cc
+
+    monkeypatch.setattr(cc, "_dt_reachable", lambda: (True, "http"))
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: [])
+    from nexus.cli import main
+
+    result = CliRunner().invoke(
+        main,
+        ["command-context", "devonthink-index", "--", "--smart-group", "Papers"],
+    )
+    assert result.exit_code == 0, result.output
+    assert 'nx dt index --smart-group Papers' in result.output
+
+
+def test_devonthink_index_explicit_tag_flag_is_passed_through_verbatim(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    import nexus.commands.command_context as cc
+
+    monkeypatch.setattr(cc, "_dt_reachable", lambda: (True, "http"))
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: [])
+    from nexus.cli import main
+
+    result = CliRunner().invoke(
+        main, ["command-context", "devonthink-index", "--", "--tag", "to-index"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "nx dt index --tag to-index" in result.output
+
+
+def test_devonthink_index_explicit_selection_flag_is_passed_through_verbatim(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    import nexus.commands.command_context as cc
+
+    monkeypatch.setattr(cc, "_dt_reachable", lambda: (True, "http"))
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: [])
+    from nexus.cli import main
+
+    result = CliRunner().invoke(
+        main, ["command-context", "devonthink-index", "--", "--selection"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "nx dt index --selection" in result.output
+    assert "--smart-group" not in result.output.split("### Invocation")[1].split("###")[0]
+
+
+def test_devonthink_index_bare_smart_group_name_is_still_a_guess(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Non-vacuity / regression guard: a bare name that is NOT one of the
+    known flags must still fall through to the smart-group guess -- the
+    fix narrows the smart-group branch, it does not remove it."""
+    monkeypatch.chdir(tmp_path)
+    import nexus.commands.command_context as cc
+
+    monkeypatch.setattr(cc, "_dt_reachable", lambda: (True, "http"))
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: [])
+    from nexus.cli import main
+
+    result = CliRunner().invoke(
+        main, ["command-context", "devonthink-index", "--", "Papers"],
+    )
+    assert result.exit_code == 0, result.output
+    assert 'nx dt index --smart-group "Papers"' in result.output
+
+
+class _FakeCatalogRowsForKnowledgeCollections:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def list_collections(self):
+        return list(self._rows)
+
+
+def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
+    """nexus-bgt0r: ``_knowledge_collections`` reads the catalog's own
+    ``list_collections()`` rows (the same query ``nx collection list``
+    uses -- see ``_catalog_collection_rows`` in ``commands/collection.py``)
+    and filters on the row's own ``content_type`` column, never on the
+    collection name. This used to read ``mcp_infra.get_collection_row``
+    (a ``/v1/vectors/stats``-backed cache keyed by name) instead, which
+    printed "(none listed)" against 15 live knowledge collections in
+    service mode -- that cache's own docstring names the exact failure
+    shape: a row missing from the stats response is indistinguishable
+    from "never registered". A row whose NAME merely looks like a
+    knowledge collection but whose catalog content_type says otherwise
+    (and vice versa) is the proof this reads the column, not the string.
     """
     import nexus.commands.command_context as cc
-    import nexus.db as _db
-    from tests.conftest import catalog_row_for_collection_name
 
-    # RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26): _knowledge_collections
-    # reads nexus.mcp_infra.get_collection_row -- a SEPARATE singleton from
-    # whatever make_t3() this test patches -- so it needs its own stub. The
-    # fixture names below carry no quarantine/lookalike traps the plain
-    # name-derived emitter would misclassify.
-    monkeypatch.setattr(
-        "nexus.mcp_infra.get_collection_row",
-        lambda name: catalog_row_for_collection_name(name),
-    )
-
-    class _FakeT3:
-        def list_collections(self):
-            return [
-                "knowledgefoo__bar",       # boundary: not the knowledge__ prefix
-                "code__myrepo",
-                "bare-legacy-name",        # no "__" at all
-                "knowledge__delos__model-ctx__v1",
-                "knowledge__notes",
-            ]
-
-    # _knowledge_collections() does a fresh `from nexus.db import make_t3`
-    # inside its own body every call -- patch the source attribute, not a
-    # module-level name on `cc` (it never binds one).
-    monkeypatch.setattr(_db, "make_t3", lambda: _FakeT3())
-    result = cc._knowledge_collections()
+    rows = [
+        {"name": "knowledgefoo__bar", "content_type": "code"},
+        {"name": "code__myrepo", "content_type": "code"},
+        {"name": "bare-legacy-name", "content_type": ""},
+        {"name": "knowledge__delos__model-ctx__v1", "content_type": "knowledge"},
+        {"name": "knowledge__notes", "content_type": "knowledge"},
+        # A name with no knowledge__ prefix at all, but the catalog row
+        # says knowledge: the column decides, not the string.
+        {"name": "legacy-migrated-subject", "content_type": "knowledge"},
+    ]
+    with patch(
+        "nexus.catalog.factory.make_catalog_reader",
+        return_value=_FakeCatalogRowsForKnowledgeCollections(rows),
+    ):
+        result = cc._knowledge_collections()
     assert result == sorted([
         "knowledge__delos__model-ctx__v1",
         "knowledge__notes",
+        "legacy-migrated-subject",
     ])
+
+
+def test_knowledge_collections_returns_empty_when_catalog_reader_is_none(monkeypatch) -> None:
+    """A ``None`` catalog reader (uninitialised) degrades to an empty
+    list, never a raise -- a preamble probe must not abort the command."""
+    import nexus.commands.command_context as cc
+
+    with patch(
+        "nexus.catalog.factory.make_catalog_reader", return_value=None,
+    ):
+        assert cc._knowledge_collections() == []
+
+
+def test_knowledge_collections_returns_empty_on_catalog_exception(monkeypatch) -> None:
+    """A catalog read failure also degrades to an empty list rather than
+    propagating and aborting the preamble."""
+    import nexus.commands.command_context as cc
+
+    with patch(
+        "nexus.catalog.factory.make_catalog_reader",
+        side_effect=RuntimeError("engine down"),
+    ):
+        assert cc._knowledge_collections() == []
