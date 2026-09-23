@@ -1573,6 +1573,64 @@ class CatalogRepositoryTest {
     }
 
     /**
+     * nexus-l52ms ship-blocker fixup: display_name is a DURABLE opt-in marker
+     * (nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER) some callers stamp once at
+     * registration time, but EVERY generic re-registration of the same
+     * collection (a T3 chunk write's ensure_collection_registered(kwargs=None),
+     * indexer.py's Phase-4 migration cascade's direct register_collection call,
+     * ...) passes NO display_name at all -- "" on the wire. Before this fix,
+     * upsertCollection's ON CONFLICT DO UPDATE wrote CONFLICT_NAME.display_name
+     * from EXCLUDED.display_name unconditionally, so the very next ordinary
+     * write from ANY other code path silently wiped a real marker back to "".
+     * A blank incoming value must never clobber an existing non-blank one.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_blankDisplayNameNeverClobbersExisting() {
+        String name = "knowledge__display-name-durable__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "knowledge", "owner_id", "dn-durable",
+            "embedding_model", "voyage-context-3", "model_version", "v1",
+            "display_name", "nx-corpus-knowledge-opt-in"));
+        // Simulates a GENERIC re-registration (a T3 chunk write, the indexer's
+        // migration cascade) -- same name, no display_name in the request at all.
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "knowledge", "owner_id", "dn-durable",
+            "embedding_model", "voyage-context-3", "model_version", "v1"));
+        var coll = repo.getCollection(TENANT_A, name);
+        assertThat(coll.get("display_name"))
+            .as("a blank display_name on a generic re-registration must never wipe "
+                + "an existing marker")
+            .isEqualTo("nx-corpus-knowledge-opt-in");
+    }
+
+    /**
+     * The companion direction: a caller that DOES send a real display_name
+     * (the deliberate opt-in writer re-asserting the marker on an ALREADY-
+     * registered row -- the "re-run nx index repo --corpus knowledge once"
+     * backfill remedy for a repo that opted in before this fix existed) must
+     * still be able to SET it. Blank-never-clobbers is not blanket exclusion.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_nonBlankDisplayNameStillUpdates() {
+        String name = "knowledge__display-name-backfill__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "knowledge", "owner_id", "dn-backfill",
+            "embedding_model", "voyage-context-3", "model_version", "v1"));
+        var before = repo.getCollection(TENANT_A, name);
+        assertThat(before.get("display_name")).isEqualTo("");
+
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "knowledge", "owner_id", "dn-backfill",
+            "embedding_model", "voyage-context-3", "model_version", "v1",
+            "display_name", "nx-corpus-knowledge-opt-in"));
+        var after = repo.getCollection(TENANT_A, name);
+        assertThat(after.get("display_name"))
+            .as("a deliberate, non-blank display_name must still land on an "
+                + "already-registered row -- the backfill remedy for a pre-fix opt-in")
+            .isEqualTo("nx-corpus-knowledge-opt-in");
+    }
+
+    /**
      * nexus-cefa1.2: legacy_grandfathered=true (a real JSON boolean, matching the
      * only shape Python clients send — nexus-cecqy) round-trips through
      * catalog_collections.legacy_grandfathered's boolean column exactly.

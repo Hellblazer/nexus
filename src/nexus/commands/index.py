@@ -1092,10 +1092,28 @@ def index_repo_cmd(
         # is enough for every downstream layer (index_repository,
         # _index_prose_file, _index_pdf_file) to route prose at the new
         # destination, since they all read the field directly from the
-        # registry. Idempotent on re-runs: the rewrite only fires when
-        # the registry currently holds the docs__ default. Code routing
-        # is unaffected (the rewrite touches only the docs_collection
-        # field, never code_collection).
+        # registry. Code routing is unaffected (the rewrite touches only
+        # the docs_collection field, never code_collection).
+        #
+        # nexus-l52ms ship-blocker fixup, round 2 (2026-09-23): this branch
+        # does NOT special-case "already knowledge__" -- the else-arm below
+        # re-synthesizes the docs__ candidate name and re-derives new_docs
+        # from it on EVERY --corpus knowledge invocation, even when
+        # existing_docs is already knowledge__-prefixed, and reg.update()
+        # is called again with the (unchanged) result. That re-call is
+        # deliberate, not incidental: it is what durably stamps
+        # KNOWLEDGE_CORPUS_OPT_IN_MARKER (see nexus.corpus) on a
+        # pre-existing row too. This is the sole backfill path for a repo
+        # that opted in BEFORE the durable-marker fix landed -- such a
+        # repo's knowledge__ collection was registered with no marker, so
+        # from_catalog no longer admits it to the docs slot (GH #451
+        # again) until one re-run of this exact command re-stamps it.
+        # No other signal can safely backfill this: the only candidate
+        # ("a knowledge collection sharing this repo's owner_id") is
+        # exactly the coincidental-owner-id signal the l52ms incident
+        # showed is unsafe, so there's nothing to read instead of asking
+        # the operator to re-run once. See
+        # tests/test_index_corpus_knowledge_e2e.py::TestBackfillsPreFixOptIn.
         if corpus_choice == "knowledge":
             # RDR-137 Phase 4.2 (nexus-tts0d.16): derive the knowledge
             # collection name from the existing docs entry when present;

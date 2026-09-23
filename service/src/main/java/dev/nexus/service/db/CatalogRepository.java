@@ -7183,7 +7183,30 @@ public final class CatalogRepository {
                // of the nexus-uxd2a landing): hygiene-005's GC functions copy a
                // quarantine sibling's model_version from the origin's row, and that copy
                // is only ever right if the origin's own value cannot move underneath it.
-               .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+               // nexus-l52ms ship-blocker fixup: display_name is a durable marker
+               // some callers stamp once (nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER,
+               // the --corpus knowledge opt-in) but EVERY generic re-registration of
+               // the same collection (a T3 chunk write's
+               // ensure_collection_registered(kwargs=None), indexer.py's Phase-4
+               // migration cascade's direct register_collection call, ...) sends NO
+               // display_name at all -- "" on the wire, same as a genuine INSERT's
+               // default. Unconditionally writing EXCLUDED.display_name here made the
+               // very next ordinary write from ANY other code path silently wipe a
+               // real marker back to "" (a fresh-process reindex with no in-process
+               // registration cache reaches this path for real every time). A BLANK
+               // incoming value now never clobbers an existing non-blank one; a
+               // caller that DOES send a real value (the deliberate opt-in writer
+               // re-asserting the marker on an already-registered row -- the
+               // "re-run nx index repo --corpus knowledge once" backfill remedy for a
+               // repo that opted in before this fix existed) still updates it. This is
+               // NOT blanket exclusion like embedding_model/model_version/dimension/
+               // lifecycle_state above -- there is no legitimate caller today that
+               // needs to REVERT a display_name to blank, so "blank never wins" loses
+               // nothing a real caller wants.
+               .set(CATALOG_COLLECTIONS.DISPLAY_NAME,
+                    DSL.when(DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME).ne(""),
+                             DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+                       .otherwise(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
                // nexus-cecqy: an explicit registration REVIVES a tombstone. Since a rename
                // now retires the old name instead of deleting it, re-creating a collection
