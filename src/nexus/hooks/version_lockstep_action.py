@@ -280,7 +280,7 @@ def uv_receipt_present() -> bool:
     Absence of the receipt means a dev/editable tree (or no uv): SKIP, so we
     never clobber a developer checkout. All edge cases fail-safe to False.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     if shutil.which("uv") is None:
         return False
@@ -302,7 +302,7 @@ def installed_nx_version() -> str | None:
     ``nx --version`` prints e.g. ``nx, version 5.7.0``. Returns None when nx
     is absent or the output cannot be parsed.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     if shutil.which("nx") is None:
         return None
@@ -351,7 +351,7 @@ def satisfies(installed: str | None, target: str) -> bool:
 
 def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
     """Run a command; return True on exit 0, False otherwise. Never raises."""
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     try:
         result = run_bounded(
@@ -385,7 +385,7 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
     upgrade`` itself (the reason is printed instead), so this is a
     durable record of the outcome, not a gate. No CLI binary upgrade and
     no marker write: ref drift is not a CLI-version fact."""
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     try:
         result = run_bounded(

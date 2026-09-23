@@ -38,7 +38,6 @@ names this as the nexus D9 defect class.
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +91,7 @@ def _git_common_root(start: Path) -> Path | None:
     one-per-repo across worktrees — the engine build lease and the
     cached service jar both live in the git common dir for this reason.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     try:
         out = run_bounded(

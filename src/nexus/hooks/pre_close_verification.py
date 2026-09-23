@@ -276,7 +276,7 @@ def _coverage(bead_ids: list[str]) -> dict:
     # overridable via NX_CLOSE_GATE_DEADLINE_SECONDS (test seam, mirrors the
     # push-gate's NX_PUSH_GATE_DEADLINE_SECONDS) so tests can trip it fast and
     # deterministically with a slow stub nx rather than waiting out 3.5s.
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     DEADLINE_SECONDS = float(os.environ.get('NX_CLOSE_GATE_DEADLINE_SECONDS', '3.5') or '3.5')
     _start = time.monotonic()
@@ -585,7 +585,7 @@ def _active_close_rdr() -> str:
     script reaches for ``nx scratch list`` rather than search because the
     lookup is an exact tag match, not a semantic one.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     if shutil.which("nx") is None:
         return ""
@@ -711,7 +711,7 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
     observable instead of producing an audit record nobody can trust and
     nobody was told is missing.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     if not ids:
         return

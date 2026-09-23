@@ -88,7 +88,7 @@ _RDR_STEM_RE = re.compile(r"(?:rdr-?)?(\d+)", re.IGNORECASE)
 
 
 def _repo_root() -> Path | None:
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     try:
         result = run_bounded(
@@ -107,7 +107,7 @@ def _repo_name(root: Path) -> str:
     same derivation ``nx rdr preamble`` uses (``_preamble_resolve_repo``),
     so a linked worktree reads the repo's T2 project, not one named after
     the worktree directory (nexus-u1jxt.7). Falls back to *root*'s name."""
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     try:
         result = run_bounded(
@@ -279,7 +279,7 @@ def _collection_exists(target: str) -> bool:
     ``threading.Thread(daemon=True)`` has no such handler -- the process
     can exit with it still running, which is exactly the property a
     fire-and-abandon timeout needs."""
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     try:
         from nexus.db import make_t3  # noqa: PLC0415
@@ -409,7 +409,7 @@ def _load_gated_commits(repo_name: str) -> dict[str, str]:
 
 def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, str], gated: dict[str, str]) -> list[str]:
     """Lines naming draft RDRs whose file tip is past the gated commit."""
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hooks fire on every tool call and a module-scope import of this pulls structlog + ~231 modules (measured 14ms -> 62ms); paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     lines: list[str] = []
     for path in rdr_files:
