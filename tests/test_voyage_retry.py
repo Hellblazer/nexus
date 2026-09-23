@@ -68,6 +68,25 @@ def test_exhausted_then_raises() -> None:
     assert fn.call_count == 3
 
 
+def test_max_attempts_zero_still_calls_fn_once() -> None:
+    """nexus-cd1k0.16 finding (4): range(1, max_attempts + 1) was empty for
+    max_attempts=0, so fn was never called and the function silently
+    returned None -- indistinguishable from fn itself legitimately
+    returning None. fn must always be called at least once."""
+    fn = MagicMock(return_value="ok")
+    assert _voyage_with_retry(fn, max_attempts=0) == "ok"
+    fn.assert_called_once()
+
+
+def test_max_attempts_zero_retryable_error_raises_not_none() -> None:
+    """Sibling of the case above for a RETRYABLE error: a single failed
+    attempt must raise, never fall through to an implicit None."""
+    fn = MagicMock(side_effect=_ve.APIConnectionError("down"))
+    with patch("nexus.retry.time.sleep"), pytest.raises(_ve.APIConnectionError):
+        _voyage_with_retry(fn, max_attempts=0)
+    fn.assert_called_once()
+
+
 def test_non_retryable_raises_immediately() -> None:
     fn = MagicMock(side_effect=_ve.AuthenticationError("bad key"))
     with pytest.raises(_ve.AuthenticationError):

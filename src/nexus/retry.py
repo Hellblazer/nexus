@@ -552,13 +552,24 @@ def _voyage_with_retry(
     (``voyage_transient_error_retry``) so ingest-side observability reports
     rate-limit stalls instead of looking like silent multi-minute hangs
     (nexus-vatx Gap 1).
+
+    *fn* is ALWAYS called at least once, regardless of *max_attempts*
+    (nexus-cd1k0.16 finding (4)): ``range(1, max_attempts + 1)`` used to be
+    empty for ``max_attempts <= 0``, so the loop body -- including the
+    single call to *fn* -- never ran, and the function returned ``None``
+    without ever invoking *fn*. A caller cannot distinguish that from *fn*
+    itself legitimately returning ``None``, which is silently worse than a
+    raise. The sibling ``_vector_with_retry`` already guarantees a first
+    attempt unconditionally (its loop calls ``fn`` before it ever checks
+    the attempt count); this mirrors that invariant.
     """
     delay = 1.0
-    for attempt in range(1, max_attempts + 1):
+    effective_max_attempts = max(max_attempts, 1)
+    for attempt in range(1, effective_max_attempts + 1):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
-            if attempt == max_attempts or not _is_retryable_voyage_error(exc):
+            if attempt == effective_max_attempts or not _is_retryable_voyage_error(exc):
                 raise
             _log.warning(
                 "voyage_transient_error_retry",
