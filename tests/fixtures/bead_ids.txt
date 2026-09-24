@@ -6899,6 +6899,7 @@ nexus-z7hf
 nexus-z7s5r
 nexus-z8xfo
 nexus-z8xfo.1
+nexus-z93bq
 nexus-z9cz2
 nexus-z9cz2.1
 nexus-z9qt5
