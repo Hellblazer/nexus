@@ -430,6 +430,57 @@ class TestHungManagerIsKilledAtTheBound:
     that hung) and the bound, never a silent pass.
     """
 
+    def test_hung_predeactivate_before_forced_overwrite_is_killed_and_warned_not_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The best-effort unload BEFORE a ``force=True`` overwrite
+        (installer.py's ``if force and previous is not None:`` branch) must
+        warn and continue, not hang or raise, when the manager it shells
+        out to never answers. Falsifiable: with the ``except
+        subprocess.TimeoutExpired`` branch removed from that site, the
+        raw ``TimeoutExpired`` propagates out of ``install_autostart``
+        uncaught, and this test errors instead of passing."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        (tmp_path / "units").mkdir()
+        (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n")
+        monkeypatch.setattr(
+            installer, "_deactivate_cmd", lambda dest, *, tier="t2": ["sleep", "30"]
+        )
+        # The activation call that follows the predeactivate branch must
+        # itself complete fast and successfully, so this test isolates the
+        # predeactivate site's own timeout handling rather than also
+        # exercising (and being slowed or failed by) the activation site.
+        monkeypatch.setattr(installer, "_activate_cmd", lambda dest: ["true"])
+        monkeypatch.setattr(installer, "_MANAGER_ACTION_TIMEOUT_S", 0.2)
+
+        warnings: list[tuple[str, dict]] = []
+        orig_warning = installer._log.warning
+
+        def _capture_warning(event, **kw):
+            warnings.append((event, kw))
+            return orig_warning(event, **kw)
+
+        monkeypatch.setattr(installer._log, "warning", _capture_warning)
+
+        start = time.monotonic()
+        result = installer.install_autostart(tier="service", force=True)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 10, (
+            f"took {elapsed:.2f}s against a 0.2s bound -- the hang was not "
+            "actually bounded"
+        )
+        # The overwrite + activation proceed regardless (same contract as
+        # the pre-existing FileNotFoundError/OSError sibling branch): a
+        # hung predeactivate must not abort the install.
+        assert result.status is installer.InstallStatus.NEWLY_INSTALLED
+        assert warnings, "the predeactivate timeout was silently swallowed"
+        event, kw = warnings[0]
+        assert "predeactivate_timeout" in event, event
+        assert kw.get("cmd") == "sleep 30", f"warning does not name the verb: {kw!r}"
+        assert kw.get("timeout_s") == 0.2, f"warning does not name the bound: {kw!r}"
+
     def test_hung_activation_is_killed_and_raises_naming_the_verb_and_bound(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

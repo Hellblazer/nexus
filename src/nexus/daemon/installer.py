@@ -275,12 +275,36 @@ _ACTIVATION_QUERY_TIMEOUT: float = 10.0
 #:     launchctl bootstrap   idle 4.4-5.7ms   loaded 6.1-9.5ms
 #:     launchctl bootout     idle 4.2-5.1ms   loaded 5.4-6.8ms
 #:
-#: No Linux box exists here, so the systemd half is reasoned from its own
-#: published defaults instead of measured: ``systemctl --user enable/
-#: disable --now`` runs the unit's start/stop JOB inline, and that job is
-#: itself bounded by ``TimeoutStartSec=``/``TimeoutStopSec=``, which
-#: default (``DefaultTimeoutStartSec=``/``DefaultTimeoutStopSec=`` in
-#: systemd-system.conf(5)) to 90s each.
+#: NO LINUX BOX EXISTS HERE, so the Linux half is REASONED from systemd's
+#: own published defaults, not measured -- that gap is real and stays
+#: open: the bead asked to time the verbs "on macOS AND on Linux", and
+#: only macOS timings above are actual measurements. ``systemctl --user
+#: enable/disable --now`` runs the unit's start/stop JOB inline (this is
+#: the PER-USER manager, spawned by ``--user``, not the system one), and
+#: that job is itself bounded by ``TimeoutStartSec=``/``TimeoutStopSec=``,
+#: which default (``DefaultTimeoutStartSec=``/``DefaultTimeoutStopSec=``
+#: in systemd-user.conf(5) -- the user-manager config file, not
+#: systemd-system.conf(5)) to 90s each; the shipped value is the same 90s
+#: either way, so this is a citation fix, not a changed number.
+#:
+#: ONE LOAD SHAPE IS NOT ADDRESSED AT ALL: manager CONTENTION -- launchd
+#: or the systemd --user instance busy with a queue of OTHER jobs.
+#: ``TimeoutStartSec=``/``TimeoutStopSec=`` bound the job's own EXECUTION
+#: once dispatched; they say nothing about how long a job can sit
+#: QUEUED before the manager gets to it, and that wait is not measured
+#: (the CPU-loaded run above loaded the BOX, not the manager's own job
+#: queue) or reasoned about here. This bound is judged adequate anyway
+#: for what actually gets shelled out: the shipped ``com.nexus.service.plist``/
+#: ``nexus-service.service`` unit runs ``nx daemon service start
+#: --foreground``, and that supervisor's own architected shutdown budget
+#: (``storage_service_daemon._SUPERVISOR_STOP_GRACE``, currently 12.0s --
+#: 2x its election budget plus a graceful-SIGTERM window plus a
+#: post-SIGKILL reap, with a 1s margin) is the slow half of what a
+#: bootout/disable --now actually waits on, and it is an order of
+#: magnitude below both systemd's 90s default and this 120s bound. So the
+#: JOB itself is fast even under the load shapes examined; a genuinely
+#: contended manager queue is the one shape left honestly unmeasured, not
+#: reasoned to be safe.
 #:
 #: THE MULTIPLIER IS A JUDGEMENT, NOT A DERIVATION -- same posture as
 #: ``pg_provision._INITDB_TIMEOUT_S`` above (in ``db/pg_provision.py``).
