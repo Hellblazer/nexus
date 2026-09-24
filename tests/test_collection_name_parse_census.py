@@ -549,9 +549,9 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # :113 class (a), registering `new_name`; :1053/:1062 class (a),
     # first-index synthesis explicitly for the not-yet-registered case;
     # :1755 class (a), the function's OWN docstring defines "kind" as the
-    # name prefix, not a catalog fact; :2940 class (a), `collection` is
-    # the just-minted candidate from t3_collection_name on the line above.
-    "src/nexus/commands/index.py": 5,
+    # name prefix, not a catalog fact. (The :2940 index-md extractor-warning
+    # site was removed with the warning itself, nexus-kk4ut.)
+    "src/nexus/commands/index.py": 4,
     # class (a): `collection` is the raw --collection CLI argument for
     # `nx store export`, not necessarily an existing registered name.
     "src/nexus/commands/store.py": 1,
@@ -1092,8 +1092,10 @@ def test_pin_matches_documented_total() -> None:
     hardcoded set; then 53 -- 52 on 2026-09-09 when the client-side
     quarantine-sibling pre-registration and its kwargs derivation were
     deleted; then 52 -- 53 the same day when the owner-scope resolver
-    gained a class-(a) candidate split on a user-typed scope token) is derived from the same dict the guards above check
+    gained a class-(a) candidate split on a user-typed scope token; then
+    53 -- 52 on 2026-09-24 when index-md's knowledge__ extractor warning,
+    and its class-(a) split, were deleted, nexus-kk4ut) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 53
+    assert PARSE_SITE_PIN == 52
