@@ -6,6 +6,118 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.58.0] - 2026-09-23
+
+Pairs with engine-service-v0.1.130 (was engine-service-v0.1.129). The engine carries two new additive catalog routes (`POST /v1/catalog/merge`, `POST /v1/catalog/ghost-sweep`) and no new Liquibase changesets; catalog-016-0 gains a checksum-neutral DATA EFFECT comment only. Every unshipped wire-contract change is additive, so the engine deploys before this client tag.
+
+### Plugin hooks now live (conexus and sn)
+
+This release moves both plugins' pinned source forward, which makes the pending plugin-surface changes live, with one deliberate hold-back:
+
+- sn hooks launch through `uv run --no-project --no-config --quiet` instead of bare `python3`, so they work on native Windows and ignore a stray `.python-version` (nexus-j4iy0).
+- The sn worktree guard records each session's startup root and denies a Serena write whose recorded root differs from the tree being edited, closing the relocated-session hazard where a write landed in the primary checkout (nexus-ebx0s).
+- **Held back: conexus hooks.json keeps its plugin-script entries this release.** The wheel now carries `nx-hook` verbs for the behaviour census, version lockstep, both routing guards and the mailbox drain (nexus-t9klx, nexus-44812), plus `mcp-connect-wait` and `mcp-connect-check` (nexus-veh77), but hooks.json does not name them yet. An older `nx-hook` exits 2 on a verb it does not know, so a plugin that updates before its CLI would have blocked every prompt and every Bash call, and the lockstep hook that repairs that skew was itself one of the new verbs. The entries move once a CLI that knows them is the norm. Version lockstep stays a stdlib-only plugin script permanently, pinned by `tests/hooks/test_lockstep_survives_cli_skew.py`. Eight plugin scripts that nothing ran are deleted (nexus-z9cz2).
+- The orchestration ledger no longer marks in-flight workflow subagents as stranded, and uses the workflow task id rather than the run id as the container identity (nexus-silj0).
+- `rdr-close` archives post-mortems into the RDR research collection (nexus-vupim).
+
+### Added
+
+
+- **`nx catalog merge <duplicate> <canonical>`** (nexus-z4rpi): collapses a duplicate catalog entry in one transaction, moving its source URI and links. `nx catalog update --alias-of` (nexus-bt8w8) sets only the alias.
+- **`nx catalog sweep-ghosts [--apply]`** and a `ghost-sweep` doctor row (nexus-29drn): collect RDR-204 ghosts created after the one-time automatic sweep.
+- **Develop pushes take a tuple-space lock** (nexus-agctp): `scripts/git-push-develop.sh` claims `lock/ci-develop-push` around the push and names the holder and expiry when it is held.
+- The release battery refuses a paired engine release whose DATA EFFECT relay table was never attested (nexus-iu43o); plugin cuts can defer a ledger entry that straddles wheel content (nexus-2x3qy).
+- Local-install resource figures in the README and getting-started guide (nexus-7f6po): about 1.2 GB idle, 4.2-4.5 GB while indexing, measured on Apple Silicon.
+
+### Removed
+
+
+- **The `attention_guided_v1` salience boost** (nexus-0hqez). It never took effect: the hybrid scorer overwrote it, and nothing extracted the salient sentences it needed.
+- `table_regions[].html` in PDF extraction metadata (nexus-dqe86): written at three sites, read by none.
+
+### Fixed
+
+- **nx-hook no longer blocks a session when the plugin is ahead of the installed CLI** (nexus-t9klx). An unknown verb is skipped with a visible notice instead of exiting 2, which on `UserPromptSubmit` and `PreToolUse` would have blocked every prompt and Bash call. An unknown verb shaped like a ledger verb, whose exit code is its answer, exits 70 instead, so a caller never reads a skipped check as a pass.
+
+- **An older nx no longer rolls the engine back** (nexus-b2eaw). The version stamp behind the post-upgrade finish pass was compared by string equality, so with two conexus versions on one box every alternating `nx` call re-ran the finish pass, and an older client converged the engine toward its own older pin. The stamp now only moves forward. A deliberate downgrade of the installed CLI says so and names `nx daemon restart-stale`; a dev checkout stays quiet.
+- **The RDR-184 ledger projector works on clients configured by `NX_SERVICE_*`** (nexus-08cfl). It presents the same credential the real client does when no `mint_token` is configured; persistent skips show in `nx doctor`.
+- **Serena write tools are denied from a session relocated into another git tree** (nexus-ebx0s). The write used to succeed against the tree Serena started in, dry runs included. A session that started in a worktree keeps its writes.
+- **Mutating sweeps are never auto-retried on a gateway error** (nexus-ll31n). GC, purge-trash and other non-idempotent sweep routes across every client store no longer replay on 502/503/504; the catalog client also stopped raising a TypeError when asked not to retry.
+- **`store_put` no longer adopts another collection's document** (nexus-bb6n2). A re-put into a different collection whose text overlapped an existing same-titled note rewrote that note's manifest; dedup is now scoped to the target collection. Superseding a note also reaps its now-unreferenced chunks.
+- **Markdown documents rebuild without duplicated overlap** (nexus-yz7se). Chunk spans now describe the text each chunk actually carries, and the rebuild keeps one copy of a repeated section heading. Existing `rdr__`/`docs__` rows keep the old spans until reindexed.
+- **Figure markers keep their label and cover docling extractions** (nexus-9zly6); orphaned figures with no image path get a marker too.
+- **`nx taxonomy reset` keeps cross-collection projections** (nexus-0v0nj).
+- **`nx index repo --corpus knowledge` routing is recorded, not inferred** (nexus-l52ms). A knowledge collection that merely shares the repo's owner id can no longer take the docs slot.
+- **Hand-edited autostart units are backed up before convergence** (nexus-gq1pv), keeping the newest five per unit.
+- **`nx rdr gate` warns on an off-template Implementation Plan** (nexus-r9esy): RDRs after 205 whose plan doesn't use `### Phase N` / `#### Step N` headings get a warning, never a refusal; earlier RDRs are grandfathered.
+- **`beads_prime` fails closed on an unreadable config** (nexus-i4odo) and says the config could not be read instead of claiming priming was declined.
+- **Post-mortems archive to a subject collection** (nexus-vupim), not the repo's own `knowledge__<owner>` collection.
+- **A collection import with no `content_type` gets the field-named 422** (nexus-3fsyx) instead of an opaque 409.
+- Assorted smaller fixes: vimgrep/compact/context output stays parseable when a title stands in for a path and contains a colon (nexus-1uov1); `nx command-context devonthink-index` recognises explicit selectors (nexus-bgt0r); the dispatch check finds its own session and is portable to GNU `stat` (nexus-7m6uc); the stat dialect bug is fixed in six other scripts.
+
+- **A hook tool can no longer hold a session open** (nexus-5dcky). Every
+  `hook_<name>` MCP tool now bounds its `run()`; past the bound the tool
+  answers with the same empty result a crashed hook already produces, and
+  logs `hook_tool_timed_out`. Each wired hook's bound is derived from the
+  `timeout` its own `hooks.json` entry declares, a second inside it —
+  `tests/hooks/test_hook_tool_timeout.py` reads that file and fails if any
+  bound reaches its budget. The margin is `nexus-dgvsz`'s: a reply that
+  lands after the client abandoned the request id arrives as an unknown
+  message and tears the stdio transport down, so a bound equal to the
+  budget would trade a hang for a teardown. `hooks.json` wires
+  `hook_stop_verification` on
+  Stop, so on native Windows with no service endpoint — the default state
+  there, since the PG bundle has no Windows target and `nx init` refuses —
+  `claude -p` answered the prompt and then sat there indefinitely. Measured
+  2026-09-22: past 300 seconds; with the bound, it returns at 90 seconds.
+
+  The bound sits at the boundary rather than on the blocking call because
+  there turned out to be two blocking sites, not one. `hook_stop_verification`
+  blocks in a `git rev-parse` whose `subprocess.run(timeout=5.0)` does not
+  bound it — observed still running at 25 seconds, by a mechanism that is
+  NOT the generic pipe-drain story this entry first gave (a piped
+  `git rev-parse` spawns no pager, no hook and no credential helper, so no
+  descendant of it holds the write end; see `nexus-t10nc`) — and tools that
+  construct a
+  `T2Database` block importing numpy's C extension, which takes 0.08s outside
+  that process and is unexplained. A hook is advisory and the harness carries
+  its own per-entry `timeout`, so a hook past that budget cannot affect
+  anything except by holding a tool call open; answering without it is better
+  whatever the cause. Python cannot kill the thread, so a timed-out `run()` is
+  abandoned rather than stopped — stated in the code, not left to be found.
+
+  It runs on a daemon thread rather than a `ThreadPoolExecutor`, and that is
+  the fix rather than a style choice: `concurrent.futures.thread` joins every
+  live pool thread from a process-wide `atexit` handler and
+  `shutdown(wait=False)` does not exempt it, so an abandoned worker kept the
+  interpreter from exiting at all. Since nx-mcp exits at stdin EOF and runs
+  its T1 shutdown there, the first cut of this fix would have moved the hang
+  from the Stop hook to session end. Caught in review; pinned by a
+  subprocess test that fails with `TimeoutExpired` if it comes back.
+
+  The original diagnosis in `nexus-5dcky` and RDR-218's Gap 4, that a hook
+  blocks when it cannot resolve a service endpoint, was an inference from a
+  four-way probe and is wrong: none of the SessionStart hooks block, both MCP
+  servers initialize and list tools in about a second, and the Stop hook's
+  blocking path touches no storage at all. Both records are corrected.
+
+  What this does NOT cover, stated because the bead's own diagnosis was
+  wider than its title: MCP tools that are not hooks and do touch storage —
+  `tuple_registry` and every other `T2Database` caller — are still unbounded
+  and still hang on Windows with no endpoint. Bounding those is a change to
+  the failure mode of every storage operation on every platform rather than
+  a rider on this fix, so it is `nexus-fd3zf` with both arguments written
+  out.
+- Catalog: a nested-worktree path is canonicalized before the repo-owner lookup, so it no longer registers under a second owner (nexus-7or3f).
+- Catalog: the RDR backfill no longer mints curator owners from tumbler-form collection names (nexus-emrsy).
+- `nx doctor`: superseded rows no longer count toward the dormant, disputed, and quarantine checks (nexus-s1rzg).
+- PDF extraction: code that the extractor mis-recognized as LaTeX math in table cells is detected and kept as code (nexus-8eg4w).
+- `config.yml` read-modify-write is locked across processes, not only threads; the HTTP retry classifier's string fallback matches a whole status token, not a digit substring (nexus-cd1k0.16).
+- Daemon: the aspect worker's stop guard uses the fenced value it captured, the warming marker rejects non-dict JSON, and the JVM-launch argv marker is confined to the storage daemon (nexus-cd1k0.6).
+- Daemon: the engine is launched on the IPv4 stack for both native and JVM launch kinds, and the gate is watched (nexus-ijue9.7); both flock sites route through one locking helper and the Java floor is pinned to the pom (nexus-ijue9.9).
+- Hooks: refreshing managed hooks now catches the error a stale repo entry actually raises (nexus-g76yf).
+- Local PG provisioning: every `psql`/`initdb` call carries an explicit timeout, and hook subprocesses are bounded (nexus-9dkxu, nexus-zptvf).
+
 ## [7.57.0] - 2026-09-22
 
 Pairs with engine-service-v0.1.129, unchanged from 7.56.0 — this release carries no engine-side change.

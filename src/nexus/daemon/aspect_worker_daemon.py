@@ -396,6 +396,11 @@ class AspectWorkerDaemon:
 
     def stop(self, timeout: float = 10.0) -> None:
         """Stop the worker, then relinquish the lease (idempotent)."""
+        # nexus-cd1k0.6 finding (6): captured once, up front, so both the
+        # reclaim-sweep guard below and the later mark/relinquish guard see
+        # the SAME answer even if a heartbeat tick flips `supervisor.fenced`
+        # mid-stop.
+        fenced = self.is_fenced()
         self._stop.set()
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=2.0)
@@ -421,11 +426,22 @@ class AspectWorkerDaemon:
             except Exception as exc:  # noqa: BLE001 - worker stop is best-effort during teardown
                 _log.warning("aspect_worker_daemon.worker_stop_failed", tenant=self._tenant, error=str(exc))
             self._worker = None
-        if self._reclaim_queue is not None:
+        if self._reclaim_queue is not None and not fenced:
             # RDR-173 P5 item 3 (review): a final sweep makes the daemon's death
             # OBSERVABLE — the rows it owned but could not finish — AND resets them
             # to pending for the next daemon (recovery in one). reclaim_stale(0):
             # the worker is already stopped, so any in_progress row is abandoned.
+            #
+            # nexus-cd1k0.6 finding (6): reclaim_stale(0) resets ANY stale
+            # in_progress row in this tenant's scope, not only rows THIS
+            # daemon owned. When this daemon was FENCED -- a newer-generation
+            # owner already won the scope and may already be claiming/working
+            # rows -- an unconditional sweep here can reset the successor's
+            # freshly-claimed in-progress rows back to pending out from
+            # under it. A fenced loser does not own the scope any more (same
+            # reasoning as the mark/relinquish guard below); skip the sweep
+            # entirely and let the successor's own heartbeat/reclaim cadence
+            # own recovery.
             try:
                 undrained = self._reclaim_queue.reclaim_stale(0)
                 if undrained:
@@ -435,6 +451,9 @@ class AspectWorkerDaemon:
                     )
             except Exception as exc:  # noqa: BLE001 - shutdown diagnostic is best-effort
                 _log.warning("aspect_worker_daemon.final_reclaim_failed", tenant=self._tenant, error=str(exc))
+        elif self._reclaim_queue is not None:
+            _log.info("aspect_worker_daemon.reclaim_skipped_fenced", tenant=self._tenant)
+        if self._reclaim_queue is not None:
             try:
                 self._reclaim_queue.close()
             except Exception as exc:  # noqa: BLE001 - queue close is best-effort during teardown
@@ -444,7 +463,27 @@ class AspectWorkerDaemon:
         if supervisor is not None:
             # A fenced loser does not own the record; mark/relinquish are
             # owner-token-guarded no-ops there, but skip them to avoid noise.
-            if not supervisor.fenced and supervisor.record is not None:
+            #
+            # nexus-cd1k0.6 review-wave2 follow-up: this used to re-read
+            # `supervisor.fenced` LIVE here, while the reclaim-sweep guard
+            # above uses `fenced`, captured ONCE at the top of this method.
+            # A fence transition landing in the window between that
+            # capture and this check (the heartbeat thread's last tick
+            # before it was joined, or -- with the join already done by
+            # this point -- any other path that could still flip the
+            # supervisor's own `fenced` flag) made the two guards
+            # disagree: the reclaim sweep decided under the PRE-fence
+            # answer while this decided under the POST-fence one. Both
+            # guards now use the SAME single captured value, so they can
+            # never disagree with each other -- the only question stop()
+            # answers is "was this daemon fenced when its shutdown
+            # began", not "is it fenced right now at every checkpoint".
+            # Safe even when this races the true state: mark_shutting_down
+            # /relinquish are already owner-token-guarded no-ops on a
+            # record this daemon no longer owns (the comment above), so a
+            # captured-False call against an actually-just-fenced record
+            # costs nothing beyond a redundant round trip.
+            if not fenced and supervisor.record is not None:
                 try:
                     # nexus-cd1k0 review round 3 finding 6 (sibling of the
                     # storage-service fix): both calls previously took no

@@ -112,7 +112,7 @@ def test_current_head_failed_logs_debug():
     """Site 5: _current_head() OSError emits debug-level log."""
     from nexus.indexer import _current_head
 
-    with patch("nexus.indexer.subprocess.run", side_effect=OSError("git not found")):
+    with patch("nexus.indexer.run_bounded", side_effect=OSError("git not found")):
         with capture_logs() as cap:
             result = _current_head(Path("/fake/repo"))
 
@@ -158,7 +158,10 @@ def test_infer_repo_git_failed_logs_debug():
     """Site 8: _infer_repo() git failure emits debug-level log."""
     from nexus.hooks import _infer_repo
 
-    with patch("nexus.hooks.subprocess.run", side_effect=RuntimeError("git broken")):
+    # nexus-zptvf: hooks spawn through bounded_subprocess.run_bounded now,
+    # imported inside the spawning function, so the name resolves from the
+    # source module at call time rather than nexus.hooks' namespace.
+    with patch("nexus.bounded_subprocess.run_bounded", side_effect=RuntimeError("git broken")):
         with capture_logs() as cap:
             result = _infer_repo()
 
@@ -188,6 +191,11 @@ def test_session_start_stdin_parse_failed_logs_debug():
 
 # ── Site 11: commands/index.py hook detection failure ─────────────────────────
 
+# Engine-dependent: this path reaches the per-process test engine (catalog
+# reader / embedding profile), so it declares t2_service_env instead of
+# relying on the autouse pin, which NX_TEST_T2_SUBSTRATE=none turns off
+# (tests-isolation).
+@pytest.mark.usefixtures("t2_service_env")
 def test_hook_detection_failed_logs_debug(tmp_path):
     """Site 11: hook detection exception in index_repo_cmd emits debug log."""
     from nexus.commands.index import index_repo_cmd
@@ -421,6 +429,11 @@ def test_set_owner_head_hash_failed_logs_warning(tmp_path, monkeypatch):
     )
 
 
+# Engine-dependent: this path reaches the per-process test engine (catalog
+# reader / embedding profile), so it declares t2_service_env instead of
+# relying on the autouse pin, which NX_TEST_T2_SUBSTRATE=none turns off
+# (tests-isolation).
+@pytest.mark.usefixtures("t2_service_env")
 def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path):
     """_CatalogBackedRegistry.update catches Exception around
     cat.register_collection and emits

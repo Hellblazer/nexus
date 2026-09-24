@@ -51,8 +51,8 @@ session had to answer), because a claim held for a session that could
 never hear the channel would strand the message for the lease. RDR-213
 deletes the gate along with the claim itself: with no claim to strand, the
 worst a lost notification costs is a wait until the next wake or the next
-prompt, which the ``UserPromptSubmit`` drain hook (``conexus/hooks/
-scripts/mailbox_drain.py``) renders regardless. The command-line-reading
+prompt, which the ``UserPromptSubmit`` drain hook
+(:mod:`nexus.hooks.mailbox_drain`) renders regardless. The command-line-reading
 gate function, its probe fallback and probe MCP tool are deleted outright,
 not kept as fallbacks (Approach item 3). So are the waiter's claimant
 identity, its lease/renew loop, and the persisted-outstanding-claim
@@ -330,7 +330,7 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
 #: `correlation_id` (those stay in `meta`, unchanged). MVV finding F1 (T2
 #: `nexus_rdr/213-decision-hook-delivers-on-channel-wake-2026-09-17`): with
 #: the plugin's hooks loaded, the channel notification itself fires
-#: `UserPromptSubmit` and `mailbox_drain.py` claims, acks and renders the
+#: `UserPromptSubmit` and the drain hook claims, acks and renders the
 #: body with THAT prompt, before the model's turn, so the session claims
 #: for itself only when no body was rendered that way -- the text states
 #: both outcomes so the model does not act on an already-claimed row. The

@@ -31,6 +31,20 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION
 _TEST_URL = "https://example.test"
 
 
+@pytest.fixture(autouse=True)
+def _data_effect_relay_passes_by_default():
+    """nexus-iu43o wired check_data_effect_relay into the real battery,
+    where it performs REAL git-tag + filesystem I/O against the actual
+    checkout -- the ~150 other tests in this module were never written to
+    expect that dependency and are not testing it. Default it to a clean
+    pass everywhere; TestCheckDataEffectRelay overrides this fixture (same
+    name, class scope) to exercise the real function, and any test that
+    patches its own return value inside its own `with` block wins there
+    regardless (an inner patch overrides an outer one)."""
+    with patch.object(gate, "check_data_effect_relay", return_value=0):
+        yield
+
+
 def _caps(release_version: str) -> ManagedCapabilities:
     return ManagedCapabilities(
         base_url=_TEST_URL,
@@ -2402,7 +2416,8 @@ def _paired_battery(ledger_path, ack=None):
     with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger_path), \
          patch.object(gate, "_tag_exists_in_git", return_value=True), \
          patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=1.0):
+         patch.object(gate, "_tag_age_hours", return_value=1.0), \
+         patch.object(gate, "check_data_effect_relay", return_value=0):
         return gate._run_paired_precondition_battery(
             _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION,
             gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS, ack,
@@ -2438,6 +2453,132 @@ def test_paired_battery_emits_an_arming_verdict_on_an_armed_pairing(
     captured = capsys.readouterr()
     assert rc == 0
     assert "release ARMED" in captured.out
+
+
+def test_paired_battery_refuses_on_a_missing_data_effect_relay_attestation(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    """nexus-iu43o wired into the actual gate: a refusal from
+    check_data_effect_relay fails the WHOLE battery, before arming is even
+    reached -- and never merely stays prose in a skill."""
+    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)  # arming not required, so THIS is what turns the verdict
+    # NOT _paired_battery(): its own helper patches check_data_effect_relay
+    # to 0 (pass-by-default, for every OTHER test in this file), and an
+    # inner patch would win over an outer one wrapped around it -- this
+    # drives _run_paired_precondition_battery directly instead, with the
+    # same supporting mocks _paired_battery uses.
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=1.0), \
+         patch.object(gate, "check_data_effect_relay", return_value=1):
+        rc = gate._run_paired_precondition_battery(
+            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION,
+            gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS, None,
+        )
+    assert rc == 1
+    # The battery never reached arming -- no arming verdict was printed.
+    captured = capsys.readouterr()
+    assert not any(v in captured.out + captured.err for v in _ARMING_VERDICTS)
+
+
+class TestCheckDataEffectRelay:
+    """Direct tests for check_data_effect_relay / _previous_engine_tag
+    against a REAL, small, synthetic git repo (never this checkout) --
+    the same fixture shape list_data_effects' own tests use."""
+
+    @pytest.fixture(autouse=True)
+    def _data_effect_relay_passes_by_default(self):
+        """Shadows the module-level fixture of the same name (class scope
+        wins) -- these tests ARE check_data_effect_relay, so it must not
+        be mocked away here."""
+        yield
+
+    @staticmethod
+    def _git(repo, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    @pytest.fixture
+    def two_tag_repo(self, tmp_path):
+        """v1 = engine-service-v0.1.1 (one additive changeset), v2 =
+        engine-service-v0.1.2 (gains one data-effecting DELETE, no DATA
+        EFFECT: line yet -- the fixture's job is to give the relay check
+        something real to refuse, pass, or skip on)."""
+        repo = tmp_path / "repo"
+        changelog_dir = repo / "service" / "src" / "main" / "resources" / "db" / "changelog"
+        changelog_dir.mkdir(parents=True)
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "t@t")
+        self._git(repo, "config", "user.name", "t")
+
+        master_tmpl = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<databaseChangeLog\n'
+            '    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"\n'
+            '    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
+            '    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog '
+            'http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">\n'
+            '{includes}\n</databaseChangeLog>\n'
+        )
+
+        def _cs(body: str) -> str:
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?>\n<databaseChangeLog\n'
+                '    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"\n'
+                '    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
+                '    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog '
+                'http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">\n'
+                f"{body}\n</databaseChangeLog>\n"
+            )
+
+        (changelog_dir / "a.xml").write_text(_cs(
+            '    <changeSet id="a-1" author="t"><comment>Additive.</comment>\n'
+            '        <sql splitStatements="true">CREATE TABLE nexus.widgets (id int);</sql>\n'
+            "    </changeSet>"
+        ))
+        (changelog_dir / "db.changelog-master.xml").write_text(
+            master_tmpl.format(includes='    <include file="a.xml"/>')
+        )
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-q", "-m", "v1")
+        self._git(repo, "tag", "engine-service-v0.1.1")
+
+        (changelog_dir / "a.xml").write_text(_cs(
+            '    <changeSet id="a-1" author="t"><comment>Additive.</comment>\n'
+            '        <sql splitStatements="true">CREATE TABLE nexus.widgets (id int);</sql>\n'
+            "    </changeSet>\n"
+            '    <changeSet id="a-2" author="t"><comment>Deletes stale widgets.</comment>\n'
+            '        <sql splitStatements="true">DELETE FROM nexus.widgets WHERE stale = true;</sql>\n'
+            "    </changeSet>"
+        ))
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-q", "-m", "v2")
+        self._git(repo, "tag", "engine-service-v0.1.2")
+        return repo
+
+    def test_previous_engine_tag_finds_the_immediately_older_tag(self, two_tag_repo) -> None:
+        assert gate._previous_engine_tag("engine-service-v0.1.2", two_tag_repo) == "engine-service-v0.1.1"
+
+    def test_previous_engine_tag_is_none_for_the_oldest_tag(self, two_tag_repo) -> None:
+        assert gate._previous_engine_tag("engine-service-v0.1.1", two_tag_repo) is None
+
+    def test_refuses_when_never_recorded(self, two_tag_repo, capsys) -> None:
+        rc = gate.check_data_effect_relay("engine-service-v0.1.2", two_tag_repo)
+        assert rc == 1
+        assert "REFUSED" in capsys.readouterr().err
+
+    def test_passes_once_recorded(self, two_tag_repo, capsys) -> None:
+        _data_effects_module = gate._data_effects
+        _data_effects_module.record_relay_attestation(
+            "engine-service-v0.1.1", "engine-service-v0.1.2", repo_root=two_tag_repo
+        )
+        rc = gate.check_data_effect_relay("engine-service-v0.1.2", two_tag_repo)
+        assert rc == 0
+        assert "RELAY ATTESTATION OK" in capsys.readouterr().out
+
+    def test_not_applicable_for_the_oldest_tag(self, two_tag_repo, capsys) -> None:
+        rc = gate.check_data_effect_relay("engine-service-v0.1.1", two_tag_repo)
+        assert rc == 0
+        assert "NOT-APPLICABLE" in capsys.readouterr().out
 
 
 def test_paired_battery_refuses_a_non_additive_pairing_with_no_attestation(

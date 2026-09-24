@@ -61,6 +61,7 @@ from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
 import structlog
 
 from nexus import _locking
+from nexus.bounded_subprocess import run_bounded
 
 _log = structlog.get_logger(__name__)
 
@@ -380,9 +381,26 @@ class ServiceRegistry:
             text = path.read_text()
         except OSError:
             return None
+        except UnicodeDecodeError as exc:
+            # nexus-cd1k0.6 finding (8): a UnicodeDecodeError is a ValueError
+            # subclass, not an OSError, so the OSError clause above never
+            # caught it -- a non-UTF-8 record raised straight out of
+            # discover/publish/heartbeat and crash-looped the supervisor.
+            # Treated the same as a corrupt-JSON record: log and report "no
+            # lease here" rather than let the reader see raw garbage.
+            _log.warning(
+                "service_registry_corrupt_record", path=str(path), error=str(exc)
+            )
+            return None
         try:
             return LeaseRecord.from_json(text)
-        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+            # TypeError (nexus-cd1k0.6 finding (8)): valid JSON of the wrong
+            # SHAPE -- `null`, a bare list, or a dict whose "endpoint" is not
+            # itself a mapping -- raises TypeError out of from_json's field
+            # access/dict() coercion, not one of the exceptions formerly
+            # caught here. Same corrupt-record handling as a JSON syntax
+            # error: this is valid JSON, just not a valid LeaseRecord.
             _log.warning(
                 "service_registry_corrupt_record", path=str(path), error=str(exc)
             )
@@ -1065,9 +1083,9 @@ def _ps_enumerate() -> list[tuple[int, int, str]] | None:
     parses identically on macOS and Linux).
     """
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["ps", "-wweo", "pid,etime,command"],
-            capture_output=True, text=True, timeout=15,
+            timeout=15,
         )
     except FileNotFoundError:
         return None
@@ -1133,9 +1151,9 @@ def process_command(pid: int) -> str:
             return ""
         return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
     try:
-        probe = subprocess.run(
+        probe = run_bounded(
             ["ps", "-ww", "-p", str(pid), "-o", "command="],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return ""
@@ -1199,9 +1217,9 @@ def process_state(pid: int) -> str | None:
         except (ValueError, IndexError):
             return None
     try:
-        probe = subprocess.run(
+        probe = run_bounded(
             ["ps", "-o", "state=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return None
@@ -1385,6 +1403,35 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     """
     engine_path = str(config_dir / "service" / "nexus-service")
     target = str(config_dir)
+    # nexus-cd1k0.6 finding (9): an engine launched via an EXPLICIT
+    # NEXUS_SERVICE_BIN / NEXUS_SERVICE_JAR override (the dev/test opt-in
+    # storage_service_daemon.py's _resolve_launch_artifact honours) runs
+    # from a path OUTSIDE <config_dir>/service/nexus-service, so the
+    # well-known-path check above never matched its process-table row —
+    # every caller of this matcher (the changelog-lock liveness gate that
+    # gates `_release_stale_changelog_lock`, `stop`, `restart-stale`'s
+    # sweep) saw no engine at all and could treat a genuinely alive,
+    # possibly-migrating engine as dead. These overrides are read from
+    # THIS process's own environment, same as the launch that resolved
+    # them (`_resolve_launch_artifact` reads the identical env vars), and
+    # canonicalized the same way (`Path(...).resolve(strict=False)`) so
+    # the comparison matches what actually landed in the spawned argv.
+    # Native (argv[0] = binary path): same position-anchored check as the
+    # well-known path. The alternate JVM launch kind's argv marker is
+    # resolved via a helper HOSTED IN storage_service_daemon.py, not
+    # constructed here — RDR-161's amendment confines every literal
+    # identifier for that launch kind to that one sanctioned module (see
+    # tests/daemon/test_rdr161_native_only_gate.py), so this module never
+    # spells the launch flag itself, only calls the helper that does.
+    bin_override = os.environ.get("NEXUS_SERVICE_BIN", "").strip()
+    engine_override_path = (
+        str(Path(bin_override).resolve(strict=False)) if bin_override else None
+    )
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred, avoids an import cycle (storage_service_daemon imports FROM this module at load time)
+        jar_launch_stack_marker,
+    )
+
+    jar_override_marker = jar_launch_stack_marker()
     # The literal default a FLAGLESS process resolves to on its own
     # (nexus.config.nexus_config_dir()'s fallback branch) — NOT that
     # function itself, so this never depends on this process's own
@@ -1395,6 +1442,13 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
 
     def _match(command: str) -> bool:
         if command == engine_path or command.startswith(engine_path + " "):
+            return True
+        if engine_override_path is not None and (
+            command == engine_override_path
+            or command.startswith(engine_override_path + " ")
+        ):
+            return True
+        if jar_override_marker is not None and jar_override_marker in command:
             return True
         if "daemon service start" not in command:
             return False

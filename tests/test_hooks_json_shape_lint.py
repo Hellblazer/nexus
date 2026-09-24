@@ -21,15 +21,24 @@ misreading during planning, so the comparison is equality against a token
 set and `test_the_permitted_commands_are_not_rejected_as_substrings` is
 the fixture that fails if anyone rewrites it as `in`.
 
-WHY THE python3 ALLOWLIST IS BY NAME. Bead .26 was written on 2026-09-18
-and says `python3` is permitted only for `version_lockstep_hook.py`. That
-was true when written and is not true now: bead .21's tier resolution
-(T2 `nexus_rdr/215-tier-resolution-bead-21`) settled FIVE handlers as
-deliberately plugin-resident, and `conexus/PENDING_RELEASE.md` names all
-five. The bead body is stale, not the manifest. Pinning the five by name
-rather than allowing any `.py` is deliberate: each of the five was argued
-for individually, so a sixth appearing is drift the lint should refuse
-until someone argues for it too.
+WHY THE conexus python3 ALLOWLIST IS BY NAME. Bead .21 left five handlers
+plugin-resident under a bare `python3`, and this lint allows exactly those
+five. nexus-t9klx ported all five to `nx-hook` verbs, but 7.58.0 keeps
+hooks.json on the scripts: an older `nx-hook` exits 2 on a verb it does not
+know, so a plugin that updated before its CLI would block every prompt and
+every Bash call. Four of the five move to their verbs once a CLI that knows
+them is the norm; the lockstep never does, because it is the hook that
+repairs that skew (tests/hooks/test_lockstep_survives_cli_skew.py). A sixth
+script appearing is drift the lint refuses until someone argues for it.
+
+sn left `python3` for the same reason (nexus-j4iy0) by a different route. It
+ships no Python package, so it has no console script to ride; it runs its
+own stdlib scripts through `uv`, which it already requires because Serena
+launches via `uvx`, and which installs as `uv.exe` on Windows. The argv is
+pinned whole: `--no-project` keeps uv from syncing whatever project the
+session's cwd is in, and `--no-config` keeps a `.python-version` from
+choosing, or downloading, the interpreter. uv 0.8 finds that file above the
+cwd and uv 0.12 above the script's directory, so the flag covers both.
 """
 from __future__ import annotations
 
@@ -50,7 +59,12 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: A DROP means either entries were removed or the walker stopped
 #: recognising how they are declared; rule out the second reading first.
 #: 24 -> 25 at 7ad666ebb (bead .22), which gave `behaviour_census.py` its
-#: own SessionStart entry.
+#: own SessionStart entry. 25 -> 26 at nexus-veh77: the interactive MCP
+#: connection barrier (`nx-hook mcp-connect-wait`), `startup` matcher only.
+#: 26 -> 27 at nexus-veh77 round 5: the mid-session disconnect detector
+#: (`nx-hook mcp-connect-check`), `UserPromptSubmit`, sibling to
+#: `mailbox-drain`. 27 -> 25 for 7.58.0: both veh77 entries are held back
+#: with the rest of the new verbs (plugin-ahead skew; see the docstring).
 EXPECTED_CONEXUS_ENTRIES = 25
 EXPECTED_SN_ENTRIES = 4
 
@@ -61,10 +75,8 @@ FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 
 CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "python3"})
 
-#: The five handlers bead .21 resolved as plugin-resident, each for its own
-#: reason (stdlib-only siblings the wheel cannot import; the lockstep, which
-#: must run when the wheel is behind; and the transcript census, which is
-#: plugin-domain). conexus/PENDING_RELEASE.md carries the full reasoning.
+#: The five handlers bead .21 resolved as plugin-resident. See the docstring
+#: for why 7.58.0 still wires them.
 PLUGIN_RESIDENT_SCRIPTS = frozenset(
     {
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py",
@@ -76,6 +88,9 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
 )
 
 SN_SCRIPT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/"
+
+#: Everything before the script path, in order. See the module docstring.
+SN_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
 
 REGISTERED_TOOLS = frozenset(f"hook_{spec.name}" for spec in HOOK_TOOLS)
 
@@ -182,9 +197,7 @@ def reject_conexus(event: str, entry: dict) -> str | None:
         if args[0] not in PLUGIN_RESIDENT_SCRIPTS:
             return (
                 f"runs python3 on {args[0]!r}, which is not one of the five "
-                f"handlers bead .21 resolved as plugin-resident. A sixth "
-                f"needs the same argument the other five got -- see "
-                f"conexus/PENDING_RELEASE.md."
+                f"handlers bead .21 resolved as plugin-resident."
             )
     return None
 
@@ -193,9 +206,9 @@ def reject_sn(event: str, entry: dict) -> str | None:
     """``None`` if the sn entry is a permitted shape, else why it is not.
 
     sn ships no Python package and no server, so it has one shape only:
-    exec-form `python3` on a script inside sn itself. That independence is
-    an RDR-215 Cross-Cutting Concern, which is why there is no tool tier
-    here to fall back to.
+    exec-form `uv` with :data:`SN_UV_ARGV` then one script inside sn itself.
+    That independence is an RDR-215 Cross-Cutting Concern, which is why
+    there is no tool tier here to fall back to.
     """
     if "async" in entry:
         return "carries an `async` key; sn has no async tier"
@@ -214,14 +227,20 @@ def reject_sn(event: str, entry: dict) -> str | None:
         )
     if "args" not in entry:
         return "is command tier with no `args` key"
-    if entry.get("command") != "python3":
-        return f"runs command {entry.get('command')!r}; sn permits only `python3`"
+    if entry.get("command") != "uv":
+        return (
+            f"runs command {entry.get('command')!r}; sn permits only `uv`. "
+            f"`python3` is not on PATH on stock Windows (nexus-j4iy0)."
+        )
     args = entry.get("args", [])
-    if len(args) != 1:
-        return f"runs python3 with {len(args)} args; exactly one script path is permitted"
-    script = args[0]
+    if tuple(args[:-1]) != SN_UV_ARGV:  # [] slices to (), so this also rejects empty args
+        return (
+            f"runs uv with {args!r}; the argv must be exactly "
+            f"{list(SN_UV_ARGV)} followed by one script path"
+        )
+    script = args[-1]
     if not script.startswith(SN_SCRIPT_PREFIX) or not script.endswith(".py"):
-        return f"runs python3 on {script!r}, which is not a .py under {SN_SCRIPT_PREFIX}"
+        return f"runs uv on {script!r}, which is not a .py under {SN_SCRIPT_PREFIX}"
     return None
 
 
@@ -338,9 +357,21 @@ CONEXUS_REJECTS = [
         {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/a_sixth_script.py"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rdr_hook.py"],
         },
-        id="unargued-sixth-python3-script",
+        id="python3-on-a-script-outside-the-five",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": [
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+                "--extra",
+            ],
+        },
+        id="python3-with-a-second-argument",
     ),
     # The default-branch gap. Each of these was ACCEPTED before
     # nexus-q02nx.29, because anything that was not `mcp_tool` fell
@@ -379,18 +410,6 @@ CONEXUS_REJECTS = [
         {"type": "command", "command": "perl", "args": ["-e", "1"]},
         id="unpermitted-command-that-is-not-a-forbidden-token",
     ),
-    pytest.param(
-        "UserPromptSubmit",
-        {
-            "type": "command",
-            "command": "python3",
-            "args": [
-                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
-                "--extra",
-            ],
-        },
-        id="python3-with-two-args",
-    ),
 ]
 
 
@@ -405,6 +424,16 @@ def test_the_conexus_lint_rejects_what_it_exists_to_reject(
     )
 
 
+def _sn(script: str, **extra: object) -> dict:
+    """A permitted sn entry for *script*, with *extra* keys laid over it."""
+    return {
+        "type": "command",
+        "command": "uv",
+        "args": [*SN_UV_ARGV, f"{SN_SCRIPT_PREFIX}{script}"],
+        **extra,
+    }
+
+
 SN_REJECTS = [
     pytest.param(
         "SessionStart",
@@ -413,11 +442,7 @@ SN_REJECTS = [
     ),
     pytest.param(
         "SessionStart",
-        {
-            "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session-start.sh"],
-        },
+        _sn("session-start.sh"),
         id="dot-sh-in-args",
     ),
     pytest.param(
@@ -427,26 +452,22 @@ SN_REJECTS = [
     ),
     pytest.param(
         "PreToolUse",
-        {"type": "command", "command": "python3", "args": ["/etc/elsewhere.py"]},
+        _sn("x.py", args=[*SN_UV_ARGV, "/etc/elsewhere.py"]),
         id="script-outside-sn",
     ),
     pytest.param(
         "PreToolUse",
-        {"type": "command", "command": "python3"},
+        {"type": "command", "command": "uv"},
         id="no-args-key",
     ),
     pytest.param(
         "SessionStart",
-        {"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/x.py"]},
+        {k: v for k, v in _sn("x.py").items() if k != "type"},
         id="no-type-key-at-all",
     ),
     pytest.param(
         "SessionStart",
-        {
-            "type": "weird",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/x.py"],
-        },
+        _sn("x.py", type="weird"),
         id="bogus-type",
     ),
     # The conexus side had an `async-key` fixture from the start and sn's
@@ -456,12 +477,7 @@ SN_REJECTS = [
     # Cross-Cutting Concerns single out.
     pytest.param(
         "SubagentStart",
-        {
-            "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/subagent_start.py"],
-            "async": True,
-        },
+        _sn("subagent_start.py", **{"async": True}),
         id="async-key",
     ),
     pytest.param(
@@ -469,17 +485,32 @@ SN_REJECTS = [
         {"type": "command", "command": "node", "args": ["x.js"]},
         id="unpermitted-command-that-is-not-a-forbidden-token",
     ),
+    # The shape sn shipped until nexus-j4iy0. Stock Windows has no python3.
     pytest.param(
         "SessionStart",
         {
             "type": "command",
             "command": "python3",
-            "args": [
-                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session_start.py",
-                "--extra",
-            ],
+            "args": [f"{SN_SCRIPT_PREFIX}session_start.py"],
         },
-        id="python3-with-two-args",
+        id="python3-command",
+    ),
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=[*SN_UV_ARGV, f"{SN_SCRIPT_PREFIX}session_start.py", "--extra"]),
+        id="uv-with-an-argument-after-the-script",
+    ),
+    # Without --no-config a `.python-version` above the cwd or the plugin picks the
+    # interpreter: measured rc=2 against a pin that is not installed.
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["run", "--no-project", "--quiet", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-without-no-config",
+    ),
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=[]),
+        id="uv-with-empty-args",
     ),
 ]
 
@@ -489,6 +520,13 @@ def test_the_sn_lint_rejects_what_it_exists_to_reject(event: str, entry: dict) -
     assert reject_sn(event, entry) is not None, (
         f"the sn lint ACCEPTED {entry!r} on {event}."
     )
+
+
+def test_the_sn_fixture_builder_is_itself_permitted() -> None:
+    """Every sn fixture above is `_sn(...)` with one thing broken. If the
+    base it breaks were itself rejected, each fixture would pass on that
+    and prove nothing about its own clause."""
+    assert reject_sn("SessionStart", _sn("session_start.py")) is None
 
 
 def test_the_permitted_commands_are_not_rejected_as_substrings() -> None:

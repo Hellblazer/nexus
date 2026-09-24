@@ -348,6 +348,28 @@ class CatalogReaderUnavailableError(RuntimeError):
 #: in commands/config_cmd.py; keep this string byte-identical to it.
 _SERVICE_RESTART_COMMAND = "nx daemon service stop && nx daemon service start"
 
+#: nexus-l52ms ship-blocker fixup (2026-09-23): the durable, recorded signal
+#: that a ``knowledge__*`` collection is a repo's DELIBERATE ``--corpus
+#: knowledge`` opt-in (GH #451), not a coincidence of owner-id sharing.
+#:
+#: ``commands/index.py``'s ``_CatalogBackedRegistry.update`` stamps this onto
+#: the collection's own ``display_name`` at registration time (the column
+#: was otherwise unused for T3-collection rows — see ``register_collection``'s
+#: docstring). ``nexus.repos.from_catalog`` requires an exact match on this
+#: marker before a ``knowledge``-content-type row may win the repo's docs
+#: slot. Retiring the OQ-5 lock outright (nexus-l52ms) closed the real
+#: incident — a knowledge collection sharing a repo's owner_id purely by
+#: coincidence (rdr-close post-mortem archival) must never be mistaken for
+#: that repo's own docs corpus — but it also silently broke the DELIBERATE
+#: opt-in path GH #451 documents: ``nx index repo --corpus knowledge``
+#: registers a real ``knowledge__*`` collection and prints "Routing prose to
+#: ... (--corpus knowledge)", yet nothing durably recorded that this
+#: particular collection WAS that opt-in, so ``from_catalog`` (post-l52ms)
+#: had no way to admit it either. The marker is the missing signal: a
+#: coincidental knowledge collection never carries it; a genuine
+#: ``--corpus knowledge`` registration always does.
+KNOWLEDGE_CORPUS_OPT_IN_MARKER = "nx-corpus-knowledge-opt-in"
+
 
 def _write_intent_embedding_model(content_type: str) -> str:
     """The CLIENT's own configured INTENT for the write model of

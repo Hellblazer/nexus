@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 
 from nexus._hook_runtime._io import HookResult
 
@@ -62,9 +61,11 @@ def _capture(argv: list[str], env: dict) -> str:
     costs the reader one paragraph of help, and must not cost them the
     compaction.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10.0, env=env
+        proc = run_bounded(
+            argv, timeout=10.0, env=env
         )
     except Exception:  # noqa: BLE001 — a context hook must never fail; see above
         return ""

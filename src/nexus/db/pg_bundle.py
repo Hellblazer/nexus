@@ -19,6 +19,7 @@ Artifact contract (RDR-157 P3.1, bead nexus-vwvv5.10): the ``.txz`` extracts to 
 ``bundle/`` tree containing ``bin/ include/ lib/ share/``; the CI artifact is named
 ``nexus-pg-<target>`` for targets ``mac-arm64`` / ``linux-amd64`` / ``linux-arm64``.
 """
+
 from __future__ import annotations
 
 import os
@@ -61,8 +62,9 @@ def current_platform_tag() -> str:
     machine = platform.machine().lower()
     if system == "darwin":
         # mac-x64 is out of scope for the bundle (owner call); return its true tag
-        # anyway so locate simply finds no artifact and falls back to host PG,
-        # rather than mislabelling an Intel Mac as mac-arm64.
+        # anyway so locate simply finds no artifact and the caller fails loudly,
+        # rather than mislabelling an Intel Mac as mac-arm64 and extracting
+        # binaries that cannot run.
         return "mac-arm64" if machine in {"arm64", "aarch64"} else "mac-x64"
     if system == "linux":
         return "linux-arm64" if machine in {"aarch64", "arm64"} else "linux-amd64"
@@ -90,7 +92,10 @@ def is_bundle_extracted(extract_root: Path) -> bool:
     re-extracted rather than silently used.
     """
     marker = extract_root / _EXTRACT_MARKER
-    return marker.is_file() and PgBinaries.from_dir(bundle_bin_dir(extract_root)).all_present()
+    return (
+        marker.is_file()
+        and PgBinaries.from_dir(bundle_bin_dir(extract_root)).all_present()
+    )
 
 
 def _default_search_dirs() -> list[Path]:
@@ -109,12 +114,31 @@ def locate_bundle_archive(*, search_dirs: list[Path] | None = None) -> Path | No
 
     1. ``NEXUS_PG_BUNDLE`` — an explicit archive path. Set-but-missing is a loud
        error (a misconfigured override must never silently fall through to a
-       different bundle or to host PG).
+       different bundle).
     2. ``nexus-pg-<platform-tag>.txz`` in *search_dirs* (default: the directory of
        the running executable).
 
-    Returns ``None`` when no bundle is found — the caller then falls back to host
-    PostgreSQL discovery (dev boxes, host-installed PG).
+    Returns ``None`` when no bundle is found. THE CALLER DOES NOT FALL BACK TO
+    A HOST POSTGRESQL — there is no such leg anywhere in nexus. This docstring
+    said there was until 2026-09-22, describing behaviour deleted at GH #1381 /
+    nexus-yv5m4; see :func:`nexus.db.pg_provision.discover_pg_binaries`, whose
+    search order is exhaustive at two entries and whose :data:`_NO_HOST_FALLBACK`
+    is pinned by ``tests/db/test_no_host_pg_fallback.py``.
+
+    What a ``None`` actually reaches depends on the caller. ``nx init``
+    (:mod:`nexus.commands.init`) passes its OWN ``search_dirs`` of
+    ``<config_dir>/service/`` and, on a miss, DOWNLOADS the signed bundle from
+    the pinned engine tag. :func:`nexus.db.pg_provision.discover_pg_binaries`
+    raises :class:`~nexus.db.pg_provision.PgBinaryNotFoundError` naming how to
+    obtain the bundle. Neither silently substitutes anything.
+
+    The correction is spelled out rather than deleted because the deleted text
+    was ACTIONABLE, not merely wrong: it manufactured a hazard that does not
+    exist and implied a remedy for it. A WSL2 appliance (RDR-218, nexus-ijue9.1)
+    was designed around that phantom fallback and a bead was nearly filed for
+    it. Wrong-and-inert text blocks a reader until they test the premise;
+    wrong-and-actionable text does not block them at all — they build what it
+    told them to, and it surfaces when that ships.
     """
     env = os.environ.get(BUNDLE_ENV, "").strip()
     if env:
@@ -127,7 +151,7 @@ def locate_bundle_archive(*, search_dirs: list[Path] | None = None) -> Path | No
         return archive
 
     name = f"nexus-pg-{current_platform_tag()}.txz"
-    for d in (search_dirs if search_dirs is not None else _default_search_dirs()):
+    for d in search_dirs if search_dirs is not None else _default_search_dirs():
         candidate = Path(d) / name
         if candidate.is_file():
             return candidate
@@ -291,9 +315,11 @@ def ensure_pg_bundle(
     """Locate + extract the ship-alongside PG bundle for first-run provisioning.
 
     Returns the extracted ``bin/`` directory (to be exported as ``NEXUS_PG_BIN``),
-    or ``None`` when no bundle is present — in which case the caller proceeds with
-    host PostgreSQL discovery (dev / host-installed PG). Idempotent: a second call
-    after a successful extract is a cheap no-op.
+    or ``None`` when no bundle is present. A ``None`` does NOT mean host
+    PostgreSQL is used — nexus never probes or adopts one (GH #1381 /
+    nexus-yv5m4); see :func:`locate_bundle_archive` for what each caller does
+    instead. Idempotent: a second call after a successful extract is a cheap
+    no-op.
     """
     archive = locate_bundle_archive(search_dirs=search_dirs)
     if archive is None:

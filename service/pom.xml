@@ -267,20 +267,29 @@
             </plugins>
         </pluginManagement>
         <plugins>
-            <!-- Compiler: Java 25, enable-preview for pattern matching etc. -->
+            <!-- Compiler: Java 25. Preview features are NOT enabled, and the
+                 enable-preview flag was deliberately removed on 2026-09-22.
+                 Measured: zero of the jar's 11,753 classes carried the preview
+                 marker (class-file minor 0xFFFF), so the flag enabled a
+                 capability nothing used, while making one launcher's omission
+                 of it a latent trap: storage_service_daemon's JAR argv never
+                 passed it, so the day someone used a preview feature that path
+                 alone would break, and it would read as "the JVM fallback is
+                 broken". javac now refuses a preview feature outright instead.
+                 To enable them again, restore the flag in ALL of: this
+                 compilerArgs block, the surefire argLine, the generated shim
+                 script, the native-image buildArgs, service/trace-native.sh,
+                 and tests/db/test_mvv_memory_service.py. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
                 <configuration>
                     <release>25</release>
-                    <compilerArgs>
-                        <arg>--enable-preview</arg>
-                    </compilerArgs>
                 </configuration>
             </plugin>
 
-            <!-- Surefire: run JUnit 5, enable-preview, per-test JVM flags -->
+            <!-- Surefire: run JUnit 5, per-test JVM flags -->
             <!-- integration tests (@Tag("integration")) are excluded by default -->
             <!-- Run them with: mvn test -Dgroups=integration                    -->
             <plugin>
@@ -291,7 +300,7 @@
                     <!-- nexus-rph82: every fork starts in UTC, so the migrator's
                          pin (SchemaMigrator.pinJvmTimeZoneToUtc) is a no-op in the
                          test JVM rather than an order-dependent side effect. -->
-                    <argLine>--enable-preview -Duser.timezone=UTC</argLine>
+                    <argLine>-Duser.timezone=UTC</argLine>
                     <excludedGroups>${test.excluded.groups}</excludedGroups>
                     <!-- nexus-9meyc: the BACKSTOP for a wedged fork, and the only
                          layer needing no cooperation from test code. Three runs hung
@@ -592,7 +601,7 @@
                                 </exec>
                                 <!-- Launcher script: runs fat jar with jlinked JRE -->
                                 <echo file="${jlink.output}/bin/nexus-service"
-                                      message="#!/bin/sh&#xa;DIR=&quot;$(cd &quot;$(dirname &quot;$0&quot;)&quot; &amp;&amp; pwd)&quot;&#xa;JAR=&quot;$(ls &quot;$DIR/../../target/nexus-service-&quot;*.jar | head -1)&quot;&#xa;exec &quot;$DIR/java&quot; --enable-preview -jar &quot;$JAR&quot; &quot;$@&quot;&#xa;"/>
+                                      message="#!/bin/sh&#xa;DIR=&quot;$(cd &quot;$(dirname &quot;$0&quot;)&quot; &amp;&amp; pwd)&quot;&#xa;JAR=&quot;$(ls &quot;$DIR/../../target/nexus-service-&quot;*.jar | head -1)&quot;&#xa;exec &quot;$DIR/java&quot; -jar &quot;$JAR&quot; &quot;$@&quot;&#xa;"/>
                                 <chmod file="${jlink.output}/bin/nexus-service" perm="755"/>
                             </target>
                         </configuration>
@@ -724,12 +733,19 @@
                                     <buildArgs>
                                         <!-- no-fallback: fail at build instead of JVM fallback -->
                                         <buildArg>--no-fallback</buildArg>
-                                        <buildArg>--enable-preview</buildArg>
                                         <buildArg>--enable-native-access=ALL-UNNAMED</buildArg>
                                         <buildArg>-H:+UnlockExperimentalVMOptions</buildArg>
                                         <buildArg>-H:+AllowJRTFileSystem</buildArg>
                                         <buildArg>-H:+ReportExceptionStackTraces</buildArg>
                                         <!-- HTTP server support -->
+                                        <!-- RDR-218 Gap 2 (nexus-ijue9.7): bake
+                                             java.net.preferIPv4Stack=true as a RUNTIME
+                                             default. Neither a setProperty in main nor a
+                                             build-time -D has any effect; only this does.
+                                             Overridable at runtime with
+                                             -Djava.net.preferIPv4Stack=false, which is how
+                                             the deployment gate works. -->
+                                        <buildArg>--features=dev.nexus.service.Ipv4StackFeature</buildArg>
                                         <buildArg>--enable-http</buildArg>
                                         <buildArg>--enable-https</buildArg>
                                         <!-- Logback/SLF4J: initialize at build time -->

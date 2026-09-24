@@ -96,6 +96,8 @@ from typing import Any
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger(__name__)
 
 #: Plugins this wheel ships; the registry key's marketplace half is taken verbatim.
@@ -242,6 +244,15 @@ class LockstepReport:
     restart_needed: bool = False
 
 
+#: The injected spawner. Defaults to
+#: :func:`~nexus.bounded_subprocess.run_bounded`, NOT ``subprocess.run``
+#: (nexus-t10nc): the four call sites below pass capture+timeout, which
+#: is the watched shape, and an injected default is invisible to
+#: ``tests/test_bounded_subprocess_lint.py``'s AST scan -- it matches
+#: ``subprocess.run(...)``, and these read as a bare ``run(...)``. Both
+#: standing reviewers found this independently after the ratchet hit
+#: zero; the lint now refuses an unlisted alias of subprocess.run so the
+#: next one cannot hide the same way.
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -250,7 +261,7 @@ def converge_plugins(
     dry_run: bool = False,
     registry_path: Path | None = None,
     marketplaces_path: Path | None = None,
-    run: Runner = subprocess.run,
+    run: Runner = run_bounded,
     claude_path: str | None = None,
 ) -> LockstepReport:
     """Bring every installed conexus/sn plugin that is behind this wheel up
@@ -314,7 +325,7 @@ def _update_one(run: Runner, claude: str, plugin_id: str, inst: PluginInstall,
     have = inst.version
     cmd = [claude, "plugin", "update", plugin_id, "-s", inst.scope, "-y"]
     try:
-        proc = run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=UPDATE_TIMEOUT_S, check=False)
+        proc = run(cmd, stdin=subprocess.DEVNULL, timeout=UPDATE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         _log.warning("plugin_lockstep_timeout", plugin=plugin_id, timeout_s=UPDATE_TIMEOUT_S)
         return PluginOutcome(plugin_id, have, "failed", f"claude plugin update timed out after {UPDATE_TIMEOUT_S}s", scope=inst.scope)
@@ -371,8 +382,8 @@ def _refresh_marketplace(run: Runner, claude: str, marketplace_name: str) -> Non
     see stale content, which the next ``nx upgrade`` run will retry."""
     try:
         run([claude, "plugin", "marketplace", "update", marketplace_name],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL,
-            timeout=MARKETPLACE_REFRESH_TIMEOUT_S, check=False)
+            stdin=subprocess.DEVNULL,
+            timeout=MARKETPLACE_REFRESH_TIMEOUT_S)
     except (subprocess.TimeoutExpired, OSError) as e:
         _log.warning("plugin_lockstep_marketplace_refresh_failed", marketplace=marketplace_name, error=str(e))
 
@@ -402,7 +413,7 @@ def _resolve_ref_sha(run: Runner, install_location: Path, ref: str) -> str | Non
     failure (unresolvable ref, git absent, blind checkout)."""
     try:
         proc = run(["git", "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
-                   capture_output=True, text=True, timeout=REF_RESOLVE_TIMEOUT_S, check=False)
+                   timeout=REF_RESOLVE_TIMEOUT_S)
     except (subprocess.TimeoutExpired, OSError):
         return None
     if proc.returncode != 0:
@@ -419,7 +430,7 @@ def _run_claude_step(run: Runner, claude: str, verb: str, plugin_id: str, scope:
     re-reads the registry to confirm that separately."""
     cmd = [claude, "plugin", verb, plugin_id, "-s", scope, "-y"]
     try:
-        proc = run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout_s, check=False)
+        proc = run(cmd, stdin=subprocess.DEVNULL, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return False, f"claude plugin {verb} timed out after {timeout_s}s"
     except OSError as e:

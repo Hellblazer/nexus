@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.daemon.service_registry import (
     _parse_etime,
     _procfs_enumerate,
@@ -795,10 +796,8 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
             try:
-                subprocess.run(["nx", "mineru", "stop"], capture_output=True,
-                               timeout=60)
-                subprocess.run(["nx", "mineru", "start"], capture_output=True,
-                               timeout=300)
+                run_bounded(["nx", "mineru", "stop"], text=False, timeout=60)
+                run_bounded(["nx", "mineru", "start"], text=False, timeout=300)
                 actions.append(f"cycled MinerU (was pid {proc.pid})")
             except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
                 actions.append(f"mineru cycle failed: {exc}")
@@ -1504,18 +1503,18 @@ def _restart_and_verify(
     # was itself called with, not whatever a bare "nx" re-derives.
     resolved_config_dir = str(config_dir.resolve())
     try:
-        stop = subprocess.run(
+        stop = run_bounded(
             ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
         try:
             sweep_note = _sweep_surviving_stack(config_dir, before)
         except Exception as exc:  # noqa: BLE001 — the sweep is belt, never the reason start doesn't run (review M2)
             _log.warning("restart_stack_sweep_failed", error=str(exc))
             sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
-        start = subprocess.run(
+        start = run_bounded(
             ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir],
-            capture_output=True, text=True, timeout=120,
+            timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
         actions.append(
@@ -2333,7 +2332,7 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
     resolved_config_dir = str(config_dir.resolve())
     argv = ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir]
     try:
-        start = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        start = run_bounded(argv, timeout=120)
     except Exception as exc:  # noqa: BLE001 — best-effort restart; surfaced in the returned clause
         _log.warning(
             "upgrade_autostart_unit_restart",
@@ -2352,6 +2351,105 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
             f"{start.returncode}: {detail})"
         )
     return True, f"restarted the service directly (`{' '.join(argv)}`)"
+
+
+#: How many pre-convergence backups of a single autostart unit to keep
+#: (nexus-gq1pv follow-up, T2 review-wave2-daemon-2026-09-23). Every
+#: `nx daemon restart-stale` that finds the unit still drifted -- an
+#: operator who re-edits it after each converge, or a template that keeps
+#: changing across releases -- writes one more backup; without a cap they
+#: accumulate forever. 5 keeps a short history (enough to recover from a
+#: recent mistake) without an unbounded pile.
+_AUTOSTART_BACKUP_KEEP_COUNT = 5
+
+
+def _autostart_backup_prefix(dest: Path) -> str:
+    """The filename prefix shared by every pre-convergence backup of *dest*."""
+    return f"{dest.name}.pre-convergence."
+
+
+def _write_collision_proof_backup(dest: Path, content: str) -> Path:
+    """Write *content* to a NEW backup file beside *dest*, guaranteed not
+    to collide with an existing backup, then prune older ones beyond
+    :data:`_AUTOSTART_BACKUP_KEEP_COUNT`.
+
+    nexus-gq1pv follow-up: the original backup name
+    (``<unit>.pre-convergence.<second-granularity-timestamp>``) had two
+    gaps. First, second granularity: two converge passes inside the same
+    wall-clock second (an operator re-running `nx daemon restart-stale`
+    right after a first attempt, or two concurrent invocations) computed
+    the SAME name and the second write silently clobbered the first
+    backup -- the exact "nothing an operator wrote to this file is lost"
+    guarantee this backup exists to uphold, defeated by the backup
+    mechanism itself. Second, no pruning: every drift-converge pass added
+    one more file with nothing ever removing an old one.
+
+    Collision-proof via ``os.O_CREAT | os.O_EXCL`` (an atomic, race-safe
+    "fail if it already exists" — nanosecond timestamps alone narrow the
+    window but do not close it, since two SEPARATE PROCESSES calling this
+    concurrently could still observe the same ``time.time_ns()`` value),
+    not merely via finer-grained timestamps: a raced write is refused and
+    retried under a fresh timestamp rather than silently overwriting an
+    existing backup.
+
+    Raises ``OSError`` when the write genuinely fails (the caller reports
+    this loudly and refuses to converge -- see
+    :func:`converge_service_autostart_unit`). A failure to PRUNE old
+    backups is separately best-effort and never raised: pruning is
+    housekeeping, not the operation this function exists to guarantee.
+    """
+    prefix = _autostart_backup_prefix(dest)
+    last_exc: OSError | None = None
+    for attempt in range(10):
+        candidate = dest.with_name(f"{prefix}{time.time_ns()}")
+        try:
+            fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError as exc:
+            last_exc = exc
+            continue
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(content)
+        except OSError:
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+            raise
+        _prune_old_autostart_backups(dest)
+        return candidate
+    raise OSError(
+        f"could not allocate a unique backup filename beside {dest} after "
+        f"10 attempts (last collision: {last_exc})"
+    )
+
+
+def _prune_old_autostart_backups(dest: Path) -> None:
+    """Delete every pre-convergence backup of *dest* beyond the newest
+    :data:`_AUTOSTART_BACKUP_KEEP_COUNT`. Best-effort: never raises --
+    listing or deleting an old backup failing is logged and swallowed,
+    never a reason to fail the converge that just wrote a NEW backup
+    successfully.
+    """
+    try:
+        prefix = _autostart_backup_prefix(dest)
+        # Nanosecond timestamps sort lexicographically the same as
+        # numerically for the foreseeable future (fixed digit count), so a
+        # plain name sort is also a chronological sort -- oldest first.
+        backups = sorted(
+            p for p in dest.parent.iterdir()
+            if p.is_file() and p.name.startswith(prefix)
+        )
+        stale = backups[:-_AUTOSTART_BACKUP_KEEP_COUNT] if _AUTOSTART_BACKUP_KEEP_COUNT > 0 else backups
+        for old in stale:
+            try:
+                old.unlink()
+            except OSError as exc:
+                _log.warning(
+                    "service_autostart_backup_prune_failed", path=str(old), error=str(exc),
+                )
+    except OSError as exc:
+        _log.warning("service_autostart_backup_prune_scan_failed", dest=str(dest), error=str(exc))
 
 
 def converge_service_autostart_unit(
@@ -2459,6 +2557,28 @@ def converge_service_autostart_unit(
         "then `nx doctor` to confirm the service came back up."
     )
 
+    # nexus-gq1pv: uninstall_autostart runs BEFORE install_autostart below,
+    # so by the time install runs, `dest` no longer exists and
+    # install_autostart's own ContentDiffersError/--force guard (which a
+    # direct `nx daemon service install --autostart` honours) never sees
+    # the differing content -- it only ever sees "nothing here yet". A
+    # hand-edited unit is therefore invisible to that guard on this path
+    # and would otherwise be silently discarded on every drift-converge
+    # pass, with no refusal and no backup. Back the CURRENT content up
+    # beside the unit before either step runs, and fold the backup path
+    # into `note` so every message this function returns from here on
+    # names it -- nothing an operator wrote to this file is lost, even
+    # though the automatic heal still proceeds. A backup write failure
+    # refuses to converge at all rather than proceed without one.
+    try:
+        backup_path = _write_collision_proof_backup(dest, probe.existing)
+    except OSError as exc:
+        return [
+            f"NEEDS HUMAN: {note}, but backing up the existing unit "
+            f"before converging it failed ({exc}) -- {manual_fallback}"
+        ]
+    note = f"{note} (previous content backed up to {backup_path})"
+
     # nexus-ebbvt review round 1, finding 3: the initial stop and the
     # compensating restart below must target the SAME resolved config
     # dir explicitly, not let the stop re-derive its own from environment
@@ -2469,9 +2589,9 @@ def converge_service_autostart_unit(
     resolved_config_dir = str(config_dir.resolve())
 
     try:
-        stop = subprocess.run(
+        stop = run_bounded(
             ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort convergence; surfaced in the line
         return [f"NEEDS HUMAN: {note}, but stopping it raised {exc} -- {manual_fallback}"]
@@ -2600,13 +2720,15 @@ def converge_service_autostart_unit(
     if running.up:
         actions = [
             f"converged the storage-service autostart unit at "
-            f"{install_result.dest} ({install_result.detail}) — verified "
+            f"{install_result.dest} ({install_result.detail}); previous "
+            f"content backed up to {backup_path} — verified "
             "the service came back up"
         ]
     else:
         actions = [
             f"NEEDS HUMAN: converged the storage-service autostart unit at "
-            f"{install_result.dest} ({install_result.detail}), but the "
+            f"{install_result.dest} ({install_result.detail}); previous "
+            f"content backed up to {backup_path}, but the "
             f"service is not answering after the restart ({running.reason or 'no answer'}) "
             "-- check `nx daemon service status` and `nx doctor`."
         ]
@@ -2778,6 +2900,67 @@ def check_version_transition(
     pending" independent of whether any CLI trigger has fired — so a
     human path to detection always exists even when no automatic trigger
     does.
+
+    THE STAMP ONLY EVER MOVES FORWARD (nexus-b2eaw round 3). Before this,
+    ANY string difference between ``seen`` and the running version counted
+    as "a transition", direction included. On a box where two versions are
+    routinely alive at once — peer sessions, a dev checkout beside a
+    managed install, two installed generations mid-upgrade — that meant
+    every ALTERNATING invocation saw a transition and re-ran the WHOLE
+    finish pass, including :func:`converge_engine` and daemon restarts:
+    the newer invocation stamps forward and converges toward its own
+    engine pin; the next OLDER invocation (a peer's session, unrelated to
+    this one) then sees ``seen`` (the newer version) differ from ITS OWN
+    running version, stamps the box BACK, and re-runs the finish pass
+    again — converging the engine toward the OLDER release's own pin and
+    undoing the newer session's work, with the two flip-flopping for as
+    long as both keep running. A same-version invocation is silent
+    (``seen == version`` above), so this was invisible in the common case
+    and only ever fired on the routine multi-version topology this module
+    otherwise expects. An invocation whose running version is OLDER than
+    what is already stamped therefore now does NEITHER: it does not
+    rewrite the stamp and does not run the finish pass (logged at debug,
+    naming both versions, so the skip is observable without being noisy).
+    Same-or-newer keeps today's behaviour exactly — an equal comparison is
+    caught by the string check above already, and a genuinely newer
+    version is exactly the transition this function exists to finish. An
+    UNPARSEABLE non-empty stamp falls through to the pre-nexus-b2eaw
+    behaviour (proceed as a transition) rather than wedging the box on a
+    value nothing can compare against; the truly-empty (never-stamped)
+    case is unaffected, handled separately below.
+
+    TWO OLDER SHAPES, NOT ONE (nexus-b2eaw round 4, review finding). "the
+    running version is older than the stamp" covers two situations that
+    must NOT be treated alike:
+
+    * A dev checkout (or otherwise unmanaged process) running older than
+      the stamp — the routine multi-version topology above, happening
+      constantly. Silent at debug only, same posture ``nexus-i24r4``
+      already gives every dev-checkout invocation regardless of version
+      direction.
+    * The INSTALLED GENERATION ITSELF is older than the stamp — a genuine
+      downgrade (a user deliberately pinning back after a bad release).
+      Staying silent here would leave the engine converged to the release
+      the user just moved AWAY from, with no automatic path back to
+      convergence (nothing else re-runs the finish pass until the next
+      FORWARD transition) and no visible trace — a debug line the default
+      WARNING-floor CLI logging (``src/nexus/logging_setup.py``) never
+      shows. This shape returns a non-None one-line summary instead —
+      surfaced the SAME way every other summary from this function is:
+      ``cli.py``'s caller ``click.echo``s a non-None return to stderr
+      (``[upgrade-finish] {summary}``) unconditionally, never a second,
+      new surfacing mechanism — naming both versions, that the engine is
+      not converged to this release's pin, and the manual finish command
+      (``nx daemon restart-stale``, which already runs the WHOLE finish
+      pass unconditionally, independent of any stamp — see its own
+      docstring, "the re-run path for convergence outside a version
+      transition").
+
+    This changes NOTHING about `nx doctor`'s own skew surfaces:
+    ``_check_process_skew`` and ``_check_engine_convergence`` both call
+    :func:`detect_stale_processes`/``detect_engine_convergence`` directly
+    and never read this stamp, so an older invocation that stays silent
+    here still shows up there.
     """
     try:
         _, version = install_mtime_and_version()
@@ -2794,8 +2977,46 @@ def check_version_transition(
     # checked out in the shared tree) used to reach the stamp write below
     # and record ITS version, so the next managed-install invocation read
     # 7.34.0 -> 7.33.0 as an upgrade that never happened. Only a managed
-    # install owns the stamp; the tool-install check ran after the write.
-    if not running_from_tool_install():
+    # install owns the stamp. Resolved ONCE here (moved up from its
+    # original post-older-check position) because the older-branch below
+    # needs it too, to tell a dev checkout apart from a genuine downgrade.
+    is_managed_install = running_from_tool_install()
+    if seen:
+        from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred import
+
+        try:
+            running_is_older = Version(version) < Version(seen)
+        except InvalidVersion:
+            running_is_older = False  # unparseable stamp: fall through, same as pre-nexus-b2eaw
+        if running_is_older:
+            _log.debug("version_stamp_older_invocation_skipped", seen=seen, running=version)
+            if not is_managed_install:
+                # A dev checkout (or peer-adjacent process) running older
+                # than the stamp is the routine, expected shape this
+                # module lives with constantly — silent at debug only,
+                # same posture nexus-i24r4 already gives every dev-checkout
+                # invocation below.
+                return None
+            # nexus-b2eaw round 4 (review finding): a GENUINE downgrade —
+            # the INSTALLED generation itself is older than the stamp, e.g.
+            # a user deliberately pinning back after a bad release. This
+            # is NOT the peer/dev case: nothing else runs the finish pass
+            # for this box until the NEXT forward transition, so silence
+            # here would leave the engine converged to the release the
+            # user just moved away from with no visible trace (a debug
+            # line the default WARNING-floor CLI logging never shows —
+            # src/nexus/logging_setup.py). Surfaced the SAME way every
+            # other summary from this function is: a non-None return,
+            # which cli.py's caller click.echoes to stderr
+            # (`[upgrade-finish] {summary}`) unconditionally — never a
+            # new, second surfacing mechanism.
+            return (
+                f"running {version} is older than the last-seen {seen} "
+                "(installed generation, not a dev checkout) -- engine not "
+                "converged to this release's pin; run "
+                "`nx daemon restart-stale` to finish manually"
+            )
+    if not is_managed_install:
         return None
     if preview is None:
         preview = invocation_is_preview()

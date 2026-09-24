@@ -26,14 +26,31 @@ nothing.
 **Do not use this to justify skipping a release.** If a guard matters enough to
 mechanize, it matters enough to ship.
 
+**Deferring a straddling entry (nexus-2x3qy).** A plugin cut (`scripts/
+cut_plugin_release.py`) refuses when a ledger entry's bead also touches wheel
+content (`src/`, `conexus/plans/`, `conexus/daemon/`, `mcpb/`, `dt/`) the
+wholesale import cannot hold back on a per-entry basis. The only fix is moving
+that entry under `## Deferred to the next client release` below: the cut then
+holds the entry's channel path(s) back from itself too (restored to the base
+branch's own content) so the whole bead ships together, in one piece, at the
+next client release. A deferred entry is exempt from the release-window
+"ledger must be empty" rule above -- still declared there is correct, not
+stale -- and stays exactly where it is until moved back deliberately.
+
 ---
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.57.0)
+## Awaiting the next release or plugin cut (pinned: v7.58.0)
 
-_Empty. `conexus/hooks/scripts/preflight.py`'s deletion (nexus-sa187) went live with
-7.57.0 when `source.ref` advanced to `v7.57.0`; it was the only plugin-surface
-difference from the previous pinned tag, and it was unwired in installed sessions
-either way — `hooks.json` has named the `nx-hook preflight` verb since RDR-215
-nexus-q02nx.21._
+_Empty. Everything listed here (nexus-j4iy0, nexus-ebx0s, nexus-vupim) went live with 7.58.0
+when `source.ref` advanced to `v7.58.0`._
+
+## Deferred to the next client release
+
+_Empty. The four RDR-215 straddling beads deferred here by nexus-2x3qy
+(nexus-t9klx, nexus-z9cz2, nexus-silj0, nexus-veh77) shipped with the 7.58.0
+client release, except their hooks.json entries: 7.58.0 kept the v7.57.0
+plugin-script entries, because an older `nx-hook` exits 2 on a verb it does not
+know. Moving those entries to `nx-hook` verbs is future plugin-surface drift
+and gets declared here when it lands; version lockstep never moves._

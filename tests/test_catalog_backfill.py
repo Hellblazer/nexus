@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -636,6 +637,61 @@ class TestBackfillRdrsRepoOwner:
             for d in cat.list_by_collection(col_name)
         ]
         assert any(r[0] == "curator" for r in rows)
+
+    def test_backfill_rdrs_orphan_conformant_name_does_not_mint_tumbler_form_curator(
+        self, catalog_env, tmp_path,
+    ):
+        """nexus-emrsy: an orphan rdr__* collection with a CONFORMANT
+        RDR-103 name (``rdr__<owner_id>__<model>__v<n>``) used to mint its
+        curator fallback via ``col_name.replace("rdr__", "")`` — for a
+        name like ``rdr__1-1__some-model__v1`` that produces the
+        curator name ``1-1__some-model__v1``, a tumbler-form string
+        masquerading as a human curator name (junk owners 1.25/1.26 in
+        the live catalog). No repo matches this collection's hash suffix
+        (it has none — a conformant name carries no hash suffix at all),
+        so this always falls into the curator branch. The fix: the
+        curator fallback must never be the raw collection-derived string.
+
+        nexus-29drn/l52ms mode-declarations census fixup (2026-09-23):
+        the model segment is a model-neutral placeholder ("some-model"),
+        not a real voyage token — this test is about the tumbler-form
+        detection logic, not embedding-mode behavior, and
+        parse_conformant_collection_name's regex is deliberately
+        permissive about the model segment's value (nexus.corpus
+        _CONFORMANT_COLLECTION_RE), so any four-segment shape exercises
+        the same code path.
+        """
+        from nexus.commands.catalog import _backfill_rdrs
+
+        cat = ActiveCatalog()
+        mock, col_name = self._mock_t3_with_rdr(tmp_path / "fake", "deadbeef")
+        # Overwrite with a CONFORMANT RDR-103 name — no repo-hash suffix,
+        # so the repo-owner lookup can never match it; every collection
+        # shaped like this falls straight to the curator branch.
+        col_name = "rdr__1-1__some-model__v1"
+        mock.list_collections.return_value = [{"name": col_name, "count": 1}]
+        with patch(
+            "nexus.catalog.types._default_registry_path",
+            return_value=tmp_path / "repos.json",
+        ):
+            (tmp_path / "repos.json").write_text(json.dumps({"repos": {}}))
+            count = _backfill_rdrs(cat, mock, dry_run=False)
+        assert count == 1
+
+        docs = [d for d in cat.list_by_collection(col_name) if d.content_type == "rdr"]
+        assert docs, f"no RDR row in {col_name}"
+        owner_names = {o["tumbler_prefix"]: o["name"] for o in cat.list_owners()}
+        parts = str(docs[0].tumbler).split(".")
+        owner_prefix = ".".join(parts[:-1])
+        curator_name = owner_names.get(owner_prefix)
+        assert curator_name is not None
+        assert curator_name != "1-1__some-model__v1", (
+            f"curator minted with a tumbler-form name: {curator_name!r} — "
+            "a raw collection-derived string must never become an owner name"
+        )
+        assert not re.fullmatch(r"\d+(-\d+)*(__.*)?", curator_name), (
+            f"curator name {curator_name!r} still looks tumbler-form"
+        )
 
     def test_backfill_rdrs_dedups_on_doc_id_when_present(
         self, catalog_env, tmp_path,

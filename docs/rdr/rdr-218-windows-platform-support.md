@@ -2,12 +2,13 @@
 title: "Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop"
 id: RDR-218
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-09-22
 priority: high
 author: Sam
-reviewed-by: pending
+reviewed-by: self
 created: 2026-09-21
-related_issues: [nexus-sa187, nexus-5dcky, nexus-t9klx, nexus-34f7r, nexus-1vc0n]
+related_issues: [nexus-sa187, nexus-5dcky, nexus-t9klx, nexus-34f7r, nexus-fd3zf, nexus-t10nc]
 related_rdrs: [RDR-126, RDR-155, RDR-197, RDR-210, RDR-215]
 ---
 
@@ -137,6 +138,28 @@ Windows *can* read the distro's filesystem, over the `\\wsl$\<distro>\` UNC
 path, so a reader is feasible. Nothing implements one, and the resolution chain
 has no tier that would call it.
 
+**This is stronger than "unimplemented": the lease tier cannot succeed on
+Windows even in principle, and it fails for a reason nothing surfaces.**
+Measured 2026-09-22 on qwentescence, from a native Windows client, at debug
+level:
+
+```
+service_endpoint_lease_discover_failed error="module 'os' has no attribute 'getuid'"
+```
+
+The address file is named for the POSIX uid — `storage_service_addr.<uid>` —
+so discovery calls `os.getuid()`, which does not exist on Windows at all. The
+attempt raises `AttributeError` before it reaches the filesystem, and the
+`\\wsl$\` path being readable is beside the point: there is no uid to build the
+filename from. A Windows reader for that tier therefore needs a decision this
+record has not taken — what identity names that file when the platform has no
+uid — and not merely an implementation.
+
+It also explains, retroactively, something the 2026-09-21 trial recorded as
+friction without a cause: every service restart needed `NX_SERVICE_*`
+hand-copied again. That was not a rough edge on an unfinished path. It was the
+only path, because the tier beneath it can never fire.
+
 This gap is load-bearing for every option below that keeps the service in WSL2.
 It is also the only step in the eleven with no workaround at all, which makes
 it the sharpest thing this record has to decide.
@@ -173,6 +196,21 @@ loopback-only semantics intact. That is a change to the Java service, so it
 rides an engine tag and has a different release path from everything else in
 this record.
 
+Implemented at nexus-ijue9.7 as `Ipv4StackFeature`, a GraalVM build Feature
+that bakes `java.net.preferIPv4Stack=true` as a runtime default into the
+image. The image is therefore IPv4-only by default, with
+`NX_SERVICE_IPV4_ONLY=0` as an opt-out that `storage_service_daemon` turns
+into a runtime `-D`. That polarity REVERSES the earlier working assumption in
+this record that the behaviour would be off by default and opted into. The
+reason the earlier assumption was wrong is mechanical, not a change of mind: a
+Feature runs at image build time, so no runtime environment variable can gate
+whether it applies, only override its result. Sam ruled the reversed polarity
+correct on 2026-09-23. `EgressProxy.java:34` records that the cloud egress
+proxy is IPv4, which is what makes an IPv4 default safe rather than merely
+convenient; `nexus-wovg1` tracks the one thing that is still inference, namely
+whether the cloud deployment launches through that supervisor at all and so
+can reach the opt-out.
+
 #### Gap 3: the service does not survive, for two independent reasons
 
 Two distinct failures, discovered in sequence, each of which alone makes a
@@ -208,18 +246,130 @@ on native Windows hangs indefinitely — past 100 seconds and past 150 seconds,
 on a prompt whose entire body is `Reply with exactly: PLUGINPROBE`. Isolated
 four ways on the same host within minutes: no plugin and no endpoint returns
 promptly; plugin enabled and no endpoint hangs; plugin disabled returns
-promptly; plugin enabled *with* the endpoint set returns promptly. So a hook
-blocks when it cannot resolve a service, and the block is unbounded rather than
-a timeout that continues.
+promptly; plugin enabled *with* the endpoint set returns promptly.
 
-This is Windows-specific for a structural reason. On Linux and macOS the
-no-endpoint branch finds a running local service or starts one, so it is barely
-reachable. On Windows there is no local service and there cannot be one, so the
-unresolvable branch is the *default state* for every native Windows user. It is
-therefore the first thing a new user meets, and everything that works — the
-client, both MCP servers, the hook executables, all verified on that same host
-— is behind it. `claude mcp list` reports both conexus servers Connected right
-up until a plain prompt hangs forever. Filed as `nexus-5dcky`.
+**That isolation named WHEN correctly and WHY wrongly, and the correction
+matters for the remedy.** The original reading here — "a hook blocks when it
+cannot resolve a service endpoint" — was an inference from the four probes,
+not a mechanism, and measurement on 2026-09-22 falsified it. None of the
+SessionStart hooks block: all six `nx-hook` verbs return in under 2.1 seconds,
+the two `python3` entries fail loudly in 0.1s, both MCP servers initialize in
+about a second and list 64 and 10 tools instantly, and `npx` fetches the
+sequential-thinking server in 11.6s cold. What blocks is the TOOL CALL, and
+there are two distinct blocking sites:
+
+- `hook_stop_verification`, which `hooks.json` wires on Stop, blocks in
+  `nexus/hooks/verification_config.py:97` `_git_common_root` — inside a
+  `subprocess.run(["git", ...], capture_output=True, timeout=5.0)`, still
+  there when sampled at 25 seconds. This is the site that produces the
+  reported symptom, because Stop fires at the end of a `claude -p` turn — the
+  model answers, and then the session sits there.
+
+  **Why it outlives its own timeout is unexplained, and the obvious answer
+  is wrong.** This record first said "the pipe-drain shape": the timeout
+  kills the direct child and the drain that follows waits on a handle a
+  grandchild still holds. A census of the 80 capture-plus-timeout sites in
+  `src/nexus/` (`nexus-t10nc`) falsified that for THIS site specifically —
+  `git rev-parse` with stdout piped is leaf-shaped, spawning no pager, no
+  hook and no credential helper, so the write end was held by something that
+  is not a descendant of that git at all. The generic story does cover the
+  other exposed sites; it does not cover the one that was measured. A
+  standing hypothesis, labelled as one: on Windows, concurrent spawning from
+  threads can leak a pipe handle into a SIBLING process, and the hook path
+  does run each tool in a worker thread. Testable directly, untested so far.
+- `tuple_registry`, and other tools that construct a `T2Database`, block in
+  `T2Database.__init__` importing numpy's C extension. The same import outside
+  that process takes 0.08 seconds, including from a worker thread under an
+  asyncio loop, and this one is unexplained.
+
+One consequence the first reading obscured. The endpoint is not what blocks:
+`hook_stop_verification` touches no storage on the path that hangs, and
+setting `NX_SERVICE_*` made the fourth probe fast for a different reason than
+the one assumed.
+
+A second consequence stood here until 2026-09-22: that the git-subprocess
+site is "not obviously Windows-specific — an unbounded pipe drain behind a
+bounded-looking timeout is a general shape, and nothing measured says it
+cannot happen elsewhere." **Something has since been measured, and it says
+the opposite.** CPython 3.12.11's `subprocess.run` performs the untimed
+post-kill `communicate()` only under `if _mswindows`; the POSIX branch calls
+`process.wait()`. Read from `inspect.getsource` on the pinned interpreter.
+That `wait()` is itself untimed, so the step that makes it finite is worth
+naming: the child was SIGKILLed on the line above, so it is already dying
+when `wait()` is called and no descendant can delay it — where the Windows
+`communicate()` waits on the PIPE, which any descendant can hold open. The
+unbounded-drain HANG is therefore Windows-only. POSIX has a different defect
+in the same shape — the direct child is reaped and its descendants are left
+running, an orphan leak — which is real, and is not this gap's symptom.
+
+The negative half of that is pinned executably rather than left in prose:
+`test_stock_subprocess_run_does_not_hang_on_posix` in
+`tests/test_bounded_subprocess.py` runs the four grandchild-holding-the-pipe
+shapes the original probe used and asserts each returns inside its own
+timeout. It goes red if CPython moves that drain out from under
+`if _mswindows`.
+
+**None of this explains the measured 25-second block**, and it is not
+offered as doing so. The question raised above — why a 5.0s timeout was
+still running at 25s on a leaf-shaped `rev-parse` — remains open. What this
+settles is narrower: whatever the answer is, it is not the generic POSIX
+pipe-drain, because on POSIX there is no such drain.
+
+The superseded reading is quoted rather than deleted because it was honest
+before the measurement existed, and because the correction is the reusable
+part: "nothing measured says it cannot happen elsewhere" is an argument that
+survives unexamined until somebody reads the source.
+
+The remedy follows from having two sites rather than one: a bound at the
+hook-tool boundary, rather than a repair to either blocking path. Hook tools
+are advisory and the harness already carries its own `timeout` per entry, so a
+hook past that budget can no longer affect anything except by holding the
+session open. Measured on qwentescence against a wheel carrying the bound: the
+Stop hook returns at its bound with the same empty result a crashed hook
+produces, where before it never returned.
+
+**That bound covers ONE of the two sites, not both. An earlier draft of this
+section claimed it "covers both and covers whatever the third turns out to be",
+and that was wrong.** `mcp/hooks.py`'s `Thread.join(timeout)` containment is
+applied at the `hook_<name>` tool boundary and reaches roughly twelve tools.
+`tuple_registry` is not one of them: it is an ORDINARY MCP tool, and so are
+the 50-plus others that construct a `T2Database` (`nexus-fd3zf`, opened
+against this gap and absent from an earlier draft of the Beads section
+below). Every one of those stays unbounded on Windows with no endpoint
+configured, and hangs forever rather than for a budget. So:
+
+- `hook_stop_verification`, the site that produces the REPORTED symptom, is
+  covered.
+- `tuple_registry` and the whole ordinary-tool population are NOT, and need
+  either their own boundary bound or a bound at the blocking call.
+
+The reason this overreach survived a reading is worth keeping: the measured
+probe was `claude -p`, which fires Stop and therefore exercises exactly the
+covered site. A green result there says nothing about the uncovered one. The
+Test Plan's boundary half has been corrected to drive an ordinary tool call
+as well — see item 6 — because otherwise a green battery would keep
+reporting this gap closed while 50-plus tools still hang.
+
+One part of the remedy has landed since: `nexus.bounded_subprocess.run_bounded`
+(`nexus-t10nc`) bounds the git-subprocess site's shape at the call, reaping
+with an explicit timeout, which is what the Windows hang needs — CPython
+3.12's unbounded post-kill drain is inside `if _mswindows`, and the POSIX
+branch never had it. Converting `verification_config.py:97` to it is a
+one-line change, held only by `nexus-t9klx`'s in-flight restructuring of
+`src/nexus/hooks/`.
+
+So the remedy has three parts, of which one has landed, one is open as
+`nexus-fd3zf`, and one is a one-line follow-on behind `nexus-t9klx`.
+
+It reaches a Windows user first for a structural reason, whatever its cause.
+On Linux and macOS a running local service exists or is started, so these
+paths are barely reachable; on Windows there is no local service and there
+cannot be one, so the unresolvable state is the *default* for every native
+Windows user. It is therefore the first thing a new user meets, and everything
+that works — the client, both MCP servers, the hook executables, and the MCP
+tool surface itself, all verified on that same host — is behind it.
+`claude mcp list` reports both conexus servers Connected right up until a
+plain prompt hangs. Filed as `nexus-5dcky`.
 
 #### Gap 5: the desktop bundle is a shim, not a bundle, and it excludes Windows by manifest
 
@@ -592,7 +742,7 @@ The finding that makes this tractable, and it is worth stating before the plan:
 choke point that refuses Windows — it knows `mac-arm64`, `mac-x64`,
 `linux-amd64` and `linux-arm64`, and raises a `RuntimeError` naming Windows as
 a "release N+1" follow-on. Every consumer routes through it
-(`pg_bundle.py:129`, `binary_install.py:394`, `:611`), and the engine binary's
+(`pg_bundle.py:129`, `binary_install.py:338`, `:611`), and the engine binary's
 `asset_name()` raises there too, uncaught, before any download.
 
 An appliance never asks that question. The image runs `linux-amd64` binaries
@@ -650,7 +800,7 @@ overrides:
   `nexus_config_dir()`) relocates the durable estate. Everything derives from
   it: the PostgreSQL cluster (`pg_provision.py:2125`, `config_dir /
   "postgres"`), the engine binary
-  (`binary_install.py:359`, `config_dir / "service" / ...`), credentials, logs
+  (`binary_lifecycle.py:44`, `config_dir / "service" / ...`), credentials, logs
   and leases.
 - `NX_ONNX_MODEL_DIR` (`src/nexus/db/onnx_model_root.py:37,53`) relocates the
   ONNX models, which otherwise sit under `HOME/.cache/nexus/onnx_models`.
@@ -914,13 +1064,26 @@ sequences with the appliance's own cadence rather than against it.
 
 **Phase 3 — make the Windows client behave (Gaps 3 and 4).** The hang is first
 because it is what a new user meets first (`nexus-5dcky`): whatever hook blocks
-on an unresolvable endpoint must bound its wait and continue. Then the hook
-tier: port the five `python3` entries to `nx-hook` verbs (`nexus-t9klx`, and
-Sam has already ruled "we need everything ported") — no new executables are
-needed, since they become verbs on an `nx-hook` that already ships and already
-works on Windows. Then the process primitives (`nexus-34f7r`): `safe_killpg`
-not catching the `AttributeError` Windows actually raises, and SessionEnd
-having no fast path where POSIX has a double-fork.
+on an unresolvable endpoint must bound its wait and continue. That is the
+hook-tool half only; the ordinary-tool half (`nexus-fd3zf` — 50-plus tools
+constructing a `T2Database`, reached by no bound today) belongs to this phase
+as well, and is the larger of the two. Then the hook tier: port the five
+`python3` entries to `nx-hook` verbs (`nexus-t9klx`, and Sam has already ruled
+"we need everything ported") — no new executables are needed, since they
+become verbs on an `nx-hook` that already ships and already works on Windows.
+
+Then the process primitives, and this phase takes ALL of `nexus-34f7r`'s
+items rather than the two an earlier draft named: `safe_killpg` not catching
+the `AttributeError` Windows actually raises; SessionEnd having no fast path
+where POSIX has a double-fork; `start_new_session=True` being accepted and
+silently ignored, so code that believes it holds a killable process group
+does not; and the remaining async-primitive gaps that bead enumerates. The
+first and third are already partly answered by `nexus.bounded_subprocess.
+kill_child_and_descendants` (`nexus-t10nc`, landed) — the single named
+platform branch for the absent-process-group case, which reports the reach
+it achieved so
+a weaker Windows kill is visible rather than silent, and which `nexus-34f7r`
+was scoped to build on rather than beside.
 
 Two incidental defects found during research belong in this phase because they
 are in the same code and the same class:
@@ -1050,7 +1213,14 @@ checks, carrying a max-skip assert so an absent host fails rather than passes.
    Windows Claude Code session — the check that already exists for this purpose
    and the one that would have caught the 7.41.0 projector-dead-on-cloud class.
 5. A plain `claude -p` returns rather than hanging, with and without an
-   endpoint configured — the Gap 4 regression.
+   endpoint configured — the Gap 4 regression for the HOOK-TOOL half.
+6. **An ordinary MCP tool call returns rather than hanging**, with no endpoint
+   configured — `tuple_registry` or any other `T2Database` constructor. This
+   item is separate from 5 on purpose. `claude -p` fires Stop, so item 5
+   exercises only the `hook_<name>` boundary, which is the half that already
+   has a bound; the 50-plus ordinary tools in `nexus-fd3zf` are reached by
+   neither that bound nor item 5. A battery green on 5 alone would report
+   Gap 4 closed while most of the surface still hangs forever.
 
 ### What neither half covers, stated so it is not mistaken for coverage
 
@@ -1116,17 +1286,35 @@ decision surface keeps that open deliberately.
 
 ## Finalization Gate
 
-### Not yet run
+### Run, and passed at round 2
 
-This record is `status: draft`. The finalization gate has not run, and no
-contradiction check is asserted here.
+This section said "Not yet run ... this record is `status: draft`" until
+2026-09-22. It was correct when written and outlived the fact by the length of
+the gate itself. Corrected here rather than deleted, because a stale status
+INSIDE an accepted record is the exact shape this document's own Gap 4 fix was
+about: prose that survives its own premise and is read as current.
 
-That omission is deliberate. RDR-217's own gate section records that its
-no-contradictions clause "has made it twice before and been falsified both
+  round 1  BLOCKED. One Critical ship-blocker, two Significant.
+  round 2  PASSED. 0 Critical, 0 ship-blockers, 1 Significant, since fixed.
+           `nexus_rdr/218-gate-latest`, commit 5ba0cdbfa.
+  accepted 2026-09-22 (Sam, via /conexus:rdr-accept). Frontmatter carries
+           `status: accepted` and `accepted_date`.
+
+THE CAUTION THAT PRECEDED THIS STILL STANDS, and is kept because it was
+vindicated rather than superseded. It read: RDR-217's gate section records that
+its no-contradictions clause "has made it twice before and been falsified both
 times, once by gate round 1 and once by the fix check on that round's diff,
 each of which found a contradiction this section had already declared absent."
-Asserting cleanliness before the gate runs is the failure mode, so this section
-stays empty until `/conexus:rdr-gate` fills it.
+Asserting cleanliness before the gate runs is the failure mode.
+
+That is exactly what happened here. Round 1's ship-blocker was a contradiction
+-- Gap 4 claiming the hook-tool boundary bound covered both hang sites when it
+covers one. Round 2's remaining Significant was another: a measured
+Windows-only finding sitting four paragraphs from an unrevised hedge that said
+the opposite. Both were found by the gate, neither by the drafting. A third
+round of the same kind was found by the fix check on round 2's own diff. Three
+contradictions, in a document whose gate section had been careful enough not to
+claim there were none.
 
 ### Corrections already made during drafting
 
@@ -1183,6 +1371,13 @@ questions rather than from the drafting.
   endpoint. Gap 4.
 - `nexus-t9klx` — five bare-`python3` hook entries to port to `nx-hook` verbs.
 - `nexus-34f7r` — Windows async and process-primitive gaps.
+- `nexus-fd3zf` — the 50-plus ordinary MCP tools that construct a
+  `T2Database` and hang forever on Windows with no endpoint. Gap 4's
+  uncovered half: the hook-tool boundary bound does not reach them.
+- `nexus-t10nc` — `run_bounded`, the bounded-subprocess primitive. Landed.
+  Bounds the reap that makes the Windows drain unbounded, and is the
+  site-level fix for `verification_config.py:97` once `nexus-t9klx` frees
+  `src/nexus/hooks/`.
 
 ### Code the design depends on
 
@@ -1191,8 +1386,10 @@ questions rather than from the drafting.
 - `src/nexus/config.py:619` — `NEXUS_CONFIG_DIR`, which relocates the durable
   estate onto the data volume.
 - `src/nexus/db/onnx_model_root.py:37,53` — `NX_ONNX_MODEL_DIR`.
-- `src/nexus/daemon/binary_install.py:359` — the engine binary under
-  `config_dir`, which is why convergence persists on the volume.
+- `src/nexus/daemon/binary_lifecycle.py:44` — `well_known_binary_path()`,
+  the engine binary under `config_dir`, which is why convergence persists
+  on the volume. (An earlier draft cited `binary_install.py:359`; that is
+  `binary_sidecar_path()`, the provenance sidecar, not the binary.)
 - `service/src/main/java/dev/nexus/service/NexusService.java:309` —
   `NX_SERVICE_BIND` and its own warning about binding past loopback.
 
@@ -1208,3 +1405,9 @@ questions rather than from the drafting.
 | 2026-09-21 | Gate split into a substrate half on `ubuntu-latest` and a boundary half as a release-battery leg on qwentescence (Sam), rather than a Windows CI runner. |
 | 2026-09-21 | Verified both mechanism claims by experiment: a `docker export` rootfs boots with systemd as pid 1 and lingering works; a mounted VHDX survives unregister-and-re-import. |
 | 2026-09-21 | Added the structural sections this file was missing against RDR-217's shape. |
+| 2026-09-22 | Gate round 1 fixes: Gap 4's boundary bound covers the hook-tool half only, not the ordinary-tool population (`nexus-fd3zf`); Test Plan gains boundary item 6 for an ordinary tool call, since `claude -p` exercises only the covered half; Phase 3 takes all of `nexus-34f7r` and names `nexus-fd3zf`; two wrong code citations corrected (`binary_install.py:394`->`:338`, `binary_install.py:359`->`binary_lifecycle.py:44`). |
+| 2026-09-22 | Gate round 2 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `5ba0cdbfa`; critique `nexus_rdr/218-gate-critique-2026-09-22-r2`. |
+| 2026-09-22 | Round-2 Significant: replaced the superseded ``not obviously Windows-specific`` hedge in Gap 4, which contradicted the measured `if _mswindows` finding four paragraph blocks later. |
+| 2026-09-22 | Fix check `nexus_rdr/218-fix-check-34a68b628` (three passes, PASS, 0 BLOCKS-PLANNING) closed residual 2; its six OBSERVATIONs fixed here. The `four shapes` figure rested on an unrecorded probe and is now pinned by `test_stock_subprocess_run_does_not_hang_on_posix`; `wait()`'s own untimed-but-finite step is stated; the Windows-only finding is explicitly marked as NOT explaining the 25s block. |
+| 2026-09-22 | Finalization Gate section still read "Not yet run ... `status: draft`" after the gate had run twice and Sam had accepted the record. Corrected; the caution it carried is kept, because three contradictions were then found by the gate and its fix check, which is what that caution predicted. |
+| 2026-09-22 | Dropped `nexus-1vc0n` from related_issues: it is the batched `nx index repo` writer needing an engine-side bulk file_path lookup, and has nothing to do with Windows. Surfaced by the planner, which found no phase for it because there is none. |

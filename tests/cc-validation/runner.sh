@@ -293,6 +293,13 @@ export HOME="$TEST_HOME"
 export PATH="\$HOME/.local/bin:\$PATH"
 export STUB_LOG="$STUB_LOG"
 export HOOK_LOG="$HOOK_LOG"
+# nexus-cf3p2: scenario 12 installs the REAL conexus plugin into this fresh
+# HOME and dispatches a real subagent, which boots nx-mcp resolved off PATH
+# -- a uv-tool-installed wheel, never this dev checkout, so install_ping's
+# dev-checkout auto-suppression does not cover it. Every scenario inherits
+# this, not just the ones that install the plugin: the flag is free and the
+# judgement of which scenario needs it is not.
+export NX_NO_TELEMETRY=1
 cd "$REPO_ROOT"
 EOF
 chmod 600 "$TEST_HOME/.env.test"

@@ -401,9 +401,17 @@ def make_catalog_writer(
 #: to the shared ``CATALOG_WRITE_OPS``/``catalog_protocol.py`` Protocol pair
 #: (which requires a matching canonical ``Catalog`` method to fidelity-test
 #: parameter shapes against — see ``test_catalog_protocol_fidelity.py``).
+#:
+#: nexus-29drn: ``ghost_sweep`` joins this set for the same reason as
+#: ``purge_trash`` above — a service-only op (the RDR-204 ghost-sweep
+#: classification lives entirely engine-side) whose dry-run PREVIEW is
+#: itself an engine-side read behind the write surface, not something a
+#: caller could compute client-side, so it belongs on the writer even for
+#: its read-only mode. No SQLite/daemon-mode equivalent ever existed for
+#: it either.
 _SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({
     "update_many", "delete_many", "purge_trash", "record_gc_audit",
-    "delete_collection", "restore_document",
+    "delete_collection", "restore_document", "ghost_sweep",
 })
 
 

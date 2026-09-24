@@ -7,6 +7,7 @@ Sub-groups: ``service``
 ``chroma run`` subprocess) is retired — the Java storage service serves
 T3 in every mode.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,6 +34,7 @@ import click
 import structlog
 
 from nexus import config as _config
+from nexus.bounded_subprocess import run_bounded
 
 _log = structlog.get_logger(__name__)
 
@@ -50,7 +52,6 @@ def daemon_group() -> None:
 # ---------------------------------------------------------------------------
 # Autostart helpers (shared with future T2 install/uninstall)
 # ---------------------------------------------------------------------------
-
 
 
 # RDR-174 P2.1 (nexus-y2yj6): the storage SERVICE tier (engine-service binary +
@@ -104,11 +105,17 @@ def _read_template(name: str) -> str:
         return Path(resolved).read_text()
 
 
-_PLIST_NX_BIN_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)<string>__NX_BIN__</string>\s*$")
-_PLIST_CONFIG_DIR_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)<string>__CONFIG_DIR_ARGV__</string>\s*$")
+_PLIST_NX_BIN_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)<string>__NX_BIN__</string>\s*$"
+)
+_PLIST_CONFIG_DIR_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)<string>__CONFIG_DIR_ARGV__</string>\s*$"
+)
 
 
-def _substitute_plist_multi_token(body: str, pattern: re.Pattern[str], tokens: list[str]) -> str:
+def _substitute_plist_multi_token(
+    body: str, pattern: re.Pattern[str], tokens: list[str]
+) -> str:
     """Expand a single ``<string>PLACEHOLDER</string>`` line into one
     ``<string>`` element per token in *tokens*. The plist's argv arrays
     (ProgramArguments) give launchd one ``<string>`` per element; ANY
@@ -125,12 +132,19 @@ def _substitute_plist_multi_token(body: str, pattern: re.Pattern[str], tokens: l
         indent = match.group("indent")
         trailing_nl = "\n" if line.endswith("\n") else ""
         for token in tokens:
-            out_lines.append(f"{indent}<string>{_xml_escape(token)}</string>{trailing_nl}")
+            out_lines.append(
+                f"{indent}<string>{_xml_escape(token)}</string>{trailing_nl}"
+            )
     return "".join(out_lines)
 
 
 def _render_template(
-    name: str, *, nx_bin: list[str], log_dir: str, path_env: str, config_dir: str,
+    name: str,
+    *,
+    nx_bin: list[str],
+    log_dir: str,
+    path_env: str,
+    config_dir: str,
 ) -> str:
     """Substitute placeholders in a shipped autostart template.
 
@@ -157,18 +171,17 @@ def _render_template(
     if name.endswith(".plist"):
         body = _substitute_plist_multi_token(body, _PLIST_NX_BIN_LINE_RE, nx_bin)
         body = _substitute_plist_multi_token(
-            body, _PLIST_CONFIG_DIR_LINE_RE, ["--config-dir", config_dir],
+            body,
+            _PLIST_CONFIG_DIR_LINE_RE,
+            ["--config-dir", config_dir],
         )
     else:
         body = body.replace("__NX_BIN__", shlex.join(nx_bin))
         body = body.replace(
-            "__CONFIG_DIR_ARGV__", shlex.join(["--config-dir", config_dir]),
+            "__CONFIG_DIR_ARGV__",
+            shlex.join(["--config-dir", config_dir]),
         )
-    return (
-        body
-        .replace("__LOG_DIR__", log_dir)
-        .replace("__PATH_ENV__", path_env)
-    )
+    return body.replace("__LOG_DIR__", log_dir).replace("__PATH_ENV__", path_env)
 
 
 def _resolve_nx_bin() -> list[str]:
@@ -183,8 +196,6 @@ def _resolve_nx_bin() -> list[str]:
     if found:
         return [found]
     return [sys.executable, "-m", "nexus.cli"]
-
-
 
 
 def _autostart_filename_service() -> str:
@@ -239,14 +250,8 @@ def _service_autostart_unit_installed() -> Path | None:
 _SUPERVISOR_CMD_TIMEOUT: float = 10.0
 
 
-
-
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 def _discovery_record_pid(data: dict) -> int | None:
@@ -267,8 +272,6 @@ def _discovery_record_pid(data: dict) -> int | None:
     return None
 
 
-
-
 #: nexus-c0vby (GH #1405 defect 2): the honest, non-error-shaped message a
 #: service-mode box sees instead of "No T2 daemon discovery file found" --
 #: that message implies something is WRONG, but in service mode the T2
@@ -277,117 +280,8 @@ def _discovery_record_pid(data: dict) -> int | None:
 #: doctor/finish-pass action lines and this CLI message stay wordable
 #: identically without copy-paste drift.
 _T2_SERVICE_MODE_STATUS_MESSAGE = (
-    "service mode — T2 daemon intentionally not running (storage is the "
-    "engine service)"
+    "service mode — T2 daemon intentionally not running (storage is the engine service)"
 )
-
-
-
-
-# RDR-128 P0b (RF-4): bounded timeout for the pre-cycle DB-acquirability
-# probe. Matches the startup-migration busy_timeout (db/t2/__init__.py
-# _BOOTSTRAP_BUSY_TIMEOUT_MS) — there is no point cycling to a daemon whose
-# first act (the startup migration) would block longer than this. Module
-# constant so tests can shrink it without waiting the full 30s.
-_T2_CYCLE_DB_PROBE_TIMEOUT_MS: int = 30000
-
-# RDR-129 A2 (nexus-kwqhd): how long ``ensure-running`` waits for a SIGTERM'd
-# stale daemon to FULLY EXIT before cold-spawning its replacement. The wait
-# polls the predecessor's PID liveness, not the discovery file: stop() now
-# holds the spawn lock until process exit (defer-release-to-exit) but unlinks
-# the discovery file early, so a discovery-file poll would see "gone" while the
-# lock is still held and cold-spawn into an EAGAIN -> zero daemons. If the
-# predecessor outlives this window the cycle aborts and leaves it up (RDR-128
-# RF-4: never trade a working daemon for none). Module constant so tests can
-# shrink it.
-_T2_CYCLE_EXIT_TIMEOUT: float = 10.0
-
-# RDR-140 P2.2 (nexus-fkhe2): safety margin added on top of the holder's
-# worst-case hold time to derive how long a waiter blocks on the single-flight
-# election lock. The wait is computed DYNAMICALLY (see
-# ``_election_wait_for``) rather than fixed: the holder keeps the lock across
-# its whole discover→spawn→reachability path, whose worst case is
-# ``_T2_CYCLE_DB_PROBE_TIMEOUT_MS/1000`` (stale-version write-lock probe) +
-# ``_T2_CYCLE_EXIT_TIMEOUT`` (predecessor exit poll) + ``timeout`` (reachability
-# poll). A fixed wait shorter than that hold reproduces the pre-P2 thundering
-# herd on timeout (code-review H-1 / critic S-1): every waiter times out at
-# once, re-discovers the stale/absent daemon unguarded, and all cold-spawn.
-# Deriving the wait from the same budgets guarantees a waiter never gives up
-# before the holder releases, on any ``--timeout``. Releasing the lock earlier
-# (before the reachability poll) is NOT an option: a waiter acquiring it during
-# the winner's migration window would re-discover no live daemon and spawn too,
-# defeating single-flight. Margin is a module constant so tests can shrink it.
-_T2_ELECTION_WAIT_MARGIN: float = 5.0
-
-
-def _election_wait_for(timeout: float) -> float:
-    """Waiter election-lock budget: must exceed the holder's worst-case hold so
-    waiters block until the winner is reachable, then attach rather than
-    redundantly spawn (RDR-140 P2.2)."""
-    return (
-        _T2_CYCLE_DB_PROBE_TIMEOUT_MS / 1000.0
-        + _T2_CYCLE_EXIT_TIMEOUT
-        + timeout
-        + _T2_ELECTION_WAIT_MARGIN
-    )
-
-
-def _election_lock_path_for_db(db_path: Path) -> Path:
-    """Election-coordination lock path for *db_path*.
-
-    RDR-140 P2.2: a sibling of the data file (``<db>.election_lock``) so stacks
-    started from different ``config_dir``s against the same data file contend
-    on one election. DISTINCT from the daemon's lifetime spawn lock
-    (``<db>.spawn_lock`` / ``t2_spawn.lock``): if ``ensure-running`` held the
-    daemon's own spawn lock, the spawned ``t2 start`` child would hit EAGAIN on
-    its ``_acquire_spawn_lock`` and exit, leaving zero daemons.
-    """
-    return db_path.parent / f"{db_path.name}.election_lock"
-
-
-def _acquire_election_lock(db_path: Path, timeout: float) -> int | None:
-    """Blocking-with-timeout ``LOCK_EX`` on the election lock. Returns the held
-    fd, or ``None`` if the timeout elapsed (caller proceeds unguarded).
-
-    Blocking (not ``LOCK_NB``-fail-fast) so waiters queue then re-discover; the
-    daemon's ``_acquire_spawn_lock`` uses ``LOCK_NB`` and must not, hence the
-    distinct lock file. Auto-releases on holder death (the OS drops the fd's
-    lock), so a holder that crashes mid-spawn never deadlocks the waiters.
-    """
-    import errno  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    import fcntl  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    path = _election_lock_path_for_db(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return fd
-        except OSError as exc:
-            if exc.errno not in (errno.EAGAIN, errno.EACCES):
-                os.close(fd)
-                raise
-            if time.monotonic() >= deadline:
-                os.close(fd)
-                return None
-            time.sleep(0.05)
-
-
-def _release_election_lock(fd: int | None) -> None:
-    if fd is None:
-        return
-    import fcntl  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
-    try:
-        os.close(fd)
-    except OSError:
-        pass
 
 
 # RDR-140 P4.2 (nexus-hrrpz) Gap 5: bounded crash-loop guard. Cold respawns are
@@ -417,7 +311,9 @@ def _read_crashloop(config_dir: Path) -> dict:
     if not isinstance(data, dict):
         return {"timestamps": [], "tripped_logged": False}
     ts = data.get("timestamps")
-    data["timestamps"] = [t for t in ts if isinstance(t, (int, float))] if isinstance(ts, list) else []
+    data["timestamps"] = (
+        [t for t in ts if isinstance(t, (int, float))] if isinstance(ts, list) else []
+    )
     data["tripped_logged"] = bool(data.get("tripped_logged"))
     return data
 
@@ -473,20 +369,6 @@ def _reset_crashloop(config_dir: Path) -> None:
         _crashloop_sentinel_path(config_dir).unlink(missing_ok=True)
     except OSError:
         pass
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +506,7 @@ def ensure_storage_supervisor(config_dir: Path):
     )
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
     StorageServiceStartError = _ssd.StorageServiceStartError
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
@@ -645,7 +528,10 @@ def ensure_storage_supervisor(config_dir: Path):
         # re-spawned spuriously. (RDR-149-gate-safe: this IS the shared
         # primitive now, not a storage-specific copy.)
         if not reclaim_lease_if_dead_owner(
-            registry, existing, log=_log, event="storage_service_dead_lease_reclaim",
+            registry,
+            existing,
+            log=_log,
+            event="storage_service_dead_lease_reclaim",
         ):
             # nexus-4e96a: THE load-bearing short-circuit (this is the branch
             # that returns without ever spawning a subprocess, let alone
@@ -670,8 +556,13 @@ def ensure_storage_supervisor(config_dir: Path):
     # compares against, defeating the token-exact discipline
     # storage_service_stack_matcher relies on.
     argv = [
-        *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
-        "--config-dir", str(Path(config_dir).resolve()),
+        *_resolve_nx_bin(),
+        "daemon",
+        "service",
+        "start",
+        "--foreground",
+        "--config-dir",
+        str(Path(config_dir).resolve()),
     ]
     # nexus-ovbr7: route the child's streams to a crash-channel file so a failure
     # BEFORE run_storage_supervisor's configure_logging runs (import error, bad
@@ -773,12 +664,17 @@ def service_start_cmd(
     ep = existing.endpoint
     if announce_stdout:
         import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-        click.echo(_json.dumps({
-            "host": ep.get("host"),
-            "port": ep.get("port"),
-            "pid": ep.get("pid"),
-            "generation": existing.generation,
-        }))
+
+        click.echo(
+            _json.dumps(
+                {
+                    "host": ep.get("host"),
+                    "port": ep.get("port"),
+                    "pid": ep.get("pid"),
+                    "generation": existing.generation,
+                }
+            )
+        )
     else:
         click.echo(
             f"Storage service running on {ep.get('host')}:{ep.get('port')} "
@@ -854,21 +750,24 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     "want_pg_bundle",
     default=True,
     help="Also acquire+verify the relocatable PostgreSQL bundle from the same "
-         "release (default). --no-pg-bundle installs only the service binary "
-         "(e.g. cloud habitat with a managed Postgres).",
+    "release (default). --no-pg-bundle installs only the service binary "
+    "(e.g. cloud habitat with a managed Postgres).",
 )
 @click.option(
     "--force",
     is_flag=True,
     default=False,
     help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
-         "ONLY after healing per docs/migration-runbook.md (re-index the "
-         "affected collections, then re-run doctor and confirm the warning "
-         "clears). The rows stay unhealed debt if you force past them; a "
-         "pre-v0.1.48 char-era engine can still crash-loop on boot.",
+    "ONLY after healing per docs/migration-runbook.md (re-index the "
+    "affected collections, then re-run doctor and confirm the warning "
+    "clears). The rows stay unhealed debt if you force past them; a "
+    "pre-v0.1.48 char-era engine can still crash-loop on boot.",
 )
 def service_install_binary_cmd(
-    tag: str, config_dir_str: str | None, want_pg_bundle: bool, force: bool,
+    tag: str,
+    config_dir_str: str | None,
+    want_pg_bundle: bool,
+    force: bool,
 ) -> None:
     """Download, verify, and install the signed native nexus-service binary
     (and, by default, the PostgreSQL bundle) from a release.
@@ -935,7 +834,9 @@ def service_install_binary_cmd(
         click.echo(f"\nResolving {pg_bundle_asset_name()} from release {tag}…")
         try:
             pg_dest, pg_prov = install_pg_bundle(
-                tag, config_dir, installed_by=installed_by,
+                tag,
+                config_dir,
+                installed_by=installed_by,
             )
         except BinaryVerificationError as exc:
             # The binary already installed and verified; only the PG bundle
@@ -955,8 +856,10 @@ def service_install_binary_cmd(
         click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
         click.echo("  signature: verified (keyless Sigstore)")
 
-    click.echo("\nRestart the service to pick it up: nx daemon service stop && "
-               "nx daemon service start")
+    click.echo(
+        "\nRestart the service to pick it up: nx daemon service stop && "
+        "nx daemon service start"
+    )
 
 
 @service_group.command("stop")
@@ -972,7 +875,7 @@ def service_install_binary_cmd(
     is_flag=True,
     default=False,
     help="Also stop the nx-managed Postgres cluster via pg_ctl -m fast "
-         "(terminates open connections immediately; left running by default).",
+    "(terminates open connections immediately; left running by default).",
 )
 def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     """Stop the running storage-service supervisor (SIGTERM -> SIGKILL).
@@ -1016,8 +919,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             )
     elif outcome.source == "process_table_unavailable":
         lease_clause = (
-            "a storage service lease was found but had no usable process "
-            "info"
+            "a storage service lease was found but had no usable process info"
             if outcome.lease_seen
             else "no storage service lease was found"
         )
@@ -1028,8 +930,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         )
     elif outcome.source == "process_table":
         lease_clause = (
-            "A storage service lease was found but had no usable process "
-            "info"
+            "A storage service lease was found but had no usable process info"
             if outcome.lease_seen
             else "No storage service lease was found"
         )
@@ -1135,9 +1036,10 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
 
     try:
         bins = discover_pg_binaries()
-        subprocess.run(
+        run_bounded(
             [str(bins.pg_ctl), "-D", pg_data, "-m", "fast", "stop"],
-            check=True, capture_output=True, text=True, timeout=30,
+            check=True,
+            timeout=30,
         )
     except Exception as exc:  # noqa: BLE001 — boundary catch around PG stop; surfaced via click.echo + exit(2)
         click.echo(f"--with-pg: failed to stop Postgres: {exc}", err=True)
@@ -1151,7 +1053,8 @@ def _probe_health(host: str, port: int, timeout: float = 3.0) -> str:
 
     try:
         with urllib.request.urlopen(
-            f"http://{host}:{port}/health", timeout=timeout,
+            f"http://{host}:{port}/health",
+            timeout=timeout,
         ) as resp:
             return "ok" if resp.status == 200 else f"http-{resp.status}"
     except Exception as exc:  # noqa: BLE001 — boundary catch of urllib/transport errors; mapped to db-down status
@@ -1215,14 +1118,25 @@ def _pgvector_version(creds: dict) -> str | None:
     env = dict(_os.environ)
     env["PGPASSWORD"] = password
     try:
-        result = subprocess.run(
+        result = run_bounded(
             [
-                psql, "-h", "127.0.0.1", "-p", str(creds.get("PG_PORT", "")),
-                "-U", user, "-d", _db_name_from_creds(creds),
-                "-t", "-A", "-X",
-                "-c", "SELECT extversion FROM pg_extension WHERE extname='vector'",
+                psql,
+                "-h",
+                "127.0.0.1",
+                "-p",
+                str(creds.get("PG_PORT", "")),
+                "-U",
+                user,
+                "-d",
+                _db_name_from_creds(creds),
+                "-t",
+                "-A",
+                "-X",
+                "-c",
+                "SELECT extversion FROM pg_extension WHERE extname='vector'",
             ],
-            env=env, capture_output=True, text=True, timeout=10,
+            env=env,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1331,14 +1245,13 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         fetch_service_version,
         read_installed_provenance,
     )
+
     # Probe-latency guard (pebfx.5 critic S1): both HTTP probes hit the same
     # host/port — when /health is unreachable, /version cannot succeed, and
     # status is invoked MOST when the stack is broken. Skip the second 3s
     # timeout.
     svc_version = (
-        fetch_service_version(host, port)
-        if data["health"] != "unreachable"
-        else None
+        fetch_service_version(host, port) if data["health"] != "unreachable" else None
     )
     stale_warning: str | None = None
     if svc_version is not None:
@@ -1429,7 +1342,9 @@ def aspect_worker_group() -> None:
     "or an in-flight row could be false-reclaimed.",
 )
 def aspect_worker_start_cmd(
-    config_dir_str: str | None, tenant: str, stale_timeout_seconds: int,
+    config_dir_str: str | None,
+    tenant: str,
+    stale_timeout_seconds: int,
 ) -> None:
     """Start the aspect-worker daemon (foreground; runs until SIGTERM/SIGINT).
 
@@ -1448,14 +1363,19 @@ def aspect_worker_start_cmd(
         f"Aspect-worker daemon starting (config_dir={config_dir}, tenant={tenant})..."
     )
     run_aspect_worker_daemon(
-        config_dir=config_dir, tenant=tenant,
+        config_dir=config_dir,
+        tenant=tenant,
         stale_timeout_seconds=stale_timeout_seconds,
     )
 
 
 @daemon_group.command("restart-stale")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Report what would be restarted without touching anything.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report what would be restarted without touching anything.",
+)
 def restart_stale_cmd(dry_run: bool) -> None:
     """Finish an upgrade: restart processes still running old code, converge
     the local engine to the release dependency, and heal diag-view drift.
@@ -1500,15 +1420,19 @@ def restart_stale_cmd(dry_run: bool) -> None:
     # ever got a chance to fire.
     try:
         report = detect_stale_processes()
-        click.echo(f"installed: conexus {report.installed_version}  "
-                   f"(source: {install_source()})")
+        click.echo(
+            f"installed: conexus {report.installed_version}  "
+            f"(source: {install_source()})"
+        )
         if not report.stale:
             click.echo("no stale processes — the machine matches the disk.")
         else:
             for line in restart_stale(report, dry_run=dry_run):
                 click.echo(f"  {line}")
     except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
-        click.echo(f"process-skew detection failed ({exc}) — skipping this leg.", err=True)
+        click.echo(
+            f"process-skew detection failed ({exc}) — skipping this leg.", err=True
+        )
 
     config_dir = _config.nexus_config_dir()
 
@@ -1554,8 +1478,9 @@ def restart_stale_cmd(dry_run: bool) -> None:
         click.echo(f"engine convergence failed ({exc}) — skipping this leg.", err=True)
 
     if dry_run:
-        click.echo("diag-view heal: skipped (--dry-run — GRANT/ALTER OWNER "
-                    "are not previewed).")
+        click.echo(
+            "diag-view heal: skipped (--dry-run — GRANT/ALTER OWNER are not previewed)."
+        )
     else:
         try:
             heal_actions = heal_diag_view(config_dir)
@@ -1587,7 +1512,9 @@ def restart_stale_cmd(dry_run: bool) -> None:
                 for line in unload_actions:
                     click.echo(f"  {line}")
         except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
-            click.echo(f"T2 LaunchAgent unload failed ({exc}) — skipping this leg.", err=True)
+            click.echo(
+                f"T2 LaunchAgent unload failed ({exc}) — skipping this leg.", err=True
+            )
 
     # nexus-rlp0v: independent leg, same defense-in-depth pattern as the
     # legs above — converges a drifted local-mode service-tier autostart
@@ -1605,4 +1532,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
             for line in autostart_actions:
                 click.echo(f"  {line}")
     except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
-        click.echo(f"service autostart convergence failed ({exc}) — skipping this leg.", err=True)
+        click.echo(
+            f"service autostart convergence failed ({exc}) — skipping this leg.",
+            err=True,
+        )

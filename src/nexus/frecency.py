@@ -7,6 +7,8 @@ from pathlib import Path
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger()
 
 
@@ -24,11 +26,9 @@ def _git_commit_timestamps(
     *timeout* defaults to 30 s; override via TuningConfig.git_log_timeout.
     """
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "log", "--follow", "--format=%ct", "--", str(file)],
             cwd=repo,
-            capture_output=True,
-            text=True,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -100,15 +100,13 @@ def batch_frecency(
     # never appears in a valid file path.
     _MARKER = "|||nxcommit|||"
     try:
-        result = subprocess.run(
+        result = run_bounded(
             # nexus-cd1k0.15: without core.quotePath=false git C-quotes a
             # non-ASCII path ("docs/\303\251.md"), so its key never matched
             # the real path and the file scored 0.0 (the third site of the
             # nexus-6m9zy.4 class).
             ["git", "-c", "core.quotePath=false", "log", f"--format={_MARKER}%ct{_MARKER}", "--name-only"],
             cwd=repo,
-            capture_output=True,
-            text=True,
             timeout=timeout * 2,
         )
     except subprocess.TimeoutExpired:
@@ -116,6 +114,20 @@ def batch_frecency(
         return {}
     if result.returncode != 0 or not result.stdout.strip():
         return {}
+
+    # nexus-cd1k0.16 finding (5): `git log --name-only` reports every path
+    # relative to the repo's GIT TOP-LEVEL, regardless of `cwd` -- joining
+    # against *repo* directly is only correct when *repo* IS the top level.
+    # A caller indexing a SUBDIRECTORY of a larger repo (`nx index repo
+    # <subdir>`) got a doubled, nonexistent path
+    # (`<subdir>/<subdir>/file.py`) for every file, silently zeroing every
+    # frecency score for that run (no path in `scores` ever matched a real
+    # indexed file). Falls back to *repo* itself, unchanged, when the
+    # top-level cannot be resolved (not a git repo, git unavailable) --
+    # never a regression on that path.
+    from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred: keeps this module's import surface unchanged on the common (repo == top-level) path
+
+    root = find_repo_root(repo) or repo
 
     now = datetime.now(UTC).timestamp()
     scores: dict[Path, float] = {}
@@ -133,7 +145,7 @@ def batch_frecency(
             except ValueError:
                 current_ts = None  # corrupt git log line, skip
         elif current_ts is not None:
-            file_path = repo / line
+            file_path = root / line
             days = max(0.0, (now - current_ts) / 86400.0)
             scores[file_path] = scores.get(file_path, 0.0) + math.exp(-decay_rate * days)
 

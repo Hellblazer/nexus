@@ -5,7 +5,7 @@
 nexus-cnzei.6 item 3).
 
 RDR-205's ``ledger/<session_id>`` tuple space records THAT an agent
-reported. ``tuple_ledger_project.py``'s item-2 extension (bead
+reported. ``nexus.hooks.tuple_ledger_project``'s item-2 extension (bead
 nexus-cnzei.6) additionally fills each ``kind=report`` row's optional
 ``commit`` / ``t2_ref`` / ``verify`` dims by parsing the stopping agent's
 own ``VERIFY:`` lines. Neither step checks whether those CLAIMS are
@@ -29,7 +29,7 @@ line and re-running it, per ``conexus/skills/orchestration/SKILL.md``
 
 UNVERIFIABLE ENGINES (fix round 1, critic Critical 2). The three dims
 this checker reads ship in engine-service-v0.1.118 (nexus-d9k5h); a
-below-floor engine's ``tuple_ledger_project.py`` write path strips them
+below-floor engine's ``nexus.hooks.tuple_ledger_project`` write path strips them
 from EVERY report row (the HTTP-400 schema-fallback), so every
 well-behaved report from such an engine would otherwise read as
 ``verify=absent`` — a false finding on 100% of good reports, not a real

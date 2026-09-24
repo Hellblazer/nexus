@@ -15,6 +15,7 @@ Callers: ``mcp/core.py`` (MCP ``store_put`` tool),
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 import httpx
@@ -324,6 +325,12 @@ def _span_offset(value: Any) -> int | None:
 #: real overlap, and trimming one would delete text the document needs.
 MIN_VERIFIED_OVERLAP: int = 12
 
+#: A leading markdown ATX heading line (``_split_large_section``'s own
+#: re-injection shape: ``"#" * level + " " + header + "\n\n"``). Matched only
+#: to recognize a DUPLICATE heading already present in `joined`; never used
+#: to strip a heading that has no confirmed span overlap behind it.
+_MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6} .+)\n\n")
+
 
 def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
     """Join ``(text, start_char, end_char)`` manifest parts in position
@@ -399,12 +406,43 @@ def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
             and prev_start < start < prev_end
             else 0
         )
+        append_text = text
         if overlap >= MIN_VERIFIED_OVERLAP:
+            # nexus-yz7se: _split_large_section re-prefixes the section
+            # heading onto every chunk it emits from an oversized section —
+            # deliberate, kas9u's own precedent for PDFChunker._table_header
+            # on a table continuation, so a lone chunk stays independently
+            # readable. The heading is not part of the overlap span (the
+            # writer only backs the span up by the overlap_tail's own
+            # length), so it never confirms against `joined`'s tail; try the
+            # match with a duplicate leading heading stripped FIRST, and
+            # fall back to the untouched text if that does not confirm
+            # either — never strip on the strength of the heading alone.
+            #
+            # nexus-yz7se round-2 (T2 nexus/review-burndown-batch2-2026-09-23):
+            # this used to be `heading_match.group(0) in joined` — a
+            # substring search across the WHOLE accumulated rebuild, which
+            # a heading string merely mentioned mid-body somewhere earlier
+            # in the document (prose citing "## Results" as an ATX-syntax
+            # example, say) would satisfy just as well as a genuine
+            # repeat. Anchored instead to the heading *parts[index - 1][0]*
+            # — the part this overlap is actually WITH — carried at its
+            # own head, compared exactly, never a substring test.
+            match_text = text
+            heading_match = _MARKDOWN_HEADING_RE.match(text)
+            prev_heading_match = _MARKDOWN_HEADING_RE.match(parts[index - 1][0])
+            if (
+                heading_match
+                and prev_heading_match
+                and heading_match.group(1) == prev_heading_match.group(1)
+            ):
+                match_text = text[heading_match.end():]
             # The match is bounded ABOVE by the recorded overlap: stripping
             # can only ever shorten the agreement, never lengthen it.
-            for k in range(min(overlap, len(text), len(joined)), MIN_VERIFIED_OVERLAP - 1, -1):
-                if joined.endswith(text[:k]):
+            for k in range(min(overlap, len(match_text), len(joined)), MIN_VERIFIED_OVERLAP - 1, -1):
+                if joined.endswith(match_text[:k]):
                     trim = k
+                    append_text = match_text
                     break
             if trim == 0:
                 _log.debug(
@@ -412,7 +450,7 @@ def join_manifest_parts(parts: list[tuple[str, int | None, int | None]]) -> str:
                     part_index=index,
                     recorded_overlap=overlap,
                 )
-        joined += text[trim:]
+        joined += append_text[trim:]
         prev_span = (start, end)
     return joined
 
@@ -454,9 +492,26 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
         )
 
 
-def resolve_knowledge_doc_for_chash(reader, chash: str, *, log_event: str):
+def resolve_knowledge_doc_for_chash(
+    reader, chash: str, *, log_event: str, collection: str | None = None,
+):
     """Resolve *chash* to the single store_put-origin catalog document it
     identifies, or ``None`` if there is no match or the match is ambiguous.
+
+    *collection*, when given, additionally restricts candidates to
+    entries whose ``physical_collection`` equals it (nexus-bb6n2 round 2).
+    ``docs_for_chashes`` is a catalog-WIDE reverse lookup — chash is a
+    pure function of chunk text, collection-independent — so an
+    unscoped call can match a document registered under a DIFFERENT
+    collection whose manifest happens to reference an identical chunk.
+    That is correct for a raw "which document owns this chash" query
+    (the delete-path and tombstone-reap callers, which omit *collection*
+    and keep the original catalog-wide behavior — they act on the chash
+    itself, not on one particular collection's identity), but wrong for
+    a store_put RECONCILE, whose contract is keyed on (collection,
+    title): pass *collection* there so a cross-collection chash
+    coincidence can never be mistaken for "this document already
+    exists in the collection I am writing to."
 
     nexus-5axey: ``by_doc_id`` is a TUMBLER-only lookup on the engine (the
     settled wji11 contract: tumbler is the only document identity); it
@@ -504,7 +559,12 @@ def resolve_knowledge_doc_for_chash(reader, chash: str, *, log_event: str):
     candidates = []
     for tumbler in matches:
         entry = reader.resolve(tumbler)
-        if entry is not None and entry.content_type == "knowledge" and not entry.file_path:
+        if (
+            entry is not None
+            and entry.content_type == "knowledge"
+            and not entry.file_path
+            and (collection is None or entry.physical_collection == collection)
+        ):
             candidates.append(entry)
     if len(candidates) > 1:
         _log.warning(
@@ -660,16 +720,6 @@ def catalog_store_hook_tracked(
         if reader is None:
             return "", False
 
-        # Dedup by chash stored in meta.doc_id. nexus-5axey: by_doc_id is a
-        # TUMBLER-only lookup on the engine and always mismatched this
-        # chash-shaped doc_id; resolve_knowledge_doc_for_chash uses
-        # docs_for_chashes, the chash-appropriate reverse lookup.
-        existing = resolve_knowledge_doc_for_chash(
-            reader, doc_id, log_event="catalog_store_hook_dedup"
-        )
-        if existing is not None:
-            return str(existing.tumbler), False
-
         # nexus-sdp0u: stable, collection-scoped identity for this document.
         # Reuses aspect_readers.uri_for's exact chroma:// convention (the
         # knowledge-collection identity field the reader already resolves
@@ -677,7 +727,52 @@ def catalog_store_hook_tracked(
         # source_path in chunk metadata post-RDR-102 D2) — one URI format,
         # never a second one. Empty title synthesizes nothing: see the
         # docstring for why a title-less URI must not be minted.
+        #
+        # Computed BEFORE the chash dedup below (moved up at nexus-bb6n2
+        # round 2) so a dedup HIT can stamp it too.
         source_uri = uri_for(collection_name, title) if title else None
+
+        # Dedup by chash stored in meta.doc_id. nexus-5axey: by_doc_id is a
+        # TUMBLER-only lookup on the engine and always mismatched this
+        # chash-shaped doc_id; resolve_knowledge_doc_for_chash uses
+        # docs_for_chashes, the chash-appropriate reverse lookup.
+        #
+        # nexus-bb6n2 round 2: scoped to THIS collection. Pre-fix, this
+        # lookup was collection-agnostic — docs_for_chashes is a catalog-
+        # WIDE reverse lookup (chash is a pure function of chunk text,
+        # collection-independent) — so a re-put whose first chunk happened
+        # to byte-match a chunk already manifested under a DIFFERENT
+        # collection's same-titled document silently adopted THAT
+        # document's tumbler here, with NO update to its
+        # physical_collection or source_uri: the catalog row kept
+        # pointing at the old collection while its manifest and T3 chunks
+        # moved to the new one. Measured live 2026-09-23: a 6-chunk split
+        # note re-put into a new collection reconciled onto an existing
+        # document from knowledge__1-1 this way; a 1-chunk unsplit note
+        # re-put the same way did not, only because its single, whole-note
+        # chash happened not to collide with anything catalog-wide — same
+        # code path, no structural difference between "split" and
+        # "unsplit" here. Docstring contract is (collection, title); a
+        # cross-collection chash coincidence must never satisfy it.
+        existing = resolve_knowledge_doc_for_chash(
+            reader, doc_id, log_event="catalog_store_hook_dedup",
+            collection=collection_name,
+        )
+        if existing is not None:
+            # Scoped to collection_name above, so physical_collection
+            # already matches — this stamps meta.doc_id at the new
+            # content's chash and, defensively, source_uri (a legacy row
+            # reachable only via this chash dedup, same shape as the
+            # nexus-sdp0u ghost-reconcile fix-round below, could still
+            # carry a stale/empty one).
+            writer = make_catalog_writer(priority="interactive")
+            writer.update(
+                existing.tumbler,
+                physical_collection=collection_name,
+                meta={"doc_id": doc_id},
+                source_uri=source_uri or "",
+            )
+            return str(existing.tumbler), False
 
         # Get or create "knowledge" curator owner, filtered on owner_type so
         # a same-named REPO owner cannot shadow the intended curator (same
@@ -909,6 +1004,20 @@ def store_put_manifest_direct(
 
     Does not replace the fire_batch manifest hook for other producers;
     the store_put re-write it implies is an idempotent replace.
+
+    SAME-CALL SUPERSEDE REAP (nexus-bb6n2): a re-put that changes a
+    note's content (this replace's *chunks* differ from what the
+    document's manifest referenced before it) writes new chunk(s) under
+    new content-derived chashes and repoints the manifest at them here —
+    but the OLD chunk row, now referenced by nothing, used to simply
+    stay in T3, still returned by raw vector search, competing with its
+    own replacement (the ``_sweep_superseded_vectors`` mechanism that
+    reaps this class for the indexer's ``atomic_manifest_replace`` path
+    was never reachable from here — this function bypasses that generic
+    ``fire_batch`` chain entirely, by design, per the docstring above).
+    The manifest read BEFORE the replace below, diffed against the
+    replace's own *chunks*, is what lets this call reap its own drop
+    without a separate sweep pass ever needing to run.
     """
     if not catalog_doc_id:
         return
@@ -931,6 +1040,28 @@ def store_put_manifest_direct(
             "metadatas — nothing to catalog"
         )
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    # nexus-bb6n2: capture what this document's manifest referenced BEFORE
+    # the replace, so the chunk(s) a supersede drops can be reaped in this
+    # same call. Best-effort — a read failure here means the reap below
+    # simply has nothing to compare against (empty `before`), never that
+    # the manifest write itself is blocked; no sweep beats a wrong sweep.
+    before_reader = make_catalog_reader()
+    before: set[str] = set()
+    if before_reader is not None:
+        try:
+            before = {row.chash for row in before_reader.get_manifest(catalog_doc_id) if row.chash}
+        except Exception:  # noqa: BLE001 — no sweep beats a wrong sweep
+            _log.warning(
+                "store_put_supersede_before_read_failed",
+                doc_id=catalog_doc_id, collection=collection, exc_info=True,
+            )
+            before = set()
+        finally:
+            try:
+                before_reader._db.close()
+            except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
+                pass
 
     writer = make_catalog_writer(priority="interactive")
     try:
@@ -964,6 +1095,99 @@ def store_put_manifest_direct(
             f"{len(missing)} of {len(expected)} chunk hashes missing "
             f"after write (e.g. {sorted(missing)[0][:16]}…)"
         )
+
+    # nexus-bb6n2: reap what the supersede dropped, same call, so no new
+    # orphan is minted between this write and whatever sweep might
+    # otherwise have found it. A fresh reader — the verify reader above is
+    # already closed, and this reap is a distinct, best-effort step that
+    # must not be entangled with the fail-loud verify above.
+    dropped = before - expected
+    if dropped:
+        reap_reader = make_catalog_reader()
+        try:
+            _reap_superseded_note_chunks(
+                reap_reader, catalog_doc_id, dropped, collection=collection,
+            )
+        finally:
+            if reap_reader is not None:
+                try:
+                    reap_reader._db.close()
+                except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
+                    pass
+
+
+def _reap_superseded_note_chunks(
+    reader, catalog_doc_id: str, dropped: set[str], *, collection: str,
+) -> None:
+    """Delete T3 chunk rows a store_put supersede just dropped from
+    *catalog_doc_id*'s manifest (nexus-bb6n2).
+
+    Called from :func:`store_put_manifest_direct` right after its
+    ``atomic_manifest_replace`` has landed and verified — the *dropped*
+    set is what the document's manifest referenced before this replace
+    minus what it references now. Content-addressed chunk text (CLAUDE.md
+    § catalog/T3 split) collapses identical text from different documents
+    onto ONE T3 row, so "not in THIS document's manifest any more" is not
+    "unreferenced": deleting on that basis alone would remove a chunk
+    another live document still depends on. This reuses the exact same two
+    guards ``mcp_infra._sweep_superseded_vectors`` uses for the indexer's
+    own supersede path:
+
+    1. The union guard (:func:`nexus.indexer_utils.orphaned_chashes`) —
+       keeps any candidate a DIFFERENT live document's manifest still
+       references.
+    2. The note guard (:func:`nexus.indexer_utils.live_note_chashes` over
+       :func:`nexus.indexer_utils.catalog_documents_for_collection`) —
+       keeps any candidate that is itself a manifest-less note's own
+       identity elsewhere in *collection*.
+
+    Fail-open and best-effort throughout: a lookup failure or a delete
+    failure is logged and swallowed, never raised — store_put's own
+    success must never hinge on whether the OLD chunk could be reaped.
+    Over-retention is recoverable (a later re-put, or ``nx t3 gc``,
+    catches it); over-deletion is not.
+    """
+    if not dropped or not collection:
+        return
+    from nexus.indexer_utils import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+        catalog_documents_for_collection,
+        live_note_chashes,
+        orphaned_chashes,
+    )
+
+    orphaned = orphaned_chashes(reader, catalog_doc_id, dropped, collection=collection)
+    if not orphaned:
+        return
+    try:
+        documents = catalog_documents_for_collection(reader, collection)
+        notes = live_note_chashes(documents)
+    except Exception:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
+        _log.warning(
+            "store_put_supersede_reap_skipped_note_lookup_failed",
+            doc_id=catalog_doc_id, collection=collection, candidates=len(orphaned),
+            exc_info=True,
+        )
+        return
+    orphaned = [h for h in orphaned if h not in notes]
+    if not orphaned:
+        return
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
+
+        result = make_t3().get_collection(collection).delete(ids=orphaned)
+    except Exception:  # noqa: BLE001 — store_put's own success must not depend on cleanup
+        _log.warning(
+            "store_put_supersede_reap_failed",
+            doc_id=catalog_doc_id, collection=collection, orphans=len(orphaned),
+            exc_info=True,
+        )
+        return
+    actual = result if isinstance(result, int) else len(orphaned)
+    _log.info(
+        "store_put_supersede_reaped",
+        doc_id=catalog_doc_id, collection=collection, deleted=actual,
+        requested=len(orphaned),
+    )
 
 
 def _retract_manifest_rows_for_chash(

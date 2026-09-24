@@ -67,7 +67,7 @@ def test_batch_frecency_single_subprocess_call() -> None:
     mock_result.returncode = 0
     mock_result.stdout = git_output
 
-    with patch("subprocess.run", return_value=mock_result) as mock_run:
+    with patch("nexus.frecency.run_bounded", return_value=mock_result) as mock_run:
         scores = batch_frecency(Path("/repo"))
 
     # Only one subprocess call
@@ -86,7 +86,7 @@ def test_batch_frecency_timeout_returns_empty() -> None:
     """batch_frecency returns {} on git timeout."""
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
 
-    with patch("subprocess.run", side_effect=__import__("subprocess").TimeoutExpired("git", 60)):
+    with patch("nexus.frecency.run_bounded", side_effect=__import__("subprocess").TimeoutExpired("git", 60)):
         scores = batch_frecency(Path("/repo"))
 
     assert scores == {}
@@ -100,7 +100,7 @@ def test_batch_frecency_empty_repo_returns_empty() -> None:
     mock_result.returncode = 0
     mock_result.stdout = ""
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("nexus.frecency.run_bounded", return_value=mock_result):
         scores = batch_frecency(Path("/repo"))
 
     assert scores == {}
@@ -112,7 +112,7 @@ def test_compute_frecency_git_timeout_returns_zero() -> None:
     """When subprocess.run raises TimeoutExpired, compute_frecency returns 0.0."""
     import subprocess as _subprocess
 
-    with patch("subprocess.run", side_effect=_subprocess.TimeoutExpired("git", 30)):
+    with patch("nexus.frecency.run_bounded", side_effect=_subprocess.TimeoutExpired("git", 30)):
         score = compute_frecency(Path("/repo"), Path("/repo/file.py"))
 
     assert score == 0.0
@@ -126,7 +126,7 @@ def test_git_commit_timestamps_nonzero_returncode() -> None:
     mock_result.returncode = 128  # e.g., not a git repo
     mock_result.stdout = ""
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("nexus.frecency.run_bounded", return_value=mock_result):
         timestamps = _git_commit_timestamps(Path("/repo"), Path("/repo/file.py"))
 
     assert timestamps == []
@@ -149,7 +149,7 @@ def test_batch_frecency_invalid_timestamp_skipped() -> None:
     mock_result.returncode = 0
     mock_result.stdout = git_output
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("nexus.frecency.run_bounded", return_value=mock_result):
         scores = batch_frecency(Path("/repo"))
 
     # foo.py should NOT be scored (timestamp was invalid → current_ts=None)
@@ -169,7 +169,7 @@ def test_git_commit_timestamps_parses_multiline_stdout() -> None:
     mock_result.returncode = 0
     mock_result.stdout = "1700000000\n1700100000\n"
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("nexus.frecency.run_bounded", return_value=mock_result):
         timestamps = _git_commit_timestamps(Path("/repo"), Path("/repo/file.py"))
 
     assert timestamps == [1700000000.0, 1700100000.0]
@@ -183,7 +183,7 @@ def test_git_commit_timestamps_skips_blank_and_invalid_lines() -> None:
     mock_result.returncode = 0
     mock_result.stdout = "1700000000\n\nnot-a-number\n1700200000\n  \n"
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("nexus.frecency.run_bounded", return_value=mock_result):
         timestamps = _git_commit_timestamps(Path("/repo"), Path("/repo/file.py"))
 
     # Should include the two valid timestamps, skip the blank and invalid lines
@@ -210,4 +210,32 @@ def test_batch_frecency_scores_a_non_ascii_path(tmp_path) -> None:
         check=True,
     )
     scores = batch_frecency(repo)
+    assert scores.get(target, 0.0) > 0.9, scores
+
+
+def test_batch_frecency_resolves_the_real_git_top_level_when_repo_is_a_subdir(tmp_path) -> None:
+    """nexus-cd1k0.16 finding (5): `git log --name-only` reports every path
+    relative to the repo's GIT TOP-LEVEL, regardless of `cwd` -- joining
+    against `repo` directly is only correct when `repo` IS the top level.
+    A caller indexing a SUBDIRECTORY of a larger repo (`nx index repo
+    <subdir>`) used to get a doubled, nonexistent path
+    (`<subdir>/<subdir>/file.py`) for every file, silently zeroing every
+    score. Real git, real subdirectory."""
+    import subprocess  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    root = tmp_path / "monorepo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subdir = root / "subproj"
+    subdir.mkdir()
+    target = subdir / "mod.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"],
+        check=True,
+    )
+    scores = batch_frecency(subdir)
     assert scores.get(target, 0.0) > 0.9, scores

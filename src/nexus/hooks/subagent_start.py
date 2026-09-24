@@ -41,9 +41,9 @@ behavioural divergence from the plugin-resident mirror it replaces
 (still present on disk -- see below -- but no longer on this call path).
 
 The plugin-resident ``conexus/hooks/scripts/t2_prefix_scan.py`` file
-itself is NOT deleted by this port -- ``mailbox_drain.py`` and the
-``routing/`` guards are still plugin-resident and out of scope here;
-deleting the now-orphaned script is a later bead.
+itself was NOT deleted by this port, on the stated ground that
+``mailbox_drain.py`` and the ``routing/`` guards were still plugin-resident.
+nexus-t9klx ported all three, and the file was deleted at nexus-z9cz2.
 
 **``SKIP_T2_SCAN`` is genuinely dead in the bash, and stays dead here.**
 The script declares ``SKIP_T2_SCAN=0`` alongside ``SKIP_STORAGE_DOCS`` and
@@ -291,9 +291,11 @@ def _run_captured(argv: list[str], *, env: dict[str, str], timeout: float) -> st
     the bash never inspects an exit code here either, only whether the
     captured text is non-empty.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, env=env
+        proc = run_bounded(
+            argv, timeout=timeout, env=env
         )
     except Exception:  # noqa: BLE001 — carried: a missing/hanging tool is "no output"
         return ""

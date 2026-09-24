@@ -842,6 +842,8 @@ def _devonthink_resolver_default(uuid: str) -> tuple[str | None, str]:
     a literal empty path.
     """
     import subprocess  # noqa: PLC0415  — stdlib deferred to call site (subprocess)
+
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred alongside the subprocess import above
     script = (
         'tell application id "DNtp"\n'
         f'  set theItem to get record with uuid "{uuid}"\n'
@@ -853,9 +855,9 @@ def _devonthink_resolver_default(uuid: str) -> tuple[str | None, str]:
         'end tell'
     )
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
     except FileNotFoundError:
         return None, "osascript not found (macOS-only)"

@@ -37,7 +37,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import time
 from pathlib import Path
 
@@ -92,13 +91,15 @@ def _scan_script() -> Path:
 def _hits(file_path: str) -> str:
     """The scan's output, or "" on any failure. A missing sibling file
     yields no hits and the advisory no-ops, exactly as in bash."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     script = _scan_script()
     if not script.is_file():
         return ""
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["python3", str(script), file_path],
-            capture_output=True, text=True, timeout=30.0,
+            timeout=30.0,
         )
     except Exception:  # noqa: BLE001 — carried: a crashed scan is an advisory no-op
         return ""
@@ -111,17 +112,19 @@ def _log_hit(file_path: str, hit_count: int, env: dict) -> None:
     Best-effort and silent on failure, as in bash. This is the write a
     redirect-shaped grep does not find.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     if shutil.which("nx") is None:
         return
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     try:
-        subprocess.run(
+        run_bounded(
             [
                 "nx", "scratch", "put",
                 f"divergence-hook hit: {stamp} file={file_path} hits={hit_count}",
                 "--tags", "divergence-hook-hit,precision-review",
             ],
-            capture_output=True, text=True, timeout=10.0, env=env,
+            timeout=10.0, env=env,
         )
     except Exception:  # noqa: BLE001 — carried: the advisory must not fail on its own logging
         return

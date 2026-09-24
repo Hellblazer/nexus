@@ -24,6 +24,7 @@ from typing import Any, Final
 import click
 import yaml
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.plans.audit_rounds import (
     BLOCKS_PLANNING,
     DISCOVER_AT_IMPLEMENTATION,
@@ -1760,9 +1761,9 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
     # Active beads (for Related Issues field)
     print("### Active Beads (for Related Issues field)")
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["bd", "list", "--status=in_progress", "--limit=5"],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
         bd_out = (result.stdout or "").strip()
         print(bd_out if bd_out else "No in-progress beads")
@@ -1835,10 +1836,10 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
             t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
             print("### T2 Metadata")
             try:
-                t2_result = subprocess.run(
+                t2_result = run_bounded(
                     ["nx", "memory", "get", "--project", f"{repo_name}_rdr",
                      "--title", t2_key],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 t2_out = (t2_result.stdout or "").strip()
                 print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
@@ -1849,9 +1850,9 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
             # T2 research findings
             print("### T2 Research Findings")
             try:
-                list_result = subprocess.run(
+                list_result = run_bounded(
                     ["nx", "memory", "list", "--project", f"{repo_name}_rdr"],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
                 # `nx memory list` rows are "[id] <project>/<title>  (…)" —
@@ -1872,9 +1873,9 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
             # Linked beads
             print("### Linked Beads")
             try:
-                bd_result = subprocess.run(
+                bd_result = run_bounded(
                     ["bd", "list", "--status=open", "--limit=20"],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 bd_out = (bd_result.stdout or "").strip()
                 matching = [
@@ -1939,6 +1940,51 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 # preamble rdr-gate
 # ---------------------------------------------------------------------------
+
+# nexus-r9esy: RDRs numbered at or below this are grandfathered out of the
+# Layer 1 plan-grammar check below (their Implementation Plan predates the
+# template's `### Phase N` / `#### Step N` heading grammar, or was never
+# required to follow it) -- Sam's ruling, 2026-09-23.
+_LAYER1_PLAN_GRAMMAR_GRANDFATHER_MAX = 205
+
+_LAYER1_PLAN_PHASE_HEADING_RE = re.compile(
+    r"^(#{2,4})[ \t]+Phase[ \t]+\d+(?:\.\d+)?\b", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _gate_layer1_plan_grammar_conformant(text: str) -> bool:
+    """True when RDR *text*'s Implementation Plan section follows the
+    template's ``### Phase N`` / ``#### Step N`` heading grammar
+    (``conexus/resources/rdr/TEMPLATE.md``) -- every ``Phase N`` heading
+    found has at least one sub-heading exactly one level deeper. A section
+    with no ``Phase N`` heading at all (a plain numbered list, RDR-204's
+    shape; or plain prose) is NOT conformant.
+
+    Deliberately independent of :func:`_prg_parse_plan_phase_items`'s
+    three-layer TOLERANT parser -- that parser's own job is to keep
+    phase-review-gate working across every shape existing RDRs already
+    use, growing a fallback layer per deviation (nexus-w5gma). This is the
+    STRICTER, gate-time check nexus-r9esy asks for so growing tolerance in
+    the parser stops being the only way an off-template plan gets noticed;
+    the two must stay uncoupled, or tightening this check would silently
+    change what phase-review-gate accepts on content that already shipped.
+    """
+    plan_text = _prg_extract_implementation_plan_section(text)
+    if not plan_text:
+        return False
+    matches = list(_LAYER1_PLAN_PHASE_HEADING_RE.finditer(plan_text))
+    if not matches:
+        return False
+    phase_depth = len(matches[0].group(1))
+    same_depth = [m for m in matches if len(m.group(1)) == phase_depth]
+    step_re = re.compile(rf"^#{{{phase_depth + 1}}}[ \t]+\S", re.MULTILINE)
+    bounds = [m.start() for m in same_depth] + [len(plan_text)]
+    for i in range(len(same_depth)):
+        block = plan_text[bounds[i] : bounds[i + 1]]
+        if not step_re.search(block):
+            return False
+    return True
+
 
 @preamble.command("rdr-gate")
 @click.argument("args", nargs=-1)
@@ -2036,6 +2082,31 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
         print(
             f"> **Note**: RDR-{t2_key} predates the gap-structure convention (id < 65) — "
             "skipping the Layer 1 gap check."
+        )
+        print()
+
+    # nexus-r9esy: plan-grammar WARNING, never a block -- the phase-review-
+    # gate parser already tolerates the shapes named below; this only flags
+    # a NEW off-template plan for the author to notice, it never stops the
+    # gate.
+    if _rdr_id_int > _LAYER1_PLAN_GRAMMAR_GRANDFATHER_MAX:
+        if not _gate_layer1_plan_grammar_conformant(text):
+            print(
+                f"> **WARNING** (Layer 1 — plan grammar): RDR-{t2_key}'s Implementation "
+                "Plan does not follow the template's `### Phase N` / `#### Step N` "
+                "heading grammar (`conexus/resources/rdr/TEMPLATE.md`)."
+            )
+            print(
+                "> This does not block the gate. Growing tolerance for a new shape in "
+                "the phase-review-gate parser is debt, not a feature — prefer "
+                "conforming the plan to the template instead."
+            )
+            print()
+    elif not _gate_layer1_plan_grammar_conformant(text):
+        print(
+            f"> **Note**: RDR-{t2_key} predates the Phase/Step plan-grammar convention "
+            f"(id ≤ {_LAYER1_PLAN_GRAMMAR_GRANDFATHER_MAX}) — skipping the Layer 1 "
+            "plan-grammar check."
         )
         print()
 
@@ -2668,9 +2739,9 @@ def _preamble_regate_block(
     if gated_commit:
         rel = os.path.relpath(str(rdr_file), repo_root)
         try:
-            diff = subprocess.run(
+            diff = run_bounded(
                 ["git", "-C", repo_root, "diff", "--stat", f"{gated_commit}..HEAD", "--", rel],
-                capture_output=True, text=True, timeout=20, check=False,
+                timeout=20,
             )
             if diff.returncode != 0:
                 lines.append(
@@ -3190,13 +3261,13 @@ def _fix_check_lines(
             f"Fix check: not required (no change to the RDR file since `{gated_commit}`).",
         ]
     try:
-        log = subprocess.run(
+        log = run_bounded(
             ["git", "-C", repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel],
-            capture_output=True, text=True, timeout=20, check=False,
+            timeout=20,
         )
-        tip = subprocess.run(
+        tip = run_bounded(
             ["git", "-C", repo_root, "log", "-1", "--format=%h", "--", rel],
-            capture_output=True, text=True, timeout=20, check=False,
+            timeout=20,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return [f"Fix check: git log failed ({exc}); list the fix commits by hand."]
@@ -3834,10 +3905,11 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
             # S2: best-effort T1 scratch marker — downstream hook/skill consumes rdr-close-active tag
             # (original rdr_close.py:299-303)
             try:
-                subprocess.run(
+                run_bounded(
                     ["nx", "scratch", "put", t2_key,
                      "--tags", f"rdr-close-active,rdr-{t2_key}"],
-                    capture_output=True, timeout=5,
+                    text=False,
+                    timeout=5,
                 )
             except Exception:  # noqa: BLE001 — best-effort optional lookup; ignored if unavailable
                 pass
@@ -3894,9 +3966,9 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
     has_open_beads = False
     print("### Active Beads")
     try:
-        bd_result = subprocess.run(
+        bd_result = run_bounded(
             ["bd", "list", "--status=open,in_progress", "--limit=20"],
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
         )
         bd_out = (bd_result.stdout or "").strip()
         if bd_out and bd_out != "No issues found.":
@@ -4111,9 +4183,9 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
             # T2 research findings
             print("### Existing Research Findings (T2)")
             try:
-                list_result = subprocess.run(
+                list_result = run_bounded(
                     ["nx", "memory", "list", "--project", f"{repo_name}_rdr"],
-                    capture_output=True, text=True, timeout=10,
+                    timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
                 # `nx memory list` rows are "[id] <project>/<title>  (…)" —
@@ -4189,8 +4261,8 @@ _FIX_RULES: tuple[str, ...] = (
 def _git_out(repo_root: str, *args: str) -> str | None:
     """stdout of a git command, or None when it fails."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", repo_root, *args], capture_output=True, text=True, timeout=20, check=False,
+        proc = run_bounded(
+            ["git", "-C", repo_root, *args], timeout=20,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -6057,14 +6129,15 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
 
     # Write T1 scratch marker (best-effort)
     try:
-        subprocess.run(
+        run_bounded(
             [
                 "nx", "scratch", "put",
                 f"phase-review-gate PASSED: RDR-{rdr_id_label} Phase {phase_arg}",
                 "--tags",
                 f"phase-review-passed,rdr-{rdr_id_label},phase-{phase_arg}",
             ],
-            capture_output=True, timeout=5,
+            text=False,
+            timeout=5,
         )
     except Exception:  # noqa: BLE001 — best-effort sentinel write (RDR-121 P2); ignored on failure
         pass

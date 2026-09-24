@@ -9,8 +9,9 @@ layer). The CLI module re-exports the sentinels and the
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
+
+from nexus.bounded_subprocess import run_bounded
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 SENTINEL_END = "# <<< nexus managed end <<<"
@@ -24,11 +25,9 @@ def git_common_dir(repo: Path) -> Path:
     whatever shape they prefer. The CLI wrapper in
     ``nexus.commands.hooks`` translates this to ``ClickException``.
     """
-    result = subprocess.run(
+    result = run_bounded(
         ["git", "rev-parse", "--git-common-dir"],
         cwd=repo,
-        capture_output=True,
-        text=True,
         timeout=10,
     )
     if result.returncode != 0:
@@ -41,11 +40,9 @@ def git_common_dir(repo: Path) -> Path:
 
 def effective_hooks_dir(repo: Path) -> Path:
     """Return the hooks directory for *repo*, respecting ``core.hooksPath``."""
-    result = subprocess.run(
+    result = run_bounded(
         ["git", "config", "core.hooksPath"],
         cwd=repo,
-        capture_output=True,
-        text=True,
         timeout=10,
     )
     if result.returncode == 0 and result.stdout.strip():

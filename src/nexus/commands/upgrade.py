@@ -11,6 +11,8 @@ import contextlib
 import click
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger()
 
 
@@ -440,12 +442,15 @@ def _cycle_storage_service_to_current(
 
         from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         nx = _nx_bin_fn() if _nx_bin_fn is not None else _real_nx_bin()
-        _run = _run_fn if _run_fn is not None else subprocess.run
+        # nexus-t10nc: stdout= plus timeout= is the watched shape, and an
+        # aliased spawner hides it from the lint's AST scan exactly as
+        # plugin_lockstep's injected Runner did. Both streams are DEVNULL, so
+        # there is nothing to decode and text= would say nothing.
+        _run = _run_fn if _run_fn is not None else run_bounded
         for verb in ("stop", "start"):
             _run(
                 [*nx, "daemon", "service", verb],
                 timeout=60,  # service start waits for PG + JVM
-                check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

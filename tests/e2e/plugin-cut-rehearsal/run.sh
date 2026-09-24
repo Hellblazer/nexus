@@ -102,18 +102,56 @@ fi
 # ── container mode: build the image, re-enter this script inside it ─────────
 if [ "$MODE" = container ]; then
     command -v docker >/dev/null || { echo "docker not found; use --host" >&2; exit 2; }
+    STAGED_CLONE=""
+    DCFG="$HOME/.docker/config.json"
+    DCFG_BAK=""
+    _container_prep_cleanup() {
+        [ -n "$STAGED_CLONE" ] && rm -rf "$STAGED_CLONE"
+        if [ -n "$DCFG_BAK" ]; then cp "$DCFG_BAK" "$DCFG"; rm -f "$DCFG_BAK"; fi
+    }
+    trap _container_prep_cleanup EXIT
+    # A linked worktree's .git is a FILE pointing OUTSIDE $SOURCE_REPO (at
+    # the primary checkout's .git/worktrees/<name>), which a read-only bind
+    # mount of $SOURCE_REPO alone cannot reach -- `git clone` inside the
+    # container then fails with "fatal: not a git repository". Under the
+    # project's "one session, one worktree" convention every worktree-
+    # dispatched session hits this, every time, in container mode. Stage a
+    # standalone clone on the HOST first (which CAN see the real gitdir)
+    # and bind-mount that instead.
+    #
+    # A plain `git clone <worktree>` is not enough by itself: its default
+    # refspec (`+refs/heads/*:refs/remotes/origin/*`) maps the SOURCE's
+    # local branches onto the clone's `origin/*` -- and on a shared box a
+    # local `main`/`develop` sitting unused (everyone tracks
+    # `origin/main`/`origin/develop` instead per this project's worktree
+    # convention) can be many releases stale, silently poisoning the
+    # clone's own `origin/main`/`origin/develop`. An explicit fetch of the
+    # SOURCE's own remote-tracking refs (and tags) is what actually mirrors
+    # what this checkout believes is current (nexus-2x3qy rehearsal,
+    # 2026-09-23: a stale local `main` produced a spurious "plugin version
+    # field moved" cut refusal that had nothing to do with the change under
+    # test -- found only because the ref-mapping was reasoned through by
+    # hand, at the cost of two extra rehearsal rounds; this fix means the
+    # next session does not need to).
+    if [ -f "$SOURCE_REPO/.git" ]; then
+        STAGED_CLONE="$(mktemp -d "${TMPDIR:-/tmp}/plugin-cut-rehearsal-worktree-clone.XXXXXX")"
+        echo "== $SOURCE_REPO is a linked worktree; staging a standalone clone at $STAGED_CLONE for the container mount"
+        git clone -q --no-local "$SOURCE_REPO" "$STAGED_CLONE"
+        git -C "$STAGED_CLONE" fetch -q "$SOURCE_REPO" \
+            '+refs/remotes/origin/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+        SOURCE_REPO="$STAGED_CLONE"
+    fi
     # Docker Desktop's credsStore=desktop helper cannot reach a locked login
     # keychain in a non-interactive session, which fails even anonymous base-
     # image resolution at BUILD time (docker run is unaffected). Same
     # workaround as tests/e2e/migration-rehearsal/run.sh: strip credsStore
-    # for the build, restore on exit.
-    DCFG="$HOME/.docker/config.json"
-    DCFG_BAK=""
+    # for the build, restore on exit (via _container_prep_cleanup above,
+    # which also covers STAGED_CLONE -- a second `trap ... EXIT` here would
+    # silently replace rather than stack with the one already set).
     if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
         DCFG_BAK="$(mktemp "${TMPDIR:-/tmp}/docker-config.XXXXXX")"
         cp "$DCFG" "$DCFG_BAK"
         python3 -c "import json,sys;p=sys.argv[1];d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)" "$DCFG"
-        trap 'cp "$DCFG_BAK" "$DCFG"; rm -f "$DCFG_BAK"' EXIT
         echo "   (temporarily stripped credsStore from $DCFG for the build; restored on exit)"
     fi
     echo "== building $IMAGE"
@@ -284,6 +322,36 @@ g fetch -q origin
 git -C "$SOURCE_REPO" rev-parse --verify --quiet "$BASE_TAG^{commit}" >/dev/null || _die "base tag $BASE_TAG does not resolve in the source"
 echo "   main=$(g rev-parse --short main) develop=$(g rev-parse --short develop) tags=$(g tag -l | wc -l | tr -d ' ')"
 
+_step "inject a synthetic straddling-and-deferred change onto develop (nexus-2x3qy: a straddling bead, deferred, must not refuse the cut)"
+# The regression case the bead asks for: a bead's commit couples an
+# allowlisted channel path to wheel content (the nexus-0fw11 shape that
+# started this bead) -- but its ledger entry is DEFERRED, so the cut
+# must proceed, holding the channel half back too, never shipping
+# either half until the deferral is lifted.
+PROBE_CHANNEL_PATH="conexus/skills/rehearsal-deferral-probe/SKILL.md"
+PROBE_WHEEL_PATH="src/nexus/_rehearsal_deferral_probe.py"
+mkdir -p "$(dirname "$CLONE/$PROBE_CHANNEL_PATH")" "$(dirname "$CLONE/$PROBE_WHEEL_PATH")"
+printf 'rehearsal deferral probe -- channel half\n' > "$CLONE/$PROBE_CHANNEL_PATH"
+printf '# rehearsal deferral probe -- wheel half, must never ship on a plugin cut\n' > "$CLONE/$PROBE_WHEEL_PATH"
+g add -- "$PROBE_CHANNEL_PATH" "$PROBE_WHEEL_PATH"
+g commit -q -m "feat: rehearsal deferral probe, channel+wheel straddle (nexus-rhrsl1)"
+python3 - "$CLONE/conexus/PENDING_RELEASE.md" "$PROBE_CHANNEL_PATH" <<'PY'
+import sys
+path, probe = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+entry = f"- `{probe}`: straddles wheel content, deferred (nexus-rhrsl1)\n"
+heading = "## Deferred to the next client release"
+if heading not in text:
+    text = text.rstrip("\n") + "\n\n" + heading + "\n\n" + entry
+else:
+    text = text.rstrip("\n") + "\n" + entry
+open(path, "w", encoding="utf-8").write(text)
+PY
+g add -- conexus/PENDING_RELEASE.md
+g commit -q -m "docs: defer nexus-rhrsl1's straddling entry (nexus-rhrsl1)"
+g push -q origin develop
+echo "   probe on develop: $PROBE_CHANNEL_PATH (channel, deferred) + $PROBE_WHEEL_PATH (wheel, never ships) under nexus-rhrsl1"
+
 _step "uv sync --group dev in the clone"
 (cd "$CLONE" && uv sync -q --group dev) || _die "uv sync failed"
 
@@ -300,6 +368,14 @@ BRANCH="$(printf '%s' "$CUT_LINE" | sed -E 's/^cut: (plugin-v[^ ]+) on (plugin-r
 CUT_HEAD="$(g rev-parse HEAD)"
 echo "   cut $TAG on $BRANCH at ${CUT_HEAD:0:9}"
 g diff --stat origin/main | tail -3
+# Deferral regression (nexus-2x3qy): the cut above did NOT refuse despite
+# nexus-rhrsl1 straddling wheel content -- confirm the deferred channel
+# half was held back too (neither half ships) and the entry still
+# declares it, exactly as atomic_split_check's docstring promises.
+[ ! -e "$CLONE/$PROBE_WHEEL_PATH" ] || _die "deferral regression: wheel probe $PROBE_WHEEL_PATH shipped on the cut branch"
+[ ! -e "$CLONE/$PROBE_CHANNEL_PATH" ] || _die "deferral regression: deferred channel probe $PROBE_CHANNEL_PATH shipped on the cut branch despite deferral"
+grep -qF "$PROBE_CHANNEL_PATH" "$CLONE/conexus/PENDING_RELEASE.md" || _die "deferral regression: the deferred entry vanished from the ledger on the cut branch"
+echo "   deferral regression verified: nexus-rhrsl1's straddling entry did not refuse the cut, its channel path stayed held back, and the ledger still declares it"
 
 _step "the cut PR's CI: refs/pull/1/merge at depth 1, the drift-ledger workflow's tag fetch, pull_request payload, pin-reading checks"
 g push -q -u origin "$BRANCH"

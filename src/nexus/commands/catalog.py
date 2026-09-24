@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import click
+import httpx
 
 import structlog
 
@@ -311,6 +312,7 @@ from nexus.commands.catalog_cmds import purge_trash as _purge_trash_cmds  # noqa
 from nexus.commands.catalog_cmds import gc_audit as _gc_audit_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import recovery as _recovery_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import trash as _trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import ghost_sweep as _ghost_sweep_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -329,6 +331,7 @@ _purge_trash_cmds.register(catalog)
 _gc_audit_cmds.register(catalog)
 _recovery_cmds.register(catalog)
 _trash_cmds.register(catalog)
+_ghost_sweep_cmds.register(catalog)
 
 
 @catalog.command("init", hidden=True)
@@ -691,11 +694,25 @@ def register_cmd(
          "export) — the engine's UPDATABLE_DOC_COLUMNS already accepted this "
          "column; this flag exposes it on the CLI.",
 )
+@click.option(
+    "--alias-of",
+    "alias_of",
+    default="",
+    help="Canonical tumbler this entry is a duplicate of (nexus-bt8w8). "
+         "Sets ONLY the alias pointer — it does NOT move source_uri and "
+         "does NOT remap this entry's links onto the canonical, so a "
+         "second entry can still surface in search results and its links "
+         "still point at the alias. For the atomic path that does both "
+         "in one transaction, use `nx catalog merge <dup> <canonical>` "
+         "instead (nexus-z4rpi); reach for --alias-of only when you want "
+         "the pointer set by itself, e.g. scripting the three-step "
+         "recipe merge automates.",
+)
 @click.option("--owner", default="", help="Batch: update all entries for this owner")
 @click.option("--search", "search_query", default="", help="Batch: update all entries matching this search")
 def update_cmd(
     tumbler: str, title: str, author: str, year: int, corpus: str, meta: str,
-    source_uri: str, file_path: str, owner: str, search_query: str,
+    source_uri: str, file_path: str, alias_of: str, owner: str, search_query: str,
 ) -> None:
     """Update catalog entry metadata. TUMBLER can be a tumbler or title.
 
@@ -711,6 +728,19 @@ def update_cmd(
     --file-path sets or replaces the catalog file_path column. Use this to
     repoint an entry whose recorded path is dead (moved/renamed on disk)
     without touching its source_uri identity.
+
+    --alias-of points this entry at its canonical duplicate: a show on
+    this tumbler afterward returns the canonical entry instead of the
+    duplicate. It sets ONLY the alias pointer, in this one call — it does
+    NOT move source_uri onto the canonical and does NOT remap this
+    entry's links, so used alone it can leave the duplicate's identity
+    URI orphaned and its links still pointing at the alias rather than
+    the canonical. For the atomic path that does all three in one
+    transaction (the recipe this flag existed to let an operator hand-
+    assemble), use `nx catalog merge <dup> <canonical>` instead
+    (nexus-z4rpi) — that is the recovery path for a duplicate
+    registration; reach for --alias-of by itself only when you
+    deliberately want just the pointer set.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -729,6 +759,14 @@ def update_cmd(
         fields["source_uri"] = source_uri
     if file_path:
         fields["file_path"] = file_path
+    if alias_of:
+        try:
+            fields["alias_of"] = str(Tumbler.parse(alias_of))
+        except ValueError as exc:
+            # nexus-bt8w8: same clean-error convention as source_uri
+            # (nexus-fb6x) — a malformed alias target is refused here
+            # rather than discovered later on a resolve.
+            raise click.ClickException(str(exc)) from exc
     if not fields:
         raise click.ClickException("No fields to update")
 
@@ -772,6 +810,56 @@ def update_cmd(
         # nexus-fb6x: same UX-cleanup as the batch path.
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Updated: {t}")
+
+
+@catalog.command("merge")
+@click.argument("duplicate")
+@click.argument("canonical")
+def merge_cmd(duplicate: str, canonical: str) -> None:
+    """Collapse DUPLICATE into CANONICAL in one transaction (nexus-z4rpi).
+
+    Replaces the manual three-call recipe (--source-uri '' on the
+    duplicate, --source-uri on the canonical, --alias-of on the duplicate)
+    that ux_catalog_documents_live_source_uri forces apart and that a
+    failure between any two calls could tear. The engine moves the
+    duplicate's source_uri onto the canonical only when the canonical
+    currently lacks a durable one, then aliases the duplicate to the
+    canonical — either the whole thing lands or nothing does.
+
+    Also remaps every catalog link touching the duplicate onto the
+    canonical, in the SAME transaction: a link is renamed in place, folded
+    into an existing canonical-side link (the same co_discovered_by merge
+    `nx catalog link` performs when a link already exists) if the rewrite
+    collides with one, or dropped if the rewrite would make it a self-link.
+    A merge that moved identity but stranded the link graph would be only
+    half a merge.
+
+    Refuses (with a clean error, no traceback) on a self-merge, either
+    tumbler not found (including a tumbler in a different tenant), a
+    duplicate already aliased to some OTHER canonical, or a merge that
+    would close an alias cycle.
+    """
+    cat = _get_catalog()
+    writer = _get_catalog_writer()
+    dup_t = _resolve_tumbler(cat, duplicate)
+    canon_t = _resolve_tumbler(cat, canonical)
+    try:
+        result = writer.merge_documents(dup_t, canon_t)
+    except httpx.HTTPStatusError as exc:
+        # nexus-z4rpi: the engine's typed MergeRefused (self-merge, not
+        # found/cross-tenant, already-aliased-elsewhere, alias cycle)
+        # surfaces here as a 409 whose body IS the clean message — same
+        # convention as the source_uri/alias_of ValueError catches above.
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        writer.close()
+    click.echo(
+        f"Merged: {dup_t} -> {canon_t}"
+        f" (source_uri_moved={result.get('source_uri_moved', False)},"
+        f" links_remapped={result.get('links_remapped', 0)},"
+        f" links_collapsed={result.get('links_collapsed', 0)},"
+        f" links_dropped={result.get('links_dropped', 0)})"
+    )
 
 
 @catalog.command("delete")
@@ -1192,9 +1280,19 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # has not yet been registered (backfill_repos runs first
                 # but the registry may have stale entries). Curator is
                 # the legitimate fallback for orphan rdr__* collections.
-                owner = _get_or_create_curator(
-                    cat, col_name.replace("rdr__", ""), writer=w,
-                )
+                #
+                # nexus-emrsy: a single fixed curator name, NOT
+                # col_name.replace("rdr__", "") -- for a conformant RDR-103
+                # name (rdr__<owner_id>__<model>__v<n>) that strip left the
+                # owner_id/model/version segments intact, minting a curator
+                # literally named "1-1__voyage-context-3__v1" or
+                # "1-20__voyage-context-3__v1" (junk owners 1.25/1.26 on the
+                # live catalog) -- a tumbler-form string that only LOOKS like
+                # an owner name because nothing validated it. Every orphan
+                # rdr__* collection now collapses onto the same "orphaned-rdrs"
+                # curator, mirroring "standalone-pdfs"/"standalone-docs" for
+                # the other content types.
+                owner = _get_or_create_curator(cat, "orphaned-rdrs", writer=w)
 
             for path, title in seen_paths.items():
                 if dry_run:

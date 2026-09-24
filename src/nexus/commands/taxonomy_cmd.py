@@ -860,32 +860,27 @@ def reset_cmd(collection: str, yes: bool) -> None:
     a remedy that did not exist, and the only reachable "purge" destroyed the
     whole collection's documents (both reviewers of bad1e8348 caught this).
 
-    NOT a narrower rebuild. The engine's purge deletes topic_assignments by
-    SOURCE_COLLECTION as well as by topic id, so it also removes this
-    collection's documents' projections onto OTHER collections' topics, which a
-    rebuild leaves alone. That makes reset strictly more destructive than the
-    operation it is offered as an alternative to. Scoping it tighter needs an
-    engine change and rides that release train (nexus-0v0nj); until then the
-    widening is disclosed before the prompt, not discovered from the counts
-    afterwards.
+    A narrower rebuild, exactly (nexus-0v0nj). The engine's purge used to also
+    delete topic_assignments by SOURCE_COLLECTION -- this collection's
+    documents' projections onto OTHER collections' topics, which a rebuild
+    leaves alone -- making reset strictly more destructive than the operation
+    it was offered as an alternative to. reset now purges with the
+    taxonomy-only scope: exactly this collection's own topics, links and
+    assignments (plus its centroids), and nothing a rebuild would keep.
     """
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topics = db.taxonomy.get_all_topics(collection=collection)
         # ONE PATH, deliberately. Round 3 added a SECOND branch here for the
         # no-topics case, so an interrupted reset could finish its own work, and
-        # that branch reproduced in new code the exact defect the rest of this
-        # command exists to fix: it called reset_collection unconditionally with
+        # that branch reproduced in new code a defect the rest of this command
+        # was written to fix: it called reset_collection unconditionally with
         # no disclosure, no prompt (--yes had nothing to skip), and reported
-        # only centroids — so a run that destroyed cross-collection assignments
-        # and found no centroids printed "Nothing to reset", which was false.
-        #
-        # The ASYMMETRY was the bug. purgeCollection deletes topic_assignments
-        # by SOURCE_COLLECTION whether or not this collection owns any topics,
-        # so a collection with zero topics can still have outbound projections
-        # to lose. Two branches meant two homes for the disclosure and only one
-        # of them had it. There is one path now: every reset states the same
+        # only centroids. There is one path now: every reset states the same
         # scope, prompts the same way and reports the same counts, topics or no
-        # topics (round-4 review).
+        # topics (round-4 review) -- kept even though the taxonomy-only scope
+        # (nexus-0v0nj) has since removed the specific asymmetry that motivated
+        # it, because a collection with zero topics of its own can still be
+        # mid-reset from an earlier interrupted run.
         labelled = [
             t for t in topics
             if (t.get("review_status") or "") == "accepted"
@@ -899,25 +894,14 @@ def reset_cmd(collection: str, yes: bool) -> None:
         else:
             click.echo(
                 f"Collection {collection!r} owns no topics. Resetting still "
-                "clears whatever an interrupted reset left behind, and the "
-                "scope below applies either way."
+                "clears whatever an interrupted reset left behind."
             )
         click.echo("The collection's documents and chunks are not touched.")
-        # The engine's purge also deletes topic_assignments by SOURCE_COLLECTION
-        # (TaxonomyRepository.purgeCollection), which reaches BEYOND this
-        # collection's own topics: it removes this collection's documents'
-        # projections onto OTHER collections' topics. A rebuild never touches
-        # those, so reset is strictly more destructive than the operation it is
-        # offered as the alternative to, and saying so is the whole point --
-        # this session has spent the day on losses that were real, unavoidable
-        # and silent, and quietly widening one while fixing another would be
-        # the same defect wearing a fix's clothes.
-        click.echo(
-            "It ALSO removes this collection's cross-collection projections — "
-            "its documents' assignments onto other collections' topics, which a "
-            "rebuild would have kept. Re-run `nx taxonomy project` afterwards to "
-            "rebuild them."
-        )
+        # nexus-0v0nj: reset now purges with scope="taxonomy_only"
+        # (HttpTaxonomyStore.reset_collection), so it no longer reaches this
+        # collection's documents' projections onto OTHER collections' topics
+        # -- exactly what a rebuild of this collection would keep, and
+        # nothing else. No separate disclosure needed for that any more.
         if not yes:
             # Irreversible, and the accepted-label count is exactly the thing
             # the operator is being asked to weigh, so it is printed above the

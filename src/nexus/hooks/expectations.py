@@ -58,6 +58,7 @@ from pathlib import Path
 
 __all__ = [
     "ExpectationsUsageError",
+    "WORKFLOW_SUBAGENT_TYPE",
     "expectations_already_blocked",
     "expectations_append_row",
     "expectations_archive",
@@ -146,6 +147,27 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$")
 
 _MODES = ("background", "sync")
+
+#: The ``agent_type`` the harness stamps on a SubagentStart payload for an
+#: agent the WORKFLOW tool spawned (nexus-silj0), measured 2026-09-21 across
+#: 11 STARTs from one Workflow-tool run (session 2109cc46, run
+#: wf_baae5a4e-bfd: 1 enumerate + 7 trace + 3 verify agents). No PreToolUse
+#: hook can write this class an EXPECT row in advance the way
+#: ``hook_agent_dispatch_expect`` does for the Agent tool -- the fan-out
+#: count is a property of the SCRIPT's execution (``pipeline()``/
+#: ``parallel()`` fan out over data computed at runtime; a loop can be
+#: budget-bounded or loop-until-dry), not knowable at PreToolUse time, and a
+#: guessed EXPECT row would inflate the credit pool exactly the way a
+#: duplicate hand-write does. Sam's ruling (2026-09-23, bead nexus-silj0,
+#: option 2 of the bead's own candidates): this class gets its own bucket in
+#: both the census and the undeclared audit -- counted and reported, never
+#: folded into the ``undeclared`` deficit that exit code 2 exists to signal,
+#: and never allowed to spend another type's EXPECT credit. Left alone,
+#: every session that uses the Workflow tool at all ends with a non-zero
+#: declaration audit, which is how the one signal that distinguishes a real
+#: undeclared Agent dispatch from routine workflow use gets swamped into
+#: noise.
+WORKFLOW_SUBAGENT_TYPE = "workflow-subagent"
 
 
 class ExpectationsUsageError(ValueError):
@@ -531,10 +553,26 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     has no unspent EXPECT credit left. An EXPECT row of EITHER mode supplies
     credit, so a deliberately-declared sync dispatch stays audit-clean.
 
+    A START whose type is exactly :data:`WORKFLOW_SUBAGENT_TYPE` (nexus-silj0,
+    Sam's ruling) is pulled out of the audited population entirely, before
+    ``checked``/``recognized``/``undeclared`` are computed: it is counted and
+    reported on its own ``WORKFLOW\tchecked=<n>`` line, but it can neither
+    land in ``undeclared`` (so it never drives exit code 2) nor spend a unit
+    of some other type's EXPECT credit (it is never in the credit-consuming
+    loop at all). The line is emitted only when ``n > 0`` and always
+    immediately before ``SUMMARY``, so the "a populated result always ends
+    with SUMMARY or BLINDSPOT" contract (asserted in
+    ``TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne``) is unchanged.
+
     Exit codes, quoted in AGENTS.md: 0 clean, 1 BLINDSPOT, 2 undeclared>0,
     3 no ledger. **3 is not a pass** -- absence of a ledger is not evidence
     of cleanliness, which is why it carries a note naming the two
-    explanations and how to tell them apart.
+    explanations and how to tell them apart. A session with ONLY workflow
+    STARTs and no EXPECT rows is genuinely 0 (nothing Agent-tool-shaped to
+    audit), not 1 BLINDSPOT (that code requires an EXPECT row with zero
+    STARTs, and a workflow-only session has neither) -- the WORKFLOW line is
+    what keeps that 0 from reading as "nothing happened" when 11 agents
+    plainly did.
     """
     rows = _readable_rows(session_id)
     if rows is None:
@@ -555,6 +593,8 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     credit: dict[str, int] = {}
     seen_dispatch: set[str] = set()
     expect_total = 0
+    workflow_order: list[str] = []
+    workflow_seen: set[str] = set()
 
     for row in rows:
         verb = row[1] if len(row) > 1 else ""
@@ -568,9 +608,18 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
             # START gives rc=2 with `UNDECLARED\t<id>\t` there and gave
             # rc=0 here.
             agent_id = row[2]
+            agent_type = row[3] if len(row) > 3 else ""
+            if agent_type == WORKFLOW_SUBAGENT_TYPE:
+                # Its own bucket (nexus-silj0): counted, but pulled out
+                # before the credit-consuming loop below, so it can neither
+                # become UNDECLARED nor spend another type's credit.
+                if agent_id not in workflow_seen:
+                    workflow_seen.add(agent_id)
+                    workflow_order.append(agent_id)
+                continue
             if agent_id not in stype:
                 order.append(agent_id)
-                stype[agent_id] = row[3] if len(row) > 3 else ""
+                stype[agent_id] = agent_type
         elif verb == "EXPECT" and len(row) > 2:
             # Dedupe by dispatch_id. The writing hook takes a BOUNDED lock,
             # so a double registration that outlasts the budget can append
@@ -605,6 +654,9 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
             continue
         lines.append(f"UNDECLARED\t{agent_id}\t{agent_type}")
         undeclared += 1
+
+    if workflow_order:
+        lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
 
     lines.append(
         f"SUMMARY\tchecked={checked} recognized={recognized} "
@@ -931,12 +983,13 @@ def _run_nx_bounded(args: list[str], timeout_s: float) -> tuple[str, int]:
     ``_expectations_run_bounded`` uses, so both fallback branches below key
     on the identical value.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
             timeout=timeout_s,
         )
         return proc.stdout or "", proc.returncode
@@ -1141,10 +1194,20 @@ def expectations_census(session_id: str) -> LedgerReport:
     EXPECT rows, a ``ROWS`` tally, a ``CLASSIFIED`` tally and a
     ``BLINDSPOT`` line.
 
+    A START whose type is exactly :data:`WORKFLOW_SUBAGENT_TYPE` (nexus-silj0)
+    gets no ``AGENT`` line and never reaches ``all_start``/``order`` --
+    it cannot become ``checked``, ``undeclared`` or a ``no_terminal`` ghost,
+    and it cannot spend another type's EXPECT credit, because it is pulled
+    out before any of that bookkeeping runs. It is still counted: a single
+    ``WORKFLOW\tchecked=<n>`` line (n > 0 only) reports how many, placed
+    before ``ROWS`` so a Workflow-tool-heavy session does not read as "the
+    walk found nothing" merely because its agents are bucketed elsewhere.
+
     Exit codes are 0 and 1 ONLY -- never 2. That vocabulary belongs to
     ``undeclared`` alone, and conflating them is how a census gets read as
     an audit. 1 means the walk examined nothing while the ledger declared
-    dispatches.
+    dispatches -- workflow STARTs never affect this either, since ``checked``
+    excludes them.
 
     A terminal is classified rather than merely recorded, because BLOCKED
     followed by REPORTED is the success path of the whole guard: the agent
@@ -1182,6 +1245,8 @@ def expectations_census(session_id: str) -> LedgerReport:
     listed: set[str] = set()
     all_start: set[str] = set()
     res_immediate = res_later = 0
+    workflow_order: list[str] = []
+    workflow_seen: set[str] = set()
 
     for row in rows:
         exact = "\t".join(row)
@@ -1207,14 +1272,31 @@ def expectations_census(session_id: str) -> LedgerReport:
             expect_rows[who] = expect_rows.get(who, 0) + 1
             credit[who] = credit.get(who, 0) + 1
         elif verb == "START":
-            if who not in all_start:
+            agent_type = row[3] if len(row) > 3 else ""
+            if agent_type == WORKFLOW_SUBAGENT_TYPE:
+                # Its own bucket (nexus-silj0): still tallied into
+                # start_count (so EXPECTED_NO_START stays correct if this
+                # type is ever hand-declared), but never all_start/order --
+                # that is what keeps it out of `checked`/`undeclared`/
+                # `no_terminal`.
+                start_count[agent_type] = start_count.get(agent_type, 0) + 1
+                if who not in workflow_seen:
+                    workflow_seen.add(who)
+                    workflow_order.append(who)
+            elif who not in all_start:
                 all_start.add(who)
-                stype[who] = row[3] if len(row) > 3 else ""
-                start_count[stype[who]] = start_count.get(stype[who], 0) + 1
+                stype[who] = agent_type
+                start_count[agent_type] = start_count.get(agent_type, 0) + 1
                 if who not in listed:
                     order.append(who)
                     listed.add(who)
         elif verb in ("REPORTED", "BLOCKED", "WOULDBLOCK"):
+            if who in workflow_seen:
+                # A terminal for a workflow agent: not part of the
+                # declaration audit's population, and must not fall into
+                # the "no-start ghost" branch below for lack of a stype
+                # entry.
+                continue
             if who not in listed:
                 order.append(who)
                 listed.add(who)
@@ -1254,6 +1336,9 @@ def expectations_census(session_id: str) -> LedgerReport:
                 undeclared += 1
             lines.append(f"AGENT\t{agent_id}\t{agent_type}\t{terminal}\t{declared}")
         cls[terminal] = cls.get(terminal, 0) + 1
+
+    if workflow_order:
+        lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
 
     expected_no_start = 0
     # FIRST-APPEARANCE order, not alphabetical. bash iterates an awk
@@ -1354,6 +1439,76 @@ def _harness_task_ids(payload: str) -> list[str] | None:
     return identities
 
 
+def _payload_transcript_path(payload: str) -> str | None:
+    """The Stop-hook payload's own ``transcript_path``, or None.
+
+    Confirmed present on Stop/SubagentStop payloads (RDR-184 finding 5,
+    cc-validation scenario 21a: "observed payload fields: session_id,
+    transcript_path, cwd, ..."), and independently on every other hook
+    event this repo has a captured fixture for (e.g.
+    ``tests/hooks/test_post_compact_hook.py``'s PostCompact payload) --
+    it is part of Claude Code's common hook envelope, not event-specific.
+    Never raises: a junk or absent payload returns None, same fail-open
+    posture as :func:`_harness_task_ids`.
+    """
+    try:
+        data = json.loads(payload)
+    except Exception:  # noqa: BLE001 — a junk payload must never block a stop
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("transcript_path")
+    return value if isinstance(value, str) and value else None
+
+
+def _workflow_container_task_ids(transcript_path: str | None) -> set[str]:
+    """The harness ``taskId`` of every Workflow run this SESSION has
+    persisted state for (nexus-silj0 round 4).
+
+    The Workflow tool persists each run's state at
+    ``<session_dir>/workflows/<runId>.json`` beside the session's own
+    ``<session_dir>.jsonl`` transcript -- confirmed by direct read of
+    session 2109cc46-2876-4409-b4f1-ac730d1cc5ed's own
+    ``workflows/wf_baae5a4e-bfd.json``, whose ``taskId`` field
+    (``w2bole9id``) is exactly the identity that session's
+    ``<task-notification>`` used, never the ``runId`` in the filename. So
+    ``<session_dir>`` is ``transcript_path`` with its ``.jsonl`` suffix
+    dropped, a SIBLING of the transcript file, not a subdirectory of it.
+
+    FAIL-SAFE BY DESIGN, never raises: this reader is pure decoration --
+    it exists only to keep a genuine Workflow container task from reading
+    as UNDECLARED_TASK -- so a missing ``transcript_path``, a missing or
+    unreadable session/``workflows/`` directory, or any individual file
+    that fails to open or parse contributes NOTHING rather than raising.
+    "Exclude nothing, keep today's behaviour" is always the safe default
+    here; the caller's job (a real undeclared task must still be caught)
+    is what a raise or an over-eager exclusion would put at risk.
+    """
+    if not transcript_path:
+        return set()
+    path = Path(transcript_path)
+    if path.suffix != ".jsonl":
+        return set()
+    workflows_dir = path.with_suffix("") / "workflows"
+    try:
+        files = sorted(workflows_dir.glob("*.json"))
+    except OSError:
+        return set()
+
+    ids: set[str] = set()
+    for file in files:
+        try:
+            data = json.loads(file.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        task_id = data.get("taskId")
+        if isinstance(task_id, str) and task_id:
+            ids.add(task_id)
+    return ids
+
+
 def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     """Cross-check outstanding STARTs against the harness's own ground truth.
 
@@ -1366,6 +1521,82 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     background-task list is INDEPENDENT ground truth: a task the harness no
     longer tracks while the ledger still calls it outstanding is a silent
     death the ledger alone could never detect.
+
+    A START whose type is exactly :data:`WORKFLOW_SUBAGENT_TYPE` (nexus-silj0)
+    is pulled out of the STRANDED population, counted, and reported on its
+    own ``WORKFLOW\tchecked=<n>`` line instead, matching :func:`expectations_undeclared`
+    and :func:`expectations_census`.
+
+    MEASURED AGAINST THE REAL TRANSCRIPT, not assumed (nexus-silj0
+    follow-up round 2): session ``2109cc46-2876-4409-b4f1-ac730d1cc5ed``'s
+    own persisted Workflow state,
+    ``<project>/2109cc46-.../workflows/wf_baae5a4e-bfd.json``, carries BOTH
+    identities the tool uses for this one run -- ``"runId": "wf_baae5a4e-bfd"``
+    (the ``^wf_[a-z0-9-]{6,}$``-shaped id the Workflow tool's own
+    ``resumeFromRunId`` takes) AND ``"taskId": "w2bole9id"`` (a SEPARATE,
+    opaque id with no ``wf_`` prefix). The transcript's own
+    ``<task-notification>`` for this run, ``.jsonl`` line 604 (enqueue) /
+    606 (delivered), carries ``<task-id>w2bole9id</task-id>`` -- the taskId,
+    never the runId -- with
+    ``<summary>Dynamic workflow "..." completed</summary>``, ONE
+    notification for the whole 11-agent run, not one per agent. So the
+    identity the harness would put in ``background_tasks`` for a live
+    Workflow run is ``w2bole9id``-shaped: an opaque id in the SAME shape as
+    an ordinary background bash task (line 602's ``bhuty03r9``) or an
+    ordinary background Agent-tool dispatch (line 456's
+    ``aca1589669650829e``) -- **not** the ``wf_``-prefixed runId an earlier
+    round of this fix wrongly assumed was the harness-visible identity
+    (corrected here; the runId is purely the tool's own internal
+    resume-token, invisible outside the persisted workflow-state file and
+    the tool's own return value).
+
+    Under the corrected (``w2bole9id``-shaped) identity the finding is
+    unchanged in substance: that id still never equals any workflow-subagent
+    START's own ``agent_id``, so the unmodified check produced STRANDED for
+    every workflow-subagent still mid-flight whenever reconcile ran WHILE
+    the Workflow tool call was still executing -- a perfectly healthy run
+    misread as several silent deaths (exit 4, the module's own worst case),
+    because the check can never tell "this specific agent died" from "the
+    harness only tracks the workflow at container granularity" -- neither
+    the crashed case nor the healthy one ever has its own ``agent_id`` in
+    ``harness_ids``. The check was therefore never a reliable per-agent
+    liveness signal for this class to begin with, so excluding it loses no
+    signal that was trustworthy.
+
+    THE UNDECLARED_TASK RESIDUAL, CLOSED without guessing a ``type`` value
+    (nexus-silj0 round 4): the container task's own identity never equals
+    any START's ``agent_id``, so a discriminator keyed on the LEDGER alone
+    could never recognise it. A `type` field does exist on real
+    ``background_tasks`` entries (nexus-q02nx.6,
+    ``tests/mcp/test_hook_tools.py::test_a_list_valued_field_survives_a_mixed_population``,
+    a real measured ``Stop`` payload: ``{"id": "bm72q9d6v", "type": "shell", ...}``
+    / ``{"id": "a1ea45d8d324ca24a", "type": "subagent", ...}``), and the
+    harness's three DISTINCT notification-summary templates ("Background
+    command ... completed" / "Agent \"...\" finished" / "Dynamic workflow
+    \"...\" completed") make a third value plausible -- but no source
+    available to this repo shows its LITERAL string, so it stays unused: a
+    comparison against a guessed value risks being silently ineffective or,
+    guessed as a catch-all, masking a genuine undeclared background task.
+
+    Instead the discriminator comes from a SECOND, INDEPENDENT source: the
+    Stop-hook payload's own ``transcript_path`` (confirmed present, see
+    :func:`_payload_transcript_path`) names the session's transcript file,
+    and the Workflow tool persists every run's state as
+    ``<session_dir>/workflows/<runId>.json`` beside it -- ``<session_dir>``
+    being ``transcript_path`` with its ``.jsonl`` suffix dropped, a SIBLING
+    directory, not a subdirectory of the transcript. Each such file's own
+    ``taskId`` field (see :func:`_workflow_container_task_ids`) is
+    EXACTLY the identity the harness notification used for that run
+    (measured: session 2109cc46's ``workflows/wf_baae5a4e-bfd.json`` has
+    ``"taskId": "w2bole9id"``, and its transcript's delivered
+    ``<task-notification>`` carries ``<task-id>w2bole9id</task-id>`` --
+    the SAME string). So a harness ``background_tasks`` identity found
+    among these ``taskId`` values is a Workflow container with certainty,
+    not a guess: it is excluded from ``UNDECLARED_TASK`` and counted on the
+    ``WORKFLOW`` line's ``containers=<m>`` field instead. FAIL-SAFE: a
+    missing ``transcript_path``, session dir or ``workflows/`` subdirectory,
+    or any unreadable/unparseable file, excludes nothing -- today's
+    behaviour, never a raise, never an over-eager exclusion.
 
     Exit codes: 0 clean, 2 undeclared tasks, 4 STRANDED. **4 takes priority
     over 2** -- a silent death outranks a bookkeeping gap.
@@ -1383,16 +1614,27 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     harness_ids = {i for i in identities if i}
     harness_order = list(dict.fromkeys(i for i in identities if i))
     unidentified = sum(1 for i in identities if not i)
+    workflow_container_ids = _workflow_container_task_ids(_payload_transcript_path(payload))
 
     order: list[str] = []
     stype: dict[str, str] = {}
     terminated: set[str] = set()
+    workflow_order: list[str] = []
+    workflow_seen: set[str] = set()
     for row in rows:
         verb = row[1] if len(row) > 1 else ""
         who = row[2] if len(row) > 2 else ""
-        if verb == "START" and who not in stype:
-            stype[who] = row[3] if len(row) > 3 else ""
-            order.append(who)
+        if verb == "START" and who not in stype and who not in workflow_seen:
+            agent_type = row[3] if len(row) > 3 else ""
+            if agent_type == WORKFLOW_SUBAGENT_TYPE:
+                # Its own bucket (nexus-silj0): never checked for STRANDED,
+                # since the check can't tell a healthy mid-flight instance
+                # from a dead one for this class -- see the docstring.
+                workflow_seen.add(who)
+                workflow_order.append(who)
+            else:
+                stype[who] = agent_type
+                order.append(who)
         elif verb in ("REPORTED", "BLOCKED", "WOULDBLOCK"):
             terminated.add(who)
 
@@ -1407,10 +1649,29 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
             stranded += 1
 
     undeclared_tasks = 0
+    workflow_containers_excluded = 0
     for ident in harness_order:  # first appearance; see census's note
-        if ident not in stype:
+        if ident in workflow_container_ids:
+            # A Workflow container task, confirmed by session-directory
+            # discovery (nexus-silj0 round 4) -- not a guess, and never
+            # ledger-derived, so this branch runs whether or not the
+            # ledger has any workflow-subagent STARTs of its own.
+            workflow_containers_excluded += 1
+            continue
+        # `ident not in workflow_seen` is not a fix, only a guard against a
+        # false positive when the harness DOES expose per-agent identities
+        # for this class (a shape this module has never measured, but the
+        # check should not fight it if it exists): a workflow-subagent's own
+        # agent_id, if the harness ever reports one, is accounted for here
+        # rather than misread as an undeclared task.
+        if ident not in stype and ident not in workflow_seen:
             lines.append(f"UNDECLARED_TASK\t{ident}")
             undeclared_tasks += 1
+
+    if workflow_order or workflow_containers_excluded:
+        lines.append(
+            f"WORKFLOW\tchecked={len(workflow_order)} containers={workflow_containers_excluded}"
+        )
 
     lines.append(
         f"SUMMARY\toutstanding={outstanding} harness_tasks={len(harness_ids) + unidentified} "

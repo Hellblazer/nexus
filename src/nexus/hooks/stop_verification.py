@@ -43,7 +43,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 
 from nexus._hook_runtime._config import stop_guard_mode
@@ -151,24 +150,26 @@ def _reconcile_warning(payload: dict) -> str:
 
 
 def _git_is_dirty(path: str | None = None) -> bool:
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     if shutil.which("git") is None:
         return False
     args = ["git"] + (["-C", path] if path else []) + ["status", "--porcelain"]
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        proc = run_bounded(args, timeout=30)
     except Exception:  # noqa: BLE001 — an unavailable git is not a warning
         return False
     return bool(proc.stdout.strip())
 
 
 def _beads_in_progress() -> bool:
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     if shutil.which("bd") is None:
         return False
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             ["bd", "list", "--status=in_progress"],
-            capture_output=True,
-            text=True,
             timeout=30,
         )
     except Exception:  # noqa: BLE001 — an unavailable bd is not a warning

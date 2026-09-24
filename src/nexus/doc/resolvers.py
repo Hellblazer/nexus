@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
+from nexus.bounded_subprocess import run_bounded
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -100,9 +100,9 @@ class BeadResolver:
 
     def _fetch(self, key: str) -> dict[str, Any]:
         try:
-            proc = subprocess.run(
+            proc = run_bounded(
                 ["bd", "show", key, "--json"],
-                capture_output=True, text=True, timeout=10,
+                timeout=10,
             )
         except FileNotFoundError as exc:
             raise ResolutionError(

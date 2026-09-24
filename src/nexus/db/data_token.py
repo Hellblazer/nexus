@@ -834,7 +834,9 @@ class DataTokenManager:
         """
         return self._read_lease(base_url, tenant) is not None
 
-    def fresh_lease_token(self, base_url: str, tenant: str) -> str | None:
+    def fresh_lease_token(
+        self, base_url: str, tenant: str, *, near_expiry_threshold: float = _REFRESH_THRESHOLD,
+    ) -> str | None:
         """The raw bearer from a fresh cross-process lease-file entry for
         ``(base_url, tenant)``, or ``None`` — a PEEK, never mints, never
         populates the in-process cache (nexus-9c7t9), and never reads the
@@ -850,8 +852,16 @@ class DataTokenManager:
         re-read the lease file a second time or duplicate this method's
         validation (format version, tenant, digest, near-expiry threshold
         — see :meth:`_read_lease`).
+
+        *near_expiry_threshold* is the fraction of the granted TTL below
+        which a lease counts as absent. The default is the client's own
+        refresh threshold, right for a caller that would otherwise mint. A
+        read-only caller with a static-token fallback passes ``0.0`` to
+        accept any lease not yet expired: the mailbox drain and the routing
+        telemetry did so as plugin scripts, and nexus-t9klx's ports kept
+        that (nexus-t9klx review).
         """
-        cached = self._read_lease(base_url, tenant)
+        cached = self._read_lease(base_url, tenant, near_expiry_threshold=near_expiry_threshold)
         return cached.token if cached is not None else None
 
     def has_live_token(self, base_url: str, tenant: str) -> bool:
@@ -892,7 +902,9 @@ class DataTokenManager:
 
     # ── Cross-process lease file (nexus-9c7t9) ──────────────────────────────
 
-    def _read_lease(self, base_url: str, tenant: str) -> _CachedToken | None:
+    def _read_lease(
+        self, base_url: str, tenant: str, *, near_expiry_threshold: float = _REFRESH_THRESHOLD,
+    ) -> _CachedToken | None:
         """Read the cross-process lease file for ``(base_url, tenant)``, IF
         it is fresh and genuinely belongs to this pair. Returns ``None`` on
         ANY of: absent, corrupt, wrong format version, tenant/digest
@@ -923,7 +935,7 @@ class DataTokenManager:
         if not token:
             return None
         remaining = expires_at_wall - self._wall_clock()
-        if remaining <= ttl_seconds * _REFRESH_THRESHOLD:
+        if remaining <= ttl_seconds * near_expiry_threshold:
             # Expired, or too close to expiry to be worth borrowing (same
             # 20% threshold the in-process cache enforces) — a caller that
             # borrowed this would pay a near-immediate re-mint anyway.

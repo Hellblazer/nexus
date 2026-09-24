@@ -1,0 +1,7 @@
+# nexus-veh77 round 2b re-verify: the readiness signal switched from the T1
+# lease to nexus.mcp.connect_marker. Re-run just the zero-delay sanity check
+# and one previously-missing ladder_s8 rung to confirm the barrier still
+# behaves identically against the new signal.
+# label       server_delay_s submit kind   reps
+thresh        0     0     bash   2
+ladder_s8     8     1000  bash   2

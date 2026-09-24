@@ -163,13 +163,15 @@ class TestFromCatalog:
     ) -> None:
         assert from_catalog(repo, cat=cat) is None
 
-    def test_corpus_knowledge_prefix_inference_oq5(
+    def test_knowledge_collection_never_wins_docs_slot_when_alone(
         self, cat: Catalog, repo: Path,
     ) -> None:
-        """OQ-5 lock: when a repo's docs slot was indexed via
-        ``--corpus knowledge``, the catalog has a ``knowledge__*``
-        collection for the owner; the reader returns that as the
-        canonical docs_collection without any registry lookup.
+        """nexus-l52ms: the OQ-5 "knowledge wins the docs slot" lock is
+        retired. A ``knowledge__*`` collection sharing the repo's owner id
+        (e.g. rdr-close post-mortem archival, which is UNRELATED to the
+        repo's own docs corpus) must never be mistaken for the repo's docs
+        slot. With no ``docs__*`` collection registered, docs_collection
+        stays empty rather than resolving to the knowledge collection.
         """
         _seed_owner_with_collections(
             cat, repo,
@@ -178,15 +180,18 @@ class TestFromCatalog:
         )
         rec = from_catalog(repo, cat=cat)
         assert rec is not None
-        assert rec.docs_collection.startswith("knowledge__")
+        assert rec.docs_collection == ""
 
-    def test_prefers_knowledge_over_docs_when_both_exist(
+    def test_docs_wins_over_knowledge_when_both_exist(
         self, cat: Catalog, repo: Path,
     ) -> None:
-        """Mixed history: the user once indexed without --corpus, then
-        re-indexed with --corpus knowledge. Both collections exist for
-        the owner. The reader returns knowledge as the canonical docs
-        slot (the user's most recent intent)."""
+        """nexus-l52ms: with both a ``docs__*`` and an UNTAGGED
+        ``knowledge__*`` collection registered under the repo's owner
+        (no ``KNOWLEDGE_CORPUS_OPT_IN_MARKER`` display_name -- the
+        coincidental-owner-id shape the incident actually hit), the
+        real docs collection wins -- the knowledge collection is never
+        a candidate for the slot without the recorded opt-in, however
+        it sorts."""
         owner_str = _seed_owner_with_collections(
             cat, repo,
             code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
@@ -204,7 +209,71 @@ class TestFromCatalog:
         )
         rec = from_catalog(repo, cat=cat)
         assert rec is not None
-        assert rec.docs_collection.startswith("knowledge__")
+        assert rec.docs_collection.startswith("docs__")
+
+    def test_tagged_knowledge_opt_in_wins_over_docs(
+        self, cat: Catalog, repo: Path,
+    ) -> None:
+        """nexus-l52ms ship-blocker fixup (GH #451): a knowledge__*
+        collection carrying the durable KNOWLEDGE_CORPUS_OPT_IN_MARKER
+        (what commands/index.py's --corpus knowledge rewrite stamps at
+        registration time) DOES win the docs slot over a real docs__*
+        row -- restoring the original "most recent explicit intent"
+        precedence, but keyed on the recorded opt-in rather than
+        coincidental owner-id sharing."""
+        from nexus.corpus import KNOWLEDGE_CORPUS_OPT_IN_MARKER
+
+        owner_str = _seed_owner_with_collections(
+            cat, repo,
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
+        )
+        owner_id = owner_str.replace(".", "-")
+        cat.register_collection(
+            f"docs__myrepo-1-2__{_DOCS_MODEL}__v1",
+            content_type="docs", owner_id=owner_id,
+            embedding_model=_DOCS_MODEL, model_version="1",
+        )
+        tagged = f"knowledge__myrepo-1-2__{_DOCS_MODEL}__v1"
+        cat.register_collection(
+            tagged,
+            content_type="knowledge", owner_id=owner_id,
+            embedding_model=_DOCS_MODEL, model_version="1",
+            display_name=KNOWLEDGE_CORPUS_OPT_IN_MARKER,
+        )
+        rec = from_catalog(repo, cat=cat)
+        assert rec is not None
+        assert rec.docs_collection == tagged
+
+    def test_superseded_docs_collection_excluded_from_docs_slot(
+        self, cat: Catalog, repo: Path,
+    ) -> None:
+        """nexus-l52ms: a superseded (tombstoned-forward) docs collection
+        must not win the docs slot even when it sorts above the live
+        successor by name -- the same non-live exclusion collectionForTuple
+        already applies engine-side."""
+        owner_str = _seed_owner_with_collections(
+            cat, repo,
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
+        )
+        owner_id = owner_str.replace(".", "-")
+        old_name = f"docs__myrepo-1-2-zzzold__{_DOCS_MODEL}__v1"
+        new_name = f"docs__myrepo-1-2-aaanew__{_DOCS_MODEL}__v1"
+        cat.register_collection(
+            old_name, content_type="docs", owner_id=owner_id,
+            embedding_model=_DOCS_MODEL, model_version="1",
+        )
+        cat.register_collection(
+            new_name, content_type="docs", owner_id=owner_id,
+            embedding_model=_DOCS_MODEL, model_version="1",
+        )
+        # Guard: old_name must sort ABOVE new_name by name DESC, or a naive
+        # NAME DESC pick would land on it for the wrong reason.
+        assert old_name > new_name
+        cat.supersede_collection(old_name, new_name)
+
+        rec = from_catalog(repo, cat=cat)
+        assert rec is not None
+        assert rec.docs_collection == new_name
 
 
 class TestFromRegistry:

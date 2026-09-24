@@ -198,6 +198,7 @@ import sys
 from datetime import datetime, timezone
 
 import check_wire_contract_pairing as _wire_ledger
+import list_data_effects as _data_effects
 import release_choreography as _choreo
 from nexus import deploy_tracker
 from nexus.db.managed_endpoint import (
@@ -971,6 +972,59 @@ def _classify_probe_failure(exc: ManagedServiceError) -> tuple[bool, str]:
     return (deployed is not None, deployed or "")
 
 
+def _previous_engine_tag(tag: str, repo_root: pathlib.Path) -> str | None:
+    """The published ``engine-service-v*`` tag immediately BEFORE *tag* by
+    parsed version, or ``None`` when *tag* is the oldest (or only) one --
+    there is nothing to diff a DATA EFFECT range against in that case."""
+    prefix = "engine-service-"
+    try:
+        out = subprocess.run(
+            ["git", "tag", "-l", "engine-service-v*"],
+            cwd=repo_root, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    parsed_tag = parse_engine_version(tag[len(prefix):]) if tag.startswith(prefix) else None
+    if parsed_tag is None:
+        return None
+    older = [
+        (v, line.strip())
+        for line in out.stdout.splitlines()
+        if line.strip().startswith(prefix)
+        and (v := parse_engine_version(line.strip()[len(prefix):])) is not None
+        and v < parsed_tag
+    ]
+    if not older:
+        return None
+    return max(older, key=lambda pair: pair[0])[1]
+
+
+def check_data_effect_relay(tag: str, repo_root: pathlib.Path | None = None) -> int:
+    """Refuse the paired battery unless *tag*'s DATA EFFECT relay table was
+    recorded (nexus-iu43o) -- the machine-checked half of the engine-
+    release skill's handoff step, wired into the actual gate rather than
+    left as prose only (which is the exact gap this bead exists to close).
+
+    Delegates entirely to :func:`list_data_effects.verify_relay_attestation`
+    for the from_tag..tag range this function derives itself (the previous
+    published engine tag) -- REFUSE (1) on a missing or stale attestation,
+    PASS (0) when it matches, and PASS (0), NOT-APPLICABLE, both when the
+    range has no data-effecting changesets at all AND when *tag* is the
+    oldest published engine tag (no range to compute at all).
+    """
+    root = repo_root or pathlib.Path(__file__).resolve().parent.parent
+    from_tag = _previous_engine_tag(tag, root)
+    if from_tag is None:
+        print(
+            f"NOT-APPLICABLE: {tag} has no earlier published engine-service-v* tag "
+            "to diff a DATA EFFECT range against."
+        )
+        return 0
+    return _data_effects.verify_relay_attestation(from_tag, tag, root)
+
+
 def _run_paired_precondition_battery(
     tag: str,
     newest: object,
@@ -988,6 +1042,7 @@ def _run_paired_precondition_battery(
     Order: the both-halves wire-contract ledger (nexus-1vogq) FIRST -- local,
     no network, actionable without ever looking at ``tag``'s git/gh state --
     THEN :func:`check_paired_preconditions` (nexus-k1c08), THEN
+    :func:`check_data_effect_relay` (nexus-iu43o), THEN
     :func:`check_release_arming` (nexus-h0fo3).
 
     Arming runs LAST on purpose: it looks up an attestation BY the pairing
@@ -1023,6 +1078,9 @@ def _run_paired_precondition_battery(
     )
     if paired_rc != 0:
         return paired_rc
+    relay_rc = check_data_effect_relay(tag)
+    if relay_rc != 0:
+        return relay_rc
     return check_release_arming(tag, max_age_hours=paired_tag_max_age_hours)
 
 

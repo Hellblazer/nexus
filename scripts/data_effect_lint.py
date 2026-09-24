@@ -140,6 +140,72 @@ _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _DOLLAR_QUOTE_RE = re.compile(r"\$(\w*)\$(.*?)\$\1\$", re.DOTALL)
 _STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
 _LEADING_DO_BEGIN_RE = re.compile(r"^\s*(?:DO\s+\$\w*\$\s*|BEGIN\s*)+", re.IGNORECASE)
+_LEADING_WITH_RE = re.compile(r"^\s*WITH\s+(?:RECURSIVE\s+)?", re.IGNORECASE)
+_CTE_NAME_RE = re.compile(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*")
+_CTE_AS_RE = re.compile(
+    r"\s*AS\s*(?:NOT\s+MATERIALIZED\s*|MATERIALIZED\s*)?", re.IGNORECASE
+)
+_CTE_COMMA_RE = re.compile(r"\s*,\s*")
+_LEADING_WS_RE = re.compile(r"\s*")
+
+
+def _skip_balanced_parens(text: str, pos: int) -> int:
+    """Return the index just past the balanced ``(...)`` group opening at
+    *pos* (which must be ``'('``), or *pos* unchanged if it isn't one."""
+    if pos >= len(text) or text[pos] != "(":
+        return pos
+    depth = 0
+    i = pos
+    n = len(text)
+    while i < n:
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n  # unterminated -- consume to end rather than loop forever
+
+
+def _strip_leading_with(text: str) -> str:
+    """Strip a leading ``WITH [RECURSIVE] cte AS (...), cte2 AS (...) ``
+    CTE list so a CTE-led ``DELETE``/``UPDATE`` (nexus-kjecx: ``_DELETE_RE``/
+    ``_UPDATE_RE`` anchor at statement start, so ``WITH x AS (...) DELETE
+    FROM ...`` was a full classifier bypass) is exposed at position 0 for
+    the statement-initial regexes below. Balanced-paren scanning, not a
+    fixed-depth regex, so a CTE subquery with its own parenthesized
+    expressions (a JOIN condition, a nested subquery) is handled correctly.
+    Returns *text* unchanged if it doesn't open with WITH, or if the shape
+    partway through isn't what's expected (never raises).
+    """
+    m = _LEADING_WITH_RE.match(text)
+    if not m:
+        return text
+    pos = m.end()
+    n = len(text)
+    while True:
+        name_m = _CTE_NAME_RE.match(text, pos)
+        if not name_m:
+            return text
+        pos = name_m.end()
+        if pos < n and text[pos] == "(":
+            # optional column list, e.g. `cte(col1, col2) AS (...)`
+            pos = _skip_balanced_parens(text, pos)
+        as_m = _CTE_AS_RE.match(text, pos)
+        if not as_m:
+            return text
+        pos = as_m.end()
+        pos = _LEADING_WS_RE.match(text, pos).end()
+        if pos >= n or text[pos] != "(":
+            return text
+        pos = _skip_balanced_parens(text, pos)
+        comma_m = _CTE_COMMA_RE.match(text, pos)
+        if comma_m:
+            pos = comma_m.end()
+            continue
+        break
+    return text[pos:].lstrip()
 
 
 def _strip_comments(sql: str) -> str:
@@ -226,11 +292,21 @@ _STRUCTURED_DATA_EFFECT_TAGS = (
 # leading-stripped text the classifier already matched against. Used only to
 # populate DataEffectReason.table for the structural DATA EFFECT check
 # (check_data_effect_structure) -- never for classification itself.
-_TABLE_TOKEN = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?"
-_DELETE_TABLE_RE = re.compile(rf"^DELETE\s+FROM\s+({_TABLE_TOKEN})", re.IGNORECASE)
-_UPDATE_TABLE_RE = re.compile(rf"^UPDATE\s+({_TABLE_TOKEN})", re.IGNORECASE)
+#
+# nexus-kjecx: a bare identifier segment OR a double-quoted one (Postgres
+# quoted-identifier syntax, needed for a mixed-case or reserved-word table
+# name), either side of the optional schema-qualifying dot.
+_IDENT_SEGMENT = r'(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)'
+_TABLE_TOKEN = rf"{_IDENT_SEGMENT}(?:\.{_IDENT_SEGMENT})?"
+# `ONLY` (Postgres: exclude descendant partitions/inherited tables) is valid
+# before the table name on DELETE, UPDATE, and TRUNCATE alike -- skipped,
+# never captured, so it never itself reads back as the table name.
+_DELETE_TABLE_RE = re.compile(
+    rf"^DELETE\s+FROM\s+(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+)
+_UPDATE_TABLE_RE = re.compile(rf"^UPDATE\s+(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE)
 _TRUNCATE_TABLE_RE = re.compile(
-    rf"^TRUNCATE\s+(?:TABLE\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+    rf"^TRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE
 )
 _DROP_TABLE_TABLE_RE = re.compile(
     rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_TABLE_TOKEN})", re.IGNORECASE
@@ -256,13 +332,18 @@ _TABLE_EXTRACTORS: dict[str, tuple[re.Pattern[str], str]] = {
 def _extract_table(kind: str, stmt_text: str) -> str:
     """Best-effort table name for *kind* out of *stmt_text*, or ``""`` if
     the shape doesn't match (a statement this module's regexes can't parse,
-    or a kind with no single-table shape, e.g. a structured-tag reason)."""
+    or a kind with no single-table shape, e.g. a structured-tag reason).
+
+    A double-quoted identifier segment (``_IDENT_SEGMENT``) is returned
+    with its quotes stripped -- callers and ``check_data_effect_structure``
+    compare bare table names against DATA EFFECT prose, which never quotes.
+    """
     extractor = _TABLE_EXTRACTORS.get(kind)
     if extractor is None:
         return ""
     pattern, mode = extractor
     m = pattern.match(stmt_text) if mode == "match" else pattern.search(stmt_text)
-    return m.group(1) if m else ""
+    return m.group(1).replace('"', "") if m else ""
 
 
 @dataclass(frozen=True)
@@ -287,72 +368,64 @@ def _classify_sql_text(sql_text: str) -> list[DataEffectReason]:
     """Classify one changeset's concatenated forward ``<sql>`` text.
 
     Returns the list of distinct reasons this changeset is data-effecting
-    (empty if none — a purely additive changeset).
+    (empty if none — a purely additive changeset). Deduplicated by
+    ``(kind, table)``, NOT by kind alone (nexus-kjecx): two statements of
+    the same kind against DIFFERENT tables (two DELETEs in one changeset,
+    say) must both be reported, or the second table goes unchecked by
+    ``check_data_effect_structure``. Two statements of the same kind
+    against the SAME (or an equally unresolved, empty-string) table still
+    collapse to one reason — nothing is gained by repeating it.
     """
     reasons: list[DataEffectReason] = []
-    seen_kinds: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+
+    def _add(kind: str, detail: str, orig_stmt: str, table: str) -> None:
+        key = (kind, table)
+        if key in seen:
+            return
+        seen.add(key)
+        reasons.append(DataEffectReason(kind, detail, orig_stmt, table))
 
     for orig, blanked in _split_statements(sql_text):
-        stmt_for_leading = _LEADING_DO_BEGIN_RE.sub("", blanked)
-        orig_for_leading = _LEADING_DO_BEGIN_RE.sub("", orig)
+        stmt_for_leading = _strip_leading_with(_LEADING_DO_BEGIN_RE.sub("", blanked))
+        orig_for_leading = _strip_leading_with(_LEADING_DO_BEGIN_RE.sub("", orig))
 
-        if _DELETE_RE.match(stmt_for_leading) and "delete" not in seen_kinds:
-            seen_kinds.add("delete")
-            reasons.append(
-                DataEffectReason(
-                    "delete", "DELETE FROM statement", orig,
-                    _extract_table("delete", orig_for_leading),
-                )
+        if _DELETE_RE.match(stmt_for_leading):
+            _add(
+                "delete", "DELETE FROM statement", orig,
+                _extract_table("delete", orig_for_leading),
             )
 
-        if _UPDATE_RE.match(stmt_for_leading) and "update" not in seen_kinds:
-            seen_kinds.add("update")
-            reasons.append(
-                DataEffectReason(
-                    "update", "UPDATE ... SET statement", orig,
-                    _extract_table("update", orig_for_leading),
-                )
+        if _UPDATE_RE.match(stmt_for_leading):
+            _add(
+                "update", "UPDATE ... SET statement", orig,
+                _extract_table("update", orig_for_leading),
             )
 
-        if _TRUNCATE_RE.match(stmt_for_leading) and "truncate" not in seen_kinds:
-            seen_kinds.add("truncate")
-            reasons.append(
-                DataEffectReason(
-                    "truncate", "TRUNCATE statement", orig,
-                    _extract_table("truncate", orig_for_leading),
-                )
+        if _TRUNCATE_RE.match(stmt_for_leading):
+            _add(
+                "truncate", "TRUNCATE statement", orig,
+                _extract_table("truncate", orig_for_leading),
             )
 
-        if _DROP_TABLE_RE.search(stmt_for_leading) and "drop_table" not in seen_kinds:
-            seen_kinds.add("drop_table")
-            reasons.append(
-                DataEffectReason(
-                    "drop_table", "DROP TABLE statement", orig,
-                    _extract_table("drop_table", orig_for_leading),
-                )
+        if _DROP_TABLE_RE.search(stmt_for_leading):
+            _add(
+                "drop_table", "DROP TABLE statement", orig,
+                _extract_table("drop_table", orig_for_leading),
             )
 
-        if _DROP_COLUMN_RE.search(stmt_for_leading) and "drop_column" not in seen_kinds:
-            seen_kinds.add("drop_column")
-            reasons.append(
-                DataEffectReason(
-                    "drop_column", "DROP COLUMN clause", orig,
-                    _extract_table("drop_column", orig_for_leading),
-                )
+        if _DROP_COLUMN_RE.search(stmt_for_leading):
+            _add(
+                "drop_column", "DROP COLUMN clause", orig,
+                _extract_table("drop_column", orig_for_leading),
             )
 
-        if (
-            _ALTER_TYPE_USING_RE.search(stmt_for_leading)
-            and "alter_type_using" not in seen_kinds
-        ):
-            seen_kinds.add("alter_type_using")
-            reasons.append(
-                DataEffectReason(
-                    "alter_type_using",
-                    "ALTER COLUMN ... TYPE ... USING clause",
-                    orig,
-                    _extract_table("alter_type_using", orig_for_leading),
-                )
+        if _ALTER_TYPE_USING_RE.search(stmt_for_leading):
+            _add(
+                "alter_type_using",
+                "ALTER COLUMN ... TYPE ... USING clause",
+                orig,
+                _extract_table("alter_type_using", orig_for_leading),
             )
 
     return reasons

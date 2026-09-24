@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 # NEITHER ``structlog`` NOR ``nexus.session`` IS IMPORTED AT MODULE SCOPE,
@@ -46,16 +45,6 @@ def _logger():
     return structlog.get_logger()
 
 # -- Helpers ------------------------------------------------------------------
-
-def _default_db_path() -> Path:
-    # RDR-128 P3: no longer opens T2 directly (session_end_flush routes its
-    # writes through the daemon via mcp_infra.t2_index_write). Retained as
-    # the config-dir-isolation canary asserted by
-    # test_config_dir_isolation.TestT2IsolatedUnderOverride.
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-
-    return nexus_config_dir() / "memory.db"
-
 
 def _open_t1():
     """Open the process's T1 store for the SessionEnd flush, never honoring
@@ -147,10 +136,12 @@ def _t1_clear_if_owned(t1) -> None:
 
 def _infer_repo() -> str:
     """Detect current repo name from git, or fall back to cwd name."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True, timeout=10,
+            check=True, timeout=10,
         )
         return Path(result.stdout.strip()).name
     except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
@@ -256,7 +247,7 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
 
     RDR-208 Phase 2 Step 3: on ``source == "clear"`` this also records the
     session a ``/clear`` just stranded, so
-    ``conexus/hooks/scripts/mailbox_drain.py`` can empty that mailbox once
+    :mod:`nexus.hooks.mailbox_drain` can empty that mailbox once
     (:func:`nexus.session_marker.record_clear_and_write_session_marker`). Never
     on an INHERITED session id (``NX_SESSION_ID`` set): that names a nested
     subprocess reusing its parent's session, not a real ``/clear`` boundary

@@ -78,7 +78,8 @@ def _plant_legacy_t2_unit(tmp_path: Path) -> Path:
 
 def _install_service(tmp_path: Path, *, force: bool = False) -> installer.InstallResult:
     """``install_autostart(tier="service")`` with activation mocked successful."""
-    with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+    with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+            patch.object(installer, "run_bounded", new=mock_run):
         mock_run.return_value.returncode = 0
         mock_run.return_value.stderr = ""
         mock_run.return_value.stdout = ""
@@ -148,7 +149,8 @@ class TestInstallIdempotent:
 
         # Second call: content matches the freshly rendered template, so
         # no write and no activation shell-out happens.
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run2:
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run2, \
+                patch.object(installer, "run_bounded", new=mock_run2):
             mock_run2.return_value.returncode = 0
             mock_run2.return_value.stdout = ""
             mock_run2.return_value.stderr = ""
@@ -215,7 +217,8 @@ class TestActivationFailure:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
 
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+                patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 1
             mock_run.return_value.stderr = "boom"
             mock_run.return_value.stdout = ""
@@ -232,7 +235,8 @@ class TestActivationFailure:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
 
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+                patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 1
             mock_run.return_value.stderr = "boom"
             mock_run.return_value.stdout = ""
@@ -257,7 +261,8 @@ class TestUninstall:
         _stub_paths(tmp_path, monkeypatch)
         dest = _plant_legacy_t2_unit(tmp_path)
 
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+                patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
             mock_run.return_value.stdout = ""
@@ -288,7 +293,8 @@ class TestUninstall:
         _stub_paths(tmp_path, monkeypatch)
         dest = _plant_legacy_t2_unit(tmp_path)
 
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+                patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 1
             mock_run.return_value.stderr = "bootout failed"
             mock_run.return_value.stdout = ""
@@ -310,7 +316,8 @@ class TestLinuxUninstall:
         _stub_paths(tmp_path, monkeypatch)
         _plant_legacy_t2_unit(tmp_path)
 
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+                patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
             mock_run.return_value.stdout = ""

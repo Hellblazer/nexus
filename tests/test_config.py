@@ -8,12 +8,14 @@ import yaml
 from nexus import config as cfgmod
 from nexus.config import (
     _DEFAULTS,
+    _DETECT_TABLE,
     detect_test_command,
     get_telemetry_config,
     get_verification_config,
     load_config,
     set_config_value,
 )
+from nexus.hooks.verification_config import DETECT_TABLE as _HOOK_DETECT_TABLE
 
 
 @pytest.fixture
@@ -246,14 +248,13 @@ def test_detect_test_command_priority(tmp_path: Path) -> None:
     assert detect_test_command(repo_root=tmp_path) == "uv run pytest"
 
 
-def test_detect_table_matches_reader_script() -> None:
-    import importlib.util
-    from nexus.config import _DETECT_TABLE
-    script = Path(__file__).parents[1] / "conexus" / "hooks" / "scripts" / "read_verification_config.py"
-    spec = importlib.util.spec_from_file_location("reader", script)
-    reader = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(reader)
-    assert _DETECT_TABLE == reader.DETECT_TABLE
+def test_detect_table_matches_hook_reader() -> None:
+    """The hook's verification reader carries its own copy of the table.
+
+    It was the plugin script read_verification_config.py until that was
+    deleted (nexus-z9cz2); the copy now lives in the wheel port.
+    """
+    assert tuple(_DETECT_TABLE) == _HOOK_DETECT_TABLE
 
 
 # ── RDR-087 Phase 2.3: telemetry config toggle ───────────────────────────────
@@ -371,6 +372,40 @@ def test_set_config_value_dict_intermediates_merge_not_replace(home: Path) -> No
     data = yaml.safe_load(cfg.read_text())
     assert data["pdf"]["extractor"] == "mineru"
     assert data["pdf"]["timeout"] == 30  # sibling of the leaf survives
+
+
+def test_set_config_value_survives_concurrent_cross_process_writers(home: Path) -> None:
+    """nexus-cd1k0.16 finding (8): the read-modify-write behind
+    set_config_value / set_credential / unset_credential used to be
+    locked only WITHIN one process (`_config_lock`, a threading.Lock) --
+    the module's own comment claimed the atomic `os.replace()` covered
+    cross-process safety, but that only guards a READER against a torn
+    file, not two WRITERS racing the read-modify-write itself. Real OS
+    processes, real race: N subprocesses each setting a DIFFERENT dotted
+    key concurrently must all survive -- without the fix, each reads the
+    pre-race file, mutates independently, and the LAST os.replace() wins
+    whole, silently discarding every other process's key."""
+    import subprocess
+    import sys
+
+    n = 8
+    script = (
+        "import sys\n"
+        "from nexus.config import set_config_value\n"
+        "set_config_value(sys.argv[1], sys.argv[2])\n"
+    )
+    procs = [
+        subprocess.Popen([sys.executable, "-c", script, f"probe.key{i}", f"value{i}"])
+        for i in range(n)
+    ]
+    for p in procs:
+        assert p.wait(timeout=60) == 0
+
+    cfg = home / ".config" / "nexus" / "config.yml"
+    data = yaml.safe_load(cfg.read_text())
+    probe = data.get("probe") or {}
+    missing = [i for i in range(n) if probe.get(f"key{i}") != f"value{i}"]
+    assert not missing, f"keys {missing} lost to a concurrent writer -- probe={probe}"
 
 
 # ── nexus-m20mf: get_credential's config.yml parse is cached ────────────────

@@ -43,7 +43,21 @@ except Exception:
     payload = None
 if not isinstance(payload, dict):
     payload = None
-result = never_fail(lambda: subagent_start.run(payload), "subagent_start")
+# nexus-zptvf: GUARD STDOUT while the verb runs. This verb spawns
+# through bounded_subprocess.run_bounded, which emits a structlog
+# warning on TIMEOUT -- and structlog's unconfigured default
+# PrintLoggerFactory writes to STDOUT, the channel this driver
+# json.loads() below. Production is safe by a DIFFERENT route than
+# the nx-hook verbs: hooks.json wires this one as an mcp_tool against
+# nx-mcp, whose own configure_logging("mcp") runs before serving, so
+# there is no entry.main fd guard here to inherit. A standing
+# reviewer reproduced the corruption in this exact driver.
+real_stdout = sys.stdout
+sys.stdout = sys.stderr
+try:
+    result = never_fail(lambda: subagent_start.run(payload), "subagent_start")
+finally:
+    sys.stdout = real_stdout
 if result.stdout is not None:
     sys.stdout.write(result.stdout + "\\n")
 sys.exit(result.exit_code)

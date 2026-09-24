@@ -781,6 +781,142 @@ class TestUpdateCommand:
         assert "imaginary-scheme" in result.output
         assert "Traceback" not in result.output
 
+    def test_update_alias_of_resolves_to_canonical(
+        self, initialized_catalog, catalog_env,
+    ):
+        """``nx catalog update <tumbler> --alias-of <canonical>`` is the
+        recovery path for a DUPLICATE entry (nexus-bt8w8) — the answer to
+        the Credo-paper case: a second registration of the same document,
+        left over from a lost source_uri.
+
+        Assert the alias RESOLVES, not merely that it was stored: showing
+        the duplicate must now return the canonical entry, because the
+        catalog walks the alias chain on resolve. A stored-but-unfollowed
+        alias would pass a field-equality check while doing nothing (the
+        same lesson pinned for the MCP tool's
+        ``test_update_sets_alias_of``).
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Canonical", "--owner", "1.1",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Duplicate", "--owner", "1.1",
+        ])
+
+        result = runner.invoke(main, [
+            "catalog", "update", "1.1.2", "--alias-of", "1.1.1",
+        ])
+        assert result.exit_code == 0, result.output
+
+        show = runner.invoke(main, ["catalog", "show", "1.1.2", "--json"])
+        assert show.exit_code == 0, show.output
+        data = json.loads(show.stdout)
+        assert data["tumbler"] == "1.1.1", data
+        assert data["title"] == "Canonical", data
+
+    def test_update_alias_of_rejects_malformed_target(
+        self, initialized_catalog, catalog_env,
+    ):
+        """``--alias-of`` is parsed as a Tumbler, so a non-tumbler is
+        refused here rather than discovered later on a resolve — the same
+        clean-error convention as ``--source-uri`` (nexus-fb6x)."""
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Canonical", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, [
+            "catalog", "update", "1.1.1", "--alias-of", "not-a-tumbler",
+        ])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+
+
+class TestMergeCommand:
+    """nexus-z4rpi: ``nx catalog merge`` goes through the engine's single
+    transactional /merge endpoint instead of the --alias-of three-call
+    recipe TestUpdateCommand above exercises.
+    """
+
+    def test_merge_moves_source_uri_and_resolves_to_canonical(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Duplicate", "--owner", "1.1",
+            "--source-uri", "chroma://knowledge__delos//papers/dup.pdf",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Canonical", "--owner", "1.1",
+        ])
+
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+        assert result.exit_code == 0, result.output
+        assert "source_uri_moved=True" in result.output
+
+        # Assert the alias RESOLVES: show on the duplicate returns the
+        # canonical entry, not merely a stored-but-unfollowed alias_of.
+        show_dup = runner.invoke(main, ["catalog", "show", "1.1.1", "--json"])
+        assert show_dup.exit_code == 0, show_dup.output
+        dup_data = json.loads(show_dup.stdout)
+        assert dup_data["tumbler"] == "1.1.2"
+        assert dup_data["title"] == "Canonical"
+
+        show_canon = runner.invoke(main, ["catalog", "show", "1.1.2", "--json"])
+        canon_data = json.loads(show_canon.stdout)
+        assert canon_data["source_uri"] == "chroma://knowledge__delos//papers/dup.pdf"
+
+    def test_merge_refuses_self_merge_cleanly(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Solo", "--owner", "1.1"])
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.1"])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "itself" in result.output.lower()
+
+    def test_merge_refuses_already_aliased_elsewhere_cleanly(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Dup", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "First", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "Second", "--owner", "1.1"])
+        merged = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+        assert merged.exit_code == 0, merged.output
+
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.3"])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "already aliased" in result.output.lower()
+
+    def test_merge_remaps_a_link_and_reports_the_count(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nexus-z4rpi follow-up: the merge must not strand the link graph.
+        A link FROM the duplicate must resolve to the canonical afterward,
+        and the CLI output must name the count."""
+        runner = CliRunner()
+        runner.invoke(main, ["catalog", "register", "--title", "Duplicate", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "Canonical", "--owner", "1.1"])
+        runner.invoke(main, ["catalog", "register", "--title", "Other", "--owner", "1.1"])
+        linked = runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.3", "--type", "cites"])
+        assert linked.exit_code == 0, linked.output
+
+        result = runner.invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+        assert result.exit_code == 0, result.output
+        assert "links_remapped=1" in result.output, result.output
+        assert "links_collapsed=0" in result.output, result.output
+        assert "links_dropped=0" in result.output, result.output
+
+        links = runner.invoke(main, ["catalog", "links", "1.1.2", "--json"])
+        assert links.exit_code == 0, links.output
+        graph = json.loads(links.stdout)
+        assert any(
+            e["from"] == "1.1.2" and e["to"] == "1.1.3" for e in graph["edges"]
+        ), graph
+
 
 class TestDeleteCommand:
     def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
@@ -2179,9 +2315,12 @@ class TestVerifyCommand:
             Tumbler.parse("1.1"), "Alias Doc",
             content_type="knowledge", physical_collection=coll,
         )
-        # nexus-iltyk: set_alias mutates but is NOT on CATALOG_WRITE_OPS, so
+        # nexus-iltyk: alias_of mutates but is NOT on CATALOG_WRITE_OPS, so
         # the typed writer will not forward it. No single object does both.
-        unroutable_write_target().set_alias(alias_tumbler, Tumbler.parse("1.1.1"))
+        # nexus-bt8w8: set_alias was deleted (dead through the writer
+        # factory, byte-identical to update(t, alias_of=...) which IS
+        # whitelisted) — call update() directly on the raw client instead.
+        unroutable_write_target().update(alias_tumbler, alias_of=str(Tumbler.parse("1.1.1")))
 
         # T3 reports nothing present — the canonical doc is damaged.
         self._patch_t3(monkeypatch, {coll: []})

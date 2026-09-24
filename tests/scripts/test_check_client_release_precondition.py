@@ -22,6 +22,42 @@ import release_choreography as _choreo
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _data_effect_relay_passes_by_default():
+    """nexus-iu43o: check() now calls check_engine_release_floor.
+    check_data_effect_relay(engine_tag) FIRST, which performs real git-tag
+    + filesystem I/O against the actual checkout. The pre-existing tests
+    in this module are not testing that; default it to a clean pass here,
+    overridden per-test (an inner patch wins) where the relay check itself
+    is under test."""
+    with patch.object(gate._engine_floor, "check_data_effect_relay", return_value=0):
+        yield
+
+
+class TestDataEffectRelayGate:
+    def test_check_refuses_when_the_relay_check_refuses(self, capsys):
+        with patch.object(gate._engine_floor, "check_data_effect_relay", return_value=1):
+            rc = gate.check("engine-service-v0.0.0-nonexistent")
+        assert rc == 1
+
+    def test_check_never_reaches_preconditions_when_relay_refuses(self, monkeypatch, capsys):
+        """The relay check runs FIRST, so a refusal there is never masked
+        by an empty (vacuous-pass) hand table -- latest_release_tag would
+        only be reached past a registered-tag precondition check, so
+        making it raise proves that code path is never entered."""
+        def _must_not_be_called():
+            raise AssertionError("latest_release_tag should not be reached")
+
+        monkeypatch.setattr(gate, "latest_release_tag", _must_not_be_called)
+        monkeypatch.setitem(
+            gate.ENGINE_CLIENT_PRECONDITIONS, "engine-service-vTEST-relay-refuses",
+            {"deadbeef": "some precondition"},
+        )
+        with patch.object(gate._engine_floor, "check_data_effect_relay", return_value=1):
+            rc = gate.check("engine-service-vTEST-relay-refuses")
+        assert rc == 1
+
+
 class TestLogic:
     def test_no_preconditions_registered_is_ok(self, capsys):
         assert gate.check("engine-service-v0.0.0-nonexistent") == 0

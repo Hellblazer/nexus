@@ -653,11 +653,28 @@ public final class TaxonomyHandler implements HttpHandler {
 
     // ── Collection ops ─────────────────────────────────────────────────────────
 
+    /**
+     * POST /v1/taxonomy/purge_collection — Body {collection, scope?}.
+     *
+     * <p>{@code scope} (nexus-0v0nj) is optional and defaults to {@code
+     * "full"} — the pre-existing, cross-collection-reaching behavior, so
+     * every caller that omits it (every caller before this bead) is
+     * unaffected. Pass {@code "taxonomy_only"} to purge exactly what a
+     * rebuild of this collection would replace, leaving intact any
+     * projection this collection's documents made onto another
+     * collection's topics. An unrecognized value 400s via the shared
+     * {@code IllegalArgumentException} catch arm — see {@link
+     * dev.nexus.service.db.TaxonomyRepository#purgeCollection(String, String, String)}.
+     */
     private void handlePurgeCollection(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String collection = requireString(body, "collection");
-        HttpUtil.send(ex, 200, json(repo.purgeCollection(tenant, collection)));
+        Object rawScope = body.get("scope");
+        String scope = (rawScope instanceof String s && !s.isBlank())
+            ? s
+            : dev.nexus.service.db.TaxonomyRepository.PURGE_SCOPE_FULL;
+        HttpUtil.send(ex, 200, json(repo.purgeCollection(tenant, collection, scope)));
     }
 
     private void handleRenameCollection(HttpExchange ex, String tenant, String method) throws IOException {

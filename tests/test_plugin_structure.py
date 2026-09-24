@@ -160,123 +160,24 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
     return results
 
 
-_PLUGIN_ROOT_REF = re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT\}?/([^\s'\"]+)")
-
-_MIN_HOOK_SCRIPT_REFS = 5
-"""Non-vacuity floor for :func:`_hook_script_refs`.
-
-RDR-215 nexus-q02nx.21 rewrote 21 of the 25 hooks.json entries into
-exec form: the script path moved out of the ``command`` string and into
-``args``, and ``$CLAUDE_PLUGIN_ROOT`` became ``${CLAUDE_PLUGIN_ROOT}``.
-The extractor read only ``command`` and only the brace-less form, so its
-domain silently emptied out and ``test_hook_script_exists`` went green
-over nothing -- while two entries pointed at
-``hooks/scripts/<x>.py`` for scripts that live in
-``hooks/scripts/routing/``. One of the two is the routing framework's
-only fail_closed rule, so a missing-path exit is not a deny and the
-close gate failed open. This floor makes the emptying itself a failure.
-
-Five is the measured count after that rewrite, not a margin: the other
-20 entries are ``mcp_tool`` or exec-form ``nx-hook`` and name no
-plugin-root path at all. Raise it when an entry is added, and read a
-drop as the extractor going blind before reading it as a deletion.
-"""
-
-
-def _hook_script_refs() -> list[tuple[str, str]]:
-    """Every plugin-root-relative path hooks.json names, from either form.
-
-    Covers the legacy ``command``-string declaration and the exec form
-    that carries the script in ``args``, and both ``$CLAUDE_PLUGIN_ROOT``
-    and ``${CLAUDE_PLUGIN_ROOT}``.
-    """
-    data = json.loads(HOOKS_PATH.read_text())
-    events = data.get("hooks", data)
-    results = []
-    for event, entries in events.items():
-        for entry in entries:
-            sub_hooks = entry.get("hooks", [entry]) if isinstance(entry, dict) else []
-            for sub in sub_hooks:
-                if not isinstance(sub, dict):
-                    continue
-                fields = [sub.get("command", "")]
-                fields.extend(a for a in sub.get("args", []) if isinstance(a, str))
-                for field in fields:
-                    for m in _PLUGIN_ROOT_REF.finditer(field):
-                        results.append((event, m.group(1)))
-    return results
-
-
-_PYTHON_HOOK_SCRIPT_MIN_COUNT = 5
-"""Non-vacuity floor for :func:`_python_hook_script_paths`.
-
-Measured 2026-09-19 (RDR-215 nexus-q02nx.21/.22, after
-``_run_python_hook.sh`` was deleted and interpreter resolution moved into
-each script's own module-scope ``_interpreter.reexec_if_needed()`` call):
-hooks.json declares exactly 5 ``python3`` exec-form entries. Not a margin,
-same convention as ``_MIN_HOOK_SCRIPT_REFS`` above -- raise it when a
-sixth plugin-resident Python hook is added, and read a drop as the
-extractor losing its grip on the declaration form rather than as scripts
-genuinely having been removed without also lowering this floor.
-"""
-
 _MIN_HOOKS_JSON_ENTRIES_EXAMINED = 20
 """Non-vacuity floor for the sub-entry walk in
 :func:`TestHooks.test_hooks_json_names_no_deleted_runner_helper`.
 
 Measured 2026-09-19: hooks.json carries 25 ``hooks`` sub-entries across
-every event. Set just under the measured count (not pinned exactly, unlike
-``_PYTHON_HOOK_SCRIPT_MIN_COUNT`` above): this walk counts EVERY sub-entry,
-not only the python3 ones, so routine growth in the non-Python entries
-should not force a bump here on every unrelated hooks.json edit -- only a
-walk that finds implausibly little should fail.
+every event. Set just under the measured count, not pinned exactly, so
+routine growth does not force a bump on every unrelated hooks.json edit --
+only a walk that finds implausibly little should fail.
+
+nexus-t9klx deleted this file's two other hook floors,
+``_MIN_HOOK_SCRIPT_REFS`` and ``_PYTHON_HOOK_SCRIPT_MIN_COUNT``, with the
+tests parametrized over them: hooks.json names no plugin-resident script
+any more, so their domains are empty by construction, and a floor walked
+down to zero is satisfied by an extractor that sees nothing. That a
+``python3`` entry cannot come back is ``tests/test_hooks_json_shape_lint.py``'s
+job, which rejects the command outright.
 """
 
-_NO_PYTHON_FLOOR_NEEDED = frozenset({"hooks/scripts/behaviour_census.py"})
-"""Plugin-root-relative paths exempt from the Python-3.12-floor half of
-:func:`TestHooks.test_python_hook_has_future_annotations_and_version_guard`.
-
-``behaviour_census.py`` is the documented exception: pure stdlib (no
-``nexus`` import, no 3.12-only syntax), never calls
-``_interpreter.reexec_if_needed()``, and fails silently by design (its own
-docstring: "Failure mode is always 'print nothing and move on'"). This
-matches ``_interpreter.py``'s own accounting -- "Four of the five scripts
-refuse to run under Python 3.12-... only one spells the guard itself, the
-rest inherit it through `_lib` / `_endpoint_resolve`" -- which is four,
-not five; this is the fifth. Not a general escape hatch: a script added
-here without the same stdlib-only, reexec-free shape defeats the check it
-is exempted from.
-"""
-
-
-def _python_hook_script_paths() -> list[tuple[str, Path]]:
-    """Every plugin-resident script hooks.json invokes as a ``python3``
-    exec-form entry (``{"command": "python3", "args": [<script>, ...]}``),
-    as ``(plugin-root-relative label, absolute path)`` pairs.
-
-    Replaces a hand-written list (pre-RDR-215 nexus-q02nx.22) that had
-    drifted in both directions at once: it named scripts hooks.json no
-    longer declares at all (superseded by ``nx-hook`` command-tier verbs)
-    and missed scripts hooks.json gained since, because nothing kept the
-    two lists in sync.
-    """
-    data = json.loads(HOOKS_PATH.read_text())
-    events = data.get("hooks", data)
-    results: list[tuple[str, Path]] = []
-    for entries in events.values():
-        for entry in entries:
-            for sub in entry.get("hooks", []):
-                if sub.get("type") != "command" or sub.get("command") != "python3":
-                    continue
-                args = sub.get("args") or []
-                if not args or not isinstance(args[0], str):
-                    continue
-                m = _PLUGIN_ROOT_REF.match(args[0])
-                if not m:
-                    continue
-                rel = m.group(1)
-                results.append((rel, PLUGIN_DIR / rel))
-    return results
 
 
 class TestRegistryIntegrity:
@@ -676,100 +577,10 @@ class TestHooks:
             assert has_matcher or has_filter, \
                 f"PostToolUse hook without matcher: {entry.get('command', '')[:80]}"
 
-    @pytest.mark.parametrize("event,rel_path", [
-        pytest.param(ev, rp, id=f"{ev}:{rp}") for ev, rp in _hook_script_refs()
-    ])
-    def test_hook_script_exists(self, event: str, rel_path: str) -> None:
-        assert (PLUGIN_DIR / rel_path).exists(), f"hooks.json [{event}] references missing: {rel_path}"
-
-    def test_hook_script_refs_is_not_vacuous(self) -> None:
-        """``test_hook_script_exists`` must have something to check.
-
-        It is parametrized over the extractor's output, so an extractor
-        that stops recognising a declaration form collapses to zero
-        parameters and reports green. See ``_MIN_HOOK_SCRIPT_REFS``.
-        """
-        refs = _hook_script_refs()
-        assert len(refs) >= _MIN_HOOK_SCRIPT_REFS, (
-            f"only {len(refs)} plugin-root refs found in hooks.json; expected "
-            f">= {_MIN_HOOK_SCRIPT_REFS}. Either entries were removed, or the "
-            f"extractor no longer recognises how they are declared."
-        )
-
-    @pytest.mark.parametrize("rel_path,script_path", [
-        pytest.param(rp, sp, id=rp) for rp, sp in _python_hook_script_paths()
-    ])
-    def test_python_hook_has_future_annotations_and_version_guard(
-        self, rel_path: str, script_path: Path
-    ) -> None:
-        """Every plugin-resident Python hook script must (a) defer
-        annotation evaluation via ``from __future__ import annotations`` so
-        PEP 604 unions parse on Python <3.10, and (b) fail fast under
-        Python <3.12 (the floor conexus targets) -- except the one script
-        that genuinely has no floor to enforce (see
-        ``_NO_PYTHON_FLOOR_NEEDED``).
-
-        Without (a), `int | None` annotations crash the parser on Python
-        3.9 (still default on macOS Sonoma without homebrew Python).
-        Without (b), the script may run partially under an unsupported
-        interpreter and produce confusing failures further down.
-
-        (b) is satisfied two ways post-RDR-215 nexus-q02nx.21/.22, which
-        deleted ``_run_python_hook.sh`` and put interpreter resolution
-        into ``_interpreter.reexec_if_needed()``, called at module scope:
-        either the script spells the guard itself
-        (``sys.version_info < (3, 12)`` + the ``Python 3.12+`` message,
-        as ``version_lockstep_hook.py`` does), or it calls
-        ``_interpreter.reexec_if_needed()`` and imports a sibling
-        (``_lib`` or ``_endpoint_resolve``) that carries the guard at
-        import time. Checked over the WHOLE file, not a fixed line
-        window: the RDR-215 docstring rewrite pushed
-        ``from __future__ import annotations`` past line 30 in 4 of the 5
-        scripts, so a 30-line window no longer reflects reality.
-        """
-        assert script_path.exists(), f"missing hook script: {script_path}"
-        text = script_path.read_text()
-        assert "from __future__ import annotations" in text, (
-            f"{rel_path}: missing 'from __future__ import annotations'"
-        )
-        if rel_path in _NO_PYTHON_FLOOR_NEEDED:
-            return
-        has_inline_guard = (
-            "sys.version_info < (3, 12)" in text and "Python 3.12+" in text
-        )
-        inherits_guard = (
-            "_interpreter.reexec_if_needed()" in text
-            and re.search(r"(?m)^import (?:_lib|_endpoint_resolve)\b", text) is not None
-        )
-        assert has_inline_guard or inherits_guard, (
-            f"{rel_path}: no Python 3.12 floor found -- neither an inline "
-            "'sys.version_info < (3, 12)' + 'Python 3.12+' guard, nor a "
-            "'_interpreter.reexec_if_needed()' call paired with an "
-            "'import _lib' / 'import _endpoint_resolve' that carries it"
-        )
-
-    def test_python_hook_script_paths_is_not_vacuous(self) -> None:
-        """``test_python_hook_has_future_annotations_and_version_guard`` must
-        have something to check. It is parametrized over
-        :func:`_python_hook_script_paths`'s output, so an extractor that
-        stops recognising the exec-form declaration collapses to zero
-        parameters and reports green. See ``_PYTHON_HOOK_SCRIPT_MIN_COUNT``.
-        """
-        paths = _python_hook_script_paths()
-        assert len(paths) >= _PYTHON_HOOK_SCRIPT_MIN_COUNT, (
-            f"only {len(paths)} python3 exec-form hook entries found in "
-            f"hooks.json; expected >= {_PYTHON_HOOK_SCRIPT_MIN_COUNT}. "
-            "Either scripts were removed, or the extractor no longer "
-            "recognises how they are declared."
-        )
-
     def test_hooks_json_names_no_deleted_runner_helper(self) -> None:
-        """RDR-215 nexus-q02nx.21 deleted ``_run_python_hook.sh``:
-        interpreter resolution moved into ``_interpreter.reexec_if_needed()``,
-        called at module scope by each plugin-resident Python hook script
-        itself. hooks.json declares those hooks in EXEC form
-        (``{"command": "python3", "args": [<script>]}``), never routed
-        through a bash launcher.
+        """RDR-215 nexus-q02nx.21 deleted ``_run_python_hook.sh``, and
+        nexus-t9klx then ported every hook it launched into an ``nx-hook``
+        verb. Nothing in hooks.json may route through the launcher.
 
         Inverts the retired ``test_python_hooks_use_runner_helper``, which
         asserted the OPPOSITE (every Python hook routed THROUGH the
@@ -786,8 +597,6 @@ class TestHooks:
         data = json.loads(HOOKS_PATH.read_text())
         events = data.get("hooks", data)
         examined = 0
-        python3_entries = 0
-        resolved = 0
         for event, entries in events.items():
             for entry in entries:
                 for sub in entry.get("hooks", []):
@@ -802,36 +611,10 @@ class TestHooks:
                             assert "_run_python_hook.sh" not in a, (
                                 f"[{event}] args still name the deleted launcher: {a!r}"
                             )
-                    if command == "python3" and args and isinstance(args[0], str):
-                        python3_entries += 1
-                        m = _PLUGIN_ROOT_REF.match(args[0])
-                        # The match is REQUIRED, not opportunistic. Skipping a
-                        # non-matching path would let every python3 entry drift
-                        # to a spelling this regex misses while python3_entries
-                        # stayed at its floor -- the existence half checking
-                        # nothing while both counters still look healthy.
-                        assert m, (
-                            f"[{event}] python3 exec-form entry does not name a "
-                            f"${{CLAUDE_PLUGIN_ROOT}}-relative script: {args[0]!r}"
-                        )
-                        script = PLUGIN_DIR / m.group(1)
-                        assert script.exists(), (
-                            f"[{event}] python3 exec-form entry points at "
-                            f"a missing script: {script}"
-                        )
-                        resolved += 1
         assert examined >= _MIN_HOOKS_JSON_ENTRIES_EXAMINED, (
             f"only {examined} hooks.json sub-entries examined; expected >= "
             f"{_MIN_HOOKS_JSON_ENTRIES_EXAMINED}. The walk found nothing to "
             "check."
-        )
-        assert python3_entries >= _PYTHON_HOOK_SCRIPT_MIN_COUNT, (
-            f"only {python3_entries} python3 exec-form entries examined; "
-            f"expected >= {_PYTHON_HOOK_SCRIPT_MIN_COUNT}."
-        )
-        assert resolved == python3_entries, (
-            f"{resolved} of {python3_entries} python3 entries resolved to a "
-            "real script path; the rest were counted but never checked."
         )
 
     def test_plugin_json_declares_python_engine(self) -> None:

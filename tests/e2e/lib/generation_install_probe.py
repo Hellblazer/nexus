@@ -46,6 +46,34 @@ from pathlib import Path
 FAILURES: list[str] = []
 
 
+def pdftext_bound_ok(pdftext_version: str, pypdfium2_version: str) -> bool:
+    """nexus-kard5 (GH #1533 follow-on, leg 8c's sibling for this layer).
+
+    ``tests/test_install_source_wiring_pins.py`` proves this checkout's own
+    ``uv.lock``/wheel metadata carries the ``pdftext<0.7`` bound, and
+    ``fresh-install-mvv.sh``'s leg 8c proves a fresh resolve into the
+    uv-tool/plain venv (``$PROBE_PYTHON``, BEFORE this probe replaces it
+    with a generation) lands below the ceiling too. Neither proves the
+    GENERATION install layer -- ``install_generation.sh``'s own ``uv pip
+    install`` into the generation's venv, driven by the packaged
+    ``overrides.txt`` -- resolves the same bound; that install is a SEPARATE
+    ``uv`` invocation with its own resolution, not a copy of what leg 8c
+    already resolved. Same bound as leg 8c's inline check
+    (``pdftext_v < 0.7 and pypdfium2_v < 5``): mineru's unbounded
+    ``pdftext>=0.6.3`` let a fresh resolve land pdftext 0.7.x, whose
+    ``PageChars`` dropped ``__iter__`` while mineru's own
+    ``span_pre_proc.py`` still iterates it as a list (GH #1533).
+
+    A pure version-comparison function, not a subprocess call, so it is
+    unit-testable without a real generation on disk -- mirrors the shape
+    of the module's other checks (``check()``), which take an already-
+    computed condition rather than doing the computing themselves.
+    """
+    from packaging.version import Version
+
+    return Version(pdftext_version) < Version("0.7") and Version(pypdfium2_version) < Version("5")
+
+
 def check(condition: bool, ok: str, bad: str) -> bool:
     if condition:
         print(f"OK   {ok}")
@@ -214,6 +242,35 @@ def main() -> int:
         f"av is {av.stdout.strip() or av.stderr.strip()[:200]!r} in the generation — "
         "the packaged overrides file did not reach `uv pip install`; users get "
         "PyAV's ffmpeg-62 dylibs colliding with opencv's ffmpeg-61 (nexus-heykz)",
+    )
+
+    # (8) nexus-kard5 (GH #1533 follow-on): the generation's OWN resolve of
+    # pdftext/pypdfium2 must land below the same ceiling leg 8c already
+    # checks for $PROBE_PYTHON -- see pdftext_bound_ok()'s docstring for why
+    # this is a separate resolve, not a copy of that one. No live defect
+    # today (the packaged [tool.uv] override already reaches
+    # install_generation.sh's overrides.txt); this closes the gap so a
+    # regression in that path is caught by the MVV instead of shipping.
+    bound = subprocess.run(
+        [str(generation / "bin" / "python"), "-c",
+         "from importlib.metadata import version;"
+         "print(version('pdftext'));"
+         "print(version('pypdfium2'))"],
+        capture_output=True, text=True, timeout=300, env=env,
+    )
+    bound_lines = bound.stdout.strip().splitlines()
+    bound_ok = (
+        bound.returncode == 0
+        and len(bound_lines) == 2
+        and pdftext_bound_ok(bound_lines[0], bound_lines[1])
+    )
+    check(
+        bound_ok,
+        f"pdftext/pypdfium2 in the generation are below the GH #1533 bound: {bound_lines}",
+        "pdftext/pypdfium2 in the generation are ABOVE the GH #1533 bound "
+        f"({bound_lines or bound.stderr.strip()[:200]!r}) -- the packaged "
+        "overrides file did not reach the generation's own `uv pip install`; "
+        "mineru's PageChars loses __iter__ on pdftext>=0.7 (GH #1533)",
     )
 
     if FAILURES:

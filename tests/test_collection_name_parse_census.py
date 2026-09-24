@@ -298,6 +298,23 @@ _TYPE_PREFIXES = frozenset({"code__", "docs__", "rdr__", "knowledge__", "quarant
 #: judgement call, not a quieter gate.
 _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
+        "src/nexus/hooks/behaviour_census.py",
+        (
+            'name = block.get("name") or ""',
+            'base = name.rsplit("__", 1)[-1]',
+        ),
+    ): (
+        "mcp__ tool name: the census reads a TRANSCRIPT's tool_use blocks, "
+        "where `name` is a tool identifier such as "
+        "`mcp__plugin_conexus_sequential-thinking__sequentialthinking`, and "
+        "the rsplit takes its bare verb to match against HANDS_ON and "
+        "DECISION_TOOL_NAMES. No collection name is in scope anywhere in "
+        "that file. It entered this census's domain by MOVING rather than "
+        "by being written: nexus-t9klx ported the script from "
+        "conexus/hooks/scripts/ into the wheel, and the census walks "
+        "src/nexus/."
+    ),
+    (
         "src/nexus/mcp/core.py",
         (
             'raw_tool = step.get("tool", "")',

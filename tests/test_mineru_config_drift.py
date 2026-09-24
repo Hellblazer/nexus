@@ -236,6 +236,21 @@ def test_configured_fixed_port_accepts_localhost_hostname(monkeypatch) -> None:
         assert get_mineru_configured_fixed_port() == 53947
 
 
+def test_configured_fixed_port_none_for_unparseable_port(monkeypatch) -> None:
+    """nexus-cd1k0.16 finding (3): ParseResult.port raises ValueError for a
+    present-but-unparseable port segment ("80a0") rather than returning
+    None, contradicting this function's own docstring ("Returns None for
+    ... an unparseable URL")."""
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://localhost:80a0",
+        })(),
+    ):
+        from nexus.config import get_mineru_configured_fixed_port
+        assert get_mineru_configured_fixed_port() is None
+
+
 def test_mineru_start_binds_configured_port_not_random_free_port(monkeypatch) -> None:
     """The actual regression (nexus incident 2026-07-01): a bare `nx
     mineru start` (--port 0, i.e. auto-assign) with a non-default fixed

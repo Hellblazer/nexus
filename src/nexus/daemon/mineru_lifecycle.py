@@ -95,9 +95,19 @@ def _warming_marker_path() -> Path:
 
 def _read_warming_marker() -> dict | None:
     try:
-        return json.loads(_warming_marker_path().read_text())
+        data = json.loads(_warming_marker_path().read_text())
     except (OSError, ValueError):
         return None
+    # nexus-cd1k0.6 finding (11): the parse above only proves the marker is
+    # valid JSON, not that it is the dict this function's own return type
+    # promises. Valid-but-wrong-shape JSON (a list, a bare number, `null`)
+    # used to be returned as-is, and the caller's marker.get(...) calls sit
+    # OUTSIDE any try in a function documented as "never a new failure
+    # mode" (spawn_and_wait_healthy's docstring) -- an AttributeError from
+    # a non-dict marker would have broken exactly the guarantee that
+    # docstring makes. Validate here, at the single choke point, so a
+    # malformed marker reads as "no marker" everywhere.
+    return data if isinstance(data, dict) else None
 
 
 def _stamp_warming_marker(

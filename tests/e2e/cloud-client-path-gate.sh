@@ -415,12 +415,10 @@ PY
 # service_url leg) shipped through 7.41.0 unnoticed. This drives the
 # wheel's nexus.hooks.tuple_projection (which replaced the two
 # subagent-{start,stop}-tuple-async.sh wrappers at RDR-215 bead
-# nexus-q02nx.21) against THIS CHECKOUT's own
-# conexus/hooks/scripts/tuple_ledger_project.py -- the wheel does not
-# ship that projector (only conexus/plans/ travels into the Python
-# package; the plugin supplies it from the repo/plugin install, never
-# from site-packages), which is why CLAUDE_PLUGIN_ROOT is exported for
-# the drive -- against THIS BOX's real cloud
+# nexus-q02nx.21), which runs the wheel's own
+# nexus.hooks.tuple_ledger_project in-process (the plugin copy of the
+# projector was deleted at nexus-z9cz2; nothing ran it) -- against THIS
+# BOX's real cloud
 # config and live engine, with a synthetic payload for a fresh
 # ledger/<random-uuid> subspace, then polls for the two tuples they are
 # supposed to write. The nexus-0zsmg endpoint fix is already on this tree
@@ -452,12 +450,10 @@ HOOK_LOG="$HOME/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
 
 # Drives nexus.hooks.tuple_projection, the port of the two
 # subagent-{start,stop}-tuple-async.sh wrappers (RDR-215 bead
-# nexus-q02nx.20; the bash was deleted at bead nexus-q02nx.21). Same
-# subject, same projector: CLAUDE_PLUGIN_ROOT is exported so
-# _projector() resolves THIS CHECKOUT's own
-# conexus/hooks/scripts/tuple_ledger_project.py, which is the file the
-# deleted wrappers ran as their sibling and which this epic does NOT
-# port (it stays plugin-resident, stdlib-only, by contract).
+# nexus-q02nx.20; the bash was deleted at bead nexus-q02nx.21). The
+# projector now runs in-process from the wheel; CLAUDE_PLUGIN_ROOT is
+# still exported, harmlessly, from when _projector() resolved a plugin
+# script by it.
 #
 # THE JOIN IS LOAD-BEARING, and is the one shape change the port forces.
 # The bash detached a disowned subshell that outlived the hook; the port

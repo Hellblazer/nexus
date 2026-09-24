@@ -237,7 +237,7 @@ def service(pg_instance):
     # nexus-lom9g: FILE-backed output via the shared primitive; the old
     # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
     # output accumulated before the port bound (nexus-j0nec).
-    proc, _svc_log = spawn_service([str(_JAVA), "--enable-preview", "-jar", str(_JAR)], env)
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
         wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", token, proc

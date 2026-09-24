@@ -46,6 +46,60 @@ while [ $# -gt 0 ]; do
 done
 [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--max-parallel must be a positive integer" >&2; exit 2; }
 
+# >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
+# tests/test_release_battery_refuses_moving_tree.py; keep both markers.
+#
+# AGENTS.md § Worktrees: one session, one worktree -- rule 4 says the
+# battery runs in the RELEASE WORKTREE, never the primary. That rule was advice, and this repo's own
+# history says advice decays -- so this is the enforceable half the bead
+# asked for.
+#
+# WHAT IT REFUSES, and why this exact condition. The hazard is not "you are
+# in the primary", it is "the branch this checkout holds can be moved
+# underneath a 70-minute run". Rule 9 obliges whoever pushes to develop to
+# fast-forward the primary in the same breath, so a battery on `develop`
+# with peers on the box is a collision waiting to be discovered on leg 12 --
+# which is what happened to 7.57.0, eleven legs green, artifact identity
+# mismatch, nothing wrong with the code.
+#
+# The branch test is rule 2's own test, deliberately, rather than a path
+# heuristic: git refuses to check out a branch that is already checked out
+# elsewhere, so "this checkout holds develop" IS "this is the primary".
+# A path heuristic would false-positive on a renamed directory, and a false
+# positive here blocks a release.
+#
+# The worktree-count half keeps it from firing on a box where nobody can
+# move anything: a lone checkout with no peers has no rule-9 pusher, so a
+# battery on develop there is merely unusual, not hazardous.
+BATTERY_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo DETACHED)"
+BATTERY_WORKTREES="$(git worktree list 2>/dev/null | grep -c . || echo 1)"
+if [ "$BATTERY_BRANCH" = "develop" ] && [ "$BATTERY_WORKTREES" -gt 1 ] \
+   && [ "${NX_BATTERY_ALLOW_DEVELOP:-0}" != "1" ]; then
+  cat >&2 <<'REFUSED'
+BATTERY REFUSED: this checkout holds `develop` and is not the only worktree
+on this box.
+
+Another session that pushes to develop is obliged to fast-forward this
+checkout (AGENTS.md § Worktrees: one session, one worktree, rule 9),
+which moves the tree the battery
+keys its artifacts on. That ends the run on a tree-identity mismatch after
+the legs have already been paid for -- measured on 7.57.0, twelfth leg,
+eleven legs green.
+
+Run it from the RELEASE WORKTREE instead (rule 4). A release worktree holds
+the release branch, which a develop push cannot move at all, and it gates
+the tree that actually ships -- version bump included -- rather than an
+unbumped ancestor of it.
+
+    git worktree add ../nexus-wt/release-vX.Y.Z -b release/vX.Y.Z develop
+
+For a deliberate non-release sweep on develop, set NX_BATTERY_ALLOW_DEVELOP=1
+and accept that a peer's push can red the run.
+REFUSED
+  exit 2
+fi
+# <<< END moving-tree guard (nexus-57cvk)
+
 # Short root on purpose: sandbox HOMEs nest .config/nexus/postgres under it
 # and a long ${TMPDIR} would push a PG socket path past the platform limit.
 STAMP="$(date +%Y%m%d-%H%M%S)"

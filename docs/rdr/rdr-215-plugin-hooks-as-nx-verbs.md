@@ -436,6 +436,18 @@ call the same functions.
    beside `nexus.db.service_endpoint`, which Approach item 9 forbids as a
    rewrite. Unlike the first exclusion this one is not about fail-closed
    semantics; it is a dependency the tier split cannot cross.
+   CORRECTED 2026-09-23 (nexus-t9klx): THAT REASON WAS WRONG. It assumed a
+   moved script had to carry its mirror with it. A wheel module can call
+   the client's own primitives instead, which is what
+   `tuple_ledger_project` had already done when this epic ported it. All
+   three hooks, and the other two bare-`python3` hooks, are now `nx-hook`
+   verbs with no mirror. The tier outcome stands for other reasons.
+   Both routing guards return a deny, and an `mcp_tool` hook cannot return
+   a permission decision (nexus-17i1n measured the close gate inert on the
+   tool tier); `phase_review_close_requires_gate` must also deny when it
+   crashes. `mailbox_drain` must write its stdout before it returns. The
+   git-write guard's fail-OPEN posture is not a tier reason: a crash on
+   the tool tier already reads as allow. See Revision History, 2026-09-23.
 2. **The command tier.** Six of the seven `SessionStart` entries (the
    seventh is item 3) become command hooks in exec form on `nx-hook`, a
    new console script beside
@@ -483,7 +495,7 @@ call the same functions.
 8. **The sn plugin.** sn ships no Python package and no server of its
    own, and its hook logic already lives in two bundled stdlib scripts
    (`auto_approve_sn_mcp.py`, `worktree_guard.py`) that the bash wrappers
-   call with `python3`. Its four entries become exec-form `python3`: the
+   call with `python3`. Its four entries become exec-form `python3` [since 2026-09-23 exec-form `uv run`, nexus-j4iy0]: the
    `PreToolUse` and `PermissionRequest` entries on `auto_approve_sn_mcp.py`,
    `SubagentStart` on a new `subagent_start.py` that carries
    `mcp-inject.sh`'s body (the section files, the envelope, and the
@@ -618,7 +630,7 @@ settled the other four) -- and no `command` or `args` element equals
 `nx-hook` is not `nx`. A `SessionStart` entry must be command tier. For
 the sn `hooks.json`: every entry has `args`, `command` is exactly
 `python3`, and the sole `args` element is a `.py` path under
-`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/`.
+`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/`. (Launcher changed to `uv run` at nexus-j4iy0, 2026-09-23; see Revision History.)
 
 **Tests.** Each retargeted test keeps its payload fixture and expected
 bytes. Tool-tier tests call the registered tool through the server's
@@ -681,7 +693,8 @@ that client or shell out to `nx` for every call.
   tools, so the drift ledger entry states the wheel floor.
 - 15 conexus hooks stop spawning a process at all; six `SessionStart`
   hooks and the close gate spawn one `nx-hook` each instead of bash, the
-  lockstep hook spawns `python3`, and the four sn hooks spawn `python3`
+  lockstep hook spawns `python3`, and the four sn hooks spawn `python3` [`uv`
+  since nexus-j4iy0]
   instead of bash.
 - The hook tools appear in the model's tool list.
 - 4,200 lines of bash leave; roughly the same amount of Python arrives,
@@ -780,7 +793,9 @@ Assumptions).
    epic. Making them wheel-resident would mean a second copy of a
    449-line resolver beside `nexus.db.service_endpoint`, which Approach
    item 9 forbids as a rewrite. They stay exec-form `python3`; full
-   reasoning in T2 `nexus_rdr/215-tier-resolution-bead-21`. Then
+   reasoning in T2 `nexus_rdr/215-tier-resolution-bead-21`. (That reason
+   was wrong, and all three are now `nx-hook` verbs: see Approach item 1's
+   2026-09-23 correction.) Then
    `preflight.py`,
    `session_start_hook.py` and `rdr_hook.py` re-declared on `nx-hook`;
    `version_lockstep_hook.py` re-declared as exec-form `python3` with its
@@ -880,7 +895,7 @@ replaces the lines that carry them; no other behaviour changes.
   `hook_` prefix, the description, and the auto-approve matcher are the
   mitigation.
 - **Plugin independence.** sn's hooks depend on `python3` and its own
-  bundled scripts only; nothing in this RDR makes sn require conexus.
+  bundled scripts only; nothing in this RDR makes sn require conexus. (Launcher changed to `uv run` at nexus-j4iy0, 2026-09-23; see Revision History.)
 - **Logging.** Hooks log to the hook log through `_hook_logging.py`
   today; the shared boundary keeps that path so a swallowed exception is
   still recorded.
@@ -992,7 +1007,8 @@ registration module on the existing server, and one package.
   TOOL TIER IS 13, not the 15 the 2026-09-18 entry above records:
   `mailbox_drain.py` and `routing/subagent_git_write_requires_orchestrator.py`
   were both named for the tool tier and both stayed command tier, for the
-  `_endpoint_resolve.py` reason now written into phase item 5. Counted
+  `_endpoint_resolve.py` reason now written into phase item 5 (a reason
+  later shown wrong; see 2026-09-23). Counted
   from the shipped manifest: 13 `mcp_tool` and 12 `command` entries, 25
   total (24 of them this epic's; `behaviour_census.py` arrived from
   nexus-4lnn1). The resolution had existed in T2 since 2026-09-19 and
@@ -1043,3 +1059,446 @@ registration module on the existing server, and one package.
   the test drove a placeholder. None required a code change -- the code
   was already correct in every case, which is exactly what makes this
   class survive: nothing fails, so nothing asks.
+- 2026-09-23: The `_endpoint_resolve.py` reason given for keeping
+  `mailbox_drain.py` and both routing guards plugin-resident was WRONG,
+  corrected in place at Approach item 1, Phase 3 item 5, the 2026-09-19
+  entry above, and the post-mortem. It assumed moving a script meant
+  moving its stdlib mirror, and so a second copy of the resolver. The
+  option nobody re-examined was to drop the mirror and call the client's
+  own primitives, which `tuple_ledger_project` had already done in this
+  same epic. nexus-t9klx did that for all five bare-`python3` hooks; the
+  shipped `hooks.json` names no interpreter and no plugin script. The TIER
+  rulings are unaffected, because each has a reason of its own recorded
+  beside the correction. The reason this entry is written as a correction
+  rather than an update: a constraint's shape outlives its rationale, and
+  a reader who finds a reason recorded next to the decision does not
+  re-derive it.
+- 2026-09-23 (nexus-j4iy0): sn's four hooks launch through exec-form
+  `uv run --no-project --no-config --quiet <script>` instead of `python3`,
+  which stock Windows lacks. The independence ruling stands: the scripts
+  stay stdlib-only and never import the conexus wheel. The dependency moved
+  from `python3` to `uv`, which Serena's `uvx` launch already required; a
+  user who runs sn for Context7 alone now needs uv for the hooks. The shape
+  lint in `tests/test_hooks_json_shape_lint.py` pins the argv whole.
+- 2026-09-23 (nexus-veh77): the interactive delay ladder that Critical
+  Assumptions required before Phase 2 was run, and it REFUTES "no
+  command-tier twin is needed" for interactive sessions. CLI 2.1.280, macOS
+  (this dev Mac, 67 runs) and WSL2 (qwentescence, `nexus` user, 78 runs).
+  Harness: `tests/cc-validation/connection-race-ladder/` (a probe MCP server
+  with a start delay stands in for `nx-mcp`; each event carries a
+  command-tier twin as ground truth; verdicts come from the twin log, the
+  probe's own log and `--debug-file`, never the pane). Raw results: T2
+  `nexus/veh77-interactive-ladder-results-2026-09-23`.
+  (a) Interactive has NO connection barrier. Headless `claude -p` holds
+  turn 1 until the connection attempt resolves; interactive starts turn 1
+  about 50 ms after submit whatever the server's state. With the server
+  connecting 8 s after launch, every submit rung from 0 to 2000 ms missed
+  every tool-tier event: macOS 24/24 runs, WSL2 20/20 (its 0 ms rung lost the
+  Enter, below). Controls held on both hosts: server connected long before
+  submit, 2/2 fired; server exits before serving, 2/2 missed.
+  (b) The skip is decided per MODEL REQUEST, not per event. A `PreToolUse`
+  or `PostToolUse` from a request that began before the server connected is
+  skipped even when the connection finished seconds earlier: on macOS, with
+  submit at 0 ms and the probe connecting 0.15 to 2.1 s after the input box
+  appeared, the first `PreToolUse` (at +1.8 to +2.7 s) missed 15/15. With four Bash calls spread over 12 s and the server
+  connecting at +3.2 s, the first call's `PreToolUse` and `PostToolUse`
+  missed and every later call's fired (macOS 3/3, WSL2 2/2). `Stop` fires
+  when the turn's last request began after the connection. `SubagentStart`
+  fired whenever the server was connected when the subagent started (3/3);
+  `SubagentStop` for a subagent dispatched by a pre-connection request
+  missed 3/3 even so.
+  (c) The window is short but real. With a probe that needs no start delay,
+  macOS missed first-request hooks at a 0 ms submit (3/3) and fired at
+  250 ms and 500 ms (6/6); WSL2 missed at 100 ms and 250 ms (5/5) and fired
+  at 500 ms (3/3). The input box appears before any server connects.
+  (d) What closes the window today is incidental: a submitted prompt waits
+  for the SessionStart command hooks. A 12 s SessionStart hook against an
+  8 s server fired everything (macOS 3/3, WSL2 3/3); a 4 s hook missed
+  everything (2/2 each). In the one real conexus session with a debug log on
+  this Mac (2026-09-20, CLI 2.1.278) `nx-mcp` connected 2.1 s after launch,
+  its connection queued about 0.9 s behind other plugin servers, and the
+  last SessionStart hook finished at 8.4 s, so that session was covered.
+  The cover is the SessionStart verbs being slow, which this RDR's own
+  timing work pushes the other way.
+  Tool-tier entries exposed: `PreToolUse Agent|Task` (the RDR-184 EXPECT
+  writer), the `SubagentStop` tuple projector, `Stop` verification,
+  `PostToolUse Write|Edit`, and the three `SubagentStart` entries when the
+  server is not up. `PostCompact` and `StopFailure` were not measured. The
+  Risks mitigation is now a design question: twin these entries on the
+  command tier, or make a SessionStart verb wait for `nx-mcp` to connect.
+  Not decided here.
+  Two harness facts: text typed before the input box appears is kept but
+  its Enter is dropped (6/6), and on WSL2 an Enter sent 0 ms after the
+  status bar appeared was dropped 18/18 (at 100 ms, 5 of 31).
+- 2026-09-23 (nexus-veh77, decision + close-out): Sam's ruling on the design
+  question the entry above left open: a `SessionStart` command-tier verb
+  waits, bounded and fail-open, for `nx-mcp` to connect, rather than
+  twinning every exposed tool-tier entry on the command tier. Shipped as
+  `nx-hook mcp-connect-wait` (`nexus.hooks.mcp_connect_wait`), wired in
+  `conexus/hooks/hooks.json` under the `startup` matcher only.
+  **Readiness signal.** `nexus.mcp.core._t1_lifespan` Branch 0 publishes
+  this session's `t1_session_lease.<session_id>` file (`nexus.db.t1.
+  publish_t1_session_lease`) inside its mint-or-borrow critical section,
+  before the lifespan's own `yield` -- and an MCP server built on the `mcp`
+  SDK's lifespan contract cannot answer `initialize` until that `yield`
+  returns and the transport's request loop starts. So the lease file is
+  written on the causal path to "connected", not sampled after the fact,
+  and its `session_id` is byte-identical to the SessionStart payload's own
+  field (both resolve through `CLAUDE_CODE_SESSION_ID`, harness-set at
+  spawn). The verb polls `read_t1_session_lease` for THIS session's id
+  every 0.2 s.
+  **Which sources wait.** `startup` only. JDR-001 and its own
+  `nexus-ggvi0` falsification establish that the MCP process usually
+  PERSISTS across `/clear`, `/resume`, `/compact` and a fork, so the
+  connection this verb waits for already exists on every other
+  `SessionStart` source; waiting there would only add latency.
+  **The bound.** 15 s, from the ladder's own measurements: the one real
+  `nx-mcp` connect recorded from a live session's debug log was 2.1 s
+  (queued ~0.9 s behind other plugin servers); every `ladder_s8` probe
+  rung connected by design at 8.15 s (macOS) / 8.5 s (WSL2) and is the
+  widest delay this RDR measured. 15 s is a little under 2x the widest
+  measured connect and about 7x the one live-session connect, and stays
+  under `upgrade-auto`'s own 30 s ceiling in the same matcher group.
+  **Fail-open.** Not a ledger verb -- `nx-hook`'s dispatcher forces exit 0
+  regardless -- and a timeout logs one line
+  (`mcp_connect_wait_timed_out`) to the hook log, never stdout, then
+  returns the identical silent result a successful wait returns.
+  **Proof.** Unit tests (`tests/hooks/test_mcp_connect_wait_verb.py`,
+  11 cases): the polling primitive against REAL lease files (ready
+  immediately, ready after N polls via an injected fake clock, never
+  ready and times out, a lease for a DIFFERENT session id never read as
+  ready, an expired lease reads as absent) and the verb's own wiring
+  (only `source=startup` waits, a missing session id is a fast no-op, a
+  timeout still returns a silent exit-0 `HookResult`, the test-only
+  bound/poll env overrides are honoured end to end through `run()`).
+  Then the interactive ladder itself, re-run on macOS with `--barrier`
+  (`tests/cc-validation/connection-race-ladder/run_ladder.py`, the probe
+  now publishing the same lease-file signal at the point in its own
+  timeline that stands in for "connected", the barrier invoking the REAL
+  `nx-hook mcp-connect-wait` verb in-process, both via the worktree's own
+  `.venv` python).
+  **A harness confound, found and fixed before the numbers below are
+  trustworthy.** The barrier's `SessionStart` command entry chains three
+  `;`-separated commands sharing ONE stdin pipe (Claude Code writes the
+  payload once); the first, a command-tier "twin" logger that also does
+  `json.load(sys.stdin)` for its own bookkeeping, drained the payload
+  before the real verb's own `read_payload()` ran second, which then saw
+  an already-EOF stdin, read `None`, and took the `source is None` fast
+  no-op path -- the barrier measured ~50ms elapsed instead of waiting, and
+  the first re-run reproduced round 1's misses unchanged (a false
+  negative on the fix, not evidence against it). Fixed by redirecting
+  `< /dev/null` onto both twin-logger calls in the chain, leaving the
+  shared pipe untouched for the verb's own read. Recorded because it is
+  exactly this RDR's own recurring lesson in miniature: two consumers of
+  one shared resource, one silently starving the other, discovered only
+  by reading the per-run timestamps rather than trusting the summary line.
+  **After (macOS, `barrier.plan`, 2 reps per rung, the SAME `ladder_s8`
+  submit rungs that missed 4/4 in round 1):**
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop | SubagentStop |
+  |---|---|---|---|---|---|---|---|---|---|
+  | pos_control | 0 | 8000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | neg_control (broken) | 0 | 3000 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 |
+  | ladder_s8 | 8 | 0 | on | 2 | **2/0/0** | **2/0/0** | **2/0/0** | **2/0/0** | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | **2/0/0** | **2/0/0** | **2/0/0** | **2/0/0** | 1/0/1 |
+  | ladder_s8 | 8 | 2000 | on | 2 | **2/0/0** | **2/0/0** | **2/0/0** | **2/0/0** | 2/0/0 |
+  | thresh | 0 | 0 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 2/0/0 | 2/0/0 |
+
+  (fired/missed/not\_reached; bold = flipped from round 1's 0/4/0 or 0/3/1
+  to fired.) The controls are unchanged from round 1 (`pos_control` still
+  fires clean, the broken-server `neg_control` still fails open with a
+  normal miss, never a hang), and `thresh` at a genuinely fast, zero-delay
+  connect is unchanged too -- the barrier costs nothing when there is
+  nothing to wait for. Per-run timestamps on three `ladder_s8` reps show
+  the mechanism directly: the verb's own `BarrierBegin`-to-`BarrierEnd`
+  span was 8.29-8.30s (matching the probe's 8s start delay), and each
+  returned 0.22-0.24s after the probe's lease-publish event -- one poll
+  interval, well inside the 15s bound, on the exact rungs round 1 measured
+  missing every tool-tier event 4 times out of 4.
+  WSL2 and `PostCompact`/`StopFailure` remain unmeasured, as the round-1
+  entry above already recorded.
+- 2026-09-23 (nexus-veh77 round 2, Sam's review the same day): the barrier
+  above shipped keyed on the T1 lease. Sam's review asked the sharper
+  question: enumerate, from `nexus.mcp.core._t1_lifespan`, every condition
+  where `nx-mcp` starts and CONNECTS fine but never publishes that lease --
+  for each, the barrier would stall the FULL 15s bound on every session
+  start, "a user-facing regression on exactly the boxes that are already
+  unhealthy." Measured: the lease is published UNCONDITIONALLY before
+  `yield` in exactly ONE of `_t1_lifespan`'s branches (the successful-mint
+  path); every other branch that still reaches `yield` and serves every
+  non-T1 tool normally does NOT publish one --
+  - `USE_INHERITED` (an already-live `NX_T1_SESSION` inherited from a
+    parent process): no mint attempted at all.
+  - `USE_LEASED`, borrowing a lease a DIFFERENT, earlier process already
+    published: this process never publishes its own.
+  - No resolvable session id (`resolve_active_session_id()` returns
+    `None`): nothing to key a lease on.
+  - **Deferred mint (nexus-brw1s), the sharpest case**: the storage service
+    is unreachable at MCP boot -- down, not yet started, a fresh install
+    before `nx daemon service start` has ever run, a transient cloud auth
+    or network failure -- so the mint is deferred to first T1 use and the
+    server starts anyway, serving every non-T1 tool. This fires on
+    precisely the boxes already least healthy, and would have cost every
+    one of them the full bound on EVERY session start, forever, until T1
+    was fixed, even though `nx-mcp` itself connects in well under a
+    second. Also covers "a fresh install with no service yet" and "cloud
+    mode with a transient failure" from Sam's own enumeration prompt --
+    both are this same branch (an unreachable storage service), not
+    separate code paths.
+  Two conditions Sam asked about are NOT `_t1_lifespan` cases at all, and
+  the fix below does not reach them: **the plugin's MCP server failing to
+  spawn**, and **a nexus MCP server the user has disabled** (Claude Code
+  can disable an individual `mcpServers` entry independently of a plugin's
+  `hooks.json`) -- in both, `nx-mcp` never runs long enough to reach
+  `_t1_lifespan` at all, so no signal keyed on anything inside it can ever
+  appear. These are addressed in the "short-bound heuristic" paragraph
+  below, not by the marker.
+  **Fix**: a NEW signal, `nexus.mcp.connect_marker`
+  (`src/nexus/mcp/connect_marker.py`), published UNCONDITIONALLY --
+  independent of T1 mint outcome -- from every one of `_t1_lifespan`'s
+  branches right before its own `yield` (four call sites: `USE_INHERITED`,
+  `USE_LEASED`, the mint-race-borrowed sub-branch, and the shared yield
+  covering no-resolvable-session/deferred-mint/successful-mint), and
+  cleared at every matching teardown point. `nexus.hooks.mcp_connect_wait`
+  now polls THIS signal instead of the T1 lease. A missing T1 lease no
+  longer costs the barrier anything beyond the actual connect time.
+  **Proof**: `tests/mcp/test_connect_marker.py` (the marker module, 8
+  cases, real files) and `tests/hooks/test_mcp_connect_wait_verb.py`
+  (rewritten onto the marker, plus an explicit "T1 down, marker up
+  resolves well under the bound" case). The load-bearing proof is
+  end-to-end against the REAL `_t1_lifespan` deferred-mint branch:
+  `tests/db/test_t1_cli_dedicated_session.py::TestMintErrorWrapping::
+  test_branch0_mint_failure_still_publishes_the_connect_marker`, sibling
+  to the existing `test_branch0_mint_failure_DEFERS_and_the_server_starts`
+  (nexus-brw1s) and driving the SAME `_t1_lifespan` call under the SAME
+  mint-failure injection -- pins that the T1 lease is genuinely absent,
+  the connect marker is genuinely present DURING the yield, the barrier's
+  own polling primitive against the real marker file resolves in well
+  under 1s (not 15s), and the marker is cleared at teardown.
+  **A short-bound heuristic for "`nx-mcp` was never going to start at all"
+  (disabled by the user, or a spawn failure) was considered and
+  rejected.** No signal on a box cleanly discriminates that case from a
+  legitimately slow first boot (a fresh install's local PG init/migration
+  run can legitimately take LONGER than steady state) -- and the two need
+  OPPOSITE treatment: a "has this marker ever been published before"
+  flag would shorten the bound on exactly the highest-value, most
+  sympathetic case (a brand new user's very first session) to guard
+  against a rarer, self-inflicted one. Getting the direction wrong there
+  is worse than the residual it would guard against. Accepted residual:
+  a genuinely disabled or never-spawning `nx-mcp` still pays the full 15s
+  bound once per session -- bounded, session-start-only, and that same
+  session already gets a louder, independent signal today (`nx-hook
+  preflight`'s `## nx Preflight: FAILED` marker, same matcher group) that
+  nexus tooling is not working here at all. Full reasoning:
+  `nexus.mcp.connect_marker`'s own module docstring.
+  **Ladder re-verify (round 2b, macOS, `barrier2.plan`, 2 reps each,
+  after switching the probe's own readiness-signal format from the T1
+  lease to the marker)**: the first re-run surfaced a genuine
+  probe-fidelity bug, not a defect in the fix -- the probe published its
+  marker BEFORE importing/constructing `FastMCP` (an ordering the T1-lease
+  probe also had, latent in round 1 too but never triggered in that
+  smaller sample), leaving a ~44-180ms window where the barrier had
+  already released but the probe was not yet actually serving; one of two
+  `ladder_s8` reps landed a request in that window and missed. Fixed by
+  building `FastMCP`/`mcp` BEFORE the delay/publish/serve sequence,
+  mirroring the real `nx-mcp`'s own shape (`mcp = FastMCP(...)` built at
+  import time, the marker publish happening inside the lifespan `mcp.run()`
+  itself later invokes). After the fix, re-run clean:
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop |
+  |---|---|---|---|---|---|---|---|---|
+  | thresh | 0 | 0 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+
+  Matches round 1's clean result for the same rungs -- the marker-based
+  signal preserves the fix exactly.
+- 2026-09-23 (nexus-veh77 round 3, critique burndown, T2
+  `nexus/critique-burndown-batch4-2026-09-23`): four fixes.
+  (1) **Stale docs from round 2's rename.** `entry.py`'s `VERB_TABLE`
+  comment, `conexus/README.md`'s hook-table row, and
+  `conexus/PENDING_RELEASE.md`'s bullets still said the barrier waits on
+  the T1 lease after round 2 switched the signal to the connect marker.
+  Corrected in place; the same class of drift this document's own
+  standing lesson names (round-1 entry above, and its own earlier
+  self-correction entries) -- a decision's prose outlives the code change
+  that invalidated it unless something greps for it.
+  (2) **The accepted residual rested on a false premise.** Round 2's
+  writeup said a timeout was tolerable because `nx-hook preflight`'s ``##
+  nx Preflight: FAILED`` marker already tells the user nexus tooling is
+  broken. FALSE: `preflight` checks only `nx` CLI reachability
+  (`nx --version`), never whether `nx-mcp` itself is disabled or failed to
+  spawn -- a fully healthy `nx` CLI with a broken or absent MCP server
+  produces no preflight signal at all. Fixed: `run()` now returns a short
+  plain-text note in `HookResult.stdout` on timeout (the SessionStart
+  context-injection channel `preflight_verb`/`session_start_verb` already
+  use), naming the bound and that tool-tier hooks will be skipped, so both
+  the model and the user see it -- not just one log line in a file nobody
+  is watching mid-session. Tested:
+  `tests/hooks/test_mcp_connect_wait_verb.py::TestTimeoutMessage` (3
+  cases) and the rewritten
+  `test_never_ready_still_returns_exit_zero_but_a_visible_note`.
+  (3) **Mid-session `nx-mcp` respawn is a residual, not a defect this
+  bead closes.** This barrier fires once, at `SessionStart`, and protects
+  only the START of a session. The 2026-09-20 incident this epic's own
+  history records (a live `nx-mcp` process exited and was respawned mid
+  session, client binding stale ~2 minutes, every `mcp_tool` hook silently
+  unavailable the whole window) is NOT a `SessionStart` event and this
+  verb never runs again to catch it. **No existing surface detects a
+  mid-session disconnect.** Checked: `nexus.upgrade_finish.StaleProcess.
+  restartable` explicitly excludes `mcp-host` from its cycle-eligible set,
+  with its own docstring citing the exact hazard (Claude Code does not
+  auto-reconnect stdio MCP servers -- code.claude.com/docs/en/mcp: remote
+  HTTP/SSE servers back off and retry, local stdio processes are the
+  deliberate exception, so a killed host stays dead until a human runs
+  `/mcp` -> Reconnect) -- that is nexus's own automation being CAREFUL
+  NOT TO TRIGGER this failure mode itself, not a DETECTOR of it happening
+  for any other reason (an OS-level crash, an OOM kill, a manual
+  disconnect/reconnect). The `_t1_handoff_watch_loop` watches for a NEW
+  session id (`/clear`/`/resume`), a different failure mode entirely --
+  same session id, connection merely dropped, is invisible to it. The new
+  connect marker (round 2) WOULD be refreshed by a respawned `nx-mcp`
+  process reaching `_t1_lifespan` again with the same session id, since
+  publish is unconditional per lifespan start -- but nothing polls it
+  after the one-shot `SessionStart` barrier already released, so the
+  refresh happens with no reader watching. Recorded here and via
+  `bd comment nexus-veh77`; not fixed by this bead, and no design for
+  fixing it is proposed here.
+  (4) **The ladder re-verify was incomplete.** Round 1's full `barrier.plan`
+  run (6 rungs, all controls + the 3 `ladder_s8` submit rungs) ran against
+  the T1-lease signal round 2 then discarded; round 2b's re-verify switched
+  to the connect-marker signal but covered only 2 of those 6 rungs, macOS
+  only. WSL2 was measured BROKEN in the original no-barrier ladder
+  (round-1 entry above) and never re-verified fixed on either signal. A
+  full re-verify against the SHIPPED connect-marker signal, the full rung
+  set, both host shapes, follows below.
+
+  **Round 4 full re-verify (macOS, `barrier.plan`, 2 reps/rung, the SHIPPED
+  connect-marker signal, `mcp-connect-wait`'s real timeout note active):**
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop |
+  |---|---|---|---|---|---|---|---|---|
+  | pos_control | 0 | 8000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | neg_control (broken) | 0 | 3000 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 |
+  | ladder_s8 | 8 | 0 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 2000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | thresh | 0 | 0 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+
+  Every rung clean, every rep. `thresh` (the zero-artificial-delay sanity
+  check) fired 2/2 here too -- an improvement over round 2b's own
+  same-rung result (0/2/0 UPS/Pre/Post there), ordinary run-to-run timing
+  variance at that literal 0 ms submit edge, not a regression signal.
+
+  **Round 4 full re-verify (WSL2, qwentescence, `nexus` user,
+  `barrier-wsl2.plan`, 2 reps/rung, same signal).** Own directory
+  (`/home/nexus/veh77-r4`, this checkout's `src/nexus` + a fresh `uv sync`
+  venv transferred in, never touching `/home/nexus/veh77`, the round-1
+  measurement's own directory) and own tmux socket (`veh77-r4`). Credential
+  freshly picked from this Mac's keychain, copied over, and deleted from
+  the box afterward (`find -iname '*cred*' -delete` under the run
+  directory, then the whole `/home/nexus/veh77-r4` directory removed
+  entirely once the run completed; both temp files on the Windows side
+  removed too). Round 1 measured a 0 ms submit dropping the Enter keypress
+  18/18 on this host, so every rung here starts at the 100 ms floor round
+  1's own `thresh100`/`ladder_s8`-100 rungs already used, never 0 ms:
+
+  | label | S | submit | barrier | runs | UPS | PreToolUse | PostToolUse | Stop |
+  |---|---|---|---|---|---|---|---|---|
+  | pos_control | 0 | 8000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | neg_control (broken) | 0 | 3000 | on | 2 | 0/2/0 | 0/2/0 | 0/2/0 | 0/2/0 |
+  | ladder_s8 | 8 | 100 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 1000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | ladder_s8 | 8 | 2000 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+  | thresh100 | 0 | 100 | on | 2 | 2/0/0 | 2/0/0 | 2/0/0 | 2/0/0 |
+
+  Every rung clean here too. Round 1's raw WSL2 measurement for these
+  exact rungs with no barrier: `ladder_s8|8|100|...|0/4/0|0/4/0|0/4/0|0/4/0`,
+  `ladder_s8|8|1000|...|0/4/0|0/4/0|0/4/0|0/4/0`,
+  `ladder_s8|8|2000|...|0/4/0|0/4/0|0/4/0|0/4/0` -- every tool-tier event
+  missed on every run. With the barrier: 2/2 fired on every event, every
+  rung. WSL2 is confirmed fixed, not merely assumed fixed by analogy to
+  macOS.
+
+  Both host shapes now fully re-verified against the shipped signal, full
+  rung set, controls included. `PostCompact`/`StopFailure` and mid-session
+  respawn (item 3 above) remain the standing, explicitly-recorded gaps.
+- 2026-09-23 (nexus-veh77 round 5): the mid-session respawn residual
+  (round 3 item 3, also `bd comment nexus-veh77`) is now DETECTED, not
+  merely recorded as unprotected. New verb `nx-hook mcp-connect-check`
+  (`nexus.hooks.mcp_connect_check`), wired on `UserPromptSubmit` as a
+  sibling to `mailbox-drain` rather than folded into it -- considered and
+  rejected: `mailbox_drain.py` is a 1200-line module with one documented
+  contract (the RDR-205 mailbox-delivery floor), a real network round trip
+  bounded by its own budget, and an extensive existing test suite built
+  around that one concern; this check is unrelated (session MCP-connection
+  health), touches no network (two file reads, one syscall), and hooks
+  under one event already run in parallel, so separating them costs no
+  latency and keeps each verb's own cost/test/failure story legible on its
+  own.
+  **Signal.** The connect marker (round 2) already recorded a `pid` field;
+  a new `nexus.mcp.connect_marker.read_mcp_connect_marker_info` exposes it
+  (TTL-unaware -- a long session whose `nx-mcp` has genuinely run past the
+  marker's 1-hour default TTL is still connected, and this detector's own
+  liveness signal is the pid, not the file's age). The verb checks: marker
+  exists AND `nexus.daemon.service_registry.pid_alive(pid)` -- the ONE
+  shared liveness implementation ("Daemon-lifecycle fixes land in the
+  shared primitive, never one tier's copy," AGENTS.md), never a hand-rolled
+  `os.kill`.
+  **Pid-reuse hardening was considered and left out.** Comparing the
+  recorded pid's OS-level start time against a fresh read at check time
+  would need `/proc` (Linux only) or a `ps` subprocess (tens of ms) --
+  ruled out by the hot-path budget below. Consistent with this project's
+  own "liveness is lease freshness, not pid" doctrine
+  (`src/nexus/daemon/AGENTS.md`): the marker's `expires_at` is the primary
+  bound, `pid_alive` a secondary fast-reacting signal layered on top
+  through the shared primitive -- exactly the pattern that doctrine
+  endorses, not a new hand-rolled check it exists to forbid.
+  **Cost, on the path that runs on every prompt.** One file read (the
+  marker), one file read/write (a small per-session warn-once state file,
+  deliberately separate from the marker itself), one `pid_alive` call --
+  no subprocess, no network, unlike `mailbox-drain`'s own engine round
+  trip.
+  **Warn-once-per-episode**, via that state file: silent for a session
+  that never connected (the startup barrier's own job); silent while
+  connected; one visible note the first time a previously-connected
+  session's marker goes missing or names a dead pid; silent on every
+  later prompt until a live sighting resets the flag, at which point a
+  LATER disconnect warns again. Message: "nx-mcp is not connected to this
+  session; conexus tool-tier hooks are being skipped. Restart Claude Code
+  to reconnect." -- same SessionStart-style context channel
+  `preflight_verb`/`session_start_verb`/round-3's own `mcp-connect-wait`
+  timeout note already use.
+  **Native Windows, honestly recorded rather than assumed.** RDR-218
+  measured `nx-mcp` running as a genuine native Windows stdio process, so
+  `pid_alive`'s Windows behavior is not academic here, but it was not
+  independently re-verified for this call site (no native Windows Python
+  was reachable to test against during this round). Per Python's
+  documented `os.kill` semantics, signal 0 on Windows collides with
+  `signal.CTRL_C_EVENT`, restricted to processes sharing the SAME console;
+  `nx-hook` and `nx-mcp` are unrelated, separately-spawned processes, so
+  the call most likely raises an `OSError` that `pid_alive`'s own
+  ambiguous-error-is-alive default reads as "alive" regardless of the real
+  state -- meaning this detector most likely degrades to SILENT on native
+  Windows (never fires) rather than dangerous (`TerminateProcess` is never
+  reached for signal 0). That is the EXISTING behavior of the shared
+  `pid_alive` primitive, already relied on by other consumers
+  (`nexus.upgrade_finish`); sharpening it belongs in
+  `nexus.daemon.service_registry` per the hot rule above, out of scope
+  here. The WSL2 appliance -- the shipped Windows direction, Linux under
+  the hood -- is unaffected.
+  **Proof.** `tests/hooks/test_mcp_connect_check_verb.py`: the pure
+  `_decide` state machine against all four named cases (live marker
+  silent; dead pid warns once then silent; missing marker after a prior
+  one warns; never-connected stays silent, plus a reconnect-rearms case),
+  the state-file round trip, and `run()` wiring against REAL files -- a
+  live marker under this test process's own `os.getpid()`, a dead one
+  under the same `999999999` convention `test_index_lock.py` already
+  uses for an unallocated pid -- through the real, unmocked `pid_alive`.
+  `tests/mcp/test_connect_marker.py` gained the `read_mcp_connect_marker_info`
+  coverage. A real regression was caught and fixed in the same round:
+  importing `nexus.mcp.connect_marker` at MODULE scope in the new verb
+  tripped `tests/hooks/test_hook_runtime_thin.py::
+  test_the_real_verb_modules_import_no_structlog` (`nexus/mcp/__init__.py`
+  eagerly imports the whole heavy `core.py` before any submodule is
+  reachable) -- fixed by deferring the import into `run()`, the same
+  pattern `mcp-connect-wait` already used for the identical reason.

@@ -202,6 +202,55 @@ def test_a_raising_repo_probe_degrades_to_none(tmp_path, monkeypatch):
     assert _repo_owner_document_for(make_catalog_reader(), f) is None
 
 
+def test_worktree_nested_path_still_converges_on_the_repo_owner_document(tmp_path, monkeypatch):
+    """nexus-7or3f. A file reached via its nested-worktree path
+    (``<primary>/.claude/worktrees/<agent>/<rel>``) must converge on the
+    SAME repo-owner Document a plain ``nx index repo`` run registered at
+    ``<rel>`` -- exactly what ``_repo_home_for`` (the PRE-FLIGHT probe)
+    already does via ``canonicalize_worktree_path``. Before this fix,
+    ``_repo_owner_document_for`` (the POST-HOOK's own probe,
+    ``_catalog_markdown_hook``) computed ``rel`` from the raw
+    worktree-prefixed path, which never matches the repo-owner row's true
+    relative ``file_path`` -- so the pre-flight correctly converged onto
+    the existing repo-owned row while the post-hook, looking up the SAME
+    file through this un-canonicalized probe, missed and minted a second,
+    curator-owned Document on top of it. This is the exact double-
+    registration nexus-19 measured 2026-09-15 running
+    ``nx index rdr <repo>/.claude/worktrees/rdr207-idx/docs/rdr/....md``.
+    """
+    from nexus.doc_indexer import _repo_owner_document_for
+    from nexus.catalog.factory import make_catalog_reader
+
+    root, f, repo_hash = _repo_with_file(tmp_path)
+    _pin_repo_probe(monkeypatch, root, repo_hash)
+
+    cat = ActiveCatalog()
+    repo_owner = cat.register_owner(
+        f"repo-{_next()}", "repo", repo_hash=repo_hash, repo_root=root,
+    )
+    original = cat.register(
+        repo_owner, "note.md", content_type="rdr",
+        file_path="docs/note.md",
+        physical_collection=_COLLECTION,
+    )
+
+    # A worktree-nested MIRROR of the same file, at the real
+    # nexus-shaped path <primary>/.claude/worktrees/<agent>/docs/note.md
+    # -- a genuine on-disk file, since canonicalize_worktree_path's own
+    # is_file() precondition refuses to invent an identity that doesn't
+    # exist there.
+    worktree_path = root / ".claude" / "worktrees" / "some-agent" / "docs" / "note.md"
+    worktree_path.parent.mkdir(parents=True)
+    worktree_path.write_text(f.read_text())
+
+    found = _repo_owner_document_for(make_catalog_reader(), worktree_path)
+    assert found is not None, (
+        "a nested-worktree path must still converge on the repo-owner "
+        "row registered at its primary-mirror relative path"
+    )
+    assert str(found.tumbler) == str(original)
+
+
 def test_a_raising_probe_does_not_stop_registration(tmp_path, monkeypatch):
     from nexus.doc_indexer import _register_or_lookup_doc_id
     import nexus.repo_identity as ri

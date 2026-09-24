@@ -11,7 +11,7 @@ exit code the event's exit code, so the boundary has to live here.
 
 Python has no "just don't set the flag" equivalent, so every script needs
 an explicit one. Logged, not swallowed: stderr is a hook's only diagnostic
-surface (the same choice ``conexus/hooks/scripts/mailbox_drain.py`` makes),
+surface (the same choice conexus's ``nexus.hooks.mailbox_drain`` makes),
 and it does not fail the event.
 
 Stdlib only, and no import of the conexus wheel: sn ships no Python package

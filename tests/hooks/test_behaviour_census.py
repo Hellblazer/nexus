@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The SessionStart behaviour census hook (conexus/hooks/scripts/behaviour_census.py).
+"""The SessionStart behaviour census hook.
 
-Every case runs the REAL script as a subprocess against a real transcript
-directory. Deliberately not a reimplementation of its counting: a gate whose
+Every case runs the REAL handler hooks.json wires, as a subprocess against a
+real transcript directory: the plugin script, or ``nx-hook behaviour-census``
+once that entry ships (nexus-t9klx ported the census into the wheel; 7.58.0
+holds its hooks.json entry back one release). The cases are the same for
+both, and what differs is the argv. Deliberately not a reimplementation of its counting: a gate whose
 domain excludes the shipped artifact proves only that the gate's own copy
 works (nexus-01, 2026-09-19, on
 ``test_a_stdlib_only_verb_dispatch_never_loads_structlog`` passing green while
@@ -25,7 +28,32 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "behaviour_census.py"
+_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py"
+
+
+def _wired() -> list[tuple[str | None, tuple[str, ...]]]:
+    hooks = json.loads((_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
+    return [
+        (entry.get("command"), tuple(entry.get("args") or []))
+        for entries in hooks["hooks"].values()
+        for group in entries
+        for entry in group.get("hooks", [])
+    ]
+
+
+#: Whatever hooks.json wires, driven the way a session drives it. 7.58.0
+#: holds the `nx-hook behaviour-census` entry back one release and wires the
+#: plugin script (a plugin naming a verb an older `nx-hook` lacks gets exit
+#: 2 on every event, nexus-t9klx skew), so these cases follow the wiring
+#: rather than assume it: script while the script is wired, nx-hook's own
+#: dispatch once the verb is, so the verb NAME and the payload plumbing are
+#: inside what they prove.
+_ENTRY_ARGV = (
+    [sys.executable, str(_ROOT / "conexus" / "hooks" / "scripts" / "behaviour_census.py")]
+    if ("python3", (_SCRIPT,)) in _wired()
+    else [sys.executable, "-m", "nexus._hook_runtime.entry", "behaviour-census"]
+)
 
 
 def _tool_use(name: str, command: str | None = None) -> str:
@@ -42,13 +70,25 @@ def _thought() -> str:
 def _run(transcript_path: Path, session_id: str = "current") -> subprocess.CompletedProcess[str]:
     payload = json.dumps({"session_id": session_id, "transcript_path": str(transcript_path)})
     return subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        _ENTRY_ARGV,
         input=payload, capture_output=True, text=True, timeout=60, check=False,
     )
 
 
-def test_the_script_ships_where_the_hook_declares_it() -> None:
-    assert SCRIPT.is_file(), f"hooks.json declares {SCRIPT.name}; it must exist"
+def test_hooks_json_wires_the_census_in_a_form_that_exists() -> None:
+    """hooks.json wires the census, and the handler it names exists.
+
+    Without it these cases could all pass against a handler no session
+    ever calls. Either shape is accepted; see ``_ENTRY_ARGV``.
+    """
+    wired = _wired()
+    if ("python3", (_SCRIPT,)) in wired:
+        assert (_ROOT / "conexus" / "hooks" / "scripts" / "behaviour_census.py").is_file()
+        return
+    assert ("nx-hook", ("behaviour-census",)) in wired, (
+        "hooks.json wires the behaviour census in neither shape; these cases "
+        f"drive a handler nothing fires. Wired: {sorted(set(wired))}"
+    )
 
 
 def test_no_prior_session_is_silent(tmp_path: Path) -> None:
@@ -278,7 +318,7 @@ def test_output_never_contains_a_percentage_and_always_contains_the_refusal(
 @pytest.mark.parametrize("payload", ["", "not json", "[]", "null"])
 def test_a_malformed_payload_never_blocks_a_session(payload: str) -> None:
     r = subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        _ENTRY_ARGV,
         input=payload, capture_output=True, text=True, timeout=60, check=False,
     )
     assert r.returncode == 0, "a census must never fail a session start"

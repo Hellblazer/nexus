@@ -289,20 +289,76 @@ def _template_marker() -> tuple[int, str]:
     return parsed
 
 
-def manage_enabled() -> bool:
-    """Whether the persisted opt-out (``nx config set beads_prime.manage
-    false``) allows this module to detect/install at all.
+@dataclass(frozen=True)
+class ManageStatus:
+    """Result of checking the persisted ``beads_prime.manage`` opt-out.
 
-    Best-effort: any failure reading config is treated as "not declined"
-    (``True``) -- a config-read hiccup must never silently disable a
-    feature the user never explicitly opted out of.
+    ``enabled`` is exactly what :func:`manage_enabled` returns.
+    ``config_path`` is the file that was (or would have been) read.
+    ``error`` is set ONLY when ``enabled=False`` came from a config-READ
+    FAILURE, never from an explicit user decline -- the nexus-i4odo
+    follow-up (T2 ``nexus/critique-wave2-2026-09-23``): a bare bool
+    collapsed "the user ran ``nx config set beads_prime.manage false``"
+    and "config.yml could not be read" into the same ``False``, so
+    :func:`install_and_describe` printed "beads_prime.manage is set to
+    false" for a read failure too -- a genuinely false claim about a
+    decision the user never made. Callers that need to tell the two
+    apart check ``error is not None``, not the bool alone.
     """
+
+    enabled: bool
+    config_path: Path
+    error: str | None = None
+
+
+def manage_status() -> ManageStatus:
+    """Whether the persisted opt-out (``nx config set beads_prime.manage
+    false``) allows this module to detect/install at all, WITH the reason
+    when the answer defaults to declined because config could not be read.
+
+    Best-effort: any failure reading config is treated as DECLINED
+    (``enabled=False``) (nexus-i4odo).
+
+    This used to fail OPEN (``True``) on a read failure, reasoning that a
+    config-read hiccup must never silently disable a feature the user
+    never explicitly opted out of. That reasoning weighed the wrong side:
+    the two failure directions are not symmetric.
+
+    * Never declined, read fails, defaults False: this ONE invocation
+      skips an optional convenience install. Self-healing -- the very
+      next ``nx init``/``nx upgrade`` that CAN read config installs
+      normally. Nothing is lost or created.
+    * Explicitly declined, read fails, defaults True (the old behaviour):
+      :func:`install` sees an ABSENT file and WRITES a fresh
+      ``PRIME.md`` the user is on record not wanting -- a real,
+      persistent violation of a stated preference, not merely inert.
+      :func:`install`'s own "never overwrites a user-authored file"
+      guarantee bounds damage to EXISTING content; it does nothing for
+      the ABSENT case, where fail-open actively creates the very file
+      the decline exists to prevent.
+
+    Defaulting False makes the safe failure mode (skip, retry later) the
+    one a config-read glitch actually produces, and leaves the unsafe one
+    (install against a stated decline) unreachable by a mere read error.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, avoids CLI-cold-start cost
+
+    config_path = nexus_config_dir() / "config.yml"
     try:
         from nexus.config import load_config  # noqa: PLC0415 — deferred, avoids CLI-cold-start cost
         value = load_config().get(_MANAGE_CONFIG_SECTION, {}).get(_MANAGE_CONFIG_KEY, True)
-    except Exception:  # noqa: BLE001 — best-effort: an unreadable config is not a decline
-        return True
-    return value is not False
+    except Exception as exc:  # noqa: BLE001 — best-effort: an unreadable config fails CLOSED (declined), with the reason recorded
+        return ManageStatus(enabled=False, config_path=config_path, error=str(exc))
+    return ManageStatus(enabled=value is not False, config_path=config_path)
+
+
+def manage_enabled() -> bool:
+    """Bool-only convenience over :func:`manage_status`, for callers that
+    don't need to distinguish an explicit decline from a config-read
+    failure. See :func:`manage_status` for the fail-closed rationale
+    (nexus-i4odo) and :class:`ManageStatus` for the distinction.
+    """
+    return manage_status().enabled
 
 
 def status(path: Path) -> PrimeStatus:
@@ -454,7 +510,17 @@ def install_and_describe(*, disabled: bool = False) -> str | None:
     """
     if disabled:
         return "Beads PRIME.md: skipped (--no-beads-prime)"
-    if not manage_enabled():
+    manage = manage_status()
+    if not manage.enabled:
+        if manage.error is not None:
+            # nexus-i4odo follow-up: this is NOT a decline -- config.yml
+            # could not be read, so manage_status() defaulted closed
+            # (nexus-i4odo). Say so; "beads_prime.manage is set to false"
+            # would be a false claim about a decision the user never made.
+            return (
+                f"Beads PRIME.md: could not read {manage.config_path}: "
+                f"{manage.error}; not managing beads priming until it's fixed"
+            )
         return "Beads PRIME.md: skipped (beads_prime.manage is set to false)"
     detected, _reason = beads_detected()
     if not detected:

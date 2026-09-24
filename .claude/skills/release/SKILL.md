@@ -20,6 +20,16 @@ neither file.)
 
 ## Steps
 
+### Where to run the battery
+
+In the release worktree, on the release branch — never in the shared primary
+checkout. AGENTS.md § "Worktrees: one session, one worktree" rule 4 carries the
+reason and the incident; the short version is that rule 9 fast-forwards the
+primary on every push to `develop`, and a tree that moves mid-battery makes the
+artifact-identity guard (nexus-mbeke) refuse every remaining leg. Cut the
+worktree before Step 1's expensive legs, so the artifacts are built once and in
+the tree that actually ships.
+
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
 The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release pins ONE engine IDENTITY, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — the engine the release was built and gated with, installed on EVERY path (fresh init AND upgrade). It is NOT a compatibility minimum and NOT a range (Hal directive 2026-07-15). `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independently hand-typed literal — there is no floor/exact split to reason about, bumping the one constant moves both together, by construction.
@@ -203,7 +213,7 @@ the script WITH a rationale + bead reference. Leg 8d/10 (nexus-cbo4a) drives
 the real SubagentStart/SubagentStop tuple-ledger-projector hook wrappers
 against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s leg
 G does the same against a live cloud config — together the only pre-tag
-proof that `conexus/hooks/scripts/tuple_ledger_project.py` actually lands a
+proof that the wheel's `nexus.hooks.tuple_ledger_project` actually lands a
 tuple on both install classes (nexus-g2lln / nexus-0zsmg).
 
 **Leg 9/10 (nexus-utpuw.19) — a generation install on that same virgin HOME.**
@@ -647,7 +657,9 @@ the published-bytes counterpart.
 
 ### 11d. Post-publish: real-dispatch check (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18)
 
-Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh <session_id>` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
+Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
+
+**Where the session id comes from (nexus-7m6uc):** run the script with NO argument first. It auto-discovers the session id from ledgers under `~/.local/state/nexus/orchestration/` with recent agent-dispatch activity, and uses it automatically when exactly one such ledger exists — which is the common case right after a single dispatch. It refuses (exit 2, naming every candidate) rather than guess when the box has more than one recent ledger (a peer session's dispatch, a prior release's leftover), so pass a session id explicitly only then. Do NOT reach for the harness's own session id (the one in its task/output paths) — JDR-001 names three distinct T1 scopes on this box, and the ledger is written under the id leased at MCP-server spawn, which is routinely a different string. If a NAMED session id turns up no ledger, the script lists every ledger that DOES exist, newest first with mtime and START/REPORTED counts, as its own exit-2 diagnostic — read that listing before re-guessing.
 
 ### 12. Reinstall local tool and verify
 

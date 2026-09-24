@@ -1021,14 +1021,10 @@ echo "── 8d/10 tuple ledger projector hook drive (nexus-g2lln pre-tag proof,
 # nexus.hooks.tuple_projection and ARE in the wheel under test, so this
 # leg drives them out of the installed wheel -- which is strictly better
 # coverage than before, since the wheel's copy is now the one a user
-# runs. The PROJECTOR (tuple_ledger_project.py) was deliberately NOT
-# ported: it stays plugin content, and the wheel does not ship
-# conexus/hooks/scripts -- only conexus/plans/ travels into the wheel
-# (pyproject.toml's [tool.hatch.build.targets.wheel.force-include]
-# comment: "the rest of conexus/ (agents, skills, commands, hooks,
-# .claude-plugin/plugin.json) is consumed by Claude Code from the repo at
-# plugin-install time, not from the Python wheel"). So the projector is
-# still supplied from THIS CHECKOUT, via CLAUDE_PLUGIN_ROOT below.
+# runs. The PROJECTOR is in the wheel too now: tuple_projection calls
+# nexus.hooks.tuple_ledger_project in-process, and the plugin copy it
+# once spawned was deleted at nexus-z9cz2. So this leg drives the whole
+# path out of the installed wheel.
 #
 # EXPECTED TO FAIL while bead nexus-g2lln is open: the projector presents
 # ONLY a data-token-lease bearer, and a default local install runs on the
@@ -1039,9 +1035,8 @@ echo "── 8d/10 tuple ledger projector hook drive (nexus-g2lln pre-tag proof,
 HOOK_PY_DIR="$WORK/hook-py"
 mkdir -p "$HOOK_PY_DIR"
 # Symlink to $PROBE_PYTHON (already proven >=3.12 by the install this
-# journey just ran) rather than trust the ambient host `python3` --
-# tuple_ledger_project.py hard-refuses below 3.12, and an operator's system
-# python3 is routinely older (T2 proof: macOS /usr/bin/python3 3.9.6).
+# journey just ran) rather than trust the ambient host `python3`, which
+# is routinely older than 3.12 (T2 proof: macOS /usr/bin/python3 3.9.6).
 ln -sf "$PROBE_PYTHON" "$HOOK_PY_DIR/python3"
 
 HOOK_SID="$("$PROBE_PYTHON" -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -1080,16 +1075,9 @@ _drive_hook() {
     # projector resolves the sandbox's own config dir / state dir /
     # data-token lease, never the operator's.
     #
-    # CLAUDE_PLUGIN_ROOT is REQUIRED here, and was not needed by the
-    # bash. tuple_projection._projector() looks under
-    # $CLAUDE_PLUGIN_ROOT/hooks/scripts first and then falls back to
-    # Path(__file__).parents[3]/conexus/hooks/scripts -- a fallback that
-    # resolves to the repo only from a source checkout. Run from the
-    # INSTALLED wheel, __file__ is <venv>/.../site-packages/nexus/hooks/,
-    # so the fallback misses, _projector() returns None, and the
-    # projection becomes a logged no-op. Exporting it is also what makes
-    # this leg drive THIS CHECKOUT's projector, exactly as the deleted
-    # wrappers did by resolving their own sibling.
+    # CLAUDE_PLUGIN_ROOT is left over from when tuple_projection's
+    # _projector() resolved a plugin script by it; the projector is
+    # in-process now and does not read it.
     env -i \
         HOME="$HOME_DIR" \
         PATH="$HOOK_PY_DIR:/usr/bin:/bin" \

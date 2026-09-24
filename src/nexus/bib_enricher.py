@@ -70,7 +70,16 @@ def enrich(title: str) -> dict[str, Any]:
             paper = None
             first_rejected = ""
             for cand in data[:_SEARCH_CANDIDATES]:
-                cand_title = str((cand or {}).get("title") or "")
+                # nexus-cd1k0.16 finding (6): `(cand or {}).get(...)` only
+                # guards a FALSY cand (None, "") -- a truthy NON-DICT
+                # candidate (S2 returning e.g. a bare string in `data`)
+                # still raises AttributeError on `.get`, outside the
+                # (httpx/ValueError) tuple this loop is wrapped in below.
+                # An explicit isinstance check skips it as unusable,
+                # matching what a malformed candidate actually is.
+                if not isinstance(cand, dict):
+                    continue
+                cand_title = str(cand.get("title") or "")
                 if _titles_compatible(title, cand_title):
                     paper = cand
                     break
@@ -86,13 +95,19 @@ def enrich(title: str) -> dict[str, Any]:
                 return {}
             refs = [
                 r.get("paperId", "") for r in (paper.get("references") or [])
-                if r and r.get("paperId")
+                if isinstance(r, dict) and r.get("paperId")
             ]
             return {
                 "year": paper.get("year", 0) or 0,
                 "venue": paper.get("venue", "") or "",
                 "authors": ", ".join(
                     a.get("name", "") for a in (paper.get("authors") or [])[:5]
+                    # nexus-cd1k0.16 finding (6): a null author entry (or any
+                    # non-dict entry) raised AttributeError on `.get`,
+                    # outside the caught exception tuple below. Skip it, the
+                    # same defensive shape `refs` above already uses for a
+                    # null reference entry.
+                    if isinstance(a, dict)
                 ),
                 "citation_count": paper.get("citationCount", 0) or 0,
                 "semantic_scholar_id": paper.get("paperId", "") or "",

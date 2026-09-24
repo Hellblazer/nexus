@@ -1247,36 +1247,6 @@ def search_cross_corpus(
         except Exception:  # noqa: BLE001 — best-effort topic boost; failure logged at debug, results returned unboosted
             _log.debug("topic_boost_failed", exc_info=True)
 
-    # RDR-109 Phase 5: salience boost. Opt-in via .nexus.yml flag
-    # ``attention_guided_v1.enabled`` (default False). Applies only to
-    # knowledge__* and docs__* results because those are the corpora
-    # for which Phase 4b measurements showed a useful or neutral effect;
-    # rdr__ neutral and knowledge regresses are documented in the RDR.
-    ag_cfg = cfg.get("attention_guided_v1", {})
-    if ag_cfg.get("enabled") and all_results:
-        try:
-            all_results = _apply_salience_boost(
-                all_results,
-                query=query,
-                weight=float(ag_cfg.get("weight", 0.025)),
-            )
-        except Exception:  # noqa: BLE001 — best-effort salience boost; failure logged, results returned unboosted
-            # nexus-g8r2h critique fold: post-routing this guards a real HTTP
-            # round-trip on service boxes, not a rarely-failing local SQLite
-            # read. Per-call stays quiet, but the FIRST failure per process
-            # warns — a sustained outage must not be silently dead for weeks.
-            global _salience_failure_warned
-            if not _salience_failure_warned:
-                _salience_failure_warned = True
-                _log.warning(
-                    "salience_boost_failed_first",
-                    consequence="attention_guided_v1 boost inactive for this "
-                                "process (subsequent failures log at debug)",
-                    exc_info=True,
-                )
-            else:
-                _log.debug("salience_boost_failed", exc_info=True)
-
     # nexus-1qed: catalog-resolved display path attached as metadata
     # so formatters never need to import the catalog. Best-effort;
     # absent catalog or missing doc_ids leave _display_path unset and
@@ -1600,83 +1570,6 @@ def _flag_contradictions(
         else:
             out.append(r)
     return out
-
-
-#: nexus-g8r2h critique fold: first-failure-per-process latch for the
-#: salience boost's swallow (see the caller's except arm).
-_salience_failure_warned: bool = False
-
-
-def _apply_salience_boost(
-    results: list[SearchResult],
-    *,
-    query: str,
-    weight: float,
-) -> list[SearchResult]:
-    """RDR-109 Phase 5: token-overlap quality boost using stored
-    salient_sentences.
-
-    For each ``knowledge__*`` or ``docs__*`` result, read its document's
-    ``salient_sentences`` from T2 ``document_aspects`` keyed by the
-    ``doc_id`` metadata attached upstream by
-    :func:`_attach_doc_ids_from_catalog`, compute the
-    token-overlap boost, and add it to ``hybrid_score``. Results are
-    re-sorted by the new score descending.
-
-    Results without ``doc_id`` or whose document has no salient
-    sentences fall through unchanged.
-    """
-    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-    from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
-
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): a search
-    # RESULT's collection has live chunks (that is why it matched) but is
-    # NOT guaranteed to have a catalog row -- /v1/vectors/stats lists any
-    # collection with live data regardless of registration state, and a
-    # legacy pre-Phase-1 collection can be searchable with no row at all.
-    # Reads the row directly (never nexus.corpus's name-parsing
-    # primitives); a result whose collection has no row is simply
-    # excluded from the salience-boost-eligible set, the same bucket an
-    # unrecognized content_type already fell into.
-    targeted = [
-        r for r in results
-        if (row := get_collection_row(r.collection)) is not None
-        and row.get("content_type") in ("knowledge", "docs")
-    ]
-    if not targeted:
-        return results
-
-    # nexus-g8r2h fold (sweep [21089] item 8) routed this via the storage
-    # facade; the seam is now COLLAPSED (nexus-i711w Stage 2 sub-stage A3):
-    # HttpDocumentAspectsStore is the only aspects store — the SQLite arm's
-    # stale-frozen-read hazard died with it.
-    from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — circular-dep avoidance
-
-    aspects = HttpDocumentAspectsStore()
-    try:
-        cache: dict[str, list[str]] = {}
-        for r in targeted:
-            doc_id = (r.metadata or {}).get("doc_id") or ""
-            if not doc_id:
-                continue
-            if doc_id not in cache:
-                cache[doc_id] = aspects.get_salient_sentences(doc_id)
-            sentences = cache[doc_id]
-            if not sentences:
-                continue
-            boost = token_overlap_boost(query, sentences, weight=weight)
-            if boost:
-                r.hybrid_score = float(r.hybrid_score) + boost
-    finally:
-        # Both stores close(): the SQLite store closes its connection and
-        # HttpDocumentAspectsStore inherits close() from
-        # RefreshableHttpStoreMixin (closes the httpx pool — load-bearing,
-        # not a no-op; reviewer Low corrected the earlier claim here).
-        close = getattr(aspects, "close", None)
-        if callable(close):
-            close()
-
-    return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 
 
 def _apply_clustering(

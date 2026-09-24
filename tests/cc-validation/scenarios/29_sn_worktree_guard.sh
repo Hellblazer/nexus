@@ -27,7 +27,7 @@ INJECT_LOG="$TEST_HOME/sn_inject_envelope.log"
 : > "$INJECT_LOG"; : > "$STUB_LOG"
 cat > "$TEST_HOME/.claude/sn_inject_tee.sh" <<BASH_EOF
 #!/usr/bin/env bash
-out="\$(python3 "$REPO_ROOT/sn/hooks/scripts/subagent_start.py")"
+out="\$(uv run --no-project --no-config --quiet "$REPO_ROOT/sn/hooks/scripts/subagent_start.py")"
 printf '%s\n' "\$out" >> "$INJECT_LOG"
 printf '%s\n' "\$out"
 BASH_EOF
@@ -42,7 +42,7 @@ cat > "$TEST_HOME/.claude/settings.json" <<SETTINGS_EOF
       { "matcher": "", "hooks": [{ "type": "command", "command": "bash $TEST_HOME/.claude/sn_inject_tee.sh", "timeout": 10 }] }
     ],
     "PreToolUse": [
-      { "matcher": "mcp__plugin_sn_serena__.*", "hooks": [{ "type": "command", "command": "python3 $REPO_ROOT/sn/hooks/scripts/auto_approve_sn_mcp.py", "timeout": 10 }] }
+      { "matcher": "mcp__plugin_sn_serena__.*", "hooks": [{ "type": "command", "command": "uv run --no-project --no-config --quiet $REPO_ROOT/sn/hooks/scripts/auto_approve_sn_mcp.py", "timeout": 10 }] }
     ]
   }
 }

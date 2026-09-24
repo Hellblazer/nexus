@@ -21,13 +21,25 @@ import time
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
+
+#: The verb ``hooks.json`` declares since nexus-t9klx. The guard moved into
+#: the wheel: a bare ``python3`` entry cannot run on Windows, a console
+#: script can.
+VERB = "subagent-git-write-gate"
+
+#: Drives that verb through the real entry point ``hooks.json`` spawns.
+#: ``-m`` rather than the installed ``nx-hook`` console script, so these
+#: cases exercise THIS checkout and not whichever generation the box has
+#: installed.
+_VERB_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", VERB]
+
+#: The guard's own file, for the in-process cases below that load it fresh
+#: per case with ``spec_from_file_location``. Those keep loading by path
+#: deliberately: several of them mutate module globals, and a fresh module
+#: per case is the isolation they depend on, which a plain ``import`` would
+#: quietly remove.
 HOOK_SCRIPT = (
-    PROJECT_ROOT
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "routing"
-    / "subagent_git_write_requires_orchestrator.py"
+    PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py"
 )
 
 AGENT_ID = "aworker-x-6f59dab8bbb14864"
@@ -74,7 +86,7 @@ def _run(payload: dict, env_extra: dict[str, str] | None = None):
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        [sys.executable, str(HOOK_SCRIPT)],
+        _VERB_ARGV,
         input=json.dumps(payload),
         capture_output=True, text=True, timeout=20, env=env,
     )
@@ -102,8 +114,8 @@ def _isolate_log(tmp_path, monkeypatch):
     # file's _run() invokes the real hook script as a subprocess with an
     # UNMODIFIED os.environ, so without isolating NEXUS_CONFIG_DIR the
     # writer-swapped log_routing_event's endpoint discovery
-    # (conexus/hooks/scripts/routing/_lib.py's _engine_endpoint, ported
-    # from t2_prefix_scan.py) resolves against whatever is REALLY
+    # (nexus.hooks._routing_lib's _engine_endpoint, once the plugin's
+    # routing/_lib.py) resolves against whatever is REALLY
     # configured on the box running the suite -- a live lease, a real
     # service_url/service_token -- and both attempts a real network call
     # AND, on failure, would append to the REAL ~/.config/nexus/
@@ -141,8 +153,23 @@ def linked_worktree(shared_repo: pathlib.Path, tmp_path: pathlib.Path) -> pathli
     return wt
 
 
-def test_script_exists():
-    assert HOOK_SCRIPT.exists()
+def test_the_verb_dispatches():
+    """Replaces the old "the script exists" case (nexus-t9klx).
+
+    That case was standing in for "the name hooks.json declares is one
+    something will actually run", which a file's existence only ever
+    approximated. Now the name is a verb, so ask the dispatcher.
+    """
+    from nexus._hook_runtime.entry import VERB_TABLE
+
+    assert VERB_TABLE.get(VERB) == "nexus.hooks.subagent_git_write_gate", (
+        f"nx-hook does not dispatch {VERB!r}; hooks.json declares it. "
+        f"Registered: {sorted(VERB_TABLE)}"
+    )
+    assert HOOK_SCRIPT.exists(), (
+        "the module that verb resolves to is missing; the in-process cases "
+        "below load it by path"
+    )
 
 
 def _declared_paths(hooks: dict, event: str) -> list[str]:
@@ -173,12 +200,17 @@ def test_registered_in_hooks_json():
         (PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text()
     )
     declared = _declared_paths(hooks, "PreToolUse")
-    assert any(
-        p.endswith("hooks/scripts/routing/subagent_git_write_requires_orchestrator.py")
-        for p in declared
-    ), (
-        "subagent_git_write_requires_orchestrator.py must be registered at its "
-        f"real path, hooks/scripts/routing/. Declared: {declared}"
+    # 7.58.0 wires the plugin script, not the verb: an older nx-hook exits 2
+    # on a verb it does not know (plugin-ahead skew, nexus-t9klx). Either
+    # shape is accepted, and a script entry must name a file that exists.
+    script = "hooks/scripts/routing/subagent_git_write_requires_orchestrator.py"
+    scripts = [p for p in declared if p.endswith(script)]
+    if scripts:
+        assert (PROJECT_ROOT / "conexus" / script).is_file()
+        return
+    assert VERB in declared, (
+        f"hooks.json declares the git-write guard in neither shape on a "
+        f"PreToolUse entry. Declared: {declared}"
     )
 
 
@@ -278,7 +310,7 @@ class TestAllow:
 
     def test_junk_stdin_fails_open(self):
         proc = subprocess.run(
-            [sys.executable, str(HOOK_SCRIPT)],
+            _VERB_ARGV,
             input="not json", capture_output=True, text=True, timeout=20,
             env={**os.environ},
         )

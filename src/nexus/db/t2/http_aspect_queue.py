@@ -348,8 +348,16 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """Reset in_progress rows older than timeout back to 'pending'.
 
         Returns the number of rows reclaimed.
+
+        ``idempotent=False`` (nexus-ll31n sibling): an age-predicate sweep
+        over a discovered population, the same shape as ``mark_retry``
+        just above -- a retry after a lost response re-evaluates the same
+        predicate against rows already reclaimed by attempt 1 and reports
+        fewer (often zero), misreporting a completed reclaim as having
+        done nothing (RDR-173's shutdown-observability warning line
+        reads this count).
         """
-        r = self._post("/reclaim_stale", {"timeout_seconds": timeout_seconds})
+        r = self._post("/reclaim_stale", {"timeout_seconds": timeout_seconds}, idempotent=False)
         return int(r.get("reclaimed", 0))
 
     def pending_count(self, *, timeout: float | None = None) -> int:

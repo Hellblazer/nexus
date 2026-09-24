@@ -15,6 +15,7 @@ fix). Only supervisor-specific assertions belong here.
 Integration tests (pytest.mark.integration) require a real Postgres cluster
 and Java JAR; they are excluded from the default unit suite.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -141,9 +142,13 @@ def _make_supervisor(
         binary_path = Path("/fake/nexus-service")
     if creds is None:
         creds = {
-            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
-            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
-            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": str(pg_port),
+            "NX_DB_URL": "jdbc:...",
+            "NX_DB_USER": "svc",
+            "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...",
+            "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass",
+            "PG_PORT": str(pg_port),
             "PG_DATA": "/tmp/pgdata",
             # gmiaf.32.5: persistent root token, read from pg_credentials.
             "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
@@ -187,9 +192,7 @@ class TestStorageServiceSupervisorUnit:
         """The lease must not be published until the service is healthy."""
         sup = _make_supervisor(config_dir, clock)
         scope = str(os.getuid())
-        registry = ServiceRegistry(
-            dir=config_dir, tier="storage_service", clock=clock
-        )
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
 
         # Before _publish() is called, nothing is discoverable.
         assert registry.discover(scope) is None
@@ -213,16 +216,17 @@ class TestStorageServiceSupervisorUnit:
         sup._publish(18083)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=True), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_service_healthy", return_value=True),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             result = sup.heartbeat_once()
 
         assert result == (True, True)
         # Lease must still be fresh
-        registry = ServiceRegistry(
-            dir=config_dir, tier="storage_service", clock=clock
-        )
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
         assert registry.discover(str(os.getuid())) is not None
 
     def test_heartbeat_returns_false_jar_when_proc_exits(
@@ -252,6 +256,7 @@ class TestStorageServiceSupervisorUnit:
         sup._publish(18084)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
+
         with patch.object(ssd_mod, "_pid_is_alive", return_value=False):
             jar_running, _pg_ok = sup.heartbeat_once()
 
@@ -268,9 +273,12 @@ class TestStorageServiceSupervisorUnit:
         sup._publish(18084)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=True), \
-             patch.object(sup, "_pg_reachable", return_value=False), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_service_healthy", return_value=True),
+            patch.object(sup, "_pg_reachable", return_value=False),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             jar_running, pg_ok = sup.heartbeat_once()
 
         assert jar_running is True
@@ -312,9 +320,9 @@ class TestStorageServiceSupervisorUnit:
 
         sup.stop()
 
-        assert call_order.index("mark_shutting_down") < call_order.index("stop_service"), (
-            "mark_shutting_down must come before stop_service (RDR-151 P1.3)"
-        )
+        assert call_order.index("mark_shutting_down") < call_order.index(
+            "stop_service"
+        ), "mark_shutting_down must come before stop_service (RDR-151 P1.3)"
 
     def test_loud_failure_when_service_unreachable(
         self, config_dir: Path, clock: _FakeClock
@@ -325,7 +333,9 @@ class TestStorageServiceSupervisorUnit:
         fake_proc = _FakeProc(pid=42500)
 
         with patch.object(sup, "_service_healthy", return_value=False):
-            with pytest.raises(StorageServiceStartError, match="(?i)health|ready|timeout"):
+            with pytest.raises(
+                StorageServiceStartError, match="(?i)health|ready|timeout"
+            ):
                 sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)
 
     def test_stop_sets_shutdown_marker(
@@ -339,9 +349,7 @@ class TestStorageServiceSupervisorUnit:
         sup._publish(18086)
 
         scope = str(os.getuid())
-        registry = ServiceRegistry(
-            dir=config_dir, tier="storage_service", clock=clock
-        )
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
 
         # Before stop: discoverable
         assert registry.discover(scope) is not None
@@ -354,7 +362,9 @@ class TestStorageServiceSupervisorUnit:
         assert registry.discover(scope) is None
 
     def test_stop_returns_promptly_when_the_election_flock_is_held(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         """nexus-cd1k0 review round 3 finding 6: before this fix,
         mark_shutting_down()/relinquish() on the stop path took NO
@@ -433,9 +443,7 @@ class TestStorageServiceSupervisorUnit:
         sup._service_port = 18087
         sup._publish(18087)
 
-        registry = ServiceRegistry(
-            dir=config_dir, tier="storage_service", clock=clock
-        )
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
         scope = str(os.getuid())
         rec = registry.discover(scope)
         assert rec is not None
@@ -461,15 +469,23 @@ class TestStorageServiceSupervisorUnit:
         publish the same token (so HTTP clients don't get 401 after respawn).
         """
         creds = {
-            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc",
-            "NX_DB_PASS": "stablepass", "NX_DB_ADMIN_URL": "jdbc:...",
-            "NX_DB_ADMIN_USER": "admin", "NX_DB_ADMIN_PASS": "stableadmin",
-            "PG_PORT": "15432", "PG_DATA": "/tmp/pgdata",
+            "NX_DB_URL": "jdbc:...",
+            "NX_DB_USER": "svc",
+            "NX_DB_PASS": "stablepass",
+            "NX_DB_ADMIN_URL": "jdbc:...",
+            "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "stableadmin",
+            "PG_PORT": "15432",
+            "PG_DATA": "/tmp/pgdata",
             "NX_SERVICE_TOKEN": "persisted-root-token-cafef00d",
         }
         sup1 = _make_supervisor(config_dir, clock, creds=creds)
         sup2 = _make_supervisor(config_dir, clock, creds=creds)
-        assert sup1._service_token == sup2._service_token == "persisted-root-token-cafef00d"
+        assert (
+            sup1._service_token
+            == sup2._service_token
+            == "persisted-root-token-cafef00d"
+        )
 
     def test_token_decoupled_from_db_credentials(
         self, config_dir: Path, clock: _FakeClock
@@ -478,17 +494,22 @@ class TestStorageServiceSupervisorUnit:
         bearer token. The token is the persisted NX_SERVICE_TOKEN, independent
         of NX_DB_PASS / NX_DB_ADMIN_PASS (retires _derive_stable_token)."""
         base = {
-            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc",
-            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
-            "PG_PORT": "15432", "PG_DATA": "/tmp/pgdata",
+            "NX_DB_URL": "jdbc:...",
+            "NX_DB_USER": "svc",
+            "NX_DB_ADMIN_URL": "jdbc:...",
+            "NX_DB_ADMIN_USER": "admin",
+            "PG_PORT": "15432",
+            "PG_DATA": "/tmp/pgdata",
             "NX_SERVICE_TOKEN": "fixed-root-token-1234",
         }
         sup1 = _make_supervisor(
-            config_dir, clock,
+            config_dir,
+            clock,
             creds={**base, "NX_DB_PASS": "passA", "NX_DB_ADMIN_PASS": "adminA"},
         )
         sup2 = _make_supervisor(
-            config_dir, clock,
+            config_dir,
+            clock,
             creds={**base, "NX_DB_PASS": "passB", "NX_DB_ADMIN_PASS": "adminB"},
         )
         assert sup1._service_token == sup2._service_token == "fixed-root-token-1234"
@@ -499,9 +520,14 @@ class TestStorageServiceSupervisorUnit:
         """No NX_SERVICE_TOKEN in env or creds => StorageServiceStartError
         (no silent fallback for the auth-correctness input, gmiaf.32.5)."""
         creds = {
-            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "p",
-            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
-            "NX_DB_ADMIN_PASS": "a", "PG_PORT": "15432", "PG_DATA": "/tmp/pgdata",
+            "NX_DB_URL": "jdbc:...",
+            "NX_DB_USER": "svc",
+            "NX_DB_PASS": "p",
+            "NX_DB_ADMIN_URL": "jdbc:...",
+            "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "a",
+            "PG_PORT": "15432",
+            "PG_DATA": "/tmp/pgdata",
         }
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("NX_SERVICE_TOKEN", None)
@@ -526,7 +552,6 @@ class TestStorageServiceSupervisorUnit:
 # ---------------------------------------------------------------------------
 # PG-independent recovery (SIGNIFICANT-1 fix)
 # ---------------------------------------------------------------------------
-
 
 
 def _ssd_probe():
@@ -557,9 +582,12 @@ class TestPGIndependentRecovery:
         sup._publish(19001)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK), \
-             patch.object(sup, "_pg_reachable", return_value=False), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK),
+            patch.object(sup, "_pg_reachable", return_value=False),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             jar_running, pg_ok = sup.heartbeat_once()
 
         # Jar should still be considered running
@@ -596,9 +624,12 @@ class TestPGIndependentRecovery:
         sup._ensure_pg_running = _fake_ensure_pg  # type: ignore[method-assign]
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=True), \
-             patch.object(sup, "_pg_reachable", return_value=False), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_service_healthy", return_value=True),
+            patch.object(sup, "_pg_reachable", return_value=False),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             jar_running, pg_ok = sup.heartbeat_once()
 
         assert jar_running is True and pg_ok is False
@@ -607,7 +638,6 @@ class TestPGIndependentRecovery:
             sup._ensure_pg_running()
 
         assert ensure_pg_called, "_ensure_pg_running must be called on PG-down"
-
 
 
 # ---------------------------------------------------------------------------
@@ -627,9 +657,7 @@ class TestEndToEndDiscovery:
     is fresh from the resolver's real-clock perspective.
     """
 
-    def test_supervisor_publish_then_health_resolve(
-        self, config_dir: Path
-    ) -> None:
+    def test_supervisor_publish_then_health_resolve(self, config_dir: Path) -> None:
         """Publish via supervisor path (real clock) → discover via health module → same (host, port).
 
         Uses a real clock (time.time) so the published lease is fresh when
@@ -641,17 +669,23 @@ class TestEndToEndDiscovery:
         import nexus.health as health_mod
 
         # Use real-time clock for the publish so the lease is fresh
-        sup = _make_supervisor(config_dir, _FakeClock(), service_port=19100,
-                               )
+        sup = _make_supervisor(
+            config_dir,
+            _FakeClock(),
+            service_port=19100,
+        )
         # Override the registry's clock to real time
         sup._lease_clock = time.time
         fake_proc = _FakeProc(pid=44001)
         sup._proc = fake_proc
         # Publish using a real-clock registry
         sup._registry = ServiceRegistry(
-            dir=config_dir, tier="storage_service", clock=time.time,
+            dir=config_dir,
+            tier="storage_service",
+            clock=time.time,
         )
         from nexus.daemon.storage_service_daemon import _daemon_version, _SERVICE_HOST
+
         endpoint = {
             "host": _SERVICE_HOST,
             "port": 19100,
@@ -660,6 +694,7 @@ class TestEndToEndDiscovery:
         }
         sup._service_port = 19100
         from nexus.daemon.service_registry import ServiceSupervisor
+
         sup._supervisor = ServiceSupervisor(
             sup._registry,
             str(os.getuid()),
@@ -702,9 +737,7 @@ class TestEndToEndDiscovery:
             "scope='storage_service'. This verifies the CRITICAL-1 fix."
         )
 
-    def test_health_resolve_returns_none_when_no_lease(
-        self, config_dir: Path
-    ) -> None:
+    def test_health_resolve_returns_none_when_no_lease(self, config_dir: Path) -> None:
         """_resolve_service_endpoint returns None when no supervisor has published."""
         import nexus.health as health_mod
 
@@ -770,9 +803,12 @@ class TestStuckJvmDetection:
         sup._publish(20001)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=False), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             jar_running, pg_ok = sup.heartbeat_once()
 
         # Below threshold: jar still considered running (no respawn yet)
@@ -790,12 +826,15 @@ class TestStuckJvmDetection:
         sup._publish(20002)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=False), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             for i in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
                 jar_running, _pg_ok = sup.heartbeat_once()
-                assert jar_running is True, f"should not signal exit on beat {i+1}"
+                assert jar_running is True, f"should not signal exit on beat {i + 1}"
 
         assert sup._consecutive_unhealthy_heartbeats == _MAX_UNHEALTHY_HEARTBEATS - 1
 
@@ -812,9 +851,12 @@ class TestStuckJvmDetection:
         sup._publish(20003)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=False), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             # First N-1 beats: no respawn signal
             for _ in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
                 jar_running, _ = sup.heartbeat_once()
@@ -845,18 +887,24 @@ class TestStuckJvmDetection:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         # Accumulate some unhealthy beats (below threshold)
-        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN
+            ),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             for _ in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
                 sup.heartbeat_once()
 
         assert sup._consecutive_unhealthy_heartbeats == _MAX_UNHEALTHY_HEARTBEATS - 1
 
         # One healthy beat — counter resets
-        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+        with (
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             jar_running, pg_ok = sup.heartbeat_once()
 
         assert jar_running is True and pg_ok is True
@@ -887,10 +935,15 @@ class TestStuckJvmDetection:
         sup._publish(20010)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN), \
-             patch.object(sup, "_probe_service_liveness", return_value=True), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN
+            ),
+            patch.object(sup, "_probe_service_liveness", return_value=True),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             for beat in range(_MAX_UNHEALTHY_HEARTBEATS * 3):
                 jar_running, _pg_ok = sup.heartbeat_once()
                 assert jar_running is True, (
@@ -914,11 +967,18 @@ class TestStuckJvmDetection:
         sup._publish(20011)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN), \
-             patch.object(sup, "_probe_service_liveness", return_value=False), \
-             patch.object(sup, "_pg_reachable", return_value=True), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
-            results = [sup.heartbeat_once()[0] for _ in range(_MAX_UNHEALTHY_HEARTBEATS)]
+
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN
+            ),
+            patch.object(sup, "_probe_service_liveness", return_value=False),
+            patch.object(sup, "_pg_reachable", return_value=True),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
+            results = [
+                sup.heartbeat_once()[0] for _ in range(_MAX_UNHEALTHY_HEARTBEATS)
+            ]
 
         assert results[:-1] == [True] * (_MAX_UNHEALTHY_HEARTBEATS - 1), (
             "below threshold a wedge must not exit yet"
@@ -942,9 +1002,12 @@ class TestStuckJvmDetection:
         sup._publish(20007)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=False), \
-             patch.object(sup, "_pg_reachable", return_value=False), \
-             patch.object(ssd_mod, "_pid_is_alive", return_value=True):
+
+        with (
+            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_pg_reachable", return_value=False),
+            patch.object(ssd_mod, "_pid_is_alive", return_value=True),
+        ):
             jar_running, pg_ok = sup.heartbeat_once()
 
         assert jar_running is True, (
@@ -1172,9 +1235,13 @@ class TestCycleStorageServiceToCurrent:
 
         # Publish a real lease under tier='storage_service' in our tmp dir
         import time
-        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=time.time)
+
+        registry = ServiceRegistry(
+            dir=config_dir, tier="storage_service", clock=time.time
+        )
         sup = ServiceSupervisor(
-            registry, str(os.getuid()),
+            registry,
+            str(os.getuid()),
             version="1.0.0",
             endpoint_provider=lambda: {"host": "127.0.0.1", "port": 19900},
         )
@@ -1224,7 +1291,9 @@ def _write_stale_or_fresh_lease(
         ttl=ttl,
         endpoint={"pid": engine_pid} if engine_pid is not None else {},
         version="0.0.0-test",
-        payload={"supervisor_pid": supervisor_pid} if supervisor_pid is not None else {},
+        payload={"supervisor_pid": supervisor_pid}
+        if supervisor_pid is not None
+        else {},
     )
     (config_dir / f"storage_service_addr.{scope}").write_text(record.to_json())
 
@@ -1237,7 +1306,8 @@ class TestRunStorageSupervisorFunction:
         stopped (StopOutcome.already_stopped, source='none'). This is the
         ONLY case allowed to report 'already stopped' (nexus-oyo2g)."""
         with patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+            "nexus.daemon.service_registry.all_process_rows",
+            return_value=[],
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert isinstance(outcome, StopOutcome)
@@ -1246,7 +1316,8 @@ class TestRunStorageSupervisorFunction:
         assert outcome.pids == ()
 
     def test_lease_miss_with_live_stack_is_not_reported_stopped(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """REPRO (a) FALSE ALL-CLEAR (nexus-oyo2g): a TTL-expired lease
         (age_s=20 > ttl=15) on a supervisor+engine pair that are STILL
@@ -1261,23 +1332,34 @@ class TestRunStorageSupervisorFunction:
         """
         supervisor_pid, engine_pid = 970101, 970102
         _write_stale_or_fresh_lease(
-            config_dir, supervisor_pid=supervisor_pid, engine_pid=engine_pid,
-            age_s=20.0, ttl=15.0,
+            config_dir,
+            supervisor_pid=supervisor_pid,
+            engine_pid=engine_pid,
+            age_s=20.0,
+            ttl=15.0,
         )
         rows = [
-            (supervisor_pid, 60,
-             f"nx daemon service start --foreground --config-dir {config_dir}"),
+            (
+                supervisor_pid,
+                60,
+                f"nx daemon service start --foreground --config-dir {config_dir}",
+            ),
             (engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g"),
         ]
         terminated: list[list[int]] = []
-        with patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
-        ), patch(
-            "nexus.daemon.service_registry.process_command",
-            side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
-        ), patch(
-            "nexus.daemon.service_registry.terminate_pids",
-            side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
+        with (
+            patch(
+                "nexus.daemon.service_registry.all_process_rows",
+                return_value=rows,
+            ),
+            patch(
+                "nexus.daemon.service_registry.process_command",
+                side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
+            ),
+            patch(
+                "nexus.daemon.service_registry.terminate_pids",
+                side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
+            ),
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert not outcome.already_stopped, (
@@ -1295,23 +1377,29 @@ class TestRunStorageSupervisorFunction:
         )
 
     def test_lease_miss_with_no_live_processes_is_genuinely_stopped(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """A stale/absent lease with NOTHING alive in the process table IS
         'already stopped' — the fallback must not manufacture false
         positives on an ordinary clean stop."""
         _write_stale_or_fresh_lease(
-            config_dir, supervisor_pid=970103, engine_pid=970104, age_s=99.0,
+            config_dir,
+            supervisor_pid=970103,
+            engine_pid=970104,
+            age_s=99.0,
         )
         with patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+            "nexus.daemon.service_registry.all_process_rows",
+            return_value=[],
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert outcome.already_stopped
         assert outcome.source == "none"
 
     def test_fresh_lease_tree_sweep_catches_surviving_engine(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """Tree-signalling requirement (nexus-oyo2g): even with a FRESH
         lease naming a supervisor that dies cleanly from SIGTERM, the
@@ -1321,8 +1409,11 @@ class TestRunStorageSupervisorFunction:
         immediately — the engine pid never appears in any kill call."""
         supervisor_pid, engine_pid = 970105, 970106
         _write_stale_or_fresh_lease(
-            config_dir, supervisor_pid=supervisor_pid, engine_pid=engine_pid,
-            age_s=1.0, ttl=15.0,
+            config_dir,
+            supervisor_pid=supervisor_pid,
+            engine_pid=engine_pid,
+            age_s=1.0,
+            ttl=15.0,
         )
         # The supervisor dies cleanly off the direct os.kill in the
         # lease-found branch; the engine survives independently and is
@@ -1331,24 +1422,31 @@ class TestRunStorageSupervisorFunction:
             (engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g"),
         ]
         terminated: list[list[int]] = []
-        with patch(
-            "nexus.daemon.storage_service_daemon._pid_is_alive",
-            # 1st call: initial "is it alive" check -> True, enter the
-            # signal branch. 2nd call: the post-SIGTERM wait loop -> False,
-            # the supervisor died cleanly, break immediately (no real
-            # sleep). 3rd call: the post-loop SIGKILL-escalation check ->
-            # False, no escalation needed.
-            side_effect=[True, False, False],
-        ), patch(
-            "nexus.daemon.storage_service_daemon.os.kill",
-        ), patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
-        ), patch(
-            "nexus.daemon.service_registry.process_command",
-            return_value=rows[0][2],
-        ), patch(
-            "nexus.daemon.service_registry.terminate_pids",
-            side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
+        with (
+            patch(
+                "nexus.daemon.storage_service_daemon._pid_is_alive",
+                # 1st call: initial "is it alive" check -> True, enter the
+                # signal branch. 2nd call: the post-SIGTERM wait loop -> False,
+                # the supervisor died cleanly, break immediately (no real
+                # sleep). 3rd call: the post-loop SIGKILL-escalation check ->
+                # False, no escalation needed.
+                side_effect=[True, False, False],
+            ),
+            patch(
+                "nexus.daemon.storage_service_daemon.os.kill",
+            ),
+            patch(
+                "nexus.daemon.service_registry.all_process_rows",
+                return_value=rows,
+            ),
+            patch(
+                "nexus.daemon.service_registry.process_command",
+                return_value=rows[0][2],
+            ),
+            patch(
+                "nexus.daemon.service_registry.terminate_pids",
+                side_effect=lambda pids, **_: terminated.append(list(pids)) or [],
+            ),
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert engine_pid in outcome.pids, (
@@ -1359,7 +1457,8 @@ class TestRunStorageSupervisorFunction:
         )
 
     def test_stubborn_survivor_is_reported_not_silently_dropped(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """REPRO (c) DOUBLE-SPAWN precondition: a frozen (SIGSTOPped)
         supervisor does not act on SIGTERM, so even the SIGKILL escalation
@@ -1369,22 +1468,33 @@ class TestRunStorageSupervisorFunction:
         running (which is what invites the double-spawn race)."""
         supervisor_pid, engine_pid = 970107, 970108
         _write_stale_or_fresh_lease(
-            config_dir, supervisor_pid=supervisor_pid, engine_pid=engine_pid,
-            age_s=30.0, ttl=15.0,
+            config_dir,
+            supervisor_pid=supervisor_pid,
+            engine_pid=engine_pid,
+            age_s=30.0,
+            ttl=15.0,
         )
         rows = [
-            (supervisor_pid, 60,
-             f"nx daemon service start --foreground --config-dir {config_dir}"),
+            (
+                supervisor_pid,
+                60,
+                f"nx daemon service start --foreground --config-dir {config_dir}",
+            ),
             (engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g"),
         ]
-        with patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
-        ), patch(
-            "nexus.daemon.service_registry.process_command",
-            side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
-        ), patch(
-            "nexus.daemon.service_registry.terminate_pids",
-            return_value=[supervisor_pid],  # SIGKILL didn't reap it in time
+        with (
+            patch(
+                "nexus.daemon.service_registry.all_process_rows",
+                return_value=rows,
+            ),
+            patch(
+                "nexus.daemon.service_registry.process_command",
+                side_effect=lambda pid: dict((p, c) for p, _a, c in rows)[pid],
+            ),
+            patch(
+                "nexus.daemon.service_registry.terminate_pids",
+                return_value=[supervisor_pid],  # SIGKILL didn't reap it in time
+            ),
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert not outcome.already_stopped
@@ -1394,7 +1504,8 @@ class TestRunStorageSupervisorFunction:
         )
 
     def test_process_table_unavailable_degrades_honestly(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """When neither 'ps' nor '/proc' is available, the fallback must
         say so rather than silently reusing the old 'already stopped'
@@ -1411,7 +1522,8 @@ class TestRunStorageSupervisorFunction:
     #    lease must not be reported as "no lease found" ------------------
 
     def test_present_but_unusable_lease_falls_back_to_process_table(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """A lease record IS present (fresh, well within TTL) but carries
         NO usable pid info at all (malformed/legacy shape — no
@@ -1420,18 +1532,27 @@ class TestRunStorageSupervisorFunction:
         signal source ends up being the process table, because a lease
         WAS discovered — it was just unusable, not absent."""
         _write_stale_or_fresh_lease(
-            config_dir, supervisor_pid=None, engine_pid=None, age_s=1.0,
+            config_dir,
+            supervisor_pid=None,
+            engine_pid=None,
+            age_s=1.0,
             ttl=15.0,
         )
         engine_pid = 970201
         rows = [(engine_pid, 60, f"{config_dir}/service/nexus-service -Xmx1g")]
-        with patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=rows,
-        ), patch(
-            "nexus.daemon.service_registry.process_command",
-            return_value=rows[0][2],
-        ), patch(
-            "nexus.daemon.service_registry.terminate_pids", return_value=[],
+        with (
+            patch(
+                "nexus.daemon.service_registry.all_process_rows",
+                return_value=rows,
+            ),
+            patch(
+                "nexus.daemon.service_registry.process_command",
+                return_value=rows[0][2],
+            ),
+            patch(
+                "nexus.daemon.service_registry.terminate_pids",
+                return_value=[],
+            ),
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert outcome.lease_seen is True, (
@@ -1441,34 +1562,39 @@ class TestRunStorageSupervisorFunction:
         assert engine_pid in outcome.pids
 
     def test_present_but_unusable_lease_with_no_processes_still_marks_lease_seen(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """Same malformed-lease precondition, but nothing is found in the
         process table either — genuinely nothing to signal, but a
         (malformed) lease WAS present, so ``lease_seen`` must stay True,
         never silently collapsing to 'no lease at all'."""
         _write_stale_or_fresh_lease(
-            config_dir, supervisor_pid=None, engine_pid=None, age_s=1.0,
+            config_dir,
+            supervisor_pid=None,
+            engine_pid=None,
+            age_s=1.0,
             ttl=15.0,
         )
         with patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+            "nexus.daemon.service_registry.all_process_rows",
+            return_value=[],
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert outcome.already_stopped
         assert outcome.source == "none"
-        assert outcome.lease_seen is True, (
-            f"a (malformed) lease WAS present: {outcome}"
-        )
+        assert outcome.lease_seen is True, f"a (malformed) lease WAS present: {outcome}"
 
     def test_true_lease_miss_has_lease_seen_false(
-        self, config_dir: Path,
+        self,
+        config_dir: Path,
     ) -> None:
         """Baseline contrast: a genuine lease MISS (no record on disk at
         all) must report ``lease_seen=False`` — never conflated with the
         present-but-unusable case above."""
         with patch(
-            "nexus.daemon.service_registry.all_process_rows", return_value=[],
+            "nexus.daemon.service_registry.all_process_rows",
+            return_value=[],
         ):
             outcome = stop_storage_service(config_dir=config_dir)
         assert outcome.lease_seen is False
@@ -1482,6 +1608,7 @@ class TestRunStorageSupervisorFunction:
         AGENTS.md's 'no per-tier lifecycle copy' rule exists to prevent."""
         import nexus.daemon.storage_service_daemon as ssd_mod
         from nexus.daemon.service_registry import pid_alive
+
         assert ssd_mod._pid_is_alive is pid_alive, (
             "storage_service_daemon._pid_is_alive has drifted from the "
             "shared service_registry.pid_alive primitive"
@@ -1492,14 +1619,13 @@ class TestRunStorageSupervisorFunction:
     ) -> None:
         """start path reads pg_credentials file and extracts expected keys."""
         from nexus.daemon.storage_service_daemon import _read_pg_credentials
+
         creds = _read_pg_credentials(creds_path)
         assert creds["PG_PORT"] == "15432"
         assert "NX_DB_URL" in creds
         assert "NX_DB_ADMIN_USER" in creds
 
-    def test_credentials_missing_raises_loudly(
-        self, config_dir: Path
-    ) -> None:
+    def test_credentials_missing_raises_loudly(self, config_dir: Path) -> None:
         """If pg_credentials is absent, start raises a clear error."""
         with pytest.raises((StorageServiceStartError, FileNotFoundError, RuntimeError)):
             start_storage_service(config_dir=config_dir)
@@ -1524,6 +1650,7 @@ def test_scope_key_matches_health_module() -> None:
     in health.py (the discover() endpoint the doctor reads)."""
     from nexus.daemon.storage_service_daemon import STORAGE_SERVICE_SCOPE_KEY
     from nexus.health import _STORAGE_SERVICE_SCOPE_KEY as health_key
+
     assert STORAGE_SERVICE_SCOPE_KEY == health_key == "storage_service"
 
 
@@ -1538,6 +1665,7 @@ def test_module_does_not_reimplement_elect() -> None:
     the primitive only, per test_lifecycle_gate.py)."""
     import nexus.daemon.storage_service_daemon as mod
     import inspect
+
     src = inspect.getsource(mod)
     assert "def _elect(" not in src, (
         "storage_service_daemon must not re-define _elect; "
@@ -1549,6 +1677,7 @@ def test_module_does_not_define_lease_record() -> None:
     """storage_service_daemon.py must not redefine LeaseRecord."""
     import nexus.daemon.storage_service_daemon as mod
     import inspect
+
     src = inspect.getsource(mod)
     assert "class LeaseRecord" not in src, (
         "LeaseRecord must be defined only in service_registry.py"
@@ -1567,7 +1696,10 @@ class TestSpawnServiceVoyageKeyPlumbing:
     (``VOYAGE_API_KEY`` env > ``config.yml`` credentials) and pass it down."""
 
     def _spawn_env(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> dict[str, str]:
         """Run _spawn_service with Popen mocked; return the env it received."""
         sup = _make_supervisor(config_dir, clock)
@@ -1578,13 +1710,17 @@ class TestSpawnServiceVoyageKeyPlumbing:
             return MagicMock(pid=43210)
 
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
+            "nexus.daemon.storage_service_daemon._popen",
+            _fake_popen,
         )
         sup._spawn_service()
         return captured
 
     def test_explicit_nx_voyage_api_key_passes_through(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("NX_VOYAGE_API_KEY", "explicit-key")
         monkeypatch.setenv("VOYAGE_API_KEY", "chain-key-should-lose")
@@ -1594,18 +1730,25 @@ class TestSpawnServiceVoyageKeyPlumbing:
         assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
 
     def test_key_resolved_from_credential_chain(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
         with patch(
-            "nexus.config.get_credential", return_value="chain-key",
+            "nexus.config.get_credential",
+            return_value="chain-key",
         ) as get_cred:
             env = self._spawn_env(config_dir, clock, monkeypatch)
         get_cred.assert_called_once_with("voyage_api_key")
         assert env["NX_VOYAGE_API_KEY"] == "chain-key"
 
     def test_no_key_anywhere_leaves_env_unset(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
@@ -1616,23 +1759,32 @@ class TestSpawnServiceVoyageKeyPlumbing:
     # -- nexus-r5f3c: the configured local embed model is the intent record --
 
     def test_bge_configured_model_blocks_chain_plumbing(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """nx init saved local.embed_model=bge — an ambient VOYAGE_API_KEY
         must NOT flip the engine voyage-only (it 422'd the first store on
         every fresh local install whose shell exported a Voyage key)."""
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
         monkeypatch.setenv("VOYAGE_API_KEY", "ambient-key-must-not-plumb")
-        with patch(
-            "nexus.config.local_embed_model_choice",
-            return_value="BAAI/bge-base-en-v1.5",
-        ), patch("nexus.config.get_credential") as get_cred:
+        with (
+            patch(
+                "nexus.config.local_embed_model_choice",
+                return_value="BAAI/bge-base-en-v1.5",
+            ),
+            patch("nexus.config.get_credential") as get_cred,
+        ):
             env = self._spawn_env(config_dir, clock, monkeypatch)
         get_cred.assert_not_called()
         assert "NX_VOYAGE_API_KEY" not in env
 
     def test_bge_configured_model_explicit_override_still_wins(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An EXPLICIT NX_VOYAGE_API_KEY is caller intent — it overrides the
         configured model and passes through unchanged."""
@@ -1645,18 +1797,25 @@ class TestSpawnServiceVoyageKeyPlumbing:
         assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
 
     def test_voyage_configured_model_still_plumbs(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A voyage-configured local install keeps the chain plumbing (the
         mirror failure — ONNX-only engine refusing voyage-* collections —
         must not be introduced by the r5f3c fix)."""
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
-        with patch(
-            "nexus.config.local_embed_model_choice",
-            return_value="voyage-context-3",
-        ), patch(
-            "nexus.config.get_credential", return_value="chain-key",
-        ) as get_cred:
+        with (
+            patch(
+                "nexus.config.local_embed_model_choice",
+                return_value="voyage-context-3",
+            ),
+            patch(
+                "nexus.config.get_credential",
+                return_value="chain-key",
+            ) as get_cred,
+        ):
             env = self._spawn_env(config_dir, clock, monkeypatch)
         get_cred.assert_called_once_with("voyage_api_key")
         assert env["NX_VOYAGE_API_KEY"] == "chain-key"
@@ -1685,7 +1844,10 @@ class TestSpawnServiceVoyageKeyPlumbing:
     # (not off the string shape) can pass both.
 
     def test_shared_predicate_true_drives_both_sites_to_voyage(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model,
         # not effective_embedding_model_for_writes -- this test's own subject
@@ -1703,7 +1865,9 @@ class TestSpawnServiceVoyageKeyPlumbing:
         # ...but the underlying string is NOT voyage-shaped — a naive
         # inline ``.startswith("voyage")`` re-derivation would say False
         # here and skip; only genuinely calling the predicate passes.
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5")
+        monkeypatch.setattr(
+            "nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5"
+        )
         with patch("nexus.config.get_credential", return_value="shared-key"):
             env = self._spawn_env(config_dir, clock, monkeypatch)
             client_model = _write_intent_embedding_model("code")
@@ -1713,7 +1877,10 @@ class TestSpawnServiceVoyageKeyPlumbing:
         assert client_model == "voyage-code-3"
 
     def test_shared_predicate_false_drives_both_sites_to_local(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model,
         # not effective_embedding_model_for_writes -- see the sibling test
@@ -1731,7 +1898,9 @@ class TestSpawnServiceVoyageKeyPlumbing:
         # ...but the underlying string IS voyage-shaped — a naive inline
         # ``.startswith("voyage")`` re-derivation would say True here and
         # plumb/mint; only genuinely calling the predicate stays local.
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr(
+            "nexus.config.local_embed_model_choice", lambda: "voyage-code-3"
+        )
         with patch("nexus.config.get_credential") as get_cred:
             env = self._spawn_env(config_dir, clock, monkeypatch)
             client_model = _write_intent_embedding_model("code")
@@ -1756,7 +1925,10 @@ class TestSpawnServiceOnnxModelRoot:
     and engine agree by construction."""
 
     def _spawn_env(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> dict[str, str]:
         """Run _spawn_service with Popen mocked; return the env it received."""
         sup = _make_supervisor(config_dir, clock)
@@ -1767,7 +1939,8 @@ class TestSpawnServiceOnnxModelRoot:
             return MagicMock(pid=43210)
 
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
+            "nexus.daemon.storage_service_daemon._popen",
+            _fake_popen,
         )
         # Keep the voyage plumbing inert — this class tests the model root.
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
@@ -1777,7 +1950,10 @@ class TestSpawnServiceOnnxModelRoot:
         return captured
 
     def test_default_root_is_passed(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
         env = self._spawn_env(config_dir, clock, monkeypatch)
@@ -1786,7 +1962,10 @@ class TestSpawnServiceOnnxModelRoot:
         )
 
     def test_explicit_caller_root_passes_through_unchanged(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An explicit NX_ONNX_MODEL_DIR is caller intent; the supervisor's
         re-set is idempotent (the resolver returns the same value)."""
@@ -1795,7 +1974,10 @@ class TestSpawnServiceOnnxModelRoot:
         assert env["NX_ONNX_MODEL_DIR"] == "/custom/onnx-root"
 
     def test_diverging_per_model_override_warns_at_spawn(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A Python-only per-model override off the root re-creates the
         green-provision-then-crash shape (the engine reads only
@@ -1807,15 +1989,16 @@ class TestSpawnServiceOnnxModelRoot:
 
         with structlog.testing.capture_logs() as logs:
             self._spawn_env(config_dir, clock, monkeypatch)
-        diverges = [
-            e for e in logs if e["event"] == "onnx_per_model_override_diverges"
-        ]
+        diverges = [e for e in logs if e["event"] == "onnx_per_model_override_diverges"]
         assert len(diverges) == 1
         assert diverges[0]["env_var"] == "NX_SERVICE_BGE_DIR"
         assert diverges[0]["provisioner_dir"] == "/nonstandard/bge-dir"
 
     def test_no_override_no_divergence_warning(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
         monkeypatch.delenv("NX_SERVICE_BGE_DIR", raising=False)
@@ -1824,9 +2007,7 @@ class TestSpawnServiceOnnxModelRoot:
 
         with structlog.testing.capture_logs() as logs:
             self._spawn_env(config_dir, clock, monkeypatch)
-        assert not [
-            e for e in logs if e["event"] == "onnx_per_model_override_diverges"
-        ]
+        assert not [e for e in logs if e["event"] == "onnx_per_model_override_diverges"]
 
 
 class TestCredsReloadAfterBackfill:
@@ -1841,7 +2022,10 @@ class TestCredsReloadAfterBackfill:
     """
 
     def test_ensure_pg_running_reloads_creds_after_backfill(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Direct proof on ``_ensure_pg_running`` alone: a backfill that
         mutates the on-disk file is reflected in ``self._creds`` immediately
@@ -1860,12 +2044,16 @@ class TestCredsReloadAfterBackfill:
         creds_file.chmod(0o600)
 
         sup = _make_supervisor(
-            config_dir, clock,
+            config_dir,
+            clock,
             creds={
-                "NX_DB_URL": "jdbc:...", "NX_DB_USER": "nexus_svc",
+                "NX_DB_URL": "jdbc:...",
+                "NX_DB_USER": "nexus_svc",
                 "NX_DB_PASS": "original-pass",
-                "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "nexus_admin",
-                "NX_DB_ADMIN_PASS": "testadminpass", "PG_PORT": "15432",
+                "NX_DB_ADMIN_URL": "jdbc:...",
+                "NX_DB_ADMIN_USER": "nexus_admin",
+                "NX_DB_ADMIN_PASS": "testadminpass",
+                "PG_PORT": "15432",
                 "PG_DATA": "/tmp/testpgdata",
                 "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
             },
@@ -1877,7 +2065,8 @@ class TestCredsReloadAfterBackfill:
             # about (today's backfills don't touch these keys; a future one
             # might).
             text = creds_file.read_text().replace(
-                "NX_DB_PASS=original-pass", "NX_DB_PASS=fresh-post-backfill-pass",
+                "NX_DB_PASS=original-pass",
+                "NX_DB_PASS=fresh-post-backfill-pass",
             )
             creds_file.write_text(text)
 
@@ -1885,7 +2074,9 @@ class TestCredsReloadAfterBackfill:
             "nexus.daemon.storage_service_daemon._port_accepting",
             lambda *a, **k: True,  # PG already running -> short-circuit branch
         )
-        monkeypatch.setattr(sup, "_backfill_provision_grants", _fake_backfill_mutates_disk)
+        monkeypatch.setattr(
+            sup, "_backfill_provision_grants", _fake_backfill_mutates_disk
+        )
 
         assert sup._creds["NX_DB_PASS"] == "original-pass"  # precondition
 
@@ -1897,7 +2088,10 @@ class TestCredsReloadAfterBackfill:
         )
 
     def test_spawned_env_carries_post_backfill_value(
-        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """End-to-end proof through the real call sequence the reviewer
         asked for: a backfill mutates a cred value, then the SPAWNED env
@@ -1917,12 +2111,16 @@ class TestCredsReloadAfterBackfill:
         creds_file.chmod(0o600)
 
         sup = _make_supervisor(
-            config_dir, clock,
+            config_dir,
+            clock,
             creds={
-                "NX_DB_URL": "jdbc:...", "NX_DB_USER": "nexus_svc",
+                "NX_DB_URL": "jdbc:...",
+                "NX_DB_USER": "nexus_svc",
                 "NX_DB_PASS": "original-pass",
-                "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "nexus_admin",
-                "NX_DB_ADMIN_PASS": "testadminpass", "PG_PORT": "15432",
+                "NX_DB_ADMIN_URL": "jdbc:...",
+                "NX_DB_ADMIN_USER": "nexus_admin",
+                "NX_DB_ADMIN_PASS": "testadminpass",
+                "PG_PORT": "15432",
                 "PG_DATA": "/tmp/testpgdata",
                 "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
             },
@@ -1930,7 +2128,8 @@ class TestCredsReloadAfterBackfill:
 
         def _fake_backfill_mutates_disk() -> None:
             text = creds_file.read_text().replace(
-                "NX_DB_PASS=original-pass", "NX_DB_PASS=fresh-post-backfill-pass",
+                "NX_DB_PASS=original-pass",
+                "NX_DB_PASS=fresh-post-backfill-pass",
             )
             creds_file.write_text(text)
 
@@ -1938,7 +2137,9 @@ class TestCredsReloadAfterBackfill:
             "nexus.daemon.storage_service_daemon._port_accepting",
             lambda *a, **k: True,
         )
-        monkeypatch.setattr(sup, "_backfill_provision_grants", _fake_backfill_mutates_disk)
+        monkeypatch.setattr(
+            sup, "_backfill_provision_grants", _fake_backfill_mutates_disk
+        )
 
         sup._ensure_pg_running()  # Step 1 -- runs the (fake) backfill + reload
 
@@ -1949,7 +2150,8 @@ class TestCredsReloadAfterBackfill:
             return MagicMock(pid=44100)
 
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
+            "nexus.daemon.storage_service_daemon._popen",
+            _fake_popen,
         )
         sup._spawn_service()  # Step 2 -- builds the JVM env from self._creds
 
@@ -1972,18 +2174,27 @@ class TestEnsurePgRunningCalledOnFreshStart:
     """
 
     def test_no_live_lease_reaches_ensure_pg_running(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         from nexus.daemon.service_registry import ServiceRegistry
 
         scope = str(os.getuid())
-        assert ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock).discover(scope) is None
+        assert (
+            ServiceRegistry(
+                dir=config_dir, tier="storage_service", clock=clock
+            ).discover(scope)
+            is None
+        )
 
         sup = _make_supervisor(config_dir, clock)
         proc = _FakeProc(pid=51300)
-        with patch.object(sup, "_ensure_pg_running") as ensure_pg, \
-             patch.object(sup, "_spawn_service", return_value=(proc, 19800)), \
-             patch.object(sup, "_wait_for_service_ready"):
+        with (
+            patch.object(sup, "_ensure_pg_running") as ensure_pg,
+            patch.object(sup, "_spawn_service", return_value=(proc, 19800)),
+            patch.object(sup, "_wait_for_service_ready"),
+        ):
             sup.start()
 
         ensure_pg.assert_called_once()
@@ -2009,7 +2220,9 @@ class TestDeadOwnerLeaseHealedOnForegroundStart:
     """
 
     def test_dead_owner_lease_is_reclaimed_and_start_falls_through(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
 
@@ -2023,10 +2236,19 @@ class TestDeadOwnerLeaseHealedOnForegroundStart:
         # Publish a fresh, supervised lease whose payload names the dead pid
         # as supervisor_pid (mirrors a hard-crashed supervisor's last-known
         # lease — nothing ever relinquished it).
-        stale_registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        stale_registry = ServiceRegistry(
+            dir=config_dir, tier="storage_service", clock=clock
+        )
         stale_sup = ServiceSupervisor(
-            stale_registry, scope, version="1.0.0",
-            endpoint_provider=lambda: {"host": "127.0.0.1", "port": 1, "pid": dead_pid, "token": "t"},
+            stale_registry,
+            scope,
+            version="1.0.0",
+            endpoint_provider=lambda: {
+                "host": "127.0.0.1",
+                "port": 1,
+                "pid": dead_pid,
+                "token": "t",
+            },
             payload={"supervisor_pid": dead_pid},
         )
         stale_sup.publish_once()
@@ -2034,14 +2256,19 @@ class TestDeadOwnerLeaseHealedOnForegroundStart:
 
         sup = _make_supervisor(config_dir, clock)
         proc = _FakeProc(pid=51400)
-        with patch.object(sup, "_ensure_pg_running") as ensure_pg, \
-             patch.object(sup, "_spawn_service", return_value=(proc, 19801)), \
-             patch.object(sup, "_wait_for_service_ready"):
+        with (
+            patch.object(sup, "_ensure_pg_running") as ensure_pg,
+            patch.object(sup, "_spawn_service", return_value=(proc, 19801)),
+            patch.object(sup, "_wait_for_service_ready"),
+        ):
             sup.start()
 
-        ensure_pg.assert_called_once(), (
-            "a dead-owner lease must fall through to a fresh spawn, not "
-            "short-circuit past _ensure_pg_running"
+        (
+            ensure_pg.assert_called_once(),
+            (
+                "a dead-owner lease must fall through to a fresh spawn, not "
+                "short-circuit past _ensure_pg_running"
+            ),
         )
         # A genuinely NEW lease was published (this supervisor's own), not
         # the stale dead-owner record left untouched.
@@ -2050,7 +2277,9 @@ class TestDeadOwnerLeaseHealedOnForegroundStart:
             "the stale dead-owner lease must have been relinquished and "
             "replaced by a fresh publish, not left in place"
         )
-        fresh_record = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock).discover(scope)
+        fresh_record = ServiceRegistry(
+            dir=config_dir, tier="storage_service", clock=clock
+        ).discover(scope)
         assert fresh_record is not None
         assert fresh_record.owner_token == sup._supervisor.owner_token
 
@@ -2061,17 +2290,22 @@ class TestNativeStartHasNoSchemaSkewGate:
     the gate helper must not be invoked."""
 
     def test_native_start_skips_skew_gate(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         # The gate helper is expunged entirely; a native start reaches spawn.
         import nexus.daemon.binary_lifecycle as bl
+
         assert not hasattr(bl, "check_schema_skew")
 
         sup = _make_supervisor(config_dir, clock)
         proc = _FakeProc(pid=51000)
-        with patch.object(sup, "_ensure_pg_running"), \
-             patch.object(sup, "_spawn_service", return_value=(proc, 19500)) as spawn, \
-             patch.object(sup, "_wait_for_service_ready"):
+        with (
+            patch.object(sup, "_ensure_pg_running"),
+            patch.object(sup, "_spawn_service", return_value=(proc, 19500)) as spawn,
+            patch.object(sup, "_wait_for_service_ready"),
+        ):
             payload = sup.start()
         spawn.assert_called_once()
         assert payload["port"] == 19500
@@ -2123,7 +2357,10 @@ class _ScriptedSupervisor:
             self._stop.set()
             return True, True
         beat = self._beats.pop(0)
-        if self._fence_after_beats is not None and self.heartbeat_calls >= self._fence_after_beats:
+        if (
+            self._fence_after_beats is not None
+            and self.heartbeat_calls >= self._fence_after_beats
+        ):
             # Mirrors heartbeat_tick() discovering StaleOwnerError on THIS
             # tick and setting .fenced synchronously, before the run loop's
             # next check.
@@ -2163,9 +2400,7 @@ class TestMinimalSuperviseLoop:
         """(False, False): service dead — exit 3. The supervisor does NOT
         attempt an in-process PG restart or respawn; the OS restart re-runs
         start() (which brings PG back up via _ensure_pg_running)."""
-        sup, code = self._run(
-            lambda stop: _ScriptedSupervisor([(False, False)], stop)
-        )
+        sup, code = self._run(lambda stop: _ScriptedSupervisor([(False, False)], stop))
         assert code == 3, "service-unrecoverable is the exit-3 OS-restart contract"
         assert "ensure_pg" not in sup.calls, (
             "service death must NOT trigger an in-process PG restart; the OS "
@@ -2178,18 +2413,14 @@ class TestMinimalSuperviseLoop:
     def test_service_down_pg_up_exits_3(self) -> None:
         """(False, True): stuck-process threshold (live PG probe) — exit 3, no
         in-process respawn."""
-        sup, code = self._run(
-            lambda stop: _ScriptedSupervisor([(False, True)], stop)
-        )
+        sup, code = self._run(lambda stop: _ScriptedSupervisor([(False, True)], stop))
         assert code == 3, "service-unrecoverable is the exit-3 contract"
         assert "ensure_pg" not in sup.calls
 
     def test_pg_only_death_restarts_pg_without_exit(self) -> None:
         """(True, False): JVM alive, PG down — restart PG in place, NO exit.
         After the scripted beat the loop exits cleanly (code 0)."""
-        sup, code = self._run(
-            lambda stop: _ScriptedSupervisor([(True, False)], stop)
-        )
+        sup, code = self._run(lambda stop: _ScriptedSupervisor([(True, False)], stop))
         assert code == 0, "PG-only death must NOT exit the supervisor"
         assert sup.calls.count("ensure_pg") == 1, (
             "the (True, False) arm restarts PG directly without bouncing Java"
@@ -2199,7 +2430,8 @@ class TestMinimalSuperviseLoop:
         """(True, False) with an unrecoverable PG — exit 4."""
         sup, code = self._run(
             lambda stop: _ScriptedSupervisor(
-                [(True, False)], stop,
+                [(True, False)],
+                stop,
                 ensure_pg_raises=StorageServiceStartError("pg_ctl failed"),
             )
         )
@@ -2253,7 +2485,8 @@ class TestMinimalSuperviseLoop:
             lambda stop: _ScriptedSupervisor(
                 # Three healthy beats scripted; fencing on tick 1 must stop
                 # the loop before ticks 2/3 are ever reached.
-                [(True, True), (True, True), (True, True)], stop,
+                [(True, True), (True, True), (True, True)],
+                stop,
                 fence_after_beats=1,
             )
         )
@@ -2296,14 +2529,19 @@ class TestEnsureStorageSupervisor:
         # to `ps` via the same stdlib subprocess symbol this test mocks
         # (nexus-o8dil.21). The lease's supervisor_pid IS this live test
         # process, so "S" is the faithful answer.
-        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
-             patch.object(daemon_mod, "_popen") as popen:
+        with (
+            patch("nexus.daemon.service_registry.process_state", return_value="S"),
+            patch.object(daemon_mod, "_popen") as popen,
+        ):
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         assert rec is not None
         popen.assert_not_called()  # idempotent: a live lease is never re-spawned
 
     def test_live_lease_raises_on_explicit_artifact_mismatch(
-        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """nexus-4e96a mismatch arm, THE load-bearing layer: this is the
         branch that returns the live lease without ever spawning a
@@ -2323,14 +2561,19 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
-        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
-             patch.object(daemon_mod, "_popen") as popen:
+        with (
+            patch("nexus.daemon.service_registry.process_state", return_value="S"),
+            patch.object(daemon_mod, "_popen") as popen,
+        ):
             with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
                 daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
 
     def test_live_lease_unknown_artifact_allows_with_warning(
-        self, config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A lease published before this fix carries no 'artifact' key at
         all. Per the design's degrade contract, an explicit request against
@@ -2341,12 +2584,19 @@ class TestEnsureStorageSupervisor:
         from nexus.commands import daemon as daemon_mod
         from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
 
-        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=_time.time)
+        registry = ServiceRegistry(
+            dir=config_dir, tier="storage_service", clock=_time.time
+        )
         scope = str(os.getuid())
         pre_fix_supervisor = ServiceSupervisor(
-            registry, scope, version="0.0.0",
+            registry,
+            scope,
+            version="0.0.0",
             endpoint_provider=lambda: {
-                "host": "127.0.0.1", "port": 18099, "pid": 424242, "token": "tok",
+                "host": "127.0.0.1",
+                "port": 18099,
+                "pid": 424242,
+                "token": "tok",
                 # deliberately NO "artifact" / "launch_kind" keys.
             },
             payload={"supervisor_pid": os.getpid()},  # alive: this test process
@@ -2359,8 +2609,10 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
-        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
-             patch.object(daemon_mod, "_popen") as popen:
+        with (
+            patch("nexus.daemon.service_registry.process_state", return_value="S"),
+            patch.object(daemon_mod, "_popen") as popen,
+        ):
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
         assert rec is not None and rec.endpoint.get("port") == 18099
@@ -2370,7 +2622,10 @@ class TestEnsureStorageSupervisor:
         from nexus.daemon.service_registry import ServiceRegistry
 
         scope = str(os.getuid())
-        assert ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope) is None
+        assert (
+            ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope)
+            is None
+        )
 
         def _popen_publishes(*_a, **_k):
             # The detached --foreground supervisor would publish the lease; model
@@ -2378,8 +2633,10 @@ class TestEnsureStorageSupervisor:
             self._publish_fresh_lease(config_dir, port=18092)
             return MagicMock()
 
-        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen,
+        ):
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_called_once()
         assert rec is not None and rec.endpoint.get("port") == 18092
@@ -2394,8 +2651,10 @@ class TestEnsureStorageSupervisor:
         ticks = iter([0.0, 10_000.0, 10_000.0])
         monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: next(ticks))
         monkeypatch.setattr(daemon_mod.time, "sleep", lambda _s: None)
-        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod, "_popen", return_value=MagicMock()):
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", return_value=MagicMock()),
+        ):
             with pytest.raises(StorageServiceStartError):
                 daemon_mod.ensure_storage_supervisor(config_dir)
 
@@ -2416,7 +2675,10 @@ class TestEnsureStorageSupervisor:
         # nexus-o8dil.21 — see the zombie sibling test below for why.
         self._publish_fresh_lease(config_dir, port=18093)
         scope = str(os.getuid())
-        assert ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope) is not None
+        assert (
+            ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope)
+            is not None
+        )
 
         def _popen_publishes(*_a, **_k):
             self._publish_fresh_lease(config_dir, port=18094)
@@ -2427,9 +2689,12 @@ class TestEnsureStorageSupervisor:
         # service_registry.pid_running directly -- patching the storage-tier
         # re-export (ssd_mod._pid_is_running) no longer intercepts it.
         from nexus.daemon import service_registry as sr_mod
-        with patch.object(sr_mod, "pid_running", return_value=False), \
-             patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
+
+        with (
+            patch.object(sr_mod, "pid_running", return_value=False),
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen,
+        ):
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         popen.assert_called_once()  # dead lease must trigger a re-spawn
@@ -2472,12 +2737,18 @@ class TestEnsureStorageSupervisor:
             assert process_state(proc.pid) == "Z", "fixture must be a zombie"
 
             registry = ServiceRegistry(
-                dir=config_dir, tier="storage_service", clock=time.time,
+                dir=config_dir,
+                tier="storage_service",
+                clock=time.time,
             )
             ServiceSupervisor(
-                registry, str(os.getuid()), version="0.0.0",
+                registry,
+                str(os.getuid()),
+                version="0.0.0",
                 endpoint_provider=lambda: {
-                    "host": "127.0.0.1", "port": 18096, "pid": proc.pid,
+                    "host": "127.0.0.1",
+                    "port": 18096,
+                    "pid": proc.pid,
                     "token": "tok",
                 },
                 payload={"supervisor_pid": proc.pid},
@@ -2493,11 +2764,15 @@ class TestEnsureStorageSupervisor:
             # global Popen mock would break that real probe — which is the
             # thing under test here (nexus-o8dil.21).
             popen = MagicMock(side_effect=_popen_publishes)
-            with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-                 patch.object(daemon_mod, "_popen", popen):
+            with (
+                patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+                patch.object(daemon_mod, "_popen", popen),
+            ):
                 rec = daemon_mod.ensure_storage_supervisor(config_dir)
         finally:
-            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+            with contextlib.suppress(
+                ChildProcessError, OSError, subprocess.TimeoutExpired
+            ):
                 proc.wait(timeout=5)
 
         # A zombie supervisor is a CRASHED supervisor: its fresh lease must be
@@ -2505,9 +2780,7 @@ class TestEnsureStorageSupervisor:
         popen.assert_called_once()
         assert rec is not None and rec.endpoint.get("port") == 18097
 
-    def test_absent_supervisor_pid_trusts_ttl_freshness(
-        self, config_dir: Path
-    ) -> None:
+    def test_absent_supervisor_pid_trusts_ttl_freshness(self, config_dir: Path) -> None:
         """A lease WITHOUT a supervisor_pid (legacy/non-supervised) must fall
         through to the existing TTL-freshness short-circuit — no spurious
         re-spawn — even when the liveness probe would report dead."""
@@ -2522,8 +2795,10 @@ class TestEnsureStorageSupervisor:
         sup._service_port = 18095
         sup._publish(18095)
 
-        with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
-             patch.object(daemon_mod, "_popen") as popen:
+        with (
+            patch.object(ssd_mod, "_pid_is_running", return_value=False),
+            patch.object(daemon_mod, "_popen") as popen,
+        ):
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         popen.assert_not_called()  # absent supervisor_pid → trust TTL, no re-spawn
@@ -2546,8 +2821,10 @@ class TestEnsureStorageSupervisor:
         self._publish_fresh_lease(config_dir)
         assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
 
-        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
-             patch.object(daemon_mod, "_popen") as popen:
+        with (
+            patch("nexus.daemon.service_registry.process_state", return_value="S"),
+            patch.object(daemon_mod, "_popen") as popen,
+        ):
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         popen.assert_not_called()  # the short-circuit branch under test
@@ -2570,15 +2847,19 @@ class TestEnsureStorageSupervisor:
             self._publish_fresh_lease(config_dir, port=18098)
             return MagicMock()
 
-        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes):
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", side_effect=_popen_publishes),
+        ):
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         assert rec is not None and rec.endpoint.get("port") == 18098
         assert se.has_ever_resolved_lease() is True
 
     def test_spawn_argv_carries_config_dir_even_when_it_came_from_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """nexus-cd1k0.19 review round 2, finding 4: whatever combination of
         NEXUS_CONFIG_DIR / default resolved this call's config_dir, the
@@ -2603,9 +2884,11 @@ class TestEnsureStorageSupervisor:
             captured["argv"] = argv
             return MagicMock()
 
-        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod, "_popen", side_effect=_fake_popen), \
-             patch.object(daemon_mod.time, "monotonic", side_effect=[0.0, 100.0]):
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", side_effect=_fake_popen),
+            patch.object(daemon_mod.time, "monotonic", side_effect=[0.0, 100.0]),
+        ):
             with pytest.raises(StorageServiceStartError):
                 # No lease is ever published (the fake Popen does nothing
                 # real) -- this call is only here to observe the spawn argv,
@@ -2614,7 +2897,9 @@ class TestEnsureStorageSupervisor:
 
         assert "--config-dir" in captured["argv"], captured["argv"]
         idx = captured["argv"].index("--config-dir")
-        assert captured["argv"][idx + 1] == str(env_scoped_dir.resolve()), captured["argv"]
+        assert captured["argv"][idx + 1] == str(env_scoped_dir.resolve()), captured[
+            "argv"
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -2660,10 +2945,15 @@ class TestLeaseTtlAndHeapBound:
         just the constants.
         """
         import nexus.daemon.storage_service_daemon as ssd_mod
-        from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, ttl_for_tier
+        from nexus.daemon.service_registry import (
+            DEFAULT_HEARTBEAT_INTERVAL,
+            ttl_for_tier,
+        )
 
         worst_tick = (
-            ssd_mod._HEALTH_TIMEOUT + ssd_mod._LIVEZ_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+            ssd_mod._HEALTH_TIMEOUT
+            + ssd_mod._LIVEZ_TIMEOUT
+            + DEFAULT_HEARTBEAT_INTERVAL
         )
         assert ttl_for_tier("storage_service") >= 3 * worst_tick
 
@@ -2676,10 +2966,15 @@ class TestLeaseTtlAndHeapBound:
         /health timeout is no longer evidence of a wedge.
         """
         import nexus.daemon.storage_service_daemon as ssd_mod
-        from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, ttl_for_tier
+        from nexus.daemon.service_registry import (
+            DEFAULT_HEARTBEAT_INTERVAL,
+            ttl_for_tier,
+        )
 
         worst_tick = (
-            ssd_mod._HEALTH_TIMEOUT + ssd_mod._LIVEZ_TIMEOUT + DEFAULT_HEARTBEAT_INTERVAL
+            ssd_mod._HEALTH_TIMEOUT
+            + ssd_mod._LIVEZ_TIMEOUT
+            + DEFAULT_HEARTBEAT_INTERVAL
         )
         ttl = ttl_for_tier("storage_service")
         assert ttl > 3 * worst_tick, (
@@ -2708,7 +3003,11 @@ class TestLeaseTtlAndHeapBound:
         # args).
         assert captured["argv"][0] == str(sup._binary_path)
         assert captured["argv"][1] == "-Duser.timezone=UTC"
-        assert captured["argv"][2] == "-Xmx1g"
+        # nexus-ijue9.7: the IPv4 stack flag sits between the timezone pin
+        # and -Xmx. Both are runtime options the native image consumes
+        # before app args, so their relative order is fixed, not incidental.
+        assert captured["argv"][2] == "-Djava.net.preferIPv4Stack=true"
+        assert captured["argv"][3] == "-Xmx1g"
 
     def test_spawn_service_rejects_malformed_max_heap(
         self, config_dir: Path, clock: _FakeClock, monkeypatch
@@ -2721,8 +3020,11 @@ class TestLeaseTtlAndHeapBound:
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18088)
         # A malformed heap value fails loud BEFORE spawning (no /health-timeout
         # misdiagnosis); Popen is never reached.
-        monkeypatch.setattr(ssd_mod, "_popen",
-                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("Popen reached")))
+        monkeypatch.setattr(
+            ssd_mod,
+            "_popen",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("Popen reached")),
+        )
         with pytest.raises(StorageServiceStartError, match="NX_SERVICE_MAX_HEAP"):
             sup._spawn_service()
 
@@ -2837,7 +3139,9 @@ class TestPdeathsigOrphanPrevention:
             # parent exits here → the child must receive SIGKILL via PR_SET_PDEATHSIG
             """
         )
-        parent = _sp.Popen([_sys.executable, "-c", parent_src], stdout=_sp.PIPE, text=True)
+        parent = _sp.Popen(
+            [_sys.executable, "-c", parent_src], stdout=_sp.PIPE, text=True
+        )
         child_pid = int(parent.stdout.readline().strip())
         parent.wait(timeout=10)
         # give the kernel a moment to deliver the parent-death signal
@@ -2888,8 +3192,10 @@ class TestSupervisorSelfManagesPgAtBoot:
         stub_supervisor = MagicMock()
         stub_supervisor.record.generation = 1
         sup._supervisor = stub_supervisor
-        with patch.object(sup, "_wait_for_service_ready"), \
-             patch.object(sup, "_publish"):
+        with (
+            patch.object(sup, "_wait_for_service_ready"),
+            patch.object(sup, "_publish"),
+        ):
             sup._start_locked()
 
         assert order == ["ensure_pg", "spawn_service"], (
@@ -2992,8 +3298,10 @@ class TestRdr175MvvSingleSupervisor:
                 "a second service (no double-spawn)"
             )
 
-        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
-             patch.object(second, "_ensure_pg_running") as ensure_pg:
+        with (
+            patch.object(second, "_spawn_service", side_effect=_must_not_spawn),
+            patch.object(second, "_ensure_pg_running") as ensure_pg,
+        ):
             payload = second.start()
 
         ensure_pg.assert_not_called()  # short-circuit precedes PG bring-up
@@ -3004,7 +3312,10 @@ class TestRdr175MvvSingleSupervisor:
         assert payload["port"] == 18101, "second start must return the live endpoint"
 
     def test_second_start_raises_on_explicit_artifact_mismatch(
-        self, config_dir: Path, clock: _FakeClock, tmp_path: Path,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """nexus-4e96a mismatch arm: an explicit NEXUS_SERVICE_BIN request
@@ -3037,8 +3348,10 @@ class TestRdr175MvvSingleSupervisor:
                 "an explicit artifact mismatch must raise BEFORE any spawn attempt"
             )
 
-        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
-             patch.object(second, "_ensure_pg_running") as ensure_pg:
+        with (
+            patch.object(second, "_spawn_service", side_effect=_must_not_spawn),
+            patch.object(second, "_ensure_pg_running") as ensure_pg,
+        ):
             with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
                 second.start()
 
@@ -3081,12 +3394,16 @@ class TestRdr175MvvSingleSupervisor:
         second = _make_supervisor(config_dir, clock, supervised=True)
 
         def _must_not_spawn() -> tuple[Any, int]:
-            raise AssertionError("coexisting supervisor must NOT spawn a second service")
+            raise AssertionError(
+                "coexisting supervisor must NOT spawn a second service"
+            )
 
         stop = threading.Event()
-        with patch.object(second, "_spawn_service", side_effect=_must_not_spawn), \
-             patch.object(second, "_ensure_pg_running"), \
-             patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
+        with (
+            patch.object(second, "_spawn_service", side_effect=_must_not_spawn),
+            patch.object(second, "_ensure_pg_running"),
+            patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0),
+        ):
             code = ssd._supervise_until_stopped(second, stop, lambda: None)
 
         assert code == 0, (
@@ -3133,16 +3450,20 @@ class TestRdr175MvvSingleSupervisor:
             ensure_pg_calls.append(1)  # restart PG in place; do NOT touch _proc
 
         pid_before = sup._proc.pid
-        with patch.object(sup, "start"), \
-             patch.object(sup, "heartbeat_once", side_effect=_scripted_heartbeat), \
-             patch.object(sup, "_ensure_pg_running", side_effect=_record_ensure_pg), \
-             patch.object(sup, "stop"), \
-             patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
+        with (
+            patch.object(sup, "start"),
+            patch.object(sup, "heartbeat_once", side_effect=_scripted_heartbeat),
+            patch.object(sup, "_ensure_pg_running", side_effect=_record_ensure_pg),
+            patch.object(sup, "stop"),
+            patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0),
+        ):
             code = ssd._supervise_until_stopped(sup, stop, lambda: None)
 
         assert code == 0, "PG-only death must NOT exit the supervisor"
         assert ensure_pg_calls == [1], "PG restarted in place exactly once"
-        assert sup._proc is fake_proc, "Java process must NOT be bounced for a PG-only restart"
+        assert sup._proc is fake_proc, (
+            "Java process must NOT be bounced for a PG-only restart"
+        )
         assert sup._proc.pid == pid_before
 
 
@@ -3175,13 +3496,18 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
                 "fixture must produce a real unreaped zombie"
             )
             _write_stale_or_fresh_lease(
-                config_dir, supervisor_pid=proc.pid, engine_pid=None,
-                age_s=1.0, ttl=15.0,
+                config_dir,
+                supervisor_pid=proc.pid,
+                engine_pid=None,
+                age_s=1.0,
+                ttl=15.0,
             )
             with patch("time.sleep") as mock_sleep:
                 outcome = stop_storage_service(config_dir=config_dir)
         finally:
-            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+            with contextlib.suppress(
+                ChildProcessError, OSError, subprocess.TimeoutExpired
+            ):
                 proc.wait(timeout=5)
 
         # nexus-scc9t: an already-dead (zombie) supervisor must not hold
@@ -3205,14 +3531,18 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
         ps_reap_sleep_cap_s = 0.05
         intervals = [
             float(v)
-            for v in re.findall(r"time\.sleep\(([0-9.]+)\)", inspect.getsource(stop_storage_service))
+            for v in re.findall(
+                r"time\.sleep\(([0-9.]+)\)", inspect.getsource(stop_storage_service)
+            )
         ]
         assert intervals and min(intervals) > ps_reap_sleep_cap_s, (
             f"stop_storage_service sleep intervals {intervals} must all exceed the "
             f"{ps_reap_sleep_cap_s}s ps-reap cap this filter relies on"
         )
         real_polls = [
-            c for c in mock_sleep.call_args_list if c.args and c.args[0] > ps_reap_sleep_cap_s
+            c
+            for c in mock_sleep.call_args_list
+            if c.args and c.args[0] > ps_reap_sleep_cap_s
         ]
         # At most one real poll, as in the rdr149 zombie test: pid_running()
         # treats an UNKNOWN process_state() as running, and a ps snapshot can
@@ -3223,9 +3553,7 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
             f"the stop loop kept polling a zombie supervisor: {real_polls} "
             f"(all calls: {mock_sleep.call_args_list})"
         )
-        assert outcome.stubborn == (), (
-            f"a corpse is not a stubborn survivor: {outcome}"
-        )
+        assert outcome.stubborn == (), f"a corpse is not a stubborn survivor: {outcome}"
 
 
 class TestStopServiceReapsOwnChild:
@@ -3243,7 +3571,9 @@ class TestStopServiceReapsOwnChild:
     """
 
     def test_child_that_exits_promptly_is_stopped_well_under_grace(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         sup = _make_supervisor(config_dir, clock)
         proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
@@ -3267,7 +3597,9 @@ class TestStopServiceReapsOwnChild:
         )
 
     def test_child_that_ignores_sigterm_is_killed_and_reaped_within_bound(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         """The SIGKILL escalation path still works, and still reaps —
         this is not a regression test for the escalation itself, only
@@ -3280,7 +3612,8 @@ class TestStopServiceReapsOwnChild:
         sup = _make_supervisor(config_dir, clock)
         proc = subprocess.Popen(  # noqa: S603
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 "import signal, time\n"
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                 "time.sleep(60)\n",
@@ -3306,7 +3639,9 @@ class TestKillAfterReadinessFailureReapsOwnChild:
     via the caller) owns and holds directly."""
 
     def test_child_that_exits_promptly_is_killed_well_under_grace(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         sup = _make_supervisor(config_dir, clock)
         proc = subprocess.Popen(  # noqa: S603
@@ -3338,7 +3673,9 @@ class TestFencedSupervisorStopsAndStandsDown:
     would produce on a lease-miss respawn."""
 
     def test_fenced_supervisor_reaps_engine_exits_0_and_leaves_successor_untouched(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         import threading
 
@@ -3358,10 +3695,14 @@ class TestFencedSupervisorStopsAndStandsDown:
         # out past its TTL while A was still alive).
         scope = str(os.getuid())
         successor_registry = ServiceRegistry(
-            dir=config_dir, tier="storage_service", clock=clock,
+            dir=config_dir,
+            tier="storage_service",
+            clock=clock,
         )
         successor = ServiceSupervisor(
-            successor_registry, scope, version="1.0.0",
+            successor_registry,
+            scope,
+            version="1.0.0",
             endpoint_provider=lambda: {"pid": 999999, "host": "127.0.0.1", "port": 0},
         )
         successor.publish_once()
@@ -3369,9 +3710,11 @@ class TestFencedSupervisorStopsAndStandsDown:
         successor_bytes_before = lease_path.read_bytes()
 
         stop_requested = threading.Event()
-        with patch.object(sup, "start"), \
-             patch.object(sup, "_probe_service_health", return_value=HealthProbe.OK), \
-             patch.object(sup, "_pg_reachable", return_value=True):
+        with (
+            patch.object(sup, "start"),
+            patch.object(sup, "_probe_service_health", return_value=HealthProbe.OK),
+            patch.object(sup, "_pg_reachable", return_value=True),
+        ):
             exit_code = ssd._supervise_until_stopped(sup, stop_requested, lambda: None)
 
         assert exit_code == 0, (
@@ -3472,11 +3815,17 @@ class TestStaleChangelogLockCleanup:
     """_release_stale_changelog_lock / _migration_pg_probe: guarded to the
     bundled cluster, best-effort, never block a service start."""
 
-    def test_cleanup_skipped_without_pg_data(self, config_dir: Path, clock: _FakeClock) -> None:
+    def test_cleanup_skipped_without_pg_data(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
         creds = {
-            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
-            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
-            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": "15432",
+            "NX_DB_URL": "jdbc:...",
+            "NX_DB_USER": "svc",
+            "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...",
+            "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass",
+            "PG_PORT": "15432",
             "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
             # no PG_DATA: managed/BYO Postgres
         }
@@ -3487,20 +3836,28 @@ class TestStaleChangelogLockCleanup:
             sup._release_stale_changelog_lock(reason="test")
             discover.assert_not_called()
 
-    def test_pg_probe_unavailable_without_pg_data(self, config_dir: Path, clock: _FakeClock) -> None:
+    def test_pg_probe_unavailable_without_pg_data(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
         import nexus.daemon.readiness as readiness
 
         creds = {
-            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
-            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
-            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": "15432",
+            "NX_DB_URL": "jdbc:...",
+            "NX_DB_USER": "svc",
+            "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...",
+            "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass",
+            "PG_PORT": "15432",
             "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
         }
         sup = _make_supervisor(config_dir, clock, creds=creds)
         assert sup._migration_pg_probe() is readiness.PgActivity.UNAVAILABLE
 
     def test_pg_probe_unwinds_promptly_when_psql_hangs(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         """nexus-cd1k0.19 review round 2, finding 5: _run_psql had NO
         timeout, so an unresponsive local psql during MIGRATING could
@@ -3513,18 +3870,23 @@ class TestStaleChangelogLockCleanup:
         import stat
 
         import nexus.daemon.readiness as readiness
-        from nexus.daemon.storage_service_daemon import _PG_PROBE_TIMEOUT, _SUPERVISOR_STOP_GRACE
+        from nexus.daemon.storage_service_daemon import (
+            _PG_PROBE_TIMEOUT,
+            _SUPERVISOR_STOP_GRACE,
+        )
 
         fake_psql = config_dir / "fake-psql-that-hangs.sh"
-        fake_psql.write_text(
-            "#!/bin/sh\nsleep 60\necho 't'\n"
-        )
+        fake_psql.write_text("#!/bin/sh\nsleep 60\necho 't'\n")
         fake_psql.chmod(fake_psql.stat().st_mode | stat.S_IEXEC)
 
         creds = {
-            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
-            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
-            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": "15432",
+            "NX_DB_URL": "jdbc:...",
+            "NX_DB_USER": "svc",
+            "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...",
+            "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass",
+            "PG_PORT": "15432",
             "PG_DATA": str(config_dir / "pgdata"),
             "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
         }
@@ -3532,7 +3894,9 @@ class TestStaleChangelogLockCleanup:
 
         fake_bins = SimpleNamespace(psql=fake_psql)
         t0 = time.monotonic()
-        with patch("nexus.db.pg_provision.discover_pg_binaries", return_value=fake_bins):
+        with patch(
+            "nexus.db.pg_provision.discover_pg_binaries", return_value=fake_bins
+        ):
             result = sup._migration_pg_probe()
         elapsed = time.monotonic() - t0
 
@@ -3576,8 +3940,12 @@ class TestStaleChangelogLockCleanup:
 
         sup = _make_supervisor(config_dir, clock)  # default scan: no live engine
 
-        with patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.EXECUTING), \
-             patch("nexus.db.pg_provision.discover_pg_binaries") as discover:
+        with (
+            patch.object(
+                sup, "_migration_pg_probe", return_value=readiness.PgActivity.EXECUTING
+            ),
+            patch("nexus.db.pg_provision.discover_pg_binaries") as discover,
+        ):
             sup._release_stale_changelog_lock(reason="test")
             discover.assert_not_called()
 
@@ -3587,6 +3955,7 @@ class TestStaleChangelogLockCleanup:
         """A liveness-scan failure is NOT evidence of 'no live engine' — it
         must degrade to skipping cleanup, not to proceeding as if the scan
         had come back clean."""
+
         def failing_scan(cd: Path, bp: Path) -> list[tuple[int, str]]:
             raise RuntimeError("process table unreadable")
 
@@ -3606,15 +3975,24 @@ class TestStaleChangelogLockCleanup:
         import nexus.daemon.readiness as readiness
         import nexus.daemon.storage_service_daemon as ssd_mod
 
-        def fake_run_psql(psql_bin, host, port, dbname, user, password, sql, *, psql_runner=None):
+        def fake_run_psql(
+            psql_bin, host, port, dbname, user, password, sql, *, psql_runner=None
+        ):
             import subprocess as _sp
+
             if "SELECT lockedby, lockgranted" in sql:
                 return _sp.CompletedProcess(
-                    args=[], returncode=0, stdout="svc@host|2026-08-29 12:00:00\n", stderr="",
+                    args=[],
+                    returncode=0,
+                    stdout="svc@host|2026-08-29 12:00:00\n",
+                    stderr="",
                 )
             if "pg_terminate_backend" in sql:
                 return _sp.CompletedProcess(
-                    args=[], returncode=0, stdout="4242|t\n4343|t\n", stderr="",
+                    args=[],
+                    returncode=0,
+                    stdout="4242|t\n4343|t\n",
+                    stderr="",
                 )
             if "UPDATE databasechangeloglock" in sql:
                 return _sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
@@ -3622,16 +4000,22 @@ class TestStaleChangelogLockCleanup:
 
         sup = _make_supervisor(config_dir, clock)  # default: no live engine
 
-        with patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE), \
-             patch("nexus.db.pg_provision.discover_pg_binaries") as discover, \
-             patch("nexus.health._run_psql", side_effect=fake_run_psql), \
-             patch.object(ssd_mod, "_log") as log_mock:
+        with (
+            patch.object(
+                sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE
+            ),
+            patch("nexus.db.pg_provision.discover_pg_binaries") as discover,
+            patch("nexus.health._run_psql", side_effect=fake_run_psql),
+            patch.object(ssd_mod, "_log") as log_mock,
+        ):
             discover.return_value.psql = Path("/fake/psql")
             sup._release_stale_changelog_lock(reason="test_reason")
 
         released_calls = [
-            call for call in log_mock.warning.call_args_list
-            if call.args and call.args[0] == "storage_service_stale_changelog_lock_released"
+            call
+            for call in log_mock.warning.call_args_list
+            if call.args
+            and call.args[0] == "storage_service_stale_changelog_lock_released"
         ]
         assert len(released_calls) == 1
         assert released_calls[0].kwargs["terminated_pids"] == [4242, 4343]
@@ -3661,8 +4045,12 @@ class TestWaitForServiceReadyMigrationAware:
     ) -> None:
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=51001, returncode=7)
-        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
-             patch.object(sup, "_release_stale_changelog_lock"):
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN
+            ),
+            patch.object(sup, "_release_stale_changelog_lock"),
+        ):
             with pytest.raises(StorageServiceStartError, match="exited with code 7"):
                 sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)
 
@@ -3677,11 +4065,16 @@ class TestWaitForServiceReadyMigrationAware:
         fake_proc = _FakeProc(pid=51001, returncode=137)
 
         cleanup_calls: list[str] = []
-        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
-             patch.object(
-                 sup, "_release_stale_changelog_lock",
-                 side_effect=lambda reason: cleanup_calls.append(reason),
-             ):
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN
+            ),
+            patch.object(
+                sup,
+                "_release_stale_changelog_lock",
+                side_effect=lambda reason: cleanup_calls.append(reason),
+            ),
+        ):
             with pytest.raises(StorageServiceStartError, match="exited with code 137"):
                 sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)
 
@@ -3695,8 +4088,12 @@ class TestWaitForServiceReadyMigrationAware:
         it)."""
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=51002)
-        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
-             patch.object(sup, "_release_stale_changelog_lock"):
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN
+            ),
+            patch.object(sup, "_release_stale_changelog_lock"),
+        ):
             with pytest.raises(
                 StorageServiceStartError,
                 match=r"did not become healthy .* within 1s",
@@ -3723,13 +4120,20 @@ class TestWaitForServiceReadyMigrationAware:
         # executing, so the 600s-equivalent (monkeypatched to 0.2s) stall
         # bound applies. UNAVAILABLE would widen to the 3600s log-only bound
         # instead — not the branch this test targets.
-        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
-             patch.object(sup, "_build_log_tailer", return_value=fake_log_reader), \
-             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE), \
-             patch.object(
-                 sup, "_release_stale_changelog_lock",
-                 side_effect=lambda reason: cleanup_calls.append(reason),
-             ):
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN
+            ),
+            patch.object(sup, "_build_log_tailer", return_value=fake_log_reader),
+            patch.object(
+                sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE
+            ),
+            patch.object(
+                sup,
+                "_release_stale_changelog_lock",
+                side_effect=lambda reason: cleanup_calls.append(reason),
+            ),
+        ):
             with pytest.raises(StorageServiceStartError, match="migration stalled"):
                 sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
 
@@ -3756,25 +4160,33 @@ class TestWaitForServiceReadyMigrationAware:
 
         # Every tick reports 'Waiting for changelog lock' — a sustained,
         # not just one-off, observation — right up until health turns OK.
-        log_batches = iter([
-            ["Waiting for changelog lock"],
-            ["Waiting for changelog lock"],
-            ["Waiting for changelog lock"],
-        ])
+        log_batches = iter(
+            [
+                ["Waiting for changelog lock"],
+                ["Waiting for changelog lock"],
+                ["Waiting for changelog lock"],
+            ]
+        )
 
         def fake_log_reader() -> list[str]:
             return next(log_batches, [])
 
-        health_answers = iter([HealthProbe.UNKNOWN, HealthProbe.UNKNOWN, HealthProbe.OK])
+        health_answers = iter(
+            [HealthProbe.UNKNOWN, HealthProbe.UNKNOWN, HealthProbe.OK]
+        )
 
         def fake_health(port: int | None = None) -> HealthProbe:
             return next(health_answers, HealthProbe.OK)
 
-        with patch.object(sup, "_probe_service_health", side_effect=fake_health), \
-             patch.object(sup, "_build_log_tailer", return_value=fake_log_reader), \
-             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE), \
-             patch.object(sup, "_release_stale_changelog_lock") as cleanup, \
-             patch("time.sleep"):
+        with (
+            patch.object(sup, "_probe_service_health", side_effect=fake_health),
+            patch.object(sup, "_build_log_tailer", return_value=fake_log_reader),
+            patch.object(
+                sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE
+            ),
+            patch.object(sup, "_release_stale_changelog_lock") as cleanup,
+            patch("time.sleep"),
+        ):
             sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
 
         cleanup.assert_not_called()
@@ -3792,7 +4204,9 @@ class TestWaitForServiceReadyRespondsToStopRequested:
     not merely that a mocked probe eventually notices."""
 
     def test_stop_requested_mid_wait_kills_the_proc_and_raises_stop_requested(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         import threading
 
@@ -3812,10 +4226,18 @@ class TestWaitForServiceReadyRespondsToStopRequested:
         threading.Thread(target=stop_soon, daemon=True).start()
 
         t0 = time.monotonic()
-        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNREADY), \
-             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE):
+        with (
+            patch.object(
+                sup, "_probe_service_health", return_value=HealthProbe.UNREADY
+            ),
+            patch.object(
+                sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE
+            ),
+        ):
             with pytest.raises(readiness.ReadinessStopRequestedError):
-                sup._wait_for_service_ready(proc, 19999, timeout=600.0, stop_requested=stop_requested)
+                sup._wait_for_service_ready(
+                    proc, 19999, timeout=600.0, stop_requested=stop_requested
+                )
         elapsed = time.monotonic() - t0
 
         assert elapsed < 5.0, (
@@ -3830,7 +4252,9 @@ class TestWaitForServiceReadyRespondsToStopRequested:
         assert rc is not None
 
     def test_no_stop_requested_is_unaffected(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         """stop_requested=None (the default) must behave exactly as
         before — the happy-path healthy-boot case is unaffected."""
@@ -3840,7 +4264,9 @@ class TestWaitForServiceReadyRespondsToStopRequested:
             sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)  # must not raise
 
     def test_full_supervise_loop_stops_cleanly_mid_slow_start(
-        self, config_dir: Path, clock: _FakeClock,
+        self,
+        config_dir: Path,
+        clock: _FakeClock,
     ) -> None:
         """End-to-end through _supervise_until_stopped: exit code 0, not a
         crash, and the run loop's own try/finally tail (nexus-cd1k0.18)
@@ -3859,7 +4285,9 @@ class TestWaitForServiceReadyRespondsToStopRequested:
 
         def fake_start_locked(self, *, stop_requested=None):  # noqa: ANN001
             self._proc = proc
-            self._wait_for_service_ready(proc, 19999, timeout=600.0, stop_requested=stop_requested)
+            self._wait_for_service_ready(
+                proc, 19999, timeout=600.0, stop_requested=stop_requested
+            )
             raise AssertionError("readiness never succeeds in this test")
 
         def stop_soon() -> None:
@@ -3869,9 +4297,15 @@ class TestWaitForServiceReadyRespondsToStopRequested:
         threading.Thread(target=stop_soon, daemon=True).start()
 
         t0 = time.monotonic()
-        with patch.object(type(sup), "_start_locked", fake_start_locked), \
-             patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNREADY), \
-             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE):
+        with (
+            patch.object(type(sup), "_start_locked", fake_start_locked),
+            patch.object(
+                sup, "_probe_service_health", return_value=HealthProbe.UNREADY
+            ),
+            patch.object(
+                sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE
+            ),
+        ):
             exit_code = ssd._supervise_until_stopped(sup, stop_requested, lambda: None)
         elapsed = time.monotonic() - t0
 
@@ -3911,7 +4345,10 @@ class TestStartLockedReleasesStaleLockBeforeSpawn:
         stub_supervisor.record.generation = 1
         sup._supervisor = stub_supervisor
 
-        with patch.object(sup, "_wait_for_service_ready"), patch.object(sup, "_publish"):
+        with (
+            patch.object(sup, "_wait_for_service_ready"),
+            patch.object(sup, "_publish"),
+        ):
             sup._start_locked()
 
         assert order == ["ensure_pg", "release_lock:pre_spawn", "spawn_service"]

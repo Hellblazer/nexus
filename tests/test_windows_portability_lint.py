@@ -27,6 +27,7 @@ import nested inside a function, a ``try``/``except ImportError``, or an
 ``if sys.platform`` branch is a considered choice and passes — that is
 exactly what ``_locking.py`` itself does.
 """
+
 from __future__ import annotations
 
 import ast
@@ -131,3 +132,77 @@ def test_allowlist_entry_still_exists() -> None:
             f"_ALLOWED names {rel}, which no longer exists; drop the entry "
             "rather than leaving a dead exemption"
         )
+
+
+#: The one module allowed to touch ``fcntl`` at ALL, at any scope.
+_FCNTL_ALLOWED: frozenset[str] = frozenset({"_locking.py"})
+
+
+def _fcntl_references(source: str) -> list[int]:
+    """Line numbers of any ``import fcntl`` or ``fcntl.<attr>``, at ANY scope."""
+    hits: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            hits.extend(
+                node.lineno for a in node.names if a.name.split(".")[0] == "fcntl"
+            )
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".")[0] == "fcntl"
+        ):
+            hits.append(node.lineno)
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "fcntl"
+        ):
+            hits.append(node.lineno)
+    return sorted(set(hits))
+
+
+def test_no_fcntl_outside_the_locking_shim() -> None:
+    """``fcntl`` is reachable only through :mod:`nexus._locking`.
+
+    THIS IS A DIFFERENT FAILURE CLASS FROM THE MODULE-SCOPE TEST ABOVE, and
+    deliberately a separate test rather than a widening of it. That one scans
+    ``tree.body`` because a MODULE-scope POSIX import kills CLI import on
+    Windows outright, and its docstring correctly calls a function-local
+    import "a considered choice".
+
+    For ``fcntl`` specifically the shim makes that choice unnecessary, and a
+    FUNCTION-level `import fcntl` fails at call time on the one path that
+    needs the lock — passing the module-scope test by design. Two sites did
+    exactly that (nexus-ijue9.9, RDR-218 Phase 3):
+    ``daemon/storage_service_daemon.py`` deferred the import into the spawn
+    lock, and ``commands/daemon.py`` into the election lock. Both are now
+    routed through ``_locking.lock_fd``/``unlock_fd``.
+
+    Starts at ZERO offenders, so it is a pure ratchet with nothing to drain.
+    """
+    offenders = {
+        p.relative_to(SRC_ROOT).as_posix(): lines
+        for p in _py_files()
+        if p.name not in _FCNTL_ALLOWED
+        and (lines := _fcntl_references(p.read_text(encoding="utf-8")))
+    }
+    assert not offenders, (
+        "fcntl is referenced outside nexus._locking:\n  "
+        + "\n  ".join(f"{path}:{lines}" for path, lines in sorted(offenders.items()))
+        + "\nUse nexus._locking (lock_fd/unlock_fd, lock_file/unlock_file, "
+        "acquire_directory_lock). Do NOT add a second platform branch beside it."
+    )
+
+
+def test_the_fcntl_scan_would_catch_a_function_level_import() -> None:
+    """Non-vacuity, and it pins the exact shape the other test cannot see.
+
+    A synthetic function-local ``import fcntl`` must be found. Without this,
+    a regression in :func:`_fcntl_references` would make the ratchet above
+    pass for the wrong reason, and it would pass *quietly* because its
+    correct answer is already the empty set.
+    """
+    source = "def f():\n    import fcntl\n    return fcntl.flock\n"
+    assert _fcntl_references(source) == [2, 3], (
+        "the scanner missed a function-level import fcntl and/or an fcntl. "
+        "attribute; the ratchet above is not watching what it claims to"
+    )

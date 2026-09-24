@@ -171,12 +171,39 @@ _build_lease_ts() {
 # rather than stale — see ACQUIRE-PATH ATOMICITY above.
 _BUILD_LEASE_POPULATE_GRACE_S="${_BUILD_LEASE_POPULATE_GRACE_S:-10}"
 
+# _build_lease_stat_mtime <path> — epoch mtime, BSD or GNU stat, dialect
+# detected ONCE so the wrong-dialect command is never actually invoked.
+#
+# nexus-7m6uc (release-battery finding, URGENT -- burned develop at
+# 635faefb3): a blind `stat -f %m PATH 2>/dev/null || stat -c %Y PATH
+# 2>/dev/null` is unsound. GNU's `-f` is a no-argument "filesystem
+# status" flag, not BSD's "-f FORMAT", so `%m` becomes a bogus second
+# positional FILE argument; GNU stat still prints its full
+# human-readable dump for the real path before erroring on the bogus
+# one, and `||` reacts only to the exit code -- the dump leaks into the
+# captured value alongside (or instead of) the real epoch, since a
+# command substitution captures whatever EITHER branch wrote to stdout
+# regardless of which one ultimately failed. Confirmed by direct repro
+# on GNU coreutils 9.7. Detecting the dialect once and calling ONLY the
+# matching form closes this for good. Deliberately NO python3 fallback
+# here (unlike tests/e2e/post-publish-dispatch-check.sh's fix for the
+# same bug): this file gates a bare Java/Maven build box on purpose --
+# see "NO T1 DEPENDENCY, BY DESIGN" above -- so it must not gain a
+# dependency a lean box might lack.
+_build_lease_stat_mtime() {
+    if stat --version >/dev/null 2>&1; then
+        stat -c %Y "$1" 2>/dev/null
+    else
+        stat -f %m "$1" 2>/dev/null
+    fi
+}
+
 # _build_lease_dir_age_s <dir> — seconds since the directory's mtime;
 # prints a large number when the mtime is unreadable (so the caller treats
 # it as old, i.e. reclaimable, never as freshly held forever).
 _build_lease_dir_age_s() {
     local dir="$1" mtime now
-    if mtime="$(stat -f %m "$dir" 2>/dev/null)" || mtime="$(stat -c %Y "$dir" 2>/dev/null)"; then
+    if mtime="$(_build_lease_stat_mtime "$dir")" && [[ -n "$mtime" ]]; then
         now="$(date +%s)"
         printf '%s\n' "$(( now - mtime ))"
     else

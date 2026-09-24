@@ -200,6 +200,28 @@ def test_split_large_section_keeps_all_of_an_oversized_part_with_overlap():
         assert len(chunk.text) <= budget
 
 
+def test_split_large_section_first_part_too_big_never_emits_header_only_chunk():
+    """nexus-cd1k0.16 finding (1): when a section's FIRST content part alone
+    does not fit alongside the header, the old flush gate (`if current_parts:`,
+    true even when current_parts holds only the header) emitted a
+    HEADER-ONLY chunk, then built the next chunk's overlap tail from that
+    empty body -- an empty element in current_parts that doubled the
+    blank-line join ("header\n\n\n\ncontent"). Neither should happen: the
+    header must wait for real content, and no chunk's join should carry a
+    quadruple newline."""
+    chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=3)
+    section = {
+        "level": 2, "header": "Big", "header_path": ["Big"],
+        "content_parts": [{"type": "text", "content": " ".join(_WORDS), "is_code_block": False}],
+    }
+    chunks = chunker._split_large_section(section, {}, start_index=0)
+    assert len(chunks) > 1
+    header_line = "## Big"
+    for c in chunks:
+        assert c.text.strip() != header_line, "a header-only chunk was emitted"
+        assert "\n\n\n\n" not in c.text, f"doubled blank-line join in {c.text[:60]!r}"
+
+
 def test_a_paragraph_longer_than_max_chars_is_stored_whole():
     """nexus-2s91y, through the public path at the default size. The
     paragraph is about three times max_chars; every sentence must appear
@@ -303,6 +325,62 @@ def test_split_large_section_overlap_no_header_duplication():
     chunks = chunker._split_large_section(section, {}, start_index=0)
     for chunk in chunks:
         assert chunk.text.count("## Hdr") <= 1
+
+
+def test_split_large_section_span_describes_the_overlap_text():
+    """nexus-yz7se: when overlap_chars > 0, _split_large_section prepends
+    overlap_tail (the previous chunk's own tail) to the next chunk, but used
+    to record chunk_start_char = the previous chunk's end -- an abutting
+    span that CONTRADICTS the text actually emitted, since the overlap_tail
+    characters really originate overlap_chars earlier in the source. Built
+    with real, monotonically-advancing end_char values on each part (the
+    shape _build_sections actually produces from real markdown text) rather
+    than the omitted-end_char shape the two tests above use, which never
+    exercises this because part.get("end_char", current_end_char) then never
+    advances at all.
+
+    Live rdr__1-1 rows show exactly this: rdr-159 spans (12148,12311),
+    (12311,14481) with the text genuinely duplicated 162 chars at the seam.
+    """
+    chunker = SemanticMarkdownChunker(chunk_size=50, chunk_overlap=10)
+    para = "Alpha bravo charlie delta echo foxtrot golf hotel. "
+    contents = [para + suffix for suffix in ("One.", "Two.", "Three.", "Four.", "Five.")]
+    header = "## Test"
+    cursor = len(header) + 2
+    content_parts = []
+    for c in contents:
+        cursor += len(c)
+        content_parts.append({"type": "text", "content": c, "is_code_block": False, "end_char": cursor})
+        cursor += 2
+    section = {
+        "level": 2, "header": "Test", "header_path": ["Test"],
+        "content_parts": content_parts, "start_char": 0, "end_char": cursor,
+    }
+    chunks = chunker._split_large_section(section, {}, start_index=0)
+    assert len(chunks) >= 2, "fixture must force a split, or this test pins nothing"
+
+    def body_only(text: str) -> str:
+        prefix = header + "\n\n"
+        return text[len(prefix):] if text.startswith(prefix) else text
+
+    for i in range(1, len(chunks)):
+        prev, cur = chunks[i - 1], chunks[i]
+        prev_end = prev.metadata["chunk_end_char"]
+        cur_start = cur.metadata["chunk_start_char"]
+        prev_body, cur_body = body_only(prev.text), body_only(cur.text)
+        dup_len = 0
+        for length in range(min(len(prev_body), len(cur_body)), 0, -1):
+            if prev_body[-length:] == cur_body[:length]:
+                dup_len = length
+                break
+        if dup_len == 0:
+            continue
+        assert cur_start < prev_end, (
+            f"chunk {i} genuinely duplicates {dup_len} chars from chunk {i - 1} at the "
+            f"seam, but the recorded span starts at {cur_start} while the previous "
+            f"chunk's recorded span ends at {prev_end} -- the span does not describe "
+            "the text that was actually emitted."
+        )
 
 
 # ── classify_section_type ────────────────────────────────────────────────────

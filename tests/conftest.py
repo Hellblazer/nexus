@@ -451,6 +451,7 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
+    global _this_session_conexus_version, _last_seen_version_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
     if _is_controller_or_serial:
         _gate_on_build_lease()
@@ -498,6 +499,8 @@ def pytest_sessionstart(session):
         # regardless of xdist mode.
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
+        _this_session_conexus_version = _resolve_this_session_conexus_version()
+        _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
     _warn_if_service_jar_is_stale()
 
 
@@ -694,19 +697,58 @@ def _split_appends_from_state(
     changed: list[_DiffEntry],
     before: dict[str, tuple[int, int]],
     after: dict[str, tuple[int, int]],
+    *,
+    last_seen_version_content: str | None = None,
+    last_seen_version_baseline_content: str | None = None,
+    this_session_version: str | None = None,
 ) -> tuple[list[_DiffEntry], list[_DiffEntry]]:
     """Split :func:`_diff_config_dir_snapshots` entries (``(verb, rel_path)``
     pairs) into (state_mutations, benign_appends), preserving each entry
     verbatim in whichever list it lands.
 
-    Two ways to be benign. (1) The path lives under a directory a live daemon
-    owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is ambient
-    output rather than suite behaviour. (2) Its basename is a known
-    append-only log, it existed before, and its size strictly GREW.
-    A log that SHRANK or was rewritten in place is a truncation, which is a
-    state mutation and still fails -- that is the case worth catching, and
-    size alone distinguishes it without reading content (which this guard
-    deliberately never does; the directory can hold a live user's real data).
+    Three ways to be benign. (1) The path lives under a directory a live
+    daemon owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is
+    ambient output rather than suite behaviour. (2) Its basename is a known
+    append-only log, it existed before, and its size strictly GREW. A log
+    that SHRANK or was rewritten in place is a truncation, which is a state
+    mutation and still fails -- that is the case worth catching, and size
+    alone distinguishes it without reading content (which this guard
+    deliberately never does for most files; the directory can hold a live
+    user's real data). (3) nexus-b2eaw, ``last_seen_version`` only -- its
+    baseline and post-session CONTENT are byte-identical, so nothing real
+    happened regardless of whose version it is (see below).
+
+    nexus-b2eaw round 2 (review finding, CRITICAL): an EARLIER version of
+    this function also exempted ``last_seen_version`` whenever its content
+    did not match *this_session_version*, reasoning that a different
+    version could only be a peer's write. That reasoning is FALSE: a test
+    IN THIS SESSION can spawn an INSTALLED ``nx`` from a stale/different
+    generation on PATH without isolating ``NEXUS_CONFIG_DIR`` -- exactly
+    the documented 2026-08-24 incident shape
+    (``tests/test_gate_fences_the_real_config_dir.py``: "last_seen_version
+    stamped 7.16.3 -- the INSTALLED tool's version, not the tree under
+    test"). Content alone cannot tell that shape apart from a genuine peer
+    process, because BOTH produce a version different from
+    *this_session_version*. Exempting on version mismatch was therefore a
+    FALSE NEGATIVE: it could silently swallow the exact defect this guard
+    exists to catch, with zero test coverage of that direction (all of
+    round 1's tests fed synthetic content that never exercised it).
+    ``this_session_version`` is kept as a parameter, but it now feeds ONLY
+    the diagnostic (:func:`_format_diff_entry`), never the classification --
+    a false POSITIVE with an honest message (old content, new content,
+    whether the new content matches this session's own version, left for a
+    human to triage) beats a silent false negative.
+
+    *last_seen_version_content* (post-session) and
+    *last_seen_version_baseline_content* (session-start) default to
+    ``None``, which keeps the PRE-nexus-b2eaw behaviour exactly
+    (``last_seen_version`` always classified as state) -- every caller that
+    does not pass them, including every existing unit test feeding this
+    function synthetic (mtime, size) data with no real file behind it, is
+    unchanged. When both are given and equal, the base (mtime_ns, size)
+    diff's MODIFIED verdict is overridden for this one entry: a stat touch
+    with unchanged bytes is not a real event, independent of anyone's
+    version.
     """
     state: list[_DiffEntry] = []
     appends: list[_DiffEntry] = []
@@ -730,6 +772,18 @@ def _split_appends_from_state(
             # Ambient daemon output: exempt from the state verdict in every
             # direction (create, grow, rotate), because rotation is a create
             # plus a shrink and a daemon may do either at any moment.
+            appends.append(entry)
+        elif (
+            name == "last_seen_version"
+            and last_seen_version_content is not None
+            and last_seen_version_baseline_content is not None
+            and last_seen_version_content == last_seen_version_baseline_content
+        ):
+            # Content-based: the mtime/size diff fired, but the bytes never
+            # changed -- no real event, regardless of anyone's version.
+            # Deliberately the ONLY content-driven exemption left: unlike a
+            # version-mismatch, "before == after byte-for-byte" cannot be
+            # produced by a genuine state mutation, in-session or not.
             appends.append(entry)
         elif name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
             appends.append(entry)
@@ -769,6 +823,77 @@ def _snapshot_real_config_dir() -> dict[str, tuple[int, int]]:
 
 
 _real_config_dir_baseline: dict[str, tuple[int, int]] = {}
+
+#: nexus-b2eaw: this pytest session's own conexus package version, resolved
+#: once at session start (mirrors ``_real_config_dir_baseline``'s
+#: set-once-at-start shape). ``last_seen_version`` is rewritten to the
+#: RUNNING ``nx`` version on every invocation
+#: (``upgrade_finish.check_version_transition``), so on a multi-session box
+#: a PEER process running ``nx`` from a differently-versioned tree flips the
+#: same machine-wide stamp -- and the guard's before/after (mtime_ns, size)
+#: diff cannot distinguish that write from a test in THIS session writing to
+#: the real config dir; both look like "the file changed". The stamp's
+#: CONTENT does distinguish them: this session's own write, if it happened,
+#: would land on exactly this value. ``None`` when unresolvable (a
+#: frozen/broken env) -- a failure to decide must never silently exempt a
+#: real mutation, so every consumer treats ``None`` as "cannot attribute"
+#: and keeps the guard's pre-existing strict behaviour (always state).
+_this_session_conexus_version: str | None = None
+
+
+def _resolve_this_session_conexus_version() -> str | None:
+    """Exactly what ``upgrade_finish.install_dist_info`` reads
+    (``importlib.metadata.distribution("conexus").version``) -- what a
+    ``uv run nx`` invocation from THIS checkout's venv during THIS session
+    would also write to ``last_seen_version``. See
+    :data:`_this_session_conexus_version` for why this is the attribution
+    signal and what ``None`` means to callers.
+    """
+    import importlib.metadata as _md  # noqa: PLC0415 — session-start only
+
+    try:
+        return _md.version("conexus")
+    except _md.PackageNotFoundError:
+        return None
+
+
+#: nexus-b2eaw follow-up: ``last_seen_version``'s CONTENT at session start,
+#: captured alongside :data:`_this_session_conexus_version`. Two jobs.
+#:
+#: (1) MEASURED: the base real-config-dir diff (:func:`_snapshot_real_config_dir`)
+#: is mtime/size only, never content -- so a write that re-stamps the SAME
+#: bytes (a no-op ``check_version_transition`` re-run is not actually
+#: possible, since that function early-returns when ``seen == version``, but
+#: a touch from some other path is not ruled out) would still register as
+#: MODIFIED. Comparing this baseline against the post-session content
+#: switches THIS ONE entry's change determination from mtime/size to
+#: content, per the standing critique: no real byte-level change means no
+#: real event to attribute at all, independent of whose version it is.
+#:
+#: (2) The diagnostic: showing OLD content alongside NEW is what lets a
+#: reader see the actual transition (e.g. ``7.55.1 -> 7.55.3``) instead of
+#: only the current value, which was the "confidently wrong" shape --
+#: a bare current-value-matches-this-session's-version reads as "this
+#: session wrote it" when it is equally consistent with a PEER who happens
+#: to run the identical conexus version (``check_version_transition`` writes
+#: the RUNNING version regardless of which process is running it, so two
+#: different processes at the same version produce byte-identical writes --
+#: content can prove a write is NOT this session's when the versions differ,
+#: but can never prove it IS, and the diagnostic must not claim otherwise).
+_last_seen_version_baseline_content: str | None = None
+
+
+def _snapshot_last_seen_version_content() -> str | None:
+    """The REAL ``last_seen_version``'s text content right now (session
+    start, called from ``pytest_sessionstart`` alongside the other
+    baselines), or ``None`` if absent/unreadable. See
+    :data:`_last_seen_version_baseline_content`.
+    """
+    try:
+        return (_real_config_dir_for_guard() / "last_seen_version").read_text().strip()
+    except OSError:
+        return None
+
 
 #: Allowlist of relative-path PREFIXES under the real ``~/.config/nexus/``
 #: that legitimate, ambient, non-test processes touch during a normal unit
@@ -932,7 +1057,7 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # session.<claude_pid> on every source and the arm-probe cache, the
     # session's own MCP server writes its per-session instance registration
     # (addresses.d/) on subscribe, and the UserPromptSubmit drain
-    # hook (conexus/hooks/scripts/mailbox_drain.py) keeps its pending and
+    # hook (nexus.hooks.mailbox_drain) keeps its pending and
     # seen files here, all independent of pytest. MEASURED 2026-09-13: with
     # live watchers armed by restarted sessions, every run of
     # tests/test_native_smoke_client_probes.py failed this guard on
@@ -1025,8 +1150,50 @@ def _diff_config_dir_snapshots(
 def _format_diff_entry(entry: _DiffEntry) -> str:
     """Render a ``(verb, rel_path)`` pair as the ``"<VERB> <path>"`` text
     the guard prints -- the ONLY place that string shape is constructed
-    (nexus-wjkc7); every internal consumer works on the tuple."""
+    (nexus-wjkc7); every internal consumer works on the tuple.
+
+    nexus-b2eaw: ``last_seen_version`` additionally names the OLD content
+    (session-start baseline), the NEW content (current on-disk), this
+    session's own resolved version, and whether the new content matches it
+    -- in BOTH the NOTE and FAIL print paths (this function is the one
+    place both call through). Round 2 (review finding, CRITICAL) replaced
+    an EARLIER shape that showed only the new value and this session's
+    version, which read as an accusation ("this session wrote it") the
+    guard cannot actually prove -- ``check_version_transition`` writes the
+    RUNNING version regardless of which process runs it, so a peer at the
+    identical conexus version produces a byte-identical write, and
+    :func:`_split_appends_from_state` no longer exempts on a version
+    mismatch either (a same-session test hitting a stale installed ``nx``
+    is indistinguishable, by content, from a genuine peer -- see that
+    function's docstring). This renders FACTS only -- old value, new
+    value, this session's version, whether they match -- and leaves the
+    causal judgment to whoever reads it. Purely a display enrichment: it
+    reads the CURRENT on-disk stamp (the same content the caller already
+    read this session, barring a concurrent write in the print window)
+    rather than threading the snapshot content through the tuple, so the
+    entry shape itself (verb, rel_path) is untouched.
+    """
     verb, rel = entry
+    if rel == "last_seen_version":
+        try:
+            stamp_now = (_real_config_dir_for_guard() / rel).read_text().strip()
+        except OSError:
+            stamp_now = None
+        if stamp_now is not None and _this_session_conexus_version is not None:
+            match_note = (
+                "matches this session's own version"
+                if stamp_now == _this_session_conexus_version
+                else "does NOT match this session's own version -- could be "
+                "a peer process, or this session's own nx on PATH "
+                "resolving a different (stale/installed) generation"
+            )
+        else:
+            match_note = "match against this session's own version unknown"
+        return (
+            f"{verb} {rel} (was {_last_seen_version_baseline_content!r}, now "
+            f"{stamp_now!r}; this session's own version is "
+            f"{_this_session_conexus_version!r} -- {match_note})"
+        )
     return f"{verb} {rel}"
 
 
@@ -1073,10 +1240,25 @@ def _check_real_config_dir_mutations(session) -> None:
     changed = _diff_config_dir_snapshots(_real_config_dir_baseline, after)
     if not changed:
         return
+    # nexus-b2eaw: read the stamp's actual post-session content so
+    # _split_appends_from_state can tell a genuine content change from a
+    # spurious stat touch (byte-identical content -- the ONE content-driven
+    # exemption left after round 2's CRITICAL finding removed the
+    # version-mismatch exemption). See _this_session_conexus_version's and
+    # _last_seen_version_baseline_content's docstrings for why reading this
+    # ONE file's content is safe (a bare version string, not user data)
+    # where the rest of this guard deliberately never reads content.
+    try:
+        _stamp_content = (_real_config_dir_for_guard() / "last_seen_version").read_text().strip()
+    except OSError:
+        _stamp_content = None
     # nexus-pfuns follow-on: an append to a known append-only log is untidy,
     # not a state leak. Report it, do not redden the run over it.
     changed, benign_appends = _split_appends_from_state(
         changed, _real_config_dir_baseline, after,
+        last_seen_version_content=_stamp_content,
+        last_seen_version_baseline_content=_last_seen_version_baseline_content,
+        this_session_version=_this_session_conexus_version,
     )
     if benign_appends:
         print(
@@ -1666,6 +1848,75 @@ def _restore_structlog_after_test():
     saved = structlog.get_config()
     yield
     structlog.configure(**saved)
+
+
+@pytest.fixture(autouse=True)
+def _restore_manifest_fk_after_dangling_seed():
+    """Put ``fk_catalog_chunks_chunk`` back to VALIDATED after any test that
+    used ``tests._catalog_fixture_ops.fk_dropped_for_dangling_seed``.
+
+    The seed re-adds the FK NOT VALID on the process-memoized engine
+    substrate so its dangling row can outlive the ``with`` block. Without a
+    restore that state outlived the TEST too, and
+    ``tests/db/test_fk_census.py``'s VALIDATED ground truth failed whenever
+    it ran in the same process after a seeding test (tests-db-isolation,
+    2026-09-23; guard: ``tests/db/test_fk_dangling_seed_restores_fk.py``).
+
+    Reads ``sys.modules`` instead of importing, so a test that never loaded
+    the helper module pays nothing and imports nothing.
+    """
+    import sys as _sys  # noqa: PLC0415 — local, matches this file's convention
+
+    yield
+    ops = _sys.modules.get("tests._catalog_fixture_ops")
+    if ops is not None:
+        ops.restore_fk_after_dangling_seeds()
+
+
+_ENGINE_DB_ENV_KEYS: tuple[str, ...] = (
+    "NX_DB_URL", "NX_DB_USER", "NX_DB_PASS",
+    "NX_DB_ADMIN_URL", "NX_DB_ADMIN_USER", "NX_DB_ADMIN_PASS",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_engine_db_env():
+    """Fail the test that leaves the engine's DB-connection env behind.
+
+    Every engine a later test spawns from ``{**os.environ, ...}`` inherits
+    these keys, and the engine reads ``NX_DB_ADMIN_*`` for its migration
+    pool whenever they are set. ``tests/db/test_pg_provision_token.py``
+    loaded a fake ``pg_credentials`` file into ``os.environ`` through
+    ``pg_provision.load_service_credentials_into_env`` (since deleted, it had
+    no production caller) and never took it back out, so in a
+    single-process ``pytest tests/db`` every engine
+    booted after it tried to migrate against the file's dead
+    ``127.0.0.1:15999`` and exited on HikariPool fail-fast: 35 setup errors
+    in ``test_xnz0o_commands_integration.py``, hidden under ``-n auto``
+    because the two files usually land on different workers
+    (tests-db-isolation, 2026-09-23).
+
+    Autouse fixtures set up before ``monkeypatch`` and tear down after it,
+    so a key a test sets through ``monkeypatch`` is already restored when
+    this compares. What remains is a raw ``os.environ`` write. The fixture
+    puts the old values back before failing, so one leak does not cascade.
+    """
+    before = {k: os.environ.get(k) for k in _ENGINE_DB_ENV_KEYS}
+    yield
+    leaked = {k: os.environ.get(k) for k in _ENGINE_DB_ENV_KEYS if os.environ.get(k) != before[k]}
+    if leaked:
+        for k in leaked:
+            if before[k] is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = before[k]
+        pytest.fail(
+            "test left engine DB env changed in os.environ (restored now): "
+            f"{sorted(leaked)}. An engine spawned later inherits these; set "
+            "them with monkeypatch, or delenv them before code that writes "
+            "os.environ directly.",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)

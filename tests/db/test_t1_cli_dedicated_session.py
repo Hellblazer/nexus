@@ -1261,6 +1261,77 @@ class TestMintErrorWrapping:
         assert mcp_infra._t1_pre_init_hook is None
         assert not mcp_core._DEFERRED_T1_MINT
 
+    def test_branch0_mint_failure_still_publishes_the_connect_marker(
+        self, fake_service, config_dir, monkeypatch,
+    ) -> None:
+        """nexus-veh77 round 2 (Sam's review): a T1 mint failure at startup
+        must NOT cost the SessionStart barrier (nexus.hooks.
+        mcp_connect_wait) its full 15 s bound. This is the sharpest of the
+        enumerated 'connects fine, T1 lease never published' cases -- it
+        fires on exactly the boxes already least healthy (service down,
+        fresh install, transient cloud auth failure) -- so it is pinned
+        here directly against the SAME deferred-mint branch the sibling
+        test above drives, not just against the verb in isolation.
+
+        Proof: while T1 mint is failing (identical setup to the sibling
+        test), the connect marker for this session id is published DURING
+        the yield, T1's own lease is NOT, and the barrier's own polling
+        primitive -- against the REAL marker file, no fakes -- returns
+        ready well under one poll interval, not the 15 s bound."""
+        import asyncio
+        import time
+
+        from nexus.db.t1 import read_t1_session_lease
+        from nexus.hooks.mcp_connect_wait import wait_for_mcp_connect_marker
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.connect_marker import read_mcp_connect_marker
+
+        live_session_id = "mcp-branch0-connect-marker-deferral-test"
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        global _MINT_FAILS
+        _MINT_FAILS = True
+        observed: dict = {}
+
+        async def _run() -> None:
+            async with mcp_core._t1_lifespan(None):
+                # T1 itself has nothing published -- this is the T1-down
+                # case the sibling test above already pins.
+                observed["t1_lease"] = read_t1_session_lease(live_session_id, config_dir)
+                # But the connect marker -- decoupled from T1 -- IS there.
+                observed["marker_during_yield"] = read_mcp_connect_marker(
+                    live_session_id, config_dir
+                )
+                start = time.monotonic()
+                ready, elapsed = wait_for_mcp_connect_marker(
+                    live_session_id, config_dir,
+                    bound_seconds=15.0, poll_interval_seconds=0.05,
+                )
+                observed["ready"] = ready
+                observed["elapsed"] = elapsed
+                observed["wall_elapsed"] = time.monotonic() - start
+
+        try:
+            asyncio.run(_run())
+        finally:
+            _MINT_FAILS = False
+
+        assert observed["t1_lease"] is None, (
+            "T1 must be genuinely down in this test, or it proves nothing"
+        )
+        assert observed["marker_during_yield"] is True
+        assert observed["ready"] is True
+        # Well under the 15 s bound -- a T1 outage must never cost the
+        # barrier more than the time to notice the marker (one poll tick).
+        assert observed["elapsed"] < 1.0
+        assert observed["wall_elapsed"] < 1.0
+        # And the marker is cleared at teardown, same as the lease would be.
+        assert read_mcp_connect_marker(live_session_id, config_dir) is False
+
     def test_deferred_mint_retry_fails_per_call_and_stays_retryable(
         self, fake_service, config_dir, monkeypatch
     ) -> None:

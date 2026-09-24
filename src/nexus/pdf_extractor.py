@@ -508,6 +508,40 @@ def _unwrap_mineru_font_tags(md: str) -> str:
 _MD_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 _VISUAL_LABEL_RE = re.compile(r"^\s*((?:Table|Figure|Fig\.?)\s*[A-Za-z]?\d+[a-z]?|(?:Table|Figure)\s+[IVXLC]+)\b")
 
+#: Docling's own default markdown image placeholder (docling_core's
+#: ``export_to_markdown(..., image_placeholder="<!-- image -->")``), a
+#: different shape from MinerU's ``![](images/<sha>.jpg)`` -- an HTML
+#: comment with no path to look a content_list entry up by, because
+#: docling emits no content_list at all.
+_DOCLING_IMAGE_PLACEHOLDER_RE = re.compile(r"<!--\s*image\s*-->")
+
+#: The FIGURE-only shape of the caption-adjacency label (round-2 critique
+#: on nexus-9zly6). Deliberately excludes "Table": a bare "![...]" /
+#: "<!-- image -->" reference is presented to the reader as an image, so a
+#: nearby "Table N" caption must never relabel it -- a wrong specific
+#: label ("Table 9 not extracted...") is worse than the generic marker.
+#: "Chart" is included because MinerU/docling captions use it for plots
+#: that are not literally titled "Figure".
+_FIGURE_CAPTION_RE = re.compile(
+    r"^\s*((?:Figure|Fig\.?|Chart)\s*[A-Za-z]?\d+[a-z]?|(?:Figure|Chart)\s+[IVXLC]+)\b"
+)
+
+#: A visual reference/placeholder (either shape) with nothing but
+#: whitespace after it, used to detect "this reference is immediately
+#: preceded by ANOTHER one" -- see :func:`_caption_label_after`.
+_TRAILING_VISUAL_REF_RE = re.compile(
+    r"(?:!\[[^\]]*\]\([^)\s]+\)|<!--\s*image\s*-->)\s*$"
+)
+
+#: How far past a marker's position to look for an adjacent caption line
+#: (nexus-9zly6 GAP 1/2). Generous enough for a caption on the very next
+#: non-blank line without scanning the rest of the page.
+_CAPTION_LOOKAHEAD_CHARS = 200
+
+#: How far back from a reference to look for a preceding, uncaptioned
+#: visual reference (round-2 critique's adjacency guard).
+_PRECEDING_REF_LOOKBACK_CHARS = 200
+
 
 def _visual_label(entry: dict, kind: str) -> str:
     """``"Table 6"`` / ``"Figure 5"`` from the entry's first caption, else the bare kind."""
@@ -517,6 +551,62 @@ def _visual_label(entry: dict, kind: str) -> str:
         if m:
             return m.group(1).strip()
     return kind
+
+
+def _caption_label_after(text: str, start: int, end: int) -> str | None:
+    """The FIGURE label (``"Fig. 2"``, ``"Chart 4"``) from the caption line
+    immediately following *end* in *text*, or ``None``.
+
+    nexus-9zly6 GAP 1: when a content_list lookup misses (or, for docling,
+    never existed at all), the label the query-lands-on-the-gap contract in
+    :func:`_mark_unextracted_visuals` depends on would otherwise be lost.
+    Both MinerU and docling put an unrecognised visual's caption directly
+    under its own reference/placeholder in the page markdown, so the label
+    usually survives in the text even when the structured lookup does not.
+
+    Two guards keep a WRONG specific label from ever being worse than the
+    generic marker (round-2 critique):
+
+    - *start* is the reference's own match start. If the text immediately
+      before it (skipping only whitespace) is ANOTHER visual reference,
+      this one is part of an uncaptioned run -- e.g. two images stacked
+      before their captions -- and any caption that follows belongs to
+      that ambiguity, not unambiguously to *this* reference. Refuses
+      outright rather than guess.
+    - Only :data:`_FIGURE_CAPTION_RE` is tried, never the Table-inclusive
+      :data:`_VISUAL_LABEL_RE` -- a "Table N" caption must never label one
+      of these bare references, which are presented to the reader as
+      images.
+    """
+    before = text[max(0, start - _PRECEDING_REF_LOOKBACK_CHARS) : start]
+    if _TRAILING_VISUAL_REF_RE.search(before):
+        return None
+    tail = text[end : end + _CAPTION_LOOKAHEAD_CHARS].lstrip("\r\n \t")
+    first_line = tail.split("\n", 1)[0]
+    m = _FIGURE_CAPTION_RE.match(first_line)
+    return m.group(1).strip() if m else None
+
+
+def _generic_visual_marker(label: str | None) -> str:
+    """The bracketed marker for a visual with no content_list entry: the
+    caption-derived *label* (always figure-shaped -- see
+    :func:`_caption_label_after`) in the same shape ``_repl`` below would
+    have produced from an "image" content_list entry, or the bare generic
+    marker when no label could be derived at all."""
+    if label is None:
+        return "[image not indexed as text]"
+    return f"[{label} is an image; not indexed as text]"
+
+
+def _marker_for_entry(entry: dict) -> str:
+    """The bracketed marker for a content_list *entry*, by its own type."""
+    match entry.get("type"):
+        case "table":
+            return f"[{_visual_label(entry, 'Table')} not extracted as text; values not indexed]"
+        case "image":
+            return f"[{_visual_label(entry, 'Figure')} is an image; not indexed as text]"
+        case _:
+            return "[image not indexed as text]"
 
 
 def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
@@ -533,15 +623,25 @@ def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
     caption label, from the ``content_list`` entry whose ``img_path``
     matches: ``[Table 6 not extracted as text; values not indexed]`` for a
     table without a ``table_body``, ``[Figure 5 is an image; not indexed as
-    text]`` for a figure. A reference with no ``content_list`` entry (the
-    entry was dropped, or the image was never in the layout) gets the
-    generic ``[image not indexed as text]``. Tables MinerU did extract are
-    already HTML in *md* and carry no image reference, so they pass through.
+    text]`` for a figure. A reference with no matching ``content_list``
+    entry falls back to the caption line immediately under the reference in
+    *md* itself (:func:`_caption_label_after`), and only when that also
+    finds nothing gets the bare generic ``[image not indexed as text]``.
+    Tables MinerU did extract are already HTML in *md* and carry no image
+    reference, so they pass through.
+
+    A ``content_list`` entry whose ``img_path`` never appears as a ``![]``
+    reference anywhere in *md* at all (MinerU's markdown and its
+    content_list are two independently produced outputs, so this is
+    reachable, not hypothetical) gets a marker appended at the end of the
+    text -- nexus-9zly6's coverage of what used to be this function's early
+    ``if not md or "![" not in md: return md`` return, under which such an
+    entry vanished with no marker whatsoever.
 
     The marker is text the embedder sees, so a query for "Table 6" lands on
     the chunk that says the values are absent instead of on nothing.
     """
-    if not md or "![" not in md:
+    if not md and not content_list:
         return md
     by_path: dict[str, dict] = {}
     for entry in content_list:
@@ -550,20 +650,66 @@ def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
             by_path[img_path] = entry
             by_path[img_path.rsplit("/", 1)[-1]] = entry
 
+    matched_paths: set[str] = set()
+
     def _repl(m: re.Match) -> str:
         ref = m.group(1)
         entry = by_path.get(ref) or by_path.get(ref.rsplit("/", 1)[-1])
         if entry is None:
-            return "[image not indexed as text]"
-        match entry.get("type"):
-            case "table":
-                return f"[{_visual_label(entry, 'Table')} not extracted as text; values not indexed]"
-            case "image":
-                return f"[{_visual_label(entry, 'Figure')} is an image; not indexed as text]"
-            case _:
-                return "[image not indexed as text]"
+            return _generic_visual_marker(_caption_label_after(md, m.start(), m.end()))
+        matched_paths.add(entry.get("img_path", ""))
+        return _marker_for_entry(entry)
 
-    return _MD_IMAGE_REF_RE.sub(_repl, md)
+    out = _MD_IMAGE_REF_RE.sub(_repl, md) if md and "![" in md else (md or "")
+
+    trailing: list[str] = []
+    seen_paths: set[str] = set()
+    for entry in content_list:
+        # nexus-9zly6 round-2 critique: scoped to "table"/"image" entries
+        # ONLY -- an "equation" (or any other) entry never carries an
+        # img_path either, and sweeping it in here would mislabel a
+        # properly-extracted formula as an unindexed image.
+        if entry.get("type") not in ("table", "image"):
+            continue
+        img_path = entry.get("img_path")
+        if img_path and (img_path in matched_paths or img_path in seen_paths):
+            continue
+        if entry.get("type") == "table" and entry.get("table_body"):
+            # Already extracted as HTML -- by design carries no "![...]"
+            # reference anywhere (this function's own docstring), so its
+            # absence from md is the expected shape, not an orphan.
+            continue
+        # An entry with no img_path can never match a "![...]" reference
+        # by construction, so it is unconditionally an orphan -- every one
+        # gets its own marker, never deduped against img_path (there is
+        # none to dedupe on).
+        if img_path:
+            seen_paths.add(img_path)
+        trailing.append(_marker_for_entry(entry))
+    if trailing:
+        out = f"{out}\n\n" + "\n\n".join(trailing) if out else "\n\n".join(trailing)
+    return out
+
+
+def _mark_unextracted_visuals_docling(md: str) -> str:
+    """The docling sibling of :func:`_mark_unextracted_visuals` (nexus-9zly6
+    GAP 2): ``_extract_with_docling`` never called any marker pass at all,
+    so a docling-extracted PDF's figures vanished with no signal, unlike
+    the MinerU path.
+
+    Docling emits no MinerU-shaped content_list, so there is no structured
+    lookup to try first -- every placeholder goes straight to the same
+    caption-derivation :func:`_caption_label_after` uses for a MinerU
+    reference the content_list lookup missed, sharing that helper rather
+    than duplicating the caption-line regex.
+    """
+    if not md or not _DOCLING_IMAGE_PLACEHOLDER_RE.search(md):
+        return md
+
+    def _repl(m: re.Match) -> str:
+        return _generic_visual_marker(_caption_label_after(md, m.start(), m.end()))
+
+    return _DOCLING_IMAGE_PLACEHOLDER_RE.sub(_repl, md)
 
 
 _TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.S)
@@ -591,11 +737,53 @@ def _row_widths(block: str) -> list[list[str]]:
     return rows
 
 
-def _table_shape_defects(block: str) -> list[dict]:
-    """Structural disagreements inside one captured table.
+#: An inline math span containing an ESCAPED underscore. Real LaTeX math
+#: never needs to escape ``_`` -- a bare underscore already means
+#: subscript inside ``$...$`` -- so ``\_`` there is a near-diagnostic
+#: signal that the span started life as a code identifier (MinerU's
+#: formula-recognition model classifying a monospace table cell as math;
+#: nexus-8eg4w) rather than as a mathematical expression.
+_ESCAPED_UNDERSCORE_MATH_RE = re.compile(r"\$[^$]*\\_[^$]*\$")
 
-    Two signals, because the two mechanisms measured on the KnowFeat paper
-    are different and the first cannot see the second:
+
+def _code_like_math_defects(block: str) -> list[dict]:
+    """Table cells whose rendered math is more likely mis-recognized code
+    than genuine LaTeX (nexus-8eg4w).
+
+    Measured on the KnowFeat paper's TABLE V Code row: MinerU's formula
+    model classified plain Python (``mode_counts['fan_out'] / n``) as
+    LaTeX math and rendered it as one, escaping every identifier
+    underscore along the way -- ``mode\\_counts``, ``fan\\_out``. Contrast
+    that keeps this narrow: the SAME extractor renders genuine numbered
+    pseudocode (this paper's Algorithm 1) correctly, so the signal has to
+    single out an actual math/code confusion, not fire on ordinary
+    formulas that legitimately live in a table.
+
+    This is a DETECTION, not a fix. The original cell text is gone the
+    moment MinerU's model replaced it -- there is nothing here to
+    reconstruct from, only something to name as suspect, the same
+    non-rewrite discipline :func:`mark_misshapen_tables`'s docstring
+    states for :func:`_table_shape_defects`.
+    """
+    cells_flagged = sum(
+        1
+        for row in _TR_RE.findall(block)
+        for _tag, _attrs, body in _TD_RE.findall(row)
+        if _ESCAPED_UNDERSCORE_MATH_RE.search(body)
+    )
+    if not cells_flagged:
+        return []
+    return [{"kind": "code_like_math", "cells": cells_flagged}]
+
+
+def _table_shape_defects(block: str) -> list[dict]:
+    """Structural and content disagreements inside one captured table.
+
+    Three signals. The first two are shape mechanisms measured on the
+    KnowFeat paper, different from each other and the first cannot see
+    the second; the third (:func:`_code_like_math_defects`) is a content
+    signal that needs no row structure to fire, so it runs even for a
+    table too small for the other two to say anything:
 
     ``header_column_mismatch``
         The header row's effective width disagrees with the modal data-row
@@ -607,13 +795,16 @@ def _table_shape_defects(block: str) -> list[dict]:
         are labelled. This is the TABLE V row-label merge, where two labels
         fused into one cell and shifted every later row up by one; cell
         counts stay constant, so only the orphaned row betrays it.
+    ``code_like_math``
+        A cell's rendered math looks like an escaped code identifier
+        rather than genuine LaTeX. See :func:`_code_like_math_defects`.
     """
+    defects: list[dict] = list(_code_like_math_defects(block))
     rows = _row_widths(block)
     if len(rows) < 2:
         # A header with no data rows has nothing to disagree with it.
-        return []
+        return defects
     header, data = rows[0], rows[1:]
-    defects: list[dict] = []
     widths = [len(r) for r in data if r]
     if widths:
         modal = max(set(widths), key=widths.count)
@@ -699,12 +890,18 @@ def mark_misshapen_tables(text: str) -> tuple[str, list[dict]]:
                 case "empty_row_label":
                     n = len(d["rows"])
                     reasons.append(f"{n} row{'s' if n != 1 else ''} with no label")
+                case "code_like_math":
+                    n = d["cells"]
+                    reasons.append(
+                        f"{n} cell{'s' if n != 1 else ''} may be code "
+                        "mis-recognized as math"
+                    )
         label = _table_caption_label(text, m.start())
         found.extend({**d, "label": label} for d in defects)
         named = f" ({label})" if label else ""
         marker = (
             f"{_MARKER_PREFIX}{named}: {'; '.join(reasons)}; "
-            "values may be misaligned]"
+            "values may be misaligned or unreliable]"
         )
         # Just INSIDE the opening tag, not on a line before it. That span is
         # what PDFChunker's _table_header re-injects into every continuation
@@ -1389,6 +1586,11 @@ class PDFExtractor:
 
         for p in range(1, page_count + 1):
             page_md = doc.export_to_markdown(page_no=p).strip()
+            # nexus-9zly6: mark unextracted figures HERE, before lengths are
+            # measured below -- page_boundaries / current_pos must describe
+            # the text actually stored, the same ordering rationale
+            # _extract_with_mineru's own marker call follows.
+            page_md = _mark_unextracted_visuals_docling(page_md)
             if page_md:
                 page_boundaries.append(
                     {
@@ -1428,14 +1630,7 @@ class PDFExtractor:
                 elif item_type == "TableItem":
                     prov = getattr(item, "prov", [])
                     page_no = prov[0].page_no if prov else 0
-                    html = ""
-                    if callable(getattr(item, "export_to_html", None)):
-                        try:
-                            html = item.export_to_html(doc=doc)
-                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
-                            _log.debug("table_html_export_failed", page=page_no, error=str(exc))
-                            html = ""
-                    table_regions.append({"page": page_no, "html": html})
+                    table_regions.append({"page": page_no})
         else:
             # Non-enriched mode: scan text for LaTeX formula patterns
             # This is 100x faster than running the enrichment pipeline
@@ -1444,14 +1639,7 @@ class PDFExtractor:
                 if type(item).__name__ == "TableItem":
                     prov = getattr(item, "prov", [])
                     page_no = prov[0].page_no if prov else 0
-                    html = ""
-                    if callable(getattr(item, "export_to_html", None)):
-                        try:
-                            html = item.export_to_html(doc=doc)
-                        except Exception as exc:  # noqa: BLE001 — best-effort table export; logged, html falls back to empty
-                            _log.debug("table_html_export_failed", page=page_no, error=str(exc))
-                            html = ""
-                    table_regions.append({"page": page_no, "html": html})
+                    table_regions.append({"page": page_no})
 
         if formula_count > 0:
             _log.warning(
@@ -2399,7 +2587,7 @@ class PDFExtractor:
         # to the batch that produced it; _extract_with_mineru rebases it to
         # the document before it lands here (``doc_page_idx``).
         table_regions = [
-            {"page": e.get("doc_page_idx", e.get("page_idx", 0)) + 1, "html": e["table_body"]}
+            {"page": e.get("doc_page_idx", e.get("page_idx", 0)) + 1}
             for e in content_list
             if e.get("type") == "table" and e.get("table_body")
         ]

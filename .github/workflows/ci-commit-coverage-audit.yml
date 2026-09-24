@@ -1,0 +1,118 @@
+name: CI commit coverage audit (nexus-of2x8)
+
+# DETECT, not prevent (remedy (c) from the bead, Sam-authorized -- see the
+# bead body and scripts/check_ci_commit_coverage.py's module docstring for
+# the full account). ci.yml's doc-only fast lane and its cancel-in-progress
+# concurrency group are each individually correct, and their composition has
+# a gap: a code commit's own run can be CANCELLED by a later push, and if
+# that later push (or a run of pushes after it) is itself docs-only, the
+# doc-only predicate's before..HEAD range never contains the cancelled
+# commit. The result is silent: a SKIPPED pytest job reports SUCCESS to
+# branch protection, so develop goes green while carrying a commit whose
+# code no test has ever touched. Measured 2026-09-21/22 (nexus-00 + nexus-0d):
+# dbf255efe's own run (35683993461) was cancelled, and the replacement run's
+# range (dbf255efe..df3a688fd) correctly read docs-only over the three docs
+# commits pushed after it -- but dbf255efe itself, the EXCLUSIVE lower bound,
+# was in neither range.
+#
+# THE OTHER THREE REMEDIES WERE REJECTED (Sam, see the bead): (a) needs a
+# durable "last exercised sha" record that does not exist; (b) exempting a
+# run from cancellation when it touches code inverts the cost logic the
+# concurrency group exists for; (d) is the status quo, whose only catch so
+# far was a human noticing a suspiciously fast run. This workflow is the
+# ONLY remedy that adds an observer without weakening either mechanism CI
+# Cost Discipline (AGENTS.md) sanctions by name.
+#
+# WHY A SEPARATE WORKFLOW rather than a new job in ci.yml: this audit's
+# input is the *history* of past ci.yml runs, not the tree at this push --
+# folding it into ci.yml's own `needs:` graph would make ci.yml's fan-in
+# (`pytest-gate`) depend on ci.yml's own prior runs, which is circular by
+# construction (a run cannot depend on the completed state of the run that
+# supersedes it). A standalone workflow reads ci.yml's history via the
+# read-only Actions API, which is exactly the "evidence, not re-execution"
+# shape scripts/check_release_ci_evidence.py already uses for a different
+# gate.
+#
+# TRIGGER IS `push`, DELIBERATELY, NOT `workflow_run` OR `schedule` -- a
+# round-2 fix tried `workflow_run` keyed to ci.yml's own `completed` event,
+# specifically to dodge the in-flight-covering-run race this audit's own
+# first live run hit (see check_ci_commit_coverage.py's module docstring,
+# "THE RACE"). REJECTED at round 3, verified against GitHub's own docs
+# (events-that-trigger-workflows): both `workflow_run` and `schedule` "will
+# only trigger a workflow run if the workflow file exists on the DEFAULT
+# branch" -- and this repo's default branch is `main`, which only advances
+# at a release (AGENTS.md Worktrees section; all routine work lands on
+# `develop`). A `workflow_run`-triggered copy of this file added on
+# `develop` would have been DORMANT until the next release promoted it to
+# `main`, then fired using `main`'s stale copy rather than `develop`'s --
+# indistinguishable from a check that keeps passing, which is exactly the
+# nexus-moht0 vacuous-gate class this repo's own doctrine names, and worse
+# than the noisy false positive it would have replaced. `push` is why
+# nearly every other workflow in this repo is push-triggered for the same
+# reason.
+#
+# THE ACTUAL FIX lives in check_ci_commit_coverage.py itself: it narrows
+# its CLAIM to what it can actually resolve on THIS invocation (everything
+# covered by a completed run, plus anything docs-only) and PRINTS -- rather
+# than silently passing OR falsely failing on -- any code-touching commit
+# whose only potential covering run has not concluded yet. See that
+# script's module docstring ("THE ACTUAL FIX") for the full reasoning and
+# `workflow_dispatch` below for the manual close-the-gap lever.
+#
+# CI-COST SHAPE: a few GitHub API calls (bounded by --max-runs-scanned,
+# typically 1-3 calls in practice since a code-touching push is common) plus
+# a full-history checkout and a handful of `git` subprocess calls -- no
+# test execution, no build, no matrix. This is the whole point of "detect":
+# the cost is API reads, not re-running pytest.
+#
+# THIS NEVER BLOCKS A MERGE. develop has no branch protection / required
+# checks on push (only PRs do), so a red run here is purely visible: a red
+# check on develop's commit history, nothing more. That is deliberate --
+# "detect rather than prevent" means exactly this: it never competes with
+# cancel-in-progress or the doc-only fast lane for control of what runs, it
+# only reports on what already happened.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-commit-coverage-audit-${{ github.ref }}
+  # Safe to cancel a superseded run of THIS workflow specifically (unlike the
+  # commits it is auditing): every run recomputes the coverage floor from
+  # scratch against the CURRENT tip, so a newer push's run is a strict
+  # superset of what an older, cancelled run of this same workflow would
+  # have found -- no information is lost the way it is for ci.yml's own
+  # pytest matrix.
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Every develop commit since the last code-exercised run is covered
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # Full history required: the audit walks `git rev-list H..HEAD`
+          # and `git merge-base --is-ancestor` against commits that can be
+          # arbitrarily far back (bounded only by --max-runs-scanned's
+          # lookback into ci.yml's own run history, not by any fixed commit
+          # count).
+          fetch-depth: 0
+
+      - name: Audit commit coverage since the last code-exercised ci.yml run
+        # Stdlib-only script (urllib, subprocess, argparse, json) -- no `uv
+        # sync`, no interpreter setup beyond the runner's bundled python3,
+        # matching check_release_ci_evidence.py's own "runs under bare
+        # python3" design for exactly the same reason (cheapest possible
+        # leg for a read-only evidence check).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: python3 scripts/check_ci_commit_coverage.py

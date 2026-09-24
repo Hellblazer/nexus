@@ -96,11 +96,16 @@ conexus/
 │       │                              # and deliberation rates
 │       ├── version_lockstep_hook.py   # SessionStart(startup): plugin↔CLI version skew
 │       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
+│       ├── version_lockstep_action.py # Detached, extras-preserving reinstall the lockstep
+│       │                              # hook dispatches
+│       ├── routing/                   # PreToolUse(Bash) guards + their shared _lib.py
 │       ├── _interpreter.py            # Shared helper: re-exec under an interpreter that
 │       │                              # can serve the hook (3.12 floor, and the
 │       │                              # generation python that can import nexus)
-│       ├── t2_prefix_scan.py          # Shared helper: T2 multi-namespace prefix scan
-│       └── read_verification_config.py # Shared helper: read .nexus.yml verification block
+│       ├── _endpoint_resolve.py       # Shared helper: stdlib endpoint precedence
+│       ├── _tuple_size_limits.py      # Shared helper: stdlib tuple size caps
+│       ├── _hook_logging.py           # Shared helper: configure logging before nexus imports
+│       └── divergence-language-scan.py # Run by the wheel's divergence-language guard
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
 ├── CHANGELOG.md             # Version history (Keep a Changelog format)

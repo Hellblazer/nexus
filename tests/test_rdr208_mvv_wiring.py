@@ -32,8 +32,9 @@ _HOOKS_JSON = _ROOT / "conexus" / "hooks" / "hooks.json"
 #: rather than by a whole command string survives both spellings the hook
 #: can carry -- the shell form (`"command": "nx hook session-start"`) and
 #: the exec form RDR-215 moves to (`"command": "nx-hook", "args":
-#: ["session-start"]`) -- and cannot collide with the neighbouring
-#: `session_start_hook.py` entry, which spells it with an UNDERSCORE.
+#: ["session-start"]`) -- and does not collide with the neighbouring
+#: `session-context` verb (formerly `session_start_hook.py`, spelled with
+#: an UNDERSCORE, deleted at nexus-z9cz2).
 _SESSION_START_VERB = "session-start"
 
 
@@ -115,7 +116,10 @@ def test_run_sh_stages_the_drain_hooks_sibling_imports() -> None:
     never-raise contract can apply, so staging only the hook file itself makes
     the container's UserPromptSubmit hook exit 1 on every prompt with a
     ModuleNotFoundError. Measured 2026-09-18 by running the hook inside the
-    built image. run.sh must stage the whole scripts directory."""
+    built image. run.sh must stage the whole scripts directory.
+
+    7.58.0 wires the plugin script again (plugin-ahead skew, nexus-t9klx), so
+    this is the v7.57.0 check restored with it."""
     run_sh = (_DIR / "run.sh").read_text(encoding="utf-8")
     assert 'cp -R "$SRC/hooks/scripts/." "$STAGE/plugin/hooks/scripts/"' in run_sh, (
         "run.sh must stage the whole hooks/scripts directory, not named files"

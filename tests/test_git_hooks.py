@@ -29,7 +29,7 @@ def fake_repo(tmp_path) -> Path:
 
 
 def _mock_git(repo: Path, git_common_dir: str | None = None, hooks_path: str | None = None):
-    def _run(cmd, *, cwd=None, capture_output=False, text=False, timeout=None, **kw):
+    def _run(cmd, *, cwd=None, text=True, timeout=None, **kw):
         import subprocess as sp
         class Res:
             stdout = ""; stderr = ""; returncode = 0
@@ -40,13 +40,14 @@ def _mock_git(repo: Path, git_common_dir: str | None = None, hooks_path: str | N
             if hooks_path: r.stdout = hooks_path
             else: r.returncode = 1
         else:
-            return sp.run(cmd, cwd=cwd, capture_output=capture_output, text=text, timeout=timeout)
+            return sp.run(cmd, cwd=cwd, capture_output=True, text=text, timeout=timeout)
         return r
-    # nexus-8g79.10 (V2): subprocess.run call sites are inside
-    # nexus._git_hooks_meta (git_common_dir + effective_hooks_dir);
-    # commands/hooks.py uses them via re-export. Patch the lower-
-    # layer module that actually owns the call.
-    return patch("nexus._git_hooks_meta.subprocess.run", side_effect=_run)
+    # nexus-8g79.10 (V2): the call sites are inside nexus._git_hooks_meta
+    # (git_common_dir + effective_hooks_dir); commands/hooks.py uses them
+    # via re-export. Patch the lower-layer module that actually owns the
+    # call. nexus-t10nc moved both onto bounded_subprocess.run_bounded, so
+    # that is the name bound in this module's namespace.
+    return patch("nexus._git_hooks_meta.run_bounded", side_effect=_run)
 
 
 def _install(runner, repo):
@@ -400,6 +401,65 @@ class TestUpdateAll:
         result = runner.invoke(main, ["hooks", "update-all"])
         assert result.exit_code == 0, result.output
         # Good repo still refreshed despite bad repo earlier in the list.
+        assert "pgrep -f" in (
+            good / ".git" / "hooks" / "post-commit"
+        ).read_text()
+        assert "1 repo(s) skipped" in result.output
+
+    def test_one_bad_repo_raising_the_real_runtime_error_does_not_abort_sweep(
+        self, runner, tmp_path, monkeypatch,
+    ):
+        """nexus-g76yf: the sibling test above mocks ``_effective_hooks_dir``
+        to raise ``click.ClickException`` directly -- but ``_effective_hooks_dir``
+        is a BARE passthrough to ``nexus._git_hooks_meta.effective_hooks_dir``,
+        which raises a raw ``RuntimeError`` ("Not a git repository: <path>")
+        for a non-git directory, never a ClickException. That mock gave false
+        confidence: the loop's ``except click.ClickException`` never actually
+        catches what production raises, so ONE stale/no-longer-a-repo registry
+        entry escapes the per-repo handler entirely, aborts the whole sweep,
+        and (via `nx upgrade`'s outer catch-all) surfaces as a single
+        top-level warning naming that one bad path -- exactly the observed
+        ``upgrade_git_hook_refresh_failed error='Not a git repository: ...'``
+        symptom. This test exercises the REAL exception shape via the real
+        ``run_bounded`` seam, with ``_effective_hooks_dir`` unmocked."""
+        good = self._make_repo(tmp_path, "good")
+        bad = tmp_path / "bad"  # no .git at all
+        bad.mkdir()
+        self._legacy_stanza_file(good / ".git" / "hooks" / "post-commit")
+
+        def _run(cmd, *, cwd=None, text=True, timeout=None, **kw):
+            import subprocess as sp
+
+            class Res:
+                stdout = ""
+                stderr = ""
+                returncode = 0
+
+            r = Res()
+            if cwd == bad and cmd[:2] == ["git", "rev-parse"]:
+                r.returncode = 1  # real git's answer for a non-git directory
+                return r
+            if cwd == bad and cmd[:3] == ["git", "config", "core.hooksPath"]:
+                r.returncode = 1
+                return r
+            if cmd[:2] == ["git", "rev-parse"] and "--git-common-dir" in cmd:
+                r.stdout = str(good / ".git")
+                return r
+            if cmd[:3] == ["git", "config", "core.hooksPath"]:
+                r.returncode = 1
+                return r
+            return sp.run(cmd, cwd=cwd, capture_output=True, text=text, timeout=timeout)
+
+        monkeypatch.setattr(
+            "nexus.commands.hooks._iter_managed_repo_roots",
+            lambda: [bad, good],
+        )
+
+        with patch("nexus._git_hooks_meta.run_bounded", side_effect=_run):
+            result = runner.invoke(main, ["hooks", "update-all"])
+
+        assert result.exit_code == 0, result.output
+        # Good repo still refreshed despite the bad repo earlier in the list.
         assert "pgrep -f" in (
             good / ".git" / "hooks" / "post-commit"
         ).read_text()

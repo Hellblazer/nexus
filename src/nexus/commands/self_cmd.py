@@ -51,6 +51,8 @@ from pathlib import Path
 
 import click
 
+from nexus.bounded_subprocess import run_bounded
+
 __all__ = ["self_group", "perform_self_install", "packaged_install_dir"]
 
 
@@ -315,10 +317,10 @@ def _installed_version(venv: Path) -> str | None:
     python = venv / "bin" / "python"
     if not python.exists():
         return None
-    r = subprocess.run(  # noqa: S603 — fixed argv, no shell
+    r = run_bounded(  # noqa: S603 — fixed argv, no shell
         [str(python), "-c",
          "import importlib.metadata as m; print(m.version('conexus'))"],
-        capture_output=True, text=True, check=False, timeout=30,
+        timeout=30,
     )
     if r.returncode != 0:
         return None
@@ -610,8 +612,8 @@ def prune_uv_cache() -> str:
     operator. ``uv`` is looked up on PATH exactly as the generation build
     does."""
     try:
-        r = subprocess.run(  # noqa: S603 — fixed argv
-            ["uv", "cache", "prune"], capture_output=True, text=True, check=False, timeout=600,
+        r = run_bounded(  # noqa: S603 — fixed argv
+            ["uv", "cache", "prune"], timeout=600,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return f"uv cache prune skipped: {exc}"

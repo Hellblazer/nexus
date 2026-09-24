@@ -5,6 +5,7 @@ The cosign-verified native binary stays the production default; NEXUS_SERVICE_JA
 is an explicit dev/test opt-in launched via the JVM. Never auto-discovered,
 never a silent fallback.
 """
+
 from __future__ import annotations
 
 import os
@@ -68,7 +69,9 @@ def test_resolve_jar_opt_in_wins(monkeypatch, tmp_path):
 def test_resolve_no_artifact_fails_loud(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
     monkeypatch.setattr(ssd, "_find_service_binary", lambda cd: None)
-    with pytest.raises(StorageServiceStartError, match="No nexus-service launch artifact"):
+    with pytest.raises(
+        StorageServiceStartError, match="No nexus-service launch artifact"
+    ):
         _resolve_launch_artifact(tmp_path)
 
 
@@ -78,8 +81,11 @@ def test_resolve_no_artifact_fails_loud(monkeypatch, tmp_path):
 def test_supervisor_rejects_bad_launch_kind(tmp_path):
     with pytest.raises(StorageServiceStartError, match="launch_kind"):
         StorageServiceSupervisor(
-            config_dir=tmp_path, pg_port=5432, service_port=0,
-            creds={"NX_SERVICE_TOKEN": "tok"}, binary_path=tmp_path / "x",
+            config_dir=tmp_path,
+            pg_port=5432,
+            service_port=0,
+            creds={"NX_SERVICE_TOKEN": "tok"},
+            binary_path=tmp_path / "x",
             launch_kind="bogus",
         )
 
@@ -107,8 +113,11 @@ def _spawn_capture(monkeypatch, *, launch_kind, artifact, max_heap=None):
     if max_heap is not None:
         monkeypatch.setenv("NX_SERVICE_MAX_HEAP", max_heap)
     sup = StorageServiceSupervisor(
-        config_dir=Path("/tmp"), pg_port=5432, service_port=0,
-        creds={"NX_SERVICE_TOKEN": "tok"}, binary_path=artifact,
+        config_dir=Path("/tmp"),
+        pg_port=5432,
+        service_port=0,
+        creds={"NX_SERVICE_TOKEN": "tok"},
+        binary_path=artifact,
         launch_kind=launch_kind,
     )
     sup._spawn_service()
@@ -120,21 +129,91 @@ def test_native_argv_is_the_binary(monkeypatch):
     argv = _spawn_capture(monkeypatch, launch_kind="native", artifact=binary)
     # nexus-9gaj7: -Duser.timezone=UTC on every launch path, defense-in-depth
     # alongside Main.main's in-process TimeZone.setDefault(UTC) pin.
-    assert argv == [str(binary), "-Duser.timezone=UTC"]
+    assert argv == [
+        str(binary),
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=true",
+    ]
 
 
 def test_jar_argv_is_java_dash_jar(monkeypatch):
     monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
     jar = Path("/build/nexus-service.jar")
     argv = _spawn_capture(monkeypatch, launch_kind="jar", artifact=jar)
-    assert argv == ["/usr/bin/java", "-Duser.timezone=UTC", "-jar", str(jar)]
+    assert argv == [
+        "/usr/bin/java",
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=true",
+        "-jar",
+        str(jar),
+    ]
+
+
+# ── the OPT-OUT argv, both launch kinds ─────────────────────────────────────
+#
+# The three tests above assert the DEFAULT (=true). Until the round-3 review
+# of nexus-ijue9.7 nothing asserted the other branch through a real
+# _spawn_service at all: tests/daemon/test_ipv4_stack_gate.py exercises the
+# _ipv4_only_disabled helper and greps the source, neither of which would
+# catch a ternary inversion or a wrong env-var name in the one line that
+# turns the helper's answer into argv. The flag that ships is the one in
+# argv, so that is where the opt-out has to be asserted.
+
+
+def test_native_argv_states_false_when_opted_out(monkeypatch):
+    monkeypatch.setenv(ssd.IPV4_ONLY_ENV, "0")
+    binary = Path("/opt/nexus/nexus-service")
+    argv = _spawn_capture(monkeypatch, launch_kind="native", artifact=binary)
+    assert argv == [
+        str(binary),
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=false",
+    ]
+
+
+def test_jar_argv_states_false_when_opted_out(monkeypatch):
+    monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
+    monkeypatch.setenv(ssd.IPV4_ONLY_ENV, "no")
+    jar = Path("/build/nexus-service.jar")
+    argv = _spawn_capture(monkeypatch, launch_kind="jar", artifact=jar)
+    assert argv == [
+        "/usr/bin/java",
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=false",
+        "-jar",
+        str(jar),
+    ]
+
+
+def test_a_malformed_opt_out_refuses_the_spawn(monkeypatch):
+    """A typo must not silently pick a socket family.
+
+    It must also refuse in the type the CLI catches: `nx daemon service
+    start` and `nx init` both catch StorageServiceStartError to print
+    `Error: ...` and exit 2, so a bare ValueError would have reached the
+    user as a traceback.
+    """
+    monkeypatch.setenv(ssd.IPV4_ONLY_ENV, "ture")
+    with pytest.raises(ssd.StorageServiceStartError, match=ssd.IPV4_ONLY_ENV):
+        _spawn_capture(
+            monkeypatch,
+            launch_kind="native",
+            artifact=Path("/opt/nexus/nexus-service"),
+        )
 
 
 def test_jar_argv_with_heap_orders_xmx_before_jar(monkeypatch):
     monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
     jar = Path("/build/nexus-service.jar")
     argv = _spawn_capture(monkeypatch, launch_kind="jar", artifact=jar, max_heap="1g")
-    assert argv == ["/usr/bin/java", "-Duser.timezone=UTC", "-Xmx1g", "-jar", str(jar)]
+    assert argv == [
+        "/usr/bin/java",
+        "-Duser.timezone=UTC",
+        "-Djava.net.preferIPv4Stack=true",
+        "-Xmx1g",
+        "-jar",
+        str(jar),
+    ]
 
 
 # ── nx init --service honours the JAR opt-in (no native binary required) ─────
@@ -151,7 +230,13 @@ def test_init_service_skips_binary_acquire_with_jar(monkeypatch, tmp_path):
     monkeypatch.setenv("NEXUS_SERVICE_JAR", str(jar))
     # If it tried to acquire, _find_service_binary would be consulted; make it
     # explode so a regression that ignores the opt-in fails loudly.
-    monkeypatch.setattr(ssd, "_find_service_binary", lambda cd: (_ for _ in ()).throw(AssertionError("should not check native binary")))
+    monkeypatch.setattr(
+        ssd,
+        "_find_service_binary",
+        lambda cd: (_ for _ in ()).throw(
+            AssertionError("should not check native binary")
+        ),
+    )
     assert _ensure_service_binary_step(tmp_path) is True
 
 
@@ -173,7 +258,10 @@ def test_requested_resolves_explicit_jar(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
     # Fix round (nexus-4e96a round-1 critique): the returned path is
     # CANONICAL-ABSOLUTE, not necessarily identical to the input spelling.
-    assert requested_launch_artifact_if_explicit(tmp_path) == (jar.resolve(strict=False), "jar")
+    assert requested_launch_artifact_if_explicit(tmp_path) == (
+        jar.resolve(strict=False),
+        "jar",
+    )
 
 
 def test_requested_resolves_explicit_bin(monkeypatch, tmp_path):
@@ -183,7 +271,8 @@ def test_requested_resolves_explicit_bin(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
     monkeypatch.setenv("NEXUS_SERVICE_BIN", str(binary))
     assert requested_launch_artifact_if_explicit(tmp_path) == (
-        binary.resolve(strict=False), "native",
+        binary.resolve(strict=False),
+        "native",
     )
 
 
@@ -211,7 +300,8 @@ def test_mismatch_raises_naming_both_artifacts(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
     with pytest.raises(StorageServiceStartError) as exc_info:
         _raise_or_warn_on_artifact_mismatch(
-            tmp_path, {"artifact": "/opt/nexus/nexus-service", "launch_kind": "native"},
+            tmp_path,
+            {"artifact": "/opt/nexus/nexus-service", "launch_kind": "native"},
         )
     msg = str(exc_info.value)
     # Requested side is compared/reported in its CANONICAL-ABSOLUTE form.
@@ -227,11 +317,14 @@ def test_mismatch_same_artifact_is_silent(monkeypatch, tmp_path):
     monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
     # Same artifact the lease already carries (canonical spelling) -> no raise.
     _raise_or_warn_on_artifact_mismatch(
-        tmp_path, {"artifact": str(jar.resolve(strict=False)), "launch_kind": "jar"},
+        tmp_path,
+        {"artifact": str(jar.resolve(strict=False)), "launch_kind": "jar"},
     )
 
 
-def test_mismatch_unknown_lease_artifact_allows_with_warning(monkeypatch, tmp_path, caplog):
+def test_mismatch_unknown_lease_artifact_allows_with_warning(
+    monkeypatch, tmp_path, caplog
+):
     """A pre-fix lease predates artifact-identity tracking: allow + warn,
     never raise (one-release degrade window)."""
     jar = tmp_path / "svc.jar"
@@ -282,7 +375,8 @@ def test_mismatch_relative_vs_absolute_same_file_no_raise(monkeypatch, tmp_path)
 
     # The "lease", published elsewhere, carries the fully-resolved spelling.
     _raise_or_warn_on_artifact_mismatch(
-        tmp_path, {"artifact": str(binary.resolve(strict=False)), "launch_kind": "native"},
+        tmp_path,
+        {"artifact": str(binary.resolve(strict=False)), "launch_kind": "native"},
     )  # must not raise
 
 
@@ -305,7 +399,8 @@ def test_mismatch_symlink_spelling_same_file_no_raise(monkeypatch, tmp_path):
 
     # The lease recorded the REAL (non-symlinked) canonical path.
     _raise_or_warn_on_artifact_mismatch(
-        tmp_path, {"artifact": str(real_binary.resolve(strict=False)), "launch_kind": "native"},
+        tmp_path,
+        {"artifact": str(real_binary.resolve(strict=False)), "launch_kind": "native"},
     )  # must not raise
 
 
@@ -329,5 +424,6 @@ def test_mismatch_genuinely_different_files_still_raises(monkeypatch, tmp_path):
 
     with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
         _raise_or_warn_on_artifact_mismatch(
-            tmp_path, {"artifact": str(binary_b.resolve(strict=False)), "launch_kind": "native"},
+            tmp_path,
+            {"artifact": str(binary_b.resolve(strict=False)), "launch_kind": "native"},
         )

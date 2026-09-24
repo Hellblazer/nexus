@@ -145,6 +145,112 @@ def test_second_instance_same_tenant_converges_to_one_owner(tmp_path: Path) -> N
         d2.stop()
 
 
+class _RecordingQueue:
+    """Like _NoopQueue, but counts reclaim_stale calls so tests can assert
+    on whether the final shutdown sweep ran."""
+
+    def __init__(self) -> None:
+        self.reclaim_calls = 0
+
+    def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        self.reclaim_calls += 1
+        return 0
+
+    def close(self) -> None:
+        ...
+
+
+def test_stop_skips_final_reclaim_when_fenced(tmp_path: Path) -> None:
+    """nexus-cd1k0.6 finding (6): stop() ran reclaim_stale(0) unconditionally,
+    even when this daemon was fenced by a newer owner. reclaim_stale(0)
+    resets ANY stale in_progress row in the tenant's scope, not only rows
+    this daemon owned -- so a fenced loser's final sweep could reset the
+    successor's freshly-claimed in-progress rows back to pending, out from
+    under it. A fenced daemon must skip the sweep entirely."""
+    queue1 = _RecordingQueue()
+    d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
+                            worker_factory=_FakeWorker, queue_factory=lambda: queue1)
+    d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
+                            worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+    d1.start()
+    d2.start()  # higher generation — becomes the live owner, fences d1
+    try:
+        d1.heartbeat_once()
+        assert d1.is_fenced() is True
+        # the reclaim-first background thread already ran an unrelated sweep
+        # at start(); isolate the FINAL shutdown sweep's own contribution.
+        calls_before_stop = queue1.reclaim_calls
+        d1.stop()
+        assert queue1.reclaim_calls == calls_before_stop, (
+            "a fenced daemon must not sweep the successor's rows in its final stop()"
+        )
+    finally:
+        d2.stop()
+
+
+def test_stop_runs_final_reclaim_when_not_fenced(tmp_path: Path) -> None:
+    """The sibling of the case above: a daemon that owns its scope (never
+    fenced) still runs its shutdown-observability reclaim sweep."""
+    queue = _RecordingQueue()
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
+                           worker_factory=_FakeWorker, queue_factory=lambda: queue)
+    d.start()
+    # the reclaim-first background thread already ran an unrelated sweep at
+    # start(); isolate the FINAL shutdown sweep's own contribution.
+    calls_before_stop = queue.reclaim_calls
+    d.stop()
+    assert queue.reclaim_calls == calls_before_stop + 1
+
+
+class _FencesDuringStopWorker(_FakeWorker):
+    """A worker whose ``stop()`` simulates a heartbeat tick's fence landing
+    WHILE it drains -- after ``fenced`` was captured at the top of
+    ``AspectWorkerDaemon.stop()``, before the later mark/relinquish guard
+    is reached. ``daemon`` is set post-construction (the daemon does not
+    exist yet when the worker_factory builds this instance)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.daemon: "AspectWorkerDaemon | None" = None
+        self.fenced_applied = False
+
+    def stop(self, timeout: float = 10.0) -> None:
+        super().stop(timeout=timeout)
+        if self.daemon is not None and self.daemon._supervisor is not None:
+            self.daemon._supervisor.fenced = True
+            self.fenced_applied = True
+
+
+def test_mark_relinquish_uses_the_same_captured_fenced_value_as_the_reclaim_sweep(
+    tmp_path: Path,
+) -> None:
+    """nexus-cd1k0.6 review-wave2 follow-up: `fenced` was captured ONCE at
+    the top of stop() for the reclaim-sweep guard, but the later
+    mark/relinquish guard re-read `supervisor.fenced` LIVE -- a fence
+    transition landing in the window between the capture and that later
+    check (e.g. a heartbeat tick completing while the worker drains) made
+    the two guards disagree: the reclaim sweep ran under the PRE-fence
+    answer while mark/relinquish used the POST-fence one. Both guards
+    must use the single value captured at the top, so a daemon that was
+    NOT fenced when stop() started still relinquishes its lease even if
+    it becomes fenced moments later mid-drain."""
+    worker = _FencesDuringStopWorker()
+    queue = _RecordingQueue()
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
+                           worker_factory=lambda: worker, queue_factory=lambda: queue)
+    d.start()
+    worker.daemon = d
+    assert d.is_fenced() is False  # not fenced when stop() will capture it
+
+    d.stop()
+
+    assert worker.fenced_applied is True, "the mid-stop race did not actually fire"
+    assert _registry(tmp_path).discover("tenant-A") is None, (
+        "mark_shutting_down/relinquish must still run, using the captured "
+        "pre-fence value, not the live post-fence one"
+    )
+
+
 def test_cli_spawn_entrypoint_wires_run_with_tenant(tmp_path, monkeypatch) -> None:
     """`nx daemon aspect-worker start --tenant T` is the Phase-1 spawn entrypoint
     (Phase 2's enqueue hook Popens it). It must resolve and call

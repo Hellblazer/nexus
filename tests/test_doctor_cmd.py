@@ -1104,6 +1104,300 @@ class TestCheckT1:
         assert "is fresh" in result.output
 
 
+# ── tuple-projection (no dedicated flag; supplementary-sweep only,          ──
+# ── nexus-08cfl remedy 3) ─────────────────────────────────────────────────────
+
+
+class TestCheckTupleProjection:
+    """Direct unit tests of ``_run_check_tuple_projection`` (code-review
+    follow-up on nexus-08cfl's commit 6fad79187).
+
+    This row has no dedicated ``--check-*`` flag (the same shape as
+    ``--check-fanout-floor``: it only runs as part of the default
+    supplementary sweep), so ``doctor_cmd``'s ``if check_t1: ... return``
+    dispatch pattern (see ``TestCheckT1`` above) does not apply here --
+    there is no flag to invoke through ``CliRunner``. Call the function
+    directly instead, exactly as ``TestRunCheckMcpLogsNexusSection`` in
+    ``tests/test_doctor_check_mcp_logs.py`` already does for
+    ``_run_check_mcp_logs``: ``click.echo`` writes to ``sys.stdout``
+    outside a command context too, so ``capsys`` captures it fine with no
+    ``CliRunner`` involved.
+    """
+
+    @staticmethod
+    def _log_path(state_dir: Path, session_id: str) -> Path:
+        return state_dir / "nexus" / "orchestration" / f"{session_id}.tuple-projection.log"
+
+    def test_virgin_box_no_session_is_not_applicable(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ) -> None:
+        """nexus-7zhag doctrine: no session-id resolves at all (a fresh
+        install / scrubbed env) is not-applicable, never a warning -- and
+        it must not even look for a log file, let alone create one."""
+        state_dir = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state_dir))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        from nexus.commands.doctor import _run_check_tuple_projection
+
+        _run_check_tuple_projection()
+        out = capsys.readouterr().out
+        assert "no session-id resolves" in out
+        assert "SKIP" not in out
+        assert not state_dir.exists()
+
+    def test_log_absent_for_current_session_is_clean(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ) -> None:
+        """A resolved session with no log file at all (the common healthy
+        case -- the projector only ever writes on a SKIP) reads clean."""
+        state_dir = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state_dir))
+        monkeypatch.setenv("NX_SESSION_ID", "sess-clean")
+        from nexus.commands.doctor import _run_check_tuple_projection
+
+        _run_check_tuple_projection()
+        out = capsys.readouterr().out
+        assert "[✓]" in out
+        assert "no SKIPs recorded" in out
+        assert "sess-clean" in out
+
+    def test_log_present_but_empty_for_current_session_is_clean(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ) -> None:
+        """An existing-but-empty log file (e.g. truncated by something
+        else) must read identically to an absent one -- clean, never a
+        phantom SKIP count from an empty-string split."""
+        state_dir = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state_dir))
+        monkeypatch.setenv("NX_SESSION_ID", "sess-empty")
+        log_path = self._log_path(state_dir, "sess-empty")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("")
+        from nexus.commands.doctor import _run_check_tuple_projection
+
+        _run_check_tuple_projection()
+        out = capsys.readouterr().out
+        assert "[✓]" in out
+        assert "no SKIPs recorded" in out
+
+    def test_skips_recorded_for_current_session_are_reported(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ) -> None:
+        """SKIP lines for THIS session must be counted and the LAST one
+        (not the first) quoted, with the log path named."""
+        state_dir = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state_dir))
+        monkeypatch.setenv("NX_SESSION_ID", "sess-skipped")
+        log_path = self._log_path(state_dir, "sess-skipped")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "2026-09-23T00:00:00Z\tSKIP kind=start agent_id=a no fresh data-token lease\n"
+            "2026-09-23T00:00:05Z\tSKIP kind=report agent_id=b no fresh data-token lease\n"
+        )
+        from nexus.commands.doctor import _run_check_tuple_projection
+
+        _run_check_tuple_projection()
+        out = capsys.readouterr().out
+        assert "[!]" in out
+        assert "2 SKIP(s)" in out
+        assert "sess-skipped" in out
+        assert "kind=report agent_id=b" in out  # the LAST line
+        assert "kind=start agent_id=a" not in out  # not the first
+        assert str(log_path) in out
+
+    def test_never_reads_another_sessions_log(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ) -> None:
+        """A SIBLING session's log full of SKIPs must never leak into this
+        session's report -- the row is scoped to resolve_active_session_
+        id()'s own session, never a directory-wide scan of every
+        *.tuple-projection.log file under the orchestration dir."""
+        state_dir = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state_dir))
+        monkeypatch.setenv("NX_SESSION_ID", "sess-mine")
+        other_log = self._log_path(state_dir, "sess-other")
+        other_log.parent.mkdir(parents=True, exist_ok=True)
+        other_log.write_text(
+            "2026-09-23T00:00:00Z\tSKIP kind=start agent_id=x no fresh data-token lease\n"
+        )
+        from nexus.commands.doctor import _run_check_tuple_projection
+
+        _run_check_tuple_projection()
+        out = capsys.readouterr().out
+        assert "[✓]" in out
+        assert "no SKIPs recorded" in out
+        assert "sess-mine" in out
+        assert "sess-other" not in out
+        # "no SKIPs recorded" (the clean message above) legitimately
+        # contains the substring "SKIP" -- assert against the raw
+        # LOG-LINE shape instead, which must never leak through.
+        assert "SKIP kind=" not in out
+        assert "agent_id=x" not in out
+
+
+class TestCheckGhostSweep:
+    """Direct unit tests of ``_run_check_ghost_sweep`` (nexus-29drn: Sam's
+    ruling adding an ``nx doctor`` row alongside the ``nx catalog
+    sweep-ghosts`` verb). Same shape as ``TestCheckTupleProjection`` above:
+    no dedicated ``--check-*`` flag, runs only in the default supplementary
+    sweep, called directly (no ``CliRunner``).
+
+    nexus-7zhag doctrine (a NEW doctor row must be not-applicable on a
+    virgin box, never allowlisted in the fresh-install MVV): a box where
+    the catalog writer cannot be resolved or the engine cannot answer this
+    call at all (unreachable, or an engine older than nexus-29drn's route)
+    reads as not-applicable, never a red/warn line.
+    """
+
+    def test_writer_unreachable_is_not_applicable(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        def _boom():
+            raise RuntimeError("no engine configured")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", _boom)
+
+        _run_check_ghost_sweep()
+        out = capsys.readouterr().out
+        assert "not applicable" in out
+        assert "[!]" not in out
+        assert "[✓]" not in out
+
+    def test_zero_ghosts_reads_clean(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        class _Writer:
+            def ghost_sweep(self, *, dry_run):
+                assert dry_run is True
+                return {"scanned": 4, "ghosts_deleted": 0, "marked_dormant": 0,
+                        "quarantine_held": 0, "ghost_names": [], "dormant_names": [],
+                        "dry_run": True}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda: _Writer())
+
+        _run_check_ghost_sweep()
+        out = capsys.readouterr().out
+        assert "[✓]" in out
+        assert "Ghost collections: 0" in out
+
+    def test_nonzero_ghosts_names_the_count_and_the_verb(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        class _Writer:
+            def ghost_sweep(self, *, dry_run):
+                return {"scanned": 10, "ghosts_deleted": 3, "marked_dormant": 1,
+                        "quarantine_held": 0,
+                        "ghost_names": ["a", "b", "c"], "dormant_names": ["d"],
+                        "dry_run": True}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda: _Writer())
+
+        _run_check_ghost_sweep()
+        out = capsys.readouterr().out
+        assert "[!]" in out
+        assert "3" in out
+        assert "sweep-ghosts --apply" in out
+
+    def test_dry_run_true_is_always_passed_never_mutates(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_ghost_sweep
+
+        calls: list[bool] = []
+
+        class _Writer:
+            def ghost_sweep(self, *, dry_run):
+                calls.append(dry_run)
+                return {"scanned": 0, "ghosts_deleted": 0, "marked_dormant": 0,
+                        "quarantine_held": 0, "ghost_names": [], "dormant_names": [],
+                        "dry_run": dry_run}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda: _Writer())
+
+        _run_check_ghost_sweep()
+        assert calls == [True]
+
+
+def test_ghost_sweep_row_registered_in_supplementary_checks() -> None:
+    """Registration proof, mirroring
+    ``test_tuple_projection_row_registered_in_supplementary_checks``."""
+    import inspect
+
+    from nexus.commands.doctor import _SUPPLEMENTARY_CHECK_NAMES, _run_supplementary_checks
+
+    assert "ghost-sweep" in _SUPPLEMENTARY_CHECK_NAMES
+    source = inspect.getsource(_run_supplementary_checks)
+    assert '"ghost-sweep": _run_check_ghost_sweep' in source
+
+
+def test_ghost_sweep_row_absent_from_fresh_install_mvv_allowlist() -> None:
+    """nexus-7zhag doctrine, mirroring
+    ``test_tuple_projection_row_absent_from_fresh_install_mvv_allowlist``:
+    a NEW doctor row must resolve not-applicable/clean on a virgin box,
+    never gaining an entry in ``tests/e2e/fresh-install-mvv.sh``'s doctor
+    warnings allowlist."""
+    import re as _re
+
+    mvv_path = Path(__file__).resolve().parent / "e2e" / "fresh-install-mvv.sh"
+    source = mvv_path.read_text(encoding="utf-8")
+    match = _re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
+    assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
+    allowlist_regex = match.group(1)
+    assert "ghost-sweep" not in allowlist_regex
+    assert "ghost_sweep" not in allowlist_regex
+
+
+def test_tuple_projection_row_registered_in_supplementary_checks() -> None:
+    """Registration proof (mirrors ``test_all_three_rows_are_registered_
+    in_run_health_checks`` in ``tests/test_health_tuple_doctor_rows.py``,
+    the nexus-7zhag-doctrine sibling for ``nexus.health`` rows): the
+    default ``nx doctor`` sweep must actually dispatch to
+    ``_run_check_tuple_projection`` -- names it in both
+    ``_SUPPLEMENTARY_CHECK_NAMES`` (the run-order list) and the
+    ``runners`` dict inside ``_run_supplementary_checks`` (the name ->
+    callable mapping), so a name present in one but missing from the
+    other -- a ``KeyError`` at sweep time -- is caught here rather than
+    only on someone's live ``nx doctor`` run."""
+    import inspect
+
+    from nexus.commands.doctor import _SUPPLEMENTARY_CHECK_NAMES, _run_supplementary_checks
+
+    assert "tuple-projection" in _SUPPLEMENTARY_CHECK_NAMES
+    source = inspect.getsource(_run_supplementary_checks)
+    assert '"tuple-projection": _run_check_tuple_projection' in source
+
+
+def test_tuple_projection_row_absent_from_fresh_install_mvv_allowlist() -> None:
+    """nexus-7zhag doctrine (see the standing rule in the project's
+    memory, and its two prior applications in
+    ``tests/test_health_tuple_doctor_rows.py``): a NEW doctor row
+    resolves not-applicable on a virgin box -- a scrubbed MVV env has no
+    active session (or one with no log yet), so this row is informational
+    there already, with nothing to allowlist. It must never be added to
+    ``tests/e2e/fresh-install-mvv.sh``'s doctor warnings allowlist."""
+    import re as _re
+
+    mvv_path = Path(__file__).resolve().parent / "e2e" / "fresh-install-mvv.sh"
+    source = mvv_path.read_text(encoding="utf-8")
+    match = _re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
+    assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
+    # Scoped to ALLOWLIST_REGEX specifically, not "in source" -- the bare
+    # string "tuple-projection" already appears legitimately elsewhere in
+    # this script (the log-filename shape "<sid>.tuple-projection.log",
+    # leg (c)'s own comments), so a whole-file substring check would be
+    # a false positive on unrelated, correct prose.
+    allowlist_regex = match.group(1)
+    assert "tuple-projection" not in allowlist_regex
+    assert "tuple_projection" not in allowlist_regex
+
+
 # ── --check-wal-retention (nexus-bb5c8) ──────────────────────────────────────
 
 

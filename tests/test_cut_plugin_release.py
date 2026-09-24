@@ -162,6 +162,38 @@ def _mini_nexus(
             "conexus/PENDING_RELEASE.md",
             "# Pending\n- `conexus/registry.yaml`: registry work (nexus-ddddd)\n",
         )
+    elif payload == "straddle-deferred":
+        # The same straddling shape as "straddle" (nexus-ddddd's commit
+        # couples an allowlisted NEW file to a wheel file), but the entry
+        # is moved under the deferral heading (nexus-2x3qy): the cut must
+        # not refuse, and must hold the channel path back from shipping
+        # too -- registry.yaml never existed at main, so "held back"
+        # means it stays absent on the cut branch.
+        _write(repo, "conexus/registry.yaml", "registry v2\n")
+        _write(repo, "conexus/plans/builtin/p2.yml", "new wheel plan\n")
+        _write(repo, "src/nexus/straddle.py", "the wheel half\n")
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "feat: registry work (nexus-ddddd)")
+        _write(
+            repo,
+            "conexus/PENDING_RELEASE.md",
+            "# Pending\n\n## Deferred to the next client release\n\n"
+            "- `conexus/registry.yaml`: registry work (nexus-ddddd)\n",
+        )
+    elif payload == "straddle-deferred-edit":
+        # A deferred entry whose channel path already EXISTS at main
+        # (conexus/hooks/hook.py, baseline "v1\n"): held back must mean
+        # RESTORED to that content, never deleted outright.
+        _write(repo, "conexus/hooks/hook.py", "v2 coupled to wheel — MUST NOT SHIP\n")
+        _write(repo, "src/nexus/straddle2.py", "the wheel half\n")
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "feat: hook rework (nexus-fffff)")
+        _write(
+            repo,
+            "conexus/PENDING_RELEASE.md",
+            "# Pending\n\n## Deferred to the next client release\n\n"
+            "- `conexus/hooks/hook.py`: coupled rework (nexus-fffff)\n",
+        )
     elif payload == "cleanbead":
         # Ride-alongs OUTSIDE the shipped surface (tests/, docs/) do not
         # straddle: they ship nowhere, so nothing is stranded.
@@ -833,6 +865,149 @@ class TestAtomicSplit:
         for entry in entries:
             bead = attribute_entry(entry)  # raises = the test fails, by name
             assert bead.startswith("nexus-")
+
+
+# ---------------------------------------------------------------------------
+# The real deferral mechanism (nexus-2x3qy): Sam's disposition was to build
+# it, not weaken atomic_split_check's wording. A "## Deferred to the next
+# client release" ledger entry is exempt from the straddle refusal AND its
+# channel path(s) are held back from THIS cut's import -- the whole bead
+# ships together at the next client release, never split across two.
+# ---------------------------------------------------------------------------
+
+
+class TestDeferralParsing:
+    """The parser, isolated from perform_cut."""
+
+    def test_an_entry_under_the_heading_is_deferred(self) -> None:
+        from cut_plugin_release import _deferred_entries
+
+        text = (
+            "# Pending\n"
+            "- `conexus/hooks/live.py`: not deferred (nexus-aaaaa)\n"
+            "\n"
+            "## Deferred to the next client release\n"
+            "\n"
+            "- `conexus/hooks/held.py`: deferred (nexus-bbbbb)\n"
+        )
+        deferred = _deferred_entries(text)
+        assert len(deferred) == 1
+        assert "held.py" in deferred[0]
+        assert "live.py" not in "".join(deferred)
+
+    def test_a_heading_ends_the_section(self) -> None:
+        """An entry after a DIFFERENT '## ' heading following the
+        deferral section is not deferred -- section membership is by the
+        LAST heading seen, not "everything after the first Deferred
+        heading in the file"."""
+        from cut_plugin_release import _deferred_entries
+
+        text = (
+            "# Pending\n"
+            "## Deferred to the next client release\n"
+            "- `conexus/hooks/held.py`: deferred (nexus-bbbbb)\n"
+            "## Some other section\n"
+            "- `conexus/hooks/other.py`: not deferred (nexus-ccccc)\n"
+        )
+        deferred = _deferred_entries(text)
+        assert len(deferred) == 1
+        assert "held.py" in deferred[0]
+
+    def test_old_format_ledgers_with_no_deferred_heading_still_parse(self) -> None:
+        """Backward compatibility: a ledger written before this bead has
+        no deferral section at all, and must parse as zero deferred
+        entries, never an error."""
+        from cut_plugin_release import _deferred_entries, deferred_paths, path_entries
+
+        text = (
+            "# Pending\n"
+            "- Every file that differs MUST be declared here.\n"
+            "- `conexus/hooks/h.py`: real entry (nexus-aaaaa)\n"
+        )
+        assert _deferred_entries(text) == []
+        assert deferred_paths(text) == set()
+        assert len(path_entries(text)) == 1  # unaffected by the new parser
+
+    def test_deferred_paths_excludes_wheel_and_bare_prefix_spans(self) -> None:
+        """Only allowlisted, path-shaped spans count -- the wheel half of
+        a split entry was never going to ship regardless of deferral,
+        and a bare prefix root (`conexus/`) is prose, not a path."""
+        from cut_plugin_release import deferred_paths
+
+        text = (
+            "# Pending\n"
+            "## Deferred to the next client release\n"
+            "- `conexus/agents/dev.md` (see `conexus/`): split delivery, "
+            "wheel half `src/nexus/plans/x.py` (nexus-fffff)\n"
+        )
+        assert deferred_paths(text) == {"conexus/agents/dev.md"}
+
+
+class TestDeferralInAtomicSplitCheck:
+    def test_a_deferred_straddling_entry_does_not_refuse(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo = _mini_nexus(tmp_path, payload="straddle-deferred")
+        result = _cut(repo)
+        assert result["moved_plugins"] == ["conexus"]
+
+    def test_a_new_deferred_path_never_ships(self, tmp_path: pathlib.Path) -> None:
+        """registry.yaml never existed at origin/main: held back means it
+        stays absent on the cut branch, exactly as if the import had
+        never touched it."""
+        repo = _mini_nexus(tmp_path, payload="straddle-deferred")
+        _cut(repo)
+        assert not (repo / "conexus/registry.yaml").exists()
+        _run(repo, "diff", "--quiet", "origin/main", "--", "conexus/registry.yaml")
+
+    def test_the_coupled_wheel_half_still_never_ships(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo = _mini_nexus(tmp_path, payload="straddle-deferred")
+        _cut(repo)
+        assert not (repo / "src/nexus/straddle.py").exists()
+
+    def test_a_preexisting_deferred_path_is_restored_not_deleted(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """conexus/hooks/hook.py already exists at main (baseline "v1\\n");
+        holding it back must restore that content, never delete the file."""
+        repo = _mini_nexus(tmp_path, payload="straddle-deferred-edit")
+        _cut(repo)
+        assert (repo / "conexus/hooks/hook.py").read_text() == "v1\n"
+        assert not (repo / "src/nexus/straddle2.py").exists()
+
+    def test_the_deferred_entry_survives_the_cut_untouched(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """_rewrite_ledger must never empty a deferred entry: it reads as
+        "covered" under the plain heuristic (an allowlisted span, no
+        wheel span ON THE ENTRY ITSELF), which would erase it on the
+        very cut that is deliberately not shipping it."""
+        repo = _mini_nexus(tmp_path, payload="straddle-deferred")
+        _cut(repo)
+        ledger = (repo / "conexus/PENDING_RELEASE.md").read_text(encoding="utf-8")
+        assert "## Deferred to the next client release" in ledger
+        assert "conexus/registry.yaml" in ledger
+        assert "nexus-ddddd" in ledger
+
+    def test_the_stray_path_assert_still_passes(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """The final stray-path check in perform_cut must see nothing
+        outside the allowlist -- the hold-back restore must leave the
+        branch clean, not merely absent from the two files checked above."""
+        repo = _mini_nexus(tmp_path, payload="straddle-deferred")
+        _cut(repo)
+        stray = [
+            line.strip()
+            for line in _run(
+                repo, "diff", "--name-only", "origin/main"
+            ).splitlines()
+        ]
+        from cut_plugin_release import _is_allowlisted
+
+        assert all(_is_allowlisted(p) for p in stray), stray
 
 
 class TestBatterySubstrateEnv:

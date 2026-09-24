@@ -268,6 +268,48 @@ class TestDiscover:
         assert registry.discover("42") is None
 
 
+class TestReadRecordCorruptShapes:
+    """nexus-cd1k0.6 finding (8): _read_record used to let TypeError /
+    UnicodeDecodeError escape discover/publish/heartbeat for valid JSON of
+    the wrong shape, or non-UTF-8 bytes -- crash-looping the supervisor
+    instead of treating the record as absent/corrupt like a JSON syntax
+    error already was."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="json-list"),
+            pytest.param(b"null", id="json-null"),
+            pytest.param(
+                b'{"scope_key":"42","generation":1,"owner_token":"t",'
+                b'"heartbeat_epoch":1,"ttl":3,"endpoint":5,"version":"1"}',
+                id="endpoint-not-a-mapping",
+            ),
+            pytest.param(b"\xff\xfe", id="non-utf8-bytes"),
+        ],
+    )
+    def test_discover_treats_malformed_record_as_absent(
+        self, registry: ServiceRegistry, body: bytes,
+    ) -> None:
+        registry._record_path("42").write_bytes(body)
+        assert registry.discover("42") is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="json-list"),
+            pytest.param(b"null", id="json-null"),
+            pytest.param(b"\xff\xfe", id="non-utf8-bytes"),
+        ],
+    )
+    def test_publish_over_malformed_record_does_not_raise(
+        self, registry: ServiceRegistry, body: bytes,
+    ) -> None:
+        registry._record_path("42").write_bytes(body)
+        rec = registry.publish("42", endpoint=_endpoint(), version="1", owner_token="A")
+        assert rec.generation == 1
+
+
 # ---------------------------------------------------------------------------
 # relinquish: own-record-only deletion (CA-4 shutdown ordering)
 # ---------------------------------------------------------------------------
@@ -632,6 +674,65 @@ class TestStorageServiceStackMatcher:
             f"nx daemon service start --foreground --config-dir={spaced}"
         )
 
+    def test_matches_engine_launched_via_nexus_service_bin_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-cd1k0.6 finding (9): an engine launched via the
+        NEXUS_SERVICE_BIN dev/test opt-in runs from a path OUTSIDE
+        <config_dir>/service/nexus-service. Every caller of this matcher
+        (the changelog-lock liveness gate included) must still recognize
+        it, or a genuinely alive, possibly-migrating engine reads as
+        dead."""
+        cfg = tmp_path / "nexus"
+        dev_bin = tmp_path / "dev-checkout" / "service" / "target" / "nexus-service"
+        dev_bin.parent.mkdir(parents=True)
+        dev_bin.write_text("")
+        monkeypatch.setenv("NEXUS_SERVICE_BIN", str(dev_bin))
+        matcher = storage_service_stack_matcher(cfg)
+        assert matcher(f"{dev_bin} -Xmx1g")
+        # the well-known path under config_dir must still match too.
+        assert matcher(f"{cfg}/service/nexus-service -Xmx1g")
+
+    def test_matches_engine_launched_via_nexus_service_jar_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sibling of the NEXUS_SERVICE_BIN case for the JVM launch kind:
+        the jar path is a MID-command token after `-jar`, not argv[0], so
+        it needs its own recognition, not just the position-anchored
+        binary check."""
+        cfg = tmp_path / "nexus"
+        dev_jar = tmp_path / "dev-checkout" / "service" / "target" / "nexus-service.jar"
+        dev_jar.parent.mkdir(parents=True)
+        dev_jar.write_text("")
+        monkeypatch.setenv("NEXUS_SERVICE_JAR", str(dev_jar))
+        matcher = storage_service_stack_matcher(cfg)
+        assert matcher(
+            f"/usr/bin/java -Duser.timezone=UTC -jar {dev_jar} --port 8080"
+        )
+
+    def test_does_not_match_an_unrelated_command_containing_the_override_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The override recognition must not degrade into a bare substring
+        test on the whole command (e.g. a diagnostic `tail -f` on the same
+        binary), mirroring the well-known-path sibling check above."""
+        cfg = tmp_path / "nexus"
+        dev_bin = tmp_path / "dev-checkout" / "service" / "target" / "nexus-service"
+        dev_bin.parent.mkdir(parents=True)
+        dev_bin.write_text("")
+        monkeypatch.setenv("NEXUS_SERVICE_BIN", str(dev_bin))
+        matcher = storage_service_stack_matcher(cfg)
+        assert not matcher(f"tail -f {dev_bin}.log")
+
+    def test_no_override_set_does_not_match_an_arbitrary_engine_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = tmp_path / "nexus"
+        monkeypatch.delenv("NEXUS_SERVICE_BIN", raising=False)
+        monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
+        matcher = storage_service_stack_matcher(cfg)
+        assert not matcher(f"{tmp_path}/some/other/nexus-service -Xmx1g")
+
 
 class TestSweepMatchingProcesses:
     """``sweep_matching_processes`` — THE shared mechanism nexus-oyo2g's
@@ -827,7 +928,7 @@ class TestProcessState:
         with patch(
             "nexus.daemon.service_registry._procfs_available", return_value=False,
         ), patch(
-            "nexus.daemon.service_registry.subprocess.run",
+            "nexus.daemon.service_registry.run_bounded",
             return_value=SimpleNamespace(stdout="S+\n", returncode=0),
         ):
             assert process_state(4321) == "S"
@@ -836,7 +937,7 @@ class TestProcessState:
         with patch(
             "nexus.daemon.service_registry._procfs_available", return_value=False,
         ), patch(
-            "nexus.daemon.service_registry.subprocess.run",
+            "nexus.daemon.service_registry.run_bounded",
             side_effect=FileNotFoundError("no ps"),
         ):
             assert process_state(4321) is None

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from nexus._locking import lock_file, unlock_file
+from nexus.bounded_subprocess import run_bounded
 from nexus.corpus import index_model_for_collection
 from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
@@ -86,7 +87,7 @@ RDR_DIR_NON_RDR_BASENAMES: frozenset[str] = frozenset({"readme.md", "agents.md",
 def _git_metadata(repo: Path) -> dict:
     """Collect git metadata for *repo*. Returns empty strings for missing values."""
     def run(args: list[str]) -> str:
-        r = subprocess.run(args, cwd=repo, capture_output=True, text=True, timeout=10)
+        r = run_bounded(args, cwd=repo, timeout=10)
         return r.stdout.strip() if r.returncode == 0 else ""
 
     return {
@@ -117,8 +118,8 @@ def _git_ls_files(repo: Path, *, include_untracked: bool = False) -> list[Path]:
     if include_untracked:
         args.extend(["--others", "--exclude-standard"])
     try:
-        result = subprocess.run(
-            args, cwd=repo, capture_output=True, text=True, timeout=60,
+        result = run_bounded(
+            args, cwd=repo, timeout=60,
         )
     except Exception as exc:
         if is_git_repo:
@@ -143,11 +144,9 @@ def _git_ls_files(repo: Path, *, include_untracked: bool = False) -> list[Path]:
 def _current_head(repo: Path) -> str:
     """Return the current HEAD commit hash for *repo*, or '' on error."""
     try:
-        result = subprocess.run(
+        result = run_bounded(
             ["git", "rev-parse", "HEAD"],
             cwd=repo,
-            capture_output=True,
-            text=True,
             timeout=30,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
@@ -202,7 +201,7 @@ def _git_changed_since(
     unexpected status — never guess on a partial delta.
     """
     try:
-        proc = subprocess.run(
+        proc = run_bounded(
             # nexus-6m9zy.4 (#5): -z switches git to NUL-delimited,
             # UNQUOTED output. Without it, any path containing a
             # non-ASCII byte comes back C-quoted (e.g.
@@ -212,7 +211,7 @@ def _git_changed_since(
             # delta forever (owners.head_hash still advances past it).
             ["git", "-C", str(repo), "diff", "--name-status",
              "--find-renames", "--no-color", "-z", base],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
     except Exception:  # noqa: BLE001 — git unavailable/hung: full-index fallback
         _log.debug("git_changed_since_failed", repo=str(repo), exc_info=True)

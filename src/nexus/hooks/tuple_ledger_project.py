@@ -58,8 +58,8 @@ removes that assumption instead.
   module-level copy, single-sourced with the engine's
   ``dev.nexus.service.db.TupleLimits`` by
   ``tests/db/test_tuple_size_limits_parity.py`` -- rather than the plugin's
-  fourth stdlib-only mirror (``_tuple_size_limits.py``), which stays behind
-  for the two hook scripts that still cannot import ``nexus``.
+  fourth stdlib-only mirror (``_tuple_size_limits.py``), deleted at
+  nexus-z9cz2 with the plugin scripts that used it.
 - What did NOT change: the wire shape (``POST /v1/tuples/out`` against the
   ``ledger/<session_id>`` template), the VERIFY-line dims extraction (bead
   nexus-cnzei.6 item 2), the schema-fallback retry for a below-floor engine,
@@ -77,19 +77,62 @@ lease and the data-token lease file -- and PRESENTS what it finds. It never
 calls ``/v1/data-tokens/mint``, and it never puts a bearer on a spawned
 process's argv (there is no spawned process any more).
 
-BEARER PRECEDENCE (nexus-g2lln), preserved verbatim: a fresh data-token
-lease is always tried first. On a MANAGED endpoint (``service_url`` resolved
-via :func:`nexus.config.get_credential` -- env or persisted config) that is
-the ONLY accepted credential: a missing/near-expiry data-token lease is a
-SKIP, never a fallback (a wrong-scoped static token would 401 silently on a
-fire-and-forget write with no reader). On a LOCAL SUPERVISOR endpoint --
-resolved by reading the ``storage_service_addr.<uid>`` lease file for
-host/port -- a missing/near-expiry data-token lease falls back to that SAME
+BEARER PRECEDENCE (nexus-g2lln, corrected by nexus-08cfl): a fresh
+data-token lease is always tried first (:meth:`~nexus.db.data_token.DataTokenManager.fresh_lease_token`,
+a read-only peek of :meth:`~nexus.db.data_token.DataTokenManager.bearer_for`'s
+own cross-process lease-file check). When none is fresh, the discriminator
+is NOT "managed vs local-supervisor" -- it is whether a ``mint_token``
+credential is configured on this install
+(:meth:`~nexus.db.data_token.DataTokenManager.is_configured`), because
+THAT is the discriminator the real client itself applies
+(:meth:`nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin._apply_data_token_override`):
+a configured ``mint_token`` means the real client's override would now
+MINT a fresh data token (a live network call) to replace its resolved
+static token, which this hook never does (SKIP, reason named -- there is
+nothing it can safely present). No ``mint_token`` configured anywhere on
+the install means that override is a no-op on the real client too
+(:meth:`~nexus.db.data_token.DataTokenManager.bearer_for` returns
+``None`` without ever touching the network, see that method's own
+docstring), and the real client presents whatever STATIC service token
+its base resolution already produced -- so this hook presents that SAME
+credential instead of refusing it (:func:`_resolve_static_service_token`).
+
+nexus-08cfl found the ORIGINAL policy conflating two different things: "no
+env pin, ``base_url`` purely lease-derived" (this module's own
+``is_local_supervisor`` flag) was treated as the sole gate for a
+static-token fallback, so a client configured via ``NX_SERVICE_HOST``/
+``NX_SERVICE_PORT``/``NX_SERVICE_TOKEN`` -- the documented route for a
+client with no local supervisor (nexus-ijue9.2) -- was classified
+``is_local_supervisor=False`` and SKIPped on every dispatch even with no
+``mint_token`` configured anywhere, even though ``nx memory put``/``get``
+round-trips fine against the identical endpoint and env: the STATIC token
+IS the credential :func:`nexus.db.service_endpoint.resolve_service_config`
+(the same primitive every T2 store's local-style leg uses) presents there,
+straight off ``NX_SERVICE_TOKEN``, no lease touched at all. Refusing it
+was refusing a credential the real client itself trusts.
+
+One leg keeps a DELIBERATELY STRICTER bar than the real client, on
+purpose: the MANAGED ``service_url`` leg (resolved via
+:func:`nexus.config.get_credential` -- env or persisted config). The real
+client's own :func:`nexus.db.service_endpoint.resolve_service_endpoint`
+falls through to a same-box local-supervisor lease token there when no
+``service_token`` is configured (that function's own leg 1) -- but
+presenting a same-box local token to a URL this install called "managed"
+is exactly the wrong-scoped-bearer risk nexus-g2lln's original policy
+exists to prevent, so this hook does NOT reuse that particular fallback:
+on the managed leg, ``service_token`` alone (never a local lease) is the
+only accepted static credential, and its absence is a SKIP
+(``test_managed_endpoint_never_falls_back_to_a_local_lease_token`` pins
+this).
+
+The pure LOCAL-SUPERVISOR path (``base_url`` resolved purely from the
+``storage_service_addr.<uid>`` lease file, no env pin at all) keeps its
+own EXTRA bar too: the static-token fallback there still reads that SAME
 lease record's own ``endpoint.token`` field, exactly the credential the
-real local ``nx``/MCP client itself presents on this box when no
-``mint_token`` is configured. That fallback token is refused (SKIP, reason
-named) if the lease file is not owner-only (group/other read/write/execute
-bits set) -- this project never trusts a same-box bearer off a file another
+real local ``nx``/MCP client presents on this box when no ``mint_token``
+is configured, but that fallback token is refused (SKIP, reason named) if
+the lease file is not owner-only (group/other read/write/execute bits
+set) -- this project never trusts a same-box bearer off a file another
 local user could read. Nothing in :mod:`nexus.db.service_endpoint` or
 :mod:`nexus.daemon.service_registry` performs that permission check (their
 callers accept a lower bar), so this module still implements it directly --
@@ -219,8 +262,28 @@ def _log_skip(session_id: str, reason: str) -> None:
 # ── Endpoint + credential resolution ────────────────────────────────────
 
 
-def _resolve_base_url(config_dir: Path) -> tuple[str, bool]:
+def _resolve_base_url() -> tuple[str, bool]:
     """``(base_url, is_local_supervisor)``, or raise :class:`_Skip`.
+
+    TAKES NO ``config_dir``, and that is the correction rather than an
+    omission (nexus-t9klx). It used to accept one and never read it: both
+    legs resolve the process's own config dir themselves --
+    ``get_credential`` through ``nexus_config_dir``, and ``discover_lease``
+    which has no such parameter at all -- so the argument was a promise the
+    body could not keep, right only where the caller's dir and the
+    process's coincide.
+
+    That is the same defect this bead fixed one module over, in
+    ``_routing_lib._read_config_yml_credentials``, where a parity test
+    passing a tmp dir got the developer's real credentials back. Found by
+    sweeping for siblings of it rather than by a failure here. The fix is
+    the opposite one, because the cause is: there, a primitive existed that
+    could honour the directory, so the wrapper was pointed at it; here
+    ``discover_lease`` is the single discovery implementation shared by the
+    vector client, the catalog and the T2 resolvers, and threading a
+    config dir through it is a change to that contract, not a residual. So
+    the signature stops claiming what it never did, and a caller that needs
+    a specific config dir has to raise that with ``discover_lease``.
 
     Mirrors :func:`nexus.db.service_endpoint.resolve_service_endpoint`'s
     precedence, using its own primitives rather than a re-implementation:
@@ -323,13 +386,58 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
     return token
 
 
+def _resolve_static_service_token(no_lease_msg: str) -> str:
+    """The STATIC service token the real client presents when no
+    ``mint_token`` credential overrides it -- for every leg EXCEPT the
+    pure local-supervisor lease (which stays routed through
+    :func:`_read_local_supervisor_token`'s stricter, permission-checked
+    read; see the module docstring's BEARER PRECEDENCE section). Reuses
+    the real primitives rather than a parallel copy of their precedence
+    (nexus-08cfl); raises :class:`_Skip` naming *no_lease_msg* plus the
+    underlying reason on any resolution failure.
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred, same reason as above
+    from nexus.db.service_endpoint import resolve_service_config  # noqa: PLC0415 — deferred, same reason as above
+
+    managed_url = (get_credential("service_url") or "").strip().rstrip("/")
+    if managed_url:
+        # The MANAGED leg keeps nexus-g2lln's stricter bar: ONLY
+        # service_token (env or persisted config) is accepted here, never
+        # a fallback to a same-box local-supervisor lease token the way
+        # resolve_service_endpoint()'s own leg 1 would -- see the module
+        # docstring for why this hook deliberately diverges from the real
+        # client on this one leg.
+        token = (get_credential("service_token") or "").strip()
+        if not token:
+            raise _Skip(
+                f"{no_lease_msg}; service_url is configured but no "
+                "service_token is resolvable, and a local-supervisor "
+                "lease token is never an acceptable substitute for a "
+                "managed endpoint's bearer"
+            )
+        return token
+
+    # The NX_SERVICE_HOST/NX_SERVICE_PORT leg: resolve_service_config is
+    # the real primitive every T2 store's local-style leg already uses --
+    # env NX_SERVICE_TOKEN first, falling back to a live local-supervisor
+    # lease's own token exactly as that function does for every other HTTP
+    # client (no extra permission check here: this is that function's own
+    # documented behavior, not a raw lease-file read this module performs
+    # itself).
+    try:
+        _host, _port, token = resolve_service_config()
+    except RuntimeError as exc:
+        raise _Skip(f"{no_lease_msg}; {exc}") from exc
+    return token
+
+
 def _resolve_endpoint_and_token(config_dir: Path) -> tuple[str, str, bool]:
     """``(base_url, token, is_local_supervisor)`` using nexus-g2lln's
-    policy -- or raise :class:`_Skip`. See the module docstring's BEARER
-    PRECEDENCE section."""
+    policy, corrected by nexus-08cfl -- or raise :class:`_Skip`. See the
+    module docstring's BEARER PRECEDENCE section."""
     from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred, same reason as above
 
-    base_url, is_local_supervisor = _resolve_base_url(config_dir)
+    base_url, is_local_supervisor = _resolve_base_url()
     manager = DataTokenManager(config_dir=config_dir)
     token = manager.fresh_lease_token(base_url, _RESOLVED_TENANT)
     if token:
@@ -341,12 +449,31 @@ def _resolve_endpoint_and_token(config_dir: Path) -> tuple[str, str, bool]:
         f"(missing, wrong host/tenant digest, or within "
         f"{int(_NEAR_EXPIRY_THRESHOLD * 100)}% of expiry)"
     )
-    if not is_local_supervisor:
-        raise _Skip(no_lease_msg)
-    try:
-        token = _read_local_supervisor_token(config_dir)
-    except _Skip as local_exc:
-        raise _Skip(f"{no_lease_msg}; {local_exc}") from local_exc
+    if manager.is_configured():
+        # A mint_token credential IS configured for this install: the
+        # real client's own _apply_data_token_override() would now MINT a
+        # fresh data token here (a live network call) to replace its
+        # resolved static token. This hook never mints (module docstring,
+        # "NO HOOK MINTS ANYTHING") -- with no fresh lease to peek, there
+        # is nothing it can safely present, so it skips exactly as
+        # before.
+        raise _Skip(
+            f"{no_lease_msg}; a mint_token credential is configured (the "
+            "real client would mint here, which this hook never does)"
+        )
+
+    # No mint_token credential configured anywhere on this install: the
+    # real client's data-token override is then a no-op, and it presents
+    # whatever STATIC service token its base resolution already produced.
+    # Match that credential exactly rather than refusing a configuration
+    # nx memory put/get already round-trips against (nexus-08cfl).
+    if is_local_supervisor:
+        try:
+            token = _read_local_supervisor_token(config_dir)
+        except _Skip as local_exc:
+            raise _Skip(f"{no_lease_msg}; {local_exc}") from local_exc
+    else:
+        token = _resolve_static_service_token(no_lease_msg)
     return base_url, token, is_local_supervisor
 
 

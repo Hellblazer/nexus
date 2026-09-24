@@ -40,6 +40,8 @@ from pathlib import Path
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger(__name__)
 
 
@@ -305,8 +307,29 @@ def _run_manager(cmd: list[str], **kwargs: object) -> subprocess.CompletedProces
     """``subprocess.run`` of a launchctl/systemctl command with the binary
     resolved through PATH then :data:`_MANAGER_ABSOLUTE_PATHS`. Raises
     ``FileNotFoundError`` (filename = the bare command) when no manager
-    exists, exactly as a bare spawn would."""
-    return subprocess.run([_manager_executable(cmd[0]), *cmd[1:]], **kwargs)  # type: ignore[call-overload]
+    exists, exactly as a bare spawn would.
+
+    nexus-t10nc: a ``**kwargs`` funnel, so the lint's AST scan cannot read
+    a caller's kwargs from this call. Two of the five callers pass
+    ``capture_output`` AND ``timeout`` (the activation probes, at
+    ``_ACTIVATION_QUERY_TIMEOUT``) and are therefore the watched shape,
+    reached through here. Those route to
+    :func:`~nexus.bounded_subprocess.run_bounded`.
+
+    THE OTHER THREE PASS NO TIMEOUT AT ALL and keep the stock call,
+    deliberately. They are unbounded, which is a worse defect than the one
+    this bead is draining — but it is a DIFFERENT one, and closing it means
+    choosing a bound for ``launchctl bootout``/``systemctl`` calls that
+    nobody has measured. Giving them an invented number here would look
+    like a fix and would newly raise on a slow manager. Left for a bead
+    with a measurement behind it.
+    """
+    argv = [_manager_executable(cmd[0]), *cmd[1:]]
+    timeout = kwargs.get("timeout")
+    if timeout is None:
+        return subprocess.run(argv, **kwargs)  # type: ignore[call-overload]
+    rest = {k: v for k, v in kwargs.items() if k not in {"timeout", "capture_output"}}
+    return run_bounded(argv, timeout=float(timeout), **rest)  # type: ignore[arg-type]
 
 
 def _launchd_label_for(tier: str) -> str:
@@ -658,7 +681,7 @@ def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
 
     cmd = [*_daemon._resolve_nx_bin(), "daemon", "service", "stop", "--with-pg"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        result = run_bounded(cmd, timeout=30)
     except Exception as exc:  # noqa: BLE001 — stop is best-effort
         return False, f"service stop failed: {type(exc).__name__}: {exc}"
     if result.returncode != 0:
@@ -940,7 +963,12 @@ def _probe_survivors(*, tier: str) -> tuple[str, ...]:
     out: list[str] = []
     lease = _discover_service_lease()
     if lease is not None:
-        pid = getattr(lease, "supervisor_pid", None)
+        # nexus-cd1k0.6 finding (7): LeaseRecord carries no top-level
+        # `supervisor_pid` attribute -- the supervisor stamps it into
+        # `payload` (storage_service_daemon.py's publish call), so the old
+        # `getattr(lease, "supervisor_pid", None)` always fell through to
+        # its default and the survivor line never showed a pid.
+        pid = lease.payload.get("supervisor_pid")
         where = f" (pid {pid})" if pid else ""
         out.append(
             f"storage service{where} is still running — the autostart entry is "

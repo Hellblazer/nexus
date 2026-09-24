@@ -412,14 +412,19 @@ class TestSubagentHookInjection:
 
 
 class TestSessionHookInjection:
-    """Verify the SessionStart hook reads the L1 context cache."""
+    """Verify the SessionStart hook reads the L1 context cache.
 
-    HOOK_PATH = Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "session_start_hook.py"
+    Drives ``nexus.hooks.session_context.run()``, the port of the plugin's
+    ``session_start_hook.py`` (RDR-215 bead nexus-q02nx.21); the plugin copy
+    this used to exec was deleted at nexus-z9cz2. The filename
+    ``nx context refresh`` writes must be the filename this hook reads.
+    """
 
-    def test_hook_emits_knowledge_map(self, tmp_path: Path) -> None:
+    def test_hook_emits_knowledge_map(self, tmp_path: Path, monkeypatch) -> None:
         """SessionStart hook outputs the cached knowledge map content."""
         import hashlib
-        import subprocess
+
+        from nexus.hooks import session_context
 
         repo_dir = tmp_path / "fakerepo"
         repo_dir.mkdir()
@@ -430,13 +435,15 @@ class TestSessionHookInjection:
         cache_file = context_dir / f"fakerepo-{repo_hash}.txt"
         cache_file.write_text("## Knowledge Map\n\ncode: Session Topic (77)\n")
 
-        result = subprocess.run(
-            ["python3", str(self.HOOK_PATH)],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(repo_dir),
-            env={**__import__("os").environ, "HOME": str(tmp_path)},
-        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
+        monkeypatch.chdir(repo_dir)
+        # No nx/bd: the T2 and ready-beads sections are not under test.
+        monkeypatch.setattr(session_context, "which", lambda cmd: False)
 
+        result = session_context.run(None)
+
+        assert result.stdout is not None
         assert "Session Topic (77)" in result.stdout, (
             f"SessionStart hook did not emit Knowledge Map. stdout={result.stdout[:500]}"
         )

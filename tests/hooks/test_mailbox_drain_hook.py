@@ -9,10 +9,11 @@ server's channel-based push delivery: this hook claims, acks and renders
 on every prompt, whether or not a session ever subscribed anything or
 reached the channel.
 
-These tests drive the real script as a subprocess against a mock engine,
-the same shape ``test_tuple_ledger_project.py`` uses for the sibling
-tuple hook, because the thing under test is a stdlib-only script with no
-``nexus`` import and its failure modes are transport-shaped.
+These tests drive the real verb through ``nx-hook``'s own dispatch, as a
+subprocess against a mock engine, because its failure modes are
+transport-shaped and its stdout is streamed by the dispatcher rather than
+returned (nexus-t9klx ported it from a plugin script; see
+:func:`nexus._hook_runtime._io.stream`).
 """
 from __future__ import annotations
 
@@ -27,13 +28,11 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "conexus"
-    / "hooks"
-    / "scripts"
-    / "mailbox_drain.py"
-)
+from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
+
+#: ``-m`` rather than the installed ``nx-hook`` console script, so these run
+#: against this checkout's code, through the same ``main()`` the shim calls.
+_VERB_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", "mailbox-drain"]
 
 SESSION_ID = "sess-mailbox-drain"
 
@@ -49,25 +48,27 @@ def _payload(**overrides: str) -> str:
     return json.dumps(base)
 
 
+def _env(tmp_path: Path, env_overrides: dict[str, str] | None = None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NX_SERVICE_")}
+    env["NEXUS_CONFIG_DIR"] = str(tmp_path / "config")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env["PATH"] = "/usr/bin:/bin"
+    env.update(env_overrides or {})
+    return env
+
+
 def _run(
     *,
     tmp_path: Path,
     stdin: str | None = None,
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    config_dir = tmp_path / "config"
-    state_dir = tmp_path / "state"
-    env = {k: v for k, v in os.environ.items() if not k.startswith("NX_SERVICE_")}
-    env["NEXUS_CONFIG_DIR"] = str(config_dir)
-    env["XDG_STATE_HOME"] = str(state_dir)
-    env["PATH"] = "/usr/bin:/bin"
-    env.update(env_overrides or {})
     return subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        _VERB_ARGV,
         input=stdin if stdin is not None else _payload(),
         capture_output=True,
         text=True,
-        env=env,
+        env=_env(tmp_path, env_overrides),
         # A bound on a HANG, not on performance. The hook budgets itself at 6s
         # internally; this only stops a wedged subprocess from hanging the suite.
         # It was 20s, which is the load-sensitive shape fixed under nexus-61vos:
@@ -126,6 +127,8 @@ class _MockEngine:
         self.claimable: bool = True
         self.ack_ok: bool = True
         self.calls: list[tuple[str, dict]] = []
+        #: The Authorization header of every request, in order.
+        self.auth: list[str | None] = []
         self.rd_delay_s: float = 0.0
         #: Delay applied only to a paginated follow-up ``rd`` (one that carries
         #: a ``since`` cursor), so a full first page can answer instantly while
@@ -152,6 +155,11 @@ class _MockEngine:
         #: Same, but only for this address, so an unexpected failure can be aimed
         #: at ONE mailbox and the others watched for collateral damage.
         self.malformed_rd_for: str | None = None
+        #: Park the Nth ``in`` (1-based) until ``release`` is set, so a test
+        #: can kill the drain while it is still running, after earlier rows
+        #: were already acked.
+        self.park_in_call: int | None = None
+        self.release = threading.Event()
         self._route_counts: dict[str, int] = {}
         #: Serializes the claim decision (read-eligible, then mutate) and the
         #: ack decision (read-matched, then mutate) across concurrent handler
@@ -175,6 +183,7 @@ class _MockEngine:
                 except json.JSONDecodeError:
                     body = {}
                 engine.calls.append((self.path, body))
+                engine.auth.append(self.headers.get("Authorization"))
                 engine._route_counts[self.path] = engine._route_counts.get(self.path, 0) + 1
                 if self.path in engine.status_for:
                     self._json(engine.status_for[self.path], {"error": "forced"})
@@ -223,6 +232,8 @@ class _MockEngine:
                         rows = rows[:n]
                     self._json(200, {"tuples": rows})
                 elif self.path == "/v1/tuples/in":
+                    if engine.park_in_call == engine._route_counts[self.path]:
+                        engine.release.wait(timeout=60)
                     if not engine.claimable:
                         self._json(200, {})
                         return
@@ -349,6 +360,7 @@ class _MockEngine:
         return [p for p, _ in self.calls]
 
     def close(self) -> None:
+        self.release.set()
         self._server.shutdown()
         self._server.server_close()
 
@@ -667,6 +679,37 @@ class TestCredentialPolicy:
         assert res.returncode == 0, res.stderr
         assert "managed box mail" in res.stdout
 
+    def test_a_data_token_lease_in_its_last_fifth_still_drains(
+        self, tmp_path, engine,
+    ) -> None:
+        """The data-token lease is the ONLY credential here, with 60 s left
+        of a 3600 s grant. The plugin script accepted any unexpired lease; the
+        client's own reader refuses the last 20% because a caller that mints
+        would refresh it. This hook never mints, so with the client's margin a
+        lease-only box got no mail for a fifth of every lease (nexus-t9klx
+        review). The bearer on the wire must be the lease's token."""
+        import hashlib  # noqa: PLC0415 -- deferred: this test only
+        import urllib.parse  # noqa: PLC0415 -- deferred: this test only
+
+        eng = engine()
+        eng.rows = [_row("dt11", body="lease-only mail")]
+        base_url = f"http://127.0.0.1:{eng.port}"
+        cfg = tmp_path / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        host = urllib.parse.urlsplit(base_url).netloc
+        digest = hashlib.sha256(f"{host}\x00default".encode("utf-8")).hexdigest()
+        lease = cfg / f"data_token_lease.{digest}"
+        lease.write_text(json.dumps({
+            "format_version": 1, "token": "lease-bearer", "tenant": "default",
+            "base_url_digest": digest, "expires_at": time.time() + 60.0,
+            "ttl_seconds": 3600.0, "minted_by_pid": os.getpid(),
+        }))
+        lease.chmod(0o600)
+        res = _run(tmp_path=tmp_path, env_overrides={"NX_SERVICE_URL": base_url})
+        assert res.returncode == 0, res.stderr
+        assert "lease-only mail" in res.stdout, res.stderr
+        assert eng.auth and set(eng.auth) == {"Bearer lease-bearer"}, eng.auth
+
     def test_a_group_readable_supervisor_lease_is_refused_not_used(
         self, tmp_path, engine,
     ) -> None:
@@ -702,6 +745,50 @@ class TestPartialFailureNeverLosesDeliveredMail:
             "a row that was cleanly claimed, acked and rendered was discarded "
             "because a LATER row failed"
         )
+
+    def test_a_row_acked_before_a_kill_is_already_on_stdout(self, tmp_path, engine) -> None:
+        """The reason the verb streams (nexus-t9klx). The harness's hook
+        timeout is a KILL, and the verb drops a row's recovery record once
+        the row is shown. nx-hook writes a verb's HookResult only after
+        run() returns, so a buffered port would lose, to a kill mid-drain, a
+        row the engine had already consumed and whose record was gone. Row 1
+        is acked; the drain is parked claiming row 2; the process is killed
+        there. Row 1 must already be on stdout.
+        """
+        import signal  # noqa: PLC0415 -- deferred: this test only
+
+        eng = engine()
+        _wired(tmp_path, eng)
+        eng.rows = [
+            _row("t-1", body="acked before the kill"),
+            _row("t-2", body="never claimed"),
+        ]
+        eng.park_in_call = 2
+        proc = subprocess.Popen(
+            _VERB_ARGV, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=_env(tmp_path),
+        )
+        try:
+            proc.stdin.write(_payload().encode("utf-8"))
+            proc.stdin.close()
+            proc.stdin = None  # closed: communicate() below must not flush it
+            deadline = time.monotonic() + 120
+            while eng.paths().count("/v1/tuples/in") < 2:
+                assert proc.poll() is None, "the drain exited before reaching the parked claim"
+                assert time.monotonic() < deadline, "the drain never reached the parked claim"
+                time.sleep(0.02)
+            proc.send_signal(signal.SIGKILL)
+            out, _err = proc.communicate(timeout=60)
+        finally:
+            eng.release.set()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+        assert proc.returncode == -signal.SIGKILL, "the kill must land mid-drain, not after it"
+        assert "/v1/tuples/ack" in eng.paths()
+        assert b"acked before the kill" in out
+        assert b"never claimed" not in out
 
     def test_a_row_consumed_with_a_lost_ack_response_is_recovered_next_prompt(
         self, tmp_path, engine,
@@ -1404,12 +1491,9 @@ class TestClearedRecordDrain:
 
 
 def _load_module():
-    import importlib.util  # noqa: PLC0415 -- deliberately deferred
+    from nexus.hooks import mailbox_drain  # noqa: PLC0415 -- deliberately deferred
 
-    spec = importlib.util.spec_from_file_location("mailbox_drain_probe", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return mailbox_drain
 
 
 def test_drain_address_oversized_address_skips_before_any_post(monkeypatch) -> None:
@@ -1519,7 +1603,7 @@ def test_drain_claimant_length_is_independent_of_address_and_pid(monkeypatch) ->
     }
     assert len(lengths) == 1, f"claimant length varied: {lengths}"
     for claimant in (short_pid_short_addr, short_pid_long_addr, long_pid_short_addr):
-        assert len(claimant.encode("utf-8")) <= module._sz.MAX_CLAIMANT_BYTES
+        assert len(claimant.encode("utf-8")) <= _MAX_CLAIMANT_BYTES
 
 
 def test_drain_claimant_pid_of_maximum_width_still_fits(monkeypatch) -> None:
@@ -1533,7 +1617,7 @@ def test_drain_claimant_pid_of_maximum_width_still_fits(monkeypatch) -> None:
 
     claimant = module._drain_claimant("a" * 248)
 
-    assert len(claimant.encode("utf-8")) <= module._sz.MAX_CLAIMANT_BYTES
+    assert len(claimant.encode("utf-8")) <= _MAX_CLAIMANT_BYTES
 
 
 def test_pending_lock_with_almost_no_budget_skips_at_once(tmp_path) -> None:
@@ -1603,7 +1687,7 @@ def test_a_short_address_keeps_its_existing_file_name() -> None:
     assert module._address_file_name(address, ".pending.lock") == "sess-abc123.pending.lock"
 
 
-def test_a_long_address_pending_file_round_trips(tmp_path, engine, capsys) -> None:
+def test_a_long_address_pending_file_round_trips(tmp_path, engine) -> None:
     """nexus-galkv.6, gate audit round 3. An address long enough to force
     the sha256-digest filename fallback (``address + ".pending.lock"``
     alone already exceeds POSIX NAME_MAX at 248 chars) must still round-
@@ -1630,7 +1714,6 @@ def test_a_long_address_pending_file_round_trips(tmp_path, engine, capsys) -> No
         )
     except module._Skip:
         pass  # the ack's effect landed; only its response was lost
-    capsys.readouterr()  # nothing should have been delivered on pass 1; discard either way
 
     pending_path = module._pending_path(tmp_path, address)
     assert pending_path.exists(), "the pending record must survive the lost ack response"
@@ -1640,25 +1723,14 @@ def test_a_long_address_pending_file_round_trips(tmp_path, engine, capsys) -> No
 
     eng.drop_after_effect_on = None
     eng.rows = []  # gone at the engine: the ack landed
+    out = module._Out()
     ending = module._drain_address(
         base_url, "test-token", address, is_local=True, config_dir=tmp_path,
-        deadline=time.monotonic() + 10, out=module._Out(),
+        deadline=time.monotonic() + 10, out=out,
     )
-    delivered = capsys.readouterr().out
+    delivered = out.result().stdout or ""
 
     assert ending == "empty"
     assert "long address recovery" in delivered, "the recovered row must actually be delivered"
     assert not pending_path.exists(), "the recovered entry must be cleared, not left behind"
 
-
-def test_cleared_record_naming_matches_the_wheel() -> None:
-    """RDR-208 Phase 2 Step 3: this script cannot import nexus, so it spells
-    the cleared-record filename itself
-    (``nexus.session_marker.record_clear_and_write_session_marker`` writes
-    it, naming a previous session's mailbox). It must agree with the wheel."""
-    from nexus import session_marker
-
-    module = _load_module()
-    cfg = Path("/cfg")
-    for sid in (SESSION_ID, "odd-id-with-dashes.and.dots"):
-        assert module._cleared_record_path(cfg, sid) == session_marker.cleared_record_path(cfg, sid)

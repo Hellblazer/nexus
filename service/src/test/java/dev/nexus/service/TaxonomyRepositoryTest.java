@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.*;
 import static org.assertj.core.data.Offset.offset;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -429,6 +430,79 @@ class TaxonomyRepositoryTest {
 
         assertThat(repo.getAllTopics(TENANT_A, tempCol)).isEmpty();
         assertThat(repo.getLastDiscoverDocCount(TENANT_A, tempCol)).isEmpty();
+    }
+
+    /**
+     * nexus-0v0nj: {@code purgeCollection}'s FULL scope (the pre-existing,
+     * two-arg-overload default) deletes {@code topic_assignments} rows by
+     * {@code source_collection} as well as by topic id — so purging a
+     * collection also destroys THAT collection's documents' projections
+     * onto OTHER collections' topics, which a rebuild of the purged
+     * collection would never touch. This pins the scoping fix: {@link
+     * TaxonomyRepository#PURGE_SCOPE_TAXONOMY_ONLY} must leave that
+     * cross-collection row alone, and {@link
+     * TaxonomyRepository#PURGE_SCOPE_FULL} must still remove it (the
+     * pre-existing behavior, unchanged for every caller that does not
+     * opt in).
+     */
+    @Test @Order(165)
+    void purgeCollection_taxonomyOnlyScope_leavesCrossCollectionProjectionIntact() {
+        String sourceCol = "knowledge__purge-scope-src";
+        String targetCol = "knowledge__purge-scope-target";
+        registerReal(TENANT_A, sourceCol);
+        registerReal(TENANT_A, targetCol);
+        long targetTopicId = repo.insertTopic(
+            TENANT_A, "purge-scope-target-topic", null, targetCol, 0, null, null);
+        String chash = hexChash("purge-scope-cross-doc");
+        seedChunk(TENANT_A, sourceCol, chash);
+        // sourceCol owns no topic of its own here -- this row's ONLY tie to
+        // sourceCol is being its projection SOURCE.
+        repo.assignTopic(TENANT_A, chash, targetTopicId, "projection", 0.9, sourceCol, null);
+
+        Map<String, Integer> scopedCounts = repo.purgeCollection(
+            TENANT_A, sourceCol, TaxonomyRepository.PURGE_SCOPE_TAXONOMY_ONLY);
+        assertThat(scopedCounts.get("assignments"))
+            .as("sourceCol owns no topics of its own, so a taxonomy-only purge of it touches no assignments")
+            .isEqualTo(0);
+
+        assertThat(repo.getTopicById(TENANT_A, targetTopicId))
+            .as("targetCol's topic is untouched -- sourceCol never owned it").isPresent();
+        assertThat(getAssignmentCount(TENANT_A, targetTopicId, sourceCol))
+            .as("the cross-collection projection itself survives a taxonomy-only purge of its source")
+            .isEqualTo(1);
+
+        // FULL scope (the pre-existing default) DOES remove it -- proves the
+        // taxonomy-only result above is a real scoping difference, not an
+        // accident of this fixture.
+        Map<String, Integer> fullCounts = repo.purgeCollection(TENANT_A, sourceCol, TaxonomyRepository.PURGE_SCOPE_FULL);
+        assertThat(fullCounts.get("assignments")).isEqualTo(1);
+        assertThat(getAssignmentCount(TENANT_A, targetTopicId, sourceCol))
+            .as("FULL scope removes the cross-collection projection, the pre-existing behavior")
+            .isEqualTo(0);
+    }
+
+    @Test @Order(166)
+    void purgeCollection_unknownScope_rejected() {
+        assertThatThrownBy(() -> repo.purgeCollection(TENANT_A, COL_A, "bogus-scope"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("unknown scope");
+    }
+
+    /** Raw count of a (topic_id, source_collection) topic_assignments row, bypassing the
+     *  repository's own read surface so this pins the physical row, not a cached view.
+     *  Typed DSL (nexus-cbo4a/nexus-zrcj7 raw-SQL house rule) over the generated
+     *  TOPIC_ASSIGNMENTS table -- same conversion shape as every other typed count in
+     *  this file. */
+    private int getAssignmentCount(String tenant, long topicId, String sourceCollection) {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
+                        .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId))
+                        .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection)));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test @Order(17)

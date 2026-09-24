@@ -12,7 +12,7 @@ write path):
 
 Prerequisite:
   - service/target/nexus-service-1.0-SNAPSHOT.jar must exist (build first).
-  - Java (>= 17) on PATH or JAVA_HOME set.
+  - Java (>= 25) on PATH or JAVA_HOME set.
   - PostgreSQL binaries discoverable (NEXUS_PG_BIN / Homebrew / system dirs / PATH).
   - No VOYAGE_API_KEY or NX_VOYAGE_API_KEY needed (ONNX mode).
 

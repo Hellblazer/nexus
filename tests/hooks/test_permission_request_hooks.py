@@ -20,9 +20,10 @@ bash script; the byte-for-byte parity class that used to compare the port
 against it (``TestNxPortMatchesBashByteForByte``) is gone with it, its
 scenarios already covered directly elsewhere in this file. The sn plugin is
 sn followed at bead nexus-q02nx.23: its wrapper is gone too, so every sn
-assertion here now runs ``auto_approve_sn_mcp.py`` directly under
-``python3`` -- the exec form ``sn/hooks/hooks.json`` declares, argv-free,
-so the snapshot path resolves the way it does in production.
+assertion here now runs ``auto_approve_sn_mcp.py`` directly, argv-free,
+under this interpreter, standing in for the one ``uv run`` picks in the
+exec form ``sn/hooks/hooks.json`` declares (nexus-j4iy0), so the snapshot
+path resolves the way it does in production.
 """
 from __future__ import annotations
 
@@ -377,8 +378,8 @@ class TestPreToolUseApproval:
 
     def test_pretooluse_entry_runs_the_same_handler_as_permissionrequest(self) -> None:
         """Each plugin's PreToolUse and PermissionRequest entries must
-        invoke the identical handler — exec-form ``python3 <script>`` for sn
-        (RDR-215 bead nexus-q02nx.23), ``nx-hook auto-approve`` for nx.
+        invoke the identical handler — exec-form ``uv run ... <script>`` for sn
+        (RDR-215 bead nexus-q02nx.23; launcher nexus-j4iy0), ``nx-hook auto-approve`` for nx.
 
         The nx side has now been through three shapes: a bash ``command``
         string, then the ``hook_auto_approve`` mcp_tool at bead
@@ -389,7 +390,7 @@ class TestPreToolUseApproval:
         that moves here.
 
         The sn side joins ``command`` with ``args``. Under exec form the
-        ``command`` alone is the bare word ``python3`` for BOTH events, so
+        ``command`` alone is the bare word ``uv`` for BOTH events, so
         comparing it would report agreement no matter which scripts the two
         entries named — the equality would hold vacuously."""
 
@@ -413,7 +414,7 @@ class TestPreToolUseApproval:
 
         sn_pre, sn_perm = handlers(self.SN_HOOKS, "PreToolUse"), handlers(self.SN_HOOKS, "PermissionRequest")
         assert sn_pre == sn_perm, f"{self.SN_HOOKS}: PreToolUse {sn_pre} vs PermissionRequest {sn_perm}"
-        assert all(c.startswith("python3 ") for c in sn_pre), sn_pre
+        assert all(c.startswith("uv run ") for c in sn_pre), sn_pre
         assert any(c.endswith("/auto_approve_sn_mcp.py") for c in sn_pre), sn_pre
 
 

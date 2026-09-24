@@ -10,6 +10,7 @@ through two refs, not a mocked one.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -203,6 +204,96 @@ def test_main_cli_entry_point(fixture_repo: Path, capsys):
     assert rc == 1
     out, _ = capsys.readouterr()
     assert "a-2" in out and "b-1" in out
+
+
+# ---------------------------------------------------------------------------
+# Relay attestation (nexus-iu43o): refuses when missing, passes when
+# present and matching, not-applicable when the range has no data-effecting
+# changesets at all.
+# ---------------------------------------------------------------------------
+
+
+class TestRelayAttestation:
+    def test_verify_refuses_when_never_recorded(self, fixture_repo: Path, capsys):
+        rc = lde.verify_relay_attestation("v1", "v2", repo_root=fixture_repo)
+        assert rc == 1
+        _, err = capsys.readouterr()
+        assert "REFUSED" in err
+        assert "a.xml:a-2" in err and "b.xml:b-1" in err
+
+    def test_verify_passes_when_recorded_and_matching(self, fixture_repo: Path, capsys):
+        path = lde.record_relay_attestation("v1", "v2", repo_root=fixture_repo)
+        assert path == fixture_repo / "docs" / "data-effect-relay" / "v2.json"
+        body = json.loads(path.read_text())
+        assert body["engine_tag"] == "v2"
+        assert body["from_tag"] == "v1"
+        assert body["changeset_ids"] == ["a.xml:a-2", "b.xml:b-1"]
+        assert body["recorded_at"].endswith("Z")
+
+        rc = lde.verify_relay_attestation("v1", "v2", repo_root=fixture_repo)
+        assert rc == 0
+        out, _ = capsys.readouterr()
+        assert "RELAY ATTESTATION OK" in out
+
+    def test_verify_is_not_applicable_when_range_has_no_data_effects(
+        self, fixture_repo: Path, capsys
+    ):
+        rc = lde.verify_relay_attestation("v1", "v1", repo_root=fixture_repo)
+        assert rc == 0
+        out, _ = capsys.readouterr()
+        assert "NOT-APPLICABLE" in out
+        # Never wrote an attestation file just because nothing was needed.
+        assert not (fixture_repo / "docs" / "data-effect-relay" / "v1.json").exists()
+
+    def test_verify_refuses_a_stale_attestation_missing_a_new_changeset(
+        self, fixture_repo: Path, capsys
+    ):
+        """Recorded against an EARLIER state of the range (only a-2 known),
+        then the range grows a new data-effecting changeset (b-1) before the
+        battery runs -- the stale attestation must not silently pass."""
+        stale_dir = fixture_repo / "docs" / "data-effect-relay"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "v2.json").write_text(
+            json.dumps(
+                {
+                    "engine_tag": "v2",
+                    "from_tag": "v1",
+                    "changeset_ids": ["a.xml:a-2"],
+                    "recorded_at": "2026-01-01T00:00:00Z",
+                }
+            )
+        )
+        rc = lde.verify_relay_attestation("v1", "v2", repo_root=fixture_repo)
+        assert rc == 1
+        _, err = capsys.readouterr()
+        assert "not attested" in err
+        assert "b.xml:b-1" in err
+
+    def test_verify_refuses_an_attestation_for_a_different_range(
+        self, fixture_repo: Path, capsys
+    ):
+        lde.record_relay_attestation("v1", "v2", repo_root=fixture_repo)
+        # Re-tag the SAME file under a different from_ref to simulate a
+        # differently-scoped range landing on the identical to_ref name.
+        path = fixture_repo / "docs" / "data-effect-relay" / "v2.json"
+        body = json.loads(path.read_text())
+        body["from_tag"] = "some-other-tag"
+        path.write_text(json.dumps(body))
+        rc = lde.verify_relay_attestation("v1", "v2", repo_root=fixture_repo)
+        assert rc == 1
+        _, err = capsys.readouterr()
+        assert "different range" in err
+
+    def test_cli_record_then_verify_round_trips(self, fixture_repo: Path, capsys):
+        rc = lde.main(
+            ["v1", "v2", "--repo-root", str(fixture_repo), "--record-relay-attestation"]
+        )
+        assert rc == 0
+        capsys.readouterr()
+        rc = lde.main(
+            ["v1", "v2", "--repo-root", str(fixture_repo), "--verify-relay-attestation"]
+        )
+        assert rc == 0
 
 
 if __name__ == "__main__":

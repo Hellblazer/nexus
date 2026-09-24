@@ -706,6 +706,20 @@ def mint_session(base_url: str, bearer: str, session_id: str,
 # ── service spawn: FILE-backed output, never a PIPE (nexus-lom9g / j0nec) ────
 
 
+ENGINE_ADMIN_DB_ENV_KEYS: tuple[str, ...] = (
+    "NX_DB_ADMIN_URL", "NX_DB_ADMIN_USER", "NX_DB_ADMIN_PASS",
+)
+"""The engine's migration-pool credentials (``Main.buildMigrationDataSource``).
+
+When set, the engine migrates through them instead of ``NX_DB_*``. A fixture
+that builds its env as ``{**os.environ, "NX_DB_URL": ...}`` without also
+setting these inherits whatever the process or the developer's shell holds,
+and the engine then migrates against some other database or exits on
+HikariPool fail-fast. Such a fixture pops every key here
+(tests-db-isolation, 2026-09-23: a leaked ``127.0.0.1:15999`` failed all 35
+tests in ``test_xnz0o_commands_integration.py``)."""
+
+
 def spawn_service(
     cmd: list[str],
     env: dict[str, str],

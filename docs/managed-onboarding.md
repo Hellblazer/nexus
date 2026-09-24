@@ -23,9 +23,7 @@ per-shell and win when both are set.
 nx config set service_url   https://api.conexus-nexus.com
 nx config set service_token <your-bearer-token>
 
-# …or per-shell environment (takes precedence over config.yml). This also
-# selects the service backend, so all three exports belong together:
-export NX_STORAGE_BACKEND=service
+# …or per-shell environment (takes precedence over config.yml):
 export NX_SERVICE_URL=https://api.conexus-nexus.com
 export NX_SERVICE_TOKEN=<your-bearer-token>
 ```
@@ -35,10 +33,9 @@ and `NX_SERVICE_TOKEN`, so an exported `NX_SERVICE_URL` overrides a persisted
 one. The token is sent as `Authorization: Bearer <token>`; treat it as a
 secret.
 
-> The storage-backend selector is env-only today (`config.yml` persistence for
-> it is a tracked follow-up); the endpoint + token above persist via `nx config`.
-> Put the `export NX_STORAGE_BACKEND=service` in your shell profile, or run
-> with it set, until that lands.
+`NX_STORAGE_BACKEND=service` is not needed: `service` is the default and only
+backend (RDR-158 retired the SQLite alternative — setting `sqlite` now hard-
+errors rather than selecting anything). There is no backend to select.
 
 ## 2. Verify the endpoint (fail-loud capability probe)
 

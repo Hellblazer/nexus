@@ -1,4 +1,5 @@
-"""nexus-tb01a — every E2E sandbox opts out of the anonymous install ping.
+"""nexus-tb01a / nexus-cf3p2 — every harness that boots nexus in a fresh
+config dir opts out of the anonymous install ping.
 
 Within an hour of engine-service-v0.1.107 deploying, the active-install read
 counted a release-battery rehearsal install as a user. A throwaway install
@@ -6,6 +7,23 @@ spawned by the harness must never ping: every ``env -i`` allowlist under
 ``tests/e2e`` carries ``NX_NO_TELEMETRY=1``, every non-scrubbing sandbox
 script exports it, and the migration-rehearsal container forwards it (``-e``
 is the only channel into that container; an exported host var is discarded).
+
+nexus-cf3p2 widened the sweep past ``tests/e2e`` to ``tests/cc-validation``
+and ``scripts/``, since the acquire harness was only one instance of the
+class. ``tests/cc-validation/runner.sh`` boots a fresh ``$HOME`` and (in
+scenario 12) installs the REAL conexus plugin and dispatches a real
+subagent, which resolves ``nx-mcp`` off ``PATH`` -- a ``uv tool``-installed
+wheel, never this dev checkout, so ``install_ping``'s
+``running_from_dev_checkout`` auto-suppression (which is per-process and
+HOME-blind: it walks up from this module's own file, not from ``$HOME``)
+does not cover it, and it needs the same explicit opt-out. ``scripts/`` was
+swept and found to need NO new opt-out: every nexus invocation there runs
+via ``uv run nx ...`` from within the checkout (``rdr152-sandbox/``), which
+the dev-checkout guard already covers regardless of ``$HOME``, and the one
+``docker run`` under ``scripts/`` (``liquibase_bundle_smoke.sh``) never
+boots a nexus client at all. That is a checked absence, not a skipped
+check -- see the sweep's own record in T2 project ``nexus``, title
+``nexus-cf3p2-scripts-sweep-finding``.
 """
 
 from __future__ import annotations
@@ -19,6 +37,14 @@ pytestmark = pytest.mark.lint
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 E2E = REPO / "tests" / "e2e"
+CC_VALIDATION = REPO / "tests" / "cc-validation"
+
+#: cc-validation harness entry points that build their own environment (a
+#: fresh $HOME) and must export the opt-out. One entry today
+#: (``runner.sh``, the single fresh-HOME builder for that harness); kept as
+#: a tuple, not a single constant, so a second entry point added later joins
+#: the same parametrized check instead of a hand-rolled one-off test.
+CC_VALIDATION_EXPORTING_HARNESSES = ("runner.sh",)
 
 #: Sandbox scripts that build their environment without ``env -i`` and must
 #: export the opt-out instead.
@@ -140,3 +166,64 @@ def test_the_check_would_notice_a_missing_flag() -> None:
     )
     assert _forwards_the_flag('docker run "${run_env[@]}" img',
                               'run_env+=(-e "NX_NO_TELEMETRY=1")')
+
+
+@pytest.mark.parametrize("name", CC_VALIDATION_EXPORTING_HARNESSES)
+def test_cc_validation_harness_exports_the_opt_out(name: str) -> None:
+    """nexus-cf3p2: the cc-validation harness's fresh-$HOME builder must
+    export the opt-out before any scenario can install the real plugin and
+    boot a real ``nx-mcp`` off PATH."""
+    text = (CC_VALIDATION / name).read_text()
+    assert re.search(r"^export NX_NO_TELEMETRY=1$", text, re.M), (
+        f"tests/cc-validation/{name} must export NX_NO_TELEMETRY=1"
+    )
+
+
+def test_harness_entry_point_sweep_is_non_vacuous() -> None:
+    """nexus-cf3p2's whole point was that the sweep must not stop at the
+    first harness found. Each swept ROOT gets its OWN floor (review
+    finding, IMPORTANT): a single combined floor is dominated by whichever
+    root has the most entry points (measured: tests/e2e alone is 36), so
+    emptying CC_VALIDATION_EXPORTING_HARNESSES down to zero -- silently
+    dropping tests/cc-validation from the scan entirely, the exact defect
+    class this test exists to catch -- would leave a combined floor of 15
+    comfortably passing at 36. Two independent asserts close that: e2e's
+    own count can never be propped up by cc-validation's, and
+    cc-validation's own floor is tight enough (>=1) that emptying its
+    tuple fails immediately.
+    """
+    e2e_env_i = sum(len(_env_i_blocks(p.read_text())) for p in sorted(E2E.rglob("*.sh")))
+    e2e_docker_runs = sum(
+        len(_DOCKER_RUN.findall(_spliced(p.read_text(errors="replace"))))
+        for p in sorted(E2E.rglob("*.sh"))
+    )
+    e2e_total = e2e_env_i + len(EXPORTING_SANDBOXES) + e2e_docker_runs
+    cc_validation_total = len(CC_VALIDATION_EXPORTING_HARNESSES)
+    assert e2e_total >= 30, (
+        f"only {e2e_total} harness entry points found under tests/e2e "
+        "(env -i blocks + exporting sandboxes + docker runs); the sweep "
+        "is undercounting that root"
+    )
+    assert cc_validation_total >= 1, (
+        "CC_VALIDATION_EXPORTING_HARNESSES is empty -- tests/cc-validation "
+        "has silently dropped out of the sweep"
+    )
+
+
+def test_split_floor_catches_an_emptied_cc_validation_sweep(monkeypatch) -> None:
+    """Non-vacuity of the SPLIT itself (review finding): prove the new
+    per-root floor actually rejects an emptied cc-validation sweep, which
+    the OLD combined floor of 15 would NOT have caught -- tests/e2e alone
+    measures 36, so ``36 + 0 >= 15`` would have passed silently."""
+    old_combined_e2e_measurement = 36
+    old_combined_floor = 15
+    assert old_combined_e2e_measurement + 0 >= old_combined_floor, (
+        "sanity check on the incident this test regresses: if this fails, "
+        "tests/e2e's own count dropped below the old combined floor and "
+        "the split is no longer the thing proving non-vacuity here"
+    )
+    monkeypatch.setattr(
+        "tests.test_e2e_no_telemetry_lint.CC_VALIDATION_EXPORTING_HARNESSES", (),
+    )
+    with pytest.raises(AssertionError, match="CC_VALIDATION_EXPORTING_HARNESSES is empty"):
+        test_harness_entry_point_sweep_is_non_vacuous()

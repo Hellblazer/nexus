@@ -181,7 +181,12 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
 
     def purge(self, collection: str) -> int:
         """Remove every centroid for a collection. Returns rows deleted."""
-        r = self._post("/purge", {"collection": collection})
+        # idempotent=False (nexus-ll31n sibling): "every centroid for a
+        # collection" is a discovered population, not a caller-supplied id
+        # set. A retry after a lost response finds the collection already
+        # empty and reports deleted=0 -- misreporting a completed purge as
+        # having done nothing.
+        r = self._post("/purge", {"collection": collection}, idempotent=False)
         self._invalidate_centroid_cache()
         return int(r.get("deleted", 0))
 

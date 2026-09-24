@@ -23,6 +23,19 @@
   `cu130`, and so on) to opt a GPU box back in. macOS wheels carry no CUDA
   payload, so nothing is pinned there.
 
+  **Memory.** Measured on an Apple Silicon Mac, sampling the local-stack
+  processes' own RSS (never a whole-machine reading, which a shared box's
+  other work would contaminate — see `tests/e2e/local-index-memory-gate.sh`'s
+  path-keyed sampler): idle, right after `nx init` starts the service, the
+  three local processes (bundled PostgreSQL, the daemon supervisor, the
+  engine) together hold about **1.2 GB**. Running `nx index repo` against
+  this repository (~2,500 files) rises to and plateaus around **4.2-4.5 GB**,
+  almost all of it the engine process — it holds the loaded bge-768 ONNX
+  embedder, the ms-marco cross-encoder reranker, and the JVM heap; the
+  bundled PostgreSQL itself stays under 20 MB at this corpus size. Both
+  figures are upper bounds: summed RSS double-counts shared pages between
+  processes.
+
 Check your Python version:
 
 ```bash

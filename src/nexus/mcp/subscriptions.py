@@ -15,7 +15,7 @@ nexus-q82tk a board's lives in the engine's per-subscriber delivery row):
   added once via :meth:`SubscriptionSet.subscribe` with a
   ``mailbox/<name>`` subspace. Subscribing it also takes over the
   per-session instance registration file the drain hook
-  (``conexus/hooks/scripts/mailbox_drain.py``) reads and starts the
+  (:mod:`nexus.hooks.mailbox_drain`) reads and starts the
   RDR-208 ``directory/<name>`` lease, both previously owned by the now-
   deleted CLI mailbox-watch loop's own ``--instance`` flag.
 - up to :data:`MAX_BOARD_TOPICS` ``board/<topic>`` subspaces.
@@ -117,7 +117,7 @@ def registration_path(state_dir: Path, session_id: str) -> Path:
 
 def write_instance_registration(state_dir: Path, session_id: str, instance: str) -> None:
     """Register *instance* as this session's own instance-name mailbox, so
-    ``mailbox_drain.py`` can drain it for this session and only this
+    the drain hook can drain it for this session and only this
     session -- never a machine-wide file another session's prompt could
     read first.
 

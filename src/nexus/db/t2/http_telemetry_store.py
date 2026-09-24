@@ -871,8 +871,14 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """Delete relevance_log entries older than *days* days.
 
         Calls ``POST /v1/telemetry/relevance/expire``.
+
+        ``idempotent=False`` (nexus-ll31n sibling): an age-predicate sweep
+        over a discovered population -- a retry after a lost response
+        re-evaluates the same ``ts < cutoff`` predicate against
+        already-deleted rows and reports fewer (often zero), misreporting
+        a completed expire as having done little.
         """
-        resp = self._post("/v1/telemetry/relevance/expire", {"days": days})
+        resp = self._post("/v1/telemetry/relevance/expire", {"days": days}, idempotent=False)
         return int(resp.get("deleted", 0))
 
     # ── search_telemetry ──────────────────────────────────────────────────────
@@ -934,8 +940,11 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if days < 1:
             raise ValueError(f"days must be >= 1; got {days}")
+        # idempotent=False (nexus-ll31n sibling): same age-predicate sweep
+        # misreport risk as expire_relevance_log above.
         resp = self._post(
-            "/v1/telemetry/search/trim", {"days": days, "dry_run": dry_run}
+            "/v1/telemetry/search/trim", {"days": days, "dry_run": dry_run},
+            idempotent=False,
         )
         return int(resp.get("deleted", 0))
 
@@ -997,8 +1006,11 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if days < 1:
             raise ValueError(f"days must be >= 1; got {days}")
+        # idempotent=False (nexus-ll31n sibling): same age-predicate sweep
+        # misreport risk as expire_relevance_log above.
         resp = self._post(
-            "/v1/telemetry/hook_failures/trim", {"days": days, "dry_run": dry_run}
+            "/v1/telemetry/hook_failures/trim", {"days": days, "dry_run": dry_run},
+            idempotent=False,
         )
         return int(resp.get("deleted", 0))
 
@@ -1240,15 +1252,26 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["days"] = days
         if dry_run:
             payload["dry_run"] = True
-        resp = self._post("/v1/telemetry/index_failures/trim", payload)
+        # idempotent=False (nexus-ll31n sibling): a run_id/age predicate
+        # sweep over a discovered population, same misreport risk as
+        # expire_relevance_log above.
+        resp = self._post(
+            "/v1/telemetry/index_failures/trim", payload, idempotent=False,
+        )
         return int(resp.get("deleted", 0))
 
     def rename_collection(self, *, old: str, new: str) -> dict[str, int]:
         """Re-point collection columns from ``old`` to ``new`` in all telemetry tables.
 
         Calls ``POST /v1/telemetry/rename_collection``.
+
+        ``idempotent=False`` (nexus-ll31n sibling): a cascade rename over
+        every row matching ``old`` -- same population-discovery misreport
+        risk as ``HttpCatalogClient.rename_collection_cascade``.
         """
-        resp = self._post("/v1/telemetry/rename_collection", {"old": old, "new": new})
+        resp = self._post(
+            "/v1/telemetry/rename_collection", {"old": old, "new": new}, idempotent=False,
+        )
         return {
             "search_telemetry": int(resp.get("search_telemetry", 0)),
             "hook_failures":    int(resp.get("hook_failures", 0)),
@@ -1622,8 +1645,11 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if days < 1:
             raise ValueError(f"days must be >= 1; got {days}")
+        # idempotent=False (nexus-ll31n sibling): same age-predicate sweep
+        # misreport risk as expire_relevance_log above.
         resp = self._post(
-            "/v1/telemetry/capability_census/trim", {"days": days, "dry_run": dry_run}
+            "/v1/telemetry/capability_census/trim", {"days": days, "dry_run": dry_run},
+            idempotent=False,
         )
         return int(resp.get("deleted", 0))
 
@@ -1713,8 +1739,11 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if days < 1:
             raise ValueError(f"days must be >= 1; got {days}")
+        # idempotent=False (nexus-ll31n sibling): same age-predicate sweep
+        # misreport risk as expire_relevance_log above.
         resp = self._post(
-            "/v1/telemetry/routing_events/trim", {"days": days, "dry_run": dry_run}
+            "/v1/telemetry/routing_events/trim", {"days": days, "dry_run": dry_run},
+            idempotent=False,
         )
         return int(resp.get("deleted", 0))
 

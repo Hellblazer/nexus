@@ -59,10 +59,10 @@ Two things no other T2 domain store needs, both new code (RDR-205
   nexus-r7xao): the tuple space is a metadata store, not a value store.
   ``subspace``, every ``keys``/``dims``/``keys_pattern`` value, ``nonce``,
   ``claimant``, ``claim_id`` and ``body`` are each measured against the
-  same RDR-205 limits the engine enforces (mirrored, not imported, since
-  the two stdlib hooks that also write tuples cannot import ``nexus`` —
-  see ``tests/db/test_tuple_size_limits_parity.py`` for how the three
-  copies are kept equal) and refused with :class:`TooLargeError` before
+  same RDR-205 limits the engine enforces (mirrored from the engine's
+  ``TupleLimits``; ``tests/db/test_tuple_size_limits_parity.py`` keeps the
+  two copies equal, and the wheel's hooks import these rather than keep a
+  third) and refused with :class:`TooLargeError` before
   sending. The engine's own ``TooLarge`` typed error maps back to the
   SAME class (unlike the other nine, this one is raised from both
   directions), so a caller need not distinguish a local refusal from an

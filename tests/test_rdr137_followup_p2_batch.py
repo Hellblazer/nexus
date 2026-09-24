@@ -86,7 +86,7 @@ class TestImp24RepoIdentityCacheReducesSubprocessCalls:
         _resolve_main_repo_cached.cache_clear()
 
         call_count = 0
-        real_run = subprocess.run
+        from nexus.bounded_subprocess import run_bounded as real_run  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
 
         def counting_run(*args, **kwargs):
             nonlocal call_count
@@ -94,7 +94,7 @@ class TestImp24RepoIdentityCacheReducesSubprocessCalls:
                 call_count += 1
             return real_run(*args, **kwargs)
 
-        with patch("nexus.repo_identity.subprocess.run", side_effect=counting_run):
+        with patch("nexus.repo_identity.run_bounded", side_effect=counting_run):
             _resolve_main_repo(repo)
             _resolve_main_repo(repo)
             _resolve_main_repo(repo)

@@ -409,6 +409,19 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
     summary = {"repos": 0, "refreshed": 0, "errors": 0}
     for repo in _iter_managed_repo_roots():
         try:
+            # nexus-g76yf: ``_effective_hooks_dir`` is a BARE passthrough to
+            # ``nexus._git_hooks_meta.effective_hooks_dir`` -- unlike
+            # ``_git_common_dir`` above, it does NOT translate the
+            # lower layer's raw ``RuntimeError`` ("Not a git repository:
+            # <path>", raised when a repo entry no longer resolves as a
+            # git checkout -- moved, deleted, or a stale/bad registry
+            # entry) into a ``ClickException``. Catching only
+            # ``click.ClickException`` here let that RuntimeError escape
+            # this per-repo handler entirely: it aborted the WHOLE sweep
+            # (every repo after the bad one silently unrefreshed) and
+            # surfaced, via `nx upgrade`'s outer catch-all, as one
+            # top-level warning naming the single bad path -- instead of
+            # the per-repo skip this docstring already promises.
             hooks_dir = _effective_hooks_dir(repo)
             if hooks_dir.exists() and not _is_writable(hooks_dir):
                 summary["errors"] += 1
@@ -416,10 +429,11 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
                     click.echo(f"  ! {repo}  (hooks dir not writable; skipped)")
                 continue
             results = _refresh_managed_hooks(hooks_dir)
-        except click.ClickException as exc:
+        except (click.ClickException, RuntimeError) as exc:
             summary["errors"] += 1
             if echo:
-                click.echo(f"  ! {repo}  ({exc.format_message()})")
+                msg = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
+                click.echo(f"  ! {repo}  ({msg})")
             continue
 
         refreshed = [n for n, a in results if a.startswith("refreshed")]

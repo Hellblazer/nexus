@@ -98,6 +98,9 @@ from typing import NamedTuple
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+from nexus.redact import redact_credentials
+
 _log = structlog.get_logger(__name__)
 
 # ── Cluster constants ──────────────────────────────────────────────────────────
@@ -330,12 +333,12 @@ def _pg_config_value(pg_config: Path, flag: str) -> str | None:
     cmd = [str(pg_config), flag]
     try:
         # env is now an os.environ SNAPSHOT (was: inherited live by reference).
-        # subprocess.run is synchronous and os.environ is not mutated mid-call,
+        # run_bounded is synchronous and os.environ is not mutated mid-call,
         # so this is equivalent in practice — the snapshot is to thread the
         # bundle lib path (code-review H2).
-        result = subprocess.run(
+        result = run_bounded(
             cmd,
-            capture_output=True, text=True, timeout=10,
+            timeout=10,
             env=_bundle_lib_env(cmd, None),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -494,7 +497,92 @@ def _bundle_lib_env(cmd: list[str], env: dict | None) -> dict:
     return base
 
 
-def _run(cmd: list[str], *, check: bool = True, capture: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
+#: Wall-clock backstops for the PostgreSQL subprocesses this module spawns
+#: (nexus-9dkxu). These are NOT performance targets and must not be tuned
+#: down to fit a measurement. Their whole job is to turn "hangs forever"
+#: into "fails in finite time", so each is deliberately far above anything
+#: a working box produces; a bound tight enough to fire on a slow box is a
+#: NEW failure mode on the install path, which is strictly worse than the
+#: hang it replaces.
+#:
+#: Measured 2026-09-23 by driving real ``provision()`` runs on an M-series
+#: Mac with NVMe (16 cores, 128 GB), worst observed per command:
+#:
+#:     initdb          2.86 s   (idle 1.44 s; 0.82 s on the internal volume)
+#:     createdb        0.21 s   (idle 0.09 s)
+#:     pg_ctl start    0.14 s
+#:     psql, any verb  0.10 s
+#:     pg_ctl status   0.01 s
+#:
+#: The loaded column is 24 CPU burners against 16 cores, which doubled
+#: initdb and createdb and left the rest flat -- so CPU is not the tail.
+#:
+#: THE MULTIPLIERS ARE A JUDGEMENT, NOT A DERIVATION, and the first
+#: version of this comment blurred that. The measurement says what a fast
+#: box does; it does not calibrate a slow one. The only filesystem effect
+#: actually measured here is 1.65x (0.82 s internal vs 1.35 s external
+#: NVMe), and nothing was measured on WSL2, a CI runner, an encrypted
+#: volume or a network mount -- the cases the headroom is FOR. So read
+#: 180 s for initdb as "far above anything we have seen, chosen because
+#: the cost of being too generous is a longer wait on a box that is
+#: already broken, while the cost of being too tight is breaking
+#: provisioning on a slow box that works". A standing critic flagged the
+#: original wording for presenting 63x as measurement-derived.
+_INITDB_TIMEOUT_S: float = 180.0
+_CREATEDB_TIMEOUT_S: float = 60.0
+_PSQL_TIMEOUT_S: float = 60.0
+_PG_CTL_STATUS_TIMEOUT_S: float = 30.0
+
+#: pg_ctl start/stop with ``-w`` runs its OWN wait, whose default is 60 s
+#: (PostgreSQL's ``PGCTLTIMEOUT``). This outer bound must stay ABOVE that,
+#: or we would SIGKILL pg_ctl before it can report its own failure, which
+#: is better worded than ours and names the log file to read.
+_PG_CTL_WAIT_TIMEOUT_S: float = 120.0
+
+
+def _redacted(cmd: list[str]) -> list[str]:
+    """*cmd* with any credential literal scrubbed, for logs and errors.
+
+    ``_psql`` passes SQL through ``psql -c``, and several of those
+    statements are ``CREATE ROLE ... PASSWORD '<generated>'`` or
+    ``ALTER ROLE ... PASSWORD '<generated>'``. argv therefore carries live
+    credentials, and argv is what ``subprocess`` puts inside both
+    ``CalledProcessError`` and ``TimeoutExpired``: their ``str()`` embeds
+    the full command. ``commands/init.py`` echoes that text straight to the
+    terminal at default verbosity on a provisioning failure and logs it,
+    so a failed ALTER ROLE printed the cluster's passwords to the user's
+    screen and into ``~/.config/nexus/logs/``.
+
+    That was live before nexus-9dkxu and is not introduced by it. It is
+    fixed here rather than separately because adding ``timeout=`` adds a
+    THIRD exception type carrying the same payload through these same
+    lines; shipping that without the scrub would knowingly widen it.
+
+    THE ROOT FIX IS DIFFERENT AND DELIBERATELY NOT TAKEN HERE. Passing the
+    SQL on stdin instead of ``-c`` would keep secrets out of argv
+    altogether, which also hides them from ``ps``. It is not equivalent:
+    ``psql -c "a; b"`` sends both statements as ONE query in one implicit
+    transaction, where stdin is read as a script and each statement
+    auto-commits. Two call sites in this module genuinely pass
+    multi-statement SQL that depends on the first shape. Converting them
+    needs its own change and its own tests.
+
+    (An earlier wording also cited DO blocks as an example. That was
+    imprecise and a standing critic caught it: a DO block is a SINGLE
+    statement to the parser however it is delivered, so it is unaffected
+    either way. The multi-statement sites are the real constraint.)
+    """
+    return [redact_credentials(str(part)) for part in cmd]
+
+
+def _run(
+    cmd: list[str],
+    *,
+    check: bool = True,
+    capture: bool = True,
+    env: dict | None = None,
+    timeout: float,
+) -> subprocess.CompletedProcess:
     """Run a subprocess, raising on non-zero exit when *check* is True.
 
     THE CHOKE POINT for the root refusal. Every PostgreSQL subprocess this
@@ -515,20 +603,62 @@ def _run(cmd: list[str], *, check: bool = True, capture: bool = True, env: dict 
     reviewers found that path independently while reviewing the guard that
     did not cover it. It refuses here now, and the daemon's own handler
     interpolates the exception text, so the remedy travels with it.
+
+    ``timeout`` is a BACKSTOP, not a budget -- see the module constants
+    above for the measurements behind each value and why they are loose.
+
+    It is REQUIRED and has no default, for the reason
+    :func:`~nexus.bounded_subprocess.run_bounded` gives for its own:
+    "a default would let a new site inherit someone else's number". This
+    function shipped with ``timeout: float = _PSQL_TIMEOUT_S`` for a few
+    hours and the standing critic pointed out that it reproduced exactly
+    the anti-pattern the helper was designed against -- roughly twenty
+    call sites reached it through ``_psql``/``_psql_tuples``, which
+    exposed no timeout parameter at all, and silently inherited 60 s with
+    no way to override. The psql default now lives on those two helpers,
+    where psql IS the verb and the number is therefore about something.
+    Raises ``subprocess.TimeoutExpired`` when it fires. Every known caller
+    of ``provision`` and ``_start_cluster`` already catches broadly
+    (``commands/init.py``, ``storage_service_daemon`` in two places), so
+    this does not escape as a new unhandled type -- checked, not assumed.
+
+    Routed through :func:`~nexus.bounded_subprocess.run_bounded` so a
+    timed-out spawn's whole process group dies. That matters more here
+    than at most sites: pg_ctl spawns the postmaster, which spawns its own
+    children, so reaping only the direct child leaves a cluster running
+    that nothing is tracking.
     """
     refuse_root()
-    _log.debug("pg_provision_run", cmd=cmd)
-    kw: dict = dict(check=check, text=True, env=_bundle_lib_env(cmd, env))
-    if capture:
-        kw["capture_output"] = True
-    return subprocess.run(cmd, **kw)  # type: ignore[call-overload]
+    _log.debug("pg_provision_run", cmd=_redacted(cmd))
+    try:
+        return run_bounded(
+            cmd,
+            timeout=timeout,
+            check=check,
+            env=_bundle_lib_env(cmd, env),
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Rebuild rather than mutate: TimeoutExpired.cmd is what str() reads.
+        raise subprocess.TimeoutExpired(
+            _redacted(cmd), exc.timeout, output=exc.output, stderr=exc.stderr
+        ) from None
+    except subprocess.CalledProcessError as exc:
+        raise subprocess.CalledProcessError(
+            exc.returncode, _redacted(cmd), output=exc.output, stderr=exc.stderr
+        ) from None
 
 
-def _psql(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> subprocess.CompletedProcess:
+def _psql(
+    bins: PgBinaries, port: int, db: str, user: str, sql: str,
+    *, timeout: float = _PSQL_TIMEOUT_S,
+) -> subprocess.CompletedProcess:
     """Execute *sql* via psql against the local cluster."""
     return _run(
         [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-c", sql],
+        timeout=timeout,
     )
 
 
@@ -565,7 +695,10 @@ def bootstrap_superuser() -> str:
     return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
 
 
-def _psql_tuples(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> str:
+def _psql_tuples(
+    bins: PgBinaries, port: int, db: str, user: str, sql: str,
+    *, timeout: float = _PSQL_TIMEOUT_S,
+) -> str:
     """Execute *sql* via psql in tuple-only, unaligned mode (``-t -A``).
 
     Unlike :func:`_psql` (human ``-c`` output, used for existence probes via
@@ -576,6 +709,7 @@ def _psql_tuples(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> s
     res = _run(
         [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
+        timeout=timeout,
     )
     return res.stdout.strip()
 
@@ -895,7 +1029,7 @@ def _init_cluster(bins: PgBinaries, pgdata: Path, os_user: str) -> bool:
         "--no-locale", "-E", "UTF8",
         "--auth=trust",
         "--username", os_user,
-    ])
+    ], timeout=_INITDB_TIMEOUT_S)
     _log.info("pg_cluster_initialised", pgdata=str(pgdata))
     return True
 
@@ -971,6 +1105,7 @@ def _start_cluster(bins: PgBinaries, pgdata: Path, port: int) -> None:
     status = _run(
         [str(bins.pg_ctl), "-D", str(pgdata), "status"],
         check=False,
+        timeout=_PG_CTL_STATUS_TIMEOUT_S,
     )
     if status.returncode == 0:
         _log.info("pg_cluster_already_running", pgdata=str(pgdata))
@@ -984,7 +1119,7 @@ def _start_cluster(bins: PgBinaries, pgdata: Path, port: int) -> None:
         "-l", pglog,
         "-o", f"-p {port}",
         "start", "-w",
-    ])
+    ], timeout=_PG_CTL_WAIT_TIMEOUT_S)
     # Confirm the port is accepting connections (belt-and-suspenders).
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
@@ -1013,7 +1148,7 @@ def _create_db(bins: PgBinaries, port: int, os_user: str) -> bool:
         "-h", "127.0.0.1", "-p", str(port),
         "-U", os_user,
         NEXUS_DB_NAME,
-    ])
+    ], timeout=_CREATEDB_TIMEOUT_S)
     _log.info("pg_db_created", dbname=NEXUS_DB_NAME)
     return True
 
@@ -2028,38 +2163,6 @@ def _read_credentials(creds_path: Path) -> dict[str, str]:
             k, _, v = line.partition("=")
             result[k.strip()] = v.strip()
     return result
-
-
-def load_service_credentials_into_env(config_dir: Path | None = None) -> bool:
-    """Load ``pg_credentials`` into ``os.environ`` for an in-process service flow.
-
-    Historical context (RDR-159): the manual upgrade path sourced
-    ``pg_credentials`` between ``nx init --service`` and ``nx
-    migrate-to-service`` so the latter saw ``NX_SERVICE_TOKEN`` /
-    ``NX_STORAGE_BACKEND``. The now-deleted ``nx guided-upgrade`` ran both in
-    ONE process, so it self-loaded the freshly-provisioned credentials before
-    driving the migration — otherwise ``NX_SERVICE_TOKEN`` would be absent and
-    the migration would fail. RDR-155 P4b deleted both migration verbs; no
-    current caller of this function is known (2026-08-01 sweep — see
-    ``load_service_credentials_into_env`` callers). Uses ``setdefault`` for
-    credential keys (a value the user already exported wins) and forces
-    ``NX_STORAGE_BACKEND=service``. Returns True iff a token is present in the
-    environment afterwards.
-
-    No-op on the credential keys when the file is absent — the returned bool lets
-    the caller decide whether a missing token is fatal.
-    """
-    if config_dir is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415  — circular-dep avoidance (nexus.config)
-
-        config_dir = nexus_config_dir()
-    creds_path = config_dir / CREDENTIALS_FILENAME
-    if creds_path.exists():
-        for key, value in _read_credentials(creds_path).items():
-            if key.startswith("NX_") or key.startswith("PG_"):
-                os.environ.setdefault(key, value)
-        os.environ["NX_STORAGE_BACKEND"] = "service"
-    return bool(os.environ.get("NX_SERVICE_TOKEN", "").strip())
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────

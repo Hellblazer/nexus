@@ -88,6 +88,8 @@ def _probe(name: str, args: list[str], timeout: float = 3.0) -> _ToolStatus:
     """Run ``args`` with the given ``timeout``. Returns availability +
     a short detail string.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     path = shutil.which(args[0])
     if not path:
         return _ToolStatus(
@@ -95,8 +97,8 @@ def _probe(name: str, args: list[str], timeout: float = 3.0) -> _ToolStatus:
             detail="not on PATH", install_hint="",
         )
     try:
-        result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout,
+        result = run_bounded(
+            args, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return _ToolStatus(

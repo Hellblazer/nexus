@@ -1091,8 +1091,54 @@ public final class TaxonomyRepository {
                .execute());
     }
 
-    /** Purge all taxonomy rows for a collection. */
+    /**
+     * {@link #purgeCollection(String, String, String)} scope value: the
+     * current, wider behavior — also deletes {@code topic_assignments} rows
+     * whose {@code source_collection} is *collection*, i.e. this
+     * collection's documents' projections onto OTHER collections' topics.
+     * The default for every pre-nexus-0v0nj caller.
+     */
+    public static final String PURGE_SCOPE_FULL = "full";
+
+    /**
+     * {@link #purgeCollection(String, String, String)} scope value: purge
+     * only what THIS collection owns — its own topics (and their links and
+     * assignments) and its {@code taxonomy_meta} row. Leaves intact any
+     * {@code topic_assignments} row where *collection* is merely the
+     * SOURCE of a projection onto another collection's topic (nexus-0v0nj:
+     * a rebuild never touches those either, so a scoped reset should not).
+     */
+    public static final String PURGE_SCOPE_TAXONOMY_ONLY = "taxonomy_only";
+
+    private static final java.util.Set<String> PURGE_SCOPES =
+        java.util.Set.of(PURGE_SCOPE_FULL, PURGE_SCOPE_TAXONOMY_ONLY);
+
+    /** Purge all taxonomy rows for a collection, full (cross-collection-reaching) scope. */
     public Map<String, Integer> purgeCollection(String tenant, String collection) {
+        return purgeCollection(tenant, collection, PURGE_SCOPE_FULL);
+    }
+
+    /**
+     * Purge taxonomy rows for a collection, scoped by *scope* (nexus-0v0nj).
+     *
+     * <p>{@link #PURGE_SCOPE_FULL} (the two-arg overload's default, and
+     * every caller's behavior before this bead) additionally deletes
+     * {@code topic_assignments} rows keyed by {@code source_collection},
+     * which reaches documents that live in *collection* but are projected
+     * onto ANOTHER collection's topics — strictly more destructive than a
+     * rebuild of *collection* alone. {@link #PURGE_SCOPE_TAXONOMY_ONLY}
+     * omits that delete: it drops exactly what a rebuild of *collection*
+     * would replace (this collection's own topics, their links, and the
+     * assignments keyed by THOSE topic ids) and nothing a rebuild leaves
+     * alone.
+     *
+     * @throws IllegalArgumentException on a *scope* outside {@link #PURGE_SCOPES}
+     */
+    public Map<String, Integer> purgeCollection(String tenant, String collection, String scope) {
+        if (!PURGE_SCOPES.contains(scope)) {
+            throw new IllegalArgumentException(
+                "purgeCollection: unknown scope '" + scope + "' (allowed: " + PURGE_SCOPES + ")");
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             var doomedIds = ctx.select(TOPICS.ID)
                 .from(TOPICS)
@@ -1109,9 +1155,11 @@ public final class TaxonomyRepository {
                     .where(TOPIC_ASSIGNMENTS.TOPIC_ID.in(doomedIds))
                     .execute();
             }
-            assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
-                .execute();
+            if (PURGE_SCOPE_FULL.equals(scope)) {
+                assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+                    .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
+                    .execute();
+            }
             int topics = ctx.deleteFrom(TOPICS)
                 .where(TOPICS.COLLECTION.eq(collection))
                 .execute();

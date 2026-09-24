@@ -123,6 +123,31 @@ def test_retryable_chained_httpx(status: int, expected: bool) -> None:
     assert _is_retryable_vector_error(_make_chained_exc(status)) is expected
 
 
+# ── nexus-cd1k0.16 finding (7): fallback matches a status TOKEN, not a bare
+# substring — a byte count, port, or duration embedding "429"/"502"/"503"/
+# "504" must not be misread as a gateway status. ──────────────────────────
+
+@pytest.mark.parametrize("exc,expected", [
+    (Exception("upstream returned 14293 bytes"), False),
+    (Exception("cache entry 4290 expired"), False),
+    (Exception("request took 15029ms"), False),
+    (Exception("port 8429 refused"), False),
+    (Exception("connection reset after 5029 attempts"), False),
+    (Exception("HTTP 429 Too Many Requests"), True),
+    (Exception("upstream 502"), True),
+    (Exception("got 503 from backend"), True),
+    (Exception("504 at the edge"), True),
+], ids=[
+    "429-in-14293-bytes", "429-in-4290", "429-in-duration-ms",
+    "429-in-port-number", "429-in-attempt-count",
+    "standalone-429", "standalone-502", "standalone-503", "standalone-504",
+])
+def test_retryable_string_fallback_requires_a_status_token_not_a_substring(
+    exc: Exception, expected: bool,
+) -> None:
+    assert _is_retryable_vector_error(exc) is expected
+
+
 @pytest.mark.parametrize("status,expected", [
     (429, True), (404, False), (500, False), (502, True), (503, True), (504, True),
 ], ids=["429", "404", "500", "502", "503", "504"])

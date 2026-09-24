@@ -89,7 +89,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="catalog-016-0" author="nexus-78n33">
-        <comment>Dedup backfill: tombstone duplicate LIVE (tenant_id, source_uri) documents before the unique index lands — keep the row with the most chunks (tie: earliest indexed_at, then lowest tumbler)</comment>
+        <comment>Dedup backfill: tombstone duplicate LIVE (tenant_id, source_uri) documents before the unique index lands — keep the row with the most chunks (tie: earliest indexed_at, then lowest tumbler). DATA EFFECT: UPDATEs nexus.catalog_documents, setting deleted_at on every duplicate-losing row within a (tenant_id, source_uri) group; irreversible (no record of which rows were tombstoned is kept — see the empty rollback note below)</comment>
         <sql splitStatements="true">
 ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
 -- Winner per duplicate group: the document most likely to be the live,

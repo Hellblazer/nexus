@@ -24,7 +24,7 @@ Coverage:
   PLURAL + ``search group`` + ``exclude subgroups``); ``missing value``
   scope falls through; single-DB scoping.
 
-All tests run unconditionally on Linux/CI by patching ``subprocess.run`` or
+All tests run unconditionally on Linux/CI by patching ``run_bounded`` or
 ``nexus.devonthink._run_osascript`` and ``monkeypatch.setattr("sys.platform", ...)``.
 """
 from __future__ import annotations
@@ -60,7 +60,7 @@ class TestRunOsascript:
     def test_happy_path_returns_stdout(self):
         from nexus.devonthink import _run_osascript
 
-        with patch("nexus.devonthink.subprocess.run") as mock_run:
+        with patch("nexus.devonthink.run_bounded") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 args=["osascript", "-e", "..."],
                 returncode=0,
@@ -76,14 +76,14 @@ class TestRunOsascript:
         def raising(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="osascript", timeout=1)
 
-        with patch("nexus.devonthink.subprocess.run", side_effect=raising):
+        with patch("nexus.devonthink.run_bounded", side_effect=raising):
             with pytest.raises(subprocess.TimeoutExpired):
                 _run_osascript("anything", timeout=1)
 
     def test_application_not_running_raises_dt_not_available(self):
         from nexus.devonthink import DTNotAvailableError, _run_osascript
 
-        with patch("nexus.devonthink.subprocess.run") as mock_run:
+        with patch("nexus.devonthink.run_bounded") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 args=["osascript", "-e", "..."],
                 returncode=1,

@@ -2,10 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The `.nexus.yml` verification block, read IN THE WHEEL (bead nexus-b5ugt).
 
-Port of ``conexus/hooks/scripts/read_verification_config.py``. The script
-stays on disk for now — it is still the thing a bare ``python3`` hook
-could run, and deleting it belongs with the rest of the plugin-resident
-layer — but nothing in the wheel spawns it any more.
+Port of ``conexus/hooks/scripts/read_verification_config.py``, which was
+deleted with the rest of the unexecuted plugin-resident layer at
+nexus-z9cz2.
 
 **Why this had to move, and why moving it is the point.** The script was
 reached by building a path off ``$CLAUDE_PLUGIN_ROOT``. An ``mcp_tool``
@@ -39,7 +38,6 @@ names this as the nexus D9 defect class.
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -93,10 +91,12 @@ def _git_common_root(start: Path) -> Path | None:
     one-per-repo across worktrees — the engine build lease and the
     cached service jar both live in the git common dir for this reason.
     """
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+
     try:
-        out = subprocess.run(
+        out = run_bounded(
             ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=5.0,
+            timeout=5.0,
         )
     except Exception as exc:  # noqa: BLE001 — no git, not on PATH, timed out
         _emit("debug", "verification_config_git_lookup_failed", error=str(exc))

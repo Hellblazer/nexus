@@ -1,6 +1,6 @@
 # MCP Servers
 
-Nexus ships two MCP servers, bundled in the Claude Code plugin and the Claude Desktop `.mcpb` extension. This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
+Nexus ships two MCP servers, bundled in the Claude Code plugin. The Claude Desktop `.mcpb` extension bundles only the first — its manifest's `entry_point` (`mcpb/manifest.json`) runs `nexus.mcp.core:main` alone (`mcpb/src/server.py`), with no `nexus-catalog` process. This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
 
 For **when to use which retrieval interface**, see [Querying Guide](querying-guide.md). For conceptual background, see [Document Catalog](catalog.md) and [Storage Tiers](storage-tiers.md).
 
@@ -11,7 +11,7 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 | `nexus` | `nx-mcp` | 64 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
-The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
+The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`catalog_search`, `catalog_link`, etc.) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 

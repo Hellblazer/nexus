@@ -113,27 +113,15 @@ def test_auto_approve_stays_silent_for_a_tool_it_does_not_own() -> None:
 def test_the_close_gate_denies_an_unmarked_bead_over_the_real_wire(tmp_path) -> None:
     """The regression, end to end.
 
-    Armed with a purpose-built CLAUDE_PLUGIN_ROOT rather than the live
-    one, so the verdict does not depend on whether the developer running
-    this has `on_close` enabled in their own `.nexus.yml` — that
-    dependency is a separate defect (bead nexus-634ye) and a test that
-    inherited it would pass or fail by machine rather than by code.
+    Armed with a purpose-built `.nexus.yml` under CLAUDE_PROJECT_DIR
+    rather than the live one, so the verdict does not depend on whether
+    the developer running this has `on_close` enabled in their own
+    `.nexus.yml` — a test that inherited that would pass or fail by
+    machine rather than by code. (This used to stub a fake
+    read_verification_config.py under CLAUDE_PLUGIN_ROOT; the reader is
+    in the wheel now and that script is deleted, nexus-z9cz2.)
     """
-    scripts = tmp_path / "hooks" / "scripts"
-    scripts.mkdir(parents=True)
-    (scripts / "read_verification_config.py").write_text(
-        "print('"
-        + json.dumps(
-            {
-                "on_stop": False,
-                "on_close": True,
-                "test_command": "",
-                "lint_command": "",
-                "test_timeout": 120,
-            }
-        )
-        + "')\n"
-    )
+    (tmp_path / ".nexus.yml").write_text("verification:\n  on_close: true\n")
 
     proc = _run_verb(
         "pre-close-verification",
@@ -142,7 +130,7 @@ def test_the_close_gate_denies_an_unmarked_bead_over_the_real_wire(tmp_path) -> 
             "tool_name": "Bash",
             "tool_input": {"command": "bd close nexus-99xyz --reason e2e"},
         },
-        extra_env={"CLAUDE_PLUGIN_ROOT": str(tmp_path)},
+        extra_env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip(), "the close gate wrote nothing at all"

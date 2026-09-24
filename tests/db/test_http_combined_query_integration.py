@@ -52,7 +52,7 @@ four consecutive 4-in-one-process runs are clean on a healthy daemon.
 Prerequisites (identical to the write-seam gate):
   - ``service/target/nexus-service-1.0-SNAPSHOT.jar`` built and fresh.
   - Docker available and ``pgvector/pgvector:pg17`` pullable.
-  - Java (>= 17) on PATH or JAVA_HOME set.
+  - Java (>= 25) on PATH or JAVA_HOME set.
   - No VOYAGE_API_KEY needed (service runs in LOCAL/ONNX bge-768 mode).
 
 Run locally:

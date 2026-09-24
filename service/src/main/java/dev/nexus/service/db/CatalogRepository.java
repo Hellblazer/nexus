@@ -3296,12 +3296,649 @@ public final class CatalogRepository {
         );
     }
 
-    /** Set alias_of for a document. Guarded — silent 0-row no-op on a tombstoned target (nexus-eldyi; see updateDocumentCollection). */
+    /**
+     * Set alias_of for a document. Guarded — silent 0-row no-op on a
+     * tombstoned target (nexus-eldyi; see updateDocumentCollection).
+     *
+     * <p><b>Locking (nexus-z4rpi round 4, batch-4 item 2).</b> Takes {@link
+     * #lockDocumentRow} FOR UPDATE on *tumbler* before writing, giving this
+     * write the SAME serialization priority {@link #mergeDocuments} and
+     * {@link #upsertLink} already hold on the same row — a concurrent
+     * merge of this document now waits for this call (or vice versa)
+     * instead of racing an unlocked statement. This is belt-and-braces
+     * rather than closing a lost-update gap: a bare single-statement
+     * {@code UPDATE} has no read-then-decide-then-write sequence to
+     * corrupt (Postgres's own implicit per-statement row lock already
+     * makes two concurrent blind UPDATEs to the same row resolve
+     * deterministically, last-committer-wins, with no torn state possible
+     * either way) — the lock's value is ordering priority against
+     * mergeDocuments' lock-then-validate sequence, not correctness of this
+     * statement alone.
+     *
+     * <p><b>Premise note:</b> despite the name, this method is NOT the
+     * engine path behind {@code nx catalog update --alias-of} — grep of
+     * {@code CatalogHandler}'s route table shows no route bound to {@code
+     * setAlias}. The real {@code --alias-of} path is {@link
+     * #updateDocument}/{@link #buildUpdateDocumentQuery}'s alias_of-SET
+     * carve-out (nexus-ekaxn), reached via {@code /update}; that path is a
+     * single-row blind write too (alias_of-SET always targets *tumbler*
+     * itself, never hops), so the SAME reasoning applies there without a
+     * separate lock. setAlias has zero production (HTTP-reachable)
+     * callers today — Java-level test callers only — but the lock is
+     * added here regardless, both because it was explicitly asked for and
+     * to keep intent consistent for any future caller.
+     */
     public int setAlias(String tenant, String tumbler, String aliasOf) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf))
-               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
-        );
+        return tenantScope.withTenant(tenant, ctx -> {
+            lockDocumentRow(ctx, tenant, tumbler, true);
+            return ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, nne(aliasOf))
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute();
+        });
+    }
+
+    /**
+     * The merge txn refused a request that would corrupt the identity graph
+     * (a self-merge, a cycle, an already-aliased duplicate pointing
+     * elsewhere, or a tumbler this tenant cannot see — cross-tenant reads
+     * a "not found", which RLS already makes structurally indistinguishable
+     * from a genuinely absent document, and that IS the refusal: neither
+     * tumbler is ever resolved outside the caller's own tenant scope).
+     *
+     * <p>TYPED so the handler can map it to a 409 with this message intact,
+     * mirroring {@link CollectionMergeRefused} / {@link RehomeRefused}.
+     */
+    public static final class MergeRefused extends RuntimeException {
+        public MergeRefused(String message) { super(message); }
+    }
+
+    /**
+     * Lock one {@code catalog_documents} row by tumbler, discarding its
+     * content — a pure locking primitive shared by {@link #mergeDocuments}
+     * ({@code exclusive=true}, FOR UPDATE — it writes the row) and {@link
+     * #upsertLink} ({@code exclusive=false}, FOR KEY SHARE — it only needs
+     * to block a concurrent WRITER, never other concurrent readers or
+     * fellow link-creators sharing the same endpoint; FOR KEY SHARE
+     * conflicts with FOR UPDATE but not with itself or with FOR SHARE).
+     * Locking a tumbler with NO matching row is a harmless no-op — nothing
+     * to lock, and the caller's own existence check runs afterward.
+     */
+    private static void lockDocumentRow(DSLContext ctx, String tenant, String tumbler, boolean exclusive) {
+        var query = ctx.selectOne().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)));
+        if (exclusive) {
+            query.forUpdate().fetch();
+        } else {
+            query.forKeyShare().fetch();
+        }
+    }
+
+    /**
+     * Lock every DISTINCT, non-blank tumbler among *tumblers* via {@link
+     * #lockDocumentRow}, in ascending string order — the ONE global lock
+     * order {@link #mergeDocuments} and {@link #upsertLink} both use, so no
+     * combination of the two (merge-vs-merge, merge-vs-link-write,
+     * link-write-vs-link-write) can deadlock against the other: whichever
+     * of two overlapping-endpoint calls acquires the lower tumbler's lock
+     * first always tries for the higher one next, never the reverse.
+     */
+    private static void lockDocumentRowsSorted(DSLContext ctx, String tenant, boolean exclusive, String... tumblers) {
+        var distinct = new java.util.TreeSet<String>();
+        for (String t : tumblers) {
+            if (t != null && !t.isBlank()) distinct.add(t);
+        }
+        for (String t : distinct) {
+            lockDocumentRow(ctx, tenant, t, exclusive);
+        }
+    }
+
+    /**
+     * Retry bound for {@link #resolveAndLockLinkEndpoints}'s stale-under-lock
+     * recovery loop. Bounded for the same reason {@link #MAX_ALIAS_HOPS} is:
+     * a chain that never stabilizes is corrupt data or an adversarial
+     * concurrent-merge storm, not a shape to loop on forever.
+     */
+    private static final int MAX_LINK_ENDPOINT_LOCK_ROUNDS = 8;
+
+    /** One document row's alias_of, read under a FOR KEY SHARE lock taken in
+     *  the SAME query — {@code aliasOf} is {@code ""} (never null) when the
+     *  row is not itself an alias. */
+    private record LockedDocRow(String tumbler, String aliasOf) {}
+
+    /**
+     * Lock one {@code catalog_documents} row FOR KEY SHARE and read its
+     * {@code alias_of} in the SAME statement (nexus-z4rpi round 4, batch-4
+     * item 3): one round trip does what {@link #lockDocumentRow} (the lock)
+     * plus a separate {@code alias_of} SELECT plus a liveness existence
+     * check used to take three for — a live row's {@code
+     * WHERE ... DELETED_AT IS NULL} match IS the liveness answer, so a
+     * non-null result already proves liveness with no extra query.
+     *
+     * @return {@code null} when no LIVE row matches *tumbler* in this tenant
+     *         (missing or tombstoned); otherwise the locked row's alias_of
+     */
+    private static LockedDocRow lockAndReadDocRow(DSLContext ctx, String tenant, String tumbler) {
+        if (tumbler == null || tumbler.isBlank()) return null;
+        // fetchOne(Record) — not fetchOne(Field) — because fetchOne(Field)
+        // returns null for BOTH "no row matched" and "the row's alias_of
+        // column is SQL NULL"; those are different outcomes here (the
+        // second one is a live, non-aliased row) and only fetchOne(Record)
+        // (null record = no row; a present record's field = the real value,
+        // possibly null) tells them apart.
+        var rec = ctx.select(CATALOG_DOCUMENTS.ALIAS_OF)
+            .from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .forKeyShare()
+            .fetchOne();
+        if (rec == null) return null;
+        String aliasOf = rec.value1();
+        return new LockedDocRow(tumbler, aliasOf == null ? "" : aliasOf);
+    }
+
+    /**
+     * Lock the DISTINCT, non-blank tumblers among *tumblers* FOR KEY SHARE,
+     * one at a time, in ascending string order — reusing {@link
+     * #lockDocumentRowsSorted}'s exact deadlock-avoidance discipline
+     * (sequential single-row statements, sorted, never one multi-row
+     * statement: Postgres does not guarantee a multi-row {@code FOR KEY
+     * SHARE}'s internal lock-acquisition order follows an {@code ORDER BY},
+     * only its OUTPUT order — relying on that for cross-call ordering would
+     * silently reopen the deadlock this method exists to close). Returns
+     * only the tumblers that resolved to a live row; a missing/tombstoned
+     * tumbler is simply absent from the map, not a null entry.
+     */
+    private static Map<String, LockedDocRow> lockAndReadDocRowsSorted(DSLContext ctx, String tenant, String... tumblers) {
+        var distinct = new java.util.TreeSet<String>();
+        for (String t : tumblers) {
+            if (t != null && !t.isBlank()) distinct.add(t);
+        }
+        Map<String, LockedDocRow> out = new LinkedHashMap<>();
+        for (String t : distinct) {
+            LockedDocRow row = lockAndReadDocRow(ctx, tenant, t);
+            if (row != null) out.put(t, row);
+        }
+        return out;
+    }
+
+    /** {@link #resolveAndLockLinkEndpoints}'s result: each side's RESOLVED
+     *  (post-alias-chain) tumbler, locked FOR KEY SHARE, plus whether that
+     *  resolved row is live. A blank/null input tumbler resolves to itself,
+     *  not-live, with no lock taken (nothing to lock). */
+    private record ResolvedLinkEndpoints(String from, boolean fromLive, String to, boolean toLive) {}
+
+    /**
+     * Resolve BOTH {@code upsertLink} endpoints through their alias chains
+     * AND lock the resolved (not the raw) targets, closing the gap the
+     * simpler raw-endpoint lock left open (nexus-z4rpi round 4, batch-4
+     * code review 2026-09-23): a link whose RAW endpoint is an
+     * already-settled alias pointing at a document concurrently being
+     * merged elsewhere must not commit against the pre-merge target.
+     *
+     * <p><b>Two-phase, retried under contention.</b> Each attempt (1) walks
+     * the alias chain UNLOCKED via {@link #resolveAliasTarget} — cheap, and
+     * correct in the overwhelmingly common uncontended case — to get a
+     * candidate resolved tumbler for each side, then (2) locks BOTH
+     * candidates together via {@link #lockAndReadDocRowsSorted} (sorted,
+     * deadlock-safe against {@link #mergeDocuments}' own up-front sorted
+     * FOR UPDATE pair-lock — see that method's javadoc) and re-reads their
+     * {@code alias_of} in the SAME query. If EITHER locked candidate's
+     * freshly-read {@code alias_of} is non-blank, a concurrent merge raced
+     * us: it aliased our candidate AFTER the unlocked resolve but the walk
+     * never saw it. Re-seed that side from the fresh alias_of and retry —
+     * bounded by {@link #MAX_LINK_ENDPOINT_LOCK_ROUNDS} attempts, each one a
+     * COMPLETE sorted-pair lock (never a partial, cross-attempt lock
+     * accumulation — that would be the multi-round scheme this method
+     * deliberately does NOT use, precisely because a chain whose later hop
+     * resolves to a SMALLER tumbler than an earlier one locked would violate
+     * the sorted-order invariant across attempts and reopen the deadlock).
+     *
+     * <p>Once a round finds both candidates stable under lock (blank
+     * alias_of, or absent = not live), those candidates and their liveness
+     * are the answer: the FOR KEY SHARE lock held for the rest of this
+     * transaction guarantees a concurrent merge cannot re-alias either one
+     * before this call commits (mergeDocuments needs a conflicting FOR
+     * UPDATE lock on the SAME row first).
+     */
+    private static ResolvedLinkEndpoints resolveAndLockLinkEndpoints(
+            DSLContext ctx, String tenant, String rawFrom, String rawTo) {
+        String seedFrom = rawFrom;
+        String seedTo = rawTo;
+        boolean fromBlank = seedFrom == null || seedFrom.isBlank();
+        boolean toBlank = seedTo == null || seedTo.isBlank();
+        for (int attempt = 0; attempt < MAX_LINK_ENDPOINT_LOCK_ROUNDS; attempt++) {
+            String candFrom = fromBlank ? seedFrom : resolveAliasTarget(ctx, tenant, seedFrom);
+            String candTo = toBlank ? seedTo : resolveAliasTarget(ctx, tenant, seedTo);
+
+            Map<String, LockedDocRow> locked = lockAndReadDocRowsSorted(ctx, tenant, candFrom, candTo);
+
+            LockedDocRow fromRow = fromBlank ? null : locked.get(candFrom);
+            LockedDocRow toRow = toBlank ? null : locked.get(candTo);
+            boolean fromLive = !fromBlank && fromRow != null;
+            boolean toLive = !toBlank && toRow != null;
+            boolean fromStale = fromLive && !fromRow.aliasOf().isEmpty();
+            boolean toStale = toLive && !toRow.aliasOf().isEmpty();
+
+            if (!fromStale && !toStale) {
+                return new ResolvedLinkEndpoints(candFrom, fromLive, candTo, toLive);
+            }
+            log.warn("event=link_endpoint_resolve_raced tenant={} attempt={} from_stale={} to_stale={}",
+                tenant, attempt, fromStale, toStale);
+            if (fromStale) seedFrom = fromRow.aliasOf();
+            if (toStale) seedTo = toRow.aliasOf();
+        }
+        throw new IllegalStateException(
+            "link endpoint resolution did not stabilize after " + MAX_LINK_ENDPOINT_LOCK_ROUNDS
+            + " attempts (tenant=" + tenant + ", from=" + rawFrom + ", to=" + rawTo
+            + ") — an unusually persistent run of concurrent merges kept re-aliasing an endpoint"
+            + " out from under this link write.");
+    }
+
+    /**
+     * Collapse a duplicate catalog entry into its canonical one in ONE
+     * transaction (nexus-z4rpi): the client-side recipe this replaces was
+     * three non-atomic {@code /update} calls —
+     * {@code update(dup, source_uri='')}, {@code update(canonical,
+     * source_uri=<uri>)}, {@code update(dup, alias_of=canonical)} — forced
+     * apart by {@code ux_catalog_documents_live_source_uri} (catalog-016),
+     * a partial unique index on {@code (tenant_id, source_uri)} among live
+     * rows. Attempting step 2 before step 1 hits that index (measured: 18
+     * of 19 pairs in the nexus-z0lu4 cleanup); a failure between any two
+     * steps left either a document holding no identity at all, or two live
+     * rows both claiming the same document with no alias between them.
+     *
+     * <p><b>Semantics:</b>
+     * <ul>
+     *   <li>{@code source_uri} moves from *duplicateTumbler* to
+     *       *canonicalTumbler* only when the canonical currently lacks a
+     *       durable one (blank/empty). Either way the duplicate's own
+     *       {@code source_uri} is unconditionally cleared first — mirrors
+     *       the manual recipe's step 1: an alias row must not keep
+     *       occupying the partial unique index once this call returns,
+     *       whether or not its value went anywhere.</li>
+     *   <li>{@code alias_of} is set on the duplicate to *canonicalTumbler*
+     *       unconditionally (once the refusal checks below pass).</li>
+     *   <li>Every {@code catalog_links} row whose {@code from_tumbler} or
+     *       {@code to_tumbler} is *duplicateTumbler* is rewritten to
+     *       *canonicalTumbler* — see {@link #remapLinksForMerge} for the
+     *       exact collapse/drop rules.</li>
+     * </ul>
+     *
+     * <p><b>Refusals</b> (all {@link MergeRefused}, all checked against
+     * THIS transaction's own snapshot before any write):
+     * <ul>
+     *   <li><b>Self-merge:</b> the two tumblers are identical.</li>
+     *   <li><b>Not found:</b> either tumbler resolves to no LIVE row under
+     *       this tenant — covers a genuinely absent document AND, because
+     *       every read here is RLS-scoped to *tenant*, a cross-tenant
+     *       tumbler the caller cannot see at all.</li>
+     *   <li><b>Already-aliased elsewhere:</b> the duplicate's existing
+     *       {@code alias_of} is non-blank and names a DIFFERENT tumbler
+     *       than *canonicalTumbler*. A duplicate already aliased to
+     *       exactly *canonicalTumbler* is the idempotent case and
+     *       proceeds.</li>
+     *   <li><b>Cycle:</b> walking {@code alias_of} from *canonicalTumbler*
+     *       (bounded at {@link #MAX_ALIAS_HOPS}, same cap {@link
+     *       #resolveAliasTarget} uses) reaches *duplicateTumbler* — i.e.
+     *       the canonical is already (transitively) an alias OF the
+     *       duplicate, so pointing the duplicate at it would close a
+     *       loop.</li>
+     * </ul>
+     *
+     * <p>Remaps every {@code catalog_links} row touching the duplicate onto
+     * the canonical in the SAME transaction — a merge that moves identity
+     * but strands the graph is only half a merge (see
+     * {@link #remapLinksForMerge}).
+     *
+     * @return {@code {"duplicate", "canonical", "source_uri_moved",
+     *         "links_remapped", "links_collapsed", "links_dropped"}}
+     */
+    public Map<String, Object> mergeDocuments(
+        String tenant, String duplicateTumbler, String canonicalTumbler
+    ) {
+        if (duplicateTumbler == null || duplicateTumbler.isBlank()
+            || canonicalTumbler == null || canonicalTumbler.isBlank()) {
+            throw new IllegalArgumentException(
+                "merge requires both a non-blank duplicate and canonical tumbler");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            if (duplicateTumbler.equals(canonicalTumbler)) {
+                throw new MergeRefused(
+                    "cannot merge a document with itself: " + duplicateTumbler);
+            }
+
+            // nexus-z4rpi round 3 (concurrency, code review 2026-09-23): lock
+            // BOTH document rows FOR UPDATE, in deterministic (tumbler-sorted)
+            // order, BEFORE reading any state used for validation. Two
+            // concurrent merges of the SAME duplicate into DIFFERENT
+            // canonicals would otherwise both validate against a pre-merge
+            // snapshot under READ COMMITTED and one's write would silently
+            // lose the other's — the lock forces the second call to wait for
+            // the first's commit (or rollback) and then read post-commit
+            // state. Sorted order, never "duplicate first, canonical second",
+            // is what lets a REVERSE-direction concurrent merge (this call's
+            // canonical as ITS OWN duplicate) acquire the SAME two locks in
+            // the SAME order, so the two calls serialize instead of
+            // deadlocking. {@link #upsertLink} locks the SAME two rows (FOR
+            // KEY SHARE, a weaker mode that still conflicts with FOR UPDATE)
+            // in the SAME sorted order, so a link write racing this merge
+            // serializes against it too — see that method's own comment.
+            lockDocumentRowsSorted(ctx, tenant, true, duplicateTumbler, canonicalTumbler);
+
+            var dup = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.ALIAS_OF)
+                         .from(CATALOG_DOCUMENTS)
+                         .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                         .fetchOne();
+            if (dup == null) {
+                throw new MergeRefused(
+                    "duplicate not found (absent, tombstoned, or not visible to this "
+                    + "tenant): " + duplicateTumbler);
+            }
+            boolean canonicalExists = ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+            if (!canonicalExists) {
+                throw new MergeRefused(
+                    "canonical not found (absent, tombstoned, or not visible to this "
+                    + "tenant): " + canonicalTumbler);
+            }
+            String dupSourceUri = dup.value1();
+            String existingAlias = dup.value2();
+            if (existingAlias != null && !existingAlias.isBlank()
+                && !existingAlias.equals(canonicalTumbler)) {
+                throw new MergeRefused(
+                    duplicateTumbler + " is already aliased to " + existingAlias
+                    + "; refusing to re-point it to " + canonicalTumbler
+                    + " (already-aliased duplicate pointing elsewhere — settle the "
+                    + "existing alias first)");
+            }
+
+            // Cycle check: walk alias_of from the CANONICAL side. If that chain
+            // reaches the duplicate, canonical is already (transitively) an alias
+            // of duplicate, and setting duplicate.alias_of=canonical would close
+            // a loop. Bounded and cycle-safe exactly like resolveAliasTarget.
+            String cursor = canonicalTumbler;
+            Set<String> seen = new LinkedHashSet<>();
+            seen.add(cursor);
+            for (int hop = 0; hop < MAX_ALIAS_HOPS; hop++) {
+                String next = ctx.select(CATALOG_DOCUMENTS.ALIAS_OF).from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(cursor))
+                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                    .fetchOne(CATALOG_DOCUMENTS.ALIAS_OF);
+                if (next == null || next.isBlank()) break;
+                if (next.equals(duplicateTumbler)) {
+                    throw new MergeRefused(
+                        "merging " + duplicateTumbler + " -> " + canonicalTumbler
+                        + " would create an alias cycle: " + canonicalTumbler
+                        + " already resolves back to " + duplicateTumbler);
+                }
+                if (!seen.add(next)) break;  // a pre-existing cycle elsewhere; not this merge's problem
+                cursor = next;
+            }
+
+            // deleted_at IS NULL guard is defense in depth, same as the SOURCE_URI
+            // clear below: canonicalTumbler was already confirmed live (and is
+            // locked FOR UPDATE) above, so this can never actually match a
+            // tombstoned row, but the tombstone-filter gate (TombstoneFilterGateTest)
+            // wants every CATALOG_DOCUMENTS read to carry the guard explicitly
+            // rather than lean on a liveness check elsewhere in the method.
+            String canonSourceUri = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetchOne(CATALOG_DOCUMENTS.SOURCE_URI);
+            boolean dupHasUri = dupSourceUri != null && !dupSourceUri.isBlank();
+            boolean canonicalLacksUri = canonSourceUri == null || canonSourceUri.isBlank();
+            boolean moveUri = dupHasUri && canonicalLacksUri;
+
+            if (dupHasUri) {
+                // Unconditional free of the duplicate's identity slot — mirrors the
+                // manual recipe's step 1 — so the partial unique index never keeps
+                // it pinned to a row that is about to become a pure alias pointer,
+                // whether or not the value goes anywhere. deleted_at IS NULL guard
+                // is defense in depth: both rows were already confirmed live above,
+                // in this same transaction's snapshot.
+                ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "")
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .execute();
+            }
+            if (moveUri) {
+                ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, dupSourceUri)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .execute();
+            }
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, canonicalTumbler)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .execute();
+
+            LinkRemapCounts linkCounts = remapLinksForMerge(ctx, tenant, duplicateTumbler, canonicalTumbler);
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("duplicate", duplicateTumbler);
+            result.put("canonical", canonicalTumbler);
+            result.put("source_uri_moved", moveUri);
+            result.put("links_remapped", linkCounts.remapped());
+            result.put("links_collapsed", linkCounts.collapsed());
+            result.put("links_dropped", linkCounts.dropped());
+            return result;
+        });
+    }
+
+    /** Per-merge link-rewrite outcome: see {@link #remapLinksForMerge}. */
+    public record LinkRemapCounts(int remapped, int collapsed, int dropped) {}
+
+    /** One touching-row rewrite that collides with an existing canonical-side
+     *  link — the info {@link #remapLinksForMerge}'s batched collapse INSERT
+     *  needs, captured while the row is still readable (it is about to be
+     *  deleted). */
+    private record LinkCollapse(
+        long doomedId, String newFrom, String newTo, String linkType,
+        String fromSpan, String toSpan, String createdBy,
+        java.time.OffsetDateTime createdAt, String metaJson
+    ) {}
+
+    /**
+     * Rewrite every {@code catalog_links} row touching *duplicateTumbler*
+     * onto *canonicalTumbler*, inside the CALLER's transaction (nexus-z4rpi
+     * follow-up: a merge that moves identity but strands the graph is only
+     * half a merge — the nexus-z0lu4 cleanup that motivated this bead had to
+     * remap 47 edges by hand).
+     *
+     * <p>Set-based rather than per-row (nexus-z4rpi round 2, scale): reads
+     * every touching row and every existing canonical-side edge in TWO
+     * queries, classifies each touching row in Java (cheap — string-keyed
+     * lookups against an in-memory set, no per-row DB round trip), then
+     * applies the result in a HANDFUL of bulk statements regardless of how
+     * many links are involved:
+     * <ol>
+     *   <li><b>Self-links</b> (see below) — ONE bulk DELETE.</li>
+     *   <li><b>Plain renames</b> — up to two bulk UPDATEs (one for rows
+     *       where the duplicate was {@code from_tumbler}, one for {@code
+     *       to_tumbler}), each {@code WHERE id IN (...)} over every
+     *       non-colliding row on that side.</li>
+     *   <li><b>Collapses</b> — ONE multi-row {@code INSERT ... ON CONFLICT
+     *       DO UPDATE} covering every colliding row, using the EXACT SAME
+     *       {@link #LNK_META_FOLD} SQL fragment {@link #upsertLink} uses for
+     *       its {@code created=False} merge (per-row semantics are
+     *       unchanged by batching — Postgres resolves {@code EXCLUDED} per
+     *       VALUES row, not once for the whole statement), followed by ONE
+     *       bulk DELETE of the doomed source rows.</li>
+     * </ol>
+     *
+     * <p><b>Why no touching row can collide with another touching row</b>
+     * (the fact that makes batching safe without re-deriving collisions
+     * after each write, the way the old per-row loop did): a collision
+     * requires two rows sharing the SAME rewritten {@code (from_tumbler,
+     * to_tumbler, link_type)} key. A touching row's rewrite changes only
+     * the endpoint that WAS *duplicateTumbler*; the other endpoint is
+     * untouched. Two touching rows can therefore only collide if they
+     * already shared {@code (from_tumbler, to_tumbler, link_type)} before
+     * the rewrite — impossible, {@code catalog_links}' own unique key
+     * forbids two live rows at the same key. So every collision is between
+     * a touching row and a PRE-EXISTING, non-touching canonical-side edge,
+     * which is exactly what the {@code canonicalEdges} query below reads.
+     *
+     * <p>For every row where {@code from_tumbler} or {@code to_tumbler}
+     * equals *duplicateTumbler* (both directions, and regardless of whether
+     * the OTHER endpoint is duplicate, canonical, or a third document):
+     * <ul>
+     *   <li><b>Self-link:</b> if substituting *canonicalTumbler* for
+     *       *duplicateTumbler* would make {@code from_tumbler ==
+     *       to_tumbler}, the row is DELETED (dropped), never rewritten into
+     *       a self-referencing edge — covers both a duplicate-to-canonical
+     *       edge (the two documents being merged already linked to each
+     *       other) and a pre-existing duplicate-to-duplicate self-link.
+     *       Identified directly by a WHERE predicate, no read needed.</li>
+     *   <li><b>Collision:</b> if a link already exists at the rewritten
+     *       key on the canonical's OWN edges (read once, before any write),
+     *       the two are collapsed: {@code from_span}/{@code to_span} take
+     *       the rewritten row's values, {@code created_by} is NOT
+     *       overwritten (the existing link's original creator is kept),
+     *       and the rewritten row's {@code created_by}/metadata fold into
+     *       the survivor's {@code metadata['co_discovered_by']}.</li>
+     *   <li><b>Otherwise:</b> a plain in-place rename of the row's
+     *       endpoint(s) — no collision, nothing to collapse.</li>
+     * </ul>
+     *
+     * <p>Runs entirely on *ctx* — the SAME transaction {@link
+     * #mergeDocuments} is already inside — so a failure in ANY of this
+     * method's statements rolls back every link change together with the
+     * document writes around it and with any of this method's OWN earlier
+     * statements that already executed, not just the ones still pending.
+     *
+     * @return per-outcome counts: how many rows were plainly remapped,
+     *         collapsed into an existing link, or dropped as a self-link
+     */
+    private LinkRemapCounts remapLinksForMerge(
+        DSLContext ctx, String tenant, String duplicateTumbler, String canonicalTumbler
+    ) {
+        // STEP 1: self-links -- identified purely by predicate (no read
+        // needed) and dropped in ONE bulk DELETE. Covers the exact
+        // duplicate<->canonical edge (either direction) and a pre-existing
+        // duplicate<->duplicate self-link.
+        Condition selfLinkAfterRewrite =
+            CATALOG_LINKS.FROM_TUMBLER.eq(duplicateTumbler).and(CATALOG_LINKS.TO_TUMBLER.eq(canonicalTumbler))
+            .or(CATALOG_LINKS.FROM_TUMBLER.eq(canonicalTumbler).and(CATALOG_LINKS.TO_TUMBLER.eq(duplicateTumbler)))
+            .or(CATALOG_LINKS.FROM_TUMBLER.eq(duplicateTumbler).and(CATALOG_LINKS.TO_TUMBLER.eq(duplicateTumbler)));
+        int dropped = ctx.deleteFrom(CATALOG_LINKS)
+            .where(CATALOG_LINKS.TENANT_ID.eq(tenant).and(selfLinkAfterRewrite))
+            .execute();
+
+        // STEP 2: every remaining row touching the duplicate (self-links
+        // already gone, so from==duplicate XOR to==duplicate here).
+        var touching = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN,
+                CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+            .from(CATALOG_LINKS)
+            .where(CATALOG_LINKS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_LINKS.FROM_TUMBLER.eq(duplicateTumbler)
+                        .or(CATALOG_LINKS.TO_TUMBLER.eq(duplicateTumbler))))
+            .fetch();
+        if (touching.isEmpty()) {
+            return new LinkRemapCounts(0, 0, dropped);
+        }
+
+        // STEP 3: the canonical's OWN existing edges -- ONE query, used to
+        // classify every touching row's collision status in Java instead of
+        // one fetchExists() per row. Per the javadoc above, a touching row
+        // can only ever collide with a row IN THIS SET, never with another
+        // touching row.
+        var canonicalEdges = ctx.select(CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+            .from(CATALOG_LINKS)
+            .where(CATALOG_LINKS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_LINKS.FROM_TUMBLER.eq(canonicalTumbler)
+                        .or(CATALOG_LINKS.TO_TUMBLER.eq(canonicalTumbler))))
+            .fetch();
+        Set<String> existingCanonicalKeys = new HashSet<>();
+        for (var e : canonicalEdges) {
+            existingCanonicalKeys.add(linkKey(
+                e.get(CATALOG_LINKS.FROM_TUMBLER), e.get(CATALOG_LINKS.TO_TUMBLER), e.get(CATALOG_LINKS.LINK_TYPE)));
+        }
+
+        List<Long> fromRenameIds = new ArrayList<>();
+        List<Long> toRenameIds = new ArrayList<>();
+        List<LinkCollapse> collapses = new ArrayList<>();
+        for (var row : touching) {
+            long id = row.get(CATALOG_LINKS.ID);
+            String fromT = row.get(CATALOG_LINKS.FROM_TUMBLER);
+            String toT = row.get(CATALOG_LINKS.TO_TUMBLER);
+            String linkType = row.get(CATALOG_LINKS.LINK_TYPE);
+            boolean dupIsFrom = duplicateTumbler.equals(fromT);
+            String newFrom = dupIsFrom ? canonicalTumbler : fromT;
+            String newTo = dupIsFrom ? toT : canonicalTumbler;
+
+            if (existingCanonicalKeys.contains(linkKey(newFrom, newTo, linkType))) {
+                collapses.add(new LinkCollapse(id, newFrom, newTo, linkType,
+                    row.get(CATALOG_LINKS.FROM_SPAN), row.get(CATALOG_LINKS.TO_SPAN),
+                    row.get(CATALOG_LINKS.CREATED_BY), row.get(CATALOG_LINKS.CREATED_AT), row.get(F_LNK_META)));
+            } else if (dupIsFrom) {
+                fromRenameIds.add(id);
+            } else {
+                toRenameIds.add(id);
+            }
+        }
+
+        // STEP 4: plain renames -- up to two bulk UPDATEs, one per side.
+        int remapped = 0;
+        if (!fromRenameIds.isEmpty()) {
+            remapped += ctx.update(CATALOG_LINKS).set(CATALOG_LINKS.FROM_TUMBLER, canonicalTumbler)
+                .where(CATALOG_LINKS.ID.in(fromRenameIds)).execute();
+        }
+        if (!toRenameIds.isEmpty()) {
+            remapped += ctx.update(CATALOG_LINKS).set(CATALOG_LINKS.TO_TUMBLER, canonicalTumbler)
+                .where(CATALOG_LINKS.ID.in(toRenameIds)).execute();
+        }
+
+        // STEP 5: collapses -- ONE multi-row INSERT ... ON CONFLICT DO
+        // UPDATE (same fold upsertLink's created=False path uses, per row,
+        // via EXCLUDED), then ONE bulk DELETE of the doomed source rows.
+        int collapsed = 0;
+        if (!collapses.isEmpty()) {
+            var first = collapses.get(0);
+            var step = ctx.insertInto(CATALOG_LINKS,
+                    CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                    CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN,
+                    CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                .values(DSL.val(tenant), DSL.val(first.newFrom()), DSL.val(first.newTo()), DSL.val(first.linkType()),
+                        DSL.val(nne(first.fromSpan())), DSL.val(nne(first.toSpan())),
+                        DSL.val(nne(first.createdBy())), DSL.val(first.createdAt()), jsonbVal(first.metaJson()));
+            for (int i = 1; i < collapses.size(); i++) {
+                var c = collapses.get(i);
+                step = step.values(DSL.val(tenant), DSL.val(c.newFrom()), DSL.val(c.newTo()), DSL.val(c.linkType()),
+                        DSL.val(nne(c.fromSpan())), DSL.val(nne(c.toSpan())),
+                        DSL.val(nne(c.createdBy())), DSL.val(c.createdAt()), jsonbVal(c.metaJson()));
+            }
+            step.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                             CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                .doUpdate()
+                .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
+                .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
+                .set(F_LNK_META, LNK_META_FOLD)
+                .execute();
+            List<Long> doomedIds = collapses.stream().map(LinkCollapse::doomedId).toList();
+            ctx.deleteFrom(CATALOG_LINKS).where(CATALOG_LINKS.ID.in(doomedIds)).execute();
+            collapsed = collapses.size();
+        }
+
+        return new LinkRemapCounts(remapped, collapsed, dropped);
+    }
+
+    /** Delimited join key for a (from, to, type) link identity — {@code \0}
+     *  cannot appear in a tumbler or link type, so this cannot false-match
+     *  across a field boundary the way plain concatenation could. */
+    private static String linkKey(String from, String to, String type) {
+        return from + '\u0000' + to + '\u0000' + type;
     }
 
     /**
@@ -3349,21 +3986,75 @@ public final class CatalogRepository {
      * created-vs-merged signal the local {@code Catalog.link} returns (RDR-168
      * nexus-njrcn.3). The {@code (xmax = 0)} RETURNING predicate is the standard Postgres
      * idiom: a freshly inserted row has {@code xmax = 0}; a row reached via DO UPDATE does not.
+     *
+     * <p><b>Alias resolution and the merge race (nexus-z4rpi rounds 3-4, code
+     * review 2026-09-23).</b> {@code from_tumbler}/{@code to_tumbler} are
+     * resolved AND locked together by {@link #resolveAndLockLinkEndpoints} —
+     * a link addressed at an ALIAS lands on the CANONICAL target, the same
+     * rule {@code aliasTarget()}/{@link #buildUpdateDocumentQuery} already
+     * enforce for {@code /update} (nexus-ekaxn): the write is about the
+     * document, not about the specific pointer that named it, so it follows
+     * the chain. Round 3 locked the RAW endpoints before resolving; round 4
+     * closed the gap that left open — a raw endpoint that is itself an
+     * already-settled alias pointing at a document concurrently being
+     * merged elsewhere was not serialized against that merge at all, since
+     * the lock sat on the alias row, not the row the merge was about to
+     * touch. {@link #resolveAndLockLinkEndpoints} locks the RESOLVED target
+     * instead (with a bounded re-resolve-and-retry loop for the case where a
+     * merge aliases the candidate between the unlocked resolve and the
+     * lock), in the SAME sorted-tumbler order {@link #mergeDocuments} locks
+     * FOR UPDATE — FOR KEY SHARE conflicts with FOR UPDATE, so a link write
+     * racing a merge of one of its endpoints serializes against it either
+     * way: this call's lock blocks until the merge commits (and then
+     * resolves the POST-merge alias_of, landing on the canonical — the link
+     * never survives unremapped), or the merge's lock blocks until this
+     * call commits (and {@link #remapLinksForMerge}'s own read then sees
+     * the freshly-written row and remaps it in the same pass).
+     *
+     * <p><b>Self-links (nexus-z4rpi round 4, batch-4 item 1).</b> Resolution
+     * can make {@code from} and {@code to} equal even when the RAW request
+     * named two different tumblers — a link between a duplicate and its own
+     * canonical, or between two documents both aliased to the same
+     * canonical. This is DELIBERATELY NOT refused: an explicit self-link on
+     * UNRESOLVED input was never refused here either (no {@code from == to}
+     * guard existed before this round, and {@code
+     * ReadShapeViewsTest} seeds a raw self-link as a fixture, so the schema
+     * already treats {@code from == to} as an accepted shape). Refusing it
+     * only after alias resolution would make the SAME logical request
+     * (link these two names) succeed or fail depending on which alias
+     * state happened to be true when it ran — a worse inconsistency than
+     * allowing a self-link. {@link #remapLinksForMerge} already drops
+     * exactly this shape when a LATER merge creates it on an existing link
+     * row; a self-link created directly here is symmetric with that.
      */
     public boolean upsertLink(String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
         boolean allowDangling = Boolean.TRUE.equals(lnk.get("allow_dangling"))
             || "true".equalsIgnoreCase(String.valueOf(lnk.get("allow_dangling")));
+        String rawFrom = s(lnk, "from_tumbler");
+        String rawTo = s(lnk, "to_tumbler");
         return tenantScope.withTenant(tenant, ctx -> {
+            ResolvedLinkEndpoints resolved = resolveAndLockLinkEndpoints(ctx, tenant, rawFrom, rawTo);
+            String fromT = resolved.from();
+            String toT = resolved.to();
             if (!allowDangling) {
-                requireLiveEndpoints(ctx, tenant, s(lnk, "from_tumbler"), s(lnk, "to_tumbler"));
+                List<String> missing = new ArrayList<>(2);
+                if (!resolved.fromLive()) missing.add("from_tumbler");
+                if (!resolved.toLive()) missing.add("to_tumbler");
+                if (!missing.isEmpty()) {
+                    throw new DanglingEndpointException(missing,
+                        "dangling link endpoint: " + String.join(", ", missing)
+                        + " does not resolve to a live catalog document"
+                        + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
+                        + " Pass allow_dangling=true to write the edge anyway.");
+                }
             }
             try {
                 var rec = ctx.insertInto(CATALOG_LINKS,
                         CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                         CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
                    .values(DSL.val(tenant),
-                           DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                           DSL.val(fromT), DSL.val(toT), DSL.val(s(lnk,"link_type")),
                            DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
                            DSL.val(nne(s(lnk,"created_by"))), DSL.val(createdAtOrNow(s(lnk,"created_at"))),
                            jsonbVal(metaJson))
@@ -3395,13 +4086,13 @@ public final class CatalogRepository {
                    .fetchOne();
                 return rec != null && Boolean.TRUE.equals(rec.value1());
             } catch (org.jooq.exception.DataAccessException e) {
-                // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true skips
-                // requireLiveEndpoints above, but the row still has to satisfy
+                // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true skips the
+                // liveness check above, but the row still has to satisfy
                 // fk_catalog_links_from_document / fk_catalog_links_to_document
                 // (catalog-032-links-tumbler-fk.xml) — a link to a TOMBSTONED
                 // document still writes (the row exists), a link to a tumbler
                 // with NO row at all now raises SQLSTATE 23503 here. Map it to
-                // the SAME DanglingEndpointException requireLiveEndpoints
+                // the SAME DanglingEndpointException the liveness check above
                 // throws, so CatalogHandler's existing catch
                 // (400 {"code":"dangling_endpoint"}) covers both paths with no
                 // handler change, and http_catalog_client.py's translation to
@@ -3414,8 +4105,8 @@ public final class CatalogRepository {
                     throw new DanglingEndpointException(missing,
                         "dangling link endpoint: " + String.join(", ", missing)
                         + " does not resolve to any catalog document"
-                        + " (from_tumbler=" + s(lnk, "from_tumbler")
-                        + " to_tumbler=" + s(lnk, "to_tumbler") + ").");
+                        + " (from_tumbler=" + fromT
+                        + " to_tumbler=" + toT + ").");
                 }
                 throw e;
             }
@@ -3425,8 +4116,9 @@ public final class CatalogRepository {
     /**
      * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
      * Two sources, same exception type (nexus-tk070.p1, RDR-194 § D2 added
-     * the second): {@link #requireLiveEndpoints} throws it directly when
-     * {@code allow_dangling} is unset; {@link #upsertLink}'s catch throws it
+     * the second): {@link #upsertLink}'s own inline liveness check (built
+     * from {@link #resolveAndLockLinkEndpoints}'s result) throws it directly
+     * when {@code allow_dangling} is unset; the SAME method's catch throws it
      * when {@code allow_dangling=true} bypassed that check but the write still
      * violated {@code fk_catalog_links_from_document}/{@code _to_document} —
      * a tumbler with NO {@code catalog_documents} row at all, as opposed to a
@@ -3453,40 +4145,6 @@ public final class CatalogRepository {
         public List<String> missing() {
             return missing;
         }
-    }
-
-    /**
-     * Reject a link whose {@code from}/{@code to} does not resolve to a LIVE
-     * (non-tombstoned) document in this tenant (nexus-9ssih).
-     *
-     * <p>Applies to {@link #upsertLink} — the interactive/auto-linker write
-     * path — and NOT to the {@code import*} family, which legitimately writes
-     * edges for documents whose live state the ETL leg does not control (the
-     * same ETL carve-out the manifest write path grants its own {@code
-     * import*} methods — {@link #importChunksBatch}, {@code doImportChunk}).
-     * Callers that genuinely want an unvalidated edge pass
-     * {@code allow_dangling: true}, the parity of the local {@code link}'s own
-     * {@code allow_dangling} flag.
-     */
-    private static void requireLiveEndpoints(DSLContext ctx, String tenant, String fromT, String toT) {
-        List<String> missing = new ArrayList<>(2);
-        if (!liveDocument(ctx, tenant, fromT)) missing.add("from_tumbler");
-        if (!liveDocument(ctx, tenant, toT))   missing.add("to_tumbler");
-        if (missing.isEmpty()) return;
-        throw new DanglingEndpointException(missing,
-            "dangling link endpoint: " + String.join(", ", missing)
-            + " does not resolve to a live catalog document"
-            + " (from_tumbler=" + fromT + " to_tumbler=" + toT + ")."
-            + " Pass allow_dangling=true to write the edge anyway.");
-    }
-
-    private static boolean liveDocument(DSLContext ctx, String tenant, String tumbler) {
-        if (tumbler == null || tumbler.isBlank()) return false;
-        return ctx.fetchExists(
-            ctx.selectOne().from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
-                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
     }
 
     /** Delete a link by (from, to, type). Returns deleted count. */
@@ -6525,7 +7183,30 @@ public final class CatalogRepository {
                // of the nexus-uxd2a landing): hygiene-005's GC functions copy a
                // quarantine sibling's model_version from the origin's row, and that copy
                // is only ever right if the origin's own value cannot move underneath it.
-               .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+               // nexus-l52ms ship-blocker fixup: display_name is a durable marker
+               // some callers stamp once (nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER,
+               // the --corpus knowledge opt-in) but EVERY generic re-registration of
+               // the same collection (a T3 chunk write's
+               // ensure_collection_registered(kwargs=None), indexer.py's Phase-4
+               // migration cascade's direct register_collection call, ...) sends NO
+               // display_name at all -- "" on the wire, same as a genuine INSERT's
+               // default. Unconditionally writing EXCLUDED.display_name here made the
+               // very next ordinary write from ANY other code path silently wipe a
+               // real marker back to "" (a fresh-process reindex with no in-process
+               // registration cache reaches this path for real every time). A BLANK
+               // incoming value now never clobbers an existing non-blank one; a
+               // caller that DOES send a real value (the deliberate opt-in writer
+               // re-asserting the marker on an already-registered row -- the
+               // "re-run nx index repo --corpus knowledge once" backfill remedy for a
+               // repo that opted in before this fix existed) still updates it. This is
+               // NOT blanket exclusion like embedding_model/model_version/dimension/
+               // lifecycle_state above -- there is no legitimate caller today that
+               // needs to REVERT a display_name to blank, so "blank never wins" loses
+               // nothing a real caller wants.
+               .set(CATALOG_COLLECTIONS.DISPLAY_NAME,
+                    DSL.when(DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME).ne(""),
+                             DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
+                       .otherwise(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
                // nexus-cecqy: an explicit registration REVIVES a tombstone. Since a rename
                // now retires the old name instead of deleting it, re-creating a collection
@@ -8014,8 +8695,17 @@ public final class CatalogRepository {
     /**
      * Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead
      * nexus-ft04v.3; {@code quarantineHeld} added by nexus-snm4y).
+     *
+     * <p>{@code ghostNames}/{@code dormantNames} (nexus-29drn) are the
+     * collection names behind {@code ghostsDeleted}/{@code markedDormant} --
+     * added for the operator-facing {@code nx catalog sweep-ghosts} verb's
+     * report, which needs to name WHICH collections, not just how many. In
+     * dry-run mode ({@link #sweepGhostsAndMarkDormant(String, boolean)}) the
+     * counts and names describe what WOULD happen; in the mutating mode they
+     * describe what DID.
      */
-    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant, int quarantineHeld) {}
+    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant, int quarantineHeld,
+                                    List<String> ghostNames, List<String> dormantNames) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
     private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, UNCHANGED }
@@ -8111,6 +8801,28 @@ public final class CatalogRepository {
      * cached entry (if any) is still correct.
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant) {
+        return sweepGhostsAndMarkDormant(tenant, false);
+    }
+
+    /**
+     * {@link #sweepGhostsAndMarkDormant(String)} plus a {@code dryRun} mode
+     * (nexus-29drn, Sam's ruling: an operator CLI verb, {@code nx catalog
+     * sweep-ghosts}, needs a preview). {@code dryRun=true} runs the EXACT
+     * SAME per-row classification walk below — same {@link
+     * #collectionHoldsContent} predicate, same quarantine hold, same
+     * {@code COLLECTION_VECTOR_STATS} dormant check — and reports what it
+     * WOULD do, but skips every {@code DELETE}/{@code UPDATE} and every
+     * {@link CollectionRegistry#evict} call: nothing actually changed, so
+     * there is nothing to invalidate. Deliberately NOT a separate
+     * implementation — a second copy of the predicate is exactly the
+     * "don't reimplement it" trap this bead's own instruction named.
+     * {@code dryRun=false} is byte-for-byte the pre-existing behavior (the
+     * 1-arg overload above delegates here with {@code false}), including
+     * the automatic sweep's call path through {@link
+     * #ensureGhostSweepRanOnce} — the durable one-shot marker there is
+     * untouched by this change.
+     */
+    public GhostSweepResult sweepGhostsAndMarkDormant(String tenant, boolean dryRun) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
             var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                 .from(CATALOG_COLLECTIONS)
@@ -8128,7 +8840,9 @@ public final class CatalogRepository {
                     // gc_expire_quarantine writes its gc_audit row against the SIBLING's
                     // name (gc_quarantine_orphans keys its row to the origin), so a sibling
                     // ever expired from would otherwise never read as empty again.
-                    ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                    if (!dryRun) {
+                        ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                    }
                     out.add(new SweptRow(name, SweepDisposition.DELETED));
                 } else if ("quarantine".equals(lifecycleState)) {
                     // nexus-n060e (refining nexus-snm4y): hygiene-002 Branch B's assignment
@@ -8138,10 +8852,12 @@ public final class CatalogRepository {
                     out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
                 } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
                         .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
-                    ctx.update(CATALOG_COLLECTIONS)
-                       .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
-                       .where(CATALOG_COLLECTIONS.NAME.eq(name))
-                       .execute();
+                    if (!dryRun) {
+                        ctx.update(CATALOG_COLLECTIONS)
+                           .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+                           .where(CATALOG_COLLECTIONS.NAME.eq(name))
+                           .execute();
+                    }
                     out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
                 } else {
                     out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
@@ -8152,23 +8868,32 @@ public final class CatalogRepository {
         int deleted = 0;
         int dormant = 0;
         int held = 0;
+        List<String> ghostNames = new ArrayList<>();
+        List<String> dormantNames = new ArrayList<>();
         for (SweptRow r : rows) {
             switch (r.disposition()) {
                 case DELETED -> {
                     deleted++;
-                    CollectionRegistry.evict(tenant, r.name());
+                    ghostNames.add(r.name());
+                    if (!dryRun) {
+                        CollectionRegistry.evict(tenant, r.name());
+                    }
                 }
                 case MARKED_DORMANT -> {
                     dormant++;
+                    dormantNames.add(r.name());
                     // nexus-ft04v.18 C2: a cached row's lifecycleState is now stale the
                     // instant this UPDATE commits — evict so the next reader re-verifies.
-                    CollectionRegistry.evict(tenant, r.name());
+                    // Skipped in dry-run: no UPDATE ran, so nothing to invalidate.
+                    if (!dryRun) {
+                        CollectionRegistry.evict(tenant, r.name());
+                    }
                 }
                 case HELD_QUARANTINE -> held++; // nothing changed; no eviction needed
                 case UNCHANGED -> { }
             }
         }
-        return new GhostSweepResult(rows.size(), deleted, dormant, held);
+        return new GhostSweepResult(rows.size(), deleted, dormant, held, ghostNames, dormantNames);
     }
 
     /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */
@@ -9291,6 +10016,19 @@ public final class CatalogRepository {
             for (var coll : rows) unique.put(s(coll, "name"), coll);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
+            // nexus-3fsyx: validate the WHOLE deduped batch before any chunk's INSERT
+            // executes, mirroring doImportCollection's single-row guard -- a batch with
+            // a bad row anywhere in it refuses atomically (nothing lands) rather than
+            // letting rows preceding the bad one land in an earlier chunk before a later
+            // chunk's CheckViolation aborts the call.
+            for (var coll : deduped) {
+                String batchContentType = s(coll, "content_type");
+                if (batchContentType == null || batchContentType.isBlank()) {
+                    throw new EmbeddingProfileConflictException(
+                        "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
+                }
+            }
+
             final int cols = 12;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
@@ -9347,6 +10085,19 @@ public final class CatalogRepository {
         // method's caller's javadoc for why the old conditional stub-upgrade DO UPDATE
         // was retired). nexus-xtmtf: single-row delegate of the importCollectionsBatch
         // DSL shape.
+        //
+        // nexus-3fsyx: refuse loud, naming the missing field, before the INSERT runs --
+        // mirrors upsertCollection's identical content_type guard. Without this, a
+        // missing content_type reached hygiene-002-1's non-empty CHECK unguarded on a
+        // fresh row, surfacing as an opaque CheckViolation (23514) that CatalogHandler's
+        // generic catch turns into a 409 with no field named, instead of the uniform
+        // EmbeddingProfileConflictException 422 the interactive registration path gives
+        // for the identical input.
+        String importContentType = s(coll, "content_type");
+        if (importContentType == null || importContentType.isBlank()) {
+            throw new EmbeddingProfileConflictException(
+                "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
+        }
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,

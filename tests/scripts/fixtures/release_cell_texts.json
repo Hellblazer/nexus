@@ -361,11 +361,11 @@
   },
   "precond_main_dispatch::precond_main_default_tag_no_ack": {
     "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
-    "out": ""
+    "out": "NOT-APPLICABLE: engine-service-v<FLOOR> has no earlier published engine-service-v* tag to diff a DATA EFFECT range against.\n"
   },
   "precond_main_dispatch::precond_main_explicit_tag_with_ack": {
     "err": "",
-    "out": "wire-contract ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
+    "out": "NOT-APPLICABLE: engine-service-vTEST has no earlier published engine-service-v* tag to diff a DATA EFFECT range against.\nwire-contract ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
   },
   "record_deploy_from_gate_report_leg::tracker_directory_error": {
     "err": "TRACKER NOT RECORDED (exit 3): simulated: directory_error\n",

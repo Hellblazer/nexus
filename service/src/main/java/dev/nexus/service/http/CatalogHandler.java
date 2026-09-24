@@ -35,6 +35,7 @@ import java.util.*;
  *   GET   /v1/catalog/search             FTS search
  *   POST  /v1/catalog/update             update document fields
  *   POST  /v1/catalog/update_many        batch-update fields for N documents (nexus-xedhp)
+ *   POST  /v1/catalog/merge              collapse a duplicate document into its canonical one, one transaction (nexus-z4rpi)
  *   POST  /v1/catalog/delete_many        batch-tombstone N documents (nexus-xedhp)
  *   DELETE /v1/catalog/delete            delete document by tumbler
  *   POST  /v1/catalog/link               upsert link
@@ -151,11 +152,13 @@ public final class CatalogHandler implements HttpHandler {
                 case "/search"                -> handleSearch(exchange, tenant, method);
                 case "/update"                -> handleUpdate(exchange, tenant, method);
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
+                case "/merge"                 -> handleMerge(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
                 case "/delete_many"           -> handleDeleteMany(exchange, tenant, method);
                 case "/restore"               -> handleRestore(exchange, tenant, method);
                 case "/trash"                 -> handleTrash(exchange, tenant, method);
                 case "/purge-trash"           -> handlePurgeTrash(exchange, tenant, method);
+                case "/ghost-sweep"           -> handleGhostSweep(exchange, tenant, method);
                 case "/resolve"               -> handleResolve(exchange, tenant, method);
                 case "/stats"                 -> handleStats(exchange, tenant, method);
 
@@ -288,6 +291,11 @@ public final class CatalogHandler implements HttpHandler {
             // reaching an already-torn document. All are REFUSALS with the reason in
             // the message, so they get the 409 CollectionMergeRefused gets above, not
             // the generic 500 that would discard the only text naming the remedy.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.MergeRefused e) {
+            // nexus-z4rpi: POST /merge refused — self-merge, not found/cross-tenant,
+            // an already-aliased duplicate pointing elsewhere, or a would-be alias
+            // cycle. Same 409-with-message shape as the other typed refusals above.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.TombstonedDocumentException e) {
             // nexus-eldyi: a manifest write (write/append/purge) refused a
@@ -612,6 +620,35 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
+     * POST /v1/catalog/merge — collapse a duplicate document into its
+     * canonical one in ONE transaction (nexus-z4rpi). Replaces the
+     * three-call client recipe ({@code update(dup, source_uri='')} +
+     * {@code update(canonical, source_uri=<uri>)} + {@code update(dup,
+     * alias_of=canonical)}) that {@code ux_catalog_documents_live_source_uri}
+     * forces apart and that a failure between any two calls could tear.
+     *
+     * <p>Body: {"duplicate": "1.1.2", "canonical": "1.1.1"}
+     * Response: {"duplicate", "canonical", "source_uri_moved"} — see
+     * {@link CatalogRepository#mergeDocuments} for the exact semantics and
+     * refusal conditions. A refusal is a {@link CatalogRepository.MergeRefused},
+     * mapped to 409 by the shared catch ladder below.
+     */
+    private void handleMerge(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String duplicate = (String) body.get("duplicate");
+        String canonical = (String) body.get("canonical");
+        if (duplicate == null || duplicate.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'duplicate' required\"}"); return;
+        }
+        if (canonical == null || canonical.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'canonical' required\"}"); return;
+        }
+        var result = repo.mergeDocuments(tenant, duplicate, canonical);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
      * POST /v1/catalog/delete_many — batch-tombstone N documents in ONE
      * round trip (nexus-xedhp: completes the update_many/register_many/
      * delete_many batch trio).
@@ -764,6 +801,56 @@ public final class CatalogHandler implements HttpHandler {
             ? repo.purgeTrashPreview(tenant, olderThanDays)
             : repo.purgeTrash(tenant, olderThanDays);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
+     * POST /v1/catalog/ghost-sweep (nexus-29drn) — the operator-facing
+     * caller for {@link CatalogRepository#sweepGhostsAndMarkDormant(String,
+     * boolean)}, whose only PRODUCTION caller before this route existed was
+     * {@link CatalogRepository#ensureGhostSweepRanOnce}'s automatic,
+     * at-most-once-per-tenant trigger — there was no way for an operator to
+     * run the sweep on demand once that had already fired (Sam's ruling,
+     * 2026-09-23: an operator CLI verb, dry-run by default, {@code --apply}
+     * to act, backing {@code nx catalog sweep-ghosts}).
+     *
+     * <p>Body: {@code {"dry_run": bool (default true)}} — same shape and
+     * same default-safe posture as {@code /purge-trash} above. Both modes
+     * call the EXACT SAME repository method (no separate preview
+     * implementation): {@code dry_run=true} classifies every collection row
+     * exactly as the real sweep would, without mutating anything; {@code
+     * dry_run=false} physically deletes/marks-dormant.
+     *
+     * <p>Response: {@code {"scanned", "ghosts_deleted", "marked_dormant",
+     * "quarantine_held", "ghost_names", "dormant_names", "dry_run"}}. The
+     * automatic sweep's durable {@code rdr204_ghost_sweep_v1} marker
+     * ({@link CatalogRepository#ensureGhostSweepRanOnce}) is untouched by
+     * this route — an operator-triggered sweep (dry-run OR apply) never
+     * sets it, so the automatic per-tenant trigger still fires at most once
+     * regardless of how many times this route is called.
+     */
+    private void handleGhostSweep(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+
+        boolean dryRun = true;
+        Object dryRunRaw = body.get("dry_run");
+        if (dryRunRaw != null) {
+            if (!(dryRunRaw instanceof Boolean b)) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'dry_run' must be a boolean\"}"); return;
+            }
+            dryRun = b;
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant, dryRun);
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("scanned", result.scanned());
+        payload.put("ghosts_deleted", result.ghostsDeleted());
+        payload.put("marked_dormant", result.markedDormant());
+        payload.put("quarantine_held", result.quarantineHeld());
+        payload.put("ghost_names", result.ghostNames());
+        payload.put("dormant_names", result.dormantNames());
+        payload.put("dry_run", dryRun);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(payload));
     }
 
     /** GET /v1/catalog/resolve?file_path=X or ?source_uri=X or ?title=X&collection=X */

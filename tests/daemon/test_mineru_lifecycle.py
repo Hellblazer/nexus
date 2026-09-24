@@ -13,7 +13,11 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from nexus.daemon.mineru_lifecycle import ensure_mineru_running, spawn_policy_allows
+from nexus.daemon.mineru_lifecycle import (
+    _read_warming_marker,
+    ensure_mineru_running,
+    spawn_policy_allows,
+)
 
 
 def _pdf_cfg(autostart=True):
@@ -278,3 +282,42 @@ class TestEnsureSpawns:
         spawn.assert_not_called()  # live pid claimed inside the election
         # The stale marker was discarded, not honored.
         assert not (tmp_path / "mineru_warming.json").exists()
+
+
+class TestReadWarmingMarker:
+    """nexus-cd1k0.6 finding (11): the marker file is a small trust
+    boundary -- something wrote it, and it need not be this process's own
+    _stamp_warming_marker. _read_warming_marker's own type says it returns
+    a dict or None; valid-but-wrong-shape JSON must not sneak past that
+    promise and raise an AttributeError out of ensure_mineru_running's
+    marker.get(...) calls, which sit outside any try in a function
+    documented as never adding a new failure mode."""
+
+    @staticmethod
+    def _write(tmp_path, monkeypatch, content: str) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "mineru_warming.json").write_text(content)
+
+    def test_valid_dict_marker_round_trips(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, '{"pid": 4242, "ts": 100.0}')
+        assert _read_warming_marker() == {"pid": 4242, "ts": 100.0}
+
+    def test_missing_marker_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        assert _read_warming_marker() is None
+
+    def test_malformed_json_returns_none(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, "not json {{")
+        assert _read_warming_marker() is None
+
+    def test_json_list_returns_none_not_the_list(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, "[]")
+        assert _read_warming_marker() is None
+
+    def test_json_null_returns_none(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, "null")
+        assert _read_warming_marker() is None
+
+    def test_json_scalar_returns_none_not_the_scalar(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, "4242")
+        assert _read_warming_marker() is None

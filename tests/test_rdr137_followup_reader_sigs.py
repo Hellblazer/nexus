@@ -6,7 +6,14 @@ Three reader/shim observability fixes:
 
 SIG-6 (nexus-43qgm.6): from_catalog SELECT must use ORDER BY so the
 OQ-5 lock (knowledge wins over docs) is deterministic across multi-
-collection owners (e.g. post embedding-model upgrade).
+collection owners (e.g. post embedding-model upgrade). Narrowed by
+nexus-l52ms (2026-09-23): a knowledge__* collection is a docs-slot
+candidate at all only when marked with
+nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER; the ordering determinism
+this section proves now applies among marked candidates (see
+TestSig6FromCatalogDeterministicOrdering's two tests: marked
+collections resolve deterministically to the lex-latest one, unmarked
+collections resolve deterministically to "" every time).
 
 SIG-8 (nexus-43qgm.8): _diff_fields suppresses catalog-empty /
 registry-has-value (the more dangerous Phase 3 cutover state) along
@@ -89,12 +96,62 @@ class TestSig6FromCatalogDeterministicOrdering:
         """Owner with two knowledge__* collections returns the SAME
         docs_collection across 20 calls. Pre-fix no ORDER BY meant
         SQLite chose non-deterministically (insertion order in
-        practice but spec-undefined; flips after VACUUM)."""
+        practice but spec-undefined; flips after VACUUM).
+
+        nexus-l52ms (2026-09-23): this test predates the durable
+        opt-in marker requirement -- from_catalog no longer admits ANY
+        knowledge__* collection to the docs slot unless its
+        display_name carries KNOWLEDGE_CORPUS_OPT_IN_MARKER (the
+        l52ms ship-blocker fixup; see repos.py's from_catalog
+        docstring and test_repos_reader.py's
+        test_coincidental_untagged_knowledge_collection_still_never_wins).
+        That is an intentional behaviour change, not a regression: an
+        unmarked knowledge collection sharing the repo's owner id by
+        coincidence must never win, regardless of how many exist or
+        how they sort. Both collections here now carry the marker --
+        the scenario this test actually exists for (two GENERATIONS
+        of the SAME opted-in knowledge corpus after an embedding-model
+        upgrade), which is the only case where "which one wins" is a
+        real question at all. The ORDER BY name DESC determinism
+        SIG-6 was written to prove is still live among marked
+        candidates."""
         owner = cat.ensure_owner_for_repo(repo)
         owner_id = str(owner).replace(".", "-")
 
-        # Register two knowledge collections for the same owner —
-        # simulates post embedding-model-upgrade state.
+        # Register two knowledge collections for the same owner, BOTH
+        # carrying the opt-in marker — simulates post embedding-model-
+        # upgrade state for a repo that deliberately opted into
+        # --corpus knowledge.
+        for name in (
+            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
+            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v2",
+        ):
+            cat.register_collection(
+                name, content_type="knowledge", owner_id=owner_id,
+                embedding_model=_KNOWLEDGE_MODEL, model_version="v1",
+                display_name="nx-corpus-knowledge-opt-in",
+            )
+
+        winners = {from_catalog(repo, cat=cat).docs_collection for _ in range(20)}
+        assert len(winners) == 1, (
+            f"Non-deterministic OQ-5 selection across multiple knowledge "
+            f"collections; saw: {winners}"
+        )
+        # ORDER BY name DESC: v2 wins over v1 (lex-latest model version).
+        assert "v2" in next(iter(winners))
+
+    def test_two_unmarked_knowledge_collections_neither_wins(
+        self, cat: Catalog, repo: Path,
+    ) -> None:
+        """Companion to the above: the SAME two-collection, post-
+        upgrade shape, but with NEITHER collection carrying the opt-in
+        marker (the l52ms coincidental-owner-id incident, just with
+        two candidates instead of one). Selection is still
+        deterministic -- it deterministically returns empty, every
+        time, not a coin-flip between the two unmarked rows."""
+        owner = cat.ensure_owner_for_repo(repo)
+        owner_id = str(owner).replace(".", "-")
+
         for name in (
             f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
             f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v2",
@@ -105,12 +162,10 @@ class TestSig6FromCatalogDeterministicOrdering:
             )
 
         winners = {from_catalog(repo, cat=cat).docs_collection for _ in range(20)}
-        assert len(winners) == 1, (
-            f"Non-deterministic OQ-5 selection across multiple knowledge "
-            f"collections; saw: {winners}"
+        assert winners == {""}, (
+            f"an unmarked knowledge collection must never win the docs slot, "
+            f"whatever its name or how many exist; saw: {winners}"
         )
-        # ORDER BY name DESC: v2 wins over v1 (lex-latest model version).
-        assert "v2" in next(iter(winners))
 
 
 class TestSig8DiffFieldsCatalogMissingEvent:

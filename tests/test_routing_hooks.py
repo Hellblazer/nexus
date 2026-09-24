@@ -26,7 +26,12 @@ import urllib.parse
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
-LIB_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
+#: nexus-t9klx: the library moved into the wheel, and the plugin copy was
+#: DELETED once its last plugin importer — the subagent git-write guard —
+#: was ported. These tests had stayed pinned to the plugin copy, which is
+#: to say they were exercising the one that no longer runs. The drift the
+#: port's own commit message warned about, arriving from the test side.
+LIB_PATH = PROJECT_ROOT / "src" / "nexus" / "hooks" / "_routing_lib.py"
 REGISTRY_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
 README_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "README.md"
 
@@ -79,12 +84,18 @@ def test_readme_exists():
 #: match there, which is a false negative this test must not have.
 _ROUTING_ALLOW_OWNERSHIP_PHRASE = "not yours to reach for"
 
-#: Live hook scripts (relative to routing/) whose deny message offers the
-#: `# routing-allow:` escape and must therefore carry the same ownership
-#: phrase as the authoring template.
+#: Live guards whose deny message offers the `# routing-allow:` escape and
+#: must therefore carry the same ownership phrase as the authoring
+#: template. nexus-t9klx ported BOTH of them into the wheel, so these are
+#: wheel modules now rather than plugin script names.
+#:
+#: They stay in ONE list rather than being checked by each guard's own test
+#: file. The property is cross-file parity — the README template and every
+#: guard saying the same thing — and S8 shipped inconsistently in the first
+#: place precisely because each site was looked at on its own.
 _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE = (
-    "phase_review_close_requires_gate.py",
-    "subagent_git_write_requires_orchestrator.py",
+    PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py",
+    PROJECT_ROOT / "src" / "nexus" / "hooks" / "phase_review_close_gate.py",
 )
 
 
@@ -104,17 +115,32 @@ def test_readme_template_deny_example_does_not_hand_over_the_escape():
     )
 
 
-@pytest.mark.parametrize("filename", _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE)
-def test_live_hook_deny_wording_matches_the_readme_template(filename: str) -> None:
+def test_the_escape_offering_guards_are_still_enumerated() -> None:
+    """Non-vacuity floor for the parametrize below.
+
+    The list names files by path, and a path that stops resolving makes
+    the check below pass by examining nothing — which is exactly what a
+    port does to a list of filenames. Both guards moved once already.
+    """
+    assert len(_LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE) == 2, (
+        "the routing framework has two guards offering the escape; if one "
+        "was added or removed, say so here rather than letting the parity "
+        "check below quietly cover less"
+    )
+
+
+@pytest.mark.parametrize(
+    "hook_path", _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE, ids=lambda p: p.name
+)
+def test_live_hook_deny_wording_matches_the_readme_template(hook_path) -> None:
     """Parity check, not a duplicate of the README's own test: if the
     README's phrase and a live hook's phrase ever diverge (one gets fixed,
     the other doesn't -- exactly how S8 shipped inconsistently the first
     time), this fails and names which file fell behind."""
-    hook_path = README_PATH.parent / filename
     assert hook_path.exists(), f"missing: {hook_path}"
     hook_text = hook_path.read_text(encoding="utf-8")
     assert _ROUTING_ALLOW_OWNERSHIP_PHRASE in hook_text, (
-        f"{filename} offers the `# routing-allow:` escape but its deny "
+        f"{hook_path.name} offers the `# routing-allow:` escape but its deny "
         f"message no longer carries {_ROUTING_ALLOW_OWNERSHIP_PHRASE!r} -- "
         f"it has diverged from routing/README.md's authoring template"
     )
@@ -201,11 +227,12 @@ def _run_stub(body: str, stdin: str = "") -> subprocess.CompletedProcess:
     test_rule/unknown fail-ladder pair into the LIVE
     ~/.config/nexus/routing_log.jsonl (312 pairs over the 48-day soak).
     """
+    # nexus-t9klx: a package import now, not a sys.path insert. The library
+    # lives in the wheel; the plugin copy it used to load by directory is
+    # deleted. Aliased to `_lib` so every stub body below reads unchanged.
     stub = textwrap.dedent(
         f"""
-        import sys
-        sys.path.insert(0, {str(LIB_PATH.parent)!r})
-        import _lib
+        from nexus.hooks import _routing_lib as _lib
         {body}
         """
     )
@@ -465,13 +492,21 @@ def test_log_routing_event_resolves_from_lease_file_with_no_env_set(tmp_path, mo
     monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
     monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
-    lease_path = cfg_dir / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text(json.dumps({
-        "status": "live",
-        "heartbeat_epoch": _time.time(),
-        "ttl": 60.0,
-        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "lease-bearer-token"},
-    }))
+    from nexus.daemon.service_registry import LeaseRecord
+
+    # A whole record, as ServiceRegistry writes it — see _write_lease below
+    # for why a hand-written partial is not a lease file (nexus-t9klx).
+    (cfg_dir / f"storage_service_addr.{os.getuid()}").write_text(
+        LeaseRecord(
+            scope_key="storage_service",
+            generation=1,
+            owner_token="owner-fixture",
+            heartbeat_epoch=_time.time(),
+            ttl=60.0,
+            endpoint={"host": "127.0.0.1", "port": 4242, "token": "lease-bearer-token"},
+            version="0.0.0-fixture",
+        ).to_json()
+    )
     lib = _load_lib()
 
     sent: list[dict] = []
@@ -649,7 +684,7 @@ def test_registry_parses_as_yaml():
 # ---------------------------------------------------------------------------
 
 
-def _write_data_token_lease(cfg_dir, *, base_url, tenant, token, expires_in=3600.0):
+def _write_data_token_lease(cfg_dir, *, base_url, tenant, token, expires_in=3600.0, ttl_seconds=None):
     host = urllib.parse.urlsplit(base_url).netloc or base_url
     digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
     lease_path = cfg_dir / f"data_token_lease.{digest}"
@@ -659,7 +694,7 @@ def _write_data_token_lease(cfg_dir, *, base_url, tenant, token, expires_in=3600
         "tenant": tenant,
         "base_url_digest": digest,
         "expires_at": _time.time() + expires_in,
-        "ttl_seconds": expires_in,
+        "ttl_seconds": expires_in if ttl_seconds is None else ttl_seconds,
         "minted_by_pid": os.getpid(),
     }))
     return lease_path
@@ -919,135 +954,127 @@ def test_log_routing_event_unresolvable_endpoint_meters_with_cause_unresolvable(
 
 
 # ---------------------------------------------------------------------------
-# Parity with t2_prefix_scan.py (nexus-gjv9b review fold-in round 3,
-# code-review item 2): _read_service_lease/_read_lease,
-# _read_data_token_lease, and _read_config_yml_credentials were all
-# "ported verbatim" from t2_prefix_scan.py, and one of the three
-# docstrings already CLAIMED this suite existed before it did. The two
-# files use different Path-import conventions (t2_prefix_scan.py:
-# `from pathlib import Path`; routing/_lib.py: `import pathlib`), so a
-# byte-diff of the source would false-positive on that alone -- this
-# runs BOTH implementations against the SAME on-disk lease/config
-# layout instead and asserts identical return values, function by
-# function, across every branch each one documents (fresh, expired,
-# malformed, missing, wrong digest).
+# The three discovery readers, called directly (nexus-gjv9b review fold-in
+# round 3, code-review item 2). These ran as a parity suite against
+# t2_prefix_scan.py's copies until that plugin script was deleted
+# (nexus-z9cz2); what remains pins each wheel reader's own return value
+# across every branch it documents (fresh, expired, malformed, truncated,
+# missing, wrong digest).
 # ---------------------------------------------------------------------------
 
-T2_PREFIX_SCAN_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "t2_prefix_scan.py"
+
+def _write_lease(config_dir, *, age: float = 0.0, ttl: float = 60.0) -> None:
+    """A lease file of the shape ``ServiceRegistry`` actually writes.
+
+    nexus-t9klx: built from ``LeaseRecord.to_json``, the file format, rather
+    than a hand-written partial of the fields one reader happens to look at.
+    """
+    from nexus.daemon.service_registry import LeaseRecord
+
+    record = LeaseRecord(
+        scope_key="storage_service",
+        generation=1,
+        owner_token="owner-fixture",
+        heartbeat_epoch=_time.time() - age,
+        ttl=ttl,
+        endpoint={"host": "127.0.0.1", "port": 4242, "token": "tok"},
+        version="0.0.0-fixture",
+    )
+    (config_dir / f"storage_service_addr.{os.getuid()}").write_text(record.to_json())
 
 
-def _load_t2_prefix_scan():
-    spec = importlib.util.spec_from_file_location("nx_t2_prefix_scan", T2_PREFIX_SCAN_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+def test_read_service_lease_fresh(tmp_path):
+    _write_lease(tmp_path)
+    assert _load_lib()._read_service_lease(tmp_path) == {
+        "host": "127.0.0.1", "port": 4242, "token": "tok",
+    }
 
 
-def test_parity_read_service_lease_fresh(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text(json.dumps({
+def test_read_service_lease_expired(tmp_path):
+    _write_lease(tmp_path, age=120.0)
+    assert _load_lib()._read_service_lease(tmp_path) is None
+
+
+def test_a_truncated_lease_record_is_refused(tmp_path):
+    """The reader validates the whole record through
+    ``LeaseRecord.from_json``, so a lease file missing ``scope_key`` /
+    ``generation`` / ``owner_token`` / ``version`` resolves to ``None``.
+
+    The supervisor never writes such a file. ``None`` is the safe
+    direction: it drops the routing event to the meter, where a wrong
+    endpoint would send it somewhere.
+    """
+    (tmp_path / f"storage_service_addr.{os.getuid()}").write_text(json.dumps({
         "status": "live",
         "heartbeat_epoch": _time.time(),
         "ttl": 60.0,
         "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
     }))
-    assert lib._read_service_lease(tmp_path) == scan._read_lease(tmp_path)
+    assert _load_lib()._read_service_lease(tmp_path) is None
 
 
-def test_parity_read_service_lease_expired(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text(json.dumps({
-        "status": "live",
-        "heartbeat_epoch": _time.time() - 120.0,
-        "ttl": 60.0,
-        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
-    }))
-    assert lib._read_service_lease(tmp_path) is None
-    assert scan._read_lease(tmp_path) is None
+def test_read_service_lease_malformed(tmp_path):
+    (tmp_path / f"storage_service_addr.{os.getuid()}").write_text("not json")
+    assert _load_lib()._read_service_lease(tmp_path) is None
 
 
-def test_parity_read_service_lease_malformed(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
-    lease_path.write_text("not json")
-    assert lib._read_service_lease(tmp_path) is None
-    assert scan._read_lease(tmp_path) is None
+def test_read_service_lease_missing(tmp_path):
+    assert _load_lib()._read_service_lease(tmp_path) is None
 
 
-def test_parity_read_service_lease_missing(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    assert lib._read_service_lease(tmp_path) is None
-    assert scan._read_lease(tmp_path) is None
-
-
-def test_parity_read_data_token_lease_fresh_match(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    _write_data_token_lease(tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok")
+def test_read_data_token_lease_fresh_match(tmp_path):
     base_url = "http://127.0.0.1:4242"
-    assert lib._read_data_token_lease(tmp_path, base_url) == "tok"
-    assert scan._read_data_token_lease(tmp_path, base_url) == "tok"
+    _write_data_token_lease(tmp_path, base_url=base_url, tenant="default", token="tok")
+    assert _load_lib()._read_data_token_lease(tmp_path, base_url) == "tok"
 
 
-def test_parity_read_data_token_lease_wrong_digest(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_data_token_lease_wrong_digest(tmp_path):
     _write_data_token_lease(tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok")
-    other_url = "http://127.0.0.1:9999"
-    assert lib._read_data_token_lease(tmp_path, other_url) is None
-    assert scan._read_data_token_lease(tmp_path, other_url) is None
+    assert _load_lib()._read_data_token_lease(tmp_path, "http://127.0.0.1:9999") is None
 
 
-def test_parity_read_data_token_lease_expired(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_data_token_lease_expired(tmp_path):
+    base_url = "http://127.0.0.1:4242"
+    _write_data_token_lease(tmp_path, base_url=base_url, tenant="default", token="tok", expires_in=-1.0)
+    assert _load_lib()._read_data_token_lease(tmp_path, base_url) is None
+
+
+def test_read_data_token_lease_in_its_last_fifth_is_still_used(tmp_path):
+    """The plugin mirror accepted any unexpired lease; the client's own
+    reader refuses one within 20% of expiry because a minting caller would
+    refresh it. This reader never mints, so it keeps the mirror's reading
+    (nexus-t9klx review): 60s left of a 3600s lease is still a token."""
+    base_url = "http://127.0.0.1:4242"
     _write_data_token_lease(
-        tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok", expires_in=-1.0,
+        tmp_path, base_url=base_url, tenant="default", token="tok",
+        expires_in=60.0, ttl_seconds=3600.0,
     )
-    base_url = "http://127.0.0.1:4242"
-    assert lib._read_data_token_lease(tmp_path, base_url) is None
-    assert scan._read_data_token_lease(tmp_path, base_url) is None
+    assert _load_lib()._read_data_token_lease(tmp_path, base_url) == "tok"
 
 
-def test_parity_read_data_token_lease_missing(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    base_url = "http://127.0.0.1:4242"
-    assert lib._read_data_token_lease(tmp_path, base_url) is None
-    assert scan._read_data_token_lease(tmp_path, base_url) is None
+def test_read_data_token_lease_missing(tmp_path):
+    assert _load_lib()._read_data_token_lease(tmp_path, "http://127.0.0.1:4242") is None
 
 
-def test_parity_read_config_yml_credentials_present(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_config_yml_credentials_present(tmp_path):
     (tmp_path / "config.yml").write_text(
         "credentials:\n"
         "  service_url: https://api.example.test\n"
         "  service_token: tok-123\n"
     )
-    assert lib._read_config_yml_credentials(tmp_path) == scan._read_config_yml_credentials(tmp_path)
+    assert _load_lib()._read_config_yml_credentials(tmp_path) == {
+        "service_url": "https://api.example.test",
+        "service_token": "tok-123",
+    }
 
 
-def test_parity_read_config_yml_credentials_absent(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
-    assert lib._read_config_yml_credentials(tmp_path) == {}
-    assert scan._read_config_yml_credentials(tmp_path) == {}
+def test_read_config_yml_credentials_absent(tmp_path):
+    assert _load_lib()._read_config_yml_credentials(tmp_path) == {}
 
 
-def test_parity_read_config_yml_credentials_no_credentials_block(tmp_path):
-    scan = _load_t2_prefix_scan()
-    lib = _load_lib()
+def test_read_config_yml_credentials_no_credentials_block(tmp_path):
     (tmp_path / "config.yml").write_text("install:\n  mode: managed\n")
-    assert lib._read_config_yml_credentials(tmp_path) == {}
-    assert scan._read_config_yml_credentials(tmp_path) == {}
+    assert _load_lib()._read_config_yml_credentials(tmp_path) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1058,8 +1085,7 @@ def test_parity_read_config_yml_credentials_no_credentials_block(tmp_path):
 # cause's pattern table. The hook is stdlib-only (no `nexus` import) and
 # cannot share the literals via a common import, so this is the "honest
 # tool" the code review asked for: read both files' literal sets and
-# assert equality, the same discipline as the discovery-function parity
-# suite above.
+# assert equality.
 # ---------------------------------------------------------------------------
 
 

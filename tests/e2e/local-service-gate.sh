@@ -574,7 +574,16 @@ START_ENV=(NX_LOCAL=1 "NEXUS_CONFIG_DIR=$SCRATCH")
 if [ -n "${NEXUS_SERVICE_BIN:-}" ]; then
   # No freshness check exists for a native binary (jar-mtime logic does not
   # apply) — log what is being pinned so a stale artifact is at least visible.
-  echo "[gate] native binary: $NEXUS_SERVICE_BIN (mtime: $(stat -f '%Sm' "$NEXUS_SERVICE_BIN" 2>/dev/null || stat -c '%y' "$NEXUS_SERVICE_BIN"))"
+  # nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked --
+  # a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status dump
+  # into this log line on Linux (see
+  # tests/e2e/post-publish-dispatch-check.sh's fix for the full writeup).
+  if stat --version >/dev/null 2>&1; then
+    _bin_mtime="$(stat -c '%y' "$NEXUS_SERVICE_BIN" 2>/dev/null)"
+  else
+    _bin_mtime="$(stat -f '%Sm' "$NEXUS_SERVICE_BIN" 2>/dev/null)"
+  fi
+  echo "[gate] native binary: $NEXUS_SERVICE_BIN (mtime: $_bin_mtime)"
   START_ENV+=("NEXUS_SERVICE_BIN=$NEXUS_SERVICE_BIN")
 elif [ -f "$JAR" ]; then
   START_ENV+=("NEXUS_SERVICE_JAR=$JAR")

@@ -86,6 +86,61 @@ for i in $(seq 1 60); do
 done
 [ "$UP" = "1" ] || { echo "FAIL: service never became healthy"; tail -40 /tmp/native-smoke-svc.log; exit 1; }
 
+# RDR-218 Gap 2 (nexus-ijue9.7): the SOCKET FAMILY of the listener.
+#
+# Ipv4StackFeature bakes java.net.preferIPv4Stack=true into the native image,
+# because binding 127.0.0.1 on Linux otherwise opens a dual-stack AF_INET6
+# socket on ::ffff:127.0.0.1 that WSL2's localhost relay will not forward --
+# a service that is demonstrably listening and unreachable from Windows.
+#
+# THIS CHECK EXISTS BECAUSE THE ORIGINAL VERIFICATION WAS A ONE-OFF. The
+# mechanism was proven by a manual native build plus a /proc read; nothing
+# then watched it, so a pom.xml edit dropping the --features= buildArg, or a
+# GraalVM upgrade changing RuntimeSystemProperties, would regress it silently
+# and the only symptom would be on a platform this suite never runs on.
+#
+# NOT ASSERTED ON NON-LINUX: /proc/net/tcp* is the only honest observation of
+# the family (java.net reports Inet4Address for BOTH families, so the Java API
+# cannot see this at all), and it does not exist on macOS. Skipping is stated
+# rather than silent, so a run that could not check says so.
+#
+# COUNTED THE WAY THE JAVA TEST COUNTS: the LOCAL address column, in the
+# LISTEN state, not "the port appears somewhere on the line". A bare grep
+# for the port is wrong in both directions here, and this script creates
+# both cases itself. It probes the service over HTTP, so /proc/net/tcp
+# carries ESTABLISHED rows whose local port IS the service port: those
+# inflate the IPv4 count, so the "at least one IPv4 row" assert can pass
+# without any listener at all, and if a probe connects over v6 they put a
+# row in the IPv6 table, failing the "no IPv6 row" assert on a correctly
+# IPv4-only listener. st=0A is TCP_LISTEN; $2 is local_address.
+if [ -r /proc/net/tcp ] && [ -r /proc/net/tcp6 ]; then
+  HEXPORT=$(printf "%04X" "$SVCPORT")
+  count_listeners() {
+    awk -v port=":$1" 'NR>1 && $4=="0A" && index($2, port) == length($2)-length(port)+1 { n++ } END { print n+0 }' "$2"
+  }
+  V4=$(count_listeners "$HEXPORT" /proc/net/tcp)
+  V6=$(count_listeners "$HEXPORT" /proc/net/tcp6)
+  echo "socket family: ipv4_table=$V4 ipv6_table=$V6 (port $SVCPORT / 0x$HEXPORT, LISTEN rows only)"
+  if [ "${V4:-0}" -lt 1 ]; then
+    echo "FAIL: listener is not in the IPv4 socket table."
+    echo "      Ipv4StackFeature did not take. Check that pom.xml's -Pnative"
+    echo "      buildArgs still carry --features=dev.nexus.service.Ipv4StackFeature,"
+    echo "      and that RuntimeSystemProperties.register still runs in"
+    echo "      beforeAnalysis (afterRegistration fails: the support singleton"
+    echo "      is not registered that early)."
+    fail_family=1
+  fi
+  if [ "${V6:-0}" -ne 0 ]; then
+    echo "FAIL: listener is ALSO in the IPv6 table; the socket is dual-stack."
+    fail_family=1
+  fi
+  [ "${fail_family:-0}" = "1" ] && { tail -40 /tmp/native-smoke-svc.log; exit 1; }
+  echo "socket family: OK (IPv4-only, forwardable by the WSL2 relay)"
+else
+  echo "socket family: SKIPPED (no /proc/net/tcp*; not Linux). The family is"
+  echo "               unverified on this host by construction, not by passing."
+fi
+
 # Migration must have applied (changeset_count > 0).
 VER=$(curl -fsS -H "Authorization: Bearer smoketoken" "$U/version")
 echo "version: $VER"

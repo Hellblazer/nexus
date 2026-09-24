@@ -62,6 +62,7 @@ nexus-070e2
 nexus-07dm6
 nexus-07z0
 nexus-085xt
+nexus-08cfl
 nexus-08i1
 nexus-08puh
 nexus-08v8
@@ -747,6 +748,8 @@ nexus-43qgm.9
 nexus-441p5
 nexus-441p5.1
 nexus-446yl
+nexus-44812
+nexus-44812.1
 nexus-44lw2
 nexus-44lw2.1
 nexus-45i92
@@ -978,6 +981,7 @@ nexus-571e6
 nexus-572g
 nexus-575kd
 nexus-575kd.1
+nexus-57cvk
 nexus-57dh4
 nexus-57j
 nexus-57j.1
@@ -1016,6 +1020,7 @@ nexus-5da44
 nexus-5daww
 nexus-5daww.1
 nexus-5dcky
+nexus-5dcky.1
 nexus-5den3
 nexus-5dmpe
 nexus-5drgy
@@ -1711,6 +1716,7 @@ nexus-97oz3
 nexus-9800y
 nexus-984a5
 nexus-989e1
+nexus-98cy4
 nexus-98gpl
 nexus-98h
 nexus-98h.1
@@ -2701,6 +2707,7 @@ nexus-ebbvt.1
 nexus-ebu0c
 nexus-ebu0c.1
 nexus-ebu6
+nexus-ebx0s
 nexus-ebz
 nexus-ebz6
 nexus-eceik
@@ -2930,6 +2937,7 @@ nexus-fcfio
 nexus-fcjt7
 nexus-fctci
 nexus-fcx2s
+nexus-fd3zf
 nexus-fdfh3
 nexus-fdk1x
 nexus-fdn1c
@@ -3627,6 +3635,31 @@ nexus-iiy11
 nexus-iiy11.1
 nexus-ij9hg
 nexus-ijan
+nexus-ijue9
+nexus-ijue9.1
+nexus-ijue9.10
+nexus-ijue9.11
+nexus-ijue9.12
+nexus-ijue9.13
+nexus-ijue9.14
+nexus-ijue9.15
+nexus-ijue9.16
+nexus-ijue9.17
+nexus-ijue9.18
+nexus-ijue9.19
+nexus-ijue9.2
+nexus-ijue9.20
+nexus-ijue9.21
+nexus-ijue9.22
+nexus-ijue9.23
+nexus-ijue9.24
+nexus-ijue9.3
+nexus-ijue9.4
+nexus-ijue9.5
+nexus-ijue9.6
+nexus-ijue9.7
+nexus-ijue9.8
+nexus-ijue9.9
 nexus-ikd9a
 nexus-ikdvm
 nexus-ilm
@@ -3718,6 +3751,7 @@ nexus-j43k
 nexus-j46lz
 nexus-j4gl6
 nexus-j4i31
+nexus-j4iy0
 nexus-j4o
 nexus-j54kv
 nexus-j5diu
@@ -3937,6 +3971,7 @@ nexus-k8s4v
 nexus-k9er
 nexus-kard5
 nexus-kas9u
+nexus-kas9u.1
 nexus-kbn97
 nexus-kc4x
 nexus-kcaqk
@@ -4837,6 +4872,7 @@ nexus-oei.5
 nexus-oei.5.1
 nexus-oen22
 nexus-oeqk8
+nexus-of2x8
 nexus-ofpqq
 nexus-og52j
 nexus-ogccs
@@ -5602,6 +5638,7 @@ nexus-ssp.1
 nexus-ssqk9
 nexus-st976
 nexus-stkek
+nexus-stkek.1
 nexus-stvfd
 nexus-stx52
 nexus-sue7d
@@ -5623,6 +5660,7 @@ nexus-t0nrd
 nexus-t0p7o
 nexus-t0p7o.1
 nexus-t0zcn
+nexus-t10nc
 nexus-t1b1k
 nexus-t1hnc
 nexus-t1hnc.1
@@ -5657,6 +5695,7 @@ nexus-t952k
 nexus-t952k.1
 nexus-t9dgf
 nexus-t9klx
+nexus-t9klx.1
 nexus-t9oy4
 nexus-t9qvl
 nexus-t9rmg
@@ -6351,6 +6390,7 @@ nexus-wnost
 nexus-wnp3c
 nexus-wnpet
 nexus-wo6sc
+nexus-wovg1
 nexus-wowg
 nexus-wp94t
 nexus-wp9s
@@ -6837,6 +6877,8 @@ nexus-z7hf
 nexus-z7s5r
 nexus-z8xfo
 nexus-z8xfo.1
+nexus-z9cz2
+nexus-z9cz2.1
 nexus-z9qt5
 nexus-z9wa0
 nexus-za6e6

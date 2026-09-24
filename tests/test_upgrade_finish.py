@@ -9,6 +9,7 @@ metadata are injectable, no real processes are touched.
 """
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -273,7 +274,7 @@ class TestRestartStale:
 
     def test_dry_run_touches_nothing(self):
         with patch("nexus.upgrade_finish.os.kill") as k, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = restart_stale(self._report(), dry_run=True)
         sp.assert_not_called()
         k.assert_not_called()
@@ -315,7 +316,7 @@ class TestRestartStale:
                 patch("nexus.upgrade_finish.time.sleep"), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value=probe.stdout.strip()), \
-                patch("nexus.upgrade_finish.subprocess.run", return_value=probe):
+                patch("nexus.upgrade_finish.run_bounded", return_value=probe):
             actions = restart_stale(self._report())
         assert calls[0] == (200, signal.SIGTERM)
         # Wording changed when the branch started actually restarting the
@@ -347,7 +348,7 @@ class TestRestartStale:
 
         with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows",
                    return_value=False), \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = restart_stale(r)
         sp.assert_not_called()
         assert any("autostart policy is off" in a for a in actions)
@@ -356,7 +357,7 @@ class TestRestartStale:
                    return_value=True), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value="mineru-api --host 127.0.0.1"), \
-                patch("nexus.upgrade_finish.subprocess.run",
+                patch("nexus.upgrade_finish.run_bounded",
                       return_value=MagicMock(returncode=0)) as sp:
             actions = restart_stale(r)
         assert sp.call_count == 2  # stop && start
@@ -371,7 +372,7 @@ class TestRestartStale:
                    return_value=True), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value="/usr/bin/vim unrelated.txt"), \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = restart_stale(r)
         sp.assert_not_called()
         assert any("gone or recycled" in a for a in actions)
@@ -462,6 +463,150 @@ class TestVersionTransition:
         # Stamp still advanced: the transition is consumed, not retried
         # forever against a broken probe.
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+
+class TestVersionTransitionStampMovesForwardOnly:
+    """nexus-b2eaw round 3 (review finding): the stamp only ever moves
+    FORWARD. Before this, ANY string difference between the stamp and the
+    running version counted as "a transition", direction included -- on a
+    box where two versions are routinely alive at once (peer sessions, a
+    dev checkout beside a managed install, two installed generations), an
+    OLDER invocation running after a NEWER one had already stamped the
+    box would flip the stamp BACK and re-run the WHOLE finish pass
+    (including engine convergence and daemon restarts), potentially
+    converging the engine toward the OLDER release's own pin and undoing
+    the newer session's work.
+
+    Round 4 (review finding): "running older than the stamp" is not ONE
+    shape. A dev checkout is the routine peer/dev topology above -- silent
+    at debug. The INSTALLED GENERATION itself running older is a genuine
+    downgrade, and staying silent there would hide that the engine is
+    stuck converged to the release the user just moved away from -- that
+    shape gets a visible, non-None summary instead."""
+
+    def test_older_dev_checkout_neither_rewrites_nor_runs_the_finish_pass_and_stays_silent(
+        self, tmp_path,
+    ):
+        """nexus-b2eaw round 4: a dev checkout (running_from_tool_install
+        False, the nexus-i24r4 classification) running older than the
+        stamp is the routine peer/dev shape -- silent (None), not just
+        "no rewrite"."""
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=False,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+        ) as detect:
+            line = check_version_transition(tmp_path)
+        assert line is None
+        detect.assert_not_called()  # the finish pass's first leg never fired
+        # The stamp is untouched -- still the newer value a peer wrote.
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+    def test_older_genuine_downgrade_neither_rewrites_nor_runs_the_finish_pass_but_is_visible(
+        self, tmp_path,
+    ):
+        """nexus-b2eaw round 4 (review finding): the INSTALLED generation
+        itself (running_from_tool_install True) running older than the
+        stamp is a genuine downgrade, not the peer/dev case -- it must
+        still not rewrite the stamp or run the finish pass automatically,
+        but it must NOT be silent: a non-None summary naming both
+        versions, that the engine is not converged, and the manual finish
+        command, surfaced the same way every other summary from this
+        function is (cli.py's caller click.echoes a non-None return to
+        stderr unconditionally)."""
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+        ) as detect:
+            line = check_version_transition(tmp_path)
+        assert line is not None
+        assert "6.7.1" in line and "6.7.0" in line
+        assert "not converged to this release's pin" in line
+        assert "nx daemon restart-stale" in line
+        detect.assert_not_called()  # still no automatic finish pass
+        # The stamp is untouched -- a downgrade must not consume it either.
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+    def test_older_running_version_logs_at_debug_with_both_versions(self, tmp_path):
+        """Asserted by patching the module's own ``_log`` (the same
+        pattern ``test_restart_helper_emits_a_structured_log_line`` uses),
+        not ``structlog.testing.capture_logs()`` -- this repo's
+        ``configure_logging`` installs a level-FILTERING wrapper_class
+        (WARNING by default for CLI-mode processes), which silently
+        swallows a ``.debug()`` call before ``capture_logs()``'s own
+        processor ever runs."""
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.0"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish._log",
+        ) as mock_log:
+            check_version_transition(tmp_path)
+        mock_log.debug.assert_called_once_with(
+            "version_stamp_older_invocation_skipped", seen="6.7.1", running="6.7.0",
+        )
+
+    def test_unparseable_stamp_falls_through_to_a_transition(self, tmp_path):
+        """An unparseable stamp (not a valid version) cannot be compared,
+        so it is handled exactly as it was before this change: proceed as
+        a transition, rather than wedge the box forever on a value nothing
+        can compare against."""
+        (tmp_path / "last_seen_version").write_text("not-a-version\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded not-a-version -> 6.7.1; no stale processes"
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+    def test_newer_and_equal_running_versions_are_unaffected(self, tmp_path):
+        """Non-regression, in one place for a reader of this class: a
+        newer running version still transitions exactly as before
+        (TestVersionTransition.test_transition_runs_finish_and_summarizes
+        is the fuller version of this), and an equal one is still a silent
+        no-op (TestVersionTransition.test_same_version_is_silent_noop)."""
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+        (tmp_path / "last_seen_version").write_text("6.7.1\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ):
+            assert check_version_transition(tmp_path) is None
 
 
 class TestCheckVersionTransitionBackfillsInstallMode:
@@ -561,7 +706,7 @@ class TestRecycledPid:
         r.stale = [StaleProcess(pid=200, kind="aspect-worker", command="w", age_s=9)]
         probe = MagicMock(returncode=0, stdout="/usr/bin/vim innocent.txt\n")
         with patch("nexus.upgrade_finish.os.kill") as k, \
-                patch("nexus.upgrade_finish.subprocess.run", return_value=probe):
+                patch("nexus.upgrade_finish.run_bounded", return_value=probe):
             actions = restart_stale(r)
         k.assert_not_called()
         assert any("gone or recycled" in a for a in actions)
@@ -589,7 +734,13 @@ class TestFailLoud:
         from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
 
         bad = MagicMock(returncode=1, stdout="", stderr="boom")
-        with patch("nexus.upgrade_finish.subprocess.run", return_value=bad), \
+        # The ps call lives in service_registry._ps_enumerate, which
+        # upgrade_finish reaches through all_process_rows. This used to say
+        # "nexus.upgrade_finish.subprocess.run" and still worked, because
+        # patching a module's `subprocess.run` attribute patches the shared
+        # subprocess module for everyone. run_bounded is bound per module, so
+        # the patch now has to name the module that makes the call.
+        with patch("nexus.daemon.service_registry.run_bounded", return_value=bad), \
                 _pytest.raises(RuntimeError, match="ps failed"):
             enumerate_processes(None)
 
@@ -605,7 +756,7 @@ class TestFailLoud:
         removable rather than merely tolerable."""
         rows = [(4242, 99, "/opt/uv/tools/conexus/bin/python -m nexus.mcp")]
         with patch(
-            "nexus.upgrade_finish.subprocess.run",
+            "nexus.daemon.service_registry.run_bounded",
             side_effect=FileNotFoundError(2, "No such file or directory", "ps"),
         ), patch(
             "nexus.daemon.service_registry._procfs_available", return_value=True,
@@ -628,7 +779,7 @@ class TestFailLoud:
         import pytest as _pytest  # noqa: PLC0415 — file pattern: deferred imports
 
         with patch(
-            "nexus.upgrade_finish.subprocess.run",
+            "nexus.daemon.service_registry.run_bounded",
             side_effect=FileNotFoundError(2, "No such file or directory", "ps"),
         ), patch(
             "nexus.daemon.service_registry._procfs_available", return_value=False,
@@ -740,7 +891,7 @@ class TestFailLoud:
              patch.object(uf, "process_command",
                           return_value=survivors[0][1]), \
              patch.object(uf, "terminate_pids") as term, \
-             patch.object(uf.subprocess, "run",
+             patch.object(uf, "run_bounded",
                           side_effect=[stop_ok, start_ok]), \
              patch.object(uf, "_running_engine", return_value=running):
             actions: list[str] = []
@@ -768,7 +919,7 @@ class TestFailLoud:
         running = MagicMock(version="v0.1.60", pid=214)
 
         with patch.object(uf, "service_stack_pids", return_value=[]), \
-             patch.object(uf.subprocess, "run", side_effect=[stop_ok, start_ok]) as sp, \
+             patch.object(uf, "run_bounded", side_effect=[stop_ok, start_ok]) as sp, \
              patch.object(uf, "_running_engine", return_value=running):
             actions: list[str] = []
             uf._restart_and_verify(tmp_path, actions, "v0.1.60")
@@ -1128,7 +1279,7 @@ class TestConvergeEngine:
                     "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_engine(tmp_path, dry_run=True)
         install.assert_not_called()
         sp.assert_not_called()
@@ -1175,7 +1326,7 @@ class TestConvergeEngine:
                     return_value=(tmp_path / "service" / "nexus-service", {"version": _REQUIRED_STR}),
                 ) as install, \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ) as sp, \
                 patch(
@@ -1229,7 +1380,7 @@ class TestConvergeEngine:
                     "nexus.daemon.binary_install.install_binary",
                     side_effect=BinaryVerificationError("sha256 mismatch"),
                 ), \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_engine(tmp_path)
 
         sp.assert_not_called()
@@ -1261,7 +1412,7 @@ class TestConvergeEngine:
                     "nexus.daemon.binary_install.install_binary",
                     side_effect=BinaryVerificationError("sha256 mismatch"),
                 ) as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions1 = converge_engine(tmp_path)
             actions2 = converge_engine(tmp_path)
 
@@ -1292,7 +1443,7 @@ class TestConvergeEngine:
                     "nexus.daemon.binary_install.install_binary",
                     side_effect=OSError("disk full"),
                 ), \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_engine(tmp_path)
 
         sp.assert_not_called()
@@ -1313,7 +1464,7 @@ class TestConvergeEngine:
                     return_value=(tmp_path / "service" / "nexus-service", {"version": _REQUIRED_STR}),
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=1),
                 ):
             actions = converge_engine(tmp_path)
@@ -1345,7 +1496,7 @@ class TestConvergeEngine:
                     "nexus.upgrade_finish.service_stack_pids", return_value=[],
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     side_effect=[
                         MagicMock(returncode=1, stdout="", stderr="stop: no live lease"),
                         MagicMock(returncode=0, stdout="", stderr=""),
@@ -1379,7 +1530,7 @@ class TestConvergeEngine:
                     "nexus.upgrade_finish.service_stack_pids", return_value=[],
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     side_effect=[
                         MagicMock(returncode=1, stdout="", stderr="stop: no live lease"),
                         MagicMock(returncode=0, stdout="", stderr=""),
@@ -1412,7 +1563,7 @@ class TestConvergeEngine:
                     ),
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_engine(tmp_path)
 
         install.assert_not_called()
@@ -1518,7 +1669,7 @@ class TestConvergeEngineLiveVerification:
                     ),
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp:
+                patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_engine(tmp_path)
 
         # Loud, and still hands-off: no blind install under an unverifiable store.
@@ -1605,7 +1756,7 @@ class TestConvergeEngineLiveVerification:
                     ),
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ), \
                 patch(
@@ -1635,7 +1786,7 @@ class TestConvergeEngineLiveVerification:
                     ),
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ), \
                 patch(
@@ -1667,7 +1818,7 @@ class TestConvergeEngineLiveVerification:
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ) as sp, \
                 patch(
@@ -1702,7 +1853,7 @@ class TestConvergeEngineLiveVerification:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._disk_current(tmp_path), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch("nexus.upgrade_finish.run_bounded") as sp, \
                 patch(
                     "nexus.upgrade_finish._running_engine",
                     return_value=self._running(up=False, version=None),
@@ -1719,7 +1870,7 @@ class TestConvergeEngineLiveVerification:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._disk_current(tmp_path), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch("nexus.upgrade_finish.run_bounded") as sp, \
                 patch(
                     "nexus.upgrade_finish._running_engine",
                     return_value=self._running(
@@ -1747,7 +1898,7 @@ class TestConvergeEngineLiveVerification:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._disk_current(tmp_path), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch("nexus.upgrade_finish.run_bounded") as sp, \
                 patch(
                     "nexus.upgrade_finish._running_engine",
                     return_value=self._running(up=True, version=newer),
@@ -1785,7 +1936,7 @@ class TestConvergeEngineLiveVerification:
                     "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
-                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch("nexus.upgrade_finish.run_bounded") as sp, \
                 patch(
                     "nexus.upgrade_finish._running_engine",
                     return_value=self._running(up=True, version=self._OLDER),
@@ -1808,7 +1959,7 @@ class TestConvergeEngineLiveVerification:
                     "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ) as sp, \
                 patch(
@@ -1849,7 +2000,7 @@ class TestConvergeEngineLiveVerification:
                     ),
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ), \
                 patch("nexus.upgrade_finish.time.sleep") as slept, \
@@ -1881,7 +2032,7 @@ class TestConvergeEngineLiveVerification:
                     ),
                 ), \
                 patch(
-                    "nexus.upgrade_finish.subprocess.run",
+                    "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ), \
                 patch("nexus.upgrade_finish.time.sleep"), \
@@ -2285,6 +2436,84 @@ class TestUnloadStaleServiceLaunchagent:
         assert "nx daemon service uninstall --autostart" in actions[0]
 
 
+class TestAutostartBackupCollisionProofAndPruning:
+    """nexus-gq1pv follow-up (T2 review-wave2-daemon-2026-09-23): the
+    original backup filename used second-granularity timestamps with no
+    collision check and no pruning. Two converge passes inside the same
+    wall-clock second computed the SAME name, and the second write
+    silently clobbered the first backup -- the exact "nothing an operator
+    wrote is lost" guarantee the backup exists to uphold, defeated by the
+    backup mechanism itself. And with nothing ever removing an old one,
+    every drift-converge pass added one more file forever."""
+
+    def test_collision_is_never_silently_clobbered(self, tmp_path, monkeypatch) -> None:
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "com.nexus.service.plist"
+        dest.write_text("current template\n")
+        existing_backup = dest.with_name(f"{dest.name}.pre-convergence.1000")
+        existing_backup.write_text("FIRST backup content -- must survive")
+
+        # First two candidate timestamps collide with the existing backup;
+        # the third is free.
+        calls = iter([1000, 1000, 2000])
+        monkeypatch.setattr(uf.time, "time_ns", lambda: next(calls))
+
+        result = uf._write_collision_proof_backup(dest, "SECOND backup content")
+
+        assert existing_backup.read_text() == "FIRST backup content -- must survive"
+        assert result != existing_backup
+        assert result.read_text() == "SECOND backup content"
+
+    def test_exhausting_every_retry_raises_oserror(self, tmp_path, monkeypatch) -> None:
+        """A pathological case (every candidate this function will try is
+        already taken) must raise, not loop forever or silently overwrite."""
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "unit.plist"
+        monkeypatch.setattr(uf.time, "time_ns", lambda: 42)
+        dest.with_name(f"{dest.name}.pre-convergence.42").write_text("blocker")
+
+        with pytest.raises(OSError):
+            uf._write_collision_proof_backup(dest, "never written")
+
+    def test_prune_keeps_only_the_newest_n(self, tmp_path) -> None:
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "unit.plist"
+        for i in range(8):
+            dest.with_name(f"{dest.name}.pre-convergence.{1000 + i}").write_text(f"backup {i}")
+
+        uf._prune_old_autostart_backups(dest)
+
+        remaining = sorted(p.name for p in tmp_path.iterdir() if "pre-convergence" in p.name)
+        assert len(remaining) == uf._AUTOSTART_BACKUP_KEEP_COUNT
+        # Keeps the NEWEST (highest-numbered) ones, not an arbitrary subset.
+        assert remaining == [
+            f"unit.plist.pre-convergence.{1000 + i}"
+            for i in range(8 - uf._AUTOSTART_BACKUP_KEEP_COUNT, 8)
+        ]
+
+    def test_write_then_prune_via_the_public_entry_point(self, tmp_path, monkeypatch) -> None:
+        """A real end-to-end sequence through the public function: N real
+        writes, only the newest _AUTOSTART_BACKUP_KEEP_COUNT survive."""
+        from nexus import upgrade_finish as uf
+
+        dest = tmp_path / "unit.plist"
+        n = uf._AUTOSTART_BACKUP_KEEP_COUNT + 2
+        counter = iter(range(1000, 1000 + n))
+        monkeypatch.setattr(uf.time, "time_ns", lambda: next(counter))
+
+        for i in range(n):
+            uf._write_collision_proof_backup(dest, f"content {i}")
+
+        backups = sorted(p for p in tmp_path.iterdir() if "pre-convergence" in p.name)
+        assert len(backups) == uf._AUTOSTART_BACKUP_KEEP_COUNT
+        # The two oldest (content 0, content 1) were pruned.
+        surviving_content = {p.read_text() for p in backups}
+        assert surviving_content == {f"content {i}" for i in range(2, n)}
+
+
 class TestConvergeServiceAutostartUnit:
     """nexus-rlp0v: a drifted local-mode service-tier autostart unit (e.g. a
     stale ProcessType=Background) must converge on `nx daemon restart-stale`
@@ -2313,7 +2542,7 @@ class TestConvergeServiceAutostartUnit:
         with patch("nexus.config.is_local_mode", return_value=False), \
              patch("nexus.commands.daemon._service_autostart_unit_installed") as probe, \
              patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
-             patch("nexus.upgrade_finish.subprocess.run") as sp:
+             patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_service_autostart_unit(tmp_path)
         assert actions == []
         probe.assert_not_called()
@@ -2395,7 +2624,7 @@ class TestConvergeServiceAutostartUnit:
              patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
              patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "same content\n")), \
              patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
-             patch("nexus.upgrade_finish.subprocess.run") as sp:
+             patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_service_autostart_unit(tmp_path)
         assert actions == []
         uninstall.assert_not_called()
@@ -2413,7 +2642,7 @@ class TestConvergeServiceAutostartUnit:
              patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
              patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
              patch("nexus.daemon.installer.install_autostart") as install, \
-             patch("nexus.upgrade_finish.subprocess.run") as sp:
+             patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_service_autostart_unit(tmp_path, unattended=True)
         assert len(actions) == 1
         assert "NOTE" in actions[0] and "restart-stale" in actions[0]
@@ -2428,7 +2657,7 @@ class TestConvergeServiceAutostartUnit:
              patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
              patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
              patch("nexus.daemon.installer.install_autostart") as install, \
-             patch("nexus.upgrade_finish.subprocess.run") as sp:
+             patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_service_autostart_unit(tmp_path, dry_run=True)
         assert len(actions) == 1
         assert "NOTE" in actions[0]
@@ -2453,14 +2682,14 @@ class TestConvergeServiceAutostartUnit:
                        status=InstallStatus.NEWLY_INSTALLED, dest=dest,
                        detail="Activated via: launchctl bootstrap ...",
                    )) as install, \
-             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result) as sp, \
+             patch("nexus.upgrade_finish.run_bounded", return_value=stop_result) as sp, \
              patch("nexus.upgrade_finish._running_engine",
                    return_value=_RunningEngine(up=True, version=(1, 2, 3))):
             actions = converge_service_autostart_unit(tmp_path)
 
         sp.assert_called_once_with(
             ["nx", "daemon", "service", "stop", "--config-dir", str(tmp_path.resolve())],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
         uninstall.assert_called_once_with(tier="service")
         install.assert_called_once_with(tier="service")
@@ -2468,6 +2697,69 @@ class TestConvergeServiceAutostartUnit:
         assert "converged" in actions[0]
         assert str(dest) in actions[0]
         assert "NEEDS HUMAN" not in actions[0]
+
+    def test_drift_attended_backs_up_existing_unit_before_overwrite(self, tmp_path):
+        """nexus-gq1pv: uninstall_autostart runs before install_autostart,
+        so install_autostart's own ContentDiffersError/--force guard never
+        sees dest's differing content -- it only ever sees an absent file.
+        A hand-edited unit must not be silently discarded on this path:
+        the pre-convergence content is backed up beside the unit before
+        either step runs, and the action line names the backup."""
+        from nexus.daemon.installer import (  # noqa: PLC0415 — local import, test-only convenience
+            InstallResult, InstallStatus, UninstallResult, UninstallStatus,
+        )
+
+        dest = self._drifted(tmp_path)
+        original_content = dest.read_text()
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
+             patch("nexus.daemon.installer.install_autostart",
+                   return_value=InstallResult(
+                       status=InstallStatus.NEWLY_INSTALLED, dest=dest,
+                       detail="Activated via: launchctl bootstrap ...",
+                   )), \
+             patch("nexus.upgrade_finish.run_bounded", return_value=stop_result), \
+             patch("nexus.upgrade_finish._running_engine",
+                   return_value=_RunningEngine(up=True, version=(1, 2, 3))):
+            actions = converge_service_autostart_unit(tmp_path)
+
+        assert len(actions) == 1
+        assert "backed up" in actions[0]
+        backups = list(tmp_path.glob("com.nexus.service.plist.pre-convergence.*"))
+        assert len(backups) == 1, backups
+        assert backups[0].read_text() == original_content
+        assert str(backups[0]) in actions[0]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+    def test_backup_write_failure_refuses_to_converge(self, tmp_path):
+        """A backup that cannot be written must refuse the whole converge
+        rather than proceed and risk destroying the only copy of a
+        hand-edited unit."""
+        if os.geteuid() == 0:
+            pytest.skip("permission bits are not enforced against root")
+        dest = self._drifted(tmp_path)
+        tmp_path.chmod(0o555)
+        try:
+            with patch("nexus.config.is_local_mode", return_value=True), \
+                 patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+                 patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+                 patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+                 patch("nexus.daemon.installer.install_autostart") as install, \
+                 patch("nexus.upgrade_finish.run_bounded") as sp:
+                actions = converge_service_autostart_unit(tmp_path)
+        finally:
+            tmp_path.chmod(0o755)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "backing up" in actions[0]
+        uninstall.assert_not_called()
+        install.assert_not_called()
+        sp.assert_not_called()
+        assert dest.read_text() == "old content with ProcessType Background\n"
 
     def test_stop_failure_is_needs_human_never_mutates_unit(self, tmp_path):
         dest = self._drifted(tmp_path)
@@ -2477,7 +2769,7 @@ class TestConvergeServiceAutostartUnit:
              patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
              patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
              patch("nexus.daemon.installer.install_autostart") as install, \
-             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result):
+             patch("nexus.upgrade_finish.run_bounded", return_value=stop_result):
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1
         assert "NEEDS HUMAN" in actions[0]
@@ -2495,7 +2787,7 @@ class TestConvergeServiceAutostartUnit:
                    return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
              patch("nexus.daemon.installer.install_autostart",
                    side_effect=RuntimeError("bootstrap exploded")), \
-             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result):
+             patch("nexus.upgrade_finish.run_bounded", return_value=stop_result):
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1
         assert "NEEDS HUMAN" in actions[0]
@@ -2515,7 +2807,7 @@ class TestConvergeServiceAutostartUnit:
                    return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
              patch("nexus.daemon.installer.install_autostart",
                    return_value=InstallResult(status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail="ok")), \
-             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result), \
+             patch("nexus.upgrade_finish.run_bounded", return_value=stop_result), \
              patch("nexus.upgrade_finish._running_engine",
                    return_value=_RunningEngine(up=False, version=None, reason="no lease")), \
              patch("nexus.upgrade_finish.time.sleep"):
@@ -2542,7 +2834,7 @@ class TestConvergeServiceAutostartUnit:
                    return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
              patch("nexus.daemon.installer.install_autostart",
                    side_effect=RuntimeError("bootstrap exploded")), \
-             patch("nexus.upgrade_finish.subprocess.run",
+             patch("nexus.upgrade_finish.run_bounded",
                    side_effect=[stop_result, start_result]) as sp:
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1
@@ -2573,7 +2865,7 @@ class TestConvergeServiceAutostartUnit:
                    # not reachable via either of the two real members.
                    return_value=UninstallResult(status="removed_with_errors", dest=dest)) as uninstall, \
              patch("nexus.daemon.installer.install_autostart") as install, \
-             patch("nexus.upgrade_finish.subprocess.run",
+             patch("nexus.upgrade_finish.run_bounded",
                    side_effect=[stop_result, start_result]) as sp:
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1
@@ -2616,7 +2908,7 @@ class TestConvergeServiceAutostartUnit:
                    return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
              patch("nexus.daemon.installer.install_autostart",
                    side_effect=activation_error), \
-             patch("nexus.upgrade_finish.subprocess.run",
+             patch("nexus.upgrade_finish.run_bounded",
                    side_effect=[stop_result, start_result]) as sp:
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1, actions
@@ -2648,7 +2940,7 @@ class TestConvergeServiceAutostartUnit:
              patch("nexus.daemon.installer.uninstall_autostart",
                    side_effect=_NoBranchNamesThis("disk full")) as uninstall, \
              patch("nexus.daemon.installer.install_autostart") as install, \
-             patch("nexus.upgrade_finish.subprocess.run",
+             patch("nexus.upgrade_finish.run_bounded",
                    side_effect=[stop_result, start_result]) as sp:
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1, actions
@@ -2676,7 +2968,7 @@ class TestConvergeServiceAutostartUnit:
         from nexus.upgrade_finish import _restart_service_after_unit_reinstall  # noqa: PLC0415 — local import, test-only convenience
 
         start_result = MagicMock(returncode=0, stdout="", stderr="")
-        with patch("nexus.upgrade_finish.subprocess.run", return_value=start_result), \
+        with patch("nexus.upgrade_finish.run_bounded", return_value=start_result), \
              patch("nexus.upgrade_finish._log") as mock_log:
             ok, _clause = _restart_service_after_unit_reinstall(tmp_path)
         assert ok is True
@@ -2694,7 +2986,7 @@ class TestConvergeServiceAutostartUnit:
         `returncode=None` rather than a fabricated value."""
         from nexus.upgrade_finish import _restart_service_after_unit_reinstall  # noqa: PLC0415 — local import, test-only convenience
 
-        with patch("nexus.upgrade_finish.subprocess.run",
+        with patch("nexus.upgrade_finish.run_bounded",
                    side_effect=OSError("no such file")), \
              patch("nexus.upgrade_finish._log") as mock_log:
             ok, clause = _restart_service_after_unit_reinstall(tmp_path)
@@ -2731,7 +3023,7 @@ class TestConvergeServiceAutostartUnit:
                        detail="Activated via: systemctl --user enable --now nexus-service.service",
                        activated_cmd=["systemctl", "--user", "enable", "--now", "nexus-service.service"],
                    )), \
-             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result) as sp, \
+             patch("nexus.upgrade_finish.run_bounded", return_value=stop_result) as sp, \
              patch("nexus.upgrade_finish._running_engine",
                    return_value=_RunningEngine(up=True, version=(1, 2, 3))):
             actions = converge_service_autostart_unit(tmp_path)
@@ -2740,7 +3032,7 @@ class TestConvergeServiceAutostartUnit:
         assert "converged" in actions[0]
         sp.assert_called_once_with(
             ["nx", "daemon", "service", "stop", "--config-dir", str(tmp_path.resolve())],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
 
 
@@ -3835,7 +4127,7 @@ class TestConvergeServiceAutostartUnitActivation:
              patch("nexus.daemon.installer.autostart_activation_state", return_value=probe) as asked, \
              patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
              patch("nexus.daemon.installer.install_autostart") as install, \
-             patch("nexus.upgrade_finish.subprocess.run") as sp:
+             patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = converge_service_autostart_unit(tmp_path, **kwargs)
         return actions, asked, uninstall, install, sp
 

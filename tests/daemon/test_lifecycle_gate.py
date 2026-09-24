@@ -128,6 +128,19 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     "indexer.py",                        # per-repo index PID lock
     # The former CLI mailbox-watch module's entry (its per-address flock)
     # was removed — RDR-211 nexus-rplay.14 deleted that module outright.
+    # The UserPromptSubmit drain's per-address pending-file lock (nexus-t9klx
+    # moved it into the wheel from the plugin, where this scan never looked).
+    # It serializes two drain passes on one mailbox so a consumed row is
+    # never delivered twice; non-blocking with a budgeted wait, no lease, no
+    # heartbeat, no election.
+    "hooks/mailbox_drain.py",
+    # config.py's _config_write_lock (nexus-cd1k0.16 finding (8)): serializes
+    # read-modify-write of ~/.config/nexus/config.yml across set_config_value
+    # / set_credential / unset_credential, cross-process. Same shape as
+    # verify_fill_watermark.py above -- a plain critical-section flock on a
+    # sentinel file beside the JSON/YAML it protects, no lease, no
+    # heartbeat, no generation fencing, no daemon-scope election.
+    "config.py",
 })
 
 

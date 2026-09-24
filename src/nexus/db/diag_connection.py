@@ -53,6 +53,8 @@ from typing import Callable, Sequence
 
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
+
 _log = structlog.get_logger(__name__)
 
 __all__ = [
@@ -120,8 +122,8 @@ def resolve_diag_credentials(
 
 
 def _default_psql_runner(argv: list[str], env: dict[str, str]):
-    return subprocess.run(  # noqa: PLW1510 — returncode inspected by caller
-        argv, env=env, capture_output=True, text=True, timeout=60,
+    return run_bounded(
+        argv, env=env, timeout=60,
     )
 
 

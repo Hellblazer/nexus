@@ -3,8 +3,10 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -45,8 +47,8 @@ class TestSnPluginStructure:
         hooks = data["hooks"]["SubagentStart"]
         assert len(hooks) >= 1
         # Exec form (RDR-215 bead nexus-q02nx.23): ``command`` is the
-        # interpreter and the script is an ``args`` entry, so a
-        # ``command``-only walk sees the bare word ``python3`` and matches
+        # launcher and the script is an ``args`` entry, so a
+        # ``command``-only walk sees the bare word ``uv`` and matches
         # nothing while the entry still names whatever it likes. Join both,
         # the same reassembly ``_extract_hooks_json`` does in
         # tests/test_release_artifact_verb_rot.py.
@@ -55,7 +57,7 @@ class TestSnPluginStructure:
             for entry in hooks
             for h in entry["hooks"]
         ]
-        assert any(ln.startswith("python3 ") and ln.endswith("/subagent_start.py") for ln in lines), lines
+        assert any(ln.startswith("uv run ") and ln.endswith("/subagent_start.py") for ln in lines), lines
 
     def test_mcp_json_exists(self) -> None:
         assert (SN_DIR / ".mcp.json").exists()
@@ -64,7 +66,7 @@ class TestSnPluginStructure:
         assert (SN_DIR / "README.md").exists()
 
     def test_every_hook_script_named_by_hooks_json_exists(self) -> None:
-        """Exec form runs ``python3 <path>``, so the +x bit the bash wrappers
+        """Exec form runs ``uv run ... <path>``, so the +x bit the bash wrappers
         needed is no longer part of the contract — asserting it would be a
         check whose domain no longer contains the claim. What still has to
         hold is that every path the manifest names is a file that is there.
@@ -72,12 +74,14 @@ class TestSnPluginStructure:
         expands to for an installed sn.
         """
         data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
+        # The script is the LAST arg; the ones before it are uv's own flags,
+        # pinned by tests/test_hooks_json_shape_lint.py (nexus-j4iy0).
         named = [
-            arg
+            h["args"][-1]
             for hooks in data["hooks"].values()
             for entry in hooks
             for h in entry["hooks"]
-            for arg in h.get("args", [])
+            if h.get("args")
         ]
         assert len(named) == 4, f"expected 4 exec-form script paths, got {named}"
         for arg in named:
@@ -108,10 +112,99 @@ class TestSnPluginStructure:
             for h in entry["hooks"]
             if "command" in h
         ]
-        assert commands and set(commands) == {"python3"}, commands
+        assert commands and set(commands) == {"uv"}, commands
 
 
 # ── MCP configuration ────────────────────────────────────────────────────────
+
+
+class TestSnHooksLaunchUnderUv:
+    """The manifest's own argv runs under uv beneath a hostile pin (nexus-j4iy0).
+
+    sn hooks used to run under bare ``python3``, which stock Windows does
+    not have. They now run through ``uv``, which sn already requires for
+    Serena. The risk that swap brings is a ``.python-version`` pinning an
+    interpreter that is not installed: without ``--no-config`` it made the
+    launch exit 2. WHERE uv looks for that file depends on its version:
+    0.8 searches above the cwd, 0.12 above the script's directory (both
+    measured; CI runs the newer one). So the pin here sits above BOTH a
+    copy of the plugin and the cwd, and every manifest entry's real argv,
+    not a retyped copy, runs beneath it.
+    """
+
+    PAYLOAD = json.dumps({
+        "tool_name": "mcp__plugin_sn_context7__query-docs",
+        "hook_event_name": "PreToolUse",
+    })
+
+    @staticmethod
+    def _uv() -> str:
+        # `uv run` exports UV (the uv binary's path); a bare pytest falls
+        # back to PATH. CI and the dev loop both have uv, so its absence is
+        # a failure, not a skip.
+        uv = os.environ.get("UV") or shutil.which("uv")
+        if not uv:
+            pytest.fail("uv is not available; sn hooks launch through it")
+        return uv
+
+    @staticmethod
+    def _hostile_tree(tmp_path: Path) -> tuple[Path, Path]:
+        """``(plugin_root, cwd)``, both under a pin nothing can satisfy."""
+        (tmp_path / ".python-version").write_text("3.8.3\n")
+        plugin = tmp_path / "plugin"
+        shutil.copytree(SN_DIR, plugin)
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        (cwd / "pyproject.toml").write_text(
+            '[project]\nname = "x"\nversion = "0"\nrequires-python = ">=3.14"\n'
+        )
+        return plugin, cwd
+
+    def _argvs(self, plugin: Path) -> list[list[str]]:
+        data = json.loads((plugin / "hooks" / "hooks.json").read_text())
+        out = []
+        for hooks in data["hooks"].values():
+            for entry in hooks:
+                for h in entry["hooks"]:
+                    out.append([
+                        self._uv() if h["command"] == "uv" else h["command"],
+                        *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for a in h["args"]),
+                    ])
+        assert len(out) == 4, out
+        return out
+
+    def _run(self, argv: list[str], plugin: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "UV_PYTHON_DOWNLOADS": "never", "CLAUDE_PLUGIN_ROOT": str(plugin)}
+        # --no-config gates config FILES only; uv still honours UV_* env
+        # vars, and an ambient UV_PYTHON would choose the interpreter here.
+        for var in ("VIRTUAL_ENV", "UV_PYTHON", "UV_NO_CONFIG", "UV_CONFIG_FILE"):
+            env.pop(var, None)
+        return subprocess.run(
+            argv, input=self.PAYLOAD, cwd=cwd, env=env,
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def test_every_entry_runs_beneath_a_hostile_pin(self, tmp_path: Path) -> None:
+        plugin, cwd = self._hostile_tree(tmp_path)
+        for argv in self._argvs(plugin):
+            result = self._run(argv, plugin, cwd)
+            assert result.returncode == 0, (argv, result.stderr)
+            # The boundary returns 0 on a crash too; a crash leaves a trace
+            # (_hook_boundary.guard's traceback.print_exc).
+            assert "Traceback" not in result.stderr, (argv, result.stderr)
+            if argv[-1].endswith("auto_approve_sn_mcp.py"):
+                out = json.loads(result.stdout)
+                assert out["hookSpecificOutput"]["permissionDecision"] == "allow", out
+
+    def test_the_pin_is_hostile_without_no_config(self, tmp_path: Path) -> None:
+        """Non-vacuity: drop --no-config and the same tree breaks the launch,
+        so the test above is exercising the flag, not a harmless directory.
+        This failed on CI's uv 0.12 when the pin sat above the cwd only."""
+        plugin, cwd = self._hostile_tree(tmp_path)
+        argv = [a for a in self._argvs(plugin)[0] if a != "--no-config"]
+        result = self._run(argv, plugin, cwd)
+        assert result.returncode != 0, (argv, result.stdout, result.stderr)
+        assert "3.8.3" in result.stderr, result.stderr
 
 
 class TestSnMcpConfig:
@@ -337,7 +430,14 @@ class TestSnHookOutput:
 
 
 sys.path.insert(0, str(SN_DIR / "hooks" / "scripts"))
-from worktree_guard import SERENA_WRITE_TOOLS, is_linked_worktree, is_serena_write_tool  # noqa: E402
+from worktree_guard import (  # noqa: E402
+    SERENA_WRITE_TOOLS,
+    _sanitized_session_filename,
+    git_toplevel,
+    is_linked_worktree,
+    is_serena_write_tool,
+    read_recorded_root,
+)
 
 AUTO_APPROVE = SN_DIR / "hooks" / "scripts" / "auto_approve_sn_mcp.py"
 SNAPSHOT = SN_DIR / "hooks" / "scripts" / "serena-tools.txt"
@@ -361,11 +461,16 @@ def _make_repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
     return primary, worktree
 
 
-def _run_auto_approve(payload: dict) -> dict | None:
-    result = subprocess.run(
+def _run_auto_approve_raw(payload: dict, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """The full subprocess result, for tests that need stderr (fail-open logging)."""
+    return subprocess.run(
         [sys.executable, str(AUTO_APPROVE), str(SNAPSHOT)],
-        input=json.dumps(payload), capture_output=True, text=True, timeout=10,
+        input=json.dumps(payload), capture_output=True, text=True, timeout=10, env=env,
     )
+
+
+def _run_auto_approve(payload: dict, env: dict[str, str] | None = None) -> dict | None:
+    result = _run_auto_approve_raw(payload, env)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout) if result.stdout.strip() else None
 
@@ -377,6 +482,29 @@ def _run_inject(payload: dict) -> str:
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def _run_session_start(payload: dict, env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SESSION_START)], input=json.dumps(payload),
+        capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT), env=env,
+    )
+
+
+def _isolated_state_env(tmp_path: Path) -> dict[str, str]:
+    """A fresh ``XDG_STATE_HOME`` so a test's recorded Serena root never touches,
+    or is affected by, the real ``~/.claude/sn/serena-roots/`` on this box."""
+    return {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
+
+
+def _session_root_file(tmp_path: Path, session_id: str) -> Path:
+    """The per-session record file ``_isolated_state_env``'s XDG_STATE_HOME
+    resolves *session_id* to (round 3, nexus-ebx0s: one file per session, not
+    a shared serena-roots.json), built from the module's OWN sanitiser
+    (``_sanitized_session_filename``) rather than reimplemented by hand, so a
+    sanitisation-format change fails this helper's own callers before it
+    fails a caller guessing wrong."""
+    return tmp_path / "state" / "sn" / "serena-roots" / _sanitized_session_filename(session_id)
 
 
 class TestWorktreeDetection:
@@ -427,8 +555,17 @@ class TestWorktreeDetection:
 
 
 class TestWorktreeGuardHook:
+    """No session_id on any payload here, deliberately: these pin the FALLBACK
+    path (nexus-ebx0s round 2) that runs only when no per-session recorded
+    root exists to compare against -- cwd-is-a-linked-worktree denies, cwd-
+    is-the-primary allows, same as before round 2 ever existed. The record-
+    exists path (comparison decides alone, is_linked_worktree not consulted)
+    is TestRelocatedSessionGuard's territory, including the case this
+    fallback would get WRONG on its own: a session that started inside the
+    worktree it is still writing to."""
+
     @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
-    def test_write_tool_denied_in_worktree(self, tmp_path: Path, event: str) -> None:
+    def test_write_tool_denied_in_worktree_with_no_session_record(self, tmp_path: Path, event: str) -> None:
         _, worktree = _make_repo_with_worktree(tmp_path)
         out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": event,
                                  "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
@@ -442,7 +579,7 @@ class TestWorktreeGuardHook:
             assert hso["decision"]["behavior"] == "deny"
             assert str(worktree) in hso["decision"]["message"]
 
-    def test_every_write_tool_denied_in_worktree(self, tmp_path: Path) -> None:
+    def test_every_write_tool_denied_in_worktree_with_no_session_record(self, tmp_path: Path) -> None:
         _, worktree = _make_repo_with_worktree(tmp_path)
         for name in sorted(SERENA_WRITE_TOOLS):
             out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": "PreToolUse",
@@ -455,7 +592,7 @@ class TestWorktreeGuardHook:
                                  "tool_name": "mcp__plugin_sn_serena__find_symbol"})
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
-    def test_write_tool_allowed_in_primary(self, tmp_path: Path) -> None:
+    def test_write_tool_allowed_in_primary_with_no_session_record(self, tmp_path: Path) -> None:
         primary, _ = _make_repo_with_worktree(tmp_path)
         out = _run_auto_approve({"cwd": str(primary), "hook_event_name": "PreToolUse",
                                  "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
@@ -470,6 +607,284 @@ class TestWorktreeGuardHook:
         out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": "PreToolUse",
                                  "tool_name": "mcp__plugin_sn_context7__query-docs"})
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+# ── Relocated-session guard (nexus-ebx0s) ────────────────────────────────────
+#
+# is_linked_worktree alone only catches a call whose OWN cwd sits inside a
+# linked worktree. It cannot catch a session whose cwd never actually moves
+# (the Bash tool resets cwd to the primary after every call) while Serena's
+# server stays rooted wherever the session's cwd was at ITS OWN startup --
+# from cwd alone a call like that is indistinguishable from one done in the
+# primary on purpose. These drive session_start.py's recording and
+# auto_approve_sn_mcp.py's comparison end to end against real git worktrees,
+# never a fake detector.
+#
+# Round 2 ordering (write_denial_reason): when this session has a recorded
+# root, the comparison decides ALONE -- is_linked_worktree is not consulted,
+# so a session that started inside the worktree it is writing to is allowed
+# even though its cwd genuinely is a linked worktree (test 0 below). Only
+# with NO record does is_linked_worktree run at all, as the fallback
+# (TestWorktreeGuardHook's territory, plus test_no_record_with_worktree_cwd_
+# still_denies_via_fallback below, which pins the SAME session_id-present-
+# but-no-record shape here rather than in the no-session_id class).
+
+
+class TestRelocatedSessionGuard:
+    def test_session_whose_cwd_matches_serena_root_is_allowed(self, tmp_path: Path) -> None:
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        start = _run_session_start({"source": "startup", "session_id": "s1", "cwd": str(primary)}, env)
+        assert start.returncode == 0, start.stderr
+        out = _run_auto_approve(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s1",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_session_started_in_a_worktree_is_allowed_a_write(self, tmp_path: Path) -> None:
+        """Round 2 (nexus-ebx0s): this session's OWN startup was inside the
+        worktree, so Serena really is rooted there and the write is
+        legitimate. is_linked_worktree(cwd) is True here too, same as the
+        worktree-dispatched-subagent shape it exists to deny -- and round 1
+        left it unconditional, so it denied this case as well (the coordinator's
+        own finding). The fix is ordering: a matching record decides ALONE
+        and is_linked_worktree is never consulted in this branch. This failed
+        (permissionDecision == "deny") before write_denial_reason existed."""
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        start = _run_session_start({"source": "startup", "session_id": "s0", "cwd": str(worktree)}, env)
+        assert start.returncode == 0, start.stderr
+        out = _run_auto_approve(
+            {"cwd": str(worktree), "hook_event_name": "PreToolUse", "session_id": "s0",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_relocated_session_denied_even_though_cwd_is_the_primary(self, tmp_path: Path) -> None:
+        """The bead's own shape: Serena rooted at a WORKTREE (this session
+        started there), a later write call's cwd is the PRIMARY -- not
+        itself a linked worktree, so is_linked_worktree alone would allow
+        it. Naming this REPRODUCES the reported gap; the assertion below is
+        the fix, and it failed (permissionDecision == "allow") before
+        worktree_guard.write_denial_reason existed."""
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        primary = worktree.parent / "primary"
+        env = _isolated_state_env(tmp_path)
+        start = _run_session_start({"source": "startup", "session_id": "s2", "cwd": str(worktree)}, env)
+        assert start.returncode == 0, start.stderr
+        out = _run_auto_approve(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s2",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out is not None
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert str(primary) in hso["permissionDecisionReason"]
+        assert git_toplevel(worktree) in hso["permissionDecisionReason"]
+
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_relocated_write_denied_regardless_of_dry_run(self, tmp_path: Path, dry_run: bool) -> None:
+        """Serena's own dry-run report cannot be trusted (nexus-ebx0s); the
+        guard denies by tool IDENTITY and never inspects tool_input."""
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        primary = worktree.parent / "primary"
+        env = _isolated_state_env(tmp_path)
+        _run_session_start({"source": "startup", "session_id": "s3", "cwd": str(worktree)}, env)
+        out = _run_auto_approve(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s3",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files",
+             "tool_input": {"dry_run": dry_run}},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_read_tool_allowed_despite_relocation(self, tmp_path: Path) -> None:
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        primary = worktree.parent / "primary"
+        env = _isolated_state_env(tmp_path)
+        _run_session_start({"source": "startup", "session_id": "s4", "cwd": str(worktree)}, env)
+        out = _run_auto_approve(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s4",
+             "tool_name": "mcp__plugin_sn_serena__find_symbol"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_missing_record_allows_and_logs(self, tmp_path: Path) -> None:
+        """Fail-open (nexus-ebx0s requirement): no SessionStart ever recorded a
+        root for this session_id, so the mismatch cannot be established --
+        allow, but say why on stderr rather than looking identical to 'checked
+        and it matched'."""
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        result = _run_auto_approve_raw(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "never-started",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        out = json.loads(result.stdout)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert "no recorded Serena root" in result.stderr
+
+    def test_resume_does_not_overwrite_the_startup_record(self, tmp_path: Path) -> None:
+        """Only SessionStart's ``source == "startup"`` writes
+        (worktree_guard.record_startup_root's own docstring says why the
+        other three sources must not)."""
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        primary = worktree.parent / "primary"
+        env = _isolated_state_env(tmp_path)
+        _run_session_start({"source": "startup", "session_id": "s5", "cwd": str(worktree)}, env)
+        resumed = _run_session_start({"source": "resume", "session_id": "s5", "cwd": str(primary)}, env)
+        assert resumed.returncode == 0, resumed.stderr
+        record_file = _session_root_file(tmp_path, "s5")
+        assert json.loads(record_file.read_text())["root"] == git_toplevel(worktree)
+        out = _run_auto_approve(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s5",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_no_record_with_worktree_cwd_still_denies_via_fallback(self, tmp_path: Path) -> None:
+        """A session_id IS present but nothing was ever recorded for it (no
+        SessionStart happened in this test) -- the comparison cannot be
+        made, so this pins the fallback firing with a real session_id
+        rather than an absent one (TestWorktreeGuardHook's no-session_id
+        cases already cover that shape)."""
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        out = _run_auto_approve(
+            {"cwd": str(worktree), "hook_event_name": "PreToolUse", "session_id": "never-started-either",
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ── Per-session record storage (nexus-ebx0s round 3) ─────────────────────────
+#
+# Round 2's record lived in ONE shared ``serena-roots.json``, read-modify-
+# written with no lock, on the claim (its own docstring) that "concurrent
+# sessions... must not clobber each other's rows" -- a claim the code never
+# earned: two sessions starting together could each read the file before
+# the other's write landed, and one record would be silently lost. The fix
+# is not a lock (sn now runs on native Windows too, nexus-j4iy0, where
+# fcntl does not exist) but removing the shared mutable state: one file per
+# session_id, so two sessions writing their OWN files never contend for
+# anything on any platform.
+
+
+class TestPerSessionRecordStorage:
+    def test_session_id_is_sanitised_before_use_as_a_filename(self, tmp_path: Path) -> None:
+        """An adversarial session_id must not escape the roots directory, and
+        the record must still be readable back by the exact (unsanitised)
+        session_id afterward -- sanitisation is transparent to callers."""
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        malicious = "../../../etc/passwd"
+        start = _run_session_start({"source": "startup", "session_id": malicious, "cwd": str(primary)}, env)
+        assert start.returncode == 0, start.stderr
+
+        roots_dir = tmp_path / "state" / "sn" / "serena-roots"
+        files = list(roots_dir.iterdir())
+        assert len(files) == 1, files
+        assert files[0].parent.resolve() == roots_dir.resolve()
+        assert "/" not in files[0].name and "\\" not in files[0].name
+        assert not (tmp_path / "etc").exists(), "the malicious session_id escaped the roots directory"
+
+        out = _run_auto_approve(
+            {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": malicious,
+             "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
+            env=env,
+        )
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_different_all_unsafe_session_ids_do_not_collide(self, tmp_path: Path) -> None:
+        """Two session_ids that are ENTIRELY unsafe characters (so the
+        sanitiser's hash fallback fires for both) must still land on two
+        distinct files, not one overwriting the other."""
+        primary, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        _run_session_start({"source": "startup", "session_id": "////", "cwd": str(primary)}, env)
+        _run_session_start({"source": "startup", "session_id": "....", "cwd": str(worktree)}, env)
+        roots_dir = tmp_path / "state" / "sn" / "serena-roots"
+        assert len(list(roots_dir.iterdir())) == 2
+
+    def test_concurrent_session_starts_do_not_clobber_each_other(self, tmp_path: Path) -> None:
+        """The round-2 bug this round fixes, reproduced with real subprocess-
+        level concurrency: every ``session_start.py`` launched BEFORE any of
+        them is waited on, so their file writes genuinely overlap rather than
+        being serialised by the test itself. Every one of N sessions'
+        records must survive with its own root, not just SOME of them."""
+        primary, worktree = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        n = 12
+        payloads = [
+            {"source": "startup", "session_id": f"conc-{i}",
+             "cwd": str(primary if i % 2 == 0 else worktree)}
+            for i in range(n)
+        ]
+        procs = []
+        for payload in payloads:
+            proc = subprocess.Popen(
+                [sys.executable, str(SESSION_START)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=str(REPO_ROOT), env=env,
+            )
+            proc.stdin.write(json.dumps(payload))
+            proc.stdin.close()
+            procs.append(proc)
+        # Not proc.communicate(): its own internal flush of self.stdin raises
+        # ValueError on an already-closed pipe -- read stdout/stderr and wait
+        # directly instead. Output here is a few hundred bytes at most (the
+        # section text, or nothing on stderr), well under the OS pipe buffer,
+        # so this cannot deadlock the way an unbounded communicate() would.
+        for proc, payload in zip(procs, payloads):
+            stdout, stderr = proc.stdout.read(), proc.stderr.read()
+            proc.wait(timeout=15)
+            assert proc.returncode == 0, (payload["session_id"], stdout, stderr)
+
+        for i, payload in enumerate(payloads):
+            expected_root = git_toplevel(primary if i % 2 == 0 else worktree)
+            record_file = _session_root_file(tmp_path, payload["session_id"])
+            assert record_file.exists(), f"session {payload['session_id']} lost its record"
+            assert json.loads(record_file.read_text())["root"] == expected_root
+
+    def test_prune_removes_orphaned_temp_files_but_not_recent_ones(self, tmp_path: Path) -> None:
+        """Round 4 (nexus-ebx0s): ``record_startup_root`` writes
+        ``<name>.tmp<pid>`` then ``replace()``s it onto ``<name>`` -- a
+        process killed between those two steps leaves the temp file behind,
+        and nothing else in the module ever revisits it (the ``.json``
+        sweep skips it by suffix). Seed one OLD orphan (older than
+        ``_STALE_TMP_FILE_MAX_AGE_SECONDS``) and one RECENT one (mtime
+        ``now``, standing in for a write genuinely still in flight), then
+        trigger pruning via an unrelated session's own
+        ``record_startup_root`` call and check each is treated correctly:
+        the old one gone, the recent one untouched -- pruning must never be
+        able to delete a temp file a concurrent write could still be using."""
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        env = _isolated_state_env(tmp_path)
+        roots_dir = tmp_path / "state" / "sn" / "serena-roots"
+        roots_dir.mkdir(parents=True)
+
+        old_tmp = roots_dir / "orphan.json.tmp12345"
+        old_tmp.write_text("{}")
+        old_time = time.time() - 7200  # 2 hours ago: well past the 1-hour cutoff
+        os.utime(old_tmp, (old_time, old_time))
+
+        recent_tmp = roots_dir / "inflight.json.tmp99999"
+        recent_tmp.write_text("{}")  # mtime defaults to now
+
+        start = _run_session_start({"source": "startup", "session_id": "trigger", "cwd": str(primary)}, env)
+        assert start.returncode == 0, start.stderr
+
+        assert not old_tmp.exists(), "an hours-old orphaned temp file must be pruned"
+        assert recent_tmp.exists(), "a temp file that could still be an in-flight write must survive pruning"
 
 
 class TestWorktreeInjection:
@@ -549,10 +964,12 @@ class TestSnSessionStart:
     adds the error boundary every other script in the set already had.
     """
 
-    def _run(self, *, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    def _run(
+        self, *, cwd: Path | None = None, env: dict[str, str] | None = None, stdin: str = "",
+    ) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(SESSION_START)],
-            input="", capture_output=True, text=True, timeout=10,
+            input=stdin, capture_output=True, text=True, timeout=10,
             cwd=str(cwd or REPO_ROOT), env=env,
         )
 
@@ -602,7 +1019,61 @@ class TestSnSessionStart:
             for entry in data["hooks"]["SessionStart"]
             for h in entry["hooks"]
         ]
-        assert any(ln.startswith("python3 ") and ln.endswith("/session_start.py") for ln in lines), lines
+        assert any(ln.startswith("uv run ") and ln.endswith("/session_start.py") for ln in lines), lines
+
+    # ── Serena-root recording (nexus-ebx0s) ──────────────────────────────────
+
+    def test_records_root_on_startup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        result = self._run(stdin=json.dumps({"source": "startup", "session_id": "rec1", "cwd": str(primary)}))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_text()
+        assert read_recorded_root("rec1") == git_toplevel(primary)
+
+    @pytest.mark.parametrize("source", ["resume", "clear", "compact"])
+    def test_does_not_record_on_other_sources(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str,
+    ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        result = self._run(stdin=json.dumps({"source": source, "session_id": "rec2", "cwd": str(primary)}))
+        assert result.returncode == 0, result.stderr
+        assert read_recorded_root("rec2") is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"source": "startup"},  # no session_id, no cwd
+            {"source": "startup", "session_id": "rec3"},  # no cwd
+            {"source": "startup", "cwd": "/nowhere"},  # no session_id
+            {"source": "startup", "session_id": "rec3", "cwd": ""},
+            {"source": "startup", "session_id": 5, "cwd": "/tmp"},
+        ],
+        ids=["nothing", "no-cwd", "no-session-id", "empty-cwd", "non-string-session-id"],
+    )
+    def test_partial_or_malformed_payload_still_emits_the_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict,
+    ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        result = self._run(stdin=json.dumps(payload))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_text()
+
+    def test_undecodable_stdin_still_emits_the_section_text(self) -> None:
+        """The added stdin read must never cost session_start.py its primary
+        job. Deliberately NOT in TestSnHookErrorBoundary's STDIN_READERS:
+        this is handled locally (see _record_root_if_startup's docstring),
+        so it never reaches _hook_boundary at all -- reaching it here would
+        mean the section text was lost, which is the regression this pins."""
+        result = subprocess.run(
+            [sys.executable, str(SESSION_START)], input=b"\xff\xfe",
+            capture_output=True, timeout=10, cwd=str(REPO_ROOT),
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_bytes()
+        assert b"crashed, event continues" not in result.stderr
 
 
 class TestSnHookErrorBoundary:

@@ -147,6 +147,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <tr data-for="code" class="must"><td>Node.js (with npm)</td><td><strong>Required for the plugin.</strong> The plugin starts one of its servers with <code>npx</code>. Without Node.js there is no error message. The plugin installs, but its tools never appear.</td><td><code>node --version</code><br><code>npm --version</code></td></tr>
 <tr><td>Apple Silicon Mac, or Linux on x86-64 or arm64</td><td>Nexus ships its own PostgreSQL and never uses one you installed, and that bundle is built for these three only. An Intel Mac or Windows cannot run a local install: setup stops with an error rather than falling back.</td><td><code>uname -sm</code></td></tr>
 <tr><td>No GPU</td><td>Search runs a bundled CPU model. On Linux the installer pins torch to its CPU build, since the default wheel pulls ~4.5 GB of CUDA packages nothing here uses; <code>NX_TORCH_BACKEND</code> opts a GPU box back in.</td><td>—</td></tr>
+<tr><td>About 1.2 GB idle, up to about 4.5 GB while indexing</td><td>The bundled PostgreSQL is light; the embedding and reranking model running inside the engine process holds the rest. Measured on an Apple Silicon Mac indexing a real, medium-sized code repository.</td><td>—</td></tr>
 <tr><td>~600 MB download, a few minutes</td><td>The first run downloads the service program, a database, and the search model.</td><td>—</td></tr>
 </table></div>
 

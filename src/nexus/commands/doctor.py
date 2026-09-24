@@ -10,6 +10,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.redact import redact_credentials
 
 
@@ -1899,10 +1900,11 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
         # holds the file open.
         stderr_path = Path(work_dir) / "stderr.log"
         with stderr_path.open("w") as stderr_f:
-            proc = subprocess.run(
+            proc = run_bounded(
                 [sys.executable, "-c", _MINERU_DOCTOR_PARSE_SCRIPT, str(fixture), str(result_dir)],
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_f,
+                text=False,
                 timeout=timeout_s,
             )
         stderr_text = stderr_path.read_text(errors="replace")
@@ -2145,6 +2147,21 @@ def _run_check_mineru() -> None:
 #                                          | this bead names explicitly):
 #                                          | any nonzero backlog raises
 #                                          | Exit(1) with a ✗ FAIL: marker.
+#   (no --check-tuple-projection    | YES       | local read of THIS session's
+#    flag)                          |           | <session>.tuple-projection.log
+#                                          | (zero network); the RDR-205
+#                                          | ledger projector never raises
+#                                          | on failure, only logs a SKIP
+#                                          | line (nexus.hooks.tuple_ledger_
+#                                          | project), so a persistent SKIP
+#                                          | was otherwise invisible outside
+#                                          | the e2e post-publish-dispatch-
+#                                          | check (nexus-08cfl remedy 3).
+#                                          | Informational, always exit 0 --
+#                                          | same posture as --check-wal-
+#                                          | retention (a handful of SKIPs
+#                                          | early in a session is not
+#                                          | itself a failure).
 #   (no --check-fanout-floor flag)| YES       | ONE list_collections() call
 #                                          | (no per-collection round trip);
 #                                          | always exit 0 (informational,
@@ -2173,7 +2190,7 @@ def _run_check_mineru() -> None:
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
-    "index-failures", "fanout-floor",
+    "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -2212,6 +2229,8 @@ def _run_supplementary_checks() -> None:
         "engine-activity": _run_check_engine_activity,
         "index-failures": _run_check_index_failures,
         "fanout-floor": _run_check_fanout_floor,
+        "tuple-projection": _run_check_tuple_projection,
+        "ghost-sweep": _run_check_ghost_sweep,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -3087,6 +3106,109 @@ def _run_check_t1() -> None:
     raise click.exceptions.Exit(1)
 
 
+def _run_check_tuple_projection() -> None:
+    """Diagnostic: RDR-205 ledger tuple-projection SKIPs for THIS session
+    (nexus-08cfl remedy 3).
+
+    :func:`nexus.hooks.tuple_ledger_project.project` never raises -- every
+    resolution/transport failure is a line appended to
+    ``<state_dir>/nexus/orchestration/<session_id>.tuple-projection.log``
+    and nothing else (that module's own docstring). A misconfigured or
+    below-floor endpoint (missing data-token lease, unresolvable service
+    endpoint, transport failure) is therefore silently dead for the whole
+    session -- the TSV ``.expectations`` ledger keeps working (a
+    completely different write path), so nothing else surfaces this
+    unless the e2e ``tests/e2e/post-publish-dispatch-check.sh`` happens to
+    run. This is the least-invasive existing surface that puts it in
+    front of a human running routine ``nx doctor``: a local file read,
+    zero network, sub-second -- the same cost class as ``--check-t1``,
+    which this check complements (T1 reports THIS session's lease
+    freshness; this reports THIS session's ledger-projection health).
+
+    Informational, always exit 0 (same posture as ``--check-wal-
+    retention``): a handful of SKIPs early in a session (e.g. before the
+    supervisor's lease first publishes) is not itself a failure, and this
+    check cannot tell "transient" from "the whole session was dead"
+    without re-deriving the post-publish-dispatch-check's STOP/START
+    correlation -- that correlation stays the e2e gate's job (leg (c)).
+    """
+    from nexus.hooks.tuple_ledger_project import _default_state_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    session_id = resolve_active_session_id()
+    if not session_id:
+        click.echo("[ ] Tuple projection: no session-id resolves for this process")
+        return
+
+    log_path = _default_state_dir() / f"{session_id}.tuple-projection.log"
+    if not log_path.exists():
+        click.echo(f"[✓] Tuple projection: no SKIPs recorded for session {session_id!r}")
+        return
+
+    try:
+        lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError as exc:
+        click.echo(f"[!] Tuple projection: {log_path} exists but is unreadable ({_exc_detail(exc)})")
+        return
+
+    if not lines:
+        click.echo(f"[✓] Tuple projection: no SKIPs recorded for session {session_id!r}")
+        return
+
+    click.echo(
+        f"[!] Tuple projection: {len(lines)} SKIP(s) recorded for session "
+        f"{session_id!r} -- the RDR-205 ledger has received nothing from "
+        f"this hook this session. Last: {lines[-1]}"
+    )
+    click.echo(f"    Log: {log_path}")
+
+
+def _run_check_ghost_sweep() -> None:
+    """Diagnostic: current RDR-204 ghost-collection count (nexus-29drn,
+    Sam's ruling: an operator CLI verb + a doctor row alongside it).
+
+    The engine's ghost sweep (``CatalogRepository.sweepGhostsAndMarkDormant``)
+    runs automatically at most once per tenant for the life of the estate
+    (the durable ``rdr204_ghost_sweep_v1`` marker); a collection that
+    becomes a ghost afterwards accumulates with nothing to collect it. This
+    row surfaces the CURRENT count via a dry-run call to the same ``POST
+    /v1/catalog/ghost-sweep`` route ``nx catalog sweep-ghosts`` uses, and
+    names that verb when the count is nonzero -- never mutates anything
+    itself (``dry_run=True``, always).
+
+    nexus-7zhag doctrine: a NEW doctor row must be not-applicable on a
+    virgin box, never allowlisted in the fresh-install MVV
+    (``tests/e2e/fresh-install-mvv.sh``'s ``ALLOWLIST_REGEX``). A box
+    where the catalog writer cannot be resolved, the engine is
+    unreachable, or the engine predates this route (404) all collapse to
+    the SAME not-applicable line -- this check cannot distinguish those
+    causes from a dry-run call alone, and a virgin/fresh box legitimately
+    has zero collections either way, so there is nothing here worth
+    surfacing as a red or warn line in any of those cases.
+    """
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        writer = make_catalog_writer()
+        try:
+            result = writer.ghost_sweep(dry_run=True)
+        finally:
+            writer.close()
+    except Exception as exc:  # noqa: BLE001 — boundary: unreachable engine / pre-nexus-29drn route / virgin box are all not-applicable here, never a false red/warn
+        click.echo(f"[ ] Ghost collections: not applicable ({_exc_detail(exc)})")
+        return
+
+    ghosts = result.get("ghosts_deleted", 0)
+    if not ghosts:
+        click.echo("[✓] Ghost collections: 0")
+        return
+    click.echo(
+        f"[!] Ghost collections: {ghosts} collection(s) would be reclaimed -- "
+        f"run 'nx catalog sweep-ghosts --apply' to reclaim "
+        f"(preview: 'nx catalog sweep-ghosts')"
+    )
+
+
 def _run_check_collection_shape() -> None:
     """Doctor surface for ``nx collection shape`` (nexus-ger23).
 
@@ -3284,13 +3406,18 @@ def _collect_quota_report() -> dict:
 
     # RDR-188 (nexus-9o6y2.9): reranking runs SERVER-side — the engine scores
     # with Voyage rerank-2.5 (server key) or its ms-marco cross-encoder. The
-    # client substrate check survives only for the salience consumer
-    # (RDR-109 P4; disposition finalized in bead nexus-9o6y2.19).
+    # client substrate check survived the rerank caller's retirement only
+    # for the salience consumer (RDR-109 P4; disposition finalized in bead
+    # nexus-9o6y2.19) — and that consumer is now ALSO retired
+    # (nexus-0hqez, 2026-09-23: the boost's composition bug plus a missing
+    # extraction write-side meant it had never taken effect in production).
+    # No client code calls this substrate any more; the check stays as a
+    # plain availability diagnostic.
     from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
         "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder, RDR-188)",
-        "client_role": "salience-only (nexus.salience; rerank caller retired, nexus-9o6y2.19)",
+        "client_role": "none (rerank caller retired nexus-9o6y2.19; salience caller retired nexus-0hqez)",
         "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
 

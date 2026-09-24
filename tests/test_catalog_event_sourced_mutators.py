@@ -156,17 +156,21 @@ class TestDeleteDocumentEventSourced:
 
 class TestSetAliasEventSourced:
     def test_set_alias_updates_alias_of(self):
-        """``set_alias`` populates the alias row's ``alias_of``.
+        """``update(..., alias_of=...)`` populates the alias row's ``alias_of``.
 
         nexus-i711w Stage 2: PORTED. Was
         ``test_set_alias_emits_event_and_updates_alias_of``; the
         DocumentAliased event half retired with the local event log
         (nexus-i711w).
 
+        nexus-bt8w8: the standalone ``set_alias`` client method was deleted
+        — it was byte-identical to ``update(tumbler, alias_of=str(canonical))``,
+        which IS the whitelisted surface the CLI and MCP tool both call.
+
         ``unroutable_write_target()`` rather than ``ActiveCatalog``:
-        ``set_alias`` mutates but is NOT on ``CATALOG_WRITE_OPS``
-        (nexus-iltyk), so a plain ``ActiveCatalog`` refuses to route it as a
-        write on the SQLite arm and the assertion could not observe it.
+        ``alias_of`` mutates through ``update`` but a plain ``ActiveCatalog``
+        used to refuse the SQLite arm's write path (nexus-iltyk); kept here
+        for parity with the sibling tests in this module.
 
         Read back by scanning ``all_documents`` for the ALIAS row rather
         than ``resolve(alias)``: ``resolve`` follows the alias by default
@@ -185,7 +189,7 @@ class TestSetAliasEventSourced:
             owner, "alias.md", content_type="prose",
             file_path=f"{slug}/alias.md",
         )
-        cat.set_alias(alias, canonical)
+        cat.update(alias, alias_of=str(canonical))
 
         rows = [
             d for d in cat.all_documents() if str(d.tumbler) == str(alias)

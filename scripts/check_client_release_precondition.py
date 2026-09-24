@@ -59,6 +59,7 @@ import argparse
 import subprocess
 import sys
 
+import check_engine_release_floor as _engine_floor
 import check_wire_contract_pairing as _wire_ledger
 import release_choreography as _choreo
 
@@ -206,6 +207,18 @@ def is_ancestor(commit: str, tag: str) -> bool:
 
 
 def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
+    # nexus-iu43o: this script gates the DEPLOY, never the tag cut (see the
+    # module docstring and AGENTS.md § Engine-service release) -- and the
+    # DATA EFFECT relay happens BEFORE deploy, so this is where a STANDALONE
+    # engine deploy (no paired client release, so
+    # _run_paired_precondition_battery never runs) gets the same refusal a
+    # paired deploy already gets from check_engine_release_floor.py's
+    # battery. Checked first, before either precondition source below, so a
+    # missing/stale attestation is never masked by an empty hand table.
+    relay_rc = _engine_floor.check_data_effect_relay(engine_tag)
+    if relay_rc != 0:
+        return relay_rc
+
     required = ENGINE_CLIENT_PRECONDITIONS.get(engine_tag, {})
     hand_table_vacuous = not required
     if not required:

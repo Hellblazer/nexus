@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import contextlib
 import copy
 import os
 import tempfile
@@ -14,12 +15,54 @@ import click
 import structlog
 import yaml
 
+from nexus._locking import lock_fd, unlock_fd
+
 _log = structlog.get_logger(__name__)
 
-# Protects the read-modify-write sequence in set_credential() against concurrent
-# calls within the same process.  Cross-process safety is provided by the atomic
-# os.replace() at the end; in-process safety requires this lock.
+# Protects the read-modify-write sequence in set_config_value() /
+# set_credential() / unset_credential() against concurrent calls WITHIN
+# the same process.
+#
+# nexus-cd1k0.16 finding (8): this comment used to claim cross-process
+# safety came from the atomic os.replace() at the end -- it does not.
+# os.replace() only guarantees a READER never observes a torn/partial
+# file; it says nothing about two WRITERS racing the read-modify-write
+# sequence itself. Two concurrent `nx config set` / `nx auth` invocations
+# (in different processes) can each read the same config.yml, mutate
+# their own in-memory copy, and os.replace() over each other -- the
+# LAST writer silently wins and the other's change is gone, with no
+# error on either side. :func:`_config_write_lock` below closes that
+# window with a real cross-process advisory lock; this threading.Lock
+# now only needs to serialize threads WITHIN one process holding that
+# same file lock's fd (fcntl.flock is per-process, not per-thread, on
+# most platforms, so two threads in this process could otherwise both
+# "hold" the file lock at once).
 _config_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _config_write_lock(path: Path):
+    """Serialize a config.yml read-modify-write across BOTH threads (the
+    in-process ``_config_lock``) and processes (nexus-cd1k0.16 finding (8)).
+
+    Takes an advisory exclusive lock on a sentinel file beside *path*
+    (``<path>.lock``), via the same primitive the daemon lifecycle uses
+    (:mod:`nexus._locking`) -- never a bespoke ``fcntl``/``msvcrt`` call
+    here. A concurrent process blocks until the lock holder's
+    ``os.replace()`` has landed, and then reads the UPDATED file rather
+    than clobbering it. *path*'s parent directory must already exist
+    (every caller below creates it, or the file itself, before locking).
+    """
+    with _config_lock:
+        fd = os.open(str(path.with_name(path.name + ".lock")), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            lock_fd(fd, blocking=True)
+            try:
+                yield
+            finally:
+                unlock_fd(fd)
+        finally:
+            os.close(fd)
 
 # ── TuningConfig ─────────────────────────────────────────────────────────────
 
@@ -491,7 +534,14 @@ def get_mineru_configured_fixed_port(repo_root: Path | None = None) -> int | Non
     parsed = urllib.parse.urlparse(configured)
     if parsed.hostname not in ("127.0.0.1", "localhost"):
         return None
-    return parsed.port
+    try:
+        # nexus-cd1k0.16 finding (3): ParseResult.port raises ValueError for
+        # a present-but-unparseable port segment (e.g. "80a0") rather than
+        # returning None -- this function's own docstring documents "an
+        # unparseable URL" as a None case, not a raise.
+        return parsed.port
+    except ValueError:
+        return None
 
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:
     return get_pdf_config(repo_root).mineru_table_enable
@@ -529,8 +579,8 @@ def get_verification_config(repo_root: Path | None = None) -> dict[str, Any]:
     return {**defaults, **section}
 
 
-# Detection table shared with conexus/hooks/scripts/read_verification_config.py.
-# Keep both tables identical — a cross-validation test enforces this.
+# Detection table shared with nexus.hooks.verification_config.DETECT_TABLE.
+# Keep both tables identical — tests/test_config.py enforces this.
 _DETECT_TABLE: list[tuple[str, str]] = [
     ("pom.xml",          "mvn test"),
     ("build.gradle",     "./gradlew test"),
@@ -1169,19 +1219,6 @@ _DEFAULTS: dict[str, Any] = {
     "voyageai": {
         "read_timeout_seconds": 120,
     },
-    # RDR-109 Phase 5: salience-boost feature flag.
-    # Phase 4b measurements (2026-05-11) saw the boost ship Pareto-clean
-    # on code + docs (+1/+2 hits at w=0.025) but regress 2 baseline-hits
-    # on the knowledge corpus, so default-on is rejected per the bead
-    # acceptance criterion. The mechanism ships; the default does not.
-    # Operators opt in via ``.nexus.yml``:
-    #   attention_guided_v1:
-    #     enabled: true
-    #     weight: 0.025
-    "attention_guided_v1": {
-        "enabled": False,
-        "weight": 0.025,
-    },
     # RDR-087: search-observability opt-outs. Default-on.
     "telemetry": {
         "search_enabled": True,       # Phase 2.2 hot-path INSERT OR IGNORE.
@@ -1346,6 +1383,44 @@ def get_credential(name: str) -> str:
     return ""
 
 
+def persisted_credentials(config_dir: Path) -> dict[str, str]:
+    """Credentials persisted in *config_dir*'s ``config.yml``, file only.
+
+    Two things this is NOT, both deliberate, and both the reason it exists
+    rather than being folded into :func:`get_credential` (nexus-t9klx):
+
+    * It reads the config dir it is GIVEN, not the process's own. That is
+      the whole point — ``get_credential`` resolves
+      :func:`_global_config_path` itself, so a caller holding a config dir
+      has no way to say which file it means.
+    * It consults NO environment variable. A caller that wants the
+      env-over-file precedence wants ``get_credential``; a caller
+      resolving an endpoint by its own documented precedence applies the
+      env leg itself, and an env value arriving a second time under the
+      name of the file leg makes the two indistinguishable.
+
+    An absent key is ABSENT from the result, never ``""``. A caller
+    distinguishing "not configured" from "configured empty" needs that,
+    and it is what the plugin's stdlib mirror
+    (``_endpoint_resolve.read_config_yml_credentials``, deleted at
+    nexus-z9cz2) returned.
+
+    Returns ``{}`` when the file is absent, unreadable, or carries no
+    ``credentials:`` block.
+    """
+    path = config_dir / "config.yml"
+    if not path.exists():
+        return {}
+    block = _load_global_config(path).get("credentials") or {}
+    if not isinstance(block, dict):
+        return {}
+    return {
+        str(key): str(value).strip()
+        for key, value in block.items()
+        if value is not None
+    }
+
+
 def set_config_value(dotted_key: str, value: str | bool) -> None:
     """Persist a dotted config key in ``~/.config/nexus/config.yml``.
 
@@ -1363,7 +1438,7 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     parts = dotted_key.split(".")
-    with _config_lock:
+    with _config_write_lock(path):
         data: dict[str, Any] = {}
         if path.exists():
             data = yaml.safe_load(path.read_text()) or {}
@@ -1405,9 +1480,10 @@ def set_credential(name: str, value: str) -> None:
         raise ValueError(f"Unknown credential '{name}'. Known: {known}")
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Lock covers the entire read-modify-write unit so two concurrent calls in
-    # the same process cannot silently drop each other's change.
-    with _config_lock:
+    # Lock covers the entire read-modify-write unit so two concurrent calls,
+    # in the same process OR a different one (nexus-cd1k0.16 finding (8)),
+    # cannot silently drop each other's change.
+    with _config_write_lock(path):
         data: dict[str, Any] = {}
         if path.exists():
             data = yaml.safe_load(path.read_text()) or {}
@@ -1448,7 +1524,7 @@ def unset_credential(name: str) -> bool:
     path = _global_config_path()
     if not path.exists():
         return False
-    with _config_lock:
+    with _config_write_lock(path):
         data: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
         creds = data.get("credentials")
         if not isinstance(creds, dict) or name not in creds:

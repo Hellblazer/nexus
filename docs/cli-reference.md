@@ -92,7 +92,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
 | `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`. The per-commit hook's fast path |
-| `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead |
+| `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead. The opt-in is durable: it stamps a marker on the `knowledge__` collection's catalog row so a later, unrelated write (a T3 chunk write, a migration cascade) can never silently repoint prose back to `docs__` (GH #451; nexus-l52ms). **Repos that opted in before this marker existed:** re-run `nx index repo --corpus knowledge` once — the command always re-derives and re-registers the knowledge collection on every invocation, which backfills the marker on the existing row with no other action needed |
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
 
 Per-file indexing runs with bounded concurrency (6.3.1, nexus-cfc72): 2 workers by default when both the vectors and catalog backends are the HTTP service, 1 otherwise. `NX_INDEX_CONCURRENCY=N` overrides (a warning is logged when it forces concurrency past the backend gate). Progress callbacks and post-store hook chains are serialized; `--debug-timing` gains a `hooks_s` bucket so hook-serialization wait is visible separately from upload time.
@@ -1137,7 +1137,7 @@ unmeasured pass.
 ### nx catalog update
 
 ```
-nx catalog update [TUMBLER] [--title TEXT] [--author TEXT] [--year N] [--corpus TEXT] [--meta JSON] [--source-uri URI] [--file-path PATH]
+nx catalog update [TUMBLER] [--title TEXT] [--author TEXT] [--year N] [--corpus TEXT] [--meta JSON] [--source-uri URI] [--file-path PATH] [--alias-of TUMBLER]
 nx catalog update --owner PREFIX --corpus TEXT    # batch update all entries under an owner
 nx catalog update --search QUERY --corpus TEXT    # batch update all entries matching search
 ```
@@ -1154,6 +1154,61 @@ allowlist as register-time.
 repoints an entry whose recorded path is dead (moved/renamed on disk)
 *without* touching its `source_uri` identity; the two are separate columns
 updated independently.
+
+`--alias-of TUMBLER` (nexus-bt8w8) points this entry at its canonical
+duplicate. The catalog follows the alias chain on resolve/show, so `nx
+catalog show` on the aliased tumbler afterward returns the canonical
+entry instead of the duplicate.
+
+**This sets ONLY the alias pointer.** It does NOT move `source_uri` onto
+the canonical and does NOT remap the duplicate's links onto it — used by
+itself, the duplicate's identity URI stays where it is (which can still
+collide with a fresh re-index) and its links keep pointing at the alias
+rather than the canonical. **Use `nx catalog merge DUPLICATE CANONICAL`
+instead** (see below) for the atomic path that moves `source_uri` and
+remaps every link in one transaction — that is the actual recovery path
+for a duplicate registration. `--alias-of` is for the rarer case where
+the pointer alone is what's wanted, e.g. scripting the same three-step
+recipe `merge` now automates. Rejected as a `ClickException` (no
+traceback) if the target is not a well-formed tumbler.
+
+### nx catalog merge
+
+```
+nx catalog merge DUPLICATE CANONICAL
+```
+
+Collapse `DUPLICATE` into `CANONICAL` in ONE engine transaction
+(nexus-z4rpi) — the atomic replacement for `--alias-of`'s manual recipe of
+three separate `nx catalog update` calls (`--source-uri ''` on the
+duplicate, `--source-uri` on the canonical, `--alias-of` on the duplicate),
+which `ux_catalog_documents_live_source_uri` forces apart and which a
+failure between any two calls could tear — leaving a document with no
+identity, or two live rows both claiming the same document with no alias
+between them.
+
+The engine moves `source_uri` from `DUPLICATE` onto `CANONICAL` only when
+`CANONICAL` currently lacks a durable one; either way `DUPLICATE`'s own
+`source_uri` is unconditionally freed. `DUPLICATE`'s `alias_of` is then set
+to `CANONICAL` — either the whole thing lands or nothing does.
+
+Also remaps every catalog link touching `DUPLICATE` onto `CANONICAL`, in
+the same transaction — a merge that moved identity but stranded the link
+graph would be only half a merge. A link is renamed in place; a link whose
+rewrite would collide with one already on `CANONICAL` is collapsed into it
+(the same co-discovery metadata fold `nx catalog link` performs when a
+link already exists — the surviving link keeps its original creator, the
+other's creator folds into its `co_discovered_by`); a link the rewrite
+would turn into a self-link (e.g. a pre-existing `DUPLICATE`↔`CANONICAL`
+edge) is dropped rather than written. The command reports
+`links_remapped`, `links_collapsed`, and `links_dropped` alongside
+`source_uri_moved`.
+
+Refuses, with a clean error and no traceback, on: a self-merge; either
+tumbler not found (including one belonging to a different tenant, which
+reads identically to "not found" under RLS); a `DUPLICATE` already aliased
+to some OTHER canonical (settle that alias first); or a merge that would
+close an alias cycle.
 
 ### nx catalog gc
 
@@ -1497,6 +1552,55 @@ Unlike `reconcile-stale`, the catalog writer is constructed even for the default
 Note: this verb reclaims storage; it is not the search-visibility fix for a deleted document. On engines carrying the nexus-3ck2g read-side tombstone filter, content stops appearing in search results as soon as `nx catalog delete` tombstones it — independent of when `purge-trash` later reclaims the underlying rows.
 
 **Population (nexus-heizf):** the stranded-chunk count here is EXISTING chunk rows of TOMBSTONED documents with no live parent (direction chunk → parent). RDR-191 Phase 6 (nexus-o8dil.33) retired the instrument this note used to warn against cross-reading (`nx doctor`'s "dangling manifest chashes" warn / `nx catalog manifest-verify --list`, both gone — see [nx catalog manifest-verify — retired](#nx-catalog-manifest-verify--retired)) — the manifest-chunk FK makes that opposite-direction population (LIVE documents' manifest rows with no backing chunk) unreachable, so there is no other instrument left to conflate this one with.
+
+### nx catalog sweep-ghosts
+
+```
+nx catalog sweep-ghosts [--apply] [--json]
+```
+
+Operator-facing sweep for RDR-204 ghost collections (nexus-29drn, Sam's
+2026-09-23 ruling). The engine's ghost sweep
+(`CatalogRepository.sweepGhostsAndMarkDormant`) already runs automatically,
+but at most ONCE PER TENANT for the life of the estate (the durable
+`rdr204_ghost_sweep_v1` marker in `nexus.catalog_meta`): it clears the
+backlog the first time a tenant makes an authenticated request after the
+marker is absent, then disarms itself for that tenant forever. Any
+collection that BECOMES a ghost afterwards — a quarantine sibling finishing
+its drain, a re-home whose source collection empties out — accumulates with
+nothing to collect it. This verb is the on-demand caller for the SAME
+classification (no separate client-side reimplementation) via `POST
+/v1/catalog/ghost-sweep`, and never touches the automatic sweep's durable
+marker — running it, in either mode, does not count as the automatic
+per-tenant sweep having run.
+
+Two dispositions, per row:
+
+- **ghosts** — collections nothing references any more (no live row in any
+  non-audit `COLLECTION_SCOPED_TABLES` entry). `--apply` physically deletes
+  the registry row.
+- **referenced-but-empty (marked dormant)** — collections still referenced
+  somewhere but with no `collection_vector_stats` row (nothing to embed or
+  read). `--apply` flips `lifecycle_state` to `dormant`; the row itself is
+  NOT deleted — `nx doctor`'s "Collections dormant" row (see [nx doctor](#nx-doctor))
+  is how an operator later decides to re-index or remove the references.
+
+A quarantine row still referenced by something is held unconditionally
+(reported as a count only, never a name, since nothing about it changed).
+
+Default is dry-run: reports what the sweep WOULD do without writing. Pass
+`--apply` to actually reclaim/mark; `--json` emits the engine's response
+verbatim.
+
+```
+nx catalog sweep-ghosts          # dry-run report
+nx catalog sweep-ghosts --apply  # actually reclaim/mark
+```
+
+On an engine older than nexus-29drn (no `/v1/catalog/ghost-sweep` route
+yet), the command raises a clear error naming the required engine release
+rather than silently no-op'ing — same posture as `purge-trash`'s engine-floor
+refusal above.
 
 ### nx catalog orphan-backfill
 
@@ -2604,9 +2708,23 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
-`aspect-queue`, `t1`, `engine-activity`, `index-failures`, and
-`fanout-floor` (the last has no `--check-fanout-floor` flag; it only runs
-as part of this supplementary set). Before 7.11.0 all fourteen `--check-*` modes were
+`aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
+`tuple-projection`, `ghost-sweep` (the last three have no `--check-fanout-floor`
+/ `--check-tuple-projection` / `--check-ghost-sweep` flag; they only run as
+part of this supplementary set).
+`tuple-projection` (nexus-08cfl) reports whether
+this session's RDR-205 ledger tuple projector
+(`nexus.hooks.tuple_ledger_project`) has logged any SKIP lines to its
+per-session log — that projector never raises on failure, so a
+persistent SKIP was otherwise invisible outside the e2e
+`post-publish-dispatch-check.sh` gate. `ghost-sweep` (nexus-29drn) reports the
+current RDR-204 ghost-collection count via a dry-run call to the same engine
+route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
+that verb when the count is nonzero — see that section for why this row
+exists (the automatic per-tenant sweep runs at most once for the life of the
+estate). Reads `[ ]` not-applicable, never a red/warn, when the catalog
+writer cannot be resolved, the engine is unreachable, or the engine predates
+the route. Before 7.11.0 all fourteen `--check-*` modes were
 opt-in only, so a real backlog was invisible unless an operator happened to
 run its exact flag (the motivating case: an aspect-queue throwing hundreds of
 claim failures while nothing in the default run watched it). These are

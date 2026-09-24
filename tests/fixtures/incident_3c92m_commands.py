@@ -12,9 +12,9 @@ are this guard's repeat failure class (nexus-2e874 unbalanced quotes,
 nexus-3c92m's own newline/heredoc gap), so the regression tests for THIS
 bead should exercise the literal bytes that broke it, not a paraphrase.
 
-Each command must be DENIED by
-conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py
-when run as a subagent in the shared tree.
+Each command must be DENIED by the ``subagent-git-write-gate`` verb
+(``src/nexus/hooks/subagent_git_write_gate.py``; a plugin-resident script
+until nexus-t9klx ported it) when run as a subagent in the shared tree.
 """
 from __future__ import annotations
 

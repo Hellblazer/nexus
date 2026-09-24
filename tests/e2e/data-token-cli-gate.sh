@@ -313,7 +313,15 @@ LEASE_FILES=("$HOME_DIR"/.config/nexus/data_token_lease.*)
 [ -e "${LEASE_FILES[0]}" ] \
     || _fail "no data_token_lease.* file found under \$HOME/.config/nexus after store put + doctor"
 LEASE_FILE="${LEASE_FILES[0]}"
-LEASE_PERMS="$(stat -f '%Lp' "$LEASE_FILE" 2>/dev/null || stat -c '%a' "$LEASE_FILE" 2>/dev/null)"
+# nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked --
+# a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status dump
+# into the captured value on Linux (see
+# tests/e2e/post-publish-dispatch-check.sh's fix for the full writeup).
+if stat --version >/dev/null 2>&1; then
+    LEASE_PERMS="$(stat -c '%a' "$LEASE_FILE" 2>/dev/null)"
+else
+    LEASE_PERMS="$(stat -f '%Lp' "$LEASE_FILE" 2>/dev/null)"
+fi
 [ "$LEASE_PERMS" = "600" ] \
     || _fail "lease file $LEASE_FILE has perms $LEASE_PERMS, expected 600"
 if grep -qF "$MINT_LOCKED_TOKEN" "$LEASE_FILE"; then
