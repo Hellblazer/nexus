@@ -531,3 +531,37 @@ def test_resolve_pdf_title_section_heading_h1_falls_to_stem() -> None:
     assert resolve_pdf_title({}, p, "# Related Work:\n") == "2512.11001"
     # a genuine title H1 that merely CONTAINS such a word still wins
     assert resolve_pdf_title({}, p, "# Abstract Interpretation of Agents\n") == "Abstract Interpretation of Agents"
+
+
+# ── nexus-pwlqq: the space that terminates a control word is not spurious ─────
+# TeX ends a control word at the first non-letter, so the space in
+# ``\alpha A`` is what separates the macro from its operand. Deleting it
+# yields ``\alphaA``, an undefined macro. Cases are verbatim MinerU output
+# from FootprintRAG (catalog 1.12.153), 2026-09-24.
+
+def test_control_word_before_letter_keeps_its_terminating_space() -> None:
+    inp = r"E R S ( e ) = \alpha A ( e ) + \beta S ( e ) + \gamma Q ( e ) ,"
+    assert normalize_latex_spacing(inp) == r"ERS(e)=\alpha A(e)+\beta S(e)+\gamma Q(e),"
+
+
+def test_relation_control_word_before_letter() -> None:
+    inp = r"\sum _ { m \in M _ { u } } s i m ( e , m )"
+    assert normalize_latex_spacing(inp) == r"\sum_{m\in M_{u}}sim(e,m)"
+
+
+def test_backslash_control_word_before_letter() -> None:
+    assert normalize_latex_spacing(r"L _ { u } = I _ { u } \backslash R _ { u } .") == r"L_{u}=I_{u}\backslash R_{u}."
+
+
+def test_control_word_before_non_letter_still_collapses() -> None:
+    assert normalize_latex_spacing(r"\alpha _ { 1 } + \beta ( x ) \cdot \gamma") == r"\alpha_{1}+\beta(x)\cdot\gamma"
+
+
+def test_escaped_backslash_then_letter_is_not_a_control_word() -> None:
+    # ``\\`` is a control symbol (line break); the letter after it is ordinary.
+    assert normalize_latex_spacing(r"a \\ b") == r"a\\b"
+
+
+def test_control_word_space_is_idempotent() -> None:
+    once = normalize_latex_spacing(r"\alpha A + \in M")
+    assert normalize_latex_spacing(once) == once == r"\alpha A+\in M"
