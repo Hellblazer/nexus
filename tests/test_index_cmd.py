@@ -1157,15 +1157,17 @@ def test_md_collection_flag_produces_knowledge_prefix(runner, fake_md):
     assert kw["collection_name"].startswith("knowledge__")
 
 
-def test_md_collection_knowledge_target_emits_prose_extractor_warning(runner, fake_md):
-    """--collection with knowledge__ target emits the scholarly-paper warning (GH #981)."""
+def test_md_collection_knowledge_target_emits_no_extractor_warning(runner, fake_md):
+    """--collection with a knowledge__ target no longer warns that prose gets
+    the paper extractor: routing is per document (general-prose-v1 for prose,
+    c79909c4b), so the old GH #981 warning described a hazard that is gone
+    (nexus-kk4ut)."""
     # CliRunner (Click 8.x) mixes stdout+stderr into result.output by default.
     with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
         result = runner.invoke(main, ["index", "md", str(fake_md), "--collection", "mynotes"])
     assert result.exit_code == 0, result.output
-    assert "scholarly-paper extractor" in result.output
-    assert "hallucinate" in result.output
-    assert "GH #981 fix #2" in result.output
+    assert "scholarly-paper extractor" not in result.output
+    assert "hallucinate" not in result.output
 
 
 def test_md_collection_no_warning_when_corpus_default(runner, fake_md):

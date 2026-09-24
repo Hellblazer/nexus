@@ -3055,10 +3055,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         "existing one before creating (docs/collections.md). "
         "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
         "collection so 'nx enrich aspects' can process it (GH #981). "
-        "NOTE: the aspect extractor for knowledge__ targets the scholarly-paper schema; "
-        "it works well for paper-shaped content but will fabricate fields on general "
-        "prose / design notes. A prose extractor is tracked as a follow-on (fix #2 "
-        "from GH #981)."
+        "Aspect extraction routes each knowledge__ document by shape: "
+        "paper-shaped documents get scholarly-paper-v1, general prose gets "
+        "general-prose-v1."
     ),
 )
 @click.option(
@@ -3108,7 +3107,6 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         EmbeddingProfileMismatchError,
         LocalVoyageCredentialMissingError,
-        split_candidate_collection_name,
         t3_collection_name,
     )
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
@@ -3138,25 +3136,9 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # for_write=True (nexus-35ok4): indexing WRITES new content —
         # raises loud if local.embed_model is voyage-shaped with no key.
         collection = t3_collection_name(collection, for_write=True)
-        # Warn when routing into knowledge__*: the registered aspect extractor
-        # uses the scholarly-paper-v1 schema (title, abstract, methods, venue).
-        # For paper-shaped Markdown this is correct. For general prose / design
-        # notes it will hallucinate paper fields. A general-prose extractor is
-        # tracked as GH #981 fix #2 (deferred). Reverted attempt: nexus-z70w / #377.
-        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` is the
-        # JUST-MINTED candidate name from t3_collection_name above -- it
-        # may be a brand-new collection with no catalog row yet.
-        # split_candidate_collection_name, not the row-based
-        # collection_content_type.
-        if split_candidate_collection_name(collection)[0] == "knowledge":
-            click.echo(
-                "Note: 'nx enrich aspects' on knowledge__ collections applies the "
-                "scholarly-paper extractor (title, abstract, methods, venue). "
-                "This is appropriate for paper-shaped content; it will hallucinate "
-                "structure on general prose or design notes. "
-                "A prose extractor is tracked as a follow-on (GH #981 fix #2).",
-                err=True,
-            )
+        # No extractor warning for knowledge__ targets: aspect extraction
+        # routes each document by shape (scholarly-paper-v1 for papers,
+        # general-prose-v1 for prose; c79909c4b, nexus-kk4ut).
 
     path = path.resolve()
 
