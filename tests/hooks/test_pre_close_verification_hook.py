@@ -682,6 +682,96 @@ class TestAllowOnCoveredMarker:
         assert "nexus-tafjk verification=passed" in calls
 
 
+class TestNexus2b24oCloseTransitionSpellings:
+    """nexus-2b24o: match the TRANSITION, not the VERB.
+
+    ``bd update <id> --status closed`` sets the identical closed-status
+    transition as ``bd close``/``bd done`` and the gate's verb detector
+    never looked for it -- an incident closed nexus-9dkxu with no review
+    marker and no denial. Table-driven over every spelling found by
+    probing the real `bd` binary (1.0.5) rather than guessed: five CLI
+    forms of ``bd update ... --status closed`` (pflag's shorthand rules
+    make ``-s``/``-sclosed``/``-s=closed`` genuinely distinct spellings,
+    not decoration), two lines of ``bd batch``'s own grammar delivered as
+    piped stdin, and one ``bd import`` JSONL upsert -- neither of which is
+    ``bd close``/``bd update`` by verb at all. ``close``/``done`` are
+    included as the baseline the gate already caught, so a table that
+    regresses to catching NOTHING cannot pass by accident.
+
+    Each half of the table drives the SAME command list through both
+    directions: no marker anywhere denies, and a marker naming both
+    required reviewers allows -- the non-vacuity shape the bead asked
+    for, so a detector that stopped detecting (this class returns to
+    "allow" for everything) and a gate that stopped ever allowing (this
+    class returns to "deny" for everything) both turn red here, not just
+    one of them.
+    """
+
+    _ID = "nexus-tr4ns"
+
+    #: label -> command template, `{id}` substituted below. `{{`/`}}` in
+    #: the import entry are str.format's own escape for a literal brace.
+    _SPELLINGS: dict[str, str] = {
+        "close": "bd close {id}",
+        "done": "bd done {id}",
+        "update --status closed": "bd update {id} --status closed",
+        "update --status=closed": "bd update {id} --status=closed",
+        "update -s closed": "bd update {id} -s closed",
+        "update -s=closed": "bd update {id} -s=closed",
+        "update -sclosed": "bd update {id} -sclosed",
+        "batch close line": "printf 'close {id} reason\\n' | bd batch",
+        "batch update status=closed line": (
+            "printf 'update {id} status=closed\\n' | bd batch"
+        ),
+        "import JSONL status closed": (
+            'echo \'{{"id":"{id}","status":"closed"}}\' | bd import -'
+        ),
+    }
+
+    def test_the_table_is_not_vacuous(self) -> None:
+        """The check the bead itself asked for: a table quietly shrunk to
+        one entry (the pre-existing `bd close`) would pass both
+        parametrized tests below for the wrong reason -- there would be
+        nothing left to catch a regression in. Pin the count so shrinking
+        the table under review pressure turns this red on its own."""
+        assert len(self._SPELLINGS) >= 10, self._SPELLINGS
+
+    @pytest.mark.parametrize("label", sorted(_SPELLINGS))
+    def test_denies_with_no_marker(self, label, mock_config_env, fake_nx) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = self._SPELLINGS[label].format(id=self._ID)
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (
+            f"{label!r} ({command!r}) did not deny with no marker: {parsed}"
+        )
+        assert self._ID in _get_reason(parsed), (label, parsed)
+
+    @pytest.mark.parametrize("label", sorted(_SPELLINGS))
+    def test_allows_with_a_full_reviewer_marker(
+        self, label, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(
+            _marker(f"review-completed,{self._ID}", f"review-completed: {self._ID}")
+        )
+        command = self._SPELLINGS[label].format(id=self._ID)
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (
+            f"{label!r} ({command!r}) did not allow with a full marker: {parsed}"
+        )
+
+
 class TestT1OnlyCoverage:
     """nexus-fgekf (2026-08-30): the T2 memory leg is RETIRED. It existed
     for a CLI/MCP T1 scope divergence (nexus-4av2n round 2) whose both

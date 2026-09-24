@@ -21,6 +21,9 @@ from nexus.hooks import pre_close_verification as gate
 #: (see TestTheLimitThePortRecords below), and a literal here would make
 #: any command that greps this file look like a close.
 CLOSE = "bd " + "close"
+UPDATE = "bd " + "update"
+BATCH = "bd " + "batch"
+IMPORT = "bd " + "import"
 
 
 class TestTheDenyTextIsACarriedContract:
@@ -115,6 +118,105 @@ class TestTheHarvesterFixes:
         assert gate._bead_ids(f"{CLOSE} nexus-aaaaa nexus-bbbbb") == [
             "nexus-aaaaa", "nexus-bbbbb",
         ]
+
+
+class TestNexus2b24oTransitionNotVerb:
+    """bd's own binary (1.0.5), probed live rather than guessed, sets the
+    identical CLOSED status transition through spellings ``_bd_verbs``
+    never looked for. nexus-2b24o: the detector's domain was the close
+    VERB (``bd close``/``bd done``); the actual invariant is the close
+    TRANSITION, and ``bd update ... --status closed`` sets it too, in
+    five different CLI spellings, plus two more via ``bd batch``'s own
+    grammar and one via ``bd import``'s JSONL upsert -- neither of which
+    is even ``bd close``/``bd update`` by verb.
+
+    ``TestNexus2b24oCloseTransitionSpellings`` in
+    ``test_pre_close_verification_hook.py`` drives the same table through
+    the full deny/allow gate; this class pins the detector in isolation.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"{UPDATE} nexus-aaaaa --status closed",
+            f"{UPDATE} nexus-aaaaa --status=closed",
+            f"{UPDATE} nexus-aaaaa -s closed",
+            f"{UPDATE} nexus-aaaaa -s=closed",
+            f"{UPDATE} nexus-aaaaa -sclosed",
+        ],
+    )
+    def test_every_update_status_closed_spelling_is_recognized(self, command):
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert gate._bead_ids(command) == ["nexus-aaaaa"], command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"{UPDATE} nexus-aaaaa --status open",
+            f"{UPDATE} nexus-aaaaa --status in_progress",
+            f"{UPDATE} nexus-aaaaa --status deferred",
+            f"{UPDATE} nexus-aaaaa --priority 1",
+            "bd list --status=closed",
+        ],
+    )
+    def test_non_closing_update_forms_do_not_trigger(self, command):
+        """Bounds the widening: any status OTHER than closed, and any bd
+        verb other than update (`bd list` takes `--status` too, for
+        filtering), must not trip it."""
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_batch_close_line_piped_from_printf_is_recognized(self):
+        """`bd batch`'s own mini-grammar (`bd batch --help`): a `close
+        <id>` line delivered as piped stdin text, never an argument this
+        hook tokenizes."""
+        command = "printf 'close nexus-aaaaa reason\\n' | " + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_batch_update_status_closed_line_is_recognized(self):
+        command = "printf 'update nexus-aaaaa status=closed\\n' | " + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_batch_line_with_no_bead_id_does_not_trigger(self):
+        """The batch-grammar scan is anchored on a bead-id-shaped token,
+        not the bare word `close` -- a reason string alone must not trip
+        it, the same property nexus-fv65m established for `bd close`."""
+        command = "printf 'create task 2 \"close this out\"\\n' | " + BATCH
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_batch_verb_absent_never_triggers_the_raw_text_scan(self):
+        """The scan is gated on the `batch` verb actually appearing
+        (position-based, same rigor as `close`/`done`) -- text that merely
+        LOOKS like a batch-close line, with no `bd batch` anywhere in the
+        command, must not trigger it."""
+        command = "printf 'close nexus-aaaaa reason\\n' > /tmp/ops.txt"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_import_json_with_closed_status_is_recognized(self):
+        """`bd import` upserts by id from JSONL, also read from stdin,
+        never a command-line argument."""
+        command = 'echo \'{"id":"nexus-aaaaa","status":"closed"}\' | ' + IMPORT + " -"
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_import_json_without_closed_status_does_not_trigger(self):
+        command = 'echo \'{"id":"nexus-aaaaa","status":"open"}\' | ' + IMPORT + " -"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_import_with_no_id_field_does_not_trigger(self):
+        """Anchored on BOTH the id and the closed status -- a bare
+        status-closed mention with no id field must not match alone."""
+        command = 'echo \'{"status":"closed"}\' | ' + IMPORT + " -"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_import_verb_absent_never_triggers_the_raw_text_scan(self):
+        command = 'echo \'{"id":"nexus-aaaaa","status":"closed"}\' > /tmp/x.jsonl'
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
 
 
 class TestTheLimitThePortRecords:

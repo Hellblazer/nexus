@@ -69,6 +69,43 @@ RULE_NAME = "phase_review_close_requires_gate"
 _BD_CLOSE_RE = re.compile(
     r"\bbd\s+(?:close|done)\s+(?P<bead_id>[A-Za-z0-9._-]+)",
 )
+
+#: SIBLING of the same class as nexus-2b24o (that bead's fix is
+#: ``pre_close_verification.py``'s ``_bd_verbs``, which matched only ``bd
+#: close``/``bd done`` by VERB POSITION -- ``bd update <id> --status
+#: closed`` sets the identical status transition and matched nothing).
+#: This gate has the same blind spot: a phase-review bead closed via
+#: ``bd update --status closed`` bypassed the sentinel check entirely,
+#: because ``_BD_CLOSE_RE`` above never looked for it either.
+#:
+#: Narrower than that fix on purpose, matching this file's own existing
+#: rigor rather than importing the other module's tokenizer: `bd close`
+#: here already assumes the bead id is the token immediately after the
+#: verb (no flags in between), so this mirrors that same simplifying
+#: assumption for `update` rather than re-deriving a stricter contract
+#: this file never had. `bd batch`/`bd import`'s piped-stdin forms
+#: (nexus-2b24o found both close a bead with no `bd close`/`bd update`
+#: verb anywhere in the command) are NOT covered here -- a phase-review
+#: bead closed that way is a narrower, compound edge case, and widening
+#: this advisory gate to scan piped content is deferred rather than
+#: silently assumed away.
+_BD_UPDATE_RE = re.compile(
+    r"\bbd\s+update\s+(?P<bead_id>[A-Za-z0-9._-]+)\b",
+    re.IGNORECASE,
+)
+
+#: The five spellings `bd update --help` and pflag's shorthand rules
+#: actually accept for setting status to closed, probed against the real
+#: binary (bd 1.0.5) rather than guessed -- see
+#: ``pre_close_verification._update_sets_closed_status`` for the same
+#: enumeration against tokens rather than raw text.
+_STATUS_CLOSED_RE = re.compile(
+    r"--status(?:=|\s+)[\"']?closed[\"']?\b"
+    r"|-s\s+[\"']?closed[\"']?\b"
+    r"|-s=[\"']?closed[\"']?\b"
+    r"|-sclosed\b",
+    re.IGNORECASE,
+)
 _RDR_RE = re.compile(r"\brdr[-_ ]?(?P<id>\d+)\b", re.IGNORECASE)
 _PHASE_RE = re.compile(r"\bphase[\s-]?(?P<phase>\d+)\b", re.IGNORECASE)
 _P_LEAF_RE = re.compile(r"\bP(?P<phase>\d+)(?:\.\d+)*\b")
@@ -234,7 +271,16 @@ def body(payload: dict[str, Any]) -> HookResult | None:
 
     match = _BD_CLOSE_RE.search(command)
     if not match:
-        return _lib.allow_result()
+        # nexus-2b24o sibling: `bd update <id> --status closed` sets the
+        # identical transition. Only counts when the status-closed flag
+        # is found in the text AFTER the matched `bd update <id>` --
+        # matching this file's existing convention of not modeling flags
+        # between the verb and the id.
+        update_match = _BD_UPDATE_RE.search(command)
+        if update_match and _STATUS_CLOSED_RE.search(command[update_match.end():]):
+            match = update_match
+        else:
+            return _lib.allow_result()
 
     # Escape token takes precedence; audit and pass through.
     if _lib.should_skip_for_reason(command):

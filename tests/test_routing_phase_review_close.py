@@ -289,6 +289,101 @@ def test_escape_token_allows_even_on_phase_review_bead(tmp_env):
 
 
 # ---------------------------------------------------------------------------
+# nexus-2b24o sibling: `bd update <id> --status closed` sets the identical
+# transition as `bd close`/`bd done`, and this gate's own `_BD_CLOSE_RE`
+# never looked for it either -- a phase-review bead closed that way
+# bypassed the sentinel check with no denial at all.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bd update nexus-b9lox --status closed",
+        "bd update nexus-b9lox --status=closed",
+        "bd update nexus-b9lox -s closed",
+        "bd update nexus-b9lox -s=closed",
+        "bd update nexus-b9lox -sclosed",
+    ],
+)
+def test_update_status_closed_spellings_trigger_on_a_gate_bead(tmp_env, command):
+    """Every CLI spelling `bd update --help` accepts for setting status to
+    closed must trigger the same sentinel check `bd close` does -- probed
+    against the real binary (bd 1.0.5), not guessed."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="Phase 3b review gate: /conexus:phase-review-gate RDR-120 --phase 3b",
+    )
+    # No sentinel written — expect deny.
+    _make_session_addr(tmp_env["config_dir"], os.getpid())
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        env_extra={"NX_FAKE_CLAUDE_PID": str(os.getpid())},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    decision = _decision(proc)
+    assert decision["permissionDecision"] == "deny", (command, decision)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bd update nexus-b9lox --status open",
+        "bd update nexus-b9lox --status in_progress",
+        "bd update nexus-b9lox --priority 1",
+    ],
+)
+def test_non_closing_update_forms_on_a_gate_bead_allow(tmp_env, command):
+    """Bounds the widening: any status other than closed, and any update
+    that never touches status at all, must not trigger the sentinel
+    check even on a genuine phase-review-gate bead."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="Phase 3b review gate: /conexus:phase-review-gate RDR-120 --phase 3b",
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
+
+
+def test_update_status_closed_on_a_gate_bead_allows_with_a_passed_sentinel(tmp_env):
+    """The widened trigger still runs through the SAME sentinel check --
+    a passed, fresh sentinel allows the update-status-closed spelling
+    exactly as it would allow `bd close`."""
+    pid = os.getpid()
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="RDR-112 Phase 1 review gate",
+    )
+    _make_session_addr(tmp_env["config_dir"], pid)
+    _make_sentinel(
+        tmp_env["sentinel_dir"],
+        claude_pid=pid, rdr_id="112", phase="1",
+        outcome="PASSED",
+        mtime=time.time(),
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd update nexus-abc --status closed"}},
+        env_extra={"NX_FAKE_CLAUDE_PID": str(pid)},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow"
+
+
+def test_update_status_closed_on_a_non_phase_review_bead_allows(tmp_env):
+    _write_bd_stub(tmp_env["bin_dir"], title="Add some feature thing")
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd update nexus-xyz --status closed"}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow"
+
+
+# ---------------------------------------------------------------------------
 # Five sentinel scenarios
 # ---------------------------------------------------------------------------
 

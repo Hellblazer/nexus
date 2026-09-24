@@ -60,11 +60,115 @@ from nexus._hook_runtime._io import HookResult
 __all__ = ["run"]
 
 
+#: The only built-in bd status VALUE whose category is "done" (bd's own
+#: label; see `bd statuses`). Case-sensitive on bd's side -- `bd update
+#: --status Closed` is refused by bd itself with `invalid status "Closed"`
+#: -- but matched case-INSENSITIVELY here, on purpose: a command bd would
+#: reject anyway is harmless to also gate, and under-matching here is the
+#: dangerous direction (nexus-2b24o). A repo that configures a custom
+#: closed-category status via `bd config set status.custom` is NOT covered
+#: -- checking that would mean this detector shelling out to `bd` on every
+#: Bash call, which is the KNOWN LIMIT class this file already accepts
+#: elsewhere (heredocs, above) rather than a gap silently left unstated.
+_CLOSED_STATUS_VALUES = frozenset({'closed'})
+
+
+def _update_sets_closed_status(tokens: list[str]) -> bool:
+    """Does *tokens* (bd update's arguments, past ``bd update``) carry a
+    ``--status``/``-s`` flag whose value is a closed-category status?
+
+    Enumerated from ``bd update --help`` and probed against the real
+    binary (bd 1.0.5), not guessed -- pflag's shorthand rules make this
+    genuinely five spellings, not one:
+
+    * ``--status closed`` / ``-s closed`` -- flag and value as two tokens.
+    * ``--status=closed`` / ``-s=closed`` -- ``=``-joined, one token.
+    * ``-sclosed`` -- pflag shorthand concatenation, no separator at all.
+
+    Stateless and order-independent: every position is probed on its own,
+    so a real ``--status`` occurring anywhere among update's other flags
+    (``--priority``, ``--assignee``, ...) is found regardless of what
+    precedes or follows it. This mirrors ``_bd_verbs``'s own tolerance for
+    "found somewhere", not "found in the expected slot".
+    """
+    for idx, tok in enumerate(tokens):
+        if tok in ('--status', '-s'):
+            nxt = tokens[idx + 1] if idx + 1 < len(tokens) else ''
+            if nxt.strip('\'"').lower() in _CLOSED_STATUS_VALUES:
+                return True
+        elif tok.startswith('--status='):
+            if tok[len('--status='):].lower() in _CLOSED_STATUS_VALUES:
+                return True
+        elif tok.startswith('-s=') and tok[3:].lower() in _CLOSED_STATUS_VALUES:
+            return True
+        elif tok.startswith('-s') and len(tok) > 2 and tok[2] not in ('=',):
+            if tok[2:].lower() in _CLOSED_STATUS_VALUES:
+                return True
+    return False
+
+
+#: `bd batch` (RDR-q02nx unrelated; a real bd subcommand, `bd batch
+#: --help`) takes its own one-line-per-op grammar from stdin or -f/--file,
+#: never from an argument this hook tokenizes -- so a genuine close
+#: reaches it as PIPED TEXT, not a `bd close`/`bd update --status` this
+#: file's verb detector was ever built to see. Probed live (bd 1.0.5):
+#: `printf 'close nexus-x reason\n' | bd batch` and
+#: `printf 'update nexus-x status=closed\n' | bd batch` both close
+#: nexus-x. This is a RAW-TEXT scan of the whole command deliberately --
+#: the content lives in a sibling shell segment (the pipe's LEFT side),
+#: not inside the `bd batch` segment itself, so a segment-scoped scan
+#: would never reach it. Anchored on a bead-id-shaped token specifically
+#: (never a bare `close`/`update`) to keep the same "quoted mention does
+#: not trip it" property nexus-fv65m won for the primary detector: a
+#: reason string that happens to contain the word "close" with no
+#: adjoining id does not match.
+_BD_BATCH_CLOSE_RE = re.compile(
+    r'\b(?:close|done)\s+(?:nexus-[a-z0-9]+)\b'
+    r'|\bupdate\s+nexus-[a-z0-9]+\s+[^\n]*?\bstatus\s*=\s*closed\b',
+    re.IGNORECASE,
+)
+
+#: `bd import` upserts by an `id` field from JSONL, also read from stdin
+#: or a file, never from a command-line argument. Probed live: `echo
+#: '{"id":"nexus-x","status":"closed"}' | bd import -` closes nexus-x with
+#: no bd verb this file previously recognized as close-shaped anywhere in
+#: the command. Requires BOTH the id and the closed-status key to appear
+#: (order-independent -- JSONL field order is not guaranteed) so an import
+#: line that only touches unrelated fields does not match.
+_BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"nexus-[a-z0-9]+"', re.IGNORECASE)
+_BD_IMPORT_CLOSED_RE = re.compile(r'"status"\s*:\s*"closed"', re.IGNORECASE)
+
+
 def _bd_verbs(cmd: str) -> dict:
     """Which bd verb this command carries, and whether it inline-overrides.
 
-    Carried verbatim. Segment-scoped: it matches only when ``bd`` is the
-    command word of a segment, after any environment assignments.
+    Carried verbatim, THEN WIDENED (nexus-2b24o): the original matched only
+    ``bd close``/``bd done`` by VERB POSITION -- ``bd update <id> --status
+    closed`` sets the identical status transition and matched nothing,
+    because nothing here asked whether a DIFFERENT VERB could close a bead.
+    The detector's domain was the close verb; the actual invariant is the
+    close TRANSITION. Three more paths to that transition, enumerated from
+    the real ``bd`` binary rather than guessed (see the bead for the
+    session that found this the hard way):
+
+    1. ``bd update ... --status/-s closed`` in any of its five CLI
+       spellings -- :func:`_update_sets_closed_status`.
+    2. ``bd batch``'s own grammar, delivered as piped/heredoc stdin text
+       rather than as an argument -- :data:`_BD_BATCH_CLOSE_RE` against the
+       WHOLE raw command, gated on the ``batch`` verb actually appearing.
+    3. ``bd import``'s JSONL upsert, same delivery shape -- the
+       :data:`_BD_IMPORT_ID_RE` / :data:`_BD_IMPORT_CLOSED_RE` pair, gated
+       on the ``import`` verb.
+
+    Segment-scoped for the verb-position matches (1), exactly as before.
+    (2) and (3) are NOT segment-scoped and cannot be: the closing content
+    lives in a DIFFERENT shell segment from the one carrying the verb (the
+    left side of a pipe feeding ``bd batch``/``bd import``), so they scan
+    the full ``cmd`` text once the corresponding verb has been seen
+    anywhere. That is a wider net than the rest of this function casts,
+    and it is deliberately anchored on a bead-id-shaped token (never a
+    bare ``close``/``update``/``"status"``) to keep the false-positive
+    rate down -- see the two regexes' own docstrings.
 
     KNOWN LIMIT, measured at this port (nexus-q02nx.17) and NOT fixed
     here. The trigger is narrower than it first looks, and the narrow
@@ -91,10 +195,20 @@ def _bd_verbs(cmd: str) -> dict:
     parser change rather than a reordering. A wrong attempt stops the
     gate detecting real closes, which fails OPEN, so this is recorded for
     a decision rather than patched under time pressure.
+
+    STILL A KNOWN LIMIT after nexus-2b24o's widening: ``bd batch -f
+    file.txt`` and ``bd import path/to.jsonl`` (a real file, not stdin)
+    carry their close-shaped content in a file this hook cannot read
+    without spawning a process on every Bash call. That degrades to the
+    same INDETERMINATE-allow ``_bead_ids`` already produces when it finds
+    no literal id -- not a silent bypass, but not a denial either. Same
+    posture as ``--reason-file`` above: recorded, not chased.
     """
     segments = re.split(r'(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)', cmd)
     has_create = False
     has_close_or_done = False
+    has_batch_verb = False
+    has_import_verb = False
     inline_override = False
     env_assign_re = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
     for seg in segments:
@@ -140,6 +254,24 @@ def _bd_verbs(cmd: str) -> dict:
                     has_create = True
                 elif rest[1] in ('close', 'done'):
                     has_close_or_done = True
+                elif rest[1] == 'update' and _update_sets_closed_status(rest[2:]):
+                    has_close_or_done = True
+                elif rest[1] == 'batch':
+                    has_batch_verb = True
+                elif rest[1] == 'import':
+                    has_import_verb = True
+    # (2)/(3) above: whole-command text scans, gated on the verb having
+    # actually appeared (never on the regex alone -- that is exactly the
+    # "quoted mention" false-positive class nexus-fv65m fixed for (1), one
+    # level down).
+    if has_batch_verb and _BD_BATCH_CLOSE_RE.search(cmd):
+        has_close_or_done = True
+    if (
+        has_import_verb
+        and _BD_IMPORT_ID_RE.search(cmd)
+        and _BD_IMPORT_CLOSED_RE.search(cmd)
+    ):
+        has_close_or_done = True
     return {
         "has_create": has_create,
         "has_close_or_done": has_close_or_done,
