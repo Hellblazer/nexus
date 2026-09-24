@@ -24,8 +24,6 @@ carries no method signature for a contract change to reconcile against) is a
   commit absent from this section is UNDECLARED and fails the lint.
 - When the client release carrying a commit's fix ships, move its line from
   `## Unshipped` to `## Shipped` (or delete it). An `## Unshipped` entry whose
-
-
   commit is already an ancestor of the newest published `v*` tag is STALE and
   fails the lint -- the ledger cannot quietly claim something is still pending
   once it has shipped.

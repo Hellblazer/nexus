@@ -1,5 +1,11 @@
 # Postmortem: nx index pdf stores chunks in wrong collection
 
+> **Historical (2026-03-23).** Describes a Chroma-era bug (`db.get_or_create_collection`,
+> a bare `"knowledge"` Chroma collection). ChromaDB is not a live substrate in
+> any mode since RDR-155 P4b (2026-07-25); T3 is the engine's pgvector store
+> today. For current collection-naming rules see
+> [`docs/collections.md`](../collections.md).
+
 **Date**: 2026-03-23
 **Severity**: High — 10,036 chunks silently stored in unsearchable collection
 **Duration**: ~4 hours of indexing work before discovery

@@ -1,5 +1,9 @@
 # RDR-101 Phase 4 Audit — 2026-05-02
 
+> **Historical forensic record** (2026-05-02). The RDR-101 migration is
+> complete. See [`README.md`](README.md) for the directory index and the
+> current authoritative record.
+
 User-driven audit prompted by "everything looks like an orphan" observation.
 Goal: **ensure stuff that's wired actually works as designed; find what isn't wired**.
 
