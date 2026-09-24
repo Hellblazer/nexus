@@ -644,13 +644,22 @@ class TestBackfillRdrsRepoOwner:
         """nexus-emrsy: an orphan rdr__* collection with a CONFORMANT
         RDR-103 name (``rdr__<owner_id>__<model>__v<n>``) used to mint its
         curator fallback via ``col_name.replace("rdr__", "")`` — for a
-        name like ``rdr__1-1__voyage-context-3__v1`` that produces the
-        curator name ``1-1__voyage-context-3__v1``, a tumbler-form string
+        name like ``rdr__1-1__some-model__v1`` that produces the
+        curator name ``1-1__some-model__v1``, a tumbler-form string
         masquerading as a human curator name (junk owners 1.25/1.26 in
         the live catalog). No repo matches this collection's hash suffix
         (it has none — a conformant name carries no hash suffix at all),
         so this always falls into the curator branch. The fix: the
         curator fallback must never be the raw collection-derived string.
+
+        nexus-29drn/l52ms mode-declarations census fixup (2026-09-23):
+        the model segment is a model-neutral placeholder ("some-model"),
+        not a real voyage token — this test is about the tumbler-form
+        detection logic, not embedding-mode behavior, and
+        parse_conformant_collection_name's regex is deliberately
+        permissive about the model segment's value (nexus.corpus
+        _CONFORMANT_COLLECTION_RE), so any four-segment shape exercises
+        the same code path.
         """
         from nexus.commands.catalog import _backfill_rdrs
 
@@ -659,7 +668,7 @@ class TestBackfillRdrsRepoOwner:
         # Overwrite with a CONFORMANT RDR-103 name — no repo-hash suffix,
         # so the repo-owner lookup can never match it; every collection
         # shaped like this falls straight to the curator branch.
-        col_name = "rdr__1-1__voyage-context-3__v1"
+        col_name = "rdr__1-1__some-model__v1"
         mock.list_collections.return_value = [{"name": col_name, "count": 1}]
         with patch(
             "nexus.catalog.types._default_registry_path",
@@ -676,7 +685,7 @@ class TestBackfillRdrsRepoOwner:
         owner_prefix = ".".join(parts[:-1])
         curator_name = owner_names.get(owner_prefix)
         assert curator_name is not None
-        assert curator_name != "1-1__voyage-context-3__v1", (
+        assert curator_name != "1-1__some-model__v1", (
             f"curator minted with a tumbler-form name: {curator_name!r} — "
             "a raw collection-derived string must never become an owner name"
         )

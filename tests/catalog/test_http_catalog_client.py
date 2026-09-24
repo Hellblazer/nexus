@@ -835,6 +835,23 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "chunks_768_stranded": 12,
                 "chunks_1024_stranded": 0,
             })
+        elif op == "/ghost-sweep":
+            # nexus-29drn: mirrors CatalogHandler.handleGhostSweep —
+            # {"dry_run": bool (default true)} in;
+            # CatalogRepository.GhostSweepResult out, echoing dry_run
+            # alongside the scan/action counts and name lists in BOTH
+            # modes (the real handler always populates ghost_names/
+            # dormant_names regardless of dry_run).
+            dry_run = body.get("dry_run", True)
+            self._send_json({
+                "scanned": 5,
+                "ghosts_deleted": 1,
+                "marked_dormant": 1,
+                "quarantine_held": 0,
+                "ghost_names": ["knowledge__ghost-1__voyage-context-3__v1"],
+                "dormant_names": ["knowledge__dormant-1__voyage-context-3__v1"],
+                "dry_run": dry_run,
+            })
         else:
             self._send_json({"ok": True})
 

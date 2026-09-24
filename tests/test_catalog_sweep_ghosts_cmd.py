@@ -7,6 +7,12 @@ route is the sibling (Java) half; these tests exercise only the client-side
 wiring: the CLI verb's dry-run/--apply gate, the
 ``HttpCatalogClient.ghost_sweep`` wire contract, and the engine-floor
 refusal.
+
+The collection names in ``_FakeWriter``'s canned responses use a
+model-neutral placeholder ("some-model"), not a real voyage token: the
+writer is fully faked here, so no embedding call is ever made and no
+mode (local/cloud) applies -- this file is entirely about CLI plumbing,
+never about embedding-mode behavior.
 """
 from __future__ import annotations
 
@@ -28,9 +34,9 @@ class _FakeWriter:
             "ghosts_deleted": 2,
             "marked_dormant": 1,
             "quarantine_held": 1,
-            "ghost_names": ["knowledge__gone-a__voyage-context-3__v1",
-                             "knowledge__gone-b__voyage-context-3__v1"],
-            "dormant_names": ["knowledge__empty-c__voyage-context-3__v1"],
+            "ghost_names": ["knowledge__gone-a__some-model__v1",
+                             "knowledge__gone-b__some-model__v1"],
+            "dormant_names": ["knowledge__empty-c__some-model__v1"],
             "dry_run": True,
         }
         self._raise = raise_exc
@@ -77,9 +83,9 @@ class TestDryRunDefault:
         assert result.exit_code == 0, result.output
         assert "scanned: 5" in result.output
         assert "would reclaim" in result.output.lower()
-        assert "knowledge__gone-a__voyage-context-3__v1" in result.output
-        assert "knowledge__gone-b__voyage-context-3__v1" in result.output
-        assert "knowledge__empty-c__voyage-context-3__v1" in result.output
+        assert "knowledge__gone-a__some-model__v1" in result.output
+        assert "knowledge__gone-b__some-model__v1" in result.output
+        assert "knowledge__empty-c__some-model__v1" in result.output
         assert "would mark dormant" in result.output.lower()
         assert "nothing reclaimed" in result.output.lower()
         assert "--apply" in result.output
@@ -100,7 +106,7 @@ class TestApply:
     def test_apply_calls_client_with_dry_run_false(self, monkeypatch):
         writer = _FakeWriter({
             "scanned": 2, "ghosts_deleted": 1, "marked_dormant": 0,
-            "quarantine_held": 0, "ghost_names": ["knowledge__gone__voyage-context-3__v1"],
+            "quarantine_held": 0, "ghost_names": ["knowledge__gone__some-model__v1"],
             "dormant_names": [], "dry_run": False,
         })
         _patch_writer(monkeypatch, writer)
@@ -124,7 +130,7 @@ class TestJsonOutput:
         result = runner.invoke(main, ["catalog", "sweep-ghosts", "--json"])
 
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["scanned"] == 5
         assert payload["ghosts_deleted"] == 2
         assert payload["dry_run"] is True

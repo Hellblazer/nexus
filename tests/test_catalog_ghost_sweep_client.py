@@ -7,6 +7,12 @@ Repository-level classification is pinned engine-side
 (``GhostSweepDormantMarkingTest``/``CatalogHandlerGhostSweepTest``); this
 file pins only the client's wire-shape and the write-only-proxy wiring,
 same split as ``test_gc_audit_record_client.py``.
+
+The collection names in the fake engine responses use a model-neutral
+placeholder ("some-model"), not a real voyage token: `_post` is
+monkeypatched here, so no embedding call is ever made and no mode
+(local/cloud) applies -- this file is entirely about the wire shape,
+never about embedding-mode behavior.
 """
 
 from __future__ import annotations
@@ -24,8 +30,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> tuple[HttpCatalogClient, list]:
     monkeypatch.setattr(
         c, "_post", lambda path, body=None, **kw: (posted.append((path, body)) or {
             "scanned": 3, "ghosts_deleted": 1, "marked_dormant": 1, "quarantine_held": 0,
-            "ghost_names": ["knowledge__x__voyage-context-3__v1"],
-            "dormant_names": ["knowledge__y__voyage-context-3__v1"],
+            "ghost_names": ["knowledge__x__some-model__v1"],
+            "dormant_names": ["knowledge__y__some-model__v1"],
             "dry_run": body.get("dry_run") if body else True,
         }),
     )
@@ -37,7 +43,7 @@ def test_ghost_sweep_defaults_to_dry_run_true(client) -> None:
     result = c.ghost_sweep()
     assert posted == [("/ghost-sweep", {"dry_run": True})]
     assert result["dry_run"] is True
-    assert result["ghost_names"] == ["knowledge__x__voyage-context-3__v1"]
+    assert result["ghost_names"] == ["knowledge__x__some-model__v1"]
 
 
 def test_ghost_sweep_dry_run_false_posts_the_apply_flag(client) -> None:
@@ -52,8 +58,8 @@ def test_ghost_sweep_returns_engine_response_verbatim(client) -> None:
     result = c.ghost_sweep()
     assert result == {
         "scanned": 3, "ghosts_deleted": 1, "marked_dormant": 1, "quarantine_held": 0,
-        "ghost_names": ["knowledge__x__voyage-context-3__v1"],
-        "dormant_names": ["knowledge__y__voyage-context-3__v1"],
+        "ghost_names": ["knowledge__x__some-model__v1"],
+        "dormant_names": ["knowledge__y__some-model__v1"],
         "dry_run": True,
     }
 
