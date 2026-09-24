@@ -126,4 +126,4 @@ sets `NX_T2_SUBSTRATE_EXPECTED=1`, so it cannot silently skip.
    pinning a removed copy, a non-vacuity plant that moved the corpus with the
    query, a coverage pointer naming one file of two, a positive control passing
    against a dead route, and a test that inspected a signature while claiming to
-   guard a schema. Treat that as a rate: expect roughly one per reviewed commit.
+   guard a schema. Plan for it as a recurring rate, not six one-off accidents.
