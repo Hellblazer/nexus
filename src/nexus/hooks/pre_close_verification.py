@@ -724,7 +724,7 @@ def _bead_ids(cmd: str) -> list[str]:
     return ids
 
 
-def _coverage(bead_ids: list[str]) -> dict:
+def _coverage(bead_ids: list[str], session_id: str = "") -> dict:
     """Which of *bead_ids* have a review-completed marker in T1 scratch.
 
     Carried from the script. Returns ``t1_reachable``, a per-id ``status``
@@ -737,6 +737,15 @@ def _coverage(bead_ids: list[str]) -> dict:
     ceiling. It exists because this runs inside a 5s PreToolUse ceiling and
     the hook would rather stop itself deterministically than be killed
     mid-check by the harness.
+
+    *session_id*, added for nexus-dgl8g's Stop-hook reuse (this module's
+    own ``run()`` never passes it -- it relies on the module-level
+    ``_SESSION_ID`` slot :func:`_nx_env` already falls back to): a caller
+    outside this module's own ``run()``/``_run_gate`` call chain has no
+    reason to have populated that slot, and reaching into it from another
+    hook module would be reading private state across a module boundary.
+    Passed straight through to :func:`_nx_env`, whose own precedence
+    (explicit argument over the module slot) is unchanged.
     """
 
     # nexus-4av2n round 3: wall-clock deadline for the WHOLE coverage phase,
@@ -834,7 +843,7 @@ def _coverage(bead_ids: list[str]) -> dict:
     t1_entries = []
     if shutil.which('nx'):
         try:
-            r = run_bounded(['nx', 'scratch', 'list'], timeout=_clamp_timeout(), env=_nx_env())
+            r = run_bounded(['nx', 'scratch', 'list'], timeout=_clamp_timeout(), env=_nx_env(session_id))
             if r.returncode == 0:
                 t1_reachable = True
                 t1_entries = _parse_entries(r.stdout)
