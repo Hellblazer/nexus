@@ -30,6 +30,7 @@ import pytest
 
 from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.mcp.hooks import HOOK_TOOLS
+from tests._hook_wiring import command_verb
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
@@ -57,8 +58,9 @@ _MIN_MCP_TOOL_ENTRIES = 9
 #: self-gc, session-start, session-context, rdr.
 #:
 #: 6 -> 10 at bead nexus-17i1n: the four entries the line above moved off
-#: the tool tier arrive here.
-_MIN_NX_HOOK_ENTRIES = 10
+#: the tool tier arrive here. 12 at nexus-rcoze: verbs wired through the
+#: nx-hook shim count too (four moved there, two veh77 entries added).
+_MIN_NX_HOOK_ENTRIES = 12
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
@@ -76,10 +78,8 @@ def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
                     name = sub.get("tool_name") or sub.get("tool") or sub.get("name")
                     if name:
                         tools.append((event, str(name)))
-                elif sub.get("command") == "nx-hook":
-                    args = [a for a in sub.get("args", []) if isinstance(a, str)]
-                    if args:
-                        verbs.append((event, args[0]))
+                elif (verb := command_verb(sub)) is not None:
+                    verbs.append((event, verb))
     return tools, verbs
 
 

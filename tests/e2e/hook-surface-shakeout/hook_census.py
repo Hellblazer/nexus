@@ -68,6 +68,23 @@ NOT_PROVOKED = {
 }
 
 
+def label(entry: dict) -> str:
+    """One command-tier entry's census name; run.sh's shims write the same.
+
+    ``nx-hook <verb>``; ``nx_hook_shim.py <verb>`` for a verb wired through the
+    stdlib shim (nexus-rcoze), because a bare script name would fold every shim
+    entry into one handler and one firing would mark them all fired; otherwise
+    the script's file name, or the bare command.
+    """
+    args = [a for a in (entry.get("args") or []) if isinstance(a, str)]
+    cmd = entry.get("command") or "?"
+    if cmd == "nx-hook" and args:
+        return f"nx-hook {args[0]}"
+    if args and pathlib.Path(args[0]).name == "nx_hook_shim.py" and len(args) == 2:
+        return f"nx_hook_shim.py {args[1]}"
+    return pathlib.Path(args[0]).name if args else cmd
+
+
 def declared(hooks_json: pathlib.Path) -> dict[str, str]:
     """``handler -> the events it is declared on``.
 
@@ -83,13 +100,7 @@ def declared(hooks_json: pathlib.Path) -> dict[str, str]:
                 if entry.get("type") == "mcp_tool":
                     name = entry.get("tool")
                 else:
-                    args = entry.get("args") or []
-                    cmd = entry.get("command") or "?"
-                    name = (
-                        f"{cmd} {args[0]}".strip()
-                        if cmd == "nx-hook" and args
-                        else (pathlib.Path(args[0]).name if args else cmd)
-                    )
+                    name = label(entry)
                 if name:
                     events.setdefault(name, []).append(event)
     return {n: ",".join(sorted(set(e))) for n, e in events.items()}

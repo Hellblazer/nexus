@@ -294,47 +294,36 @@ def test_mutation_a_synthetic_unregistered_verb_is_detected(tmp_path: Path) -> N
     )
 
 
-def test_mutation_a_verb_new_on_head_but_absent_from_v7_57_0_is_detected(tmp_path: Path) -> None:
-    """The EXACT shape nexus-t9klx actually shipped, not a stand-in for it:
-    a verb this dev tree's own VERB_TABLE registers -- so
-    ``tests/test_release_artifact_verb_rot.py``'s live-tree check would
-    call it perfectly fine -- but the PREVIOUS RELEASED tag does not. Uses
-    ``behaviour-census``, one of the seven real offenders that motivated
-    this module: registered on HEAD, absent from v7.57.0. If this verb ever
-    stops being newer than the resolved floor (once a release ships that
-    includes it), the asserts below say so by name rather than passing
-    vacuously.
+def test_mutation_a_verb_a_fail_closed_release_lacks_is_detected(tmp_path: Path) -> None:
+    """The nexus-t9klx defect shape, pinned so it cannot expire.
+
+    The control this replaced used a verb newer than the PREVIOUS release,
+    and went red by design the moment 7.58.0 shipped and registered it (its
+    own message said so). The fail-closed release set, 7.55.0 through
+    7.57.x, never changes, so a verb one of those releases lacks stays a
+    valid control forever. ``auto-approve`` is registered on HEAD and absent
+    from v7.55.0 (measured against the published wheel: exit 2).
     """
     from nexus._hook_runtime.entry import VERB_TABLE as head_verb_table  # noqa: PLC0415
 
-    verb = "behaviour-census"
-    assert verb in head_verb_table, (
-        f"{verb!r} is no longer registered on HEAD -- pick a still-current "
-        "example of a verb newer than the previous released tag."
-    )
-    tag = _previous_released_tag()
-    verb_table = _verb_table_at_tag(tag)
-    assert verb not in verb_table, (
-        f"{verb!r} is now registered in {tag}'s VERB_TABLE too -- this test's "
-        "premise (a verb newer than the previous release) no longer holds; "
-        "pick a different verb or retire this test."
-    )
+    verb = "auto-approve"
+    assert verb in head_verb_table, f"{verb!r} is no longer registered on HEAD; pick another"
+    known = _verbs_every_fail_closed_release_knows()
+    assert verb not in known
 
     synthetic = {
         "hooks": {
-            "UserPromptSubmit": [
+            "PreToolUse": [
                 {"hooks": [{"type": "command", "command": "nx-hook", "args": [verb]}]}
             ]
         }
     }
     perturbed = tmp_path / "hooks.json"
     perturbed.write_text(json.dumps(synthetic))
-
-    invocations = _nx_hook_verbs_in_hooks_json(perturbed)
-    offenders = [(v, line) for v, line in invocations if v not in verb_table]
-    assert offenders and offenders[0][0] == verb, (
-        f"a verb registered on HEAD but absent from {tag} was not flagged -- "
-        "exactly the nexus-t9klx defect shape this module exists to catch"
+    offenders = [v for v, _ in _nx_hook_verbs_in_hooks_json(perturbed) if v not in known]
+    assert offenders == [verb], (
+        "a direct nx-hook verb that v7.55.0 lacks was not flagged -- exactly the "
+        "nexus-t9klx defect shape this module exists to catch"
     )
 
 
@@ -380,4 +369,72 @@ def test_hooks_json_nx_hook_verbs_resolve_in_the_previous_released_wheel() -> No
         "is ALLOWED -- not merely delayed or degraded (nexus-t9klx, the 7.58.0 "
         "release blocker this test exists to catch before the NEXT one repeats "
         "it)."
+    )
+
+
+# ── Every fail-closed release, not only the previous one (nexus-rcoze) ──────
+#
+# "Previous released" protects a user one release behind. It does not protect
+# a user who skips releases: after 7.58.0 ships, the previous release is
+# 7.58.0, whose VERB_TABLE knows every verb above, while a user still on a
+# 7.57.0 CLI gets exit 2 from each of them. `nx-hook` fails CLOSED on an
+# unknown verb in exactly 7.55.0 (its first release) through 7.57.x, and fails
+# open from 7.58.0. That set can never grow, so the rule is permanent: a direct
+# `nx-hook` entry must name a verb EVERY one of those releases registers.
+# Anything else goes through conexus/hooks/scripts/nx_hook_shim.py, which this
+# extractor does not see, because its command is python3.
+
+_FIRST_NX_HOOK_RELEASE: Version = (7, 55, 0)
+_FIRST_FAIL_OPEN_RELEASE: Version = (7, 58, 0)
+
+
+def _fail_closed_release_tags() -> list[str]:
+    proc = _run_git(["tag", "--list", "v*"])
+    if proc.returncode != 0:
+        pytest.fail(f"git tag --list failed (rc {proc.returncode}): {proc.stderr.strip()}")
+    tags: list[tuple[Version, str]] = []
+    for line in proc.stdout.splitlines():
+        m = _TAG_RE.match(line.strip())
+        if not m:
+            continue
+        version = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if _FIRST_NX_HOOK_RELEASE <= version < _FIRST_FAIL_OPEN_RELEASE:
+            tags.append((version, line.strip()))
+    if not tags:
+        pytest.fail(
+            "no v7.55.0 <= tag < v7.58.0 is visible. Fetch tags "
+            "(`git fetch --tags`) before trusting this check: a tagless checkout "
+            "cannot see the answer, which is not the answer being clean."
+        )
+    return [t for _, t in sorted(tags)]
+
+
+def _verbs_every_fail_closed_release_knows() -> set[str]:
+    tables = [_verb_table_at_tag(t) for t in _fail_closed_release_tags()]
+    return set.intersection(*tables)
+
+
+def test_the_fail_closed_release_set_is_the_known_one() -> None:
+    tags = _fail_closed_release_tags()
+    assert tags[0] == "v7.55.0", f"first fail-closed release resolved to {tags[0]}, not v7.55.0"
+    assert "v7.57.0" in tags, f"v7.57.0 missing from the fail-closed set: {tags}"
+    assert len(tags) >= 6, f"expected at least v7.55.0-.3, v7.56.0, v7.57.0; got {tags}"
+
+
+def test_positive_control_a_verb_7_55_0_lacks_is_detected() -> None:
+    # auto-approve was added after 7.55.0; wired directly, a 7.55.0 CLI exits 2
+    # on every conexus MCP tool call (measured against the published wheel).
+    assert "auto-approve" not in _verbs_every_fail_closed_release_knows()
+
+
+def test_direct_nx_hook_entries_resolve_in_every_fail_closed_release() -> None:
+    known = _verbs_every_fail_closed_release_knows()
+    offenders = sorted({line for verb, line in _nx_hook_verbs_in_hooks_json() if verb not in known})
+    assert not offenders, (
+        "conexus/hooks/hooks.json runs these nx-hook verbs directly, and at least "
+        "one release from 7.55.0 to 7.57.x does not register them, so a user on "
+        "that CLI whose plugin updates first gets exit 2 (blocking on "
+        "UserPromptSubmit, PreToolUse and PermissionRequest). Route them through "
+        "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py <verb>: "
+        f"{offenders}"
     )

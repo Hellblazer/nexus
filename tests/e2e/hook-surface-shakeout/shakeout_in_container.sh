@@ -247,6 +247,46 @@ sleep 20
 ok "/exit issued"
 
 # --- the census -----------------------------------------------------------
+# OLD-CLI MODE (nexus-rcoze, --cli-version): this plugin against a published
+# CLI a user may still have. The question is not "did every hook fire" -- a
+# verb the old CLI lacks is SKIPPED by the shim, by design -- but "did any hook
+# block the session". So: every turn's effect happened, no hook invocation
+# exited 2, and at least one shim entry fired for a verb this CLI does not
+# register (otherwise the run never exercised the path it exists to prove).
+if [ -n "${SHAKEOUT_CLI_VERSION:-}" ]; then
+    say "old CLI ${SHAKEOUT_CLI_VERSION}: nothing may block"
+    HAVE="$(nx --version 2>/dev/null | awk '{print $NF}')"
+    if [ "$HAVE" = "$SHAKEOUT_CLI_VERSION" ]; then ok "the installed CLI is $HAVE"
+    else bad "the installed CLI is '$HAVE', not $SHAKEOUT_CLI_VERSION: this run proved nothing"; fi
+    said() {  # TOKEN: an assistant message in ANY transcript carries it
+        local t
+        for t in $(find "$HOME_DIR/.claude/projects" -name '*.jsonl' 2>/dev/null); do
+            python3 "$HOME_DIR/assistant_said.py" "$t" "$1" && return 0
+        done
+        return 1
+    }
+    for tok in shakeout-bash-ok WROTE DONE PONG; do
+        if said "$tok"; then ok "the session answered $tok"; else bad "no assistant message carries $tok: that turn was blocked or failed"; fi
+    done
+    if [ -f "$HOME_DIR/repo/shakeout_note.md" ]; then ok "the Write turn wrote its file"
+    else bad "the Write turn left no file"; fi
+    EXITS="$RUN/hook-exits.tsv"
+    ROWS="$(awk 'END{print NR}' "$EXITS" 2>/dev/null || echo 0)"
+    BLOCKED="$(awk -F'\t' '$3 == 2' "$EXITS" 2>/dev/null)"
+    if [ "${ROWS:-0}" -gt 0 ]; then ok "$ROWS hook invocations recorded with their exit codes"
+    else bad "no hook exit codes recorded: the harness shims never ran"; fi
+    if [ -z "$BLOCKED" ]; then ok "no hook invocation exited 2"
+    else bad "hook invocations exited 2 (blocking):"; printf '%s\n' "$BLOCKED" | sed 's/^/        /'; fi
+    SKIPPED=""
+    for v in $(awk -F'\t' '$2 ~ /^nx_hook_shim\.py / {split($2, a, " "); print a[2]}' "$EXITS" 2>/dev/null | sort -u); do
+        rc=0
+        echo '{}' | nx-hook "$v" > /dev/null 2>&1 || rc=$?
+        [ "$rc" = 2 ] && SKIPPED="$SKIPPED $v"
+    done
+    if [ -n "$SKIPPED" ]; then ok "the shim fired for verbs this CLI does not register:$SKIPPED"
+    else bad "no fired shim entry named a verb this CLI lacks: the skew path was not exercised"; fi
+fi
+
 say "census: every declared handler against what fired"
 TRANSCRIPTS="$(find "$HOME_DIR/.claude/projects" -name '*.jsonl' 2>/dev/null | tr '\n' ' ')"
 # THE DENOMINATOR COMES FROM THE ORIGINAL MANIFEST, not the shimmed one.
@@ -274,6 +314,9 @@ fi
 sed -n '1,12p' "$RUN/census.txt" 2>/dev/null | sed 's/^/    /'
 
 say "summary: $PASS passed, $FAIL failed"
+# In old-CLI mode the census is advisory: a shim-skipped verb never runs its
+# handler, which the census reads as quiet. The assertions above are the verdict.
+[ -n "${SHAKEOUT_CLI_VERSION:-}" ] && CENSUS=0
 if [ "$FAIL" -eq 0 ] && [ "$CENSUS" -eq 0 ]; then
     echo "HOOK-SURFACE SHAKEOUT PASSED"
     exit 0

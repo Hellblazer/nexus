@@ -41,10 +41,11 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.58.0)
+## Awaiting the next release or plugin cut (pinned: v7.59.0)
 
-_Empty. Everything listed here (nexus-j4iy0, nexus-ebx0s, nexus-vupim) went live with 7.58.0
-when `source.ref` advanced to `v7.58.0`._
+_Empty. Everything listed here (nexus-rcoze: the nx-hook shim, the rerouted
+entries and the veh77 wiring) went live with 7.59.0 when `source.ref` advanced
+to `v7.59.0`._
 
 ## Deferred to the next client release
 

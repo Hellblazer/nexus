@@ -7,7 +7,11 @@ decision that changes over time:
 
 * tool tier -- ``{"type": "mcp_tool", "tool": "hook_<name>", ...}``
 * command tier -- ``{"type": "command", "command": "nx-hook",
-  "args": ["<name-with-dashes>"], ...}``
+  "args": ["<name-with-dashes>"], ...}``, or the same verb through the
+  stdlib shim (nexus-rcoze): ``{"type": "command", "command": "python3",
+  "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+  "<name-with-dashes>"]}``, which is how a verb that an older CLI lacks
+  is wired so it cannot block. It is still the command tier.
 
 Tests that assert WHICH EVENT a hook fires on, or that it is wired
 exactly once, are making a claim about the hook. Writing those against
@@ -31,6 +35,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
+NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
+
+
+def command_verb(entry: dict) -> str | None:
+    """The nx-hook verb a command-tier entry runs, directly or via the shim."""
+    if entry.get("type") != "command":
+        return None
+    args = [a for a in (entry.get("args") or []) if isinstance(a, str)]
+    if entry.get("command") == "nx-hook" and args:
+        return args[0]
+    if entry.get("command") == "python3" and len(args) == 2 and args[0] == NX_HOOK_SHIM:
+        return args[1]
+    return None
 
 
 def names_hook(entry: dict, hook_name: str) -> bool:
@@ -41,9 +58,7 @@ def names_hook(entry: dict, hook_name: str) -> bool:
     """
     if entry.get("type") == "mcp_tool":
         return entry.get("tool") == f"hook_{hook_name}"
-    if entry.get("type") == "command" and entry.get("command") == "nx-hook":
-        return hook_name.replace("_", "-") in (entry.get("args") or [])
-    return False
+    return command_verb(entry) == hook_name.replace("_", "-")
 
 
 def events_for(hook_name: str, hooks_json: Path | None = None) -> list[str]:

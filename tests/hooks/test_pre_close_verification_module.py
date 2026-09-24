@@ -21,6 +21,9 @@ from nexus.hooks import pre_close_verification as gate
 #: (see TestTheLimitThePortRecords below), and a literal here would make
 #: any command that greps this file look like a close.
 CLOSE = "bd " + "close"
+UPDATE = "bd " + "update"
+BATCH = "bd " + "batch"
+IMPORT = "bd " + "import"
 
 
 class TestTheDenyTextIsACarriedContract:
@@ -115,6 +118,414 @@ class TestTheHarvesterFixes:
         assert gate._bead_ids(f"{CLOSE} nexus-aaaaa nexus-bbbbb") == [
             "nexus-aaaaa", "nexus-bbbbb",
         ]
+
+
+class TestNexus2b24oTransitionNotVerb:
+    """bd's own binary (1.0.5), probed live rather than guessed, sets the
+    identical CLOSED status transition through spellings ``_bd_verbs``
+    never looked for. nexus-2b24o: the detector's domain was the close
+    VERB (``bd close``/``bd done``); the actual invariant is the close
+    TRANSITION, and ``bd update ... --status closed`` sets it too, in
+    five different CLI spellings, plus two more via ``bd batch``'s own
+    grammar and one via ``bd import``'s JSONL upsert -- neither of which
+    is even ``bd close``/``bd update`` by verb.
+
+    ``TestNexus2b24oCloseTransitionSpellings`` in
+    ``test_pre_close_verification_hook.py`` drives the same table through
+    the full deny/allow gate; this class pins the detector in isolation.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"{UPDATE} nexus-aaaaa --status closed",
+            f"{UPDATE} nexus-aaaaa --status=closed",
+            f"{UPDATE} nexus-aaaaa -s closed",
+            f"{UPDATE} nexus-aaaaa -s=closed",
+            f"{UPDATE} nexus-aaaaa -sclosed",
+        ],
+    )
+    def test_every_update_status_closed_spelling_is_recognized(self, command):
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert gate._bead_ids(command) == ["nexus-aaaaa"], command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"{UPDATE} nexus-aaaaa --status open",
+            f"{UPDATE} nexus-aaaaa --status in_progress",
+            f"{UPDATE} nexus-aaaaa --status deferred",
+            f"{UPDATE} nexus-aaaaa --priority 1",
+            "bd list --status=closed",
+        ],
+    )
+    def test_non_closing_update_forms_do_not_trigger(self, command):
+        """Bounds the widening: any status OTHER than closed, and any bd
+        verb other than update (`bd list` takes `--status` too, for
+        filtering), must not trip it."""
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_batch_close_line_piped_from_printf_is_recognized(self):
+        """`bd batch`'s own mini-grammar (`bd batch --help`): a `close
+        <id>` line delivered as piped stdin text, never an argument this
+        hook tokenizes."""
+        command = "printf 'close nexus-aaaaa reason\\n' | " + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_batch_update_status_closed_line_is_recognized(self):
+        command = "printf 'update nexus-aaaaa status=closed\\n' | " + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_batch_line_with_no_bead_id_does_not_trigger(self):
+        """The batch-grammar scan is anchored on a bead-id-shaped token,
+        not the bare word `close` -- a reason string alone must not trip
+        it, the same property nexus-fv65m established for `bd close`."""
+        command = "printf 'create task 2 \"close this out\"\\n' | " + BATCH
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_batch_verb_absent_never_triggers_the_raw_text_scan(self):
+        """The scan is gated on the `batch` verb actually appearing
+        (position-based, same rigor as `close`/`done`) -- text that merely
+        LOOKS like a batch-close line, with no `bd batch` anywhere in the
+        command, must not trigger it."""
+        command = "printf 'close nexus-aaaaa reason\\n' > /tmp/ops.txt"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_import_json_with_closed_status_is_recognized(self):
+        """`bd import` upserts by id from JSONL, also read from stdin,
+        never a command-line argument."""
+        command = 'echo \'{"id":"nexus-aaaaa","status":"closed"}\' | ' + IMPORT + " -"
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_import_json_without_closed_status_does_not_trigger(self):
+        command = 'echo \'{"id":"nexus-aaaaa","status":"open"}\' | ' + IMPORT + " -"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_import_with_no_id_field_does_not_trigger(self):
+        """Anchored on BOTH the id and the closed status -- a bare
+        status-closed mention with no id field must not match alone."""
+        command = 'echo \'{"status":"closed"}\' | ' + IMPORT + " -"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_import_verb_absent_never_triggers_the_raw_text_scan(self):
+        command = 'echo \'{"id":"nexus-aaaaa","status":"closed"}\' > /tmp/x.jsonl'
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+
+class TestNexus2b24oRound2Scoping:
+    """Round 2 of nexus-2b24o: code-review-expert + substantive-critic
+    both returned on commit 5ba250e92. Two SHIP-BLOCKERS (false positives
+    that regressed nexus-fv65m's own quoted-mention protection, one level
+    removed) plus three "also fix" items, addressed together.
+
+    SHIP-BLOCKER: round 1's batch/import raw-text scan ran over the WHOLE
+    ``cmd`` once the verb appeared ANYWHERE, so a close-shaped substring
+    sitting in an unrelated &&-joined command, or in a --reason/-m value
+    of a DIFFERENT command, false-positived. Fixed by scoping the scan to
+    the prior PIPE STAGE(S) of the SAME strong-boundary-delimited shell
+    segment -- see :func:`gate._pipeline_segments` and the two regexes'
+    own docstrings.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f'echo "close nexus-99999: fixed bug" && {BATCH} --help',
+            f'{UPDATE} nexus-11111 --reason "will close nexus-99999 later" && {BATCH} --help',
+        ],
+    )
+    def test_close_shaped_text_in_an_unrelated_segment_does_not_trigger(self, command):
+        """The exact two reproductions from the round-2 code review. Both
+        must fail against 5ba250e92 (has_close_or_done True there) and
+        pass here."""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, (
+            f"false positive: {command!r} -> has_close_or_done=True. "
+            f"The batch scan read text outside bd batch's own pipeline."
+        )
+
+    def test_the_genuine_batch_close_still_survives_the_scoping_fix(self):
+        """The scoping fix must not blind the scan to a REAL close --
+        over-narrowing here is the failure direction that matters, same
+        doctrine as the bead-id harvester fixes above."""
+        command = "printf 'close nexus-aaaaa reason\\n' | " + BATCH
+        assert gate._bd_verbs(command)["has_close_or_done"] is True, command
+
+    # -- Item 4: batch/import content off the command line is now VISIBLE,
+    # not silently allowed. --------------------------------------------
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"{BATCH} -f file.txt",
+            f"{BATCH} < file.txt",
+            f"{IMPORT} path/to.jsonl",
+        ],
+    )
+    def test_content_off_the_command_line_is_indeterminate_not_silent(self, command):
+        """`bd batch -f <file>`, a bare redirect, and `bd import <file>`
+        all carry their close-shaped content (if any) somewhere this hook
+        cannot read without spawning a process. Round 1's docstring
+        claimed this degraded to the module's INDETERMINATE-allow; it did
+        not -- has_close_or_done stayed False AND has_indeterminate_source
+        did not exist, so `run()` took the top-of-function bare `_allow()`
+        with zero message. Now it is a real, distinct signal."""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is True, (
+            f"{command!r} carries content this hook cannot read, but "
+            f"has_indeterminate_source is False -- back to a silent allow."
+        )
+
+    def test_an_opaque_shell_variable_feeding_batch_is_indeterminate(self):
+        """The substantive-critic's own example: a variable populated by
+        an earlier command substitution. The LITERAL text ("$OPS") proves
+        nothing about what bd actually receives -- correctly neither a
+        confirmed close nor a confirmed non-close."""
+        command = 'OPS=$(cat f); echo "$OPS" | ' + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is True, command
+
+    def test_a_fully_visible_non_close_batch_call_stays_silent(self):
+        """Bounds item 4: content that IS visible and definitively is NOT
+        a close (no variable, no close-shaped line) must stay a clean,
+        silent allow -- indeterminate is for content this hook cannot
+        read, not a blanket noise tax on every batch/import call."""
+        command = "printf 'create task 2 \"new feature\"\\n' | " + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is False, command
+
+    def test_indeterminate_source_message_names_the_reason_and_never_denies(
+        self, monkeypatch
+    ) -> None:
+        """The message `_run_gate` emits for the indeterminate-only path
+        must be visible (not the bare pre-round-2 `_allow()`) and must
+        NEVER call `_bead_ids` -- doing so would re-harvest whatever
+        unrelated bead id sits in a sibling segment, reopening the
+        ship-blocker one call away."""
+        monkeypatch.setattr(
+            "nexus.hooks.stop_verification._read_config", lambda: {"on_close": True}
+        )
+        called: list[str] = []
+        monkeypatch.setattr(
+            gate, "_bead_ids", lambda cmd: called.append(cmd) or []
+        )
+        command = f'echo "close nexus-99999" && {BATCH} -f ops.txt'
+        verbs = gate._bd_verbs(command)
+        result = gate._run_gate({}, command, verbs)
+        parsed = json.loads(result.stdout)
+        hso = parsed["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "allow"
+        assert "INDETERMINATE" in (hso.get("additionalContext") or "")
+        assert called == [], (
+            "_bead_ids was called on the indeterminate-only path -- this "
+            "re-opens the ship-blocker via the id harvester's own breadth"
+        )
+
+    # -- Item 5: `bd sql` is a fourth close transition. -------------------
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bd sql \"UPDATE issues SET status='closed' WHERE id='nexus-aaaaa'\"",
+            'bd sql \'UPDATE issues SET status="closed" WHERE id="nexus-aaaaa"\'',
+            "bd sql \"UPDATE issues SET priority=1, status='closed' WHERE id='nexus-aaaaa'\"",
+        ],
+    )
+    def test_bd_sql_confirmed_close_is_recognized(self, command):
+        """`bd sql --help`: 'Execute a raw SQL query... Useful for...
+        working around bugs in higher-level commands.' A real bd 1.0.5
+        subcommand, unmentioned by round 1 despite closing a bead with no
+        close/done/update/batch/import verb anywhere in the command."""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_bd_sql_write_to_a_different_status_is_definitively_not_a_close(self):
+        command = "bd sql \"UPDATE issues SET status='open' WHERE id='nexus-aaaaa'\""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is False, command
+
+    def test_bd_sql_select_is_not_a_close(self):
+        command = "bd sql \"SELECT * FROM issues WHERE status='closed'\""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is False, command
+
+    def test_bd_sql_unparseable_status_value_is_indeterminate(self):
+        """A bind parameter, expression, or subquery for the status value
+        cannot be read literally -- neither confirmed close nor confirmed
+        non-close."""
+        command = "bd sql \"UPDATE issues SET status=@newval WHERE id='nexus-aaaaa'\""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is True, command
+
+
+class TestNexus2b24oRound3ShellBoundaries:
+    """Round 3 of nexus-2b24o (substantive-critic on commit 8853ee707):
+    two PRE-EXISTING silent bypasses in the shared segment splitter, not
+    caused by round 1 or 2 but walked through by a literal close all the
+    same:
+
+    * a bare NEWLINE between two commands. The verb-position check only
+      ever looks at position 0 of a segment (``rest[0] == 'bd'``); with no
+      newline boundary, ``echo hi\\nbd close nexus-x`` tokenized as ONE
+      segment starting with ``echo``, so the real close at token position
+      2 was invisible -- a full silent allow, not even the INDETERMINATE
+      message.
+    * ``|&`` (bash's stdout+stderr pipe), invisible to both boundary
+      regexes -- same failure shape, one operator this file never knew
+      about.
+
+    Fixed in the SHARED boundary finder (:func:`gate.iter_shell_boundaries`)
+    so both this module and ``phase_review_close_gate`` inherit it -- see
+    that module's own tests for its half.
+    """
+
+    def test_bare_newline_between_commands_is_a_boundary(self):
+        command = "echo hi" + chr(10) + "bd close nexus-99999"
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-99999" in gate._bead_ids(command)
+
+    def test_stdout_stderr_pipe_is_a_boundary(self):
+        command = "echo foo |& bd close nexus-99999"
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-99999" in gate._bead_ids(command)
+
+    def test_a_genuine_close_on_line_three_is_caught(self):
+        """The multi-line shape named directly: several unrelated lines,
+        then a real close."""
+        command = chr(10).join(["echo one", "echo two", "bd close nexus-line3"])
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-line3" in gate._bead_ids(command)
+
+    def test_a_heredoc_body_containing_close_shaped_text_still_does_not_trigger(self):
+        """The newline boundary must NOT reach inside a heredoc's body --
+        a heredoc's multi-line construct is syntactically ONE command from
+        the shell's perspective, and its body is DATA fed to the
+        preceding command, never executed. Without this exclusion, adding
+        `\\n` as a boundary would turn every heredoc line into its own
+        fake "segment" and this exact case would become a false
+        positive."""
+        command = "cat <<'EOF'" + chr(10) + "bd close nexus-hdoc1" + chr(10) + "EOF"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_the_two_pinned_heredoc_limit_tests_are_unaffected(self):
+        """Non-regression against `TestTheLimitThePortRecords` below: the
+        operator-inside-heredoc-body trip and the no-operator-heredoc
+        no-op must both still hold with `\\n` now a boundary too."""
+        v_operator = gate._bd_verbs(
+            "python3 - <<'PY'" + chr(10) + "s = 'x && " + CLOSE + " y'" + chr(10) + "PY"
+        )
+        assert v_operator["has_close_or_done"] is True
+
+        v_no_operator = gate._bd_verbs(
+            "cat <<'EOF'" + chr(10) + "run " + CLOSE + " to finish" + chr(10) + "EOF"
+        )
+        assert v_no_operator["has_close_or_done"] is False
+
+
+class TestNexus2b24oRound4QuoteAwareBoundaries:
+    """Round 4 of nexus-2b24o (substantive-critic on commit 47f635dcd):
+    round 3's new bare-newline boundary is not QUOTE-aware -- only
+    heredoc bodies were protected. A multi-line ``--reason``/``-m`` VALUE
+    is a normal, common shape (a multi-paragraph close reason), and its
+    embedded newlines are literal quoted text, not command boundaries:
+
+        bd update nexus-1 --reason "line one
+        bd close nexus-x
+        line three"
+
+    tokenized the SECOND line as its own segment starting with ``bd``,
+    a full false positive. Fixed by :func:`gate._quoted_spans`, wired
+    into :func:`gate.iter_shell_boundaries` -- see that function's own
+    docstring for the two independent protections (quotes protect EVERY
+    boundary type; heredoc bodies protect only the newline).
+    """
+
+    _REASON_MULTILINE = (
+        'line one' + chr(10) + 'bd close nexus-x' + chr(10) + 'line three'
+    )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f'{UPDATE} nexus-1 --reason "{_REASON_MULTILINE}"',
+            f'{UPDATE} nexus-1 -m "{_REASON_MULTILINE}"',
+            f"{UPDATE} nexus-1 --reason '{_REASON_MULTILINE}'",
+        ],
+    )
+    def test_a_close_shaped_line_inside_a_quoted_multiline_value_does_not_trigger(
+        self, command
+    ):
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_operator_inside_a_quoted_value_also_does_not_trigger(self):
+        """Quoting protects EVERY boundary type, not only the newline --
+        a literal `&&` inside a quoted --reason value is equally not a
+        real shell boundary."""
+        command = (
+            f'{UPDATE} nexus-1 --reason "supersedes nexus-y && ' + CLOSE + ' nexus-fake"'
+        )
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_command_substitution_nesting_inside_double_quotes_does_not_confuse_the_scanner(
+        self,
+    ):
+        """`"$(echo "nested")"` -- a double-quoted string containing its
+        own nested double quotes via $(...) -- must not make the scanner
+        think the outer quote closes early and then misread the rest."""
+        command = (
+            f'{UPDATE} nexus-1 --reason "output: $(echo "nested ' + CLOSE + ' nexus-fake")"'
+        )
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_a_genuine_close_after_a_closed_multiline_quoted_value_is_still_caught(self):
+        """Bounds the fix: protection ends at the REAL closing quote. A
+        close on its own line AFTER the quoted string properly closes
+        must still be caught."""
+        command = (
+            f'{UPDATE} nexus-1 --reason "{self._REASON_MULTILINE}"'
+            + chr(10) + CLOSE + " nexus-z"
+        )
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-z" in gate._bead_ids(command)
+
+    def test_an_unterminated_quote_does_not_crash(self):
+        """Defined posture, not a crash: an unterminated quote is simply
+        NOT protected (see `_quoted_spans`'s own docstring for why under-
+        protecting here is the safe direction, matching
+        `TestMalformedQuotingNeverBypasses`'s existing, accepted
+        behavior for a malformed --reason value)."""
+        command = f'{CLOSE} nexus-abc12 --reason="unterminated'
+        gate._bd_verbs(command)  # must not raise
+
+    def test_the_operator_inside_heredoc_body_limit_survives_quote_awareness(self):
+        """The exact regression this fix's first draft introduced: a
+        heredoc body containing a Python string literal (`'x && bd close
+        y'`) was newly (and wrongly) read as a REAL single-quoted span,
+        hiding the `&&` the heredoc known-limit test requires to still
+        split. Heredoc bodies are excluded from quote-scanning entirely
+        (`_quoted_spans`'s `skip_spans` parameter)."""
+        command = (
+            "python3 - <<'PY'" + chr(10) + "s = 'x && " + CLOSE + " y'" + chr(10) + "PY"
+        )
+        assert gate._bd_verbs(command)["has_close_or_done"] is True, command
 
 
 class TestTheLimitThePortRecords:
@@ -227,7 +638,13 @@ class TestTheOverridePathKeepsTheBashDifferential:
         )
         command = f"{CLOSE} " + " ".join(status)
         result = gate._run_gate(
-            {}, command, {"has_create": False, "inline_override": True}
+            {}, command,
+            {
+                "has_create": False,
+                "has_close_or_done": True,
+                "has_indeterminate_source": False,
+                "inline_override": True,
+            },
         )
         return result, calls, escapes
 

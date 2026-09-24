@@ -376,9 +376,14 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
     starter, then poll the lease it publishes. Never starts a session supervisor
     underneath the unit (RDR-175 Gap 3). Self-reporting (prints its own outcome).
 
-    On ``ActivationError`` (headless / no session bus — `install_autostart`
-    cannot activate the unit) nothing was started, so falling back to a session
-    supervisor is coexistence-safe and leaves the user with a serving backend.
+    On ``ActivationError`` -- headless / no session bus, or (nexus-k9i56) the
+    manager not answering within ``installer._MANAGER_ACTION_TIMEOUT_S`` --
+    falling back to a session supervisor is safe not because nothing was
+    started (a timed-out activation may have completed asynchronously, on the
+    OS side, after the CLI-side kill), but because ``ensure_storage_supervisor``
+    checks for a FRESH published lease before spawning anything: if the unit
+    actually came up, its lease is discovered and no second supervisor is
+    started; only a genuinely absent lease triggers the fallback spawn below.
     """
     from nexus.daemon import installer  # noqa: PLC0415 — deferred local import — CLI startup cost
 
@@ -397,10 +402,17 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
     try:
         result = installer.install_autostart(tier="service")
     except installer.ActivationError as exc:
-        # Headless / no session bus: the unit could not be ACTIVATED, so nothing
-        # was started — falling back to a session supervisor is coexistence-safe
-        # and leaves the user with a serving backend. (Installation is idempotent
-        # — PG and the binary are not re-provisioned on a later retry.)
+        # Headless / no session bus, or (nexus-k9i56) the manager timed out at
+        # installer._MANAGER_ACTION_TIMEOUT_S -- a timeout is not proof that
+        # nothing was started, the OS side may still complete the job
+        # asynchronously after the CLI-side kill. Falling back to a session
+        # supervisor is safe regardless, because _start_service_step routes
+        # through ensure_storage_supervisor (commands/daemon.py), which checks
+        # for a FRESH lease before spawning: if the unit is actually up, its
+        # lease is discovered and nothing is double-started; only a genuinely
+        # absent lease triggers the fallback spawn. (Installation is
+        # idempotent — PG and the binary are not re-provisioned on a later
+        # retry.)
         click.echo(
             f"\nCould not activate the autostart unit ({exc}); starting the "
             "service for this session instead. Re-run `nx daemon service install "

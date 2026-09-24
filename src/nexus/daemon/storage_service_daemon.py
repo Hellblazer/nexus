@@ -483,6 +483,14 @@ _JAVA_FLOOR: int = 25
 #: deployment this repo knows of wants: the cloud egress proxy is IPv4 too
 #: (``EgressProxy.java:34``). The opt-out exists for a deployment that turns
 #: out to need a dual-stack listener, not for one already known to.
+#:
+#: This supervisor is its ONLY reader, so the opt-out exists only where
+#: nexus launches the engine. The managed cloud engine does not: its image
+#: entrypoint execs the binary directly, so there the baked IPv4-only stack
+#: always applies. That is correct by design, not an unreachable knob
+#: (nexus-wovg1, measured on engine-service-v0.1.130's deploy): the engine
+#: binds 127.0.0.1, and its database host and Voyage endpoint both resolve
+#: A-only, reached over IPv4 paths in a subnet with no IPv6 route.
 IPV4_ONLY_ENV = "NX_SERVICE_IPV4_ONLY"
 
 

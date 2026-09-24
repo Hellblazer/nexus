@@ -1,0 +1,10 @@
+{
+  "changeset_ids": [
+    "pipeline-002-per-row-identity.xml:pipeline-002-2"
+  ],
+  "engine_tag": "engine-service-v0.1.129",
+  "from_tag": "engine-service-v0.1.128",
+  "recorded_at": "2026-09-24T02:52:48Z",
+  "retroactive": true,
+  "retroactive_note": "Written 2026-09-24, after the fact, by Sam's decision; NOT witnessed at relay time. Evidence the pipeline-002-2 table reached the v0.1.129 handoff: conexus's own records of the 2026-09-18 PITR-fork walk rehearsal and predicate check (0 parentless rows) and the flip, T2 conexus/deploy-v01129-walk-rehearsal-2026-09-18 and conexus/deploy-v01129-flipped-2026-09-18."
+}

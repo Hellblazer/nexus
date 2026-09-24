@@ -194,6 +194,41 @@ requests, independent of ``per_page``, and a retry is the remedy rather than
 a different query. :data:`WINDOW_FETCH_ATTEMPTS` refetches before believing a
 short window, and each stale observation is logged rather than swallowed, so
 the phenomenon stays visible if its rate changes.
+
+ROUND 5 (nexus-of2x8 critique, 2026-09-24), four independent fixes:
+
+1. The retry above originally fired with ZERO delay between attempts. That
+   assumes each attempt is an INDEPENDENT draw against the intermittent
+   staleness, and this measurement never established that -- a session-,
+   edge-, or cache-sticky server behind a load balancer would make an
+   immediate retry land on the exact same cached response, defeating it as
+   surely as no retry at all. The previously-stated "0.08^3 ~= 1/2000"
+   compounded residual-rate figure carried that unstated assumption and is
+   deliberately DELETED here rather than corrected -- nothing in this
+   module's measurement distinguishes "independent per-request roll" from
+   "sticky until the edge's own cache expires", so no compounded figure can
+   be honestly derived from it. :data:`WINDOW_FETCH_BACKOFF_SECONDS` puts a
+   real, growing delay between attempts instead, which at least gives a
+   different edge/cache a chance to answer; it is not a proof of
+   independence, only a cheap hedge against the alternative.
+2. The BLOCKED path (the harder finding: covered by nothing at all, not
+   even a run in progress) used to print only to stderr, a full level softer
+   than the out-of-scope PENDING case's ``::warning::`` annotation. It now
+   emits ``::error::`` (see :func:`_emit_blocked_annotation`) and a
+   :envvar:`GITHUB_STEP_SUMMARY` line, both visible on the run page without
+   opening the log -- the same reasoning :func:`_emit_out_of_scope_annotation`
+   already gave for the softer case applies at least as strongly here.
+3. :func:`run_is_code_exercised` used to require a code-exercising job to
+   conclude ``success``, so a run whose pytest jobs genuinely RAN and then
+   reported red (``failure``/``timed_out``) was rejected with the same "did
+   not exercise code" message as a run that never ran pytest at all
+   (``skipped``/``cancelled``). Those are different findings -- see
+   :func:`run_is_code_tested_red` and its DECISION.
+4. :func:`git_changed_files`'s merge-commit handling claimed "this repo's
+   own convention is a direct push with no merge commits on develop" --
+   false; back-merges genuinely land on develop (82eda20af, 7e59d3b15). The
+   conservative handling itself is unchanged and correct for a different
+   reason -- see that function's docstring.
 """
 
 from __future__ import annotations
@@ -203,6 +238,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -223,20 +259,42 @@ CODE_EXERCISED_JOB_PREFIXES: tuple[str, ...] = (
 
 #: How many times to fetch the run list before believing a window that does
 #: not reach the audited head. See STALE WINDOWS in the module docstring: the
-#: measured per-request rate is about 8%, so three attempts takes a false
-#: CANNOT VERIFY from roughly 1 push in 12 to roughly 1 in 2000. Raising this
-#: buys very little and delays a genuine refusal; lowering it to 1 restores
-#: the noisy behaviour.
+#: measured per-request rate is about 8%. What is NOT measured is whether
+#: repeated requests are INDEPENDENT draws against that staleness -- the
+#: observed pattern (one page, repeatedly, at a roughly constant rate) is
+#: also consistent with a session-, edge-, or cache-sticky server, in which
+#: case a retry's odds of success depend on the delay before it, not on the
+#: retry count alone. A compounded "0.08^3" residual-rate figure would
+#: assume the independence this measurement does not establish, so it is
+#: deliberately not stated as a number here. Raising this attempt count buys
+#: diminishing returns either way and delays a genuine refusal; lowering it
+#: to 1 restores the fully noisy behaviour.
 WINDOW_FETCH_ATTEMPTS: int = 3
+
+#: Backoff unit between window-fetch retries, in seconds, scaled by the
+#: attempt number (1x, 2x, ... up to WINDOW_FETCH_ATTEMPTS-1 sleeps total).
+#: ROUND 5 (nexus-of2x8 critique): the retry originally fired with ZERO
+#: delay, which does nothing to rule out the session/edge/cache-sticky
+#: possibility above -- an immediate retry can land on the exact same cached
+#: response. A real, growing delay at least gives a different edge/cache a
+#: chance to answer; it is a cheap hedge, not a proof of independence.
+#: Injectable via :func:`check`'s ``sleep`` parameter so tests never sleep
+#: for real.
+WINDOW_FETCH_BACKOFF_SECONDS: float = 1.0
 
 _REMEDY = (
     "Remedy: this commit's code was never exercised by pytest on any tree. "
     "If it is still on develop, the next push (even a docs-only one) will "
-    "not retroactively fix this -- something must push a commit that "
-    "touches code (or re-run ci.yml against this commit's tree directly) so "
-    "a real pytest matrix runs over a tree containing it. Do NOT respond by "
-    "weakening the doc-only fast lane or the concurrency cancellation: "
-    "AGENTS.md's CI Cost Discipline sanctions both by name (nexus-of2x8)."
+    "not retroactively fix this. ci.yml has no workflow_dispatch trigger, "
+    "so it cannot be re-run directly by name -- two things actually work: "
+    "(1) find this commit's own ci.yml run in the Actions tab (filter runs "
+    "by this sha) and `gh run rerun <run-id>` it -- GitHub reruns a "
+    "cancelled run's full job graph over its original tree even though the "
+    "run already concluded; or (2) push a new commit that touches code "
+    "(even a one-line comment) so the next real pytest matrix runs over a "
+    "tree containing this commit. Do NOT respond by weakening the doc-only "
+    "fast lane or the concurrency cancellation: AGENTS.md's CI Cost "
+    "Discipline sanctions both by name (nexus-of2x8)."
 )
 
 
@@ -308,14 +366,64 @@ class CommitInfo:
     changed_files: tuple[str, ...]
 
 
+#: Conclusions that prove a code-exercising job actually RAN to its own
+#: verdict, as opposed to being skipped (ci.yml's `changes` job resolved
+#: code=false, so the job's `if:` was never true) or cancelled (cut short
+#: before it could conclude on its own -- concurrency cancellation, the
+#: exact bead-triggering shape). `timed_out` is included alongside `failure`
+#: because a job that times out has still started, executed, and been
+#: allowed to run to its own time limit -- it is not a skip and not an
+#: externally-imposed cancellation.
+_CODE_EXERCISED_REAL_CONCLUSIONS: tuple[str, ...] = ("success", "failure", "timed_out")
+
+
 def run_is_code_exercised(jobs: dict[str, str]) -> bool:
     """True iff *jobs* proves ci.yml's `changes` job resolved code=true and
-    pytest genuinely ran (see :data:`CODE_EXERCISED_JOB_PREFIXES`)."""
+    pytest genuinely RAN against this run's tree (see
+    :data:`CODE_EXERCISED_JOB_PREFIXES`) -- a clean `success` (the common
+    case) or a genuine red (`failure`/`timed_out`) both count.
+
+    DECISION (nexus-of2x8 round 5): a tested-but-failing run counts as
+    COVERED for this audit's purpose. This audit exists to catch a commit
+    NOBODY ever ran pytest against; a commit whose pytest run genuinely
+    executed and then reported red is a different, already-loud problem
+    (ci.yml's own red check on that push), not the silent hole this script
+    closes. Folding a tested-red run into "never exercised" would make this
+    audit re-report ordinary CI failures under a misleading message -- see
+    :func:`run_is_code_tested_red` for the distinct, separately-reported
+    finding this decision does NOT erase.
+    """
     return any(
-        conclusion == "success"
+        conclusion in _CODE_EXERCISED_REAL_CONCLUSIONS
         and any(name.startswith(prefix) for prefix in CODE_EXERCISED_JOB_PREFIXES)
         for name, conclusion in jobs.items()
     )
+
+
+def run_is_code_tested_red(jobs: dict[str, str]) -> bool:
+    """True iff a code-exercising job in *jobs* ran to a genuine conclusion
+    (see :data:`_CODE_EXERCISED_REAL_CONCLUSIONS`) but NONE of them
+    succeeded -- pytest executed against this run's tree and reported red.
+
+    A run in this state IS code-exercised (:func:`run_is_code_exercised`
+    already returns True for it, by the DECISION in its own docstring) and
+    can still become the coverage floor. This function exists only to drive
+    a DISTINCT message and annotation ("tested, red") in :func:`check`,
+    instead of the misleading "did not exercise code" the undifferentiated
+    rejection used to print for this exact shape (the defect this function
+    closes: a run where every code job FAILED was reported identically to
+    one where pytest never ran at all).
+    """
+    saw_success = False
+    saw_real_red = False
+    for name, conclusion in jobs.items():
+        if not any(name.startswith(prefix) for prefix in CODE_EXERCISED_JOB_PREFIXES):
+            continue
+        if conclusion == "success":
+            saw_success = True
+        elif conclusion in ("failure", "timed_out"):
+            saw_real_red = True
+    return saw_real_red and not saw_success
 
 
 def find_last_code_exercised_run(runs: list[RunRecord]) -> RunRecord | None:
@@ -519,10 +627,18 @@ def git_changed_files(repo_path: str, sha: str) -> tuple[str, ...]:
 
     A MERGE commit (>1 parent) is treated as touching code unconditionally
     (the conservative, fail-toward-detection direction) rather than diffed
-    against a chosen parent -- this repo's own convention is a direct push
-    with no merge commits on develop (AGENTS.md Worktrees rule 8), so a
-    merge commit showing up here is itself unusual enough to warrant the
-    loud path, not a silent diff-against-first-parent guess.
+    against a chosen parent. CORRECTED (nexus-of2x8 critique, 2026-09-24):
+    this used to claim "this repo's own convention is a direct push with no
+    merge commits on develop" -- false; back-merges genuinely land on
+    develop (82eda20af, 7e59d3b15 reconcile `main` back into `develop` after
+    a release, per AGENTS.md Worktrees rule 9's primary-checkout sync and
+    the release process). Merge commits are therefore not rare here, and
+    the conservative handling is kept for a different reason: which
+    parent's diff is "the" diff for a merge is inherently ambiguous (a
+    back-merge's first-parent diff is typically empty or near-empty even
+    when the merge brought in real code from the other side), so treating
+    every merge as touching code is the correct default regardless of how
+    often merges occur -- not a loud-path-for-a-rare-event heuristic.
 
     A ROOT commit (0 parents) is diffed against the empty tree via
     ``--root`` -- it is not a merge, and without ``--root`` `diff-tree`
@@ -586,6 +702,78 @@ def _emit_out_of_scope_annotation(
     )
 
 
+def _emit_blocked_annotation(blocked: "list[CommitInfo]") -> None:
+    """The BLOCKED counterpart to :func:`_emit_out_of_scope_annotation`.
+
+    ROUND 5 (nexus-of2x8 critique): BLOCKED -- covered by nothing at all,
+    not even a run in progress -- is the HARDER finding of the two, yet
+    this path used to print only to stderr, a full level softer than the
+    out-of-scope PENDING case's own ``::warning::``. The reasoning
+    :func:`_emit_out_of_scope_annotation` already gives for that case
+    ("nobody reads the log of a green run") applies at least as strongly
+    to a red one: GitHub's own generic "Process completed with exit code
+    1" annotation, the only thing a reader sees without opening the log if
+    this were never emitted, carries none of the diagnostic content (which
+    shas, what to do about it).
+
+    ``::error::`` (rather than ``::warning::``) matches this repo's
+    overwhelming convention of pairing a hard failure with a named error
+    annotation (25+ precedents across ci.yml, engine-service-release.yml,
+    service-ci.yml, scripts/check_lint_leg_non_vacuity.py). Unlike the
+    out-of-scope annotation this does not compete for control of anything
+    -- the job's exit code (1) is unchanged; this only makes the existing
+    failure legible without opening the log. Emitted only under
+    GITHUB_ACTIONS, one annotation for the whole set (GitHub caps
+    annotations per run).
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    shas = ", ".join(c.sha[:12] for c in blocked)
+    print(
+        f"::error title=Commit(s) never exercised by pytest::"
+        f"{len(blocked)} commit(s) touch code and are covered by NOTHING -- "
+        f"not a completed run, not even one still in progress ({shas}). "
+        f"{_REMEDY}"
+    )
+
+
+def _emit_tested_red_annotation(run_id: object, candidate_sha: str) -> None:
+    """Distinct signal for the "tested, red" finding (nexus-of2x8 round 5):
+    a run used as this audit's coverage floor whose own pytest jobs
+    genuinely ran and reported failure/timed_out, not success. This DOES
+    count as coverage (see :func:`run_is_code_exercised`'s DECISION) so it
+    must never look like a BLOCKED/error state -- ``::warning::``, not
+    ``::error::``, and its own title so it is not mistaken for the
+    out-of-scope annotation either. Emitted only under GITHUB_ACTIONS.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    print(
+        f"::warning title=Coverage floor is a RED run::run {run_id} "
+        f"({candidate_sha[:12]}) is this audit's pytest coverage floor even "
+        f"though its own pytest run reported failure/timed_out, not "
+        f"success. Pytest genuinely ran against this tree -- this commit "
+        f"and its ancestors count as covered by this audit -- but that is a "
+        f"separate, already-visible problem from the silent coverage hole "
+        f"nexus-of2x8 closes. Check ci.yml's own result for that push."
+    )
+
+
+def _write_job_summary(text: str) -> None:
+    """Append *text* to :envvar:`GITHUB_STEP_SUMMARY`, GitHub Actions' own
+    run-page-visible surface (rendered as markdown, distinct from both the
+    log and annotations). A no-op when the env var is unset -- a local or
+    `uv run` invocation never tries to write a file that does not exist.
+    """
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
+
+
 def check(
     repo: str,
     token: str,
@@ -595,6 +783,7 @@ def check(
     repo_path: str,
     max_runs_scanned: int,
     api: Callable[[str], dict] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     if not repo or not token:
         print(
@@ -636,6 +825,13 @@ def check(
             f"audited head {head_sha} -- refetching (see STALE WINDOWS).",
             file=sys.stderr,
         )
+        if attempt < WINDOW_FETCH_ATTEMPTS:
+            # Backoff BEFORE the next attempt, not after the last one -- a
+            # sleep that only precedes a real retry, never a final refusal
+            # (see WINDOW_FETCH_BACKOFF_SECONDS: zero delay here is the
+            # defect round 5 fixes, since it gives a sticky edge/cache no
+            # chance to have moved on by the next request).
+            sleep(WINDOW_FETCH_BACKOFF_SECONDS * attempt)
     else:
         newest = raw_runs[0].get("head_sha", "<none>")
         print(
@@ -724,6 +920,23 @@ def check(
                 file=sys.stderr,
             )
             continue
+        if run_is_code_tested_red(jobs):
+            # DISTINCT from the rejection above (round 5 fix): pytest
+            # genuinely ran here and reported red, which is not the same
+            # finding as "never exercised" -- see run_is_code_tested_red's
+            # docstring for the DECISION that this still counts as
+            # coverage. Say so explicitly rather than silently accepting it
+            # as though it were a clean success.
+            print(
+                f"note: run {run_id} ({candidate_sha}) exercised code but "
+                "reported RED (tested, red) -- pytest genuinely ran against "
+                "this tree and failed; this DOES count as coverage for this "
+                "audit, but is a distinct, already-visible problem from the "
+                "silent coverage hole nexus-of2x8 closes -- check ci.yml's "
+                "own result for that push.",
+                file=sys.stderr,
+            )
+            _emit_tested_red_annotation(run_id, candidate_sha)
         if not git_commit_exists(repo_path, candidate_sha):
             print(
                 f"note: run {run_id}'s head {candidate_sha} is code-exercised "
@@ -794,6 +1007,16 @@ def check(
                 file=sys.stderr,
             )
         print(f"\n{_REMEDY}", file=sys.stderr)
+        _emit_blocked_annotation(blocked)
+        _write_job_summary(
+            "## nexus-of2x8: commit coverage audit BLOCKED\n\n"
+            f"{len(blocked)} commit(s) on `{branch}` between the last "
+            f"code-exercised run (`{last_covering_run.head_sha}`) and "
+            f"`{head_sha}` touch code and are covered by NOTHING -- not a "
+            "completed run, not even one still in progress:\n\n"
+            + "\n".join(f"- `{c.sha}`" for c in blocked)
+            + f"\n\n{_REMEDY}\n"
+        )
         return 1
 
     audited_count = len(pending_shas) - len(pending)

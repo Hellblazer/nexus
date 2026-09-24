@@ -263,6 +263,64 @@ class ActivationProbe:
 #: ``nx doctor`` or the finish pass; a timeout reads as ``UNREACHABLE``.
 _ACTIVATION_QUERY_TIMEOUT: float = 10.0
 
+#: Ceiling on an OS-manager INSTALL/UNINSTALL action -- ``launchctl
+#: bootstrap``/``bootout`` on macOS, ``systemctl --user enable --now``/
+#: ``disable --now`` on Linux (nexus-k9i56). MEASURED on this box (macOS
+#: 25.6.0, 2026-09-23) against a throwaway LaunchAgent
+#: (``com.nexus.k9i56-throwaway-test``, never a live nexus unit --
+#: ``launchctl list | grep -i nexus`` was checked first and left alone),
+#: three runs each, idle and under a 17-process ``yes`` CPU load (all
+#: cores pinned, load average ~6-16 during the run):
+#:
+#:     launchctl bootstrap   idle 4.4-5.7ms   loaded 6.1-9.5ms
+#:     launchctl bootout     idle 4.2-5.1ms   loaded 5.4-6.8ms
+#:
+#: NO LINUX BOX EXISTS HERE, so the Linux half is REASONED from systemd's
+#: own published defaults, not measured -- that gap is real and stays
+#: open: the bead asked to time the verbs "on macOS AND on Linux", and
+#: only macOS timings above are actual measurements. ``systemctl --user
+#: enable/disable --now`` runs the unit's start/stop JOB inline (this is
+#: the PER-USER manager, spawned by ``--user``, not the system one), and
+#: that job is itself bounded by ``TimeoutStartSec=``/``TimeoutStopSec=``,
+#: which default (``DefaultTimeoutStartSec=``/``DefaultTimeoutStopSec=``
+#: in systemd-user.conf(5) -- the user-manager config file, not
+#: systemd-system.conf(5)) to 90s each; the shipped value is the same 90s
+#: either way, so this is a citation fix, not a changed number.
+#:
+#: ONE LOAD SHAPE IS NOT ADDRESSED AT ALL: manager CONTENTION -- launchd
+#: or the systemd --user instance busy with a queue of OTHER jobs.
+#: ``TimeoutStartSec=``/``TimeoutStopSec=`` bound the job's own EXECUTION
+#: once dispatched; they say nothing about how long a job can sit
+#: QUEUED before the manager gets to it, and that wait is not measured
+#: (the CPU-loaded run above loaded the BOX, not the manager's own job
+#: queue) or reasoned about here. This bound is judged adequate anyway
+#: for what actually gets shelled out: the shipped ``com.nexus.service.plist``/
+#: ``nexus-service.service`` unit runs ``nx daemon service start
+#: --foreground``, and that supervisor's own architected shutdown budget
+#: (``storage_service_daemon._SUPERVISOR_STOP_GRACE``, currently 12.0s --
+#: 2x its election budget plus a graceful-SIGTERM window plus a
+#: post-SIGKILL reap, with a 1s margin) is the slow half of what a
+#: bootout/disable --now actually waits on, and it is an order of
+#: magnitude below both systemd's 90s default and this 120s bound. So the
+#: JOB itself is fast even under the load shapes examined; a genuinely
+#: contended manager queue is the one shape left honestly unmeasured, not
+#: reasoned to be safe.
+#:
+#: THE MULTIPLIER IS A JUDGEMENT, NOT A DERIVATION -- same posture as
+#: ``pg_provision._INITDB_TIMEOUT_S`` above (in ``db/pg_provision.py``).
+#: The measured numbers say what an idle-to-moderately-loaded Mac does in
+#: single-digit milliseconds; they say nothing about a slow box, a wedged
+#: launchd/systemd bus, or a unit whose own ExecStart genuinely takes a
+#: while. This bound must stay ABOVE systemd's own 90s default for the
+#: same reason ``pg_provision._PG_CTL_WAIT_TIMEOUT_S`` stays above
+#: ``PGCTLTIMEOUT``: killing the outer call before the inner job can
+#: report its own, better-worded failure loses information. 120s clears
+#: that with margin and is several orders of magnitude above anything
+#: measured here -- the cost of being generous is a longer wait on a box
+#: that is already broken, the cost of being tight is breaking a
+#: slow-but-working install/uninstall.
+_MANAGER_ACTION_TIMEOUT_S: float = 120.0
+
 #: Where the manager binaries live when the calling process's PATH is
 #: trimmed (an MCP server, cron). Consulted after PATH by every manager
 #: spawn in this module, probe and actuator alike (critic on 6867dbe4d:
@@ -303,33 +361,39 @@ def _manager_executable(name: str) -> str:
     return name
 
 
-def _run_manager(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-    """``subprocess.run`` of a launchctl/systemctl command with the binary
-    resolved through PATH then :data:`_MANAGER_ABSOLUTE_PATHS`. Raises
-    ``FileNotFoundError`` (filename = the bare command) when no manager
-    exists, exactly as a bare spawn would.
+def _run_manager(
+    cmd: list[str], *, timeout: float, **kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    """A launchctl/systemctl command with the binary resolved through PATH
+    then :data:`_MANAGER_ABSOLUTE_PATHS`, routed through
+    :func:`~nexus.bounded_subprocess.run_bounded` so a hung manager is
+    killed -- process group and all -- at ``timeout`` rather than left to
+    block the caller forever. Raises ``FileNotFoundError`` (filename = the
+    bare command) when no manager exists, exactly as a bare spawn would;
+    ``subprocess.TimeoutExpired`` when the manager does not answer within
+    ``timeout``.
 
-    nexus-t10nc: a ``**kwargs`` funnel, so the lint's AST scan cannot read
-    a caller's kwargs from this call. Two of the five callers pass
-    ``capture_output`` AND ``timeout`` (the activation probes, at
-    ``_ACTIVATION_QUERY_TIMEOUT``) and are therefore the watched shape,
-    reached through here. Those route to
-    :func:`~nexus.bounded_subprocess.run_bounded`.
+    ``timeout`` is REQUIRED and keyword-only (nexus-k9i56). Originally a
+    ``**kwargs`` funnel (nexus-t10nc) with a branch that fell through to a
+    stock, unbounded ``subprocess.run`` whenever a caller omitted
+    ``timeout`` -- three of the five call sites did, deliberately left
+    unbounded because nobody had measured a bound for ``launchctl
+    bootout``/``systemctl`` yet. All five now pass one: the two activation
+    probes use :data:`_ACTIVATION_QUERY_TIMEOUT`, the three install/
+    uninstall actuators use :data:`_MANAGER_ACTION_TIMEOUT_S`. Making
+    ``timeout`` an explicit parameter (rather than reading it out of
+    ``kwargs``) means a call site that omits it fails loudly at the call,
+    with Python's own ``TypeError``, instead of silently falling through
+    to the removed unbounded branch.
 
-    THE OTHER THREE PASS NO TIMEOUT AT ALL and keep the stock call,
-    deliberately. They are unbounded, which is a worse defect than the one
-    this bead is draining — but it is a DIFFERENT one, and closing it means
-    choosing a bound for ``launchctl bootout``/``systemctl`` calls that
-    nobody has measured. Giving them an invented number here would look
-    like a fix and would newly raise on a slow manager. Left for a bead
-    with a measurement behind it.
+    ``capture_output`` is accepted, for callers written against the
+    ``subprocess.run`` shape, and dropped before reaching
+    :func:`run_bounded` -- which always captures via its own
+    ``stdout``/``stderr`` defaults.
     """
     argv = [_manager_executable(cmd[0]), *cmd[1:]]
-    timeout = kwargs.get("timeout")
-    if timeout is None:
-        return subprocess.run(argv, **kwargs)  # type: ignore[call-overload]
-    rest = {k: v for k, v in kwargs.items() if k not in {"timeout", "capture_output"}}
-    return run_bounded(argv, timeout=float(timeout), **rest)  # type: ignore[arg-type]
+    rest = {k: v for k, v in kwargs.items() if k != "capture_output"}
+    return run_bounded(argv, timeout=timeout, **rest)  # type: ignore[arg-type]
 
 
 def _launchd_label_for(tier: str) -> str:
@@ -575,10 +639,25 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     # so the unload runs for any previous content, not only differing.
     previous: str | None = existing if dest.exists() else None
     if force and previous is not None:
+        predeactivate_cmd = _deactivate_cmd(dest, tier=tier)
         try:
-            _run_manager(_deactivate_cmd(dest, tier=tier), capture_output=True, text=True, check=False)
+            _run_manager(
+                predeactivate_cmd, capture_output=True, text=True, check=False,
+                timeout=_MANAGER_ACTION_TIMEOUT_S,
+            )
         except (FileNotFoundError, OSError):
             pass
+        except subprocess.TimeoutExpired:
+            # Best-effort unload before the overwrite below (same as the
+            # FileNotFoundError/OSError branch above): a hung manager here
+            # must not block the reinstall, but "never a silent pass"
+            # (nexus-k9i56) means naming the verb and the bound rather than
+            # swallowing it outright.
+            _log.warning(
+                f"{tier}_install_predeactivate_timeout",
+                cmd=" ".join(predeactivate_cmd),
+                timeout_s=_MANAGER_ACTION_TIMEOUT_S,
+            )
 
     dest.write_text(rendered)
     dest.chmod(0o644)
@@ -594,7 +673,10 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     cmd = _activate_cmd(dest)
     warnings: tuple[str, ...] = ()
     try:
-        result = _run_manager(cmd, capture_output=True, text=True, check=False)
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_MANAGER_ACTION_TIMEOUT_S,
+        )
     except FileNotFoundError as exc:
         msg = (
             f"{cmd[0]} not found on PATH; file installed but not activated ({exc}). "
@@ -603,6 +685,26 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
         if not force:
             raise ActivationError(msg) from exc
         _log.warning(f"{tier}_install_activation_not_found", dest=str(dest), error=str(exc))
+        return InstallResult(
+            status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail=msg, warnings=(msg,)
+        )
+    except subprocess.TimeoutExpired as exc:
+        # nexus-k9i56: activation is the load-bearing half of install, so a
+        # timeout here is treated exactly like FileNotFoundError above --
+        # raised unless --force, and either way the message names the verb
+        # (the shown command) and the bound, never a silent pass.
+        msg = (
+            f"`{' '.join(cmd)}` did not answer within {_MANAGER_ACTION_TIMEOUT_S:g}s; "
+            f"file installed but not activated. Once the service manager responds, run "
+            f"`{REINSTALL_REMEDY}` to register it."
+        )
+        if not force:
+            raise ActivationError(msg) from exc
+        _log.warning(
+            f"{tier}_install_activation_timeout",
+            dest=str(dest),
+            timeout_s=_MANAGER_ACTION_TIMEOUT_S,
+        )
         return InstallResult(
             status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail=msg, warnings=(msg,)
         )
@@ -869,13 +971,26 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
     deactivated = True
     cmd = _deactivate_cmd(dest, tier=tier)
     try:
-        result = _run_manager(cmd, capture_output=True, text=True, check=False)
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_MANAGER_ACTION_TIMEOUT_S,
+        )
         if result.returncode != 0:
             detail = (result.stderr or "").strip() or (result.stdout or "").strip()
             warnings.append(f"{' '.join(cmd)} exited {result.returncode}: {detail}")
             deactivated = False
     except FileNotFoundError as exc:
         warnings.append(f"{cmd[0]} not found ({exc}); removing file anyway.")
+        deactivated = False
+    except subprocess.TimeoutExpired:
+        # nexus-k9i56: same posture as the FileNotFoundError branch above --
+        # a hung manager must not block removal of the unit file (the
+        # durable artifact), but the warning names the verb and the bound
+        # rather than passing silently.
+        warnings.append(
+            f"`{' '.join(cmd)}` did not answer within {_MANAGER_ACTION_TIMEOUT_S:g}s; "
+            "removing file anyway."
+        )
         deactivated = False
 
     dest.unlink()

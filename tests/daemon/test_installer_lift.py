@@ -34,6 +34,8 @@ shell-out is mocked; template substitution + file placement are exercised for re
 """
 from __future__ import annotations
 
+import subprocess
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -326,3 +328,204 @@ class TestLinuxUninstall:
         assert result.status is installer.UninstallStatus.REMOVED
         cmd = mock_run.call_args[0][0]
         assert cmd == ["systemctl", "--user", "disable", "--now", "nexus-t2.service"]
+
+
+class TestManagerActionsCarryATimeout:
+    """nexus-k9i56: ``_run_manager``'s ``timeout`` is now a required,
+    keyword-only parameter rather than something read out of ``**kwargs``
+    with a stock-``subprocess.run`` fallback when a caller omitted it.
+    That closes the untimed branch structurally (a caller that forgets
+    ``timeout`` gets Python's own ``TypeError`` at the call), but each
+    site is pinned here too, one per call site, so a future edit that
+    reintroduces an untimed branch fails on THIS test rather than only
+    surfacing as an unbounded hang far from the diff that caused it.
+    """
+
+    def test_activation_probe_passes_the_query_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        calls: list[dict[str, object]] = []
+
+        def _fake(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(kwargs)
+            raise FileNotFoundError(2, "no such file or directory", cmd[0])
+
+        monkeypatch.setattr(installer, "_run_manager", _fake)
+        probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+
+        assert probe.state is installer.ActivationState.NO_MANAGER
+        assert len(calls) == 1
+        assert calls[0]["timeout"] == installer._ACTIVATION_QUERY_TIMEOUT
+
+    def test_loaded_now_probe_passes_the_query_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        calls: list[dict[str, object]] = []
+
+        def _fake(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(kwargs)
+            raise OSError("boom")
+
+        monkeypatch.setattr(installer, "_run_manager", _fake)
+        result = installer._launchd_loaded_now("service")
+
+        assert result is None
+        assert len(calls) == 1
+        assert calls[0]["timeout"] == installer._ACTIVATION_QUERY_TIMEOUT
+
+    def test_predeactivate_and_activate_pass_the_action_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``force=True`` over differing content runs BOTH untimed-before-
+        this-bead call sites in one pass: the best-effort predeactivate
+        unload, then the real activation."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        (tmp_path / "units").mkdir()
+        (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n")
+
+        calls: list[dict[str, object]] = []
+
+        def _fake(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(installer, "_run_manager", _fake)
+        result = installer.install_autostart(tier="service", force=True)
+
+        assert result.status is installer.InstallStatus.NEWLY_INSTALLED
+        assert len(calls) == 2, "expected one predeactivate call and one activate call"
+        assert all(
+            kw.get("timeout") == installer._MANAGER_ACTION_TIMEOUT_S for kw in calls
+        )
+
+    def test_uninstall_deactivate_passes_the_action_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        _plant_legacy_t2_unit(tmp_path)
+
+        calls: list[dict[str, object]] = []
+
+        def _fake(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(installer, "_run_manager", _fake)
+        result = installer.uninstall_autostart()
+
+        assert result.status is installer.UninstallStatus.REMOVED
+        assert len(calls) == 1
+        assert calls[0].get("timeout") == installer._MANAGER_ACTION_TIMEOUT_S
+
+
+class TestHungManagerIsKilledAtTheBound:
+    """nexus-k9i56: a manager that never answers -- a fake binary that
+    sleeps, standing in for a wedged ``launchctl``/``systemctl`` -- must be
+    killed at the bound rather than left to hang install/uninstall
+    forever, and the resulting report must name the verb (the command
+    that hung) and the bound, never a silent pass.
+    """
+
+    def test_hung_predeactivate_before_forced_overwrite_is_killed_and_warned_not_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The best-effort unload BEFORE a ``force=True`` overwrite
+        (installer.py's ``if force and previous is not None:`` branch) must
+        warn and continue, not hang or raise, when the manager it shells
+        out to never answers. Falsifiable: with the ``except
+        subprocess.TimeoutExpired`` branch removed from that site, the
+        raw ``TimeoutExpired`` propagates out of ``install_autostart``
+        uncaught, and this test errors instead of passing."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        (tmp_path / "units").mkdir()
+        (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n")
+        monkeypatch.setattr(
+            installer, "_deactivate_cmd", lambda dest, *, tier="t2": ["sleep", "30"]
+        )
+        # The activation call that follows the predeactivate branch must
+        # itself complete fast and successfully, so this test isolates the
+        # predeactivate site's own timeout handling rather than also
+        # exercising (and being slowed or failed by) the activation site.
+        monkeypatch.setattr(installer, "_activate_cmd", lambda dest: ["true"])
+        monkeypatch.setattr(installer, "_MANAGER_ACTION_TIMEOUT_S", 0.2)
+
+        warnings: list[tuple[str, dict]] = []
+        orig_warning = installer._log.warning
+
+        def _capture_warning(event, **kw):
+            warnings.append((event, kw))
+            return orig_warning(event, **kw)
+
+        monkeypatch.setattr(installer._log, "warning", _capture_warning)
+
+        start = time.monotonic()
+        result = installer.install_autostart(tier="service", force=True)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 10, (
+            f"took {elapsed:.2f}s against a 0.2s bound -- the hang was not "
+            "actually bounded"
+        )
+        # The overwrite + activation proceed regardless (same contract as
+        # the pre-existing FileNotFoundError/OSError sibling branch): a
+        # hung predeactivate must not abort the install.
+        assert result.status is installer.InstallStatus.NEWLY_INSTALLED
+        assert warnings, "the predeactivate timeout was silently swallowed"
+        event, kw = warnings[0]
+        assert "predeactivate_timeout" in event, event
+        assert kw.get("cmd") == "sleep 30", f"warning does not name the verb: {kw!r}"
+        assert kw.get("timeout_s") == 0.2, f"warning does not name the bound: {kw!r}"
+
+    def test_hung_activation_is_killed_and_raises_naming_the_verb_and_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        monkeypatch.setattr(installer, "_activate_cmd", lambda dest: ["sleep", "30"])
+        monkeypatch.setattr(installer, "_MANAGER_ACTION_TIMEOUT_S", 0.2)
+
+        start = time.monotonic()
+        with pytest.raises(installer.ActivationError) as excinfo:
+            installer.install_autostart(tier="service")
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 10, (
+            f"took {elapsed:.2f}s against a 0.2s bound -- the hang was not "
+            "actually bounded"
+        )
+        msg = str(excinfo.value)
+        assert "sleep 30" in msg, f"error does not name the verb: {msg!r}"
+        assert "0.2s" in msg, f"error does not name the bound: {msg!r}"
+
+    def test_hung_deactivate_during_uninstall_is_killed_and_warned_not_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uninstall's deactivate is best-effort (the unit file is removed
+        either way -- ``uninstall_autostart``'s own docstring), so a hung
+        manager here is a warning naming the verb and bound, not a raise."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        dest = _plant_legacy_t2_unit(tmp_path)
+        monkeypatch.setattr(
+            installer, "_deactivate_cmd", lambda dest, *, tier="t2": ["sleep", "30"]
+        )
+        monkeypatch.setattr(installer, "_MANAGER_ACTION_TIMEOUT_S", 0.2)
+
+        start = time.monotonic()
+        result = installer.uninstall_autostart()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 10, (
+            f"took {elapsed:.2f}s against a 0.2s bound -- the hang was not "
+            "actually bounded"
+        )
+        assert result.status is installer.UninstallStatus.REMOVED
+        assert not dest.exists()
+        assert result.deactivated is False
+        assert result.warnings
+        assert any("sleep 30" in w and "0.2s" in w for w in result.warnings), result.warnings

@@ -264,6 +264,10 @@ _RETIRED_SCRIPT_ALLOWLIST: dict[str, str] = {
 #: exemption for a file that is NOT otherwise a wholesale historical
 #: tombstone. Empty today — see module docstring for why it stays wired.
 _FILE_VERB_ALLOWLIST: dict[tuple[str, str], str] = {
+    ("tests/e2e/hook-cli-skew/run.sh", "no-such-verb-skew-gate"): (
+        "deliberate: the gate's positive control calls an unregistered verb to "
+        "prove 7.57.0's nx-hook still exits 2 on one (nexus-rcoze)"
+    ),
     # nexus-x8fuq: upgrade-shakeout's demoted-verb detector
     # (_check_no_demoted_verb) exists to FAIL when doctor output names a
     # retired verb, and its self-test plants exactly that string as the RED

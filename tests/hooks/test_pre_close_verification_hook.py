@@ -682,6 +682,362 @@ class TestAllowOnCoveredMarker:
         assert "nexus-tafjk verification=passed" in calls
 
 
+class TestNexus2b24oCloseTransitionSpellings:
+    """nexus-2b24o: match the TRANSITION, not the VERB.
+
+    ``bd update <id> --status closed`` sets the identical closed-status
+    transition as ``bd close``/``bd done`` and the gate's verb detector
+    never looked for it -- an incident closed nexus-9dkxu with no review
+    marker and no denial. Table-driven over every spelling found by
+    probing the real `bd` binary (1.0.5) rather than guessed: five CLI
+    forms of ``bd update ... --status closed`` (pflag's shorthand rules
+    make ``-s``/``-sclosed``/``-s=closed`` genuinely distinct spellings,
+    not decoration), two lines of ``bd batch``'s own grammar delivered as
+    piped stdin, and one ``bd import`` JSONL upsert -- neither of which is
+    ``bd close``/``bd update`` by verb at all. ``close``/``done`` are
+    included as the baseline the gate already caught, so a table that
+    regresses to catching NOTHING cannot pass by accident.
+
+    Each half of the table drives the SAME command list through both
+    directions: no marker anywhere denies, and a marker naming both
+    required reviewers allows -- the non-vacuity shape the bead asked
+    for, so a detector that stopped detecting (this class returns to
+    "allow" for everything) and a gate that stopped ever allowing (this
+    class returns to "deny" for everything) both turn red here, not just
+    one of them.
+    """
+
+    _ID = "nexus-tr4ns"
+
+    #: label -> command template, `{id}` substituted below. `{{`/`}}` in
+    #: the import entry are str.format's own escape for a literal brace.
+    _SPELLINGS: dict[str, str] = {
+        "close": "bd close {id}",
+        "done": "bd done {id}",
+        "update --status closed": "bd update {id} --status closed",
+        "update --status=closed": "bd update {id} --status=closed",
+        "update -s closed": "bd update {id} -s closed",
+        "update -s=closed": "bd update {id} -s=closed",
+        "update -sclosed": "bd update {id} -sclosed",
+        "batch close line": "printf 'close {id} reason\\n' | bd batch",
+        "batch update status=closed line": (
+            "printf 'update {id} status=closed\\n' | bd batch"
+        ),
+        "import JSONL status closed": (
+            'echo \'{{"id":"{id}","status":"closed"}}\' | bd import -'
+        ),
+        # nexus-2b24o round 2, item 5: `bd sql` is a fourth close
+        # transition, a real bd 1.0.5 subcommand entirely unmentioned by
+        # round 1 -- `bd sql --help`: "Useful for... working around bugs
+        # in higher-level commands."
+        "sql UPDATE issues status closed": (
+            "bd sql \"UPDATE issues SET status='closed' WHERE id='{id}'\""
+        ),
+    }
+
+    def test_the_table_is_not_vacuous(self) -> None:
+        """The check the bead itself asked for: a table quietly shrunk to
+        one entry (the pre-existing `bd close`) would pass both
+        parametrized tests below for the wrong reason -- there would be
+        nothing left to catch a regression in. Pin the count so shrinking
+        the table under review pressure turns this red on its own."""
+        assert len(self._SPELLINGS) >= 11, self._SPELLINGS
+
+    @pytest.mark.parametrize("label", sorted(_SPELLINGS))
+    def test_denies_with_no_marker(self, label, mock_config_env, fake_nx) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = self._SPELLINGS[label].format(id=self._ID)
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (
+            f"{label!r} ({command!r}) did not deny with no marker: {parsed}"
+        )
+        assert self._ID in _get_reason(parsed), (label, parsed)
+
+    @pytest.mark.parametrize("label", sorted(_SPELLINGS))
+    def test_allows_with_a_full_reviewer_marker(
+        self, label, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(
+            _marker(f"review-completed,{self._ID}", f"review-completed: {self._ID}")
+        )
+        command = self._SPELLINGS[label].format(id=self._ID)
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (
+            f"{label!r} ({command!r}) did not allow with a full marker: {parsed}"
+        )
+
+
+class TestNexus2b24oRound2NegativeControls:
+    """SHIP-BLOCKER fix, round 2 of nexus-2b24o (code-review-expert +
+    substantive-critic both returned on commit 5ba250e92): the missing
+    negative-control class the review named directly -- "the verb is
+    present for an unrelated purpose, and close-shaped text sits
+    elsewhere on the line." The four exact strings from the review, plus
+    the analogous pair for the sibling gate's own scoping bug (covered in
+    ``tests/test_routing_phase_review_close.py`` instead, since that is
+    where the sibling's own harness lives).
+
+    Every case here must FAIL against commit 5ba250e92 (a wrongful deny)
+    and PASS after the pipe-stage/argv-scoping fix (a clean allow).
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo "close nexus-99999: fixed bug" && bd batch --help',
+            'bd update nexus-11111 --reason "will close nexus-99999 later" && bd batch --help',
+        ],
+    )
+    def test_close_shaped_text_in_an_unrelated_segment_never_denies(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        """No review-completed marker exists anywhere for nexus-99999 (or
+        nexus-11111); if the round-1 scan's false positive survived, this
+        would deny. It must allow -- there is no genuine close here at
+        all, for either id."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_a_real_batch_close_joined_by_and_and_to_an_unrelated_command_still_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """Bounds the fix: scoping to the prior pipe stage must not blind
+        the gate to a GENUINE close that happens to be followed by an
+        unrelated &&-joined command."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = "printf 'close nexus-realone reason\\n' | bd batch && echo done"
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-realone" in _get_reason(parsed)
+
+
+class TestNexus2b24oRound2IndeterminateSource:
+    """Item 4: content off the command line (`bd batch -f`, `bd import
+    <file>`, a bare redirect, an opaque shell variable) is now a VISIBLE
+    allow, not the silent bare `_allow()` round 1's docstring incorrectly
+    claimed was already an INDETERMINATE advisory (substantive-critic
+    Finding 1 on 5ba250e92: it was, in fact, indistinguishable from an
+    unrelated Bash call)."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bd batch -f ops.txt",
+            "bd import path/to.jsonl",
+            'OPS=$(cat f); echo "$OPS" | bd batch',
+        ],
+    )
+    def test_content_off_the_command_line_allows_with_a_visible_message(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+        assert "INDETERMINATE" in _get_context(parsed), (
+            f"{command!r} allowed silently -- round 1's docstring claimed "
+            f"this already happened; it did not until this fix."
+        )
+
+    def test_unrelated_content_elsewhere_is_never_re_harvested_by_the_indeterminate_path(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The critical non-regression: routing the indeterminate case
+        into the gate must NOT call `_bead_ids` on the whole command, or
+        an unrelated nexus-id sitting in a sibling segment would be
+        re-harvested and denied -- the ship-blocker reopened one call
+        away. No marker exists for nexus-99999 here; a deny would prove
+        exactly that regression."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = 'echo "close nexus-99999" && bd batch -f ops.txt'
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_on_close_disabled_suppresses_the_indeterminate_message_too(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The indeterminate branch is reached through `_run_gate`
+        specifically so it respects the SAME `on_close` config gate every
+        other branch does -- it must not become a second, ungated
+        advisory channel."""
+        env = mock_config_env({"on_close": False})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="bd batch -f ops.txt"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "on_close is not enabled" in _get_context(parsed)
+        assert "INDETERMINATE" not in _get_context(parsed)
+
+
+class TestNexus2b24oRound3ShellBoundaries:
+    """Round 3 of nexus-2b24o (substantive-critic on commit 8853ee707):
+    two PRE-EXISTING silent bypasses in the shared segment splitter --
+    a bare newline between commands, and `|&` -- fixed in the shared
+    heredoc-aware boundary finder. Full deny/allow gate, not just the
+    `_bd_verbs` boolean, for the same reason `TestNexus2b24oCloseTransitionSpellings`
+    drives the primary table through the harness."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hi" + chr(10) + "bd close nexus-nlb01",
+            "echo foo |& bd close nexus-nlb01",
+        ],
+    )
+    def test_the_two_reproductions_deny_with_no_marker(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-nlb01" in _get_reason(parsed)
+
+    def test_a_heredoc_body_containing_close_shaped_text_does_not_trigger(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = "cat <<'EOF'" + chr(10) + "bd close nexus-hdoc2" + chr(10) + "EOF"
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_a_multi_line_command_with_a_genuine_close_on_line_three_is_caught(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = chr(10).join(["echo one", "echo two", "bd close nexus-nlb02"])
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-nlb02" in _get_reason(parsed)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hi" + chr(10) + "bd close nexus-nlb01",
+            "echo foo |& bd close nexus-nlb01",
+        ],
+    )
+    def test_the_two_reproductions_allow_with_a_full_marker(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(
+            _marker("review-completed,nexus-nlb01", "review-completed: nexus-nlb01")
+        )
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "allow", command
+
+
+class TestNexus2b24oRound4QuoteAwareBoundaries:
+    """Round 4 of nexus-2b24o (substantive-critic on commit 47f635dcd):
+    round 3's bare-newline boundary is not quote-aware. Full deny/allow
+    gate for the primary repro, not just the `_bd_verbs` boolean."""
+
+    _REASON_MULTILINE = (
+        "line one" + chr(10) + "bd close nexus-nlb03" + chr(10) + "line three"
+    )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f'bd update nexus-1 --reason "{_REASON_MULTILINE}"',
+            f'bd update nexus-1 -m "{_REASON_MULTILINE}"',
+            f"bd update nexus-1 --reason '{_REASON_MULTILINE}'",
+        ],
+    )
+    def test_a_close_shaped_line_inside_a_quoted_multiline_value_allows(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_a_genuine_close_after_a_closed_multiline_quoted_value_still_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = (
+            f'bd update nexus-1 --reason "{self._REASON_MULTILINE}"'
+            + chr(10) + "bd close nexus-nlb04"
+        )
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-nlb04" in _get_reason(parsed)
+
+
 class TestT1OnlyCoverage:
     """nexus-fgekf (2026-08-30): the T2 memory leg is RETIRED. It existed
     for a CLI/MCP T1 scope divergence (nexus-4av2n round 2) whose both

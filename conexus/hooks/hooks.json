@@ -72,6 +72,15 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"
             ],
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+              "mcp-connect-wait"
+            ],
+            "timeout": 20
           }
         ]
       }
@@ -171,8 +180,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx-hook",
+            "command": "python3",
             "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "subagent-stop"
             ],
             "timeout": 10
@@ -213,8 +223,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx-hook",
+            "command": "python3",
             "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "pre-close-verification"
             ],
             "timeout": 5
@@ -259,8 +270,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx-hook",
+            "command": "python3",
             "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "auto-approve"
             ],
             "timeout": 5
@@ -292,8 +304,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx-hook",
+            "command": "python3",
             "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "auto-approve"
             ],
             "timeout": 5
@@ -312,6 +325,15 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+              "mcp-connect-check"
+            ],
+            "timeout": 5
           }
         ]
       }

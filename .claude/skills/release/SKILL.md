@@ -149,6 +149,7 @@ tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergenc
 tests/e2e/migration-rehearsal/run.sh --candidate-migration   # REQUIRED when the tree carries a changeset (nexus-z0ylb)
 tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see below
 bash tests/e2e/gen-flip-live-holder.sh   # ~30s — REQUIRED for shim/flip/GC changes, see 1c below
+tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); a battery leg
 ```
 
 All must pass. Integration is excluded from CI and is the last line of defense before tag-push.

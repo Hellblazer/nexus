@@ -33,7 +33,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from nexus.mcp.hooks import DECIDING_HOOKS
-from tests._hook_wiring import HOOKS_JSON
+from tests._hook_wiring import HOOKS_JSON, NX_HOOK_SHIM, REPO_ROOT, command_verb
 
 #: hook name -> the nx-hook verb hooks.json actually wires it as. Read
 #: from the file rather than written down, so this cannot drift from the
@@ -44,17 +44,29 @@ def _wired_verbs() -> dict[str, str]:
     for groups in data.get("hooks", {}).values():
         for group in groups:
             for hook in group.get("hooks", []):
-                if hook.get("type") == "command" and hook.get("command") == "nx-hook":
-                    args = hook.get("args") or []
-                    if args:
-                        out[str(args[0]).replace("-", "_")] = str(args[0])
+                verb = command_verb(hook)
+                if verb:
+                    out[verb.replace("-", "_")] = verb
     return out
 
 
+def _wired_argv(verb: str) -> list[str]:
+    """The argv hooks.json runs for *verb*: the nx-hook shim when that is
+    how it is wired (nexus-rcoze), so the real path is shim then nx-hook."""
+    data = json.loads(HOOKS_JSON.read_text())
+    for groups in data.get("hooks", {}).values():
+        for group in groups:
+            for hook in group.get("hooks", []):
+                if command_verb(hook) == verb and hook.get("command") == "python3":
+                    shim = NX_HOOK_SHIM.replace("${CLAUDE_PLUGIN_ROOT}", str(REPO_ROOT / "conexus"))
+                    return [sys.executable, shim, verb]
+    return ["nx-hook", verb]
+
+
 def _run_verb(verb: str, payload: dict, extra_env: dict[str, str] | None = None):
-    """Spawn nx-hook exactly as an exec-form command hook would."""
+    """Spawn the verb exactly as its exec-form hooks.json entry would."""
     return subprocess.run(
-        ["nx-hook", verb],
+        _wired_argv(verb),
         input=json.dumps(payload),
         capture_output=True,
         text=True,

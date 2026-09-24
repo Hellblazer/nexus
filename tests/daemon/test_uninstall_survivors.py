@@ -46,7 +46,15 @@ def installed_unit(tmp_path: Path):
         "nexus.commands.daemon._autostart_install_dir", return_value=install_dir,
     ), patch(
         "nexus.daemon.installer.subprocess.run",
-    ) as run:
+    ) as run, patch(
+        # nexus-k9i56: _run_manager's deactivate call always routes through
+        # run_bounded now (never the stock subprocess.run once its timeout
+        # is required), so patching subprocess.run alone no longer
+        # intercepts it -- that used to work only because subprocess is one
+        # shared module object across both. Without this, uninstall_autostart
+        # would shell out to a REAL launchctl/systemctl here.
+        "nexus.daemon.installer.run_bounded", new=run,
+    ):
         run.return_value.returncode = 0
         run.return_value.stderr = ""
         run.return_value.stdout = ""
