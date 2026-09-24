@@ -169,8 +169,37 @@ class TupleWaiterSupersessionTest {
     }
 
     @Test
+    void aPartlySupersededWait_returnsOnlyTheSupersededSpec_andStampsNothing() {
+        // Waiter 1 watches a mailbox and a board; waiter 2, newer, takes over the
+        // mailbox only. Waiter 1's next call must come back superseded for the
+        // mailbox and must not stamp the board post for its subscriber either:
+        // the client stops the whole waiter on any superseded spec, so a stamp here
+        // would be an announcement nobody delivers.
+        String to = "partial-" + UUID.randomUUID();
+        String topic = "partial-" + UUID.randomUUID();
+        String older = token(1_000);
+        TupleRepository.WaitSpec olderMailbox = mailbox(to, older);
+        TupleRepository.WaitSpec olderBoard = board(topic, "session-p", older);
+        assertThat(repo.waitAny(TENANT, List.of(olderMailbox, olderBoard), 0)).isEmpty();
+        assertThat(repo.waitAny(TENANT, List.of(mailbox(to, token(2_000))), 0)).isEmpty();
+        repo.out(TENANT, "board/" + topic, Map.of("topic", topic), Map.of("from", "x"),
+                "post", UUID.randomUUID().toString(), null);
+
+        List<TupleRepository.WaitResult> partial = repo.waitAny(TENANT, List.of(olderMailbox, olderBoard), 0);
+        assertThat(partial).hasSize(1);
+        assertThat(partial.get(0).subspace()).isEqualTo("mailbox/" + to);
+        assertThat(partial.get(0).superseded()).isTrue();
+
+        List<TupleRepository.WaitResult> board = repo.waitAny(TENANT, List.of(board(topic, "session-p", older)), 0);
+        assertThat(board).as("the board post was not stamped for session-p by the superseded call").hasSize(1);
+        assertThat(board.get(0).tuples().get(0).announceCount()).isEqualTo(1);
+    }
+
+    @Test
     void malformedTokens_areRefused() {
-        for (String bad : List.of("", "abc", "12-", "-abc", "12-a_b", "x-1")) {
+        // The last one matches the pattern but overflows a long: accepted, it would
+        // poison its key, since every later comparison against it would throw.
+        for (String bad : List.of("", "abc", "12-", "-abc", "12-a_b", "x-1", "9999999999999999999-abc")) {
             assertThatThrownBy(() -> new TupleRepository.WaitSpec.Announce(150, 5, null, bad))
                     .as(bad).isInstanceOf(SchemaViolationException.class);
         }

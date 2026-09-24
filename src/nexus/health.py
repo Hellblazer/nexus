@@ -6036,9 +6036,13 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         elif not alive and stopped_reason == "superseded":
             reason = (
                 "the waiter stopped: a newer channel waiter for this session took over (bead nexus-rxuiq), "
-                "which means two nx-mcp processes are serving one session"
+                "which means two nx-mcp processes are serving one session, or this host's clock stepped "
+                "backwards since an earlier waiter started"
             )
-            fix_suggestions = ["Close the duplicate session window, then restart the MCP server: /mcp"]
+            fix_suggestions = [
+                "Close any duplicate window on this session, then restart the MCP server: /mcp "
+                "(a restart mints a fresh token, which also clears the clock case)",
+            ]
         elif not alive:
             reason = "the waiter is not alive"
             fix_suggestions = restart_fix

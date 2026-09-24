@@ -212,9 +212,25 @@ final class TupleWaitRegistry {
             java.util.regex.Pattern.compile("([0-9]{1,19})-([A-Za-z0-9]{1,64})");
 
     /** {@code <decimal time_ns>-<alphanumeric id>}: the client mints one per waiter
-     *  instance, so a waiter started later has the larger token. */
+     *  instance, strictly increasing within its process, so a waiter started later
+     *  there has the larger token; across processes the wall clock orders them. The
+     *  time must fit a {@code long}: a 19-digit value past {@link Long#MAX_VALUE}
+     *  would pass the pattern and then fail every later comparison on its key, so it
+     *  is refused here, at validation, instead. */
     static boolean isWellFormedWaiterToken(String token) {
-        return token != null && WAITER_TOKEN.matcher(token).matches();
+        if (token == null) {
+            return false;
+        }
+        var m = WAITER_TOKEN.matcher(token);
+        if (!m.matches()) {
+            return false;
+        }
+        try {
+            Long.parseLong(m.group(1));
+            return true;
+        } catch (NumberFormatException overflow) {
+            return false;
+        }
     }
 
     /** Orders two well-formed tokens by their time, then by their id. */
