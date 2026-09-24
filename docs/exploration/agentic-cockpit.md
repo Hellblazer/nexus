@@ -1,7 +1,7 @@
 # Agentic cockpit: tuple space common model + semantic events as integration
 
-> **Disposition**: historical exploration; candidate for archive. Outcome:
-> superseded by RDR-127 (see banner below).
+> **Historical record** (kept by decision, nexus-z93bq). The design was superseded
+> by RDR-127 (see banner below); kept as a source record for RDR-111, RDR-118, RDR-119 and RDR-212.
 
 > **SCRAPPED ARCHITECTURE**: this exploration is written atop RDR-110 (semantic
 > tuple space), RDR-111 (ORB agentic-cockpit substrate), RDR-112 (storage-as-service

@@ -1,7 +1,7 @@
 # Brainstorming brief — adjacent design space for the workflow engine
 
-> **Disposition**: historical exploration; candidate for archive. No outcome
-> disposition named in the docs audit — adopt-or-scrap is Hal's call.
+> **Historical record** (kept by decision, nexus-z93bq): part of the May 2026
+> workflow-engine exploration, which no RDR adopted. Not current design.
 
 12 angles surfaced by architect-planner agent (run abe8e36d) on the workflow-engine design doc, May 2026.
 
