@@ -7261,14 +7261,15 @@ def tuple_subscribe(
     session's own mailbox.
 
     Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
-    lease so `mailbox_send` resolves that name to this session (RDR-208
-    Phase 3, bead nexus-galkv.20: it is NOT a second delivered mailbox --
-    nothing is pushed or drained for it; only this session's own mailbox
-    and its board topics ever are).
+    lease so `mailbox_send` resolves that name to this session. It is NOT
+    a second delivered mailbox: nothing is pushed or drained for it; only
+    this session's own mailbox and its board topics ever are.
 
     A `/resume` (same session id) restores this list; a `/clear` (a new
     session id) starts clean.
     """
+    # RDR-208 Phase 3 (bead nexus-galkv.20): a leased name stopped being a
+    # second delivered mailbox here -- see SubscriptionSet's own docstring.
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
@@ -7323,9 +7324,9 @@ def tuple_subscriptions() -> list[dict]:
     """List this session's MCP server's subscription set (RDR-211).
 
     Always the session's own mailbox first, then subscribed board topics.
-    A leased name (RDR-208 Phase 3, bead nexus-galkv.20) never appears
-    here: it is not a delivered mailbox, only a `directory/<name>` lease
-    for `mailbox_send` resolution. There is no cursor: the engine keeps
+    A leased name never appears here: it is not a delivered mailbox, only
+    a `directory/<name>` lease for `mailbox_send` resolution (RDR-208
+    Phase 3). There is no cursor: the engine keeps
     every subspace's delivery position (a row stamp for a mailbox, a
     per-subscriber stamp for a board).
     """
