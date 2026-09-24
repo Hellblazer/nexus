@@ -1737,11 +1737,12 @@ def _run_claude_isolated(
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the child's whole process group; fall back to killing just the
-    child if the group is already gone."""
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    """Hard-kill the child's whole process group; fall back to killing just
+    the child if the group is already gone, or on Windows, where there is no
+    group (nexus-34f7r)."""
+    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if not safe_killpg(proc):
         with contextlib.suppress(Exception):
             proc.kill()
 

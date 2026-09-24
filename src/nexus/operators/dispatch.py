@@ -1572,9 +1572,8 @@ async def claude_dispatch(
             # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
             # tests/test_process_group_safety.py.
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 - deferred to avoid circular import at module load
-            import signal  # noqa: PLC0415 - branch-local; deferred to call time
 
-            if not safe_killpg(proc, signal.SIGKILL):
+            if not safe_killpg(proc):
                 try:
                     proc.kill()
                 except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal

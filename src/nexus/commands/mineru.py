@@ -239,7 +239,7 @@ def _stop_under_election() -> None:
         time.sleep(0.2)
     else:
         # Escalate to SIGKILL on the group — same reason (reach workers).
-        safe_killpg(pid, signal.SIGKILL)
+        safe_killpg(pid)  # the platform's hard kill (KILL_SIGNAL)
         click.echo(
             f"Warning: MinerU server (PID {pid}) did not exit within "
             f"{_STOP_TIMEOUT_SECONDS}s; escalated SIGKILL to process group",

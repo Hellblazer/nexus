@@ -242,3 +242,54 @@ def test_group_sweep_refuses_unsafe_ids(pgid, monkeypatch):
     monkeypatch.setattr(os, "killpg", lambda g, s: calls.append(g))
     assert safe_killpg_group(pgid) is False
     assert calls == []
+
+
+# nexus-34f7r: Windows has no os.killpg, os.getpgid or signal.SIGKILL. The
+# helper's SIGKILL defaults raised AttributeError at IMPORT there, and every
+# cleanup branch calling it threw from inside its own except/finally. The
+# probe runs in a subprocess that deletes the three names BEFORE importing
+# the module, because this process already holds the module with the real
+# names bound. Positive control: against 2dfa8f0e9 the import itself fails.
+_WINDOWS_SHAPED_PROBE = r"""
+import json, os, signal, subprocess, sys, time
+for name in ("killpg", "getpgid"):
+    delattr(os, name)
+del signal.SIGKILL
+from nexus.util import process_group as pg
+
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+time.sleep(0.2)
+group = pg.safe_killpg_group(child.pid)
+alive_after_group = child.poll() is None
+single = pg.safe_killpg(child)
+child.wait(timeout=10)
+print(json.dumps({
+    "kill_signal_is_sigterm": pg.KILL_SIGNAL == signal.SIGTERM,
+    "group": group,
+    "alive_after_group": alive_after_group,
+    "single": single,
+    "returncode": child.returncode,
+}))
+"""
+
+
+def test_windows_shaped_platform_imports_and_degrades_honestly():
+    proc = subprocess.run(
+        [sys.executable, "-c", _WINDOWS_SHAPED_PROBE],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = __import__("json").loads(proc.stdout.strip().splitlines()[-1])
+    assert result["kill_signal_is_sigterm"] is True
+    # No groups: refuse rather than kill a leader pid by number.
+    assert result["group"] is False
+    assert result["alive_after_group"] is True
+    # One process: signalled directly, and reported as delivered.
+    assert result["single"] is True
+    assert result["returncode"] == -signal.SIGTERM
+
+
+def test_kill_signal_is_sigkill_on_posix():
+    from nexus.util.process_group import KILL_SIGNAL
+
+    assert KILL_SIGNAL == signal.SIGKILL

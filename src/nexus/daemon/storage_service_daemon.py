@@ -92,6 +92,7 @@ from nexus.daemon import readiness
 from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
+from nexus.util.process_group import KILL_SIGNAL
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_STOP_ELECTION_BUDGET,
@@ -1558,7 +1559,7 @@ class StorageServiceSupervisor:
             try:
                 proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                safe_killpg(proc.pid, signal.SIGKILL)
+                safe_killpg(proc.pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
 
@@ -1798,7 +1799,7 @@ class StorageServiceSupervisor:
             try:
                 proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                safe_killpg(pid, signal.SIGKILL)
+                safe_killpg(pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
         self._proc = None
@@ -2845,7 +2846,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
                 time.sleep(0.1)
             if _pid_is_running(supervisor_pid):
                 try:
-                    os.kill(supervisor_pid, signal.SIGKILL)
+                    os.kill(supervisor_pid, KILL_SIGNAL)
                 except (ProcessLookupError, PermissionError):
                     pass
             signalled.append(supervisor_pid)

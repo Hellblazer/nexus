@@ -62,6 +62,7 @@ import structlog
 
 from nexus import _locking
 from nexus.bounded_subprocess import run_bounded
+from nexus.util.process_group import KILL_SIGNAL
 
 _log = structlog.get_logger(__name__)
 
@@ -1483,7 +1484,7 @@ def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
         time.sleep(0.2)
     for pid in live:
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, KILL_SIGNAL)
         except (ProcessLookupError, PermissionError):
             pass
     settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
