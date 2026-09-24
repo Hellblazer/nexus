@@ -724,7 +724,9 @@ def _bead_ids(cmd: str) -> list[str]:
     return ids
 
 
-def _coverage(bead_ids: list[str], session_id: str = "") -> dict:
+def _coverage(
+    bead_ids: list[str], session_id: str = "", deadline_seconds: float | None = None
+) -> dict:
     """Which of *bead_ids* have a review-completed marker in T1 scratch.
 
     Carried from the script. Returns ``t1_reachable``, a per-id ``status``
@@ -746,6 +748,15 @@ def _coverage(bead_ids: list[str], session_id: str = "") -> dict:
     hook module would be reading private state across a module boundary.
     Passed straight through to :func:`_nx_env`, whose own precedence
     (explicit argument over the module slot) is unchanged.
+
+    *deadline_seconds*, ALSO added for nexus-dgl8g's Stop-hook reuse: this
+    module's own ``run()``/``_run_gate`` never pass it, so
+    ``NX_CLOSE_GATE_DEADLINE_SECONDS`` (default 3.5s) keeps sizing THIS
+    call chain exactly as before -- that default is tuned for PreToolUse's
+    5s hard ceiling, a number that has nothing to do with Stop's own
+    budget. Stop passes its own explicit value rather than retuning the
+    shared env-var default, which every OTHER caller of this function
+    would also pick up.
     """
 
     # nexus-4av2n round 3: wall-clock deadline for the WHOLE coverage phase,
@@ -754,7 +765,10 @@ def _coverage(bead_ids: list[str], session_id: str = "") -> dict:
     # deterministically with a slow stub nx rather than waiting out 3.5s.
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
-    DEADLINE_SECONDS = float(os.environ.get('NX_CLOSE_GATE_DEADLINE_SECONDS', '3.5') or '3.5')
+    if deadline_seconds is not None:
+        DEADLINE_SECONDS = deadline_seconds
+    else:
+        DEADLINE_SECONDS = float(os.environ.get('NX_CLOSE_GATE_DEADLINE_SECONDS', '3.5') or '3.5')
     _start = time.monotonic()
 
     def _deadline_exceeded():

@@ -15,6 +15,31 @@ dynamically-built ``bd sql``) is structurally invisible to it. This is the
 detective backstop for exactly that gap -- it reads bd's own record of
 what closed, not the command that closed it.
 
+FOLLOW-UP 1 (sibling-session false positive): a plain time-window filter
+over bd's own record fires on ANOTHER session's legitimate close too,
+because this project runs several sessions against one shared bd database
+at once and bd's record carries no per-close actor/session field. The fix
+INTERSECTS the time-window list with THIS session's own transcript -- a
+bead counts only if bd reports it closed in the window AND this session's
+own transcript shows a Bash tool_use whose command would close it. This
+also lets an override close (``NX_REVIEW_GATE_OVERRIDE=1``) be told apart
+directly (the override is literally in the transcript's own recorded
+command) instead of stating it as an unresolvable limitation.
+
+FOLLOW-UP 2 (Stop fires every turn, not once per session): the whole
+design has to be cheap on the COMMON turn, because Stop runs on every
+assistant turn. Three changes: (1) the transcript scan runs BEFORE any
+bd/nx spawn and is now incremental (a persisted byte offset, so each turn
+reads only what was appended since the last Stop, not the whole file) --
+a turn with no new close-shaped Bash command touches zero subprocesses;
+(2) per-session state (offset, pending ids, and every id's TERMINAL
+verdict) is memoized to a small JSON file, so a bead is verified against
+bd/T1 at most once per session, ever, and every later turn renders its
+warning from that cache; (3) the T1 coverage call gets its own explicit
+deadline (:data:`nexus.hooks.stop_verification._STOP_COVERAGE_DEADLINE_SECONDS`)
+instead of inheriting ``pre_close_verification``'s PreToolUse-sized
+default.
+
 These are in-process module tests (mirrors ``test_pre_close_verification_module.py``'s
 ``_coverage`` monkeypatch pattern) rather than a real T1/bd stack: bd is a
 real fake binary on ``PATH`` (this module's own pattern, matching
@@ -22,7 +47,17 @@ real fake binary on ``PATH`` (this module's own pattern, matching
 T1 coverage is monkeypatched at ``pre_close_verification._coverage`` --
 the exact reader this bead's own instructions say to reuse rather than
 reimplement, so faking its OUTPUT (not the T1 scan underneath it) is the
-right seam.
+right seam. Transcripts are written in the real Claude Code JSONL shape
+(``{"type": "assistant", "message": {"content": [{"type": "tool_use",
+"name": "Bash", "input": {"command": ...}}]}}``), matching
+``nexus.hooks.subagent_stop_scans``'s own fixtures for the same format.
+
+Every test in this module isolates ``XDG_STATE_HOME`` (the
+``isolated_state`` autouse fixture) -- the memoization this follow-up adds
+persists to a REAL file on disk keyed by session_id, and a test that did
+not isolate it would read or write a real ``~/.local/state/nexus/`` file
+and could leak state between test runs (or between tests, since several
+here reuse ``session_id="s1"``).
 """
 from __future__ import annotations
 
@@ -37,17 +72,22 @@ from nexus.hooks import stop_verification as hook
 # --- fixtures ---------------------------------------------------------------
 
 
-def _fake_bd(tmp_path: Path, closed_json: str, *, in_progress_output: str = "") -> Path:
+def _fake_bd(tmp_path: Path, closed_json: str, *, in_progress_output: str = "", counter: str | None = None) -> Path:
     """A one-file ``bd`` on PATH: ``--json`` gets *closed_json*, anything
     else (e.g. ``_beads_in_progress``'s own ``bd list --status=in_progress``
     call, which some ``run()``-level tests also trigger) gets
-    *in_progress_output* and exit 0.
+    *in_progress_output* and exit 0. When *counter* is given, every
+    invocation appends one line to that file -- the literal, real-process
+    proof (not a Python-level mock) that "no bd spawn on turns with
+    nothing new" means what it says.
     """
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(exist_ok=True)
     p = bin_dir / "bd"
+    count_line = f"echo x >> {counter}\n" if counter else ""
     p.write_text(
         "#!/bin/sh\n"
+        f"{count_line}"
         "case \"$*\" in\n"
         "  *--json*) cat <<'EOF'\n"
         f"{closed_json}\n"
@@ -67,18 +107,48 @@ def _fake_bd_absent(tmp_path: Path) -> Path:
     return bin_dir
 
 
-def _write_transcript(tmp_path: Path, session_start_iso: str, *, name: str = "transcript.jsonl") -> str:
+def _bash_entry(command: str) -> dict:
+    """One assistant turn's Bash ``tool_use`` block, in the real Claude
+    Code transcript shape (see ``nexus.hooks.subagent_stop_scans._blocks``,
+    which reads the identical ``message.content`` list)."""
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": command}}
+            ]
+        },
+    }
+
+
+def _write_transcript(
+    tmp_path: Path,
+    session_start_iso: str,
+    *,
+    bash_commands: tuple[str, ...] = (),
+    name: str = "transcript.jsonl",
+) -> str:
     """A minimal transcript: a leading line with NO timestamp (matches a
-    real session's first ``{"type":"mode",...}`` row), then one that
-    carries the session's start.
+    real session's first ``{"type":"mode",...}`` row), one that carries
+    the session's start, and one assistant Bash ``tool_use`` entry per
+    command in *bash_commands* -- this session's own recorded closes.
     """
     path = tmp_path / name
     lines = [
         json.dumps({"type": "mode", "mode": "normal", "sessionId": "s1"}),
         json.dumps({"type": "file-history-snapshot", "timestamp": session_start_iso}),
     ]
+    lines.extend(json.dumps(_bash_entry(cmd)) for cmd in bash_commands)
     path.write_text("\n".join(lines) + "\n")
     return str(path)
+
+
+def _append_bash_command(path: str, command: str) -> None:
+    """Simulate a LATER turn: append one more Bash tool_use entry to an
+    already-written transcript, so the next ``_undeclared_close_warning``
+    call sees genuinely NEW content past its persisted offset."""
+    with open(path, "a", encoding="utf-8") as fh:  # noqa: PTH123
+        fh.write(json.dumps(_bash_entry(command)) + "\n")
 
 
 def _bd_row(bead_id: str, closed_at: str) -> dict:
@@ -105,6 +175,13 @@ def isolated_path(monkeypatch):
     def _set(bin_dir: Path) -> None:
         monkeypatch.setenv("PATH", f"{bin_dir}:{_MINIMAL_SHELL_PATH}")
     return _set
+
+
+@pytest.fixture(autouse=True)
+def isolated_state(tmp_path, monkeypatch):
+    """Every test's close-gate memoization file lives under a per-test
+    XDG_STATE_HOME -- see the module docstring's closing paragraph."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
 
 
 # --- _session_start_dt --------------------------------------------------
@@ -174,6 +251,104 @@ class TestBdClosedSince:
         assert hook._bd_closed_since(session_start) == []
 
 
+# --- _scan_transcript_tail --------------------------------------------------
+
+
+class TestScanTranscriptTail:
+    """Reuses ``pre_close_verification``'s own close-spelling detector
+    (``_bd_verbs``/``_bead_ids``) against each Bash command found strictly
+    after the given byte offset, rather than re-implementing the
+    spellings or re-scanning the whole file every call."""
+
+    def test_finds_a_bd_close_and_its_id_from_offset_zero(self, tmp_path):
+        transcript = _write_transcript(
+            tmp_path, "2026-09-24T10:00:00Z",
+            bash_commands=("bd close nexus-x --reason done",),
+        )
+        result = hook._scan_transcript_tail(transcript, 0)
+        assert result is not None
+        declared, offset = result
+        assert declared == {"nexus-x": False}
+        assert offset == len(open(transcript, "rb").read())  # noqa: PTH123, SIM115 — test-only, immediate read
+
+    def test_a_second_call_from_the_returned_offset_sees_only_new_content(self, tmp_path):
+        transcript = _write_transcript(
+            tmp_path, "2026-09-24T10:00:00Z",
+            bash_commands=("bd close nexus-x",),
+        )
+        declared1, offset1 = hook._scan_transcript_tail(transcript, 0)
+        assert declared1 == {"nexus-x": False}
+
+        _append_bash_command(transcript, "bd close nexus-y")
+        declared2, offset2 = hook._scan_transcript_tail(transcript, offset1)
+        assert declared2 == {"nexus-y": False}  # NOT nexus-x again
+        assert offset2 > offset1
+
+    def test_finds_the_inline_override(self, tmp_path):
+        transcript = _write_transcript(
+            tmp_path, "2026-09-24T10:00:00Z",
+            bash_commands=("NX_REVIEW_GATE_OVERRIDE=1 bd close nexus-z --reason override",),
+        )
+        declared, _ = hook._scan_transcript_tail(transcript, 0)
+        assert declared == {"nexus-z": True}
+
+    def test_non_close_bd_commands_are_ignored(self, tmp_path):
+        transcript = _write_transcript(
+            tmp_path, "2026-09-24T10:00:00Z",
+            bash_commands=("bd show nexus-w", "bd list --status open"),
+        )
+        declared, _ = hook._scan_transcript_tail(transcript, 0)
+        assert declared == {}
+
+    def test_a_quoted_mention_does_not_count_as_a_close(self, tmp_path):
+        """Reusing ``_bd_verbs`` inherits its own quoted-mention exclusion
+        (nexus-fv65m) for free -- proof this is a real reuse, not a
+        reimplementation that merely resembles it."""
+        transcript = _write_transcript(
+            tmp_path, "2026-09-24T10:00:00Z",
+            bash_commands=('git commit -m "docs: bd close nexus-q notes"',),
+        )
+        declared, _ = hook._scan_transcript_tail(transcript, 0)
+        assert declared == {}
+
+    def test_none_for_missing_file(self, tmp_path):
+        assert hook._scan_transcript_tail(str(tmp_path / "nope.jsonl"), 0) is None
+
+    def test_offset_at_eof_returns_nothing_new(self, tmp_path):
+        transcript = _write_transcript(
+            tmp_path, "2026-09-24T10:00:00Z",
+            bash_commands=("bd close nexus-x",),
+        )
+        size = len(open(transcript, "rb").read())  # noqa: PTH123, SIM115 — test-only
+        declared, offset = hook._scan_transcript_tail(transcript, size)
+        assert declared == {}
+        assert offset == size
+
+
+# --- close-gate memoization state -------------------------------------------
+
+
+class TestCloseGateState:
+    def test_round_trips(self, tmp_path):
+        state = {"offset": 42, "pending": {"nexus-a": True}, "resolved": {"nexus-b": "clean"}}
+        hook._write_close_gate_state("s1", state)
+        assert hook._read_close_gate_state("s1") == state
+
+    def test_missing_state_file_is_empty(self):
+        assert hook._read_close_gate_state("s-never-seen") == hook._empty_close_gate_state()
+
+    def test_path_unsafe_session_id_reads_as_empty_and_write_is_a_noop(self, tmp_path):
+        assert hook._read_close_gate_state("../escape") == hook._empty_close_gate_state()
+        hook._write_close_gate_state("../escape", {"offset": 1, "pending": {}, "resolved": {}})
+        # Nothing to assert on disk (there is no valid path) -- the point
+        # is that this does not raise.
+
+    def test_corrupt_state_file_reads_as_empty(self, tmp_path):
+        path = hook._close_gate_state_path("s1")
+        path.write_text("not json")
+        assert hook._read_close_gate_state("s1") == hook._empty_close_gate_state()
+
+
 # --- _undeclared_close_warning (the integrated backstop) ------------------
 
 
@@ -181,10 +356,13 @@ class TestUndeclaredCloseWarning:
     """Each test corresponds to one of the bead's named coverage
     scenarios."""
 
-    def _payload(self, tmp_path, session_start_iso: str = "2026-09-24T10:00:00Z") -> dict:
+    def _payload(
+        self, tmp_path, session_start_iso: str = "2026-09-24T10:00:00Z",
+        *, bash_commands: tuple[str, ...] = (),
+    ) -> dict:
         return {
             "session_id": "s1",
-            "transcript_path": _write_transcript(tmp_path, session_start_iso),
+            "transcript_path": _write_transcript(tmp_path, session_start_iso, bash_commands=bash_commands),
         }
 
     def test_no_session_id_is_silent(self, tmp_path):
@@ -200,16 +378,28 @@ class TestUndeclaredCloseWarning:
         payload = self._payload(tmp_path)
         assert hook._undeclared_close_warning(payload) == ""
 
+    def test_no_close_commands_means_zero_subprocesses(self, tmp_path, isolated_path):
+        """THE CHEAP-TRIGGER-FIRST CONTRACT: a transcript with no
+        close-shaped Bash command at all never even looks at bd -- there
+        is no fake bd on PATH here, so any spawn attempt would surface as
+        a crash or a wrong answer, not a silent pass."""
+        isolated_path(_fake_bd_absent(tmp_path))
+        payload = self._payload(tmp_path)  # no bash_commands
+        assert hook._undeclared_close_warning(payload) == ""
+
     def test_bd_unavailable_reports_cannot_check(self, tmp_path, isolated_path):
         isolated_path(_fake_bd_absent(tmp_path))
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-x",))
         warning = hook._undeclared_close_warning(payload)
         assert "could not check" in warning
         assert "WARNING" in warning
 
-    def test_no_beads_closed_in_window_is_silent(self, tmp_path, isolated_path):
+    def test_close_not_confirmed_by_bd_is_silent(self, tmp_path, isolated_path):
+        """The transcript declares a close, but bd's window answers empty
+        (the command may have failed, or bd has not caught up) -- resolved
+        clean, not reported."""
         isolated_path(_fake_bd(tmp_path, "[]"))
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-x",))
         assert hook._undeclared_close_warning(payload) == ""
 
     def test_close_before_session_window_is_ignored_end_to_end(self, tmp_path, isolated_path, monkeypatch):
@@ -219,32 +409,64 @@ class TestUndeclaredCloseWarning:
         # window filter, not the coverage check, is what kept it out.
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {b: "missing" for b in ids}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {b: "missing" for b in ids}
+            },
         )
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-old",))
         assert hook._undeclared_close_warning(payload) == ""
+
+    def test_sibling_closed_bead_in_window_is_not_reported(self, tmp_path, isolated_path, monkeypatch):
+        """THE HEADLINE FIX (follow-up 1): bd reports a bead closed inside
+        this session's time window, but THIS session's own transcript
+        never names it -- a sibling session (sharing the same bd
+        database) closed it correctly. Must not be reported, even though
+        the coverage stub below would flag it as missing if it were ever
+        consulted."""
+        rows = json.dumps([_bd_row("nexus-sibling", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows))
+        consulted = []
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: consulted.append(list(ids)) or {
+                "t1_reachable": True, "status": {b: "missing" for b in ids}
+            },
+        )
+        # This session's own transcript closes a DIFFERENT bead -- proves
+        # the exclusion is identity-scoped, not "transcript has no closes
+        # at all".
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-mine",))
+        assert hook._undeclared_close_warning(payload) == ""
+        assert consulted == []  # never even reached the T1 coverage check
 
     def test_covered_bead_with_both_reviewer_marker_is_not_reported(self, tmp_path, isolated_path, monkeypatch):
         rows = json.dumps([_bd_row("nexus-good", "2026-09-24T10:30:00Z")])
         isolated_path(_fake_bd(tmp_path, rows))
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {"nexus-good": "covered"}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-good": "covered"}
+            },
         )
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-good",))
         assert hook._undeclared_close_warning(payload) == ""
 
-    def test_bead_with_no_marker_is_reported_by_id(self, tmp_path, isolated_path, monkeypatch):
+    def test_this_sessions_close_with_no_marker_is_reported(self, tmp_path, isolated_path, monkeypatch):
+        """THIS session's own transcript shows the close AND bd confirms it
+        landed in the window AND T1 has no marker -- genuinely undeclared."""
         rows = json.dumps([_bd_row("nexus-bad", "2026-09-24T10:30:00Z")])
         isolated_path(_fake_bd(tmp_path, rows))
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {"nexus-bad": "missing"}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-bad": "missing"}
+            },
         )
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-bad --reason done",))
         warning = hook._undeclared_close_warning(payload)
         assert "nexus-bad" in warning
         assert "1 bead" in warning
+        assert "closed under" not in warning  # not the override category
 
     def test_partial_marker_incomplete_is_reported_as_undeclared(self, tmp_path, isolated_path, monkeypatch):
         """nexus-e3mak: a marker naming only one reviewer does not count as
@@ -254,38 +476,44 @@ class TestUndeclaredCloseWarning:
         isolated_path(_fake_bd(tmp_path, rows))
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {"nexus-half": "incomplete"}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-half": "incomplete"}
+            },
         )
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-half",))
         warning = hook._undeclared_close_warning(payload)
         assert "nexus-half" in warning
 
-    def test_override_close_states_the_limitation_rather_than_hiding_it(self, tmp_path, isolated_path, monkeypatch):
-        """An evidence-only override close (NX_REVIEW_GATE_OVERRIDE=1) is
-        legitimate and LOOKS IDENTICAL to a genuinely undeclared one here --
-        neither bd nor T1 records the override was used. Per the bead: say
-        so in the line rather than silently excluding it (which would read
-        as "checked and clean")."""
+    def test_this_sessions_override_close_is_its_own_category(self, tmp_path, isolated_path):
+        """An override close is now IDENTIFIED, not merely disclaimed: the
+        inline ``NX_REVIEW_GATE_OVERRIDE=1`` sits on this session's own
+        recorded closing command, so it is reported as "closed under
+        override" and never reaches the T1 coverage check at all (real
+        ``_coverage`` is left UNPATCHED here -- proof it is genuinely
+        never called, not merely mocked to look clean)."""
         rows = json.dumps([_bd_row("nexus-override", "2026-09-24T10:30:00Z")])
         isolated_path(_fake_bd(tmp_path, rows))
-        monkeypatch.setattr(
-            "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {"nexus-override": "missing"}},
+        payload = self._payload(
+            tmp_path,
+            bash_commands=("NX_REVIEW_GATE_OVERRIDE=1 bd close nexus-override --reason evidence",),
         )
-        payload = self._payload(tmp_path)
         warning = hook._undeclared_close_warning(payload)
         assert "nexus-override" in warning
-        assert "NX_REVIEW_GATE_OVERRIDE" in warning
-        assert "cannot be told apart" in warning
+        assert "override" in warning.lower()
+        assert "NOTE:" in warning
+        assert "no review-completed marker naming both reviewers" not in warning
+        assert "cannot be told apart" not in warning  # the old caveat is gone
 
     def test_t1_unreachable_reports_cannot_check_not_undeclared(self, tmp_path, isolated_path, monkeypatch):
         rows = json.dumps([_bd_row("nexus-unk", "2026-09-24T10:30:00Z")])
         isolated_path(_fake_bd(tmp_path, rows))
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": False, "status": {"nexus-unk": "uncertain"}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": False, "status": {"nexus-unk": "uncertain"}
+            },
         )
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-unk",))
         warning = hook._undeclared_close_warning(payload)
         assert "nexus-unk" in warning
         assert "could not verify" in warning
@@ -296,30 +524,140 @@ class TestUndeclaredCloseWarning:
         isolated_path(_fake_bd(tmp_path, rows))
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {"nexus-slow": "deadline"}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-slow": "deadline"}
+            },
         )
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-slow",))
         warning = hook._undeclared_close_warning(payload)
         assert "nexus-slow" in warning
         assert "could not verify" in warning
         assert "no review-completed marker naming both reviewers" not in warning
 
-    def test_passes_session_id_through_to_coverage_reader(self, tmp_path, isolated_path, monkeypatch):
+    def test_passes_session_id_and_deadline_through_to_coverage_reader(self, tmp_path, isolated_path, monkeypatch):
         """Reuses ``pre_close_verification._coverage``'s reader against
-        THIS session's own T1 scope, not whatever the module-level
-        ``_SESSION_ID`` slot happens to hold."""
+        THIS session's own T1 scope, and Stop's OWN explicit deadline --
+        not ``NX_CLOSE_GATE_DEADLINE_SECONDS``'s PreToolUse-sized default."""
         rows = json.dumps([_bd_row("nexus-x", "2026-09-24T10:30:00Z")])
         isolated_path(_fake_bd(tmp_path, rows))
         seen = {}
 
-        def _fake_coverage(ids, session_id=""):
+        def _fake_coverage(ids, session_id="", deadline_seconds=None):
             seen["session_id"] = session_id
+            seen["deadline_seconds"] = deadline_seconds
             return {"t1_reachable": True, "status": {b: "covered" for b in ids}}
 
         monkeypatch.setattr("nexus.hooks.pre_close_verification._coverage", _fake_coverage)
-        payload = self._payload(tmp_path)
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-x",))
         hook._undeclared_close_warning(payload)
         assert seen["session_id"] == "s1"
+        assert seen["deadline_seconds"] == hook._STOP_COVERAGE_DEADLINE_SECONDS
+
+    def test_unreadable_transcript_falls_back_to_the_unscoped_list(self, tmp_path, isolated_path, monkeypatch):
+        """The transcript is readable enough to anchor the session's start
+        (stubbed directly here) but genuinely missing by the time
+        ``os.path.getsize`` tries to stat it -- the real, non-stubbed
+        code path hits a plain missing file. Falls back to the UNSCOPED
+        bd time-window list with an honest caveat, rather than silently
+        reporting nothing (a missing transcript is not evidence every
+        close was legitimate either)."""
+        rows = json.dumps([_bd_row("nexus-fallback", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows))
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-fallback": "missing"}
+            },
+        )
+        monkeypatch.setattr(
+            hook, "_session_start_dt",
+            lambda transcript_path: hook._exp._parse_iso("2026-09-24T10:00:00Z"),
+        )
+        payload = {"session_id": "s1", "transcript_path": str(tmp_path / "does-not-exist.jsonl")}
+        warning = hook._undeclared_close_warning(payload)
+        assert "could not scope" in warning
+        assert "nexus-fallback" in warning
+
+    # --- memoization: the follow-up 2 contract -----------------------------
+
+    def test_a_resolved_bead_is_never_reverified_but_stays_reported(self, tmp_path, isolated_path, monkeypatch):
+        rows = json.dumps([_bd_row("nexus-bad", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows))
+        calls = []
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: calls.append(list(ids)) or {
+                "t1_reachable": True, "status": {b: "missing" for b in ids}
+            },
+        )
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-bad",))
+
+        first = hook._undeclared_close_warning(payload)
+        second = hook._undeclared_close_warning(payload)  # same payload, no transcript growth
+
+        assert "nexus-bad" in first
+        assert "nexus-bad" in second  # still SHOWN
+        assert calls == [["nexus-bad"]]  # but VERIFIED exactly once
+
+    def test_no_bd_spawn_on_a_turn_with_nothing_new(self, tmp_path, isolated_path):
+        """Coordinator's explicit ask: call ``_undeclared_close_warning``
+        repeatedly and assert no bd spawn on turns with nothing new --
+        proven against a REAL fake bd binary that counts its own
+        invocations (not a Python-level mock), so this is evidence about
+        the actual subprocess boundary."""
+        counter = tmp_path / "bd_invocations"
+        rows = json.dumps([_bd_row("nexus-once", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows, counter=str(counter)))
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-once",))
+
+        hook._undeclared_close_warning(payload)  # turn 1: new close -> bd spawns
+        first_count = counter.read_text().count("x") if counter.exists() else 0
+        assert first_count == 1
+
+        hook._undeclared_close_warning(payload)  # turn 2: nothing new
+        hook._undeclared_close_warning(payload)  # turn 3: nothing new
+        second_count = counter.read_text().count("x") if counter.exists() else 0
+        assert second_count == 1  # unchanged -- zero additional bd spawns
+
+    def test_a_later_turns_new_close_triggers_exactly_one_more_bd_call(self, tmp_path, isolated_path):
+        counter = tmp_path / "bd_invocations"
+        rows = json.dumps([
+            _bd_row("nexus-one", "2026-09-24T10:15:00Z"),
+            _bd_row("nexus-two", "2026-09-24T10:45:00Z"),
+        ])
+        isolated_path(_fake_bd(tmp_path, rows, counter=str(counter)))
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-one",))
+
+        hook._undeclared_close_warning(payload)
+        assert counter.read_text().count("x") == 1
+
+        hook._undeclared_close_warning(payload)  # still nothing new
+        assert counter.read_text().count("x") == 1
+
+        _append_bash_command(payload["transcript_path"], "bd close nexus-two")
+        warning = hook._undeclared_close_warning(payload)
+        assert counter.read_text().count("x") == 2  # exactly one more spawn
+        assert "nexus-two" in warning or warning == ""  # bd's own real status decides; no crash either way
+
+    def test_memoization_survives_a_fresh_read_of_persisted_state(self, tmp_path, isolated_path, monkeypatch):
+        """State written by one call is read back correctly by a later,
+        independent call (simulating the NEXT Stop invocation, a separate
+        hook process in production) -- not merely held in a Python
+        variable across two calls in the same test process."""
+        rows = json.dumps([_bd_row("nexus-bad", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows))
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-bad": "missing"}
+            },
+        )
+        payload = self._payload(tmp_path, bash_commands=("bd close nexus-bad",))
+        hook._undeclared_close_warning(payload)
+
+        state = hook._read_close_gate_state("s1")
+        assert state["resolved"] == {"nexus-bad": "undeclared"}
+        assert state["pending"] == {}
 
 
 # --- run() integration: still only ever approves ---------------------------
@@ -327,22 +665,22 @@ class TestUndeclaredCloseWarning:
 
 class TestRunIntegration:
     def test_run_includes_the_backstop_warning_in_the_reason(self, tmp_path, isolated_path, monkeypatch):
-        # Isolate the RDR-184 ledger this run() also reads (via
-        # _reconcile_warning) from any real ~/.local/state/nexus ledger a
-        # session id of "s1" might collide with.
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
         rows = json.dumps([_bd_row("nexus-bad", "2026-09-24T10:30:00Z")])
         isolated_path(_fake_bd(tmp_path, rows))
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {"nexus-bad": "missing"}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-bad": "missing"}
+            },
         )
         # on_stop stays default (unset -> not True), so only the RDR-184-
         # family warnings (reconcile + this backstop) can appear.
         monkeypatch.setattr(hook, "_read_config", lambda: {})
         payload = {
             "session_id": "s1",
-            "transcript_path": _write_transcript(tmp_path, "2026-09-24T10:00:00Z"),
+            "transcript_path": _write_transcript(
+                tmp_path, "2026-09-24T10:00:00Z", bash_commands=("bd close nexus-bad",)
+            ),
         }
         result = hook.run(payload)
         parsed = json.loads(result.stdout)
@@ -350,17 +688,20 @@ class TestRunIntegration:
         assert "nexus-bad" in parsed.get("reason", "")
 
     def test_run_never_denies_even_with_undeclared_closes(self, tmp_path, isolated_path, monkeypatch):
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
         rows = json.dumps([_bd_row("nexus-bad", "2026-09-24T10:30:00Z")])
         isolated_path(_fake_bd(tmp_path, rows))
         monkeypatch.setattr(
             "nexus.hooks.pre_close_verification._coverage",
-            lambda ids, session_id="": {"t1_reachable": True, "status": {"nexus-bad": "missing"}},
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {"nexus-bad": "missing"}
+            },
         )
         monkeypatch.setattr(hook, "_read_config", lambda: {"on_stop": True})
         payload = {
             "session_id": "s1",
-            "transcript_path": _write_transcript(tmp_path, "2026-09-24T10:00:00Z"),
+            "transcript_path": _write_transcript(
+                tmp_path, "2026-09-24T10:00:00Z", bash_commands=("bd close nexus-bad",)
+            ),
         }
         result = hook.run(payload)
         parsed = json.loads(result.stdout)

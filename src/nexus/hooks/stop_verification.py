@@ -96,12 +96,49 @@ _T1_CANNOT_CHECK_WARNING_TMPL = (
     "markers for bead(s) closed this session (T1 unreachable or the check "
     "timed out): {ids}\n"
 )
+#: nexus-dgl8g follow-up: the override-caveat wording this template used to
+#: carry ("cannot be told apart from a genuinely undeclared close") is
+#: GONE, not softened -- an override close is now identified directly from
+#: this session's own transcript (see :func:`_session_close_declarations`)
+#: and reported under :data:`_OVERRIDE_CLOSE_NOTE_TMPL` instead, so a bead
+#: only ever reaches this template once it is known NOT to be one.
 _UNDECLARED_CLOSE_WARNING_TMPL = (
     "WARNING: {count} bead(s) closed this session with no review-completed "
-    "marker naming both reviewers: {ids} (an evidence-only override close "
-    "via NX_REVIEW_GATE_OVERRIDE=1 cannot be told apart from a genuinely "
-    "undeclared close using bd's or T1's own records — verify by hand)\n"
+    "marker naming both reviewers: {ids}\n"
 )
+_OVERRIDE_CLOSE_NOTE_TMPL = (
+    "NOTE: {count} bead(s) closed this session under an explicit review-gate "
+    "override (NX_REVIEW_GATE_OVERRIDE=1, found on the closing command "
+    "itself in this session's transcript): {ids}\n"
+)
+#: The transcript could not be scanned for THIS session's own close
+#: commands (missing, unreadable, or every line failed to parse) -- the
+#: bd time-window list is reported UNSCOPED, exactly as it would have been
+#: before this session-scoping existed, which means it can include a
+#: SIBLING session's legitimate close. Said plainly rather than silently
+#: falling back, per the bead's "never report a false clean" -- here
+#: widened to "never report a false undeclared" either.
+_SCOPE_FALLBACK_WARNING = (
+    "WARNING: could not scope the close-gate reconciliation to this "
+    "session (its own transcript could not be read) — the bead(s) below "
+    "may include another session's legitimate close:\n"
+)
+
+#: nexus-dgl8g follow-up 2: Stop fires on EVERY assistant turn, not once per
+#: session, so ``NX_CLOSE_GATE_DEADLINE_SECONDS``'s 3.5s default -- sized
+#: for PreToolUse's 5s hard ceiling, a budget this hook does not share --
+#: is the wrong number to inherit. Passed explicitly to ``_coverage``
+#: rather than retuned at the env-var level, which every OTHER caller of
+#: that function (the PreToolUse gate itself) would also pick up.
+_STOP_COVERAGE_DEADLINE_SECONDS = 5.0
+
+#: nexus-dgl8g follow-up 2: per-session memoization state lives beside the
+#: RDR-184 ledger's own per-session files (``expectations.py``'s
+#: ``_state_dir()``: ``XDG_STATE_HOME/nexus/<subdir>``), in a sibling
+#: subdirectory rather than that same one -- this state has nothing to do
+#: with the EXPECT/START ledger and mixing the two would make a reap of
+#: one accidentally a reap of the other.
+_CLOSE_GATE_STATE_SUBDIR = "close-gate-backstop"
 
 
 def _approve(reason: str = "") -> HookResult:
@@ -313,6 +350,266 @@ def _bd_closed_since(session_start) -> list[str] | None:
     return ids
 
 
+def _close_gate_state_dir() -> Path:
+    """Sibling of ``expectations._state_dir()``, own subdirectory.
+
+    Same private-by-construction posture (``chmod`` reapplied on every
+    call: the dir may predate a version that created it 0700, and this
+    file names live bead ids).
+
+    KNOWN RESIDUAL, not fixed here: unlike the RDR-184 ledger
+    (``expectations_sweep()``), nothing reaps a session's file after the
+    session ends -- one small JSON file per session, forever. Scoped out
+    of this dispatch; a reap would mirror ``expectations_sweep()``'s own
+    mtime-floor sweep over this sibling directory.
+    """
+    root = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    directory = Path(root) / "nexus" / _CLOSE_GATE_STATE_SUBDIR
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.chmod(0o700)
+    except OSError:  # pragma: no cover — a dir we cannot chmod is still usable
+        pass
+    return directory
+
+
+def _close_gate_state_path(session_id: str) -> Path | None:
+    """The per-session memoization file, or ``None`` for a path-unsafe id.
+
+    Reuses ``expectations._SESSION_ID_RE`` -- the same charset the RDR-184
+    ledger's own per-session filename already trusts -- rather than a
+    second regex that could drift from it.
+    """
+    if not session_id or not _exp._SESSION_ID_RE.match(session_id):
+        return None
+    return _close_gate_state_dir() / f"{session_id}.json"
+
+
+#: The state a fresh session (or a path-unsafe/corrupt one) starts from.
+#: A fresh dict every call -- callers mutate their own copy.
+def _empty_close_gate_state() -> dict:
+    return {"offset": 0, "pending": {}, "resolved": {}}
+
+
+def _read_close_gate_state(session_id: str) -> dict:
+    """This session's memoized offset/pending/resolved state, or empty.
+
+    Fail-open on every axis (missing file, corrupt JSON, wrong shape):
+    the WORST this can do wrong is re-scan-from-zero and re-verify
+    everything once, which is exactly what would have happened before
+    this memoization existed -- never worse than the un-memoized
+    baseline, never a reason to fail the hook.
+    """
+    path = _close_gate_state_path(session_id)
+    if path is None:
+        return _empty_close_gate_state()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return _empty_close_gate_state()
+    if not isinstance(data, dict):
+        return _empty_close_gate_state()
+    offset = data.get("offset")
+    pending = data.get("pending")
+    resolved = data.get("resolved")
+    return {
+        "offset": offset if isinstance(offset, int) and offset >= 0 else 0,
+        "pending": dict(pending) if isinstance(pending, dict) else {},
+        "resolved": dict(resolved) if isinstance(resolved, dict) else {},
+    }
+
+
+def _write_close_gate_state(session_id: str, state: dict) -> None:
+    """Best-effort atomic write (temp file + ``os.replace``), matching
+    ``db.t1.publish_t1_session_lease``'s own pattern so a concurrent
+    reader (there should not be one -- Stop hooks for one session do not
+    overlap -- but the file lives beside others that assume this) never
+    observes a torn write. A failure here loses only the memoization for
+    this turn, never the hook itself.
+    """
+    path = _close_gate_state_path(session_id)
+    if path is None:
+        return
+    try:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _scan_transcript_tail(
+    transcript_path: str, start_offset: int
+) -> tuple[dict[str, bool], int] | None:
+    """New close declarations found strictly AFTER *start_offset*.
+
+    nexus-dgl8g follow-up 2: Stop fires on every assistant turn, so
+    re-reading the WHOLE transcript every time (this function's own
+    previous shape, ``_session_close_declarations``) means a turn deep
+    into a long session pays for the growing prefix again on every single
+    turn. *start_offset* is a raw BYTE offset from a PRIOR call's own
+    ``tell()`` (persisted across process invocations in
+    :func:`_read_close_gate_state`/:func:`_write_close_gate_state`);
+    opened in BINARY mode specifically so that offset is unambiguous --
+    text-mode ``seek``/``tell`` cookies are only valid against the SAME
+    open stream that produced them, where a raw byte offset from a
+    PRIOR process's read is exactly what persisting across turns needs.
+
+    Returns ``(new_declarations, new_offset)`` where *new_declarations*
+    maps a NEWLY-seen bead id to whether ITS OWN closing command carried
+    an inline ``NX_REVIEW_GATE_OVERRIDE=1`` (OR'd if the same id appears
+    more than once in the tail). Reuses
+    ``pre_close_verification._bd_verbs``/``_bead_ids`` rather than
+    re-implementing the close spellings, exactly as the single-pass
+    version did.
+
+    Returns ``None`` if the transcript cannot be read at all (missing,
+    unreadable, or a decode failure never even producible from a valid
+    JSONL file). Distinct from "readable, nothing new" (``({}, offset)``
+    with ``new_declarations`` empty) -- the caller falls back to an
+    UNSCOPED report only on the former, never treats the latter as
+    anything but "nothing new to check".
+    """
+    from nexus.hooks.pre_close_verification import _bd_verbs, _bead_ids  # noqa: PLC0415 — deferred: see the other spawns in this module
+
+    declarations: dict[str, bool] = {}
+    try:
+        with open(transcript_path, "rb") as fh:  # noqa: PTH123 — carried: binary, see the byte-offset note above
+            fh.seek(start_offset)
+            for raw in fh:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line or '"Bash"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(entry, dict) or entry.get("type") != "assistant":
+                    continue
+                message = entry.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") == "Bash"
+                    ):
+                        continue
+                    tool_input = block.get("input")
+                    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+                    if not isinstance(command, str) or not command:
+                        continue
+                    verbs = _bd_verbs(command)
+                    if not verbs.get("has_close_or_done"):
+                        continue
+                    is_override = bool(verbs.get("inline_override"))
+                    for bid in _bead_ids(command):
+                        declarations[bid] = declarations.get(bid, False) or is_override
+            new_offset = fh.tell()
+    except OSError:
+        return None
+    return declarations, new_offset
+
+
+def _render_resolved_warning(resolved: dict[str, str]) -> str:
+    """The persisted verdicts, rendered -- every turn, from CACHE, no I/O.
+
+    A bead already resolved keeps being SHOWN each turn it stays that way
+    (matching this file's other advisory nags, e.g. beads-in-progress,
+    which re-warn every Stop while the condition persists) but is never
+    RE-VERIFIED (nothing here spawns anything) -- "reported once" bounds
+    the WORK, not the visibility.
+    """
+    override_ids = sorted(b for b, st in resolved.items() if st == "override")
+    unchecked_ids = sorted(
+        b for b, st in resolved.items() if st in ("unchecked", "t1-unreachable")
+    )
+    undeclared_ids = sorted(b for b, st in resolved.items() if st == "undeclared")
+
+    warning = ""
+    if override_ids:
+        warning += _OVERRIDE_CLOSE_NOTE_TMPL.format(
+            count=len(override_ids), ids=" ".join(override_ids)
+        )
+    if unchecked_ids:
+        warning += _T1_CANNOT_CHECK_WARNING_TMPL.format(ids=" ".join(unchecked_ids))
+    if undeclared_ids:
+        warning += _UNDECLARED_CLOSE_WARNING_TMPL.format(
+            count=len(undeclared_ids), ids=" ".join(undeclared_ids)
+        )
+    return warning
+
+
+def _resolve_pending(
+    session_id: str, transcript_path: str, pending: dict[str, bool], resolved: dict[str, str]
+) -> str:
+    """Confirm *pending* ids against bd + T1, mutating *resolved* in place
+    and returning them (removed from *pending*, also mutated in place) --
+    or a TRANSIENT cannot-check note if bd could not answer this turn,
+    in which case *pending* is left untouched for the next turn to retry
+    (bd being briefly unreachable is presumed transient, matching
+    ``_beads_in_progress``'s own un-cached retry-every-turn posture
+    elsewhere in this file).
+
+    Every id THIS call DOES manage to ask bd about gets a TERMINAL
+    ``resolved`` entry this turn, whatever the answer -- clean (not
+    actually in bd's closed-in-window list; the close command may have
+    failed, or bd has not caught up), override, covered/missing/
+    incomplete via T1, or T1-unreachable/deadline. "Verified once, never
+    re-checked" is deliberately taken to mean an INCONCLUSIVE T1 read
+    counts as verified too: the alternative (retry indefinitely) can cost
+    a full bd + nx round trip on every future turn for the life of the
+    session if T1 stays flaky, which is the exact cost this follow-up
+    exists to remove.
+    """
+    session_start = _session_start_dt(transcript_path)
+    if session_start is None:
+        return ""  # can't ask bd without a window; pending stays for next turn
+
+    closed_ids = _bd_closed_since(session_start)
+    if closed_ids is None:
+        return _BD_CANNOT_CHECK_WARNING  # transient; pending left untouched
+
+    closed_set = set(closed_ids)
+    confirmed = [b for b in pending if b in closed_set]
+    not_confirmed = [b for b in pending if b not in closed_set]
+
+    override_now = [b for b in confirmed if pending[b]]
+    non_override_now = [b for b in confirmed if not pending[b]]
+
+    for bid in override_now:
+        resolved[bid] = "override"
+    for bid in not_confirmed:
+        resolved[bid] = "clean"
+
+    if non_override_now:
+        from nexus.hooks import pre_close_verification as _pcv  # noqa: PLC0415 — deferred: see the other spawns in this module
+
+        coverage = _pcv._coverage(
+            non_override_now, session_id=session_id,
+            deadline_seconds=_STOP_COVERAGE_DEADLINE_SECONDS,
+        )
+        if not coverage.get("t1_reachable"):
+            for bid in non_override_now:
+                resolved[bid] = "t1-unreachable"
+        else:
+            status = coverage.get("status", {})
+            for bid in non_override_now:
+                st = status.get(bid)
+                if st == "covered":
+                    resolved[bid] = "clean"
+                elif st == "deadline":
+                    resolved[bid] = "unchecked"
+                else:
+                    resolved[bid] = "undeclared"
+
+    for bid in confirmed + not_confirmed:
+        pending.pop(bid, None)
+    return ""
+
+
 def _undeclared_close_warning(payload: dict) -> str:
     """nexus-dgl8g: the close-gate reconciliation backstop.
 
@@ -328,81 +625,126 @@ def _undeclared_close_warning(payload: dict) -> str:
     out of together, independent of the ``on_stop`` toggle that governs
     the git/beads UX nags below.
 
+    TWO FILTERS, TRANSCRIPT FIRST (nexus-dgl8g follow-up 2 -- this order
+    is the opposite of the follow-up 1 shape, and deliberately so). Stop
+    fires on EVERY assistant turn, not once per session, so the cost of
+    this function IS the whole design, not an afterthought. The
+    transcript scan is now a cheap, INCREMENTAL, memoized local read (a
+    ``stat`` plus, only on growth, the bytes appended since the last
+    call -- see :func:`_scan_transcript_tail` and the persisted state in
+    :func:`_read_close_gate_state`); bd and T1 are process spawns
+    (measured ~1.5-1.9s each, dominated by their own boot cost, not by
+    what they are asked). So the transcript decides FIRST whether there
+    is anything new to even ask bd/T1 about, and a turn with no new
+    close-shaped Bash command touches neither: zero subprocesses. THIS
+    session's own transcript is also what tells a sibling session's
+    legitimate close (same bd, same time window, different session --
+    bd's own record carries no per-close actor/session field, and this
+    project runs several sessions against one shared bd database at
+    once) apart from this session's own undeclared one, exactly as
+    follow-up 1 established; that intersection still happens, just
+    id-by-id inside :func:`_resolve_pending` rather than as one big list
+    comparison, because the SET of pending ids memoizes down to "only
+    ever the newly-declared ones" instead of recomputing the whole
+    session's history every turn.
+
     Reuses :func:`nexus.hooks.pre_close_verification._coverage` for the
     marker read rather than re-implementing it -- same T1 scan, same
-    reviewer-name matching, same ``review-completed`` tag rule. Marker
-    reading and close-detection are two independently-maintained readers
-    of two different sources (T1 scratch vs. bd's own record) and a
-    second implementation of either would be exactly the drift this
-    bead's own review markers exist to prevent.
+    reviewer-name matching, same ``review-completed`` tag rule -- with an
+    explicit :data:`_STOP_COVERAGE_DEADLINE_SECONDS` rather than that
+    function's own env-var default (3.5s, sized for PreToolUse's 5s
+    ceiling, a budget this hook does not share).
 
-    An override close (``NX_REVIEW_GATE_OVERRIDE=1``) is legitimate and
-    LOOKS IDENTICAL here to a genuinely undeclared one: nothing bd records
-    and nothing T1 records distinguishes the two (the override is read
-    only from the PreToolUse hook's own process environment at close
-    time, never persisted anywhere this reader can reach -- see
-    ``pre_close_verification.py``'s own ``NX_REVIEW_GATE_OVERRIDE``
-    references). Per the bead: state that limitation in the line rather
-    than silently dropping such closes from the count, which would make
-    an override indistinguishable from "checked and clean".
+    An override close (``NX_REVIEW_GATE_OVERRIDE=1``) is identified
+    directly from this session's own transcript and reported under
+    :data:`_OVERRIDE_CLOSE_NOTE_TMPL`, never reaching the T1 coverage
+    check at all (override alone is what the PreToolUse gate's own
+    ``_run_gate`` treats as sufficient, regardless of marker state). Only
+    an INLINE override (``NX_REVIEW_GATE_OVERRIDE=1 bd close ...``) is
+    visible this way; a persistent ``export`` set in an earlier Bash call
+    is not -- narrower than the gate's own detection, not a claimed
+    equivalence.
 
-    A SECOND, WIDER LIMITATION worth naming here rather than discovering
-    at review: bd's own record (``bd list --json``, confirmed above) has
-    no per-close actor/session field, so the window is TIME-scoped only
-    (``closed_at >= this session's start``), never SESSION-scoped. Per
-    ``AGENTS.md``'s own "one session, one worktree" model this project
-    runs several sessions against the SAME shared bd database at once, so
-    a bead a SIBLING session closed (with its own valid marker, in its
-    own T1 scope) inside this session's time window reads as undeclared
-    here too -- this reader has no way to tell "closed by someone else,
-    correctly" from "closed by me, without a marker". Not fixable from
-    data bd exposes today; a false positive of this shape is a reason to
-    check bd's own ``close_reason``/timing by hand, not evidence the
-    close itself was actually undeclared.
+    A transcript that cannot be read AT ALL when there is genuinely
+    nothing cached yet (see the fallback branch below) is reported
+    UNSCOPED with :data:`_SCOPE_FALLBACK_WARNING` rather than silently
+    saying nothing -- a missing transcript is not evidence every close in
+    the window was legitimate either.
     """
     if stop_guard_mode() not in ("observe", "block"):
         return ""
     session_id = str(payload.get("session_id") or "")
     if not session_id:
         return ""
-
-    session_start = _session_start_dt(str(payload.get("transcript_path") or ""))
-    if session_start is None:
-        # No transcript to anchor a window on: there is nothing to check
-        # AGAINST, not evidence of anything amiss. Matches this file's
-        # other missing-signal branches (e.g. empty session_id above).
+    transcript_path = str(payload.get("transcript_path") or "")
+    if not transcript_path:
         return ""
 
-    closed_ids = _bd_closed_since(session_start)
-    if closed_ids is None:
-        return _BD_CANNOT_CHECK_WARNING
-    if not closed_ids:
-        return ""
+    state = _read_close_gate_state(session_id)
+    offset = state["offset"]
+    pending = state["pending"]
+    resolved = state["resolved"]
 
-    from nexus.hooks import pre_close_verification as _pcv  # noqa: PLC0415 — deferred: see the other spawns in this module
+    try:
+        size = os.path.getsize(transcript_path)
+    except OSError:
+        size = None
 
-    coverage = _pcv._coverage(closed_ids, session_id=session_id)
-    if not coverage.get("t1_reachable"):
-        return _T1_CANNOT_CHECK_WARNING_TMPL.format(ids=" ".join(sorted(closed_ids)))
+    if size is None:
+        # Cannot even stat the transcript: no way to scope to this
+        # session at all. Fall back to the OLD unscoped bd time-window
+        # report, transient (never persisted into `resolved`) so normal
+        # memoized operation resumes the moment the transcript is
+        # readable again, rather than staying wedged on this branch.
+        session_start = _session_start_dt(transcript_path)
+        if session_start is None:
+            return _render_resolved_warning(resolved)
+        closed_ids = _bd_closed_since(session_start)
+        if closed_ids is None:
+            return _BD_CANNOT_CHECK_WARNING + _render_resolved_warning(resolved)
+        unscoped = [b for b in closed_ids if b not in resolved]
+        if not unscoped:
+            return _render_resolved_warning(resolved)
+        from nexus.hooks import pre_close_verification as _pcv  # noqa: PLC0415 — deferred: see the other spawns in this module
 
-    status = coverage.get("status", {})
-    # "deadline" means the coverage phase's own wall-clock budget ran out
-    # before it could look -- NOT CONFIRMED missing, just unchecked (see
-    # pre_close_verification._deny_message's identical treatment of the
-    # same status). Reported as cannot-check, not folded into undeclared.
-    unchecked = sorted(b for b in closed_ids if status.get(b) == "deadline")
-    undeclared = sorted(
-        b for b in closed_ids if status.get(b) not in ("covered", "deadline")
-    )
-
-    warning = ""
-    if unchecked:
-        warning += _T1_CANNOT_CHECK_WARNING_TMPL.format(ids=" ".join(unchecked))
-    if undeclared:
-        warning += _UNDECLARED_CLOSE_WARNING_TMPL.format(
-            count=len(undeclared), ids=" ".join(undeclared)
+        coverage = _pcv._coverage(
+            unscoped, session_id=session_id, deadline_seconds=_STOP_COVERAGE_DEADLINE_SECONDS
         )
-    return warning
+        fallback = _SCOPE_FALLBACK_WARNING
+        if not coverage.get("t1_reachable"):
+            fallback += _T1_CANNOT_CHECK_WARNING_TMPL.format(ids=" ".join(sorted(unscoped)))
+        else:
+            status = coverage.get("status", {})
+            unchecked = sorted(b for b in unscoped if status.get(b) == "deadline")
+            undeclared = sorted(b for b in unscoped if status.get(b) not in ("covered", "deadline"))
+            if unchecked:
+                fallback += _T1_CANNOT_CHECK_WARNING_TMPL.format(ids=" ".join(unchecked))
+            if undeclared:
+                fallback += _UNDECLARED_CLOSE_WARNING_TMPL.format(
+                    count=len(undeclared), ids=" ".join(undeclared)
+                )
+        return fallback + _render_resolved_warning(resolved)
+
+    transient_note = ""
+    if size > offset:
+        tail = _scan_transcript_tail(transcript_path, offset)
+        if tail is not None:
+            new_declarations, new_offset = tail
+            for bid, is_override in new_declarations.items():
+                if bid in resolved:
+                    continue  # already terminal; a re-close of a closed bead is not this backstop's concern
+                pending[bid] = pending.get(bid, False) or is_override
+            offset = new_offset
+        # tail is None (became unreadable mid-scan): leave offset/pending
+        # untouched, nothing more to do -- caught next turn once readable.
+
+    if pending:
+        transient_note = _resolve_pending(session_id, transcript_path, pending, resolved)
+
+    _write_close_gate_state(
+        session_id, {"offset": offset, "pending": pending, "resolved": resolved}
+    )
+    return transient_note + _render_resolved_warning(resolved)
 
 
 def _git_is_dirty(path: str | None = None) -> bool:
