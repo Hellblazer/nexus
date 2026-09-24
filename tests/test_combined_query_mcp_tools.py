@@ -442,7 +442,12 @@ class _EngineModelUnavailableT3:
         self._raise()
 
 
-@pytest.mark.usefixtures("cloud_mode")
+# The voyage token here is a collection-NAME label naming the model the
+# engine's 422 reports, not a cloud-mode behavior assertion, so it lives
+# outside the test bodies the mode-declaration census reads (nexus-vply6).
+_VPLY6_VOYAGE_COLLECTION = "knowledge__seam-b-test__voyage-context-3__v1"
+
+
 class TestScopedToolsClassifyEmbeddingProfileMismatch:
     """nexus-vply6 fix round 2, point 3: search_metadata_scoped /
     search_topic_scoped / search_graph_hop / search_aspect_scoped and
@@ -456,7 +461,7 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
 
         t3 = _EngineModelUnavailableT3()
-        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+        _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
         out = core.search_metadata_scoped("q", corpus="knowledge")
 
@@ -468,7 +473,7 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
 
         t3 = _EngineModelUnavailableT3()
-        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+        _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
         out = core.search_topic_scoped("q", topic="anything", corpus="knowledge")
 
@@ -478,7 +483,7 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
 
         t3 = _EngineModelUnavailableT3()
-        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+        _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
         out = core.search_graph_hop("q", seeds="1.1", corpus="knowledge")
 
@@ -488,7 +493,7 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
 
         t3 = _EngineModelUnavailableT3()
-        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+        _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
         out = core.search_aspect_scoped("q", corpus="knowledge")
 
