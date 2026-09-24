@@ -901,11 +901,13 @@ def test_mailbox_max_attempts_lapsed_leases_dead_letters(t2_service_env) -> None
 #
 # Two sessions on one box, both minting against the ONE tenant t2_service_env
 # provisions -- the RDR's own "not a third consumer" clause: address_kind
-# `instance` reuses the mailbox/<address> template, addressed to a session
-# name instead of an agent id. Journey per docs/tuple-space-walkthroughs.md
-# § Cross-instance request and ack: A outs a request to B's mailbox and
-# parks an `in` on its OWN mailbox for the ack; B drains, acks by outing
-# back to A's address; A's parked `in` returns.
+# `session` reuses the mailbox/<address> template, addressed to a session
+# name instead of an agent id (RDR-208 Phase 3, bead nexus-galkv.24, retired
+# and refused the original `instance` value this journey used to send).
+# Journey per docs/tuple-space-walkthroughs.md § Cross-instance request and
+# ack: A outs a request to B's mailbox and parks an `in` on its OWN mailbox
+# for the ack; B drains, acks by outing back to A's address; A's parked `in`
+# returns.
 
 
 def _parked_in_loop(
@@ -959,12 +961,13 @@ def test_cross_instance_request_and_ack_two_sessions_one_box(t2_service_env) -> 
     b = _tuple_uniq("conexus-b")
     correlation_id = _tuple_uniq("corr")
 
-    # A -> B: the request, address_kind instance (RDR-205 Phase 6 addressing).
+    # A -> B: the request, address_kind session (RDR-205 Phase 6 addressing,
+    # re-addressed by session id at RDR-208 Phase 3).
     out = runner.invoke(main, [
         "tuple", "out", f"mailbox/{b}",
         "--key", f"to={b}", "--dim", f"from={a}",
         "--dim", "kind=request", "--dim", f"correlation_id={correlation_id}",
-        "--dim", "address_kind=instance", "--body", "deploy and re-gate",
+        "--dim", "address_kind=session", "--body", "deploy and re-gate",
         "--nonce", correlation_id,
     ])
     assert out.exit_code == 0, out.output
@@ -1172,7 +1175,7 @@ def test_cross_instance_unacked_request_is_visible_to_the_sweep(t2_service_env) 
         "tuple", "out", f"mailbox/{b}",
         "--key", f"to={b}", "--dim", f"from={a}",
         "--dim", "kind=request", "--dim", f"correlation_id={correlation_id}",
-        "--dim", "address_kind=instance", "--body", "never acked",
+        "--dim", "address_kind=session", "--body", "never acked",
         "--nonce", correlation_id,
     ])
     assert out.exit_code == 0, out.output
@@ -1244,7 +1247,7 @@ def test_mailbox_sweep_real_nx_subprocess_finds_unacked_skips_acked(
         "tuple", "out", f"mailbox/{b}",
         "--key", f"to={b}", "--dim", f"from={a}",
         "--dim", "kind=request", "--dim", f"correlation_id={corr_unacked}",
-        "--dim", "address_kind=instance", "--body", "never acked",
+        "--dim", "address_kind=session", "--body", "never acked",
         "--nonce", corr_unacked,
     ])
     assert out_unacked.exit_code == 0, out_unacked.output
@@ -1255,7 +1258,7 @@ def test_mailbox_sweep_real_nx_subprocess_finds_unacked_skips_acked(
         "tuple", "out", f"mailbox/{b}",
         "--key", f"to={b}", "--dim", f"from={a}",
         "--dim", "kind=request", "--dim", f"correlation_id={corr_acked}",
-        "--dim", "address_kind=instance", "--body", "will be acked",
+        "--dim", "address_kind=session", "--body", "will be acked",
         "--nonce", corr_acked,
     ])
     assert out_acked.exit_code == 0, out_acked.output
@@ -1263,7 +1266,7 @@ def test_mailbox_sweep_real_nx_subprocess_finds_unacked_skips_acked(
         "tuple", "out", f"mailbox/{a}",
         "--key", f"to={a}", "--dim", f"from={b}",
         "--dim", "kind=ack", "--dim", f"correlation_id={corr_acked}",
-        "--dim", "address_kind=instance", "--body", "done",
+        "--dim", "address_kind=session", "--body", "done",
         "--nonce", f"ack-{corr_acked}",
     ])
     assert ack.exit_code == 0, ack.output
