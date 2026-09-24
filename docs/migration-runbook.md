@@ -91,15 +91,16 @@ documented in
 under `~/.config/nexus/` unless noted:
 
 - `logs/storage_service.log` — supervisor lifecycle: start/exit breadcrumbs,
-  jar exit codes, restart attempts, PG recoveries
-- `logs/storage_service_jar.log` — the Java service's stdout/stderr
+  service exit codes, restart attempts, PG recoveries
+- `logs/storage_service_native.log` — the native service's stdout/stderr
+  (banners, fatal errors)
 - `logs/storage_service.crash.log` — pre-startup failures of the detached
   supervisor
 - `<pg_data>/pg.log` — the nx-managed Postgres cluster
 
 **The absence convention**: a supervisor death WITHOUT a
 `storage_service_supervisor_exit` breadcrumb in `storage_service.log` means it
-was killed, not that it chose to exit. Check the jar log tail and `pg.log`
+was killed, not that it chose to exit. Check the service log tail and `pg.log`
 next. Once `nx daemon service status` is green, re-run whatever was
 interrupted — the ETL paths are idempotent and re-converge on
 `(tenant, collection, chash)`.

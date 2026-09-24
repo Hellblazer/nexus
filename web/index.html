@@ -126,7 +126,7 @@ details p{margin:8px 0 4px;font-size:15px}
   <button data-surface="cli" aria-pressed="false">Just the nx CLI</button>
   <button data-surface="desktop" aria-pressed="false">Claude Desktop only</button>
 </div>
-<p class="who" data-for="code">You run <code>claude</code> in a terminal. You install the <code>nx</code> command and a plugin. The plugin adds 48 tools, 13 agents, and 43 skills to Claude Code. <strong>The plugin needs Node.js.</strong></p>
+<p class="who" data-for="code">You run <code>claude</code> in a terminal. You install the <code>nx</code> command and a plugin. The plugin adds 74 tools, 10 agents, and 44 skills to Claude Code. <strong>The plugin needs Node.js.</strong></p>
 <p class="who hidden" data-for="cli">You want to index and search from the terminal only. You can add the Claude plugin later.</p>
 <p class="who hidden" data-for="desktop">You use the Claude Desktop app and you do not have Claude Code. You install Nexus as an extension with one click.</p>
 
@@ -277,7 +277,7 @@ nx uninstall --yes --remove-data      <span class="c"># stop the service, remove
   <p><code>nx uninstall</code> does not remove <code>nx</code> itself, the downloaded search model, or older versions kept side by side. Remove them by hand:</p>
   <div class="cmd"><pre>uv tool uninstall conexus 2&gt;/dev/null      <span class="c"># the uv install, if one exists</span>
 rm -rf ~/.local/share/nexus                <span class="c"># program versions, search model cache</span>
-rm -f ~/.local/bin/nx ~/.local/bin/nx-mcp ~/.local/bin/nx-mcp-catalog ~/.local/bin/nx-session-end-launcher</pre><button class="copy" type="button">Copy</button></div>
+rm -f ~/.local/bin/nx ~/.local/bin/nx-mcp ~/.local/bin/nx-mcp-catalog ~/.local/bin/nx-session-end-launcher ~/.local/bin/nx-hook</pre><button class="copy" type="button">Copy</button></div>
 </div></li>
 </ol>
 <h3>Check</h3>

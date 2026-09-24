@@ -180,8 +180,9 @@ service to stop — it clears the local endpoint config (`service_url` +
 `service_token`) and never touches the remote tenant's data.
 
 The `daemon_uninstall` MCP tool does the equivalent teardown in one step for
-in-chat use (with `remove_data=true` for the data wipe), including booting
-out a legacy `com.nexus.t2` unit if one is still present.
+in-chat use (`confirm=true` to act, plus `remove_data=true` for the data
+wipe — `confirm=false` only describes what would be removed), including
+booting out a legacy `com.nexus.t2` unit if one is still present.
 
 ## Verification
 
