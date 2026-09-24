@@ -157,7 +157,14 @@ class TestConfirmedUninstall:
         assert "daemon stopped" in report.message
 
     def _install_service_unit(self) -> None:
-        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        # nexus-k9i56: activation now always routes through installer.run_bounded
+        # (never the stock subprocess.run) once _run_manager's timeout is
+        # required, so patching daemon_cmd.subprocess.run alone no longer
+        # reaches it -- that used to work only because subprocess is one
+        # shared module object across both. Patch both, as every other
+        # install-mocking helper in this test module already does.
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run, \
+                patch.object(installer, "run_bounded", new=mock_run):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
             mock_run.return_value.stdout = ""
