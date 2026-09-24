@@ -261,11 +261,20 @@ class Announce:
     read by many sessions is announced once to EACH of them. ``None``
     (the default, every mailbox spec) is the row-level stamp. The
     channel waiter sends its session id for every board spec.
+
+    ``waiter`` (bead nexus-rxuiq) is the reader's supersession token,
+    ``"<time_ns>-<alphanumeric id>"``, minted once per waiter instance. The
+    engine keeps the newest token per ``(subspace, subscriber)``; a wait
+    carrying an older one returns ``WaitResult.superseded`` without
+    stamping anything, so a replaced waiter's still-parked call can no
+    longer mark the next row announced for nobody. ``None`` is today's
+    behaviour.
     """
 
     interval_s: int
     max: int
     subscriber: str | None = None
+    waiter: str | None = None
 
 
 @dataclass(frozen=True)
@@ -320,6 +329,11 @@ class WaitResult:
     #: own session id, the way a missing ``announce_count`` stops it on
     #: an engine predating announce mode.
     subscriber: str | None = None
+    #: Bead nexus-rxuiq: a newer waiter token owns this spec, so the engine
+    #: returned without querying or stamping (``tuples`` is empty, the one
+    #: exception to the rule above). The caller's successor is live; it
+    #: should stop waiting.
+    superseded: bool = False
 
 
 @dataclass(frozen=True)

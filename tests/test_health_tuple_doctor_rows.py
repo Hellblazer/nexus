@@ -1209,6 +1209,21 @@ class TestCheckTupleChannelDelivery:
         assert any("current engine" in s for s in r.fix_suggestions)
         assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
 
+    def test_superseded_names_the_duplicate_session_cause(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """Bead nexus-rxuiq: a live waiter only ever sees `superseded` when a
+        newer waiter for the same session exists, i.e. two nx-mcp processes
+        serve one session. The engine is fine; the duplicate is the cause."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="superseded")
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "newer channel waiter" in r.detail
+        assert not any("current engine" in s for s in r.fix_suggestions)
+
     def test_no_wait_support_names_the_cause_and_suggests_rebuilding_the_engine(
         self, monkeypatch, tmp_path: Path,
     ) -> None:

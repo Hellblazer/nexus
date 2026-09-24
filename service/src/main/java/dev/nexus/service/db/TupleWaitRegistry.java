@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -190,6 +191,11 @@ final class TupleWaitRegistry {
          * two distinct listeners.
          */
         final Set<MultiWaiter> multiListeners = new CopyOnWriteArraySet<>();
+        /** Bead nexus-rxuiq: the newest waiter token seen per announce subscriber
+         *  ({@code ""} for a row-level mailbox spec), guarded by {@link #lock}. Lives
+         *  on the group so it is evicted with it; an evicted group has no parked wait
+         *  left to fence. */
+        final Map<String, String> currentWaiter = new HashMap<>();
 
         Group(long nowNanos) {
             this.lastActivityNanos = nowNanos;
@@ -198,6 +204,100 @@ final class TupleWaitRegistry {
 
     private long now() {
         return nanoTimeSource.getAsLong();
+    }
+
+    // ── waiter supersession (bead nexus-rxuiq) ────────────────────────────────
+
+    private static final java.util.regex.Pattern WAITER_TOKEN =
+            java.util.regex.Pattern.compile("([0-9]{1,19})-([A-Za-z0-9]{1,64})");
+
+    /** {@code <decimal time_ns>-<alphanumeric id>}: the client mints one per waiter
+     *  instance, so a waiter started later has the larger token. */
+    static boolean isWellFormedWaiterToken(String token) {
+        return token != null && WAITER_TOKEN.matcher(token).matches();
+    }
+
+    /** Orders two well-formed tokens by their time, then by their id. */
+    static int compareWaiterTokens(String a, String b) {
+        var ma = WAITER_TOKEN.matcher(a);
+        var mb = WAITER_TOKEN.matcher(b);
+        if (!ma.matches() || !mb.matches()) {
+            throw new IllegalArgumentException("malformed waiter token");
+        }
+        int byTime = Long.compare(Long.parseLong(ma.group(1)), Long.parseLong(mb.group(1)));
+        return byTime != 0 ? byTime : ma.group(2).compareTo(mb.group(2));
+    }
+
+    /**
+     * Bead nexus-rxuiq. A parked announce-mode wait outlives the reader that
+     * issued it: the engine cannot see a client disconnect while a handler is
+     * blocked (the JDK HTTP server exposes none), so a cancelled waiter's call,
+     * or a dead process's, stays parked for up to its timeout and stamps the next
+     * row as announced for nobody. Each reader therefore sends a waiter token,
+     * and the newest token for a {@code (tenant, subspace, subscriber)} wins.
+     *
+     * <p>Returns {@code false} when {@code token} is older than the current one:
+     * the caller must return superseded without querying. A NEWER token becomes
+     * current and wakes the group, so an older wait still parked there re-checks
+     * ({@link #isCurrentWaiter}) and returns instead of stamping.
+     *
+     * <p>Per engine process, like the rest of this registry: on a multi-instance
+     * engine an older wait parked on another instance is not fenced, which is
+     * today's behaviour, never worse.
+     */
+    boolean admitWaiter(String tenant, String subspace, String subscriber, String token) {
+        WaitKey key = new WaitKey(tenant, subspace);
+        String who = subscriber == null ? "" : subscriber;
+        while (true) {
+            Group g = groups.computeIfAbsent(key, k -> new Group(now()));
+            g.lock.lock();
+            try {
+                if (groups.get(key) != g) {
+                    continue; // evicted in between, same retry as register()
+                }
+                g.lastActivityNanos = now();
+                String current = g.currentWaiter.get(who);
+                int cmp = current == null ? 1 : compareWaiterTokens(token, current);
+                if (cmp < 0) {
+                    return false;
+                }
+                if (cmp > 0) {
+                    g.currentWaiter.put(who, token);
+                    if (current != null) {
+                        wakeLocked(g, subspace);
+                    }
+                }
+                return true;
+            } finally {
+                g.lock.unlock();
+            }
+        }
+    }
+
+    /** {@code true} unless a newer token than {@code token} has been admitted for
+     *  {@code (tenant, subspace, subscriber)} since. */
+    boolean isCurrentWaiter(String tenant, String subspace, String subscriber, String token) {
+        Group g = groups.get(new WaitKey(tenant, subspace));
+        if (g == null) {
+            return true;
+        }
+        g.lock.lock();
+        try {
+            String current = g.currentWaiter.get(subscriber == null ? "" : subscriber);
+            return current == null || compareWaiterTokens(token, current) >= 0;
+        } finally {
+            g.lock.unlock();
+        }
+    }
+
+    /** Wakes every waiter on {@code g} without counting as a delivered write
+     *  signal (the test hook stays write-only). Caller holds {@code g.lock}. */
+    private void wakeLocked(Group g, String subspace) {
+        g.generation++;
+        g.condition.signalAll();
+        for (MultiWaiter mw : g.multiListeners) {
+            mw.notifyWake(subspace);
+        }
     }
 
     /** Signals every waiter parked on {@code (tenant, subspace)}. Call ONLY after commit. */
