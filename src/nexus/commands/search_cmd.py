@@ -19,6 +19,7 @@ from nexus.formatters import (
 )
 from nexus.scoring import round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.errors import SearchEmbeddingProfileMismatchError
 from nexus.search_engine import (
     LexicalLegUnavailableError,
     SearchDiagnostics,
@@ -433,6 +434,12 @@ def search_cmd(
         # clean, remedy-naming error that decision called for. Not a
         # VectorServiceError subclass on purpose — this is a capability
         # refusal, not a service failure — so it needs its own handler here.
+        raise click.ClickException(str(exc)) from exc
+    except SearchEmbeddingProfileMismatchError as exc:
+        # nexus-vply6: this install's current query-side embedding mode
+        # cannot serve one or more targeted collections — a clean,
+        # remedy-naming refusal, never a raw traceback and never a
+        # silent empty result.
         raise click.ClickException(str(exc)) from exc
     except VectorServiceError as exc:
         # nexus-pebfx.8: every targeted collection was unservable — show the

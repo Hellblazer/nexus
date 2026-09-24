@@ -200,6 +200,62 @@ class EmbeddingDimensionMismatch(NexusError):
         )
 
 
+class SearchEmbeddingProfileMismatchError(NexusError):
+    """A search/query request could not be served because this install's
+    CURRENT query-side embedding mode cannot produce a vector compatible
+    with one or more of the targeted collections (nexus-vply6, Sam's
+    decision 2026-09-24 — "every platform", not just Windows).
+
+    Sibling of :class:`nexus.corpus.EmbeddingProfileMismatchError` — that
+    class is the WRITE-side registration-seam check, and its own
+    docstring explicitly forbids it firing from a read path (search /
+    store list / store get / store delete must stay readable against
+    whatever model wrote the data, credential or not). This is the read
+    path's own named error instead, never raised anywhere near a write.
+
+    Canonical repro (``docs/desktop-deployment.md:262``): a GUI-launched
+    subprocess inherits no shell environment, so it resolves a local
+    bge-768 embedder against ``voyage-*``-registered collections. The
+    engine already refuses this loudly per collection — 422
+    ``EmbeddingModelUnavailableException`` ("this install's profile names
+    a model this mode cannot serve") — but that refusal used to be
+    swallowed at :func:`nexus.search_engine.search_cross_corpus`'s
+    per-collection isolation seam (the nexus-9tsdf/nexus-d9xt2 "isolate
+    one bad collection, keep searching the rest" design) whenever at
+    least one OTHER targeted collection was servable, so the caller saw a
+    quietly partial (often empty-looking) result instead of a diagnosable
+    error. Raised unconditionally for this specific failure class now,
+    regardless of how many other targeted collections would have
+    succeeded — the class the nexus-9tsdf isolation design exists for (a
+    single stale, orphaned, dimension-mismatched collection that still
+    resolves an embedder but disagrees with the dispatched table's
+    dimension) is unaffected and keeps its existing graceful,
+    fraction-scaled degrade; that is a different, previously-reviewed
+    failure shape with its own remediation tooling (``nx doctor``,
+    ``nx collection prune``), not the systemic install-level
+    misconfiguration this class names.
+    """
+
+    def __init__(self, *, serving_mode: str | None, mismatches: dict[str, str]) -> None:
+        self.serving_mode = serving_mode
+        self.mismatches = dict(mismatches)
+        mode = serving_mode or "unknown"
+        detail = "; ".join(f"{col!r}: {err}" for col, err in mismatches.items())
+        super().__init__(
+            f"this install's current query-side embedding mode ({mode}) cannot "
+            f"serve {len(mismatches)} of the targeted collection(s): {detail}. "
+            "The engine reads local.embed_model / the Voyage credential only at "
+            "spawn, so a GUI-launched process with no shell environment (or any "
+            "config change since the service last started) can silently disagree "
+            "with what a collection was actually indexed with. Fix: persist the "
+            "right mode to ~/.config/nexus/config.yml (`nx config set "
+            "service_url` / `nx config set service_token` for managed cloud, or "
+            "NX_VOYAGE_API_KEY in the SERVICE's own environment for local+voyage), "
+            "then restart the service (`nx daemon service stop && nx daemon "
+            "service start`) so it re-reads the credential."
+        )
+
+
 class EphemeralPathRefusedError(NexusError):
     """A named file lives only in an agent worktree or a temp dir and has no
     durable catalog identity (nexus-3o4lt, critique [24433]).

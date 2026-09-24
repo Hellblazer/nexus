@@ -13,6 +13,7 @@ import structlog
 from nexus.config import TuningConfig, get_telemetry_config, load_config
 from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+from nexus.errors import SearchEmbeddingProfileMismatchError
 from nexus.types import SearchResult
 
 _log = structlog.get_logger(__name__)
@@ -514,6 +515,39 @@ def _is_permanent_poisoning_error(exc: VectorServiceError) -> bool:
     ``None`` for every transport-level failure regardless of cause.
     """
     return "dim" in str(exc).lower()
+
+
+#: The engine's own wording for :class:`EmbeddingModelUnavailableException`
+#: (``EmbedderRouter.resolveEmbedderStrict`` / ``resolveEmbedderByModel``,
+#: HTTP 422) -- "this install's profile names a model this mode cannot
+#: serve -- collection 'X' resolves to model 'Y', which embedding mode Z
+#: has no embedder for. ...". Matched verbatim rather than re-derived from
+#: ``VectorServiceError.code`` alone: 422 is also returned for
+#: ``IllegalStateException`` and ``VoyageTooManyTokensException``, neither
+#: of which is an embedding-profile mismatch (see ``VectorHandler``'s
+#: exception ladder). Deliberately does NOT match the SIBLING dimension
+#: check in ``PgVectorRepository#embedQuery`` ("query embedder produced a
+#: N-dim vector but the collection dispatches to embedding_D") -- that is
+#: the nexus-9tsdf stale-orphan class :func:`_is_permanent_poisoning_error`
+#: already classifies, and it keeps its existing graceful per-collection
+#: degrade; see :class:`~nexus.errors.SearchEmbeddingProfileMismatchError`'s
+#: docstring for why the two are deliberately NOT unified.
+_MODEL_UNAVAILABLE_MARKER = "this install's profile names a model this mode cannot serve"
+
+
+def _is_embedding_mode_unavailable_error_text(text: str) -> bool:
+    """True when *text* (an error message, already-stringified) is the
+    engine's ``EmbeddingModelUnavailableException`` -- this install's
+    CURRENT query-side embedding mode has no embedder at all for the
+    collection's registered model (nexus-vply6: the systemic "GUI
+    subprocess resolved bge-768 against voyage-1024 collections" class, as
+    opposed to one stale orphaned collection). Text-based (not exception-
+    based, unlike :func:`_is_permanent_poisoning_error`) because
+    :func:`_search_batch`'s per-collection failure record already carries
+    only ``str(exc)`` by the time this classifies it. See
+    :data:`_MODEL_UNAVAILABLE_MARKER`.
+    """
+    return _MODEL_UNAVAILABLE_MARKER in text.lower()
 
 
 def _record_poisoned_collection(name: str, exc: Exception) -> None:
@@ -1059,11 +1093,21 @@ def search_cross_corpus(
     # (>=5% — a genuine problem). Never silent either way; non-dimension
     # failures are unaffected and stay at WARNING immediately, as before.
     dim_mismatch_cols: list[str] = []
+    # nexus-vply6 (Sam's decision 2026-09-24): the systemic class -- this
+    # install's CURRENT query-side embedding mode has no embedder at all
+    # for the collection's registered model -- is collected separately
+    # from dim_mismatch_cols (the nexus-9tsdf stale-orphan class) and
+    # raised unconditionally below, never silently isolated the way a
+    # single orphaned collection is. See
+    # nexus.errors.SearchEmbeddingProfileMismatchError's docstring.
+    model_unavailable_cols: dict[str, str] = {}
     for part in partials:
         col = part["col"]
         if part.get("error") is not None:
             failed_collections[col] = part["error"]
-            if "dim" in part["error"].lower():
+            if _is_embedding_mode_unavailable_error_text(part["error"]):
+                model_unavailable_cols[col] = part["error"]
+            elif "dim" in part["error"].lower():
                 dim_mismatch_cols.append(col)
             else:
                 _log.warning(
@@ -1099,6 +1143,30 @@ def search_cross_corpus(
                 collection=col,
                 error=failed_collections[col],
             )
+
+    if model_unavailable_cols:
+        # nexus-vply6: unconditional -- fires even when every OTHER
+        # targeted collection searched fine, unlike the all-failed check
+        # below. A partial success here is the exact silent-empty-result
+        # shape Sam's decision closes: a query whose relevant hits live
+        # only in the unservable collection(s) would otherwise come back
+        # looking like a genuine "no matches", backed only by whatever
+        # unrelated collections happened to be servable.
+        _log.warning(
+            "search_embedding_profile_mismatch",
+            collections=sorted(model_unavailable_cols),
+            errors=model_unavailable_cols,
+        )
+        serving_mode = None
+        _embedding_mode = getattr(t3, "embedding_mode", None)
+        if callable(_embedding_mode):
+            try:
+                serving_mode = _embedding_mode()
+            except Exception:  # noqa: BLE001 — best-effort diagnostic only; must not mask the real error below
+                serving_mode = None
+        raise SearchEmbeddingProfileMismatchError(
+            serving_mode=serving_mode, mismatches=model_unavailable_cols,
+        )
 
     if failed_collections and len(failed_collections) == len(collections):
         # Nothing was servable — surface the failure instead of silently
