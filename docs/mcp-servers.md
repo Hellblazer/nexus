@@ -1,6 +1,6 @@
 # MCP Servers
 
-Nexus ships two MCP servers, bundled in the Claude Code plugin. The Claude Desktop `.mcpb` extension bundles only the first — its manifest's `entry_point` (`mcpb/manifest.json`) runs `nexus.mcp.core:main` alone (`mcpb/src/server.py`), with no `nexus-catalog` process. This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
+Nexus ships two MCP servers, bundled in the Claude Code plugin. The Claude Desktop `.mcpb` extension bundles only the first — its manifest's `entry_point` (`mcpb/manifest.json`) is `mcpb/src/bootstrap.py`, a resolve-with-retry wrapper (nexus-r433b) that execs `mcpb/src/server.py`, which in turn runs `nexus.mcp.core:main` — with no `nexus-catalog` process. This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
 
 For **when to use which retrieval interface**, see [Querying Guide](querying-guide.md). For conceptual background, see [Document Catalog](catalog.md) and [Storage Tiers](storage-tiers.md).
 
@@ -124,6 +124,33 @@ One further tool rounds out the server (RDR-126): `daemon_uninstall`
 (remove the storage-service OS autostart unit — plus any legacy
 `com.nexus.t2` unit left behind by a pre-retirement install — and stop the
 engine-service + Postgres stack; destructive, `confirm=true` gated).
+
+### Hook-tier tools (internal plumbing, RDR-215)
+
+The remaining 12 of the 64 registered tools are `hook_*` entries
+(`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
+conexus plugin `hooks.json` entry — `PreToolUse`, `PermissionRequest`,
+`SubagentStart`, `SubagentStop`, `Stop`, `PreCompact` — to an `mcp_tool`
+call instead of a bash script. They are wired automatically by the
+plugin's own hook configuration; there is no reason to call one by hand,
+and their own tool descriptions say so ("not meant to be invoked
+directly"). Listed here only so the 64-tool count reconciles with the
+tables above, which cover the 52 tools an agent calls directly:
+
+| Tool | Fires on |
+|---|---|
+| `hook_agent_dispatch_expect` | Agent/Task dispatch — records an RDR-184 EXPECT row before the dispatch |
+| `hook_auto_approve` | PreToolUse / PermissionRequest — auto-approves an allowlisted `mcp__plugin_conexus_*` tool |
+| `hook_subagent_start` | SubagentStart — assembles a starting subagent's context (RDRs, T2, T1, tool guidance) |
+| `hook_subagent_start_stamp` | SubagentStart — records an RDR-184 START row |
+| `hook_subagent_start_tuple` | SubagentStart — projects the RDR-205 ledger START tuple |
+| `hook_subagent_stop` | SubagentStop — blocks a background teammate's stop once if it reported nothing |
+| `hook_subagent_stop_tuple` | SubagentStop — projects the RDR-205 ledger REPORT tuple |
+| `hook_stop_verification` | Stop — warns on uncommitted changes, in-progress beads, outstanding agents |
+| `hook_stop_failure` | StopFailure — observes a transient API failure; debug trace only |
+| `hook_pre_close_verification` | Bash (bd close/create) — refuses a close with no review-completed marker |
+| `hook_post_compact` | PreCompact — re-injects active beads and session scratch after compaction |
+| `hook_divergence_language_guard` | Write/Edit under `docs/rdr/post-mortem/` — flags divergence language (advisory) |
 
 ## `nexus-catalog` — document catalog (10 tools)
 
