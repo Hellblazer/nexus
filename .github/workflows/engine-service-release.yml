@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
       - name: Set up GraalVM 25.0.3
-        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
@@ -252,7 +252,7 @@ jobs:
       - name: Set up GraalVM 25.0.3
         # SHA-pinned (not @v1): this is a PUBLISH path that creates a GitHub
         # Release, so a floating tag is a supply-chain hole. bef4b0e == v1.
-        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276  # v1
         with:
           # >= 25.0.2 REQUIRED: the bundled jOOQ / liquibase reachability metadata
           # use GraalVM's unified reachability-metadata schema (nexus-lp2qo).
