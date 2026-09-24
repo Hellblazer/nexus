@@ -6,9 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.59.0] - 2026-09-24
+
+Pairs with engine-service-v0.1.130, unchanged from 7.58.0: this is a client and plugin release with no engine cut.
+
 ### Fixed
 
 - **A plugin that updates before its CLI no longer blocks the session, under any CLI from 7.55.0 on** (nexus-rcoze). `nx-hook` in conexus 7.55.0 to 7.57.x exits 2 on a hook verb it does not know, and exit 2 blocks prompts, Bash calls and MCP tool calls. hooks.json now runs every verb one of those releases lacks through a stdlib shim that skips it with a notice instead. That covers three hooks the 7.58.0 plugin still ran directly (`auto-approve`, `pre-close-verification`, `subagent-stop`), which a 7.55.0 CLI does not register. A new release-battery gate fires every hook against each published CLI from 7.55.0 on.
+- **Closing a bead through `bd update --status closed` no longer skips the close gate** (nexus-2b24o). The pre-close verification gate matched only `bd close` and `bd done`, so the `update` spelling, and a close fed through `bd batch` or `bd import`, closed a bead with no review check. The phase-review close gate had the same blind spot for the `update` spelling.
+- **Installing or removing the nexus daemon's autostart unit can no longer hang on `launchctl` or `systemctl`** (nexus-k9i56). Three of those calls ran with no timeout; every call now carries a 120 s bound.
+- **`nx index` no longer warns about knowledge collections' extractor** (nexus-kk4ut). The warning was stale: aspect extraction already routes prose to the general-prose extractor.
 
 ### Added
 

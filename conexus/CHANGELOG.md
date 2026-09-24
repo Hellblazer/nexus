@@ -1,5 +1,22 @@
 # Changelog
 
+## [7.59.0] - 2026-09-24
+
+Plugin version aligned with conexus 7.59.0. The plugin-side changes go live as
+`source.ref` advances to `v7.59.0`.
+
+A plugin that updates before its CLI can no longer block a session. `nx-hook`
+in conexus 7.55.0 to 7.57.x exits 2 on a hook verb it does not know, and exit 2
+blocks prompts, Bash calls and MCP tool calls. Every hook whose verb one of
+those CLIs lacks now runs through `hooks/scripts/nx_hook_shim.py`, which skips
+it with a notice instead. That includes `auto-approve`, `pre-close-verification`
+and `subagent-stop`, which the 7.58.0 plugin ran directly and a 7.55.0 CLI does
+not register (nexus-rcoze).
+
+The two MCP connection hooks held back from 7.58.0 are wired, through the shim:
+a bounded wait for nx-mcp at session start, and a warning on a mid-session
+disconnect (nexus-veh77).
+
 ## [7.58.0] - 2026-09-23
 
 Plugin version aligned with conexus 7.58.0. This release carries real
