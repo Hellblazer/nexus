@@ -19,6 +19,7 @@ from nexus.formatters import (
 )
 from nexus.scoring import round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.errors import SearchEmbeddingProfileMismatchError
 from nexus.search_engine import (
     LexicalLegUnavailableError,
     SearchDiagnostics,
@@ -51,18 +52,65 @@ _CONTENT_MAX_CHARS: int = 200
 _THRESHOLD_SUGGESTION_OFFSET: float = 0.20
 
 
+def _emit_excluded_collections_note(
+    diagnostics_out: list[SearchDiagnostics],
+    *,
+    quiet: bool,
+) -> None:
+    """Emit the "N collection(s) excluded" stderr line whenever the call
+    skipped any collection, REGARDLESS of whether the overall call
+    returned results (nexus-vply6 fix round 2, point 2 — Sam's scope
+    ruling: "the search result must carry an explicit warning naming each
+    skipped collection and the reason", not only on a total-zero-results
+    call). Previously bundled into :func:`_maybe_emit_silent_zero_note`,
+    which only ran on the zero-results path — a genuine partial degrade
+    (some collections skipped, others returned real hits) never printed
+    this note at all, exactly the "silent skip" shape the bead forbids.
+    Split out so it fires unconditionally right after retrieval, before
+    the caller branches on whether ``results`` is empty.
+
+    ``--quiet`` suppresses (unlike the threshold-hint half in
+    :func:`_maybe_emit_silent_zero_note`, this is NOT gated on
+    ``telemetry.stderr_silent_zero`` — that config knob is about
+    threshold-tuning noise, not about a service-side skip the user must
+    know about to trust the result at all).
+    """
+    if quiet:
+        return
+    if not diagnostics_out:
+        return
+    diag = diagnostics_out[0]
+    if not diag.failed_collections:
+        return
+    # nexus-pebfx.8 / nexus-vply6: skipped-by-service-error collections
+    # were never searched — the caller must be told so a result (empty OR
+    # partial) is never mistaken for a genuine, complete miss.
+    click.echo(
+        f"note: {len(diag.failed_collections)} collection(s) excluded by "
+        "service errors and NOT searched: "
+        + ", ".join(diag.failed_collections),
+        err=True,
+    )
+
+
 def _maybe_emit_silent_zero_note(
     diagnostics_out: list[SearchDiagnostics],
     *,
     quiet: bool,
     config: dict,
 ) -> None:
-    """Emit the RDR-087 silent-zero stderr line when the conditions match.
+    """Emit the RDR-087 silent-zero threshold-tuning hint when the
+    conditions match.
 
     Fires when a call returned zero post-threshold results yet had at least
     one dropped candidate. Exactly one line per call (not per collection —
     avoids a 15-line storm on prefix broadcasts). ``--quiet`` on the CLI
     or ``telemetry.stderr_silent_zero = false`` in ``.nexus.yml`` suppresses.
+
+    The excluded-collections note this function used to ALSO print lives
+    in :func:`_emit_excluded_collections_note` now (fix round 2, point 2)
+    — called separately, unconditionally, so it is not gated behind this
+    function's zero-results-only call site.
     """
     if quiet:
         return
@@ -71,15 +119,6 @@ def _maybe_emit_silent_zero_note(
     if not diagnostics_out:
         return
     diag = diagnostics_out[0]
-    if diag.failed_collections:
-        # nexus-pebfx.8: skipped-by-service-error collections were never
-        # searched — a zero-hit must say so or it reads as a genuine miss.
-        click.echo(
-            f"note: {len(diag.failed_collections)} collection(s) excluded by "
-            "service errors and NOT searched: "
-            + ", ".join(diag.failed_collections),
-            err=True,
-        )
     if diag.total_dropped < 1:
         return
     worst = diag.worst_offender()
@@ -434,10 +473,22 @@ def search_cmd(
         # VectorServiceError subclass on purpose — this is a capability
         # refusal, not a service failure — so it needs its own handler here.
         raise click.ClickException(str(exc)) from exc
+    except SearchEmbeddingProfileMismatchError as exc:
+        # nexus-vply6: this install's current query-side embedding mode
+        # cannot serve one or more targeted collections — a clean,
+        # remedy-naming refusal, never a raw traceback and never a
+        # silent empty result.
+        raise click.ClickException(str(exc)) from exc
     except VectorServiceError as exc:
         # nexus-pebfx.8: every targeted collection was unservable — show the
         # service's error body cleanly instead of a raw traceback.
         raise click.ClickException(str(exc)) from exc
+
+    # nexus-vply6 fix round 2, point 2: unconditional, BEFORE the
+    # empty/non-empty branch below — a genuine partial degrade (some
+    # collections skipped, others returned real hits) must be visible
+    # too, not only a total-zero-results call.
+    _emit_excluded_collections_note(diagnostics_out, quiet=quiet)
 
     if not results:
         _maybe_emit_silent_zero_note(

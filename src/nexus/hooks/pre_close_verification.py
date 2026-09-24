@@ -724,7 +724,9 @@ def _bead_ids(cmd: str) -> list[str]:
     return ids
 
 
-def _coverage(bead_ids: list[str]) -> dict:
+def _coverage(
+    bead_ids: list[str], session_id: str = "", deadline_seconds: float | None = None
+) -> dict:
     """Which of *bead_ids* have a review-completed marker in T1 scratch.
 
     Carried from the script. Returns ``t1_reachable``, a per-id ``status``
@@ -737,6 +739,24 @@ def _coverage(bead_ids: list[str]) -> dict:
     ceiling. It exists because this runs inside a 5s PreToolUse ceiling and
     the hook would rather stop itself deterministically than be killed
     mid-check by the harness.
+
+    *session_id*, added for nexus-dgl8g's Stop-hook reuse (this module's
+    own ``run()`` never passes it -- it relies on the module-level
+    ``_SESSION_ID`` slot :func:`_nx_env` already falls back to): a caller
+    outside this module's own ``run()``/``_run_gate`` call chain has no
+    reason to have populated that slot, and reaching into it from another
+    hook module would be reading private state across a module boundary.
+    Passed straight through to :func:`_nx_env`, whose own precedence
+    (explicit argument over the module slot) is unchanged.
+
+    *deadline_seconds*, ALSO added for nexus-dgl8g's Stop-hook reuse: this
+    module's own ``run()``/``_run_gate`` never pass it, so
+    ``NX_CLOSE_GATE_DEADLINE_SECONDS`` (default 3.5s) keeps sizing THIS
+    call chain exactly as before -- that default is tuned for PreToolUse's
+    5s hard ceiling, a number that has nothing to do with Stop's own
+    budget. Stop passes its own explicit value rather than retuning the
+    shared env-var default, which every OTHER caller of this function
+    would also pick up.
     """
 
     # nexus-4av2n round 3: wall-clock deadline for the WHOLE coverage phase,
@@ -745,7 +765,10 @@ def _coverage(bead_ids: list[str]) -> dict:
     # deterministically with a slow stub nx rather than waiting out 3.5s.
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
-    DEADLINE_SECONDS = float(os.environ.get('NX_CLOSE_GATE_DEADLINE_SECONDS', '3.5') or '3.5')
+    if deadline_seconds is not None:
+        DEADLINE_SECONDS = deadline_seconds
+    else:
+        DEADLINE_SECONDS = float(os.environ.get('NX_CLOSE_GATE_DEADLINE_SECONDS', '3.5') or '3.5')
     _start = time.monotonic()
 
     def _deadline_exceeded():
@@ -834,7 +857,7 @@ def _coverage(bead_ids: list[str]) -> dict:
     t1_entries = []
     if shutil.which('nx'):
         try:
-            r = run_bounded(['nx', 'scratch', 'list'], timeout=_clamp_timeout(), env=_nx_env())
+            r = run_bounded(['nx', 'scratch', 'list'], timeout=_clamp_timeout(), env=_nx_env(session_id))
             if r.returncode == 0:
                 t1_reachable = True
                 t1_entries = _parse_entries(r.stdout)
@@ -1182,14 +1205,13 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
     observable instead of producing an audit record nobody can trust and
     nobody was told is missing.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
-
     if not ids:
         return
     if shutil.which("bd") is None:
         _warn(f"bd not found on PATH \u2014 cannot stamp verification={state} "
               f"for: {' '.join(ids)}")
         return
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
     for bid in ids:
         try:
             r = run_bounded(

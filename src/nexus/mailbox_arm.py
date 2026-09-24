@@ -6,14 +6,15 @@ wrote this module for).
 
 RDR-211: the nexus MCP server is the session's own subscriber and delivery
 endpoint, waking the session through the Claude Code channel
-(``notifications/claude/channel``) for its RDR-205 mailboxes and any
-subscribed board topics (see :mod:`nexus.mcp.subscriptions`). Subscribing
-the session's own instance-name mailbox is a request the model can decline
-or forget -- it is never the floor (``nexus-73vnw``'s
-:mod:`nexus.hooks.mailbox_drain` is) -- so this module's only job
-is to put a correct, literal, copy-pasteable subscribe instruction in front
-of the model at the start of every session, and to say nothing when that
-instruction could not possibly succeed.
+(``notifications/claude/channel``) for its own mailbox and any subscribed
+board topics (see :mod:`nexus.mcp.subscriptions`). Subscribing the
+session's own name (RDR-208 Phase 3, bead nexus-galkv.20: this arms a
+``directory/<name>`` lease, never a second delivered mailbox) is a request
+the model can decline or forget -- neither it nor the channel is ever the
+floor (``nexus-73vnw``'s :mod:`nexus.hooks.mailbox_drain` is) -- so this
+module's only job is to put a correct, literal, copy-pasteable subscribe
+instruction in front of the model at the start of every session, and to say
+nothing when that instruction could not possibly succeed.
 
 Sam's decision of 2026-09-16 (T2 nexus_rdr/211-decision-channel-delivery-
 2026-09-16): the prior Monitor-driven CLI watcher loop, the SessionStart
@@ -44,18 +45,17 @@ Never emitted when it cannot succeed
 
 The instance-name mailbox
     The ``ListAgents`` row name (e.g. ``nexus-19``) reaches no environment
-    variable anywhere and it reaches no FILE this module could read either:
-    an earlier version of this module trusted a machine-wide registry file
-    that nothing wrote, and on a box running several sessions a populated
-    file would have named several candidates with no way to tell whose
-    instance any of them is (nexus-6konb.9 defect fix, drained by
-    :mod:`nexus.hooks.mailbox_drain`'s PER-SESSION registry
-    instead -- see that module's docstring). So this module reads NOTHING
-    to guess an instance name. The name exists only in the model's own
-    knowledge, from the ``ListAgents`` tool's "This session is <name>"
-    line, and the rendered instruction says so: pass it to
+    variable anywhere and it reaches no FILE this module could read either,
+    so this module reads NOTHING to guess it. The name exists only in the
+    model's own knowledge, from the ``ListAgents`` tool's "This session is
+    <name>" line, and the rendered instruction says so: pass it to
     ``tuple_subscribe("mailbox/<name>")``, taken from a fresh
-    ``ListAgents`` call, never from memory.
+    ``ListAgents`` call, never from memory. Subscribing it arms a
+    ``directory/<name>`` lease so a peer's ``mailbox_send`` can resolve
+    this session by name; it does not itself register anything the drain
+    hook reads (RDR-208 Phase 3, bead nexus-galkv.20 deleted that
+    per-session registry -- :mod:`nexus.hooks.mailbox_drain`'s own
+    docstring has the retirement note).
 """
 from __future__ import annotations
 
@@ -176,7 +176,7 @@ def mailbox_arm_instruction(session_id: str) -> str:
     from a FRESH ``ListAgents`` call rather than memory (nexus-6konb.20):
     ListAgents renames a session on resume (measured nexus-58 to nexus-03,
     2026-09-14), and reusing an old name from memory would subscribe the
-    wrong instance mailbox. The session's own ``mailbox/<session id>`` is
+    wrong name. The session's own ``mailbox/<session id>`` is
     already subscribed from MCP-server startup and needs no call here
     (:mod:`nexus.mcp.subscriptions`).
 
@@ -197,9 +197,9 @@ def mailbox_arm_instruction(session_id: str) -> str:
         f"{ARM_MARKER}: call "
         f'mcp__plugin_conexus_nexus__tuple_subscribe("mailbox/<name>") once, '
         "with <name> from a fresh ListAgents call now, never from memory (it "
-        "changes on resume), so this session's instance-name mailbox is "
-        f"delivered over the channel; mailbox/{session_id} is already "
-        "subscribed. "
+        "changes on resume), so peers can reach this session by name via "
+        f"mailbox_send; mailbox/{session_id} is already subscribed and "
+        "delivered over the channel regardless. "
         "The channel is a Claude Code research preview: launch with "
         "--channels plugin:conexus@nexus-plugins (dialog-free once "
         "allowlisted) or --dangerously-load-development-channels "

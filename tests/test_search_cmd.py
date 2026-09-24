@@ -1160,6 +1160,44 @@ def test_silent_zero_notes_failed_collections(
     assert "knowledge__seam" in result.output
 
 
+def test_partial_results_still_notes_excluded_collections(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """nexus-vply6 fix round 2, point 2 (Sam's scope ruling): a call that
+    DID return real results must STILL print the excluded-collections
+    note when another targeted collection was skipped — the pre-fix
+    behavior only ever printed this note on a total-zero-results call, so
+    a genuine partial degrade (real hits from the healthy majority, one
+    orphan quietly skipped) never told the caller anything was excluded
+    at all."""
+    from nexus.search_engine import SearchDiagnostics
+
+    mock_t3 = _mock_t3(["knowledge__art"])
+    fake_results = [_make_result("1", "a real hit", collection="knowledge__art")]
+
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        diag_out = kwargs.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={"knowledge__art": (1, 0, None, None)},
+                total_dropped=0,
+                total_raw=1,
+                failed_collections={
+                    "knowledge__seam": "HTTP 400: dim mismatch",
+                },
+            ))
+        return fake_results
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert result.exit_code == 0, result.output
+    assert "a real hit" in result.output
+    assert "excluded by service errors" in result.output
+    assert "knowledge__seam" in result.output
+
+
 # ── Catalog wiring into search_cross_corpus (nexus-mw2kg) ───────────────────
 #
 # The 7.11.0 shakedown's live parity probe found CLI results carrying

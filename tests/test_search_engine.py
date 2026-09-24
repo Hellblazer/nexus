@@ -915,28 +915,37 @@ class _FailingT3:
     """T3 stand-in where selected collections raise VectorServiceError.
 
     Models the service-mode failure where a collection's embedding space
-    doesn't match the query embedding (HTTP 400 from /v1/vectors/search).
+    doesn't match the query embedding (HTTP 400 from /v1/vectors/search) by
+    default. ``fail_message`` (fix round 2) overrides that canned text with
+    a genuinely NEUTRAL failure — one that matches neither the "dim"
+    classifier nor nexus.errors' model-unavailable marker — for tests whose
+    subject is the GENERIC all-collections-failed guard, not the
+    dimension-mismatch class's own (now-raising) all-scope path.
     """
+
+    _DEFAULT_MESSAGE = (
+        "POST /v1/vectors/search → HTTP 400: query embedder produced "
+        "a 1024-dim vector but the collections dispatch to the embedding_384 column"
+    )
 
     def __init__(
         self,
         results_by_col: dict[str, list[dict]],
         failing: set[str],
         voyage: bool = True,
+        fail_message: str | None = None,
     ):
         self._results = results_by_col
         self._failing = set(failing)
         self._voyage_client = "fake-voyage" if voyage else None
+        self._fail_message = fail_message or self._DEFAULT_MESSAGE
 
     def search(self, query, collection_names, n_results=10, where=None):
         from nexus.db.http_vector_client import VectorServiceError
 
         col = collection_names[0]
         if col in self._failing:
-            raise VectorServiceError(
-                "POST /v1/vectors/search → HTTP 400: query embedder produced "
-                "a 1024-dim vector but the collections dispatch to the embedding_384 column",
-            )
+            raise VectorServiceError(self._fail_message)
         return self._results.get(col, [])
 
 
@@ -993,9 +1002,19 @@ class TestPerCollectionErrorIsolation:
         assert list(diags[0].per_collection) == ["code__nexus"]
 
     def test_all_collections_failing_reraises(self):
+        """A GENERIC (non-embedding-related) failure on every targeted
+        collection keeps the original all-fail guard's message shape --
+        fix round 2's dimension/model-unavailable-specific named error
+        (see TestDimensionMismatchLoggingQuieted and
+        TestPerCollectionErrorIsolation's mismatch-specific tests below)
+        does not apply here since ``fail_message`` matches neither
+        classifier."""
         from nexus.db.http_vector_client import VectorServiceError
 
-        t3 = _FailingT3({}, failing={"code__a", "knowledge__b"})
+        t3 = _FailingT3(
+            {}, failing={"code__a", "knowledge__b"},
+            fail_message="POST /v1/vectors/search → HTTP 503: service unavailable",
+        )
         with pytest.raises(VectorServiceError, match="all 2 collections failed"):
             search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3)
 
@@ -1004,9 +1023,25 @@ class TestPerCollectionErrorIsolation:
         name (failed_collections is keyed by name; pre-dedup the input)."""
         from nexus.db.http_vector_client import VectorServiceError
 
-        t3 = _FailingT3({}, failing={"code__a"})
+        t3 = _FailingT3(
+            {}, failing={"code__a"},
+            fail_message="POST /v1/vectors/search → HTTP 503: service unavailable",
+        )
         with pytest.raises(VectorServiceError, match="all 1 collections failed"):
             search_cross_corpus("q", ["code__a", "code__a"], 10, t3)
+
+    def test_all_collections_dimension_mismatched_raises_named_error_not_generic(self):
+        """fix round 2, point 2: the SAME all-failed shape, but with the
+        dimension-mismatch class's canned message (the default
+        ``_FailingT3`` text) -- now raises
+        ``SearchEmbeddingProfileMismatchError`` instead of the generic
+        all-fail ``VectorServiceError``, since every targeted collection
+        failed for the SAME embedding-profile reason."""
+        from nexus.errors import SearchEmbeddingProfileMismatchError
+
+        t3 = _FailingT3({}, failing={"code__a", "knowledge__b"})
+        with pytest.raises(SearchEmbeddingProfileMismatchError):
+            search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3)
 
     def test_failure_log_event_name_locked(self):
         """Lock the ``collection_search_failed`` structlog event name —
@@ -1034,32 +1069,33 @@ class TestDimensionMismatchLoggingQuieted:
     prior embedder generation) fails every search with an embedding-space
     HTTP 400. Pre-fix this logged one WARNING per search, every search,
     for as long as the orphan existed -- even when it was 1 of 80
-    collections and everything else searched fine. Quieted per AC3: <5%
-    of the requested scope -> DEBUG (noise); >=5% -> WARNING (real
-    problem). Never silent either way."""
+    collections and everything else searched fine.
+
+    nexus-vply6 fix round 2 (Sam's scope ruling, "keep the degrade, but
+    loud"): the original AC3 <5%-of-scope DEBUG downgrade is RETIRED --
+    "never silent" now means every dimension-mismatch failure logs at
+    WARNING unconditionally, regardless of what fraction of the requested
+    scope it affects. A genuine PARTIAL hit (one orphan among many healthy
+    collections) still degrades gracefully and returns the healthy
+    majority's results (nx doctor / nx collection prune remain the fix for
+    the orphan itself); a call where the dimension-mismatch class consumes
+    the WHOLE requested scope now raises
+    ``nexus.errors.SearchEmbeddingProfileMismatchError`` instead of
+    degrading to an empty result -- see
+    ``TestPerCollectionErrorIsolation``'s all-collections-failing tests
+    and ``tests/test_vply6_search_embedding_profile_mismatch.py``."""
 
     _DIM_ERROR = (
         "POST /v1/vectors/search -> HTTP 400: query embedder produced a "
         "1024-dim vector but the collection dispatches to the embedding_384 column"
     )
 
-    def test_small_fraction_dimension_mismatch_downgraded_to_debug(self):
-        """1 mismatched collection out of 21 (~4.8%) is noise -- DEBUG,
-        not WARNING. The event still fires (never silent).
-
-        The suite's default structlog wrapper (tests/conftest.py) filters
-        below WARNING, matching the default runtime -- exactly the
-        visibility change this fix is for. Raise the wrapper threshold to
-        DEBUG for this test only so the (correctly suppressed-by-default)
-        debug entry is observable; the autouse
-        ``_restore_structlog_after_test`` fixture resets it after.
-        """
-        import logging
-
-        import structlog
+    def test_small_fraction_dimension_mismatch_still_logged_at_warning(self):
+        """1 mismatched collection out of 21 (~4.8%) still logs at WARNING
+        -- the old <5%-of-scope DEBUG downgrade no longer applies (fix
+        round 2: never silent means never below the default-visible
+        level, not merely "logged somewhere")."""
         from structlog.testing import capture_logs
-
-        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
 
         good_cols = [f"code__c{i}" for i in range(20)]
         t3 = _FailingT3(
@@ -1077,7 +1113,7 @@ class TestDimensionMismatchLoggingQuieted:
             and e.get("collection") == "knowledge__orphan__minilm-l6-v2-384__v1"
         ]
         assert matches, "the failure must still be logged -- never silent"
-        assert matches[0]["log_level"] == "debug"
+        assert matches[0]["log_level"] == "warning"
 
     def test_large_fraction_dimension_mismatch_stays_warning(self):
         """40 of 80 collections mismatched (50%) is a real problem --
@@ -1124,6 +1160,38 @@ class TestDimensionMismatchLoggingQuieted:
         ]
         assert matches
         assert matches[0]["log_level"] == "warning"
+
+    def test_all_targeted_collections_dimension_mismatched_raises_named_error(self):
+        """fix round 2, point 2: when the dimension-mismatch class consumes
+        EVERY targeted collection (not a fraction), the call raises
+        SearchEmbeddingProfileMismatchError instead of degrading to an
+        empty result -- the same loud-refusal bar the model-unavailable
+        class already held, reached here because there is no healthy
+        collection left to return results from."""
+        from nexus.errors import SearchEmbeddingProfileMismatchError
+
+        bad_cols = [f"knowledge__orphan{i}__minilm-l6-v2-384__v1" for i in range(3)]
+        t3 = _FailingT3({}, failing=set(bad_cols))
+
+        with pytest.raises(SearchEmbeddingProfileMismatchError) as excinfo:
+            search_cross_corpus("q", bad_cols, 10, t3)
+
+        assert set(excinfo.value.mismatches) == set(bad_cols)
+
+    def test_partial_dimension_mismatch_does_not_raise(self):
+        """The inverse: a genuine PARTIAL hit (some healthy collections
+        remain) keeps the existing graceful degrade -- no raise, the
+        healthy majority's results still come back."""
+        good_cols = [f"code__c{i}" for i in range(5)]
+        bad = "knowledge__orphan__minilm-l6-v2-384__v1"
+        t3 = _FailingT3(
+            {c: [{"id": f"{c}-hit", "content": "x", "distance": 0.2}] for c in good_cols},
+            failing={bad},
+        )
+
+        results = search_cross_corpus("q", [*good_cols, bad], 10, t3)
+
+        assert {r.id for r in results} == {f"{c}-hit" for c in good_cols}
 
 
 # ── nexus-7lm3q: batch manifest/resolve, backward-compat fallback ────────────

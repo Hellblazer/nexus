@@ -1,24 +1,33 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): the session MCP server's
-per-session subscription set -- what the not-yet-built lifespan waiter
-(bead nexus-rplay.10) will park a single ``wait`` call on -- plus the
-instance-mailbox takeover (Technical Design "Subscriptions").
+per-session subscription set -- what the lifespan waiter
+(:mod:`nexus.mcp.channel`) parks a single ``wait`` call on -- plus the
+``directory/<name>`` name lease (RDR-208 Phase 3, bead nexus-galkv.20).
 
-The set holds three kinds of entry (no cursor: since bead nexus-vsipz a
-mailbox's position lives on the engine's row stamp, and since bead
-nexus-q82tk a board's lives in the engine's per-subscriber delivery row):
+The set holds two kinds of DELIVERED entry (no cursor: since bead
+nexus-vsipz a mailbox's position lives on the engine's row stamp, and since
+bead nexus-q82tk a board's lives in the engine's per-subscriber delivery
+row):
 
 - ``mailbox/<session id>``, present from construction, never removable
   (it is the floor's own address).
-- at most one further mailbox, this session's own instance-name mailbox,
-  added once via :meth:`SubscriptionSet.subscribe` with a
-  ``mailbox/<name>`` subspace. Subscribing it also takes over the
-  per-session instance registration file the drain hook
-  (:mod:`nexus.hooks.mailbox_drain`) reads and starts the
-  RDR-208 ``directory/<name>`` lease, both previously owned by the now-
-  deleted CLI mailbox-watch loop's own ``--instance`` flag.
 - up to :data:`MAX_BOARD_TOPICS` ``board/<topic>`` subspaces.
+
+A ``mailbox/<name>`` subscribe call is accepted for exactly one *name* per
+session and starts the RDR-208 ``directory/<name>`` lease heartbeat (see
+:func:`_directory_heartbeat`), so peers can resolve that name to this
+session through ``mailbox_send`` -- but it is NOT a third delivered entry:
+:meth:`SubscriptionSet.entries` never lists it, so neither the lifespan
+waiter (:mod:`nexus.mcp.channel`) nor ``tuple_subscriptions`` ever treats it
+as a mailbox to watch or report. Through RDR-208 Phase 2 this call ALSO
+took over a per-session instance-registration file
+(``<config>/tuple-watch/addresses.d/<session id>``) the drain hook read to
+extend its own floor onto that name; Phase 3 (nexus-galkv.20) deleted that
+file and its write, along with the entries()-listing that fed the waiter's
+push delivery for it -- the retention window (R2 + 7 days) that transition
+depended on has passed. A name registered under the old file format is
+simply never read again; nothing migrates it, and nothing needs to.
 
 Persisted in T1 scratch keyed by session id (see :func:`load`/:func:`persist`),
 so a ``/resume`` (same session id, a fresh process) restores the list and a
@@ -29,24 +38,16 @@ sees the old rows.
 
 A mutation bumps :attr:`SubscriptionSet.version` and calls every
 registered listener with ``self`` (:meth:`SubscriptionSet.add_listener`),
-so the future waiter can cancel its parked ``wait`` and re-issue it with
-the new list (Approach item 6, Technical Design "Waiting").
+so the waiter can cancel its parked ``wait`` and re-issue it with the new
+list (Approach item 6, Technical Design "Waiting").
 
 **Lifted, not imported, from the former CLI mailbox-watch loop** (RDR-208
-Phase 2 Step 1 / bead nexus-6konb.9): ``write_instance_registration``'s path
-and on-disk format are byte-identical to the original (the drain hook reads
-``<config>/tuple-watch/addresses.d/<session id>``, one instance name per
-line) -- copied rather than imported because the session-marker contract
-(``_read_session_marker``/``write_session_marker``/``session_marker_path``/
-``record_clear_and_write_session_marker``/``cleared_record_path``) was being
-rehomed to :mod:`nexus.session_marker` by a concurrent bead at the time, and
-this module was not to become one of its importers mid-move.
-``_directory_heartbeat``'s due/rotate/nonce logic is the same shape as the
-original, adapted to log via structlog instead of the CLI watcher's budgeted
-stdout emitter -- there is no Monitor stream here to budget against. The
-originals lived in the now-deleted CLI watcher module until RDR-211
-nexus-rplay.14 removed it along with the watcher loop itself (RDR-211
-Existing Infrastructure Audit).
+Phase 2 Step 1 / bead nexus-6konb.9): ``_directory_heartbeat``'s due/rotate/
+nonce logic is the same shape as the original, adapted to log via structlog
+instead of the CLI watcher's budgeted stdout emitter -- there is no Monitor
+stream here to budget against. The original lived in the now-deleted CLI
+watcher module until RDR-211 nexus-rplay.14 removed it along with the
+watcher loop itself (RDR-211 Existing Infrastructure Audit).
 """
 from __future__ import annotations
 
@@ -70,19 +71,11 @@ _log = structlog.get_logger(__name__)
 
 _STATE_SUBDIR = "tuple-watch"
 
-#: Mirrored the former CLI mailbox-watch module's own ``_SAFE_SESSION_ID``
-#: exactly -- a session id outside this charset becomes a stray
-#: path-hostile filename, so a bad value is a silent no-op here too, never
-#: trusted with a directory write.
-_SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-
 #: The mailbox address charset (RDR-211 fix round, bead nexus-rplay.18,
-#: code review Minor 6): a `mailbox/<name>` instance name becomes both a
-#: bare directory-entry name (:func:`write_instance_registration`) and a
+#: code review Minor 6): a `mailbox/<name>` instance name becomes a
 #: `directory/<name>` lease key, so a name outside this charset -- a
 #: newline, a slash, a leading `.`/`-`/`_` -- is refused rather than
-#: sanitised, exactly as :data:`_SAFE_SESSION_ID` already refuses a bad
-#: session id.
+#: sanitised.
 _SAFE_INSTANCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 #: Matches ``directory.yaml``'s own ``retention_seconds`` -- a re-send can
@@ -105,47 +98,6 @@ DIRECTORY_HEARTBEAT_S: float = 60.0
 #: with a short poll without also shortening the TTL/heartbeat semantics
 #: under test.
 _LEASE_POLL_S: float = 5.0
-
-
-def registry_dir(state_dir: Path) -> Path:
-    return state_dir / _STATE_SUBDIR / "addresses.d"
-
-
-def registration_path(state_dir: Path, session_id: str) -> Path:
-    return registry_dir(state_dir) / session_id
-
-
-def write_instance_registration(state_dir: Path, session_id: str, instance: str) -> None:
-    """Register *instance* as this session's own instance-name mailbox, so
-    the drain hook can drain it for this session and only this
-    session -- never a machine-wide file another session's prompt could
-    read first.
-
-    Written atomically (temp file, then rename) so a concurrent reader
-    never observes a partial write. Best-effort: a failure here must never
-    crash the caller -- it only means this session's instance-addressed
-    mail has no drain floor until the next successful call.
-
-    A *session_id* outside the safe charset, or an *instance* that is
-    empty or outside :data:`_SAFE_INSTANCE_NAME` (a defense-in-depth
-    guard: :meth:`SubscriptionSet.subscribe` already refuses a bad
-    instance name loudly, with ``SchemaViolationError``, before this
-    function is ever reached on that path -- this guard only matters to
-    a caller that bypasses `subscribe`), is a silent no-op, mirroring the
-    former CLI mailbox-watch module's own ``write_instance_registration``
-    exactly (same path, same format, same guard) -- see this module's
-    docstring for why it is copied rather than imported.
-    """
-    if not instance or not _SAFE_INSTANCE_NAME.fullmatch(instance) or not _SAFE_SESSION_ID.fullmatch(session_id):
-        return
-    path = registration_path(state_dir, session_id)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.parent / (path.name + ".tmp")
-        tmp.write_text(instance + "\n", encoding="utf-8")
-        tmp.replace(path)
-    except OSError as e:  # pragma: no cover — best-effort, disk-failure path
-        _log.debug("subscriptions_registration_write_failed", session_id=session_id, error=str(e))
 
 
 @dataclass
@@ -223,7 +175,7 @@ def _release_directory_entry(
     store: Any, name: str, session_id: str, lease: _DirectoryLease,
 ) -> None:
     """Release this lease's live ``directory/<name>`` row on a DELIBERATE
-    stop (an ``unsubscribe`` of the instance mailbox, or ``shutdown`` on
+    stop (an ``unsubscribe`` of the leased name, or ``shutdown`` on
     a session handoff): re-send the SAME nonce with ``ttl_seconds=1``, so
     the idempotent tuple id updates the live row's expiry and it lapses
     within about a second instead of at :data:`DIRECTORY_TTL_S` (RDR-208
@@ -253,7 +205,7 @@ def _lease_loop(
     heartbeat_s: float,
     poll_s: float,
 ) -> None:
-    """Background re-send loop for one instance mailbox's directory
+    """Background re-send loop for one leased name's directory
     lease. *store_factory* is called on every tick (never held across
     ticks) and must return a CONTEXT MANAGER yielding a T2Database-shaped
     object with a ``.tuples`` attribute -- ``_t2_ctx()``'s own contract --
@@ -321,16 +273,22 @@ class SubscriptionSet:
     """One session's subscription list.
 
     ``session_mailbox`` (``mailbox/<session_id>``) is implicit and never
-    stored in ``_board`` or removable. ``instance_mailbox`` is at most one
-    further mailbox. ``_board`` is the subscribed ``board/<topic>``
+    stored in ``_board`` or removable; it is the only mailbox ever
+    delivered. ``leased_name`` is at most one further name, armed through a
+    ``mailbox/<name>`` subscribe call -- it starts the ``directory/<name>``
+    lease so peers can resolve it via ``mailbox_send``, but (RDR-208 Phase
+    3, bead nexus-galkv.20) it is never a delivered mailbox: it never
+    appears in :meth:`entries`. ``_board`` is the subscribed ``board/<topic>``
     subspaces in subscription order (a dict used as an ordered set: the
     value is always ``None``; the per-topic cursor it once held moved to
     the engine, bead nexus-q82tk).
     """
 
     session_id: str
-    instance_mailbox: str | None = None
-    _instance_name: str | None = field(default=None, repr=False)
+    #: The bare name currently leasing a `directory/<name>` row for this
+    #: session, or None. NOT a mailbox subspace and NOT listed by
+    #: :meth:`entries` -- see the class docstring.
+    leased_name: str | None = None
     _board: dict[str, None] = field(default_factory=dict)
     version: int = 0
     _listeners: list[Callable[["SubscriptionSet"], None]] = field(default_factory=list, repr=False)
@@ -382,18 +340,21 @@ class SubscriptionSet:
         """Add *subspace* to this set.
 
         ``board/<topic>``: added, subject to :data:`MAX_BOARD_TOPICS`.
-        ``mailbox/<name>``: accepted only as this session's own instance
-        mailbox (see :meth:`_subscribe_instance_mailbox`). Anything else
-        that resolves to a take-enabled template (a queue or a lock) is
-        refused naming ``in``, since those are never delivered; anything
-        else is refused as neither a board topic nor the session's own
-        mailbox.
+        ``mailbox/<name>``: accepted only as this session's own leased name
+        (see :meth:`_arm_name_lease`) -- arms the ``directory/<name>``
+        lease, never a delivered mailbox. Anything else that resolves to a
+        take-enabled template (a queue or a lock) is refused naming ``in``,
+        since those are never delivered; anything else is refused as
+        neither a board topic nor the session's own leased name.
 
         *store_factory* is called (possibly more than once, possibly from
         a background thread later) to get a context manager yielding a
         T2Database-shaped object with a ``.tuples`` attribute -- see
         :func:`_lease_loop`'s docstring for why a raw store handle is
-        never accepted directly.
+        never accepted directly. *state_dir* is currently unused (the
+        per-session registration file it once fed was deleted at RDR-208
+        Phase 3, bead nexus-galkv.20) and is kept only so the existing
+        `mailbox/<name>` call shape does not change again.
         """
         if not subspace:
             raise SchemaViolationError("subspace must not be empty")
@@ -409,10 +370,9 @@ class SubscriptionSet:
                     f"{name!r} is not a valid mailbox address name -- must match "
                     f"{_SAFE_INSTANCE_NAME.pattern!r}; refused before any write or lease"
                 )
-            self._subscribe_instance_mailbox(
+            self._arm_name_lease(
                 name,
                 store_factory=store_factory,
-                state_dir=state_dir,
                 directory_ttl_s=directory_ttl_s,
                 directory_heartbeat_s=directory_heartbeat_s,
                 lease_poll_s=lease_poll_s,
@@ -422,10 +382,10 @@ class SubscriptionSet:
             raise SchemaViolationError(
                 f"{subspace!r} is a take-enabled subspace, worked with `in` and never "
                 "delivered; tuple_subscribe accepts only board topics and the session's "
-                "own instance mailbox"
+                "own leased name"
             )
         raise SchemaViolationError(
-            f"{subspace!r} is not a board topic or the session's own instance mailbox; refused"
+            f"{subspace!r} is not a board topic or the session's own leased name; refused"
         )
 
     def _subscribe_board(self, topic: str) -> None:
@@ -439,44 +399,45 @@ class SubscriptionSet:
         self._board[topic] = None
         self._bump()
 
-    def _subscribe_instance_mailbox(
+    def _arm_name_lease(
         self,
         name: str,
         *,
         store_factory: Callable[[], Any],
-        state_dir: Path,
         directory_ttl_s: float,
         directory_heartbeat_s: float,
         lease_poll_s: float,
     ) -> None:
-        subspace = f"mailbox/{name}"
-        if subspace == self.session_mailbox:
-            return  # already present from startup; not "an instance name"
-        if self.instance_mailbox is not None:
-            if subspace == self.instance_mailbox:
-                return  # idempotent re-subscribe of the same name
+        """Arm *name*'s ``directory/<name>`` lease for this session. NEVER
+        adds a mailbox entry: :attr:`leased_name` is bookkeeping only, read
+        by :meth:`unsubscribe` and this method's own one-name-limit check,
+        never by :meth:`entries` (RDR-208 Phase 3, bead nexus-galkv.20)."""
+        if name == self.session_id:
+            return  # already present from startup; not "a name"
+        if self.leased_name is not None:
+            if name == self.leased_name:
+                return  # idempotent re-arm of the same name
             raise SchemaViolationError(
-                f"this session already subscribes {self.instance_mailbox!r}; only one "
-                f"instance mailbox is accepted, refusing {subspace!r}"
+                f"this session already leases {self.leased_name!r}; only one "
+                f"name is accepted, refusing {name!r}"
             )
-        write_instance_registration(state_dir, self.session_id, name)
         self._start_lease(name, store_factory, directory_ttl_s, directory_heartbeat_s, lease_poll_s)
-        self.instance_mailbox = subspace
-        self._instance_name = name
+        self.leased_name = name
         self._bump()
 
     def unsubscribe(self, subspace: str) -> None:
         """Remove *subspace*. The session's own mailbox can never be
-        unsubscribed -- it is the floor's address. Unsubscribing something
-        not currently subscribed is a silent no-op, not a refusal."""
+        unsubscribed -- it is the floor's address. Unsubscribing a
+        `mailbox/<name>` whose name this session leases releases the
+        `directory/<name>` lease. Unsubscribing something not currently
+        subscribed or leased is a silent no-op, not a refusal."""
         if subspace == self.session_mailbox:
             raise SchemaViolationError(
                 "the session's own mailbox cannot be unsubscribed; it is the floor's address"
             )
-        if self.instance_mailbox and subspace == self.instance_mailbox:
+        if self.leased_name and subspace == f"mailbox/{self.leased_name}":
             self._stop_lease()
-            self.instance_mailbox = None
-            self._instance_name = None
+            self.leased_name = None
             self._bump()
             return
         if subspace in self._board:
@@ -484,14 +445,19 @@ class SubscriptionSet:
             self._bump()
 
     def entries(self) -> list[dict[str, Any]]:
-        """This set's subspaces, in the order ``tuple_subscriptions``
-        renders them: the session mailbox first, then the instance
-        mailbox if any, then board topics. No cursor: delivery position
-        lives in the engine for every shape (beads nexus-vsipz,
-        nexus-q82tk)."""
+        """This set's DELIVERED subspaces, in the order
+        ``tuple_subscriptions`` renders them: the session mailbox first,
+        then board topics. No cursor: delivery position lives in the
+        engine for every shape (beads nexus-vsipz, nexus-q82tk).
+
+        Deliberately never includes :attr:`leased_name` (RDR-208 Phase 3,
+        bead nexus-galkv.20): a leased name arms a `directory/<name>` lease
+        for `mailbox_send` resolution, but it is not a mailbox this session
+        watches or drains, so it is not an entry here either -- this is the
+        one place :mod:`nexus.mcp.channel`'s waiter reads to decide what to
+        wait on (:meth:`~nexus.mcp.channel.ChannelWaiter._build_specs`),
+        so leaving it out here is what stops push delivery for it."""
         out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
-        if self.instance_mailbox:
-            out.append({"subspace": self.instance_mailbox})
         for topic in self._board:
             out.append({"subspace": topic})
         return out
@@ -559,16 +525,18 @@ class SubscriptionSet:
     def to_json(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
-            "instance_mailbox": self.instance_mailbox,
-            "instance_name": self._instance_name,
+            "leased_name": self.leased_name,
             "board": list(self._board),
         }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "SubscriptionSet":
         obj = cls(session_id=data["session_id"])
-        obj.instance_mailbox = data.get("instance_mailbox")
-        obj._instance_name = data.get("instance_name")
+        # A record written before RDR-208 Phase 3 (nexus-galkv.20) carries
+        # the retired "instance_mailbox"/"instance_name" keys instead --
+        # absent here, so this simply reads None, which `load()` would
+        # force anyway (the leased name is never restored on resume).
+        obj.leased_name = data.get("leased_name")
         # A record written before bead nexus-q82tk carries a dict of
         # topic -> cursor; only the topics survive a `/resume` across that
         # change, which is exactly what the engine-side stamp makes
@@ -594,18 +562,18 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
     set with just the session mailbox (a ``/clear`` — a new session id has
     nothing to find, since T1 itself is already session-scoped).
 
-    Board topics only. The instance mailbox is NOT restored (bead
-    nexus-kdxyv): the ``ListAgents`` name changes at every process start
-    (RDR-208's identity table), so the name a resumed session held is
-    stale by construction; RDR-211's own Subscriptions design says a
-    ``/resume`` under a new name repeats the ``tuple_subscribe`` call and
-    the old name's mail strands, as RDR-208 accepted. Restoring the old
-    name re-armed its directory lease for the life of the new process and
-    made the new name's subscribe refuse as a second instance mailbox.
-    The old name's row lapses at its TTL from the old process's exit, as
-    a plain exit leaves it. *store_factory* is accepted for the call
-    shape :func:`get_or_load` passes and is unused: nothing restored here
-    holds a lease.
+    Board topics only. The leased name is NOT restored (bead nexus-kdxyv):
+    the ``ListAgents`` name changes at every process start (RDR-208's
+    identity table), so the name a resumed session held is stale by
+    construction; RDR-211's own Subscriptions design says a ``/resume``
+    under a new name repeats the ``tuple_subscribe`` call and the old
+    name's mail strands, as RDR-208 accepted. Restoring the old name
+    re-armed its directory lease for the life of the new process and made
+    the new name's subscribe refuse as a second leased name. The old
+    name's row lapses at its TTL from the old process's exit, as a plain
+    exit leaves it. *store_factory* is accepted for the call shape
+    :func:`get_or_load` passes and is unused: nothing restored here holds
+    a lease.
     """
     for entry in t1.list_entries():
         tags = (entry.get("tags") or "").split(",")
@@ -618,8 +586,7 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
         if data.get("session_id") != session_id:
             continue
         obj = SubscriptionSet.from_json(data)
-        obj.instance_mailbox = None  # see the docstring: the name is stale on resume
-        obj._instance_name = None
+        obj.leased_name = None  # see the docstring: the name is stale on resume
         return obj
     return SubscriptionSet(session_id=session_id)
 

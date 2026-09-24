@@ -61,15 +61,17 @@ positive-control failure surfaced a genuine metric flaw (whole-string vs
 token-level citation matching), corrected transparently, not
 retroactively erased.
 
-**`verify` is UNDECIDABLE at its current sample size.** Its positive
-control passes (n=2 pairs, mean 0.8667) but with a THIN margin (min
+**`verify` is UNDECIDABLE even after a topped-up sample.** Its positive
+control passes (n=4 pairs, mean 0.8000) but with a THIN margin (min
 0.7333 vs threshold 0.70 — only 0.033 of headroom), and its graded
 near-miss test shows a realistic partial loss (1-of-2 citations dropped)
-still scores 0.800, above threshold. `.p2c` may not flip `verify` on this
-proxy's evidence alone — see the working T2 entry's variance table and
-the bd comment on nexus-nyry9.16. A larger sample (`--topup`, below) is
-the recommended next step before treating `verify`'s threshold as
-validated.
+still scores 0.800, above threshold. A `--topup operator_verify` run
+(one more live dispatch, paired against every prior raw output) landed
+two more pairs at the same 0.7333, corroborating rather than resolving
+the thin margin — 3 of 4 pairs now land at exactly 0.7333, which is a
+repeated observation, not a single outlier. `.p2c` may not flip `verify`
+on this proxy's evidence alone — see the working T2 entry's variance
+table and the bd comment on nexus-nyry9.16.
 
 ```
 uv run python scripts/bench/operator_proxy.py --model sonnet

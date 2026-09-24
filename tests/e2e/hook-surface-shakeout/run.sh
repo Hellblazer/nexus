@@ -170,7 +170,7 @@ d = json.load(open(src))
 DROP = {"upgrade-auto", "self-gc"}
 
 # EVERY COMMAND-TIER ENTRY IS ROUTED THROUGH A SHIM that appends one row and
-# THEN execs the real handler. Three properties, in the order they matter:
+# THEN runs the real handler, recording its exit code. Three properties, in the order they matter:
 #
 #  1. The row is written BEFORE delegating. A handler that crashes, hangs or
 #     exits non-zero still leaves evidence, so "never invoked" separates from
@@ -208,12 +208,20 @@ for event, groups in d["hooks"].items():
                 # Not exec: the shim waits so it can record the handler's exit
                 # code (hook-exits.tsv). Exit 2 is what blocks a session, and
                 # the --cli-version mode asserts no invocation returned it.
+                # The handler runs in the background so a TERM/INT/HUP from
+                # Claude Code's hook timeout reaches this trap, which forwards
+                # it and records "killed" -- a hung invocation must leave a
+                # row, not vanish (review finding, nexus-rcoze). `<&0` keeps
+                # the hook's stdin: sh gives a background job /dev/null.
                 with open(path, "w") as fh:
                     fh.write(
                         "#!/bin/sh\n"
                         f"printf '%s\\t%s\\t%s\\t%s\\n' "
                         f"'{event}' '{declared}' \"$$\" \"$(date +%s)\" >> {CENSUS}\n"
-                        f"{real} \"$@\"\n"
+                        f"{real} \"$@\" <&0 &\n"
+                        "child=$!\n"
+                        f"trap 'kill -TERM $child 2>/dev/null; printf \"%s\\t%s\\t%s\\n\" \"{event}\" \"{declared}\" killed >> {EXITS}; exit 143' TERM INT HUP\n"
+                        "wait $child\n"
                         "rc=$?\n"
                         f"printf '%s\\t%s\\t%s\\n' '{event}' '{declared}' \"$rc\" >> {EXITS}\n"
                         "exit $rc\n"

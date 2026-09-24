@@ -1,7 +1,7 @@
 # Workflow engine + ext-apps: human-in-the-loop without durable state at v1
 
-> **Disposition**: historical exploration; candidate for archive. No outcome
-> disposition named in the docs audit — adopt-or-scrap is Hal's call.
+> **Historical record** (kept by decision, nexus-z93bq): the main design note of
+> the May 2026 workflow-engine exploration, which no RDR adopted. Not current design.
 
 A design note exploring how a Parmar-style MCP workflow engine combines with
 [`modelcontextprotocol/ext-apps`](https://github.com/modelcontextprotocol/ext-apps)

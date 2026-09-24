@@ -32,10 +32,21 @@ skip() { echo "  [skip] $1"; SKIP=$((SKIP + 1)); }
 # either a fabricated pass or a false failure that blames the code for an
 # environment property. TERM is NOT subject to this rule and needs no probe
 # — Test 4 already proves it works end to end.
+#
+# The subshell must signal ITSELF. `$$` inside `( ... )` is the PARENT
+# script's pid, not the subshell's, and until nexus-fd3zf this probe used
+# it: the trap in the subshell never fired (so every run took the skip path
+# below and the real SIGINT case never ran), and the SIGINT landed on this
+# test script instead. The script survived only while bash was already
+# waiting on the subshell, which defers a foreground child's SIGINT; under
+# `pytest -n auto` load the signal could arrive first and kill the script
+# with rc=-2 before its summary line (2026-09-24, full suite). $BASHPID is
+# the subshell's own pid; the fallback covers bash 3.2, which lacks it.
 _sigint_delivery_works() {
     local marker="$WORKDIR/.sigint-probe-$$"
     rm -f "$marker"
-    ( trap 'touch "'"$marker"'"; exit 0' INT; kill -INT $$; sleep 0.3 ) >/dev/null 2>&1
+    ( trap 'touch "'"$marker"'"; exit 0' INT
+      kill -INT "${BASHPID:-$(exec sh -c 'echo "$PPID"')}"; sleep 0.3 ) >/dev/null 2>&1
     [[ -f "$marker" ]]
 }
 
@@ -244,8 +255,15 @@ sleep 30
 STUB
     chmod +x "$repo/service/mvnw"
 
+    # Job control on for the launch: without it bash starts an async command
+    # with SIGINT and SIGQUIT IGNORED, and a signal ignored on entry cannot be
+    # trapped, so the wrapper's INT trap would never be installed and Test 5b
+    # would prove nothing about it. An interactive Ctrl-C reaches a foreground
+    # wrapper with the default disposition, which is what this reproduces.
+    set -m
     "$repo/scripts/mvnw-leased.sh" build &
     local wrapper_pid=$!
+    set +m
 
     for _ in $(seq 1 50); do
         [[ -f "$started" ]] && break

@@ -11,7 +11,9 @@ Validates the contract every routing hook must honor:
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import http.server
 import importlib.util
 import json
 import os
@@ -19,6 +21,7 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import threading
 import time as _time
 import urllib.error
 import urllib.parse
@@ -555,6 +558,69 @@ def test_log_routing_event_expired_lease_is_ignored(tmp_path, monkeypatch):
 
     drops = _drop_records(drop_path)
     assert len(drops) == 1, "an expired lease must be treated as absent -- no attempt, straight to the drop meter"
+
+
+def test_read_service_lease_honors_reader_side_grace(tmp_path, monkeypatch):
+    """nexus-wo6sc review round (2026-09-24): this hook's own lease read
+    used to go straight through ``LeaseRecord.from_json`` + ``is_fresh``,
+    bypassing ``ServiceRegistry.discover()`` entirely -- so a TTL-expired
+    lease from an alive, healthy supervisor (the 2026-09-12 heartbeat-stall
+    shape) still read as absent HERE even after discover() itself grew
+    reader-side grace. Proves the routing hook now sees the same grace
+    everything else routed through discover() sees: real subprocess for
+    pid liveness, a real bound HTTP server for the /health identity check
+    -- no mocks of pid_alive."""
+    from nexus.daemon.service_registry import LeaseRecord
+
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
+
+    class _Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            body = b'{"status": "ok", "db": "up"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args) -> None:  # noqa: A002
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Health)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    owner = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+    )
+    try:
+        port = server.server_address[1]
+        (cfg_dir / f"storage_service_addr.{os.getuid()}").write_text(
+            LeaseRecord(
+                scope_key=str(os.getuid()),
+                generation=1,
+                owner_token="owner-fixture",
+                heartbeat_epoch=_time.time() - 5.0,  # past ttl, inside the 10x grace bound
+                ttl=1.0,
+                endpoint={"host": "127.0.0.1", "port": port, "token": "grace-bearer-token"},
+                version="0.0.0-fixture",
+                payload={"supervisor_pid": owner.pid},
+            ).to_json()
+        )
+        lib = _load_lib()
+        lease = lib._read_service_lease(cfg_dir)
+        assert lease is not None, (
+            "a stale-but-alive-and-healthy lease must resolve here too -- "
+            "the fix routed this reader through discover()'s grace, not "
+            "around it"
+        )
+        assert lease["port"] == port
+        assert lease["token"] == "grace-bearer-token"
+    finally:
+        owner.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            owner.wait(timeout=5)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_log_routing_event_resolves_from_config_yml_service_url(tmp_path, monkeypatch):

@@ -445,7 +445,7 @@ highlights. Each flag degrades cleanly when DEVONthink is absent (zero edges /
 no write-back / primary-backend-only enrich / no highlight ingest); the index
 itself always succeeds. See [`docs/rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md`](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md).
 
-**Default routing by extension** (nexus-cvaw): `nx dt index --uuid X` without `--collection` picks the home based on file type. PDFs land in `knowledge__<corpus>-papers` so `nx enrich aspects` can extract structured fields via `scholarly-paper-v1`. Markdown notes land in `docs__<corpus>` (no aspect extraction; `docs__` is reserved for non-paper prose per nexus-z70w). Pre-nexus-cvaw both extensions defaulted to `docs__default`, which stranded paper PDFs.
+**Default routing by extension** (nexus-cvaw): `nx dt index --uuid X` without `--collection` picks the home based on file type. PDFs land in `knowledge__<corpus>-papers`, where `nx enrich aspects` routes each document by shape (nexus-kmbys): paper-shaped documents get `scholarly-paper-v1`, other prose gets `general-prose-v1` — a `knowledge__*` collection is never paper-only. Markdown notes land in `docs__<corpus>`, which gets no aspect extraction at all (`docs__` is reserved for repo/non-paper prose per nexus-z70w). Pre-nexus-cvaw both extensions defaulted to `docs__default`, which stranded paper PDFs.
 
 Multi-database default is the right behaviour for tags shared across
 libraries (a `nexus-test` tag in both `Inbox` and a project library
@@ -978,6 +978,85 @@ nx catalog unlink FROM TO [--type TYPE]
 ```
 
 Remove link(s). Omit `--type` to remove all link types between the pair.
+
+### nx catalog link-audit (hidden)
+
+```
+nx catalog link-audit [--json]
+```
+
+Hidden from `--help` but fully functional. Reports link graph stats: total
+count, orphaned links (endpoint no longer resolves), duplicates, a
+by-type and by-creator breakdown, and the list of orphaned links
+themselves. `--json` emits the same fields as a machine-readable object.
+
+### nx catalog link-bulk-delete (hidden)
+
+```
+nx catalog link-bulk-delete [--from TUMBLER] [--to TUMBLER] [--type TYPE]
+                             [--created-by NAME] [--created-at-before ISO_TIMESTAMP]
+                             [--no-dry-run --confirm]
+```
+
+Hidden from `--help` but fully functional. Bulk-remove links matching the
+given filters (all optional; omitting every filter matches every link).
+Same double-gate as `nx catalog gc`: report-only by default, and
+`--no-dry-run` alone still only reports — pass `--confirm` alongside it to
+actually delete (nexus-9nim, 4.29.1 inverted the old delete-unless-dry-run
+default). **Not reversible in-product**: the pre-delete JSONL backup
+snapshot died with the local catalog in 7.0.0 (nexus-i711w).
+
+### nx catalog register (hidden)
+
+```
+nx catalog register --title TITLE --owner OWNER [--author NAME] [--year YEAR]
+                     [--type CONTENT_TYPE] [--file-path PATH] [--source-uri URI]
+                     [--corpus NAME]
+```
+
+Hidden from `--help` but fully functional: single-document, explicit
+catalog registration, mirroring the MCP `catalog_register` tool. An
+absolute `--file-path` under a known repo is relativized automatically
+(RDR-060). `--source-uri` accepts an explicit persistent URI (`chroma://`,
+`https://`, `nx-scratch://`, `x-devonthink-item://`) or is omitted to
+derive `file://<abspath>` from `--file-path`; malformed URIs are rejected
+at register time. Refuses (nexus-u8n4r) to register a path that sits under
+an agent worktree or system temp dir unless the owner's own `repo_root` is
+itself rooted there, so an ephemeral checkout can't leave a permanent
+orphan behind. Most indexing paths (`nx index repo`/`pdf`/`md`/`rdr`, `nx dt
+index`) register through their own pipelines; this verb is for one-off or
+scripted registration outside those flows.
+
+### nx catalog backfill (hidden)
+
+```
+nx catalog backfill [--dry-run]
+nx catalog backfill --from-t3 --collection NAME
+nx catalog backfill --from-t3 --all-repo-collections
+```
+
+Hidden from `--help` but fully functional. Bare form (no `--from-t3`)
+populates the catalog from existing T3 collections and the legacy repo
+registry — the standard multi-pass backfill; `--dry-run` reports without
+writing. `--from-t3` is a per-file recovery mode: it enumerates T3 chunks
+directly and registers one catalog row per unique `source_path` under the
+repo owner, skipping the standard passes. It requires either `--collection
+NAME` (a single `docs__<repo>-<hash>` or `code__<repo>-<hash>` collection
+whose repo owner is already registered) or `--all-repo-collections` (run
+recovery against every matching collection in T3); the two are mutually
+exclusive.
+
+### nx catalog compact — RETIRED (hidden from `--help`)
+
+```
+nx catalog compact   # refuses with guidance
+```
+
+Retired in 7.0.0 alongside the local JSONL/SQLite catalog it compacted
+(catalog-git-DECISION Option C) — the nexus service's Postgres is the sole
+catalog authority and needs no client-side compaction. Refuses with
+`click.ClickException` and a pointer to that, rather than the uncaught
+`NotImplementedError` it used to raise.
 
 ### nx catalog sync / pull (retired)
 
@@ -2567,15 +2646,37 @@ nx config init
 | Subcommand | Description |
 |------------|-------------|
 | `init` | Interactive managed-service (cloud) credential wizard — collects `service_url` + `service_token`. Local mode uses `nx init` instead. |
-| `list` | Show all config values |
+| `list` | Show all config values (secrets masked to their first and last four characters) |
 | `get KEY` | Get single value (masked by default) |
-| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form. |
+| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form, or `KEY --stdin` / `KEY --from-file PATH`. |
 
 **`get` flags:**
 
 | Flag | Description |
 |------|-------------|
 | `--show` | Reveal the full value instead of masking |
+
+**`list` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--keys-only` | Print each key with `set` / `not set` and its source, and no value characters at all. Use this whenever the output leaves your own terminal, instead of redacting the default listing yourself (nexus-6fvwo). |
+
+**`set` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--stdin` | Read the value from stdin, so it never appears in the process list. |
+| `--from-file PATH` | Read the value from a file. On POSIX it is refused unless only you can access it (mode `0600`, or stricter such as `0400`); on Windows the file's ACL is not checked, and `set` says so on stderr. |
+
+A secret given inline (`KEY VALUE` or `KEY=VALUE`) is visible to every process
+you run through `ps`; `set` still accepts it and prints a note pointing at
+`--stdin`. The two ways that keep it off the command line:
+
+```
+printf %s "$VOYAGE_KEY" | nx config set voyage_api_key --stdin
+nx config set voyage_api_key --from-file ~/.secrets/voyage.key
+```
 
 **Managed-service credentials** (RDR-166 greenfield onboarding):
 
@@ -3646,9 +3747,20 @@ remaining demoted-not-deleted primitives — still callable, out of `--help`:
 
 | Demoted verb | Its only job was | Now done by |
 |---|---|---|
-| `nx migration` | migration-sentinel inspect/recover | crash-recovery plumbing behind the trigger |
+| `nx migration [--clear-state [--force]]` | migration-sentinel inspect/recover | crash-recovery plumbing behind the trigger |
 | `nx collection backfill-hash` | upgrade-era `chunk_text_hash` repair | the ladder's manifest heal |
 | `nx hooks update-all` | manual managed-hook sweep | `nx upgrade` refreshes managed hooks itself |
+
+**`nx migration`** (RDR-159) inspects or recovers the cross-process
+migration-sentinel file that a crashed migration/rekey can leave stranded,
+banner-wrapping every read surface with a "migration in progress" warning
+forever. Bare `nx migration` prints the current sentinel read-only
+(`not-migrating` when none exists). `--clear-state` removes a stranded
+`migrated-failed` sentinel (safe — a resumed migration recomputes
+done-vs-total from live source-vs-target state, never trusts the stale
+marker); clearing a `migrating` sentinel additionally requires `--force`,
+since that phase may be a live migration in another process and dropping
+the banner mid-migration is only safe if that process actually crashed.
 
 Verbs that appeared in the old upgrade graph but have a genuine **non-upgrade**
 job keep their surface — `nx collection reindex` (refresh changed content),
@@ -4011,9 +4123,12 @@ Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints eac
 | `--json` | Output as JSON: `{name, entries, holders, ambiguous, resolved_session_id}` |
 
 Mailbox push delivery has no CLI verb (RDR-211 nexus-rplay.14 deleted the
-prior CLI ping-then-pull watcher outright): a session subscribes its own
-instance mailbox via the `tuple_subscribe` MCP tool, and its own nexus MCP
-server pushes over the Claude Code channel. See
+prior CLI ping-then-pull watcher outright): a session's own nexus MCP
+server pushes its own mailbox over the Claude Code channel automatically,
+from startup, with no subscribe call needed. `tuple_subscribe("mailbox/<name>")`
+leases a NAME in the directory above, via the same MCP tool, so a peer can
+reach this session by name -- it is not a second delivered mailbox (RDR-208
+Phase 3, bead nexus-galkv.20). See
 [Tuple space § Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
 ## nx service

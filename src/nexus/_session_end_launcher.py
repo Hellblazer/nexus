@@ -45,14 +45,40 @@ Shell invocation (wired into ``conexus/hooks/hooks.json``)::
 
     nx-session-end-launcher
 
-On platforms without ``os.fork`` (Windows), falls through to the
-synchronous path so cleanup still happens, at the cost of the hook
-blocking until done.
+On platforms without ``os.fork`` (Windows), :func:`_spawn_detached_cleanup`
+starts the cleanup as a detached child process and returns, which is the
+Windows equivalent of the double-fork (nexus-34f7r). Running the cleanup
+inline there, as this module used to, spent the hook's whole budget on it,
+and Claude Code on Windows reported "SessionEnd hook
+[nx-session-end-launcher] failed: Hook cancelled". Only if the detached
+spawn fails does the cleanup run synchronously, so it is never skipped.
 """
 from __future__ import annotations
 
 import os
 import sys
+
+#: The cleanup child's entry. A ``-c`` string rather than ``-m``, because
+#: this module's ``__main__`` block is the whole launcher, and the child must
+#: run only the cleanup.
+_DETACHED_CHILD_CODE: str = (
+    "from nexus._session_end_launcher import _run_session_end_synchronously; "
+    "_run_session_end_synchronously()"
+)
+
+#: Windows CreateProcess flags, spelled out because ``subprocess`` defines
+#: them only on Windows and is not imported here at module scope: POSIX pays
+#: the pre-fork budget above, and ``subprocess`` costs ~5ms of it (measured
+#: 2026-09-24). DETACHED_PROCESS gives the child no console, so nothing
+#: flashes on screen and nothing ties it to the hook's console.
+#: CREATE_NEW_PROCESS_GROUP keeps a console CTRL event aimed at the hook
+#: from reaching it. CREATE_BREAKAWAY_FROM_JOB takes it out of any job
+#: object the hook runs in, so closing that job does not kill it; a job
+#: that forbids breakaway refuses the spawn, and the spawn is retried
+#: without the flag.
+_DETACHED_PROCESS: int = 0x00000008
+_CREATE_NEW_PROCESS_GROUP: int = 0x00000200
+_CREATE_BREAKAWAY_FROM_JOB: int = 0x01000000
 
 
 def _run_session_end_synchronously() -> None:
@@ -192,6 +218,47 @@ def _daemonize_and_run() -> None:
     os._exit(0)
 
 
+def _spawn_detached_cleanup() -> bool:
+    """Start the cleanup as a detached child and return at once (nexus-34f7r).
+
+    The no-fork counterpart of :func:`_daemonize_and_run`. Returns ``True``
+    when a child was started. Returns ``False`` when both spawn attempts
+    failed, and the caller then runs the cleanup inline so it still happens.
+    The child's stdio is the null device, as the grandchild's is on POSIX,
+    because Claude Code may close the hook's handles while it is exiting.
+
+    WHAT IS NOT MEASURED: whether the child outlives Claude Code's own exit
+    on Windows. That depends on the job object Claude Code runs hooks in,
+    which this code cannot see; the breakaway attempt is the best it can do
+    without knowing. The qwentescence check on nexus-34f7r settles it.
+    """
+    import subprocess  # noqa: PLC0415 — deferred: off the POSIX pre-fork path (module docstring)
+    import warnings  # noqa: PLC0415 — deferred with subprocess, for the same reason
+
+    argv = [sys.executable, "-c", _DETACHED_CHILD_CODE]
+    base = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+    for flags in (base | _CREATE_BREAKAWAY_FROM_JOB, base):
+        try:
+            child = subprocess.Popen(
+                argv,
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        except (OSError, ValueError):
+            continue
+        # The child is deliberately never waited on. Dropping the handle
+        # here makes Popen.__del__ print "subprocess N is still running" as
+        # a ResourceWarning on the hook's stderr, so drop it quietly.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            del child
+        return True
+    return False
+
+
 def _print_service_tier_summary() -> None:
     """Print the Phase-1C tier-write summary from the engine — POST-fork.
 
@@ -286,8 +353,10 @@ def main() -> None:
     # a slow/hung service read can never delay the cleanup dispatch — the
     # exact pre-fork SIGTERM race the old ordering had to guard against.
     if not hasattr(os, "fork"):
-        # Windows etc — no fork, run synchronously.
-        _run_session_end_synchronously()
+        # Windows: a detached child is the no-fork double-fork. Inline only
+        # when the spawn itself failed, so cleanup is never skipped.
+        if not _spawn_detached_cleanup():
+            _run_session_end_synchronously()
         _print_service_tier_summary()
         return
     _daemonize_and_run()

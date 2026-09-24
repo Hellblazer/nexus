@@ -1161,21 +1161,33 @@ def test_md_collection_knowledge_target_emits_no_extractor_warning(runner, fake_
     """--collection with a knowledge__ target no longer warns that prose gets
     the paper extractor: routing is per document (general-prose-v1 for prose,
     c79909c4b), so the old GH #981 warning described a hazard that is gone
-    (nexus-kk4ut)."""
+    (nexus-kk4ut).
+
+    Checking for the absence of the two exact retired phrases is a weak
+    negative -- it would still pass if some OTHER caveat text got emitted
+    here by accident. Nothing in `nx index md`'s knowledge__ path emits any
+    "Note:" line at all (verified: no such string exists in index.py's md
+    command body), so the real property is the absence of ANY such line.
+    """
     # CliRunner (Click 8.x) mixes stdout+stderr into result.output by default.
     with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
         result = runner.invoke(main, ["index", "md", str(fake_md), "--collection", "mynotes"])
     assert result.exit_code == 0, result.output
-    assert "scholarly-paper extractor" not in result.output
-    assert "hallucinate" not in result.output
+    assert "Note:" not in result.output
 
 
 def test_md_collection_no_warning_when_corpus_default(runner, fake_md):
-    """No prose-extractor warning when --collection is absent (docs__ path)."""
+    """No "Note:" line when --collection is absent (docs__ path) either.
+
+    Was a weak negative on the same two retired phrases -- vacuous once
+    nothing in this path emits them regardless of correctness. Converted to
+    the same no-"Note:"-line assertion as the knowledge__ case above rather
+    than deleted, so the docs__ default path keeps a real regression guard.
+    """
     with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
         result = runner.invoke(main, ["index", "md", str(fake_md)])
     assert result.exit_code == 0, result.output
-    assert "scholarly-paper extractor" not in result.output
+    assert "Note:" not in result.output
 
 
 # ── --extractor flag ─────────────────────────────────────────────────────────

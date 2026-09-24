@@ -2322,7 +2322,7 @@ class PDFExtractor:
         result_dir = tempfile.mkdtemp()
         try:
             import os as _os  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-            import signal  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+            from nexus.util.process_group import KILL_SIGNAL  # noqa: PLC0415 — deferred import — branch-local, matches this block's own imports
 
             # RDR-148 Gap 6: optional RLIMIT_AS address-space ceiling on the
             # worker. LINUX-GATED: macOS raises ValueError on
@@ -2413,8 +2413,10 @@ class PDFExtractor:
                 # across every subprocess cleanup site in the codebase.
                 from nexus.util.process_group import safe_killpg, safe_killpg_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-                safe_killpg(proc, signal.SIGKILL)
-                safe_killpg_group(worker_pgid, signal.SIGKILL)
+                # On Windows the group sweep refuses and only the worker
+                # itself is killed; its pool children survive (nexus-6y4e0).
+                safe_killpg(proc)
+                safe_killpg_group(worker_pgid)
 
             try:
                 returncode = proc.wait(timeout=timeout_s)
@@ -2436,7 +2438,7 @@ class PDFExtractor:
                 # breach. The SIGKILL-only mapping would miss (2) and (3) — the
                 # gate finding that motivated this classification.
                 is_oom = (
-                    returncode == -signal.SIGKILL
+                    returncode == -KILL_SIGNAL  # POSIX only: Windows exit codes are never negative
                     or returncode == _MINERU_OOM_EXIT
                     or self._mineru_ceiling_applied
                 )

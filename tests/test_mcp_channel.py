@@ -430,6 +430,42 @@ def _subs(session_id: str):
     return SubscriptionSet(session_id=session_id)
 
 
+def _inject_extra_mailbox(subs, addr: str) -> None:
+    """Test-only shortcut: give *subs* a SECOND delivered mailbox entry
+    without driving the real `directory/<name>` lease machinery a genuine
+    `subscribe("mailbox/<name>")` call performs, and let `unsubscribe(addr)`
+    drop it again.
+
+    Since RDR-208 Phase 3 (bead nexus-galkv.20), `SubscriptionSet` never
+    tracks a second delivered mailbox at all -- a leased name arms a
+    lease but is never listed by `entries()` (see that method's own
+    docstring), so `subscribe()` can no longer produce this shape. These
+    tests exist to prove `ChannelWaiter` handles more than one delivered
+    mailbox generically (still true: nothing in the waiter assumes there
+    is only ever one), so this patches `entries()`/`unsubscribe()` on the
+    instance directly -- the same two methods a real subscribe/unsubscribe
+    pair would drive -- rather than reaching for a subscription-set
+    attribute that no longer exists."""
+    base_entries = subs.entries
+    base_unsubscribe = subs.unsubscribe
+    state = {"active": True}
+
+    def _entries():
+        out = base_entries()
+        if state["active"]:
+            out.append({"subspace": addr})
+        return out
+
+    def _unsubscribe(subspace):
+        if subspace == addr:
+            state["active"] = False
+            return
+        base_unsubscribe(subspace)
+
+    subs.entries = _entries
+    subs.unsubscribe = _unsubscribe
+
+
 def _dead_letter_n_rows(addr: str, to_key: str, claimant: str, count: int, prefix: str = "dead") -> None:
     """Create *count* real tuples in *addr*, keyed to *to_key*, and
     dead-letter each one in turn (repeated claim+nack to the mailbox
@@ -675,7 +711,7 @@ class TestChannelWaiterFakeStore:
         subs = _subs(session_id)
         addr_a = subs.session_mailbox
         addr_b = f"mailbox/{uuid.uuid4().hex}"
-        subs.instance_mailbox = addr_b  # noqa: SLF001 — test-only shortcut, bypassing subscribe()'s directory-lease side effects
+        _inject_extra_mailbox(subs, addr_b)
         subs.subscribe(
             "board/release-notes", templates=[],
             store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
@@ -704,7 +740,7 @@ class TestChannelWaiterFakeStore:
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
         addr_b = f"mailbox/{uuid.uuid4().hex}"
-        subs.instance_mailbox = addr_b  # noqa: SLF001 — test-only shortcut
+        _inject_extra_mailbox(subs, addr_b)
         fake = _FakeTupleStore()
         fake.seed(addr_b, "b1", "leaky-if-unsubscribed")
         sender = _FakeSender()
@@ -912,6 +948,43 @@ class TestChannelWaiterRealEngine:
     stop rule) that announce mode, unlike a client-side cursor, never
     loses a row under concurrent writers (T2 `nexus_rdr/213-waiter-deep-
     analysis-2026-09-17` (2/2) section E, stop rule 1)."""
+
+    def test_a_leased_name_is_never_referenced_by_the_waiter(self, t2_service_env, tmp_path) -> None:
+        """RDR-208 Phase 3 (bead nexus-galkv.20), the Transition Test
+        Plan's "then stops" half at the waiter itself: a genuine
+        `subscribe("mailbox/<name>")` call arms the name's
+        `directory/<name>` lease through the REAL engine, but the waiter
+        never builds a `WaitSpec` for it and never references a message
+        sent to `mailbox/<name>` -- only this session's OWN mailbox is
+        ever referenced. THE FALSIFIER: reverting `entries()` to include
+        the leased name (this bead's actual code change) makes this fail,
+        since the fake sender would then also see the leaked address."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp.subscriptions import SubscriptionSet
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        subs = SubscriptionSet(session_id=session_id)
+        name = f"inst-{uuid.uuid4().hex[:8]}"
+        try:
+            subs.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
+            tuple_out(
+                f"mailbox/{name}", {"to": name}, {"from": "sender-leaked"},
+                "should never be referenced", nonce=uuid.uuid4().hex,
+            )
+            tuple_out(
+                subs.session_mailbox, {"to": session_id}, {"from": "sender-own"},
+                "own mailbox", nonce=uuid.uuid4().hex,
+            )
+
+            sender = _FakeSender()
+            waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
+            asyncio.run(waiter.tick())
+
+            subspaces_referenced = {m.get("subspace") for _c, m in sender.calls}
+            assert subspaces_referenced == {subs.session_mailbox}
+        finally:
+            subs.shutdown()
 
     def test_wait_returns_claimed_and_dead_rows_not_just_available_ones(self, t2_service_env) -> None:
         """Engine-fact check, confirmed against the real engine
@@ -1161,7 +1234,7 @@ class TestChannelWaiterRealEngine:
         subs = _subs(session_id)
         addr_a = subs.session_mailbox
         addr_b = f"mailbox/{uuid.uuid4().hex}"
-        subs.instance_mailbox = addr_b  # noqa: SLF001 — test-only shortcut
+        _inject_extra_mailbox(subs, addr_b)
         tuple_out(addr_a, {"to": session_id}, {"from": "sender-a"}, "first-a", nonce=uuid.uuid4().hex)
         to_b = addr_b.removeprefix("mailbox/")
         tuple_out(addr_b, {"to": to_b}, {"from": "sender-b"}, "first-b", nonce=uuid.uuid4().hex)

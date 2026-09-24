@@ -15,6 +15,8 @@ from nexus.db.t1 import (
     publish_t1_session_lease,
 )
 from nexus.garbage import (
+    CLOSE_GATE_STATE_MAX_AGE_DAYS,
+    CLOSE_GATE_STATE_SUBDIR,
     MINT_LOCK_MAX_AGE_DAYS,
     OPERATOR_LOG_MAX_AGE_DAYS,
     ROTATED_LOG_MAX_AGE_DAYS,
@@ -106,6 +108,37 @@ class TestLocalSweep:
         assert sorted(report.removed["ripgrep_cache"]) == sorted(
             [today.name, ancient.name, hyphenated.name]
         )
+
+    def test_stale_close_gate_state_goes_unless_its_session_has_a_lease(self, tmp_path: Path) -> None:
+        """nexus-dgl8g follow-up 3: the Stop-hook close-gate backstop's own
+        per-session memoization file, registered as a litter class here
+        exactly like ``mint_lock`` -- same two-part guard (age AND
+        liveness), and this is the "an old file is reaped, a fresh one
+        and the current session's are kept" test the coordinator asked
+        for. The current session IS the fresh, leased one: its state file
+        is written on literally every Stop turn, so it is never stale
+        while the session is live, and its lease (belt and suspenders)
+        protects it even if it somehow were."""
+        old = _touch(
+            tmp_path / CLOSE_GATE_STATE_SUBDIR / "dead-session.json",
+            age_days=CLOSE_GATE_STATE_MAX_AGE_DAYS + 1,
+        )
+        leased = _touch(
+            tmp_path / CLOSE_GATE_STATE_SUBDIR / "current-session.json",
+            age_days=30,
+        )
+        _touch(tmp_path / "t1_session_lease.current-session", age_days=0)
+        fresh_other = _touch(
+            tmp_path / CLOSE_GATE_STATE_SUBDIR / "other-fresh-session.json",
+            age_days=0.2,
+        )
+
+        report = sweep_local_garbage(tmp_path, now=NOW)
+
+        assert not old.exists()
+        assert leased.exists(), "the current session's file, leased, is never reaped whatever its age"
+        assert fresh_other.exists(), "inside the age window is kept even with no lease"
+        assert report.removed == {"close_gate_state": [old.name]}
 
     def test_a_failed_unlink_is_reported_not_raised(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         stale = _touch(tmp_path / "t1_mint_dead.lock", age_days=5)

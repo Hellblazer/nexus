@@ -128,6 +128,24 @@ def test_both_skew_window_failure_branches_call_it(branch: str) -> None:
     )
 
 
+def test_the_seed_loop_failure_also_calls_it() -> None:
+    """nexus-wo6sc half two: the very FIRST client call against the
+    supervisor (Stage 3's pre-upgrade T1 seed loop) can hit the identical
+    heartbeat-stall shape as the later skew-window asserts, and reported it
+    with the same opaque "could not seed a T1 row" message with no
+    attribution until this test's fix. Sibling of
+    ``test_both_skew_window_failure_branches_call_it`` -- same failure
+    shape, a different (earlier) failure site."""
+    text = HARNESS.read_text(encoding="utf-8")
+    marker = "could not seed a T1 row after 6 attempts"
+    idx = text.index(marker)
+    window = text[max(0, idx - 400):idx + 200]
+    assert "_stall_note" in window, (
+        "the Stage 3 seed-loop failure reports the opaque error without "
+        "the heartbeat-stall note"
+    )
+
+
 class TestTheLibraryReachesTheContainer:
     """nexus-wo6sc, 2026-09-13. The note was correct, unit-tested and
     mutation-checked, and had never once run where it was written to run.

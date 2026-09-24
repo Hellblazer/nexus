@@ -383,6 +383,72 @@ class TestDeterministicCostEstimate:
         assert f"${3 * _PER_PAPER_COST_USD:.2f}" in result.output
 
 
+# ── nexus-kk4ut: the pre-run banner must not claim a single extractor for a
+# shape-routed collection ────────────────────────────────────────────────────
+
+
+class TestExtractorBanner:
+    """The pre-run "N document(s) in 'x' (extractor=..., ...)" line named
+    only ``select_config``'s BASE extractor for ``knowledge__*``, which is a
+    lie the instant one document in the batch is general prose
+    (nexus-kmbys). Literal-text pin for the fixed wording."""
+
+    def _register_rdr_entries(self, cat: Catalog, source_paths: list[str]) -> None:
+        owner = cat.register_owner("rdr", "rdr-curator")
+        for sp in source_paths:
+            cat.register(
+                owner, Path(sp).stem,
+                content_type="rdr",
+                physical_collection="rdr__nexus-foo",
+                file_path=sp,
+            )
+
+    def test_knowledge_collection_says_routed_per_document(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf"])
+
+        def _no_t3():
+            raise RuntimeError("test: no t3")
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", _no_t3)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["aspects", "knowledge__delos", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            "extractor=routed per document (scholarly-paper-v1 or general-prose-v1)"
+            in result.output
+        )
+        # The base config's name never appears bare (unqualified) as the
+        # banner's extractor= value -- it only ever appears inside the
+        # "routed per document (...)" phrase.
+        assert "extractor=scholarly-paper-v1," not in result.output
+
+    def test_rdr_collection_names_the_single_extractor(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """rdr__* is never shape-routed, so the banner keeps naming one
+        extractor plainly -- this pins that the fix did not regress the
+        non-shape-routed prefix."""
+        _, _, cat = env
+        self._register_rdr_entries(cat, ["/repo/docs/rdr/RDR-001.md"])
+
+        def _no_t3():
+            raise RuntimeError("test: no t3")
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", _no_t3)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["aspects", "rdr__nexus-foo", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "extractor=rdr-frontmatter-v1," in result.output
+        assert "routed per document" not in result.output
+
+
 # ── nexus-ow9f: source_uri visibility in dry-run skips ──────────────────────
 
 
@@ -607,6 +673,61 @@ class TestDefaultExtraction:
         with T2Database(db_path) as db:
             count = len(db.document_aspects.list_by_collection("knowledge__delos"))
         assert count == 2
+
+    def test_done_summary_reports_by_extractor_when_shape_routed(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-kk4ut: the post-run "Done:" summary must report what was
+        ACTUALLY written, not the pre-run estimate's base config name --
+        the only honest source for a shape-routed batch is the routed
+        records themselves."""
+        import dataclasses
+
+        _, _, cat = env
+        _register_entries(cat, ["/papers/paper1.pdf", "/papers/prose1.pdf"])
+
+        def fake_extract(content, source_path, collection, **_kw):
+            name = "general-prose-v1" if "prose" in source_path else "scholarly-paper-v1"
+            return dataclasses.replace(
+                _make_record(source_path=source_path), extractor_name=name,
+            )
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects", fake_extract,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "2 extracted" in result.output
+        assert "by_extractor: general-prose-v1=1, scholarly-paper-v1=1" in result.output
+
+    def test_done_summary_omits_by_extractor_when_only_one_name_used(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A batch that never actually mixed extractors carries no
+        by_extractor breakdown -- nothing to disambiguate."""
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "2 extracted" in result.output
+        assert "by_extractor" not in result.output
 
     @_needs_diagnosis_nexus_t0nrd
     def test_aspect_persist_routes_through_t2_index_write(

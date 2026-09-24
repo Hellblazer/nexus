@@ -1,5 +1,11 @@
 # Daemon Concurrency Forensics — T2 Daemon Silent 100% CPU Peg + Lifecycle Bug Class
 
+> **Historical (2026-06-05, conexus 5.10.3).** Diagnoses a `t2.sock`
+> UNIX-domain-socket busy-loop in the SQLite-backed T2 daemon. That daemon is
+> retired (nexus-i711w); T2 is now served by the nexus-service over HTTP
+> (`nx daemon service start|stop|status`), which has no such socket. Kept as
+> the forensic record of the bug class, not a live operator reference.
+
 - **Date:** 2026-06-05
 - **Version under test:** conexus 5.10.3 (local + PyPI), branch `chore/reconcile-develop-with-main`
 - **Primary bead:** nexus-xmohw (P1, open) — "Daemon self-pegs 100% CPU … root-cause RDR needed"

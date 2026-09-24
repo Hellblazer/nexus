@@ -112,6 +112,7 @@ sn/
 │   ├── hooks.json                 # SessionStart, SubagentStart, PreToolUse, PermissionRequest
 │   └── scripts/
 │       ├── session_start.py       # main-conversation reminder
+│       ├── session-start-section.md # injected main-conversation reminder text
 │       ├── subagent_start.py      # SubagentStart injection (JSON envelope)
 │       ├── serena-section.md      # injected Serena guidance
 │       ├── context7-section.md    # injected Context7 guidance

@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): ``SubscriptionSet``
-validation, mutation, the change-observer signal, the instance-mailbox
-takeover, and T1 persistence across a resume vs. a clear.
+validation, mutation, the change-observer signal, the name lease
+(RDR-208 Phase 3, bead nexus-galkv.20), and T1 persistence across a
+resume vs. a clear.
 
 Validation-only tests (queue/lock refusal naming ``in``, the 32-topic
 bound, a malformed subspace, the observer, plain unsubscribe) never touch
 a real store: a POISON ``store_factory`` that raises if ever called is the
-falsifier proving the refusal happens before any engine call. The
-instance-mailbox takeover, the directory-lease send/re-send, and the
-resume/clear persistence tests run against the real engine substrate
-(``t2_service_env``) and a real T1 handle, mirroring
-``tests/test_mcp_tuple_tools.py``'s own fixtures.
+falsifier proving the refusal happens before any engine call. The name
+lease, the directory-lease send/re-send, and the resume/clear persistence
+tests run against the real engine substrate (``t2_service_env``) and a
+real T1 handle, mirroring ``tests/test_mcp_tuple_tools.py``'s own
+fixtures.
 """
 from __future__ import annotations
 
@@ -29,8 +30,6 @@ from nexus.mcp.subscriptions import (
     SubscriptionSet,
     load,
     persist,
-    registration_path,
-    write_instance_registration,
 )
 
 
@@ -117,9 +116,8 @@ class TestSubscribeValidation:
     def test_mailbox_name_with_a_newline_is_refused_before_any_write_or_lease(self, tmp_path):
         """Code review Minor 6: an instance name outside the mailbox
         address charset must be refused loudly (`SchemaViolationError`),
-        before `write_instance_registration` or the `directory/<name>`
-        lease -- `_poison_store_factory` is the falsifier that no lease
-        was ever started."""
+        before the `directory/<name>` lease -- `_poison_store_factory` is
+        the falsifier that no lease was ever started."""
         s = SubscriptionSet(session_id=str(uuid.uuid4()))
         with pytest.raises(SchemaViolationError):
             s.subscribe(
@@ -135,23 +133,16 @@ class TestSubscribeValidation:
             )
         assert list(tmp_path.rglob("*")) == []
 
-    def test_write_instance_registration_itself_rejects_a_charset_hostile_instance(self, tmp_path):
-        """Defense in depth: even a direct call to
-        `write_instance_registration` -- bypassing `subscribe`'s loud
-        refusal -- must never write a bad name to disk."""
-        write_instance_registration(tmp_path, "sess-1", "evil/name")
-        assert list(tmp_path.rglob("*")) == []
-
     def test_subscribing_the_sessions_own_mailbox_is_a_noop(self, tmp_path):
         sid = str(uuid.uuid4())
         s = SubscriptionSet(session_id=sid)
         s.subscribe(
             f"mailbox/{sid}", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
         )
-        assert s.instance_mailbox is None
+        assert s.leased_name is None
         assert s.version == 0
 
-    def test_a_second_instance_mailbox_name_is_refused(self, tmp_path):
+    def test_a_second_leased_name_is_refused(self, tmp_path):
         fake = _FakeTuples()
         s = SubscriptionSet(session_id=str(uuid.uuid4()))
         s.subscribe(
@@ -159,13 +150,13 @@ class TestSubscribeValidation:
             state_dir=tmp_path,
         )
         try:
-            assert s.instance_mailbox == "mailbox/name-a"
+            assert s.leased_name == "name-a"
             with pytest.raises(SchemaViolationError):
                 s.subscribe(
                     "mailbox/name-b", templates=[], store_factory=_poison_store_factory(),
                     state_dir=tmp_path,
                 )
-            assert s.instance_mailbox == "mailbox/name-a"
+            assert s.leased_name == "name-a"
         finally:
             s.shutdown()
 
@@ -248,11 +239,16 @@ class TestUnsubscribe:
         s.unsubscribe("board/never-subscribed")  # must not raise
 
 
-class TestInstanceMailboxTakeover:
-    """Real engine (t2_service_env): the registration file, the directory
-    lease's shape and re-send cadence, and unsubscribe stopping it."""
+class TestNameLease:
+    """Real engine (t2_service_env): the directory lease's shape and
+    re-send cadence, unsubscribe stopping it, and -- RDR-208 Phase 3, bead
+    nexus-galkv.20, pinning the Transition Test Plan's "then stops" half
+    -- that arming a name writes NO per-session registration file any
+    more and is NEVER a delivered mailbox (never listed by `entries()`,
+    which is the one place the channel waiter and `tuple_subscriptions`
+    both read)."""
 
-    def test_writes_registration_file_and_sends_the_directory_lease(
+    def test_arms_the_directory_lease_and_writes_no_registration_file(
         self, t2_service_env, tmp_path,
     ) -> None:
         from nexus.mcp_infra import t2_ctx
@@ -262,10 +258,22 @@ class TestInstanceMailboxTakeover:
         name = f"inst-{uuid.uuid4().hex[:8]}"
         try:
             s.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
-            assert s.instance_mailbox == f"mailbox/{name}"
+            assert s.leased_name == name
 
-            reg_path = registration_path(tmp_path, sid)
-            assert reg_path.read_text(encoding="utf-8") == f"{name}\n"
+            # THE "THEN STOPS" HALF: no per-session registration file is
+            # written under state_dir any more -- the old drain-hook floor
+            # for a registered instance name is gone outright, not merely
+            # relocated. Checked as a specific path, not "state_dir holds
+            # nothing at all": under the full suite (nexus-6qp25 xdist),
+            # `tmp_path` doubles as this worker's `NEXUS_CONFIG_DIR`
+            # sub-path (the autouse `_isolate_config_dir` fixture), and a
+            # worker's FIRST substrate call may cache an unrelated
+            # data-token lease file there -- legitimate T2 plumbing this
+            # test has nothing to say about.
+            assert not (tmp_path / "tuple-watch").exists()
+
+            # A leased name is never a delivered mailbox.
+            assert {"subspace": f"mailbox/{name}"} not in s.entries()
 
             with t2_ctx() as db:
                 rows = db.tuples.rd(f"directory/{name}", {"name": name})
@@ -304,7 +312,7 @@ class TestInstanceMailboxTakeover:
         s.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
         assert s._lease_thread is not None
         s.unsubscribe(f"mailbox/{name}")
-        assert s.instance_mailbox is None
+        assert s.leased_name is None
         assert s._lease_thread is None
 
     def test_re_sends_on_the_configured_interval(self, t2_service_env, tmp_path) -> None:
@@ -343,7 +351,7 @@ class TestDirectoryRelease:
     """nexus-kdxyv (RDR-208 test plan: "a /clear self-stop releases the
     watcher's entry within about a second; an ordinary exit leaves it for
     one TTL"). Stopping a lease on purpose -- ``unsubscribe`` of the
-    instance mailbox, or ``shutdown`` on a handoff -- re-sends the SAME
+    leased name, or ``shutdown`` on a handoff -- re-sends the SAME
     nonce with ``ttl_seconds=1`` so the ``directory/<name>`` row lapses
     within about a second instead of at the 300 s TTL. The idempotent
     tuple id (keys + nonce) makes that an update of the live row, never a
@@ -446,12 +454,12 @@ class TestPersistenceAcrossResumeAndClear:
         finally:
             fresh_a.shutdown()
 
-        # nexus-kdxyv: the instance mailbox is NOT restored on resume. The
+        # nexus-kdxyv: the leased name is NOT restored on resume. The
         # ListAgents name changes at every process start (RDR-208), so the
         # resumed session subscribes its NEW name (RDR-211: "a /resume
         # under a new name repeats it, and the old name's mail strands");
         # restoring the old one re-armed a stale lease and made that
-        # subscribe refuse as a second instance mailbox.
+        # subscribe refuse as a second leased name.
         fake = _FakeTuples()
         subs2 = load(t1_a, session_a)
         subs2.subscribe("mailbox/name-before-resume", templates=[],
@@ -460,12 +468,12 @@ class TestPersistenceAcrossResumeAndClear:
         subs2.shutdown()
         resumed = load(t1_a, session_a, store_factory=lambda: _fake_store_factory(fake))
         try:
-            assert resumed.instance_mailbox is None
+            assert resumed.leased_name is None
             assert "board/release-notes" in {e["subspace"] for e in resumed.entries()}
             before = len(fake.calls)
             resumed.subscribe("mailbox/name-after-resume", templates=[],
                               store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
-            assert resumed.instance_mailbox == "mailbox/name-after-resume"
+            assert resumed.leased_name == "name-after-resume"
             # Assert WHICH names were written, not how many writes happened: a
             # heartbeat thread may tick under a loaded box, and a count would
             # make this test fail for a reason it does not name.

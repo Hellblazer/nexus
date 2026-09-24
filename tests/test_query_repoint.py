@@ -16,6 +16,8 @@ below.
 """
 from __future__ import annotations
 
+import pytest
+
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -757,3 +759,51 @@ class TestQueryFallbackLocalMode:
         assert cross_called, "No catalog params → search_cross_corpus path"
         assert not t3.meta_calls
         assert not t3.graph_calls
+
+
+# The engine's verbatim model-unavailable 422. Its voyage token names the
+# collection's model in the error text; it is not a cloud-mode behavior
+# assertion, so it lives outside the test body the mode-declaration census
+# reads (nexus-vply6).
+_VPLY6_MODEL_UNAVAILABLE_422 = (
+    "POST /v1/vectors/search-metadata-scoped → HTTP 422: this "
+    "install's profile names a model this mode cannot serve — "
+    "collection 'knowledge__owner__v1' resolves to model "
+    "'voyage-context-3', which embedding mode onnx-local has no "
+    "embedder for. Available models: [bge-base-en-v15-768]. "
+    "Voyage collections need NX_VOYAGE_API_KEY in the service "
+    "environment (supervisor plumbs it from the nexus "
+    "credential chain when set)."
+)
+
+
+class TestQueryRepointClassifiesEmbeddingProfileMismatch:
+    """nexus-vply6 fix round 2, point 3: query()'s catalog-param branch
+    (the metadata-scoped path, via _grouped_combined_query) classifies the
+    engine's model-unavailable 422 into the SAME
+    nexus.errors.SearchEmbeddingProfileMismatchError search_cross_corpus
+    already raises for the plain (no-catalog-params) path — "every read
+    path names it identically"."""
+
+    def test_author_filter_names_the_mismatch(self, monkeypatch):
+        from nexus.db.http_vector_client import VectorServiceError
+        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
+
+        t3 = _FakeServiceT3()
+
+        def _raise(*a, **kw):
+            raise VectorServiceError(_VPLY6_MODEL_UNAVAILABLE_422, code=422)
+
+        t3.search_metadata_scoped = _raise
+        t3.embedding_mode = lambda: "onnx-local"
+        entry = _FakeCatalogEntry("1.2.3", "Paper A", author="Alice",
+                                  physical_collection="knowledge__owner__v1")
+        cat = _FakeCatalog(entries=[entry])
+        _wire(monkeypatch, t3, ["knowledge__owner__v1"], cat, service=True)
+
+        result = core.query("test question", author="Alice")
+
+        assert isinstance(result, str)
+        assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in result
+        assert "onnx-local" in result
+        assert "NX_VOYAGE_API_KEY" in result

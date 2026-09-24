@@ -3055,8 +3055,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         "existing one before creating (docs/collections.md). "
         "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
         "collection so 'nx enrich aspects' can process it (GH #981). "
-        "Aspect extraction routes each knowledge__ document by shape: "
-        "paper-shaped documents get scholarly-paper-v1, general prose gets "
+        "Aspect extraction routes each knowledge__ document by shape (a "
+        "structural heuristic, not a guarantee): paper-shaped documents "
+        "(by that heuristic) get scholarly-paper-v1, other prose gets "
         "general-prose-v1."
     ),
 )

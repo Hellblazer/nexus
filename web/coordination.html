@@ -459,7 +459,7 @@ This session is <b>nexus-4a</b> [102a61] — the name other sessions use to mess
 <div class="tbl"><table class="steps">
 <tr><th>By</th><th>Step</th></tr>
 <tr><td><span class="who">hook</span></td><td>Gives Claude the session id and the subscribe instruction, and writes the session marker.</td></tr>
-<tr><td><span class="who cl">Claude</span></td><td>Learns the session's name from <code>ListAgents</code> and subscribes its instance mailbox once.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Learns the session's name from <code>ListAgents</code> and subscribes it once, which publishes the name in the session directory so a peer can send to it.</td></tr>
 <tr><td><span class="who">channel</span></td><td>Publishes and renews the directory entry, announces each mailbox row the engine marks as due, and pings on it and on each board post.</td></tr>
 <tr><td><span class="who">engine</span></td><td>Keeps each message in its mailbox for up to seven days, until a reader acks it.</td></tr>
 <tr><td><span class="who cl">Claude</span></td><td>Sends requests and corrections. Acts on a message the hook already rendered when the channel pinged; claims it itself with <code>tuple_in</code> only without the plugin's hooks, then acks, nacks, or releases it, or takes one itself when checking a mailbox by hand.</td></tr>

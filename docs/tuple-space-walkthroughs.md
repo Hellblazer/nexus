@@ -1,6 +1,6 @@
 # Tuple Space Walkthroughs
 
-> Status: design of record from RDR-205 (accepted), RDR-206 (accepted, adds `renew` and reply-in-ack), and RDR-211 (accepted, adds `release`, the board, queue and lock templates, and push delivery over the Claude Code channel). RDR-205's engine and client surface (`nx tuple`, the `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), and the client in conexus 7.41.0, which also bumps the pinned local-mode engine floor to the same tag. RDR-206's `renew` and reply-in-ack shipped on `engine-service-v0.1.117` and in conexus 7.44.0. RDR-211 is implemented on both halves as of this writing but not yet in a tagged engine release or a client release; see `docs/wire-contract-pending.md`'s `## Unshipped` entry. An install below a given piece's floor stays pinned there and a local-mode call for it 404s until it upgrades.
+> Status: design of record from RDR-205 (closed), RDR-206 (closed, adds `renew` and reply-in-ack), RDR-211 (closed, adds `release`, the board, queue and lock templates, and push delivery over the Claude Code channel), and RDR-213 (closed, the channel's announce/subscriber refinements — no proof gate, per-subscriber board stamping). All four have shipped, both halves. RDR-205's engine and client surface (`nx tuple`, the `tuple_*` MCP tools, the doctor rows): `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), client in conexus 7.41.0. RDR-206's `renew` and reply-in-ack: `engine-service-v0.1.117`, conexus 7.44.0. RDR-211's `release`, board/queue/lock templates, and the channel: `engine-service-v0.1.127`, conexus 7.51.0. RDR-213's `announce`/`subscriber` refinements: `engine-service-v0.1.129`, conexus 7.53.0. Each bump also raises the pinned local-mode engine floor to its own tag; see the wire ledger's `## Shipped` entries (`docs/wire-contract-pending.md`) for the exact commits. An install below a given piece's floor stays pinned there and a local-mode call for it 404s until it upgrades.
 
 Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each section follows one use of the space from the caller's side, drawn as a sequence between the processes involved.
 
@@ -208,7 +208,7 @@ A wait of minutes is a loop of parked calls, never one long park. Each call park
 
 ## Push delivery: the channel
 
-The session's own nexus MCP server (the delivery endpoint, RDR-211 nexus-rplay.14) and the drain hook (`nx-hook mailbox-drain`, `nexus.hooks.mailbox_drain`) are two renderers of one row that never wait on each other. This follows one message arriving at an idle session that has subscribed its instance-name mailbox per the SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
+The session's own nexus MCP server (the delivery endpoint, RDR-211 nexus-rplay.14) and the drain hook (`nx-hook mailbox-drain`, `nexus.hooks.mailbox_drain`) are two renderers of one row that never wait on each other. This follows one message arriving at an idle session's own mailbox, subscribed automatically from MCP-server startup -- no subscribe call is needed for it. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
 ```mermaid
 sequenceDiagram
@@ -250,7 +250,7 @@ The notification itself carries no content, only the reference (Sam, T2 `nexus_r
 
 When the channel is unreached at all (the session was not launched with the development-channel flag, or it subscribed too late) the row is still delivered: the next prompt fires `nx-hook mailbox-drain`, which probes independently, claims, acks and renders the same row inline in that prompt's context. The drain hook is the unconditional floor and never depends on whether the channel delivered anything first.
 
-A `/clear` or `/resume` puts the conversation on a new session id; the new session's own MCP server loads a fresh subscription set for that id (T1-scoped) and re-subscribes its instance mailbox once the model calls `tuple_subscribe` per the new SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel) for that handoff.
+A `/clear` or `/resume` puts the conversation on a new session id; the new session's own MCP server loads a fresh subscription set for that id (T1-scoped) -- its own mailbox is delivered from startup -- and re-leases its own name once the model calls `tuple_subscribe` per the new SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel) for that handoff.
 
 ## How a blocking read parks
 

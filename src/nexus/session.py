@@ -14,6 +14,7 @@ from uuid import uuid4
 import structlog
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.util.process_group import KILL_SIGNAL
 
 _log = structlog.get_logger()
 
@@ -442,7 +443,7 @@ def _kill_orphan_tracker_pids(
     for pid in pids:
         if _is_pid_alive(pid):
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, KILL_SIGNAL)
             except (ProcessLookupError, PermissionError):
                 continue
     return signalled

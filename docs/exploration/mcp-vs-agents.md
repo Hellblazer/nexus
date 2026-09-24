@@ -117,10 +117,13 @@ structured calls in disguise.
 ## How the MCP tools run under the hood
 
 The RDR-080 tools (`nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`) and the
-eight operator tools (`operator_extract`, `operator_rank`, `operator_compare`,
+ten operator tools (`operator_extract`, `operator_rank`, `operator_compare`,
 `operator_summarize`, `operator_generate`, `operator_filter`,
-`operator_check`, `operator_verify`) use a single primitive:
-`nexus.operators.dispatch.claude_dispatch`.
+`operator_groupby`, `operator_aggregate`, `operator_check`,
+`operator_verify`) use a single primitive:
+`nexus.operators.dispatch.claude_dispatch`. Three of the ten
+(`operator_filter`, `operator_groupby`, `operator_aggregate`) also have a
+SQL fast path ahead of the LLM dispatch — see `src/nexus/mcp/operator_requests.py`.
 
 `claude_dispatch` spawns `claude -p --output-format json --json-schema <schema>`,
 feeds the prompt via stdin, times out at a configurable limit (default 120s),

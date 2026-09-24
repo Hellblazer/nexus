@@ -25,6 +25,17 @@ The observable symptom is a hung pytest step with no timeout.
 ``safe_killpg`` centralises the ``isinstance(pid, int)`` guard so mock
 tests deterministically skip the kernel call and real subprocesses
 continue to work unchanged.
+
+WINDOWS (nexus-34f7r). ``os.killpg``, ``os.getpgid`` and ``signal.SIGKILL``
+do not exist there, and ``start_new_session=True`` is silently ignored at
+spawn, so there is never a group to signal. Before this module handled that,
+the ``SIGKILL`` default arguments below raised ``AttributeError`` at IMPORT,
+and every cleanup branch that reached for this helper threw from inside its
+own ``except``/``finally``, masking the original error. :data:`KILL_SIGNAL`
+is the platform's hard kill, :func:`safe_killpg` degrades to signalling the
+one process (the same weaker reach ``nexus.bounded_subprocess`` reports),
+and :func:`safe_killpg_group` refuses, because a recorded pid whose owner
+may already have exited is not safe to kill by number alone.
 """
 from __future__ import annotations
 
@@ -36,10 +47,17 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+#: The platform's hard kill: ``SIGKILL`` on POSIX. Windows has no
+#: ``SIGKILL``; there ``os.kill(pid, SIGTERM)`` calls TerminateProcess, which
+#: is the same uncatchable stop. Use this instead of ``signal.SIGKILL`` on any
+#: path a Windows client can reach (``tests/test_process_group_safety.py``
+#: holds the census).
+KILL_SIGNAL: int = getattr(_signal, "SIGKILL", _signal.SIGTERM)
+
 
 def safe_killpg(
     proc_or_pid: Any,
-    sig: int = _signal.SIGKILL,
+    sig: int = KILL_SIGNAL,
 ) -> bool:
     """Signal the process group of *proc_or_pid* with *sig*, safely.
 
@@ -64,6 +82,17 @@ def safe_killpg(
     3. On a mock path, emits a ``safe_killpg_mock_guard`` debug log so
        production misuse (passing a mock proc by accident) is
        observable in structured logs.
+    4. Where ``os.killpg`` does not exist (Windows), signals the process
+       itself with ``os.kill``. The reach is weaker, one process instead of
+       its tree, and ``True`` then means that process was signalled.
+
+    ON WINDOWS THERE IS NO GRACEFUL SIGNAL. ``os.kill`` with anything but a
+    console CTRL event is TerminateProcess, so a caller's ``signal.SIGTERM``
+    meant as "stop, then escalate" is the hard kill and its grace window is
+    gone. That is still better than the alternative: refusing would return
+    ``False``, which callers read as "already gone". A real graceful stop
+    there needs CTRL_BREAK_EVENT to a child spawned with
+    CREATE_NEW_PROCESS_GROUP, which is nexus-6y4e0's design question.
 
     The helper is intentionally *not* async: every call site is already
     synchronous (a subprocess-cleanup branch inside an ``except`` or
@@ -90,15 +119,23 @@ def safe_killpg(
             msg="pid <= 0 would target the caller's own pgid — skipping killpg",
         )
         return False
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        # Windows: one process, and any sig is TerminateProcess (docstring).
+        try:
+            os.kill(pid, sig)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
     try:
         pgid = os.getpgid(pid)
-        os.killpg(pgid, sig)
+        killpg(pgid, sig)
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
 
 
-def safe_killpg_group(pgid: Any, sig: int = _signal.SIGKILL) -> bool:
+def safe_killpg_group(pgid: Any, sig: int = KILL_SIGNAL) -> bool:
     """Signal process group *pgid* directly, safely (nexus-5ny9r).
 
     :func:`safe_killpg` resolves the group from a LIVE pid. After the
@@ -113,6 +150,11 @@ def safe_killpg_group(pgid: Any, sig: int = _signal.SIGKILL) -> bool:
     Same guards and same swallow contract as :func:`safe_killpg`: a
     non-int or ``pgid <= 1`` is refused (``1`` is init's group), and
     ``ESRCH`` (nothing left in the group) / ``EPERM`` return ``False``.
+
+    Returns ``False`` without signalling anything where ``os.killpg`` does
+    not exist (Windows). There is no group there, and the number is the
+    LEADER's pid, recorded because the leader may already be gone, so
+    ``os.kill`` on it could reach an unrelated process that reused the pid.
     """
     if not isinstance(pgid, int) or isinstance(pgid, bool):
         _log.debug("safe_killpg_group_type_guard", pgid_type=type(pgid).__name__)
@@ -120,11 +162,15 @@ def safe_killpg_group(pgid: Any, sig: int = _signal.SIGKILL) -> bool:
     if pgid <= 1:
         _log.debug("safe_killpg_group_pgid_guard", pgid=pgid)
         return False
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        _log.debug("safe_killpg_group_no_process_groups", pgid=pgid)
+        return False
     try:
-        os.killpg(pgid, sig)
+        killpg(pgid, sig)
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
 
 
-__all__ = ["safe_killpg", "safe_killpg_group"]
+__all__ = ["KILL_SIGNAL", "safe_killpg", "safe_killpg_group"]

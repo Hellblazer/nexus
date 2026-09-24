@@ -480,16 +480,32 @@ def ensure_storage_supervisor(config_dir: Path):
     supervisor (``start_new_session=True``) and waits up to 60s for it to publish
     a lease.
 
-    Liveness is TTL-FRESHNESS, not process-aliveness: the short-circuit returns
-    any lease whose heartbeat is within the ServiceRegistry TTL (a supervisor
-    that crashed within the last TTL window still passes the freshness check and
-    its lease expires shortly after). It also does not distinguish a supervised
-    lease (``payload.supervisor_pid`` set) from a legacy transient one. In the
-    current code paths this is sound because BOTH ``nx init --service`` and ``nx
-    daemon service start`` route through here and the old transient
-    ``start_storage_service`` init path is retired — so a fresh lease is a
-    supervised one. A caller needing process-level liveness should poll the
-    service ``/health`` endpoint directly (or ``nx service probe``).
+    Liveness is TTL-FRESHNESS, not BARE process-aliveness: the short-circuit
+    returns any lease whose heartbeat is within the ServiceRegistry TTL (a
+    supervisor that crashed within the last TTL window still passes the
+    freshness check and its lease expires shortly after). REVISED
+    nexus-wo6sc (2026-09-24): for ``storage_service`` specifically, "within
+    the TTL" now also admits a TTL-EXPIRED lease that reader-side grace
+    (``ServiceRegistry._stale_lease_still_live`` — see
+    ``docs/rdr/rdr-149-unified-service-registry-substrate.md``'s Revision
+    History and ``src/nexus/daemon/AGENTS.md``'s "Third documented
+    exception") independently confirmed: the recorded ``supervisor_pid``
+    alive AND the recorded port answering ``/health`` as the expected
+    service. This still does not distinguish a supervised lease
+    (``payload.supervisor_pid`` set) from a legacy transient one on its
+    own, and it also does not, by itself, distinguish a genuinely dead
+    supervisor from a live one for the CALLER below — but it never needs
+    to: the ``reclaim_lease_if_dead_owner`` call immediately below
+    independently re-checks ``pid_running(supervisor_pid)`` at USE time
+    before this function trusts the record as the live owner, the same
+    "re-check at the point of trust" pattern ``stop_storage_service``
+    applies before signalling. In the current code paths this stays sound
+    because BOTH ``nx init --service`` and ``nx daemon service start``
+    route through here and the old transient ``start_storage_service``
+    init path is retired — so an accepted lease (fresh OR grace-accepted)
+    is a supervised one. A caller needing process-level liveness should
+    poll the service ``/health`` endpoint directly (or ``nx service
+    probe``).
 
     This is the SINGLE persistent-start path (nexus-qke1e): routing both surfaces
     through it means neither leaves a transient unsupervised lease that ages out

@@ -55,8 +55,36 @@ merely share a path, the tool you want is `nx catalog links-for-file`, which
 lists every document registered at that path rather than silently picking one.
 
 Reachable from the MCP `update` tool (above) and from Python
-(`HttpCatalogClient.set_alias`). There is no `nx catalog` verb for it yet —
-bead nexus-bt8w8.
+(`HttpCatalogClient.set_alias`). `nx catalog update --alias-of` (nexus-bt8w8)
+sets only the alias pointer — it does not move `source_uri` and does not
+remap the duplicate's links onto the canonical, so a second entry can still
+surface in search results and its links can still point at the alias
+instead of the canonical. For the recovery case (a genuine duplicate
+registration), use `nx catalog merge` below instead.
+
+## Merge duplicate entries
+
+```bash
+nx catalog merge <duplicate> <canonical>
+```
+
+Collapses `duplicate` into `canonical` in one transaction (nexus-z4rpi,
+7.58.0). The engine moves the duplicate's `source_uri` onto the canonical
+(only when the canonical currently lacks a durable one), aliases the
+duplicate to the canonical, and remaps every catalog link touching the
+duplicate onto the canonical — renamed in place, folded into an existing
+canonical-side link if the rewrite collides with one (the same
+`co_discovered_by` merge `nx catalog link` performs), or dropped if the
+rewrite would make it a self-link. Either the whole thing lands or nothing
+does. Refuses with a clean error on a self-merge, either tumbler not found
+(including a tumbler in a different tenant), a duplicate already aliased to
+some other canonical, or a merge that would close an alias cycle.
+
+This replaces the manual three-call recipe (`--source-uri ''` on the
+duplicate, `--source-uri` on the canonical, `--alias-of` on the duplicate)
+that a failure between any two calls could tear. Reach for
+`nx catalog update --alias-of` by itself only when you deliberately want
+just the pointer set, not the full merge.
 
 ## Explore relationships
 
@@ -167,7 +195,7 @@ Conventional `created_by` values:
 - `rdr_implements_pass` — generator pass walked accepted RDRs and emitted strict `implements`
 - `code_rdr_heuristic` — looser pass; emitted `implements-heuristic` on path/symbol substring match
 - `manual` — user authored via `nx catalog link`
-- `auto_linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
+- `auto-linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
 - `llm_linker` — Claude-suggested edge; advisory, manual review recommended before traversing in an audit
 
 When auditing graph traversal, prefer `created_by IN ('bib_enricher', 'rdr_implements_pass', 'manual')` over heuristic creators.
@@ -462,6 +490,45 @@ nx catalog gc --dry-run                 # preview
 ```
 
 The indexer automatically tracks `miss_count` for each catalog entry. Files deleted or renamed are detected: renames (same content hash at a new path) transfer links to the new entry; true deletions are evicted after 2 consecutive missed index runs. `gc` provides the manual escape hatch.
+
+### Ghost and dormant collections
+
+```bash
+nx catalog sweep-ghosts            # dry-run report
+nx catalog sweep-ghosts --apply    # reclaim ghosts, mark dormant collections
+nx catalog sweep-ghosts --json     # dry-run report as JSON
+```
+
+RDR-204's ghost sweep (7.58.0, nexus-29drn) runs automatically at most once
+per tenant, the first authenticated request after a durable engine-side
+marker is absent, then disarms itself for that tenant forever. A
+collection that becomes a ghost afterward — a quarantine sibling that
+finishes draining, a re-home whose source collection empties out — has
+nothing to collect it until an operator runs this verb. It reuses the same
+engine-side classification the automatic sweep uses (`POST
+/v1/catalog/ghost-sweep`), and calling it never touches the automatic
+sweep's one-shot marker, so the automatic trigger still fires at most once
+regardless of how many times this runs.
+
+Two dispositions, reported per row:
+
+- **Ghosts** — collections nothing references any more (no live row in any
+  non-audit collection-scoped table). `--apply` deletes the registry row.
+- **Dormant** — collections still referenced somewhere but with no vector
+  stats row (nothing to embed or read). `--apply` flips `lifecycle_state`
+  to `dormant`; the row itself is not deleted — see [Storage Tiers §
+  Collections](collections.md#rule-6-lifecycle-goes-through-the-catalog)
+  for the `lifecycle_state` filter (`live`, `quarantine`, `dormant`,
+  `disputed`).
+
+A quarantine row still referenced by something is held unconditionally
+(never relitigated into dormant) — reported as a count only, no names.
+
+`nx doctor` reports the same count as a `ghost-sweep` row, naming
+`nx catalog sweep-ghosts --apply` as the remedy. Requires an engine at or
+past the nexus-29drn release (`engine-service-v0.1.130`); an older engine
+refuses `POST /v1/catalog/ghost-sweep` and the CLI names the required
+release in its error.
 
 ### Path migration
 

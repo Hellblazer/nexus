@@ -63,7 +63,7 @@ tags: comma,separated,free-form
 # REQUIRED
 plan_json:
   steps:
-    - tool: search | query | traverse | extract | summarize | rank | compare | generate
+    - tool: search | query | traverse | extract | summarize | rank | compare | generate | filter | check | verify | groupby | aggregate
       args: {<kwargs>}            # may contain $var and $stepN.<field> refs
       scope:                      # optional — Phase 2 domain routing
         taxonomy_domain: prose | code
@@ -463,7 +463,7 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 - `conexus/plans/purposes.yml` — registered purpose names and link-type mappings.
 - `src/nexus/plans/schema.py` — the validator enforcing this schema.
 - `src/nexus/plans/runner.py` — `plan_run` implementation.
-- `src/nexus/plans/matcher.py` — `plan_match` (T1 cosine + FTS5 fallback).
+- `src/nexus/plans/matcher.py` — `plan_match` (T1 cosine + PostgreSQL full-text `ts_rank` fallback over `HttpPlanLibrary.search_plans`; the module's own internal naming still says "FTS5", a holdover from the retired SQLite backend — the substrate is Postgres, not SQLite).
 - `src/nexus/plans/match_text.py::_synthesize_match_text`, the
   hybrid match-text synthesiser (RDR-092 Phase 1 + Phase 3; lifted out of
   the now-deleted `db/t2/plan_library.py` at nexus-i711w Stage 2).

@@ -13,6 +13,10 @@ import structlog
 from nexus.config import TuningConfig, get_telemetry_config, load_config
 from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+from nexus.errors import (
+    SearchEmbeddingProfileMismatchError,
+    is_embedding_profile_mismatch_error_text,
+)
 from nexus.types import SearchResult
 
 _log = structlog.get_logger(__name__)
@@ -514,6 +518,17 @@ def _is_permanent_poisoning_error(exc: VectorServiceError) -> bool:
     ``None`` for every transport-level failure regardless of cause.
     """
     return "dim" in str(exc).lower()
+
+
+# nexus-vply6 fix round 2: the marker + text classifier moved to
+# nexus.errors (imported above as is_embedding_profile_mismatch_error_text)
+# so the same check drives search_cross_corpus AND the mcp.core
+# _grouped_combined_query / search_topic_scoped choke points — see
+# nexus.errors.classify_vector_service_error's docstring for the shared-
+# choke-point rationale. The nexus-9tsdf stale-orphan DIMENSION class
+# (PgVectorRepository#embedQuery's "query embedder produced a N-dim vector
+# but the collection dispatches to embedding_D") stays classified locally
+# below via the "dim" substring check, unaffected by this move.
 
 
 def _record_poisoned_collection(name: str, exc: Exception) -> None:
@@ -1048,22 +1063,41 @@ def search_cross_corpus(
     # collection (leftover from a prior embedder generation) can never be
     # searched — the service rejects it with an embedding-space-mismatch
     # HTTP 400 ("... produced a 1024-dim vector but the collections
-    # dispatch to embedding_384", see PgVectorRepository). Logging every such
-    # per-collection failure at WARNING meant one orphan touched by a
-    # corpus=all search spammed a WARNING on EVERY search call, even when
-    # it was 1 of 80 collections and the other 79 searched fine. Collect
-    # dimension-mismatch failures separately and log them as a class: at
-    # DEBUG when they affect a small minority (<5%) of the requested scope
-    # (noise — `nx doctor` / `nx collection prune` carry the actionable
-    # per-collection detail), at WARNING when they affect a real fraction
-    # (>=5% — a genuine problem). Never silent either way; non-dimension
-    # failures are unaffected and stay at WARNING immediately, as before.
+    # dispatch to embedding_384", see PgVectorRepository). Collect
+    # dimension-mismatch failures separately and log them as a class.
+    #
+    # nexus-vply6 fix round 2, point 2 (Sam's scope ruling, "keep the
+    # degrade, but loud"): the old <5%-of-scope DEBUG downgrade is RETIRED
+    # — "never silent" now means never dropped to a log level a caller
+    # would not see by default, not merely "logged somewhere". Every
+    # dimension-mismatch failure logs at WARNING unconditionally, and (see
+    # below, after this loop) a call where EVERY targeted collection hit
+    # this class raises SearchEmbeddingProfileMismatchError instead of
+    # degrading to an empty result — the SAME loud-refusal bar the
+    # model-unavailable class already holds, but reached only when this
+    # class has consumed the WHOLE scope, since a genuine partial (one
+    # orphan among many healthy collections) still has real results to
+    # return and nx doctor / nx collection prune remain the fix for the
+    # orphan itself. failed_collections (attached to SearchDiagnostics
+    # below, unconditionally, not just on a zero-result call) is what lets
+    # the CLI/MCP/plan-runner surfaces render this loud even on a partial
+    # hit — see search_cmd.py and mcp/core.py's callers.
     dim_mismatch_cols: list[str] = []
+    # nexus-vply6 (Sam's decision 2026-09-24): the systemic class -- this
+    # install's CURRENT query-side embedding mode has no embedder at all
+    # for the collection's registered model -- is collected separately
+    # from dim_mismatch_cols (the nexus-9tsdf stale-orphan class) and
+    # raised unconditionally below, never silently isolated the way a
+    # single orphaned collection is. See
+    # nexus.errors.SearchEmbeddingProfileMismatchError's docstring.
+    model_unavailable_cols: dict[str, str] = {}
     for part in partials:
         col = part["col"]
         if part.get("error") is not None:
             failed_collections[col] = part["error"]
-            if "dim" in part["error"].lower():
+            if is_embedding_profile_mismatch_error_text(part["error"]):
+                model_unavailable_cols[col] = part["error"]
+            elif "dim" in part["error"].lower():
                 dim_mismatch_cols.append(col)
             else:
                 _log.warning(
@@ -1091,14 +1125,52 @@ def search_cross_corpus(
             )
 
     if dim_mismatch_cols:
-        fraction = len(dim_mismatch_cols) / len(collections) if collections else 0.0
-        _dim_log = _log.warning if fraction >= 0.05 else _log.debug
+        # nexus-vply6 fix round 2: unconditional WARNING now -- the old
+        # <5% DEBUG downgrade is retired (see the loop's own comment
+        # above). A caller-visible surface still needs failed_collections
+        # (below) to render this to a human/model; this log line is the
+        # operator-facing half.
         for col in dim_mismatch_cols:
-            _dim_log(
+            _log.warning(
                 "collection_search_failed",
                 collection=col,
                 error=failed_collections[col],
             )
+
+    if model_unavailable_cols or (
+        dim_mismatch_cols and len(dim_mismatch_cols) == len(collections)
+    ):
+        # nexus-vply6: model_unavailable_cols is unconditional -- fires
+        # even when every OTHER targeted collection searched fine, unlike
+        # the all-failed check below. A partial success here is the exact
+        # silent-empty-result shape Sam's decision closes: a query whose
+        # relevant hits live only in the unservable collection(s) would
+        # otherwise come back looking like a genuine "no matches", backed
+        # only by whatever unrelated collections happened to be servable.
+        #
+        # fix round 2, point 2: the dim_mismatch_cols disjunct widens this
+        # to the nexus-9tsdf stale-orphan class too, but ONLY when it
+        # consumes the WHOLE requested scope (every targeted collection,
+        # not a fraction) -- a genuine partial orphan still degrades
+        # gracefully (see the loop's comment above) since real results
+        # from the healthy majority are still worth returning.
+        mismatches = {**model_unavailable_cols,
+                      **{c: failed_collections[c] for c in dim_mismatch_cols}}
+        _log.warning(
+            "search_embedding_profile_mismatch",
+            collections=sorted(mismatches),
+            errors=mismatches,
+        )
+        serving_mode = None
+        _embedding_mode = getattr(t3, "embedding_mode", None)
+        if callable(_embedding_mode):
+            try:
+                serving_mode = _embedding_mode()
+            except Exception:  # noqa: BLE001 — best-effort diagnostic only; must not mask the real error below
+                serving_mode = None
+        raise SearchEmbeddingProfileMismatchError(
+            serving_mode=serving_mode, mismatches=mismatches,
+        )
 
     if failed_collections and len(failed_collections) == len(collections):
         # Nothing was servable — surface the failure instead of silently

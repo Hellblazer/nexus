@@ -2,7 +2,8 @@
 title: "A Lexical Leg for the nexus Client: Reach the Engine's FTS Hybrid Route"
 id: RDR-217
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-09-24
 accepted_date: 2026-09-19
 priority: medium
 author: Sam
@@ -726,11 +727,14 @@ BUG-0148 risk.
       These cover the route's request and response shape, rerank parity,
       tenant handling and the zero-row semantics. They are NOT the section
       titled Critical Assumptions, which concerns RDR-216 baseline reuse.
-- [ ] The one assumption that gates Phase 3, that a lexical leg improves
+- [x] The one assumption that gates Phase 3, that a lexical leg improves
       retrieval for real nexus queries, is deliberately unverified. See
       Finalization Gate > Assumption Verification. Phase 1 is the plan to
-      verify it.
-- [ ] Phase 1's baseline taken, since Phase 3's answer depends on it.
+      verify it. (Verified 2026-09-19, narrowly: precision@10 on rare tokens
+      0.167 -> 0.698, identifiers 0.867 -> 0.961, prose zero rows; T2
+      nexus_rdr/217-phase1-report.)
+- [x] Phase 1's baseline taken, since Phase 3's answer depends on it.
+      (2026-09-19, T2 nexus_rdr/217-phase1-baseline.)
 
 ### Minimum Viable Validation
 
@@ -769,6 +773,14 @@ Per the Technical Design signature. Body construction mirrors `search()`.
 #### Step 2: the wire test
 
 Assert the body carries exactly the seven wire fields and no more.
+
+**Correction at close (2026-09-24).** This step list is narrower than the
+Minimum Viable Validation above, which puts the engine-substrate journey in
+Phase 2 plus Phase 4. Read literally, the list would ship Phase 2 without the
+Gap 2 closure. The journey shipped anyway, as bead nexus-lqo4p.8 at
+`91bd47bcd`, because the plan caught the gap; this note records the
+contradiction where the next reader meets it (T2
+nexus_rdr/217-phase2-phase4-close-gate).
 
 Phase 2 stops there, and deliberately. The client method and its wire test
 are semantics-independent: they are the same code whichever way the surface
@@ -1053,3 +1065,7 @@ function family this RDR explicitly does not touch.
 - 2026-09-19: Gate round 1 — BLOCKED (1 Critical, 2 Significant, 1 ship-blocker(s)); commit `8f71c96f8`; critique `nexus_rdr/217-gate-critique-2026-09-19-r1`.
 - 2026-09-19: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `7d27a4a55`; critique `nexus_rdr/217-gate-critique-2026-09-19-r2`.
 - 2026-09-19: Sam settled two Phase 3 questions after accept: a lexical row is exempt from the per-collection distance threshold, and the flag refuses on a backend without the hybrid route rather than falling back. Additive union versus explicit mode remains open on Phase 1.
+- 2026-09-19: Phase 1 reported (T2 `nexus_rdr/217-phase1-report`): precision@10 rare tokens 0.167 -> 0.698, identifiers 0.867 -> 0.961, and the hybrid route returned zero rows for every prose query, which decided the surface: additive union behind `--lexical`.
+- 2026-09-19: Phases 2 and 4 shipped: `HttpVectorClient.hybrid_search`, the exact seven-field wire pin, the engine-substrate journey `tests/test_rdr217_hybrid_search_journey.py` (`91bd47bcd`, the Gap 2 closure) and the recurrence detector. Close gate PASSED (T2 `nexus_rdr/217-phase2-phase4-close-gate`).
+- 2026-09-20: Phase 3 shipped the `--lexical` flag and the MCP `lexical` parameter (`1e29554f0`, review fixes `68bb35469`). Close gate PASSED (T2 `nexus_rdr/217-phase3-close-gate`). Released in conexus 7.55.0.
+- 2026-09-24: Closed as Implemented. Post-mortem `post-mortem/rdr-217-client-lexical-retrieval-leg.md`. The BUG-0148 risk remains PARTIAL: Phase 4 is a CI assertion, not live monitoring.

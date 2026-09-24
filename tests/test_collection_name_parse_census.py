@@ -546,11 +546,14 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # Exception` and masking the false-clean-by-omission finding this
     # probe exists to catch (nexus-4ijv4).
     "src/nexus/health.py": 1,
-    # :113 class (a), registering `new_name`; :1053/:1062 class (a),
-    # first-index synthesis explicitly for the not-yet-registered case;
-    # :1755 class (a), the function's OWN docstring defines "kind" as the
-    # name prefix, not a catalog fact. (The :2940 index-md extractor-warning
-    # site was removed with the warning itself, nexus-kk4ut.)
+    # nexus-kk4ut: re-grepped against the real call sites, which had
+    # drifted from this comment's anchors. :115 class (a), registering
+    # `new_name`; :1135/:1144 class (a), first-index synthesis explicitly
+    # for the not-yet-registered case; :1898 class (a), the function's OWN
+    # docstring defines "kind" as the name prefix, not a catalog fact. (The
+    # index-md extractor-warning site was removed with the warning itself,
+    # also nexus-kk4ut -- that removal is why this file's line numbers
+    # moved out from under the comment in the first place.)
     "src/nexus/commands/index.py": 4,
     # class (a): `collection` is the raw --collection CLI argument for
     # `nx store export`, not necessarily an existing registered name.

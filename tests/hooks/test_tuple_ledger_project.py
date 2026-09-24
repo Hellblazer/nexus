@@ -26,6 +26,7 @@ file. Pins:
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -107,6 +108,7 @@ def _write_storage_lease(
     status: str = "live",
     heartbeat_age_s: float = 0.0,
     ttl: float = 30.0,
+    payload: dict | None = None,
 ) -> None:
     record = {
         "scope_key": str(os.getuid()),
@@ -116,7 +118,7 @@ def _write_storage_lease(
         "ttl": ttl,
         "endpoint": {"host": host, "port": port, "token": "static-mint-locked"},
         "version": "test",
-        "payload": {},
+        "payload": payload or {},
         "status": status,
         "format_version": 1,
     }
@@ -188,6 +190,23 @@ class _MockTupleEngine:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:  # noqa: A002
                 pass
+
+            def do_GET(self) -> None:  # noqa: N802
+                # nexus-wo6sc review round: the real engine's GET /health
+                # (HealthHandler.java) is what ServiceRegistry.discover()'s
+                # reader-side grace probes on a stale lease. Answering it
+                # here lets a test drive that grace path through this same
+                # mock, rather than needing a second server.
+                if self.path == "/health":
+                    body = b'{"status": "ok", "db": "up"}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.end_headers()
 
             def do_POST(self) -> None:  # noqa: N802
                 length = int(self.headers.get("Content-Length", "0"))
@@ -470,6 +489,52 @@ def test_local_supervisor_token_refused_when_lease_file_is_group_or_world_readab
     content = log.read_text()
     assert "SKIP kind=start" in content
     assert "group/other-accessible" in content
+
+
+def test_local_supervisor_token_honors_reader_side_grace(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """nexus-wo6sc review round (2026-09-24): this reader used to go
+    straight through ``LeaseRecord.from_json`` + ``is_fresh``, bypassing
+    ``ServiceRegistry.discover()`` entirely -- so a TTL-expired lease from
+    an alive, healthy supervisor (the 2026-09-12 heartbeat-stall shape)
+    still SKIPped here even after discover() itself grew reader-side
+    grace. Proves this reader now sees the same grace, WITHOUT losing its
+    own extra permission check (mode 0600 stays required) -- a real
+    subprocess for pid liveness, no mock of pid_alive."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    owner = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+    )
+    try:
+        _write_storage_lease(
+            config_dir, host=parsed.hostname, port=parsed.port,
+            heartbeat_age_s=5.0,  # past ttl, inside the 10x grace bound
+            ttl=1.0,
+            payload={"supervisor_pid": owner.pid},
+        )
+        os.chmod(config_dir / f"storage_service_addr.{os.getuid()}", 0o600)
+        # No data-token lease written at all -- same shape as the
+        # no-grace sibling test above, forcing this exact fallback path.
+
+        proc = _run("start", tmp_path=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert len(engine.requests) == 1, (
+            "a stale-but-alive-and-healthy supervisor lease must still "
+            "resolve here -- the fix routed this reader through "
+            "discover()'s grace, not around it"
+        )
+        assert engine.auth_headers[0] == "Bearer static-mint-locked"
+        log = _log_path(tmp_path / "state")
+        assert not log.exists() or "SKIP" not in log.read_text()
+    finally:
+        owner.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            owner.wait(timeout=5)
 
 
 def test_managed_endpoint_never_falls_back_to_a_local_lease_token(

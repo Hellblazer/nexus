@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.60.0] - 2026-09-24
+
+Plugin version aligned with conexus 7.60.0. The plugin-side changes go live as
+`source.ref` advances to `v7.60.0`.
+
+- `hooks/scripts/nx_hook_shim.py` passes SIGTERM, SIGINT and SIGHUP on to its
+  `nx-hook` child and exits 128+signal, so a hook killed by its timeout no
+  longer leaves the handler running (nexus-rcoze).
+- `hooks/scripts/mailbox_drain.py` no longer reads the per-session
+  `addresses.d` registry, so an instance-name mailbox is no longer drained
+  (RDR-208 Phase 3, nexus-galkv.20). It still drains the session's own
+  mailbox and `/clear` cleared-record mailboxes.
+- The `mailbox` and `peer-messaging` skills say that subscribing a name only
+  lets `mailbox_send` resolve it; mail to a name lands in that session's own
+  mailbox (nexus-galkv.20).
+
 ## [7.59.0] - 2026-09-24
 
 Plugin version aligned with conexus 7.59.0. The plugin-side changes go live as

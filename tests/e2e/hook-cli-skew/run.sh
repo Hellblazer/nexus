@@ -34,7 +34,7 @@ command -v uv >/dev/null || _unverified "uv not on PATH"
 # Every release whose nx-hook fails closed, the first that fails open, and the
 # newest published. Extend when a release ships; never drop one: those CLIs
 # are still installed somewhere.
-VERSIONS=(7.55.0 7.55.3 7.56.0 7.57.0 7.58.0)
+VERSIONS=(7.55.0 7.55.3 7.56.0 7.57.0 7.58.0 7.59.0)
 
 _cli() {  # $1 = version -> prints its bin dir, installing on a cache miss
     local v="$1" d="$CACHE/cli-$1"
@@ -57,6 +57,24 @@ set -e
 [ "$PRC" = 2 ] || _fail "positive control: the 7.57.0 CLI exited $PRC on an unknown verb, not 2; this environment does not reproduce the failure"
 grep -q "unknown verb" "$WORK/pc.err" || _fail "positive control: 7.57.0 stderr did not name the unknown verb: $(cat "$WORK/pc.err")"
 echo "  the 7.57.0 CLI exits 2 on an unknown verb, as in the field"
+
+echo "── negative control: the driver must catch a direct unknown verb ──"
+# Pinned, not a one-off (critic finding, nexus-rcoze): a hooks.json wiring
+# `nx-hook mcp-connect-check` directly, as the t9klx tree did, run under the
+# 7.57.0 CLI. drive.py must report it as blocking; if it passes, the driver
+# has gone blind and every PASSED below means nothing.
+mkdir -p "$WORK/negctl"
+cat > "$WORK/negctl/hooks.json" <<'JSON'
+{"hooks": {"UserPromptSubmit": [{"matcher": "", "hooks": [
+  {"type": "command", "command": "nx-hook", "args": ["mcp-connect-check"], "timeout": 5}]}]}}
+JSON
+set +e
+python3 "$HERE/drive.py" "$WORK/negctl/hooks.json" "$ROOT/conexus" "$BIN57" negctl "$WORK/negctl" > "$WORK/negctl.out" 2>&1
+NRC=$?
+set -e
+[ "$NRC" = 1 ] && grep -q 'FAIL  \[UserPromptSubmit\] nx-hook mcp-connect-check: exit 2' "$WORK/negctl.out" \
+    || _fail "negative control: drive.py did not flag a direct unknown verb under 7.57.0 (rc=$NRC): $(cat "$WORK/negctl.out")"
+echo "  a hooks.json entry naming a verb 7.57.0 lacks, wired directly, is flagged as blocking"
 
 echo "── this checkout's wheel ──"
 HEADV="$WORK/cli-head"

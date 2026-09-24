@@ -382,7 +382,10 @@ def test_hooks_json_nx_hook_verbs_resolve_in_the_previous_released_wheel() -> No
 # open from 7.58.0. That set can never grow, so the rule is permanent: a direct
 # `nx-hook` entry must name a verb EVERY one of those releases registers.
 # Anything else goes through conexus/hooks/scripts/nx_hook_shim.py, which this
-# extractor does not see, because its command is python3.
+# extractor does not see, because its command is python3. So this rule covers
+# DIRECT entries only; shim-routed verbs are checked elsewhere: registered on
+# HEAD by tests/test_hooks_json_shape_lint.py, and resolvable by
+# tests/hooks/test_hooks_json_handlers_resolve.py (tests/_hook_wiring.command_verb).
 
 _FIRST_NX_HOOK_RELEASE: Version = (7, 55, 0)
 _FIRST_FAIL_OPEN_RELEASE: Version = (7, 58, 0)

@@ -36,9 +36,14 @@ removes that assumption instead.
   own leg 1, sourced from the SAME function rather than a hand-rolled YAML
   line-scanner), :func:`nexus.db.service_endpoint.discover_lease` for the
   local-supervisor lease (host/port), and
-  :class:`nexus.daemon.service_registry.LeaseRecord` for parsing +
-  liveness-checking that SAME lease file's raw JSON when its token is needed
-  as a credential fallback (see BEARER PRECEDENCE below). ``config_dir`` is
+  :meth:`nexus.daemon.service_registry.ServiceRegistry.discover` (routed
+  through directly since the nexus-wo6sc review round, 2026-09-24 -- a
+  raw ``LeaseRecord.from_json`` + ``is_fresh`` parse of that SAME lease
+  file, this module's original form, bypassed ``discover()``'s
+  reader-side grace for a TTL-expired ``storage_service`` lease) for
+  parsing + liveness-checking that same lease file's token when it is
+  needed as a credential fallback (see BEARER PRECEDENCE below).
+  ``config_dir`` is
   resolved via :func:`nexus.config.nexus_config_dir` throughout -- the SAME
   resolution :func:`~nexus.db.service_endpoint.discover_lease` and
   :class:`~nexus.db.data_token.DataTokenManager` use internally, so every
@@ -355,11 +360,20 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
     Neither :func:`nexus.db.service_endpoint.discover_lease` nor
     :class:`nexus.daemon.service_registry.ServiceRegistry` performs this
     check (their callers accept a lower bar), so this fire-and-forget
-    writer's higher bar lives here. Liveness itself is delegated to
-    :meth:`~nexus.daemon.service_registry.LeaseRecord.is_fresh` -- the
-    real primitive, not a hand-parsed heartbeat/ttl comparison.
+    writer's higher bar lives here, stat-checked BEFORE any content is
+    read. Liveness itself is delegated to
+    :meth:`~nexus.daemon.service_registry.ServiceRegistry.discover`
+    (nexus-wo6sc review round, 2026-09-24) -- the real primitive, not a
+    hand-parsed heartbeat/ttl comparison, and, unlike a bare
+    ``LeaseRecord.is_fresh`` check (this function's form before that
+    review round), grace-aware for a TTL-expired ``storage_service``
+    lease: the supervisor alive and healthy, its own heartbeat stamp
+    write simply overrunning the TTL. The permission check stays a
+    SEPARATE, prior gate on the raw file -- ``discover()`` has no
+    equivalent and must not be asked to grow one; this caller's extra bar
+    is additive to it, not a replacement for it.
     """
-    from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred, same reason as above
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, same reason as above
 
     path = config_dir / f"storage_service_addr.{os.getuid()}"
     try:
@@ -374,11 +388,9 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
             f"local supervisor lease {path} is group/other-accessible "
             f"(mode {oct(mode)}); refusing to use its token as a bearer"
         )
-    try:
-        record = LeaseRecord.from_json(path.read_text())
-    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
-        raise _Skip(f"local supervisor lease {path} unreadable/malformed: {exc}") from exc
-    if not record.is_fresh(time.time()):
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    record = registry.discover(str(os.getuid()))
+    if record is None:
         raise _Skip(f"local supervisor lease {path} is not live or is stale")
     token = str(record.endpoint.get("token", "") or "")
     if not token:

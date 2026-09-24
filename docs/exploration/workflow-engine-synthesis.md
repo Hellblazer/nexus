@@ -1,7 +1,7 @@
 # Workflow Engine Landscape Synthesis
 
-> **Disposition**: historical exploration; candidate for archive. No outcome
-> disposition named in the docs audit — adopt-or-scrap is Hal's call.
+> **Historical record** (kept by decision, nexus-z93bq): part of the May 2026
+> workflow-engine exploration; cited by RDR-112. Not current design.
 
 Deep-research-synthesizer (run a78c5a1c) cross-source synthesis on workflow-engine design doc, May 2026.
 

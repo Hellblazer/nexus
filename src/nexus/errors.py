@@ -3,6 +3,8 @@
 """Nexus exception hierarchy."""
 from __future__ import annotations
 
+from typing import Any, Iterable
+
 
 class NexusError(Exception):
     """Base exception for all Nexus errors."""
@@ -197,6 +199,171 @@ class EmbeddingDimensionMismatch(NexusError):
         super().__init__(
             f"{label} ({declared_dims}-dim) but vectors are {actual_dims}-dim "
             f"for collection {collection!r} -- {hint}."
+        )
+
+
+#: The engine's own wording for ``EmbeddingModelUnavailableException``
+#: (``EmbedderRouter.resolveEmbedderStrict`` / ``resolveEmbedderByModel``,
+#: service/src/main/java/dev/nexus/service/vectors/EmbedderRouter.java,
+#: HTTP 422) — "this install's profile names a model this mode cannot
+#: serve — collection 'X' resolves to model 'Y', which embedding mode Z
+#: has no embedder for. ...". Matched verbatim rather than re-derived from
+#: an HTTP status code alone: 422 is also returned for
+#: ``IllegalStateException`` and ``VoyageTooManyTokensException``, neither
+#: of which is an embedding-profile mismatch (see ``VectorHandler``'s
+#: exception ladder). Deliberately does NOT match the SIBLING dimension
+#: check in ``PgVectorRepository#embedQuery`` ("query embedder produced a
+#: N-dim vector but the collection dispatches to embedding_D") — nexus-vply6
+#: fix round 2 (Sam's scope ruling) keeps that class's own graceful,
+#: fraction-scaled per-collection degrade for a PARTIAL hit and routes it
+#: through this SAME error class only when it consumes EVERY targeted
+#: collection — see :func:`nexus.search_engine.search_cross_corpus`.
+_MODEL_UNAVAILABLE_MARKER = "this install's profile names a model this mode cannot serve"
+
+
+def is_embedding_profile_mismatch_error_text(text: str) -> bool:
+    """True when *text* (an error message, already-stringified) is the
+    engine's ``EmbeddingModelUnavailableException`` — this install's
+    CURRENT query-side embedding mode has no embedder at all for the
+    collection's registered model (nexus-vply6: the systemic "GUI
+    subprocess resolved bge-768 against voyage-1024 collections" class).
+    See :data:`_MODEL_UNAVAILABLE_MARKER`.
+    """
+    return _MODEL_UNAVAILABLE_MARKER in text.lower()
+
+
+def classify_vector_service_error(
+    exc: Exception, *, collections: Iterable[str], t3: Any = None,
+) -> Exception:
+    """Return :class:`SearchEmbeddingProfileMismatchError` when *exc*'s
+    text is the engine's model-unavailable marker, else return *exc*
+    unchanged — for a caller to ``raise classify_vector_service_error(exc,
+    collections=cols, t3=t3) from exc``.
+
+    Shared choke point for every read path that does NOT go through
+    :func:`nexus.search_engine.search_cross_corpus` (which builds its own
+    multi-collection ``mismatches`` dict across a whole batch): the
+    ``_grouped_combined_query`` fan-out (``search_metadata_scoped``,
+    ``search_graph_hop``, ``search_aspect_scoped``, ``query()``'s
+    catalog-param branch) and ``search_topic_scoped``'s own per-collection
+    loop, in :mod:`nexus.mcp.core` — nexus-vply6 fix round 2, point 3:
+    "every read path names it identically". *collections* is whatever
+    scope the failed call targeted (a model-group or a single collection);
+    *t3* is best-effort for the ``serving_mode`` diagnostic only.
+    """
+    text = str(exc)
+    if not is_embedding_profile_mismatch_error_text(text):
+        return exc
+    serving_mode = None
+    embedding_mode_fn = getattr(t3, "embedding_mode", None)
+    if callable(embedding_mode_fn):
+        try:
+            serving_mode = embedding_mode_fn()
+        except Exception:  # noqa: BLE001 — best-effort diagnostic only; must not mask the real error
+            serving_mode = None
+    return SearchEmbeddingProfileMismatchError(
+        serving_mode=serving_mode, mismatches={", ".join(collections): text},
+    )
+
+
+#: The fixed opening of every :class:`SearchEmbeddingProfileMismatchError`
+#: message — a stable signature for a CONSUMER that only has the
+#: already-stringified text (e.g. the plan runner, which sees an MCP
+#: tool's ``"Error: ..."`` return string, not the raised exception object;
+#: ``_mcp_tool_error`` renders ``f"Error: {e}"`` with no other transform
+#: for this class, since none of its special-cased markers — session-
+#: unauthorized, connection-refused — apply). nexus-vply6 fix round 2,
+#: point 1 (the plan-runner SHIP-BLOCKER): matching on this lets
+#: :mod:`nexus.plans.runner` recognize the failure class from the bare
+#: string a retrieval tool returned and refuse the plan loudly instead of
+#: synthesizing an empty structured result.
+SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE = (
+    "this install's current query-side embedding mode ("
+)
+
+
+def is_search_embedding_profile_mismatch_text(text: str) -> bool:
+    """True when *text* is (or carries, e.g. behind an ``"Error: "``
+    prefix) a rendered :class:`SearchEmbeddingProfileMismatchError`
+    message. See :data:`SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE`.
+    """
+    return SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in text
+
+
+class SearchEmbeddingProfileMismatchError(NexusError):
+    """A search/query request could not be served because this install's
+    CURRENT query-side embedding mode cannot produce a vector compatible
+    with one or more of the targeted collections (nexus-vply6, Sam's
+    decision 2026-09-24 — "every platform", not just Windows).
+
+    Sibling of :class:`nexus.corpus.EmbeddingProfileMismatchError` — that
+    class is the WRITE-side registration-seam check, and its own
+    docstring explicitly forbids it firing from a read path (search /
+    store list / store get / store delete must stay readable against
+    whatever model wrote the data, credential or not). This is the read
+    path's own named error instead, never raised anywhere near a write.
+
+    Canonical repro (``docs/desktop-deployment.md``): a GUI-launched
+    subprocess inherits no shell environment, so it resolves a local
+    bge-768 embedder against ``voyage-*``-registered collections. The
+    engine already refuses this loudly per collection — 422
+    ``EmbeddingModelUnavailableException`` ("this install's profile names
+    a model this mode cannot serve") — but that refusal used to be
+    swallowed at :func:`nexus.search_engine.search_cross_corpus`'s
+    per-collection isolation seam (the nexus-9tsdf/nexus-d9xt2 "isolate
+    one bad collection, keep searching the rest" design) whenever at
+    least one OTHER targeted collection was servable, so the caller saw a
+    quietly partial (often empty-looking) result instead of a diagnosable
+    error. Raised unconditionally for this specific failure class,
+    regardless of how many other targeted collections would have
+    succeeded.
+
+    Fix round 2 (Sam's scope ruling) widened this class to ALSO cover the
+    nexus-9tsdf stale-orphan dimension-mismatch class, but ONLY when it
+    consumes EVERY targeted collection in a call — a PARTIAL hit from that
+    class still keeps its existing graceful, fraction-scaled per-collection
+    degrade (a different, previously-reviewed failure shape with its own
+    remediation tooling, ``nx doctor`` / ``nx collection prune``); see
+    :func:`nexus.search_engine.search_cross_corpus`. Every read path names
+    this SAME class identically: the ``_grouped_combined_query`` fan-out
+    and ``search_topic_scoped`` in :mod:`nexus.mcp.core` route their engine
+    422 through :func:`classify_vector_service_error`.
+    """
+
+    def __init__(self, *, serving_mode: str | None, mismatches: dict[str, str]) -> None:
+        self.serving_mode = serving_mode
+        self.mismatches = dict(mismatches)
+        mode = serving_mode or "unknown"
+        detail = "; ".join(f"{col!r}: {err}" for col, err in mismatches.items())
+        # nexus-vply6 fix round 2, point 5: the remedy differs by scenario
+        # and this text is the ONLY thing a Claude Desktop GUI user ever
+        # sees (there is no shell to check `nx doctor` output in) — name
+        # BOTH remedies explicitly rather than picking one. Which case
+        # applies cannot be determined reliably from inside this process
+        # (a persisted-but-unread config.yml looks identical from here to
+        # a genuinely local-only install), so the message states the
+        # DIAGNOSTIC each case is recognized by, not a single prescription.
+        super().__init__(
+            f"this install's current query-side embedding mode ({mode}) cannot "
+            f"serve {len(mismatches)} of the targeted collection(s): {detail}. "
+            "This means the collection(s) were embedded under a different "
+            "model/credential than this process currently has. Two common "
+            "causes, with different fixes:\n"
+            "  (1) Managed/cloud service intended, but this process resolved "
+            "LOCAL mode: a GUI-launched subprocess (Claude Desktop's .mcpb "
+            "extension) never inherits your shell's environment, so cloud "
+            "credentials set only via shell exports are invisible to it — it "
+            "reads ~/.config/nexus/config.yml instead. Fix: `nx config set "
+            "service_url <url>` and `nx config set service_token <token>` "
+            "(or the interactive `nx config init`), then fully QUIT and "
+            "RELAUNCH Claude Desktop so the extension re-spawns and re-reads "
+            "config.yml.\n"
+            "  (2) Local install with Voyage embeddings intended, but the "
+            "already-running service has not picked up the credential: the "
+            "engine reads NX_VOYAGE_API_KEY only at process spawn. Fix: set "
+            "NX_VOYAGE_API_KEY in the SERVICE's own environment, then "
+            "restart it — `nx daemon service stop && nx daemon service "
+            "start` (a terminal is needed for this step either way)."
         )
 
 

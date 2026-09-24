@@ -512,6 +512,75 @@ async def test_default_dispatcher_auto_injects_structured_for_retrieval_tools() 
 
 
 @pytest.mark.asyncio
+async def test_default_dispatcher_raises_on_embedding_profile_mismatch() -> None:
+    """nexus-vply6 fix round 2, SHIP-BLOCKER (critique T2 [26773]): a
+    retrieval tool's error text carrying
+    nexus.errors.SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE must NOT be
+    normalized into the empty structured shape
+    ({ids: [], ..., error: <text>}) -- that shape is what let nx_answer
+    confidently answer "no evidence" on a mismatch even though the
+    collection may hold exactly the evidence the plan needs. It must
+    raise PlanRunRetrievalRefusedError instead, naming the tool and
+    carrying the full message (surfaced verbatim by nx_answer's own
+    generic plan_run exception handler)."""
+    from nexus.mcp import core as mcp_core
+    from nexus.plans.runner import PlanRunRetrievalRefusedError, _default_dispatcher
+
+    mismatch_text = (
+        "Error: this install's current query-side embedding mode "
+        "(onnx-local) cannot serve 1 of the targeted collection(s): "
+        "'knowledge__seam-b-test__voyage-context-3__v1': this install's "
+        "profile names a model this mode cannot serve — collection "
+        "'knowledge__seam-b-test__voyage-context-3__v1' resolves to model "
+        "'voyage-context-3', which embedding mode onnx-local has no "
+        "embedder for."
+    )
+
+    def _fake_search(*args, **kwargs):
+        return mismatch_text
+
+    original = mcp_core.search
+    mcp_core.search = _fake_search  # type: ignore[assignment]
+    try:
+        with pytest.raises(PlanRunRetrievalRefusedError) as excinfo:
+            await _default_dispatcher(
+                "search", {"query": "q", "corpus": "knowledge", "limit": 5},
+            )
+    finally:
+        mcp_core.search = original  # type: ignore[assignment]
+
+    assert excinfo.value.tool == "search"
+    assert "voyage-context-3" in str(excinfo.value)
+    assert "onnx-local" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_default_dispatcher_still_synthesizes_empty_for_other_retrieval_errors() -> None:
+    """The generic empty-structured-shape synthesis is UNCHANGED for a
+    retrieval error that is NOT the embedding-profile-mismatch class
+    (e.g. a bad subtree, an uninitialized catalog) -- fix round 2 scopes
+    the SHIP-BLOCKER fix to that one class, per the coordinator's
+    explicit instruction not to widen it to other retrieval errors."""
+    from nexus.mcp import core as mcp_core
+    from nexus.plans.runner import _default_dispatcher
+
+    def _fake_search(*args, **kwargs):
+        return "Error: catalog not initialized — run 'nx catalog setup'"
+
+    original = mcp_core.search
+    mcp_core.search = _fake_search  # type: ignore[assignment]
+    try:
+        result = await _default_dispatcher(
+            "search", {"query": "q", "corpus": "knowledge", "limit": 5},
+        )
+    finally:
+        mcp_core.search = original  # type: ignore[assignment]
+
+    assert result["ids"] == []
+    assert "catalog not initialized" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_default_dispatcher_passes_through_dict_return() -> None:
     """The `traverse` MCP tool returns dict directly — must not be
     re-wrapped. Verified by stub-calling a dict-returning function
@@ -3630,6 +3699,68 @@ async def test_run_substitutes_sentinel_on_operator_error_isolated() -> None:
     # Empty downstream-ref fields so $stepN.<field> resolves to "" not raises.
     assert s2["text"] == ""
     assert s2["summary"] == ""
+
+
+class _RetrievalRefusingDispatcher:
+    """Dispatcher that raises PlanRunRetrievalRefusedError on a named
+    step — simulates what ``_default_dispatcher`` does when a retrieval
+    tool's result text is the embedding-profile-mismatch signature
+    (nexus-vply6 fix round 2, SHIP-BLOCKER). Unlike
+    ``_OperatorFailingDispatcher``'s ``OperatorError``, this must NOT be
+    absorbed by the graceful-degrade path -- ``_is_operator_error``
+    returns False for it, so ``plan_run``'s own re-raise fires.
+    """
+
+    def __init__(self, refuse_tool: str) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._refuse_tool = refuse_tool
+
+    async def __call__(self, tool: str, args: dict) -> dict:
+        from nexus.plans.runner import PlanRunRetrievalRefusedError
+
+        self.calls.append((tool, args))
+        if tool == self._refuse_tool:
+            raise PlanRunRetrievalRefusedError(
+                tool=tool,
+                message=(
+                    "this install's current query-side embedding mode "
+                    "(onnx-local) cannot serve 1 of the targeted "
+                    "collection(s): 'knowledge__seam__voyage-context-3__v1': "
+                    "..."
+                ),
+            )
+        return {"text": f"{tool}(stub)", "ids": [], "tumblers": []}
+
+
+@pytest.mark.asyncio
+async def test_retrieval_refused_propagates_out_of_plan_run_not_absorbed() -> None:
+    """nexus-vply6 fix round 2, SHIP-BLOCKER: unlike an OperatorError
+    (which substitutes a sentinel and keeps going), a retrieval step's
+    PlanRunRetrievalRefusedError must fail the WHOLE plan -- the runner
+    never reaches step 2, and the exception (with step_records attached,
+    RDR-196 .p1d) propagates all the way out of plan_run. This is what
+    lets nx_answer's own generic plan_run exception handler surface the
+    embedding-profile-mismatch message verbatim in the final answer
+    instead of quietly degrading to 'no evidence'."""
+    from nexus.plans.runner import PlanRunRetrievalRefusedError, plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "operator_summarize", "args": {"text": "$step1.text"}},
+        ],
+    }
+    disp = _RetrievalRefusingDispatcher(refuse_tool="search")
+
+    with pytest.raises(PlanRunRetrievalRefusedError) as excinfo:
+        await plan_run(_match(plan), {}, dispatcher=disp)
+
+    assert "onnx-local" in str(excinfo.value)
+    # Step 2 never dispatched -- the whole plan failed at step 1.
+    assert disp.calls == [("search", {"query": "x", "corpus": _PLAN_STEP_DEFAULT_CORPUS})]
+    # RDR-196 .p1d: step_records attached to the exception instance even
+    # though zero steps completed (the first segment failed).
+    assert excinfo.value.step_records == []
 
 
 # ── nexus-h33x8.6 a4: hard wall-clock budget + partial results ─────────────

@@ -118,16 +118,23 @@ conexus/
     ├── serena-code-nav/     # Standalone: navigate code by symbol (definitions, callers, renames)
     ├── using-nx-skills/     # Standalone: skill invocation discipline
     ├── writing-nx-skills/   # Standalone: plugin authorship guide
-    ├── brainstorming-gate/  # Standalone: design gate before implementation
     ├── orchestration/       # Standalone: routing reference
     ├── mailbox/             # Standalone: RDR-205 mailbox/<address> tuple-space convention
     ├── peer-messaging/      # Standalone: messaging other sessions and agents, sharing one machine
+    ├── composition-probe/   # Standalone: runtime composition smoke test for coordinator beads
+    ├── finishing-branch/    # Standalone: guide branch completion
+    ├── git-worktrees/       # Standalone: isolated workspace setup via git worktrees
+    ├── phase-review-gate/   # Standalone: cross-walk RDR §Approach against closing beads
+    ├── receiving-review/    # Standalone: technical evaluation of code review feedback
     │
     │   # RDR-078 verb skills (dispatch plan_match + plan_run)
-    ├── research/            # verb: research / design / architecture
-    ├── review/              # verb: review / critique / audit change-set
+    ├── design-to-code-trace/ # verb: research / design / architecture (dimensions={verb:research};
+    │                         # renamed off bare 'research', nexus-cnzei.4)
+    ├── decision-drift-review/ # verb: review / critique / audit change-set (dimensions={verb:review};
+    │                         # renamed off bare 'review', nexus-cnzei.4)
     ├── analyze/             # verb: analyze / compare across corpora
-    ├── debug/               # verb: debug / failing-path investigation
+    ├── why-was-this-written/ # verb: debug / failing-path investigation (dimensions={verb:debug};
+    │                         # renamed off bare 'debug', nexus-cnzei.4)
     ├── document/            # verb: document coverage / authoring
     ├── plan-first/          # gate: plan_match before any retrieval
     │
@@ -151,12 +158,13 @@ conexus/
     │
     │   # RDR workflow skills
     ├── rdr-create/          # RDR: create new RDR from template
-    ├── rdr-gate/            # RDR: quality gate before finalizing
-    ├── rdr-accept/          # RDR: accept a gated RDR
+    ├── rdr-gate-checklist/  # RDR: quality gate before finalizing
+    ├── rdr-fix-checklist/   # RDR: fix a gated RDR's findings before re-gating
+    ├── rdr-accept-checklist/ # RDR: accept a gated RDR
     ├── rdr-close/           # RDR: close RDR, bead advisory
     ├── rdr-show/            # RDR: show RDR details
     ├── rdr-research/        # RDR: delegate research to agents
-    └── rdr-audit/           # RDR: audit project RDR lifecycle
+    └── rdr-audit-checklist/ # RDR: audit project RDR lifecycle
 ```
 
 ## Standalone Skills (26)
@@ -168,10 +176,10 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 
 | Skill | Purpose |
 |-------|---------|
-| research | Design / architecture / planning — walks RDR/prose into code |
-| review | Critique / audit / code-review against a change set |
+| design-to-code-trace | Design / architecture / planning — walks RDR/prose into code (renamed off bare `research`, nexus-cnzei.4) |
+| decision-drift-review | Critique / audit against decision history for a change set (renamed off bare `review`, nexus-cnzei.4) |
 | analyze | Cross-corpus analysis and synthesis |
-| debug | Dev / debug from a failing code path |
+| why-was-this-written | Design intent behind a failing code path (renamed off bare `debug`, nexus-cnzei.4) |
 | document | Documentation authoring or coverage audit |
 | plan-first | Retrieval gate — try `plan_match` before falling through to `/conexus:query` |
 
@@ -352,12 +360,13 @@ the invocation reads the same and the surface is marked per line below:
 - `/conexus:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
 - `/conexus:nx-preflight` — verify conexus plugin dependencies (CLI, doctor, beads).
 
-**RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`. Four of these
-(`rdr-gate`, `rdr-accept`, `rdr-audit`, plus `rdr-fix` not shown above) are backed by BOTH a `commands/*.md`
-file and a same-named skill — a deliberately-kept dual surface (see `_KNOWN_COMMAND_SKILL_COLLISIONS`
-in `tests/test_plugin_structure.py`). `rdr-list` is command-only (its skill depended on the command's
-own bash-injected data and was deleted at nexus-cnzei.4); `rdr-create`/`rdr-close`/`rdr-research`/`rdr-show`
-are skill-only (the redundant command was deleted at nexus-cnzei.4).
+**RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`, `/conexus:rdr-fix`. Four of these
+(`rdr-gate`, `rdr-accept`, `rdr-audit`, `rdr-fix`) pair a `commands/*.md` file with a distinctly-named
+`*-checklist` skill (`rdr-gate-checklist`, `rdr-accept-checklist`, `rdr-audit-checklist`, `rdr-fix-checklist`).
+The names don't collide, so `_KNOWN_COMMAND_SKILL_COLLISIONS` in `tests/test_plugin_structure.py` stays
+empty. `rdr-list` is command-only (its skill depended on the command's own bash-injected data and was
+deleted at nexus-cnzei.4); `rdr-create`/`rdr-close`/`rdr-research`/`rdr-show` are skill-only (the redundant
+command was deleted at nexus-cnzei.4).
 
 
 ## MCP Servers
@@ -392,7 +401,7 @@ via `plan_run`, and falls through to an inline planner on miss.  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 52 MCP tools and the nexus-catalog server exposes 10 catalog tools, for 62 registered tools total (3 tools demoted to Python-only). These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 52 MCP tools and the nexus-catalog server exposes 10 catalog tools, 62 tools an agent calls (3 more are demoted to Python-only). The core server also registers 12 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

@@ -2703,7 +2703,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.t3 import apply_hnsw_ef  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         if not is_local_mode():
-            click.echo("SPANN defaults adequate — no HNSW tuning needed (cloud mode)")
+            click.echo("HNSW search tuning is server-side in cloud mode (the engine's NX_HNSW_EF_SEARCH); nothing to tune here")
             return
         # RDR-155 P4a.2 (nexus-1k8s1): make_t3() returns the service-backed
         # handle in production; apply_hnsw_ef no-ops on it (the chroma

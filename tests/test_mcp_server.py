@@ -1955,6 +1955,52 @@ def test_search_structured_true_wire_call_unchanged():
     assert "truncated_chars" not in result
 
 
+def test_search_structured_partial_mismatch_carries_warnings_key():
+    """nexus-vply6 fix round 2, point 2: a call that DID return results
+    but also skipped a collection (the SAME SearchDiagnostics.
+    failed_collections the CLI/text surfaces already render) carries an
+    ADDITIVE ``warnings`` key in the structured envelope -- reachable by
+    the plan runner as ``$stepN.warnings`` -- while the CLEAN case above
+    stays exactly as pinned (the key is present only when there is
+    something to warn about, never unconditionally)."""
+    from nexus.search_engine import SearchDiagnostics
+
+    _mock_t3([{"name": "code__test", "count": 1}])
+
+    def _fake_cross_corpus(*a, **kw):
+        diag_out = kw.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={"code__test": (1, 0, None, None)},
+                total_dropped=0, total_raw=1,
+                failed_collections={"knowledge__seam": "HTTP 400: dim mismatch"},
+            ))
+        return [SearchResult(id="r1", content="x", distance=0.1,
+                             collection="code__test", metadata={})]
+
+    # A query distinct from the sibling clean-case test above -- the
+    # search() page cache keys on (query, target, where, cluster_by,
+    # topic, threshold, lexical), NOT on `structured`, so reusing the
+    # same query string would read back THAT test's cached (warning-free)
+    # diag instead of exercising this test's fake dispatcher.
+    with patch("nexus.search_engine.search_cross_corpus", _fake_cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="x-vply6-partial-mismatch", corpus="code__test", structured=True)
+
+    assert result["ids"] == ["r1"]
+    assert result["warnings"] == [
+        "Note: 1 collection(s) were excluded by service errors and NOT "
+        "searched: knowledge__seam: HTTP 400: dim mismatch",
+    ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _fake_cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        text_result = search(query="x-vply6-partial-mismatch-text", corpus="code__test")
+    rendered = text_result.content[0].text
+    assert "excluded by service errors" in rendered
+    assert "knowledge__seam" in rendered
+
+
 def test_search_structured_content_reflects_text_truncation(monkeypatch):
     from nexus.mcp import core as mcp_core
 

@@ -2292,6 +2292,32 @@ def _append_fanout_excluded_note(text: str, excluded: list[str]) -> str:
     return f"{text}\n[excluded below fan-out floor: {', '.join(excluded)}]"
 
 
+def _failed_collections_note(diagnostics: list) -> str:
+    """The "N collection(s) excluded by service errors" sentence, or ""
+    when nothing was excluded (nexus-vply6 fix round 2, point 2 — Sam's
+    scope ruling: this must reach the model's TEXT regardless of whether
+    the overall call returned zero or partial results). Pure function of
+    the diagnostics list populated by ``search_cross_corpus(diagnostics_out=...)``.
+
+    Split out of ``_no_results_message`` (which still uses it for the
+    zero-results case) so the non-empty-results success paths in
+    ``search``/``query`` can append the SAME sentence — pre-fix this note
+    only ever reached a caller on a total-zero-results call, so a genuine
+    partial degrade (real hits from the healthy majority, one collection
+    quietly skipped) told the model nothing was excluded at all.
+    """
+    if not diagnostics:
+        return ""
+    failed = diagnostics[0].failed_collections
+    if not failed:
+        return ""
+    return (
+        f"Note: {len(failed)} collection(s) were excluded by service "
+        "errors and NOT searched: "
+        + "; ".join(f"{c}: {e}" for c, e in failed.items())
+    )
+
+
 def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     """Surface a threshold-drop instead of a silent zero-hit (nexus-uro6c).
 
@@ -2309,14 +2335,8 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
         return base
     # nexus-pebfx.8: collections the backend refused to serve were skipped,
     # not searched — a zero-hit must say so or it reads as a genuine miss.
-    failed = diagnostics[0].failed_collections
-    suffix = ""
-    if failed:
-        suffix = (
-            f" Note: {len(failed)} collection(s) were excluded by service "
-            "errors and NOT searched: "
-            + "; ".join(f"{c}: {e}" for c, e in failed.items())
-        )
+    failed_note = _failed_collections_note(diagnostics)
+    suffix = f" {failed_note}" if failed_note else ""
     worst = diagnostics[0].worst_offender()
     if worst is None:
         return base + suffix
@@ -2596,6 +2616,20 @@ def _search_render(
         # consumers that need per-chunk origin (e.g. ``nx_answer``) get
         # the right collection for every hit, not just the top result.
         if structured:
+            # nexus-vply6 fix round 2, point 2: "warnings" is additive and
+            # CONDITIONAL via the ``**`` spread below -- absent entirely
+            # when there is nothing to warn about (a spread's keys are not
+            # statically knowable, so test_mcp_tool_description_lint.py's
+            # AST-literal derivation never sees it as part of this dict's
+            # documented shape, and test_search_structured_true_wire_call_
+            # unchanged's "no new keys" pin keeps passing for the clean
+            # case). Present only when a collection was excluded, so the
+            # plan-runner's own step-output envelope ($stepN.warnings)
+            # carries the SAME note the CLI/text surfaces get, even though
+            # real results (from the healthy majority) are still returned.
+            # MUST stay a literal ``return {...}`` (not a named
+            # intermediate variable) -- _ast_return_keys only recognizes a
+            # dict literal directly at the return statement.
             return {
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
@@ -2615,6 +2649,8 @@ def _search_render(
                 "chunk_text_hash": [
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
+                **({"warnings": [_failed_collections_note(diag)]}
+                   if _failed_collections_note(diag) else {}),
             }
 
         # nexus-onn7s: the reader instruction leads every text render, and
@@ -2656,6 +2692,15 @@ def _search_render(
             note = annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
             lines.append(f"[{dist}] {label}{flag}{note_line}\n  {snippet}")
+
+        # nexus-vply6 fix round 2, point 2: the SAME note the zero-results
+        # path (_no_results_message) already carries, now ALSO reaching the
+        # model on a call that DID return results -- a partial degrade
+        # (real hits from the healthy majority, one collection quietly
+        # skipped) must not read as a clean, complete search.
+        _warning_line = _failed_collections_note(diag)
+        if _warning_line:
+            lines.append(f"\n[{_warning_line}]")
 
         # Pagination footer
         shown_end = offset + len(page)
@@ -3195,6 +3240,8 @@ def _reported_distances(rows: list[dict]) -> list[float | None]:
 def _grouped_combined_query(
     target: list[str],
     call: Callable[[list[str]], list[dict]],
+    *,
+    t3: Any = None,
 ) -> list[dict]:
     """Run *call* once per embedding-model group in *target*, merge the results.
 
@@ -3214,10 +3261,11 @@ def _grouped_combined_query(
     ordering until after this merge sort.
 
     All-or-nothing by design: *call* is invoked synchronously per group with
-    no per-iteration try/except, so a later group's exception propagates
-    immediately and the caller gets NO partial result set from only the
-    groups that happened to succeed first — matching
-    ``search_topic_scoped``'s existing (uncaught) per-collection loop.
+    no per-iteration try/except beyond the classification below, so a
+    later group's exception propagates immediately and the caller gets NO
+    partial result set from only the groups that happened to succeed first
+    — matching ``search_topic_scoped``'s existing (uncaught) per-collection
+    loop.
 
     CAVEAT: when *target* spans more than one embedding model, the merge
     ranks rows by raw cosine distance across DIFFERENT embedding-model
@@ -3226,10 +3274,31 @@ def _grouped_combined_query(
     metric — the merge order can carry a systematic per-model bias. This is
     the same class of accepted caveat ``search_topic_scoped`` already
     documents for its own per-collection merge.
+
+    *t3* (nexus-vply6 fix round 2, point 3 — "every read path names it
+    identically") is passed through to
+    :func:`nexus.errors.classify_vector_service_error`, which re-raises a
+    group's ``VectorServiceError`` as
+    :class:`~nexus.errors.SearchEmbeddingProfileMismatchError` when its text
+    is the engine's model-unavailable marker — the SAME named error
+    :func:`nexus.search_engine.search_cross_corpus` raises for the plain
+    ``search``/``query`` tools, closing the gap where this combined-query
+    fan-out reached the identical engine 422 but surfaced it as a raw,
+    unclassified message. *t3* is optional (best-effort ``serving_mode``
+    diagnostic only) so existing test callers that pass only ``target`` and
+    ``call`` keep working unchanged.
     """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.errors import classify_vector_service_error  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
     rows: list[dict] = []
     for group in _group_collections_by_model(target):
-        rows.extend(call(group))
+        try:
+            rows.extend(call(group))
+        except VectorServiceError as exc:
+            raise classify_vector_service_error(
+                exc, collections=group, t3=t3,
+            ) from exc
     rows.sort(key=_distance_key)
     return rows
 
@@ -3439,7 +3508,7 @@ def search_metadata_scoped(
             subtree=(subtree or None),
             where=(where_map or None),
             n_results=limit,
-        ))
+        ), t3=t3)
         # Metadata-scoped is document-level: the function returns one row per
         # matching CHUNK, so a multi-chunk document repeats its tumbler. Collapse
         # to one row per id, keeping the best (nearest) distance, and truncate
@@ -3522,7 +3591,8 @@ def search_topic_scoped(
       included it — see the module comment above this tool for why.
     """
     try:
-        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.db.http_vector_client import VectorServiceError, is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.errors import classify_vector_service_error  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
@@ -3532,8 +3602,19 @@ def search_topic_scoped(
         if not target:
             return f"No collections match corpus {corpus!r}"
         merged: list[dict] = []
+        # nexus-vply6 fix round 2, point 3: this loop is ALL-OR-NOTHING
+        # exactly like _grouped_combined_query (no per-iteration recovery,
+        # the SAME shape that function's own docstring compares itself
+        # against) — classify a collection's VectorServiceError into the
+        # SAME named error every other combined-query tool now raises for
+        # this engine 422, rather than letting it propagate raw.
         for col in target:
-            merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit))
+            try:
+                merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit))
+            except VectorServiceError as exc:
+                raise classify_vector_service_error(
+                    exc, collections=[col], t3=t3,
+                ) from exc
         merged.sort(key=_distance_key)
         merged = merged[:limit]
         if structured:
@@ -3661,7 +3742,7 @@ def search_graph_hop(
             direction=direction,
             where=(where_dict or None),
             n_results=limit,
-        ))
+        ), t3=t3)
         # Document-level: collapse to one row per tumbler, keeping the best
         # (nearest) distance, and truncate to `limit` AFTER the merge (see
         # _dedup_by_id_keep_best).
@@ -3820,7 +3901,7 @@ def search_aspect_scoped(
             min_confidence=(min_confidence or None),
             where=(where_map or None),
             n_results=limit,
-        ))
+        ), t3=t3)
         # Document-level: the function returns one row per matching CHUNK, so a
         # multi-chunk document repeats its tumbler. Collapse to one row per id,
         # keeping the best (nearest) distance, and truncate to `limit` AFTER the
@@ -4131,7 +4212,7 @@ def query(
                             subtree=(subtree or None),
                             where=(where_dict or None),
                             n_results=fetch_n,
-                        ))
+                        ), t3=t3)
                 else:
                     rows = _grouped_combined_query(
                         target, lambda group: t3.search_graph_hop(
@@ -4140,7 +4221,7 @@ def query(
                             depth=depth,
                             where=(where_dict or None),
                             n_results=fetch_n,
-                        ))
+                        ), t3=t3)
             else:
                 # Metadata-scoped path: catalog filters pushed into SQL.
                 rows = _grouped_combined_query(
@@ -4151,7 +4232,7 @@ def query(
                         subtree=(subtree or None),
                         where=(where_dict or None),
                         n_results=fetch_n,
-                    ))
+                    ), t3=t3)
 
             # Dedup: one row per tumbler, keeping best (lowest) distance.
             # deduped_svc (pre-truncation) feeds the "N of M documents"
@@ -7154,16 +7235,17 @@ def tuple_subscribe(
     subspace: Annotated[str, Field(
         description=(
             "A board topic (`board/<topic>`), or, once, this session's own "
-            "instance-name mailbox (`mailbox/<name>`)."
+            "name (`mailbox/<name>`) to register in the peer directory."
         ),
     )],
 ) -> str:
     """Add `subspace` to this session's MCP server's subscription list (RDR-211, RDR-213).
 
-    The session's MCP server waits on this list and pushes what arrives
-    through the Claude Code channel: the lifespan waiter (`mcp/channel.py`)
-    sends a notification carrying a REFERENCE only (subspace, tuple id) --
-    never the body, never a claim -- which this session claims itself with
+    The session's MCP server waits on its board topics and its own mailbox
+    (`mailbox/<session id>`) and pushes what arrives through the Claude
+    Code channel: the lifespan waiter (`mcp/channel.py`) sends a
+    notification carrying a REFERENCE only (subspace, tuple id) -- never
+    the body, never a claim -- which this session claims itself with
     `tuple_in` (RDR-213: the waiter never claims mail, and `tuple_in`
     returns the body WITH the claim, so there is no separate `tuple_rd`
     read step first). With the plugin's hooks loaded, the notification
@@ -7171,23 +7253,23 @@ def tuple_subscribe(
     renders the body with THAT prompt before the session's own turn, so
     the session claims for itself only when that rendering did not
     already happen. `tuple_subscriptions` lists the current set.
-    Only board topics and the session's own instance-name mailbox are
-    accepted: a queue or a lock is refused naming `in`, since those are
-    never delivered, and any mailbox other than the session's own
-    instance name is refused, since it would claim another session's
-    mail. At most 32 board topics may be subscribed at once, beyond the
-    two mailboxes (the session's own, always present from startup, and at
-    most one instance-name mailbox).
+    Only board topics and the session's own mailbox are ever delivered: a
+    queue or a lock is refused naming `in`, since those are never
+    delivered, and any other `mailbox/<name>` is refused if this session
+    already leases a different name, since only one name is accepted.
+    At most 32 board topics may be subscribed at once, beyond the
+    session's own mailbox.
 
-    Subscribing the session's own instance-name mailbox also takes over
-    what the now-deleted CLI mailbox-watch loop's own `--instance NAME`
-    flag used to do for it: it writes the per-session registration file
-    the `UserPromptSubmit` drain hook reads, and starts the RDR-208
-    `directory/<name>` lease so the name resolves to this session.
+    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
+    lease so `mailbox_send` resolves that name to this session. It is NOT
+    a second delivered mailbox: nothing is pushed or drained for it; only
+    this session's own mailbox and its board topics ever are.
 
     A `/resume` (same session id) restores this list; a `/clear` (a new
     session id) starts clean.
     """
+    # RDR-208 Phase 3 (bead nexus-galkv.20): a leased name stopped being a
+    # second delivered mailbox here -- see SubscriptionSet's own docstring.
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
@@ -7215,10 +7297,10 @@ def tuple_unsubscribe(
     """Remove `subspace` from this session's MCP server's subscription list (RDR-211).
 
     The session's own mailbox can never be unsubscribed -- it is the
-    floor's address. Unsubscribing the session's instance-name mailbox
-    stops its `directory/<name>` lease. Unsubscribing a board topic, or a
-    subspace not currently subscribed, is otherwise a plain removal (a
-    no-op when it was never subscribed).
+    floor's address. Unsubscribing `mailbox/<name>` for the name this
+    session leases stops its `directory/<name>` lease. Unsubscribing a
+    board topic, or a subspace not currently subscribed or leased, is
+    otherwise a plain removal (a no-op when it was never subscribed).
     """
     try:
         session_id = _current_subscription_session_id()
@@ -7241,10 +7323,12 @@ def tuple_unsubscribe(
 def tuple_subscriptions() -> list[dict]:
     """List this session's MCP server's subscription set (RDR-211).
 
-    Always the session's own mailbox first, then the instance-name
-    mailbox if one was subscribed, then subscribed board topics. There
-    is no cursor: the engine keeps every subspace's delivery position
-    (a row stamp for a mailbox, a per-subscriber stamp for a board).
+    Always the session's own mailbox first, then subscribed board topics.
+    A leased name never appears here: it is not a delivered mailbox, only
+    a `directory/<name>` lease for `mailbox_send` resolution (RDR-208
+    Phase 3). There is no cursor: the engine keeps
+    every subspace's delivery position (a row stamp for a mailbox, a
+    per-subscriber stamp for a board).
     """
     try:
         session_id = _current_subscription_session_id()
@@ -10261,7 +10345,17 @@ async def nx_answer(
         check may have been blind for part of this run — the mid-run
         stop-line itself is UNCHANGED and still enforces on every
         MEASURED StepRecord cost; only the coverage gap needs
-        surfacing, once per run).
+        surfacing, once per run). ``"excluded-collections"``
+        (nexus-vply6 fix round 2, coordinator follow-up: the FIRST
+        non-budget kind — a retrieval step returned real results but
+        also skipped one or more collections due to a dimension-
+        mismatch/embedding-profile issue; the detail is the SAME
+        "N collection(s) were excluded by service errors..." sentence
+        the CLI/MCP-text surfaces already render, read back off each
+        executed step's own ``warnings`` output field. Confirms this
+        emitter generalizes past "budget" in its literal name to "every
+        warning this call can produce", exactly as this docstring's
+        "never grow a second, parallel warning mechanism" rule intends).
 
         Appends rather than overwrites: independent kinds can co-occur
         in one call (e.g. a `"no-estimate"` pre-flight warning and an
@@ -11149,6 +11243,32 @@ async def nx_answer(
     _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
     if not isinstance(_dropped_reduce_steps, list):
         _dropped_reduce_steps = []
+    # nexus-vply6 fix round 2 (coordinator follow-up, "never silent" for
+    # the person reading the answer): a retrieval step's own structured
+    # output carries an additive "warnings" list when
+    # SearchDiagnostics.failed_collections was non-empty (search()'s
+    # structured branch — see _search_render's "warnings" spread literal)
+    # -- one collection skipped, real results still returned from the
+    # healthy majority. result.steps already holds every executed step's
+    # raw output dict (RDR-078 §Phase 1 contract); this reads it, it does
+    # NOT add new StepRecord/T2 plumbing. Fed through the SAME
+    # _emit_budget_warning accumulator every other run-level warning
+    # uses, per that function's own docstring ("never grow a second,
+    # parallel warning mechanism") -- so the note reaches BOTH final_text
+    # (the "[budget warning (kind): detail]" line) and the structured
+    # envelope's budget_warnings list, the one place every exit path this
+    # call can take already threads a caller-visible warning through.
+    # Same placement rule as _dropped_reduce_steps immediately above:
+    # BEFORE _budget_exhausted_response has a chance to build and return
+    # an envelope, so a budget-cut partial run still surfaces a warning
+    # from a retrieval step that DID execute.
+    _result_steps = getattr(result, "steps", None)
+    if isinstance(_result_steps, list):
+        for _step_output in _result_steps:
+            if not isinstance(_step_output, dict):
+                continue
+            for _excluded_note in _step_output.get("warnings") or []:
+                _emit_budget_warning("excluded-collections", _excluded_note)
     # nexus-yg49g: the success record USED to be here — before final_text is
     # even extracted (below) and ~60 lines before the empty-retrieval guard that
     # already knows the run produced nothing. It could not have been right: at

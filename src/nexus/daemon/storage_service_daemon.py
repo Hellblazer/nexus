@@ -92,6 +92,7 @@ from nexus.daemon import readiness
 from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
+from nexus.util.process_group import KILL_SIGNAL
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_STOP_ELECTION_BUDGET,
@@ -1538,7 +1539,9 @@ class StorageServiceSupervisor:
 
     def _kill_after_readiness_failure(self, proc: subprocess.Popen[bytes]) -> None:
         """SIGTERM + grace window + SIGKILL, matching ``_stop_service`` (not
-        a bare SIGKILL) so the service can flush before it dies. Best-effort
+        a bare SIGKILL) so the service can flush before it dies (POSIX: the
+        supervisor does not run on native Windows, where SIGTERM would be
+        TerminateProcess; nexus-6y4e0). Best-effort
         — a signal failure (process already gone) must never mask the
         ``StorageServiceStartError`` this precedes.
 
@@ -1558,7 +1561,7 @@ class StorageServiceSupervisor:
             try:
                 proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                safe_killpg(proc.pid, signal.SIGKILL)
+                safe_killpg(proc.pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
 
@@ -1798,7 +1801,7 @@ class StorageServiceSupervisor:
             try:
                 proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                safe_killpg(pid, signal.SIGKILL)
+                safe_killpg(pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
         self._proc = None
@@ -2756,13 +2759,29 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
     Never reports "already stopped" while a matching process exists; see
     :class:`StopOutcome`.
 
-    Freshness gate (mirrors stop_t3_daemon CRITICAL P3 guard): only trust
-    ``supervisor_pid`` from the lease payload when ``registry.discover()``
-    returns a fresh record (TTL-live). If a SIGKILL'd supervisor left a
-    stale lease, the kernel may have recycled its pid to an unrelated process;
-    trusting that pid would SIGTERM the wrong process. Since
-    ``ServiceRegistry.discover()`` already reaps expired leases (returning
-    None for stale ones), a non-None return is the freshness proxy.
+    Freshness gate (mirrors stop_t3_daemon CRITICAL P3 guard), REVISED
+    nexus-wo6sc (2026-09-24): a non-None ``registry.discover()`` return is
+    no longer a pure freshness proxy for ``storage_service`` — reader-side
+    grace (``ServiceRegistry._stale_lease_still_live``, per
+    ``docs/rdr/rdr-149-unified-service-registry-substrate.md``'s Revision
+    History and ``src/nexus/daemon/AGENTS.md``'s "Third documented
+    exception") can also return a TTL-EXPIRED record when the recorded
+    ``supervisor_pid`` is alive AND the recorded port answers ``/health``
+    as the expected service. This is still safe: it never trusts the
+    lease's pid ON THE STRENGTH OF ``discover()`` alone. The very next
+    line below independently re-checks ``_pid_is_alive(supervisor_pid)``
+    AT SIGNAL TIME, immediately before ``os.kill(..., SIGTERM)`` — so a
+    supervisor that has since genuinely died (its pid dead, or since
+    reaped) between ``discover()`` and this check is never signalled,
+    grace-accepted record or not. What a pid-alive check can never rule
+    out — the kernel recycling that exact pid to an unrelated process in
+    the narrow window between the two checks — is the same accepted
+    trade-off every other pid-based mechanism in this primitive documents
+    (``reclaim_lease_if_dead_owner``'s docstring names it explicitly); it
+    is not new here, and the discovery-time grace path independently
+    requires that SAME pid's process to also be serving the recorded
+    port's ``/health`` with the exact expected body, which a coincidental
+    pid-reuse victim answering by accident is not a realistic risk.
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         storage_service_stack_matcher,
@@ -2829,7 +2848,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
                 time.sleep(0.1)
             if _pid_is_running(supervisor_pid):
                 try:
-                    os.kill(supervisor_pid, signal.SIGKILL)
+                    os.kill(supervisor_pid, KILL_SIGNAL)
                 except (ProcessLookupError, PermissionError):
                     pass
             signalled.append(supervisor_pid)

@@ -18,6 +18,7 @@ Contract pins:
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from unittest.mock import patch
 
@@ -216,24 +217,98 @@ def test_capability_census_not_called_in_daemonize_parent_path() -> None:
     assert census_calls == []
 
 
-def test_main_falls_through_to_sync_when_fork_unavailable() -> None:
-    """On platforms without ``os.fork`` (Windows), cleanup must still run
-    synchronously rather than be silently skipped.
+@pytest.mark.parametrize(
+    ("spawned", "expected"),
+    [(True, ["spawn"]), (False, ["spawn", "sync"])],
+    ids=["detached-child-started", "spawn-failed-runs-inline"],
+)
+def test_main_without_fork_spawns_detached_and_falls_back_inline(
+    spawned: bool, expected: list[str],
+) -> None:
+    """On platforms without ``os.fork`` (Windows) the cleanup goes to a
+    detached child so the hook returns inside its budget (nexus-34f7r).
+    Inline only when that spawn failed, so cleanup is never skipped.
     """
     import nexus._session_end_launcher as launcher
 
     calls: list[str] = []
+
+    def _spawn() -> bool:
+        calls.append("spawn")
+        return spawned
+
     with (
         patch("nexus._session_end_launcher.hasattr", return_value=False),
+        patch.object(launcher, "_spawn_detached_cleanup", side_effect=_spawn),
         patch.object(launcher, "_run_session_end_synchronously",
                      side_effect=lambda: calls.append("sync")),
         patch.object(launcher, "_daemonize_and_run",
                      side_effect=lambda: calls.append("daemon")),
+        patch.object(launcher, "_print_service_tier_summary"),
     ):
         launcher.main()
-    assert calls == ["sync"], (
-        f"platform without fork must run sync path; got {calls}"
+    assert calls == expected
+
+
+def test_spawn_detached_cleanup_asks_for_breakaway_first_then_retries_without() -> None:
+    """A job object that forbids breakaway refuses CreateProcess outright,
+    so the second attempt drops that one flag and keeps the rest."""
+    import subprocess
+
+    import nexus._session_end_launcher as launcher
+
+    seen: list[dict] = []
+
+    def _popen(argv, **kwargs):
+        seen.append({"argv": argv, **kwargs})
+        if len(seen) == 1:
+            raise PermissionError("breakaway not permitted by the job")
+        return object()
+
+    with patch.object(subprocess, "Popen", side_effect=_popen):
+        assert launcher._spawn_detached_cleanup() is True
+
+    base = launcher._DETACHED_PROCESS | launcher._CREATE_NEW_PROCESS_GROUP
+    assert [c["creationflags"] for c in seen] == [
+        base | launcher._CREATE_BREAKAWAY_FROM_JOB, base,
+    ]
+    for call in seen:
+        assert call["argv"] == [sys.executable, "-c", launcher._DETACHED_CHILD_CODE]
+        assert call["stdin"] == call["stdout"] == call["stderr"] == subprocess.DEVNULL
+        assert call["close_fds"] is True
+
+
+def test_spawn_detached_cleanup_reports_failure_when_both_attempts_fail() -> None:
+    import subprocess
+
+    import nexus._session_end_launcher as launcher
+
+    with patch.object(subprocess, "Popen", side_effect=OSError("no")) as popen:
+        assert launcher._spawn_detached_cleanup() is False
+    assert popen.call_count == 2
+
+
+def test_detached_child_code_runs_the_cleanup(tmp_path) -> None:
+    """The ``-c`` string is the child's whole program, so run it for real.
+    A scrubbed env with no endpoint keeps it off any real store; the flush
+    fails soft, as it must, and the process exits 0."""
+    import subprocess
+
+    import nexus._session_end_launcher as launcher
+
+    proc = subprocess.run(
+        [sys.executable, "-c", launcher._DETACHED_CHILD_CODE],
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(tmp_path / "home"),
+            "NEXUS_CONFIG_DIR": str(tmp_path / "config"),
+        },
+        capture_output=True, text=True, timeout=120,
     )
+    assert proc.returncode == 0, proc.stderr
+    # Non-vacuity: the cleanup really ran, which here means it reached the
+    # storage flush and reported the missing endpoint.
+    assert "session_end_storage_error" in proc.stdout + proc.stderr
 
 
 def test_daemonize_parent_path_returns_without_running_cleanup() -> None:

@@ -334,6 +334,25 @@ def test_dead_wire_census_requires_a_surface(tmp_path: Path) -> None:
     assert "args.surface" in report["error"]["message"]
 
 
+def test_dead_wire_census_accepts_string_args(tmp_path: Path) -> None:
+    """nexus-kk4ut: the SAME defect pressure-test.js had -- the Skill tool's
+    `args` is typed as a string, and docs/workflows.md's own example ("Run
+    the dead-wire-census workflow over the MCP tool surface") is exactly
+    the natural-language form that used to die on "dead-wire-census
+    requires args.surface" even though the string named one."""
+    scenario = {
+        "args": "surface: mcp-tools\nscopeHints: only the plugin's own servers",
+        "agents": {"enumerate": {"items": []}},
+    }
+    report = run_workflow(DEAD_WIRE_CENSUS, scenario, tmp_path)
+    # No args error; falls through to the (separately tested) vacuous-gate
+    # "ZERO items" inconclusive path, which only a correctly parsed
+    # args.surface reaches.
+    assert report["error"] is None
+    assert report["result"]["complete"] is False
+    assert any("ZERO items" in line for line in report["logs"])
+
+
 def test_dead_wire_census_fails_loudly_when_enumeration_dies(
     tmp_path: Path,
 ) -> None:
@@ -522,6 +541,183 @@ def test_pressure_test_requires_target_and_spec(tmp_path: Path) -> None:
 
     missing_spec = run_workflow(PRESSURE_TEST, {"args": {"target": "t"}}, tmp_path)
     assert "args.spec" in missing_spec["error"]["message"]
+
+
+def test_pressure_test_accepts_string_args(tmp_path: Path) -> None:
+    """nexus-kk4ut: the Skill tool's own `args` param is typed as a string,
+
+    so a natural-language pressure-test invocation forwarded through it
+    lands here as text, not an object -- every such call used to die on
+    "pressure-test requires args.target" even though the string named one.
+    A multi-line string with recognized `key: value` lines must parse into
+    the same object shape a direct object caller would pass, including a
+    numeric `votesPerFinding` that actually changes the vote fan-out (2
+    votes for the critical finding here, not the default 3).
+    """
+    agents = _pt_reviews()
+    for i in range(2):
+        agents[f"verify:code-mechanics:0:{i}"] = {
+            "refuted": False,
+            "reasoning": "stands",
+        }
+    agents["verify:spec-fidelity:1:0"] = {"refuted": True, "reasoning": "wrong"}
+    agents["synthesize"] = {
+        "verdict": "fix-then-ship",
+        "ranked": [{"severity": "critical", "claim": "c1", "evidence": "e1"}],
+    }
+    scenario = {
+        "args": "target: diff X\nspec: directive Y\nvotesPerFinding: 2",
+        "agents": agents,
+    }
+    report = run_workflow(PRESSURE_TEST, scenario, tmp_path)
+    assert report["error"] is None
+    result = report["result"]
+
+    assert result["findingCount"] == 2
+    assert result["survivingCount"] == 1
+    assert result["verdict"] == "fix-then-ship"
+    assert result["complete"] is True
+
+    labels = [d["label"] for d in report["dispatched"]]
+    assert labels.count("verify:code-mechanics:0:0") == 1
+    assert labels.count("verify:code-mechanics:0:1") == 1
+    # The default is 3 votes for a critical/significant finding; a string
+    # `votesPerFinding: 2` that fell back to the default would dispatch a
+    # third one nobody stubbed and the run would error instead of complete.
+    assert "verify:code-mechanics:0:2" not in labels
+
+
+def test_pressure_test_string_args_with_no_key_is_the_whole_target(
+    tmp_path: Path,
+) -> None:
+    """A string with no recognized `key:` line is the target verbatim --
+
+    "pressure-test this diff" is the common one-line call, and it must not
+    be swallowed as an empty/malformed args object.
+    """
+    report = run_workflow(
+        PRESSURE_TEST, {"args": "just review this diff, no keys here"}, tmp_path
+    )
+    # target parsed fine; spec is still missing, so THAT is the error --
+    # proving the whole string landed in args.target, not args itself.
+    assert report["error"] is not None
+    assert "args.spec" in report["error"]["message"]
+
+
+# --- parseWorkflowStringArgs (shared between both files) -------------------
+
+_SHARED_BEGIN_MARKER = "// >>> SHARED: parseWorkflowStringArgs (nexus-kk4ut) >>>"
+_SHARED_END_MARKER = "// <<< SHARED: parseWorkflowStringArgs <<<"
+
+
+def _extract_shared_parser_block(script: Path) -> str:
+    source = script.read_text(encoding="utf-8")
+    start = source.index(_SHARED_BEGIN_MARKER)
+    end = source.index(_SHARED_END_MARKER) + len(_SHARED_END_MARKER)
+    return source[start:end]
+
+
+def _parse_via_node(
+    script: Path, raw: str, keys: list[str], numeric_keys: list[str],
+) -> dict:
+    """Call the REAL `parseWorkflowStringArgs` extracted from `script`
+    directly under Node, bypassing the full agent-dispatch harness.
+
+    The harness's own JSON report never exposes a dispatched agent's PROMPT
+    text (only `label`/`phase`), so it cannot show whether `args.target` was
+    truncated by a mis-parsed embedded key-shaped line -- the parser must be
+    called directly and its return value inspected to prove that.
+    """
+    fn_source = _extract_shared_parser_block(script)
+    driver = (
+        f"{fn_source}\n"
+        f"const raw = {json.dumps(raw)};\n"
+        f"const keys = {json.dumps(keys)};\n"
+        f"const numericKeys = {json.dumps(numeric_keys)};\n"
+        "console.log(JSON.stringify(parseWorkflowStringArgs(raw, keys, numericKeys)));\n"
+    )
+    proc = subprocess.run(
+        ["node", "-e", driver], capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert proc.returncode == 0, f"node driver failed:\n{proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+class TestParseWorkflowStringArgsSharedBlock:
+    """nexus-kk4ut fix round. Reviewer findings on the first string-args fix:
+
+    1. The parser silently truncated a target containing an embedded
+       key-shaped line (reproduced with a YAML diff carrying "  spec:").
+    2. dead-wire-census.js had the identical defect and was unfixed.
+
+    Fixed by making the shared function ROBUST (JSON.parse first; a key is
+    recognized only flush-left at column 0, so an indented or diff-prefixed
+    key-shaped line is always a continuation) and by making it genuinely
+    SHARED (byte-identical block in both files, pinned here).
+    """
+
+    def test_the_two_copies_are_byte_identical(self) -> None:
+        assert _extract_shared_parser_block(PRESSURE_TEST) == _extract_shared_parser_block(
+            DEAD_WIRE_CENSUS
+        )
+
+    def test_json_object_string_round_trips_exactly(self) -> None:
+        """A caller who needs an exact value containing "key:"-shaped text
+        escapes the ambiguity entirely by passing JSON."""
+        payload = {
+            "target": "line one\nspec: not a real key, just text\nline three",
+            "spec": "the real spec",
+            "votesPerFinding": 5,
+        }
+        got = _parse_via_node(
+            PRESSURE_TEST, json.dumps(payload),
+            ["target", "spec", "probe", "votesPerFinding"], ["votesPerFinding"],
+        )
+        assert got == payload
+
+    def test_no_recognized_key_is_the_whole_string_as_the_first_key(self) -> None:
+        got = _parse_via_node(
+            DEAD_WIRE_CENSUS, "just census the CLI verbs, no keys here",
+            ["surface", "scopeHints"], [],
+        )
+        assert got == {"surface": "just census the CLI verbs, no keys here"}
+
+    def test_indented_and_diff_prefixed_key_shaped_lines_never_truncate_the_target(
+        self,
+    ) -> None:
+        """The reviewer's reproduction: a target embedding a YAML diff whose
+        OWN content contains "spec:", "  spec:" and "+spec:"-shaped lines,
+        plus a stray "votesPerFinding:"-shaped line -- none of them flush
+        left with no other prefix, so none of them may start a new field.
+        Only the final, genuinely flush-left "spec:" and "votesPerFinding:"
+        lines are real fields.
+        """
+        raw = (
+            "target: --- a/config.yaml\n"
+            "+++ b/config.yaml\n"
+            "@@ -2,6 +2,7 @@\n"
+            " metadata:\n"
+            "   spec:\n"
+            "+  spec:\n"
+            "+    votesPerFinding: 99\n"
+            "     replicas: 3\n"
+            "spec: Ship replicas=3 per RDR-XXX.\n"
+            "votesPerFinding: 2\n"
+        )
+        got = _parse_via_node(
+            PRESSURE_TEST, raw,
+            ["target", "spec", "probe", "votesPerFinding"], ["votesPerFinding"],
+        )
+        assert got["spec"] == "Ship replicas=3 per RDR-XXX."
+        assert got["votesPerFinding"] == 2
+        # Every key-shaped line inside the diff stayed inside target.
+        for embedded in (
+            "+++ b/config.yaml", "   spec:", "+  spec:",
+            "+    votesPerFinding: 99", "     replicas: 3",
+        ):
+            assert embedded in got["target"], f"{embedded!r} missing from target -- truncated early"
+        # And the diff's OWN key-shaped lines never leaked into spec/votes.
+        assert "99" not in str(got["votesPerFinding"])
 
 
 # --- shared shape -----------------------------------------------------------

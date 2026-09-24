@@ -1,5 +1,9 @@
 # RDR-101 Phase 4 — Legacy-Key Reader Audit
 
+> **Historical forensic record.** The RDR-101 migration is complete. See
+> [`README.md`](README.md) for the directory index and the current
+> authoritative record.
+
 **Bead:** `nexus-o6aa.10.2`
 **Goal:** Catalogue every code path that reads any of the six T3 metadata keys
 slated for prune in Phase 4, and decide each key's disposition (migrate /

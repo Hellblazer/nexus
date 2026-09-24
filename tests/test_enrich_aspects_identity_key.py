@@ -111,7 +111,7 @@ def test_identity_prefers_the_path_and_falls_back_to_the_title() -> None:
 def _gap_fill_selection(wiring) -> list:
     return _select_entries(
         collection=COLLECTION, re_extract=False,
-        extractor_version="1", config_extractor_name="x",
+        extractor_version="1",
     )
 
 

@@ -31,17 +31,19 @@ from pathlib import Path
 
 import pytest
 
-#: The verb's module, ported into the wheel at nexus-t9klx. Loaded FRESH
-#: per test, as the script was: this module reads env at import time and
-#: these cases vary it, so a cached module object would carry one test's
-#: environment into the next.
-_HOOK_MODULE = "nexus.hooks.version_lockstep"
+SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "conexus" / "hooks" / "scripts" / "version_lockstep_hook.py"
+)
 
 
 def _load_module():
-    """Load the hook verb as a fresh module object."""
-    mod = importlib.import_module(_HOOK_MODULE)
-    return importlib.reload(mod)
+    """Load the hook script as a fresh module object."""
+    spec = importlib.util.spec_from_file_location("version_lockstep_hook", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture()
@@ -60,8 +62,8 @@ def plugin_root(tmp_path: Path) -> Path:
 
 class TestScriptPresence:
     def test_script_exists(self) -> None:
-        assert importlib.util.find_spec(_HOOK_MODULE) is not None, (
-            f"hooks.json wiring (P1.5) references {_HOOK_MODULE}; "
+        assert SCRIPT.exists(), (
+            f"hooks.json wiring (P1.5) references {SCRIPT}; "
             f"if it moves SessionStart breaks silently"
         )
 
@@ -133,9 +135,9 @@ class TestMainOrchestration:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
 
-        _r = mod.run(None)
+        mod.main()
 
-        assert (_r.stdout or '').strip() == ""
+        assert capsys.readouterr().out.strip() == ""
         assert dispatched == []
 
     def test_mismatch_emits_nudge_and_dispatches(
@@ -148,9 +150,9 @@ class TestMainOrchestration:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
 
-        _r = mod.run(None)
+        mod.main()
 
-        payload = json.loads(_r.stdout or '')
+        payload = json.loads(capsys.readouterr().out)
         assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
         assert dispatched == ["9.9.9"]
 
@@ -162,9 +164,9 @@ class TestMainOrchestration:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
 
-        _r = mod.run(None)
+        mod.main()
 
-        assert json.loads(_r.stdout or '')["hookSpecificOutput"]
+        assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
         assert dispatched == ["9.9.9"]
 
     def test_hook_never_writes_marker(
@@ -175,7 +177,7 @@ class TestMainOrchestration:
         monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
         monkeypatch.setattr(mod, "dispatch_action", lambda v: None)
 
-        _r = mod.run(None)
+        mod.main()
 
         assert not marker.exists(), "the HOOK must never write the marker (action owns it)"
 
@@ -188,9 +190,9 @@ class TestMainOrchestration:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
 
-        _r = mod.run(None)
+        mod.main()
 
-        assert (_r.stdout or '').strip() == ""
+        assert capsys.readouterr().out.strip() == ""
         assert dispatched == []
 
     def test_main_swallows_exceptions(self, mod, monkeypatch, capsys) -> None:
@@ -199,8 +201,8 @@ class TestMainOrchestration:
 
         monkeypatch.setattr(mod, "read_plugin_version", boom)
         # Must not raise; fail-safe exit 0.
-        _r = mod.run(None)
-        assert (_r.stdout or '').strip() == ""
+        mod.main()
+        assert capsys.readouterr().out.strip() == ""
 
 
 class TestDispatchIsNonBlocking:
@@ -241,7 +243,7 @@ class TestDispatchIsNonBlocking:
         # The detached command must carry the target version as an argv token.
         flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
         assert "9.9.9" in flat
-        assert "nexus.hooks.version_lockstep_action" in flat
+        assert "version_lockstep_action.py" in flat
         # AND THE INTERPRETER, which the flattened-substring checks above
         # cannot see. RDR-215 bead nexus-q02nx.22 changed this argv from
         # ["bash", <_run_python_hook.sh>, <action>, ...] to
@@ -251,12 +253,6 @@ class TestDispatchIsNonBlocking:
         # been green -- the dispatch would fail at runtime with ENOENT and
         # nothing here would say so. argv[0] is the whole change; assert it.
         argv = list(calls["args"])
-        # nexus-t9klx: the action moved into the wheel with its dispatcher,
-        # so the argv names a module rather than a path. `-m` must be there:
-        # without it `sys.executable <dotted.name>` is a filename that does
-        # not exist, which is the same silent-ENOENT shape the argv[0] check
-        # below was written for.
-        assert argv[1] == "-m", f"the action must be dispatched by module: {argv!r}"
         assert argv[0] == sys.executable, (
             f"the detached action must be spawned with this process's own "
             f"already-vetted interpreter, not a launcher; got {argv[0]!r}"
@@ -340,9 +336,9 @@ class TestPluginChannelInstallSilence:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
 
-        _r = mod.run(None)
+        mod.main()
 
-        assert (_r.stdout or '').strip() == "", (
+        assert capsys.readouterr().out.strip() == "", (
             "a plugin-channel cut must not provoke a nudge (RDR-197 CA-2)"
         )
         assert dispatched == [], (
@@ -366,9 +362,9 @@ class TestPluginChannelInstallSilence:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
 
-        _r = mod.run(None)
+        mod.main()
 
-        payload = json.loads(_r.stdout or '')
+        payload = json.loads(capsys.readouterr().out)
         assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
         assert dispatched == ["7.15.0"]
 
@@ -531,9 +527,9 @@ class TestRefDriftOrchestration:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
 
-        _r = mod.run(None)
+        mod.main()
 
-        payload = json.loads(_r.stdout or '')
+        payload = json.loads(capsys.readouterr().out)
         msg = payload["hookSpecificOutput"]["additionalContext"]
         assert "conexus@nexus-plugins" in msg
         assert sha_before[:7] in msg and sha_after[:7] in msg
@@ -547,9 +543,9 @@ class TestRefDriftOrchestration:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
 
-        _r = mod.run(None)
+        mod.main()
 
-        assert (_r.stdout or '').strip() == ""
+        assert capsys.readouterr().out.strip() == ""
         assert dispatched == []
 
     def test_version_mismatch_and_ref_drift_together_fold_into_one_payload(
@@ -572,9 +568,9 @@ class TestRefDriftOrchestration:
         monkeypatch.setattr(mod, "dispatch_action", lambda v: version_dispatched.append(v))
         monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: ref_dispatched.append("fired"))
 
-        _r = mod.run(None)
+        mod.main()
 
-        out = _r.stdout or ''
+        out = capsys.readouterr().out
         assert out.count("\n") <= 1  # exactly one printed line (plus trailing newline)
         payload = json.loads(out)
         msg = payload["hookSpecificOutput"]["additionalContext"]
@@ -593,7 +589,11 @@ class TestRefDriftSentinelMatchesAction:
     try to parse the sentinel as a real version and do nothing useful)."""
 
     def test_sentinel_literal_matches_the_action_script(self, mod) -> None:
-        action_mod = importlib.import_module("nexus.hooks.version_lockstep_action")
+        action_script = SCRIPT.parent / "version_lockstep_action.py"
+        spec = importlib.util.spec_from_file_location("version_lockstep_action", action_script)
+        assert spec and spec.loader
+        action_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(action_mod)
 
         assert mod._REF_DRIFT_SENTINEL == action_mod._REF_DRIFT_SENTINEL
 
@@ -623,7 +623,7 @@ class TestDispatchRefDriftActionIsNonBlocking:
         assert calls.get("stdout") is mod.subprocess.DEVNULL
         flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
         assert mod._REF_DRIFT_SENTINEL in flat
-        assert "nexus.hooks.version_lockstep_action" in flat
+        assert "version_lockstep_action.py" in flat
         # AND THE INTERPRETER, which the flattened-substring checks above
         # cannot see. RDR-215 bead nexus-q02nx.22 changed this argv from
         # ["bash", <_run_python_hook.sh>, <action>, ...] to
@@ -633,12 +633,6 @@ class TestDispatchRefDriftActionIsNonBlocking:
         # been green -- the dispatch would fail at runtime with ENOENT and
         # nothing here would say so. argv[0] is the whole change; assert it.
         argv = list(calls["args"])
-        # nexus-t9klx: the action moved into the wheel with its dispatcher,
-        # so the argv names a module rather than a path. `-m` must be there:
-        # without it `sys.executable <dotted.name>` is a filename that does
-        # not exist, which is the same silent-ENOENT shape the argv[0] check
-        # below was written for.
-        assert argv[1] == "-m", f"the action must be dispatched by module: {argv!r}"
         assert argv[0] == sys.executable, (
             f"the detached action must be spawned with this process's own "
             f"already-vetted interpreter, not a launcher; got {argv[0]!r}"
@@ -730,15 +724,15 @@ class TestRefDriftBoundedRetry:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
 
-        first = mod.run(None)  # session 1: the reinstall keeps failing in reality
+        mod.main()  # session 1: the reinstall keeps failing in reality
         assert dispatched == ["fired"]
-        assert (first.stdout or "").strip() != ""
+        assert capsys.readouterr().out.strip() != ""
 
         dispatched.clear()
-        second = mod.run(None)  # session 2: the SAME drift, still unresolved
+        mod.main()  # session 2: the SAME drift, still unresolved
 
         assert dispatched == [], "must not redispatch the identical drift every session"
-        assert (second.stdout or "").strip() == ""
+        assert capsys.readouterr().out.strip() == ""
 
     def test_a_further_ref_move_dispatches_again(
         self, mod, tmp_path: Path, monkeypatch, capsys
@@ -747,7 +741,7 @@ class TestRefDriftBoundedRetry:
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
 
-        _r = mod.run(None)
+        mod.main()
         assert dispatched == ["fired"]
         capsys.readouterr()
 
@@ -761,10 +755,10 @@ class TestRefDriftBoundedRetry:
         _git(repo, "tag", "-a", "plugin-v9.9.9-2", "-m", "plugin-v9.9.9-2")
 
         dispatched.clear()
-        _r = mod.run(None)
+        mod.main()
 
         assert dispatched == ["fired"], "a genuinely new drift must still dispatch"
-        assert (_r.stdout or '').strip() != ""
+        assert capsys.readouterr().out.strip() != ""
 
     def test_marker_not_written_when_there_is_no_drift(
         self, mod, tmp_path: Path, monkeypatch
@@ -775,7 +769,7 @@ class TestRefDriftBoundedRetry:
         marker = tmp_path / "ref-drift-marker"
         monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(marker))
 
-        _r = mod.run(None)
+        mod.main()
 
         assert not marker.exists()
 
@@ -865,7 +859,7 @@ class TestRunsUnderBareInterpreter:
         env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
         env["NX_LOCKSTEP_MARKER"] = str(marker)
         r = subprocess.run(
-            [sys.executable, "-m", "nexus._hook_runtime.entry", "version-lockstep"],
+            [sys.executable, str(SCRIPT)],
             capture_output=True, text=True, timeout=20, env=env,
         )
         assert r.returncode == 0

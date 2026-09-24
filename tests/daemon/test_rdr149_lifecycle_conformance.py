@@ -50,13 +50,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import http.server
 import inspect
 import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -1403,3 +1406,310 @@ class TestCrossVersionLeaseDiscovery:
         assert record.scope_key == "1000"
         assert record.format_version == 1
         assert record.ttl == 15.0
+
+
+# ---------------------------------------------------------------------------
+# Reader-side grace for a TTL-expired storage-service lease (nexus-wo6sc half
+# one, Sam DECIDED 2026-09-24). Conformance-suite home per the daemon
+# mandate: the fix lives in ServiceRegistry.discover(), so its tests live
+# here, not in a tier-local file.
+#
+# REAL subprocesses for pid liveness, REAL bound sockets/HTTP servers for the
+# health probe -- per the DECISION's own instruction, ``pid_alive`` and the
+# ``/health`` client are not mocked. The only thing faked is the wall clock
+# (``_FakeClock``, the SAME fixture every other class in this module uses to
+# push a lease past its TTL deterministically).
+# ---------------------------------------------------------------------------
+
+
+class _QuietHealthHandler(http.server.BaseHTTPRequestHandler):
+    """Serves one fixed ``GET /health`` response. Silent (no per-request
+    stderr line) so the suite's own output stays legible."""
+
+    status_code = 200
+    body = b'{"status": "ok", "db": "up"}'
+
+    def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler's own naming
+        self.send_response(self.status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A002 — stdlib signature
+        pass  # quiet
+
+
+@contextlib.contextmanager
+def _health_server(*, status_code: int = 200, body: bytes = b'{"status": "ok", "db": "up"}'):
+    """A REAL ``127.0.0.1``-bound HTTP server answering ``GET /health`` with
+    *status_code*/*body* on a background thread. Yields the bound port.
+
+    Used both for the "expected identity" case (the default body, matching
+    ``HealthHandler.java`` exactly) and the "answered by a different
+    identity" case (a caller-supplied wrong-shaped *body*).
+    """
+    handler_cls = type(
+        "_Handler", (_QuietHealthHandler,), {"status_code": status_code, "body": body}
+    )
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _closed_port() -> int:
+    """A port number nothing is listening on: bind, then close WITHOUT
+    ever calling ``listen()``, so a probe against it gets connection-refused
+    deterministically (never a half-open backlog)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+def _live_pid() -> "subprocess.Popen[bytes]":
+    """A REAL, currently-running child. Caller must terminate + reap it."""
+    return subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+    )
+
+
+def _dead_pid() -> int:
+    """A REAL, already-reaped, genuinely dead pid (spawn + wait), mirroring
+    the established pattern (``TestDiscoverReapToctou``'s sibling harness /
+    ``test_storage_service_daemon.py``'s identical fixture)."""
+    proc = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv, a genuinely dead pid
+    proc.wait()
+    return proc.pid
+
+
+class TestStaleLeaseReaderGrace:
+    def _registry(self, config_dir: Path, clock: _FakeClock, *, ttl: float = 1.0) -> ServiceRegistry:
+        return ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock, ttl=ttl)
+
+    def test_stale_lease_alive_pid_healthy_port_is_resolvable(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        reg = self._registry(config_dir, clock)
+        owner = _live_pid()
+        try:
+            with _health_server() as port:
+                reg.publish(
+                    "scope", endpoint={"host": "127.0.0.1", "port": port},
+                    version="1", owner_token="A", payload={"supervisor_pid": owner.pid},
+                )
+                clock.advance(5.0)  # past ttl=1.0, well inside the 10x grace bound
+                record = reg.discover("scope")
+            assert record is not None, (
+                "a stale lease with an alive pid and a healthy, correctly-"
+                "identified port must still resolve (DECISION: reader-side "
+                "grace)"
+            )
+            assert record.owner_token == "A"
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)
+
+    def test_stale_lease_dead_pid_is_down(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        reg = self._registry(config_dir, clock)
+        dead = _dead_pid()
+        # Port answers healthy throughout -- proves the PID check alone is
+        # what denies grace here, not an incidental port failure.
+        with _health_server() as port:
+            reg.publish(
+                "scope", endpoint={"host": "127.0.0.1", "port": port},
+                version="1", owner_token="A", payload={"supervisor_pid": dead},
+            )
+            clock.advance(5.0)
+            record = reg.discover("scope")
+        assert record is None, (
+            "a dead recorded pid must deny grace even with a healthy, "
+            "correctly-identified port on the recorded endpoint"
+        )
+
+    def test_stale_lease_alive_pid_closed_port_is_down(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        reg = self._registry(config_dir, clock)
+        owner = _live_pid()
+        try:
+            port = _closed_port()
+            reg.publish(
+                "scope", endpoint={"host": "127.0.0.1", "port": port},
+                version="1", owner_token="A", payload={"supervisor_pid": owner.pid},
+            )
+            clock.advance(5.0)
+            record = reg.discover("scope")
+            assert record is None, (
+                "an alive pid does not save a lease whose recorded port is "
+                "closed -- both must succeed, or it is down"
+            )
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)
+
+    def test_stale_lease_alive_pid_different_identity_on_port_is_down(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """Port reuse: SOMETHING answers 200 on the recorded port, but not
+        the expected service's ``/health`` shape (nexus-wo6sc's own
+        constraint: verify identity, not just liveness)."""
+        reg = self._registry(config_dir, clock)
+        owner = _live_pid()
+        try:
+            with _health_server(status_code=200, body=b'{"hello": "world"}') as port:
+                reg.publish(
+                    "scope", endpoint={"host": "127.0.0.1", "port": port},
+                    version="1", owner_token="A", payload={"supervisor_pid": owner.pid},
+                )
+                clock.advance(5.0)
+                record = reg.discover("scope")
+            assert record is None, (
+                "a 200 from the recorded port that does not carry the "
+                "expected service's /health shape must not grant grace -- "
+                "pid reuse and port reuse are both real"
+            )
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)
+
+    def test_fresh_lease_never_probes(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the stale path pays for the probe (CONSTRAINT). A fresh
+        lease must resolve WITHOUT ever calling the health probe at all."""
+        calls: list[tuple[str, int]] = []
+
+        def _spy(host: str, port: int, *, timeout: float) -> bool:
+            calls.append((host, port))
+            return True
+
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry._probe_health_identity", _spy,
+        )
+        reg = self._registry(config_dir, clock)
+        reg.publish(
+            "scope", endpoint={"host": "127.0.0.1", "port": 12345},
+            version="1", owner_token="A", payload={"supervisor_pid": os.getpid()},
+        )
+        # No clock.advance(): the lease is still fresh.
+        record = reg.discover("scope")
+        assert record is not None
+        assert calls == [], (
+            f"a fresh lease must never reach the grace probe, got calls={calls}"
+        )
+
+    def test_too_stale_for_grace_is_down_even_with_alive_pid_and_healthy_port(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """The staleness bound (STALE_LEASE_GRACE_MAX_TTL_MULTIPLE=10x ttl):
+        past it, grace no longer applies at all, however healthy the pid and
+        port look -- a lease this old is stale essentially forever, not
+        mid-stall."""
+        reg = self._registry(config_dir, clock, ttl=1.0)
+        owner = _live_pid()
+        try:
+            with _health_server() as port:
+                reg.publish(
+                    "scope", endpoint={"host": "127.0.0.1", "port": port},
+                    version="1", owner_token="A", payload={"supervisor_pid": owner.pid},
+                )
+                clock.advance(11.0)  # > 10 * ttl(1.0)
+                record = reg.discover("scope")
+            assert record is None, (
+                "a lease more than STALE_LEASE_GRACE_MAX_TTL_MULTIPLE past "
+                "its own ttl must be down regardless of pid/port health"
+            )
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)
+
+    def test_no_supervisor_pid_in_payload_denies_grace(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """A legacy/non-supervised lease (no ``supervisor_pid``) has nothing
+        to confirm liveness against, so it is treated as down exactly as
+        before this change -- mirrors ``reclaim_lease_if_dead_owner``'s
+        identical guard."""
+        reg = self._registry(config_dir, clock)
+        with _health_server() as port:
+            reg.publish(
+                "scope", endpoint={"host": "127.0.0.1", "port": port},
+                version="1", owner_token="A", payload={},
+            )
+            clock.advance(5.0)
+            record = reg.discover("scope")
+        assert record is None
+
+    def test_shutting_down_marker_denies_grace_even_with_alive_pid_and_healthy_port(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """TEST GAP (nexus-wo6sc review round, 2026-09-24). A published
+        shutdown marker (``mark_shutting_down`` -- ``status="shutting_down"``)
+        must never be resurrected by grace: the owner explicitly said stop
+        resolving me, and an alive pid + a healthy port on the SAME
+        endpoint (nothing stopped listening yet -- only the marker
+        published) must not override that. Guards the
+        ``record.status != "live"`` check at the top of
+        ``_stale_lease_still_live`` -- delete that guard and this is the
+        test that goes red, because without it the pid+health checks below
+        it would otherwise happily pass."""
+        reg = self._registry(config_dir, clock)
+        owner = _live_pid()
+        try:
+            with _health_server() as port:
+                published = reg.publish(
+                    "scope", endpoint={"host": "127.0.0.1", "port": port},
+                    version="1", owner_token="A", payload={"supervisor_pid": owner.pid},
+                )
+                reg.mark_shutting_down(published)
+                clock.advance(5.0)  # past ttl=1.0, well inside the 10x grace bound
+                record = reg.discover("scope")
+            assert record is None, (
+                "a published shutdown marker must deny grace even when the "
+                "owner pid is alive and the port answers /health healthy -- "
+                "the owner explicitly said stop resolving me"
+            )
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)
+
+    def test_non_storage_service_tier_never_grants_grace(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """``TIER_READER_GRACE`` is scoped to storage_service (DECISION
+        text) -- another tier's TTL-expired lease is unaffected by this
+        change even with an alive pid and a healthy port on that host/port
+        pair, because aspect_worker publishes no such endpoint in real
+        production and the primitive must not silently widen a tier's
+        contract it was never asked to."""
+        reg = ServiceRegistry(dir=config_dir, tier="aspect_worker", clock=clock, ttl=1.0)
+        owner = _live_pid()
+        try:
+            with _health_server() as port:
+                reg.publish(
+                    "scope", endpoint={"host": "127.0.0.1", "port": port},
+                    version="1", owner_token="A", payload={"supervisor_pid": owner.pid},
+                )
+                clock.advance(5.0)
+                record = reg.discover("scope")
+            assert record is None
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)

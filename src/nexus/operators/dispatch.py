@@ -1567,14 +1567,15 @@ async def claude_dispatch(
         except asyncio.TimeoutError:
             # Search review I-6: reach the whole process group so any claude
             # children (nested planners, tool subprocesses) get reaped too.
+            # On Windows there is no group: only the direct child is killed
+            # and its descendants survive (nexus-6y4e0).
             # safe_killpg guards on isinstance(proc.pid, int) so mocked-
             # subprocess tests deterministically fall through to proc.kill()
             # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
             # tests/test_process_group_safety.py.
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 - deferred to avoid circular import at module load
-            import signal  # noqa: PLC0415 - branch-local; deferred to call time
 
-            if not safe_killpg(proc, signal.SIGKILL):
+            if not safe_killpg(proc):
                 try:
                     proc.kill()
                 except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal

@@ -58,13 +58,14 @@ Through 6.x they were read by the ladder's substrate rung so `nx upgrade` could 
 
 **If you are still on a pre-migration install**, do not set these and expect an upgrade to work. Upgrading straight from a Chroma-era install into 7.0.0 is detected and refused with a loud two-hop redirect (`nexus.stranded_install`): migrate on a 6.x release first, which still ships the migration tool, then upgrade to 7.0.0. Frozen Chroma directories on disk are relics nothing reads, with no path back to that era (Sam, 2026-08-29) and no cleanup verb.
 
-## Semantic Scholar (Enrichment)
+## Bibliographic enrichment (`nx enrich bib`)
 
 | Env var | Required | Notes |
 |---|---|---|
-| `S2_API_KEY` | No | Free API key for 100 req/s (vs 100/5min unauthenticated). Get one at https://www.semanticscholar.org/product/api#api-key |
+| `S2_API_KEY` | No | Semantic Scholar API key (100 req/s, vs 100/5min unauthenticated). Get one at https://www.semanticscholar.org/product/api#api-key |
+| `OPENALEX_MAILTO` | No | Your email, for OpenAlex's polite pool (higher rate limit, no key needed). |
 
-Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, citation count). Without the key, enrichment works but is ~50x slower due to rate limiting.
+`nx enrich bib` fetches bibliographic metadata (year, venue, authors, citation count) for chunks in a collection. `--source auto` (the default) picks the backend: Semantic Scholar when `S2_API_KEY` is set, OpenAlex otherwise (nexus-57mk added the OpenAlex backend so a missing key no longer means unauthenticated rate-limited Semantic Scholar). Pass `--source s2` or `--source openalex` to pin one explicitly, or `--source dt` to gap-fill from DEVONthink's CrossRef resolver after the `auto` pass. See `nx enrich bib --help` for the full option list.
 
 **Historical note (7.0.0: no longer operative).** `chroma_database` named the ChromaDB Cloud database the migration read from; all collection prefixes (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexisted in it, and `chroma_tenant` was inferred from the API key except in multi-workspace setups. Retained as provenance for the collection-naming scheme, which outlived the backend.
 
@@ -87,7 +88,7 @@ Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, c
 | `pdf.mineru_page_batch` | — | `1` | Pages per MinerU request. Increase for faster throughput at the cost of memory |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
 | `search.hybrid_default` | — | `false` | Default hybrid-scoring mode for `nx search`: blends git frecency into the score for code corpora (0.7*vector + 0.3*frecency). Set `true` to always blend |
-| `search.hnsw_ef` | — | `256` | HNSW `search_ef` parameter for local-mode collections. Higher values improve tail recall at the cost of query latency. Ignored in cloud mode (SPANN) |
+| `search.hnsw_ef` | — | `256` | Legacy client-side HNSW tuning key, inert in production. Every current install (local or cloud) serves T3 through the nexus-service over pgvector, which tunes HNSW server-side — that knob is `NX_HNSW_EF_SEARCH` above, not this key. This value only still applies to a Chroma-backed test double; there is no live SPANN or ChromaDB Cloud path left to be "ignored in" |
 | `search.distance_threshold.code` | — | `0.45` | Maximum distance for code corpus results. Results above this are filtered as noise |
 | `search.distance_threshold.knowledge` | — | `0.65` | Maximum distance for knowledge corpus results |
 | `search.distance_threshold.docs` | — | `0.65` | Maximum distance for docs corpus results |

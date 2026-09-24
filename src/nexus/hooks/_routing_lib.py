@@ -299,13 +299,19 @@ def _read_service_lease(config_dir: pathlib.Path) -> dict | None:
     """Best-effort read of the local supervisor's ServiceRegistry lease:
     ``{"host", "port", "token"}``, or ``None``.
 
-    Reads the lease file through :class:`LeaseRecord` (nexus-t9klx; it
-    delegated to the plugin's ``_endpoint_resolve`` mirror before that,
-    and the mirror was deleted at nexus-z9cz2), then applies this
-    caller's own additional requirement: a blank token is treated the
-    same as no lease at all.
+    Routes through :meth:`~nexus.daemon.service_registry.ServiceRegistry.discover`
+    (nexus-wo6sc review round, 2026-09-24) rather than a raw
+    ``LeaseRecord.from_json`` + ``is_fresh`` check (the earlier form,
+    nexus-t9klx; it delegated to the plugin's ``_endpoint_resolve`` mirror
+    before that, and the mirror was deleted at nexus-z9cz2). The raw-parse
+    form bypassed ``discover()``'s reader-side grace for a TTL-expired
+    ``storage_service`` lease (the supervisor alive and healthy, its own
+    heartbeat stamp overrunning the TTL — nexus-wo6sc), so this caller kept
+    reporting "no lease" during exactly the window grace exists to close.
+    Then applies this caller's own additional requirement: a blank token is
+    treated the same as no lease at all.
     """
-    from nexus.daemon.service_registry import LeaseRecord  # noqa: PLC0415 — deferred, same reason
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, same reason
 
     # The lease filename carries the POSIX uid, exactly as the client's own
     # nexus.db.service_endpoint.discover_lease spells it. os.getuid does not
@@ -315,12 +321,9 @@ def _read_service_lease(config_dir: pathlib.Path) -> dict | None:
     # reporting against a service the session is not talking to.
     if not hasattr(os, "getuid"):
         return None
-    path = config_dir / f"storage_service_addr.{os.getuid()}"
-    try:
-        record = LeaseRecord.from_json(path.read_text())
-    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
-        return None
-    if not record.is_fresh(time.time()):
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    record = registry.discover(str(os.getuid()))
+    if record is None:
         return None
     endpoint = record.endpoint or {}
     token = str(endpoint.get("token", "") or "")

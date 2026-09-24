@@ -41,11 +41,9 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.59.0)
+## Awaiting the next release or plugin cut (pinned: v7.60.0)
 
-_Empty. Everything listed here (nexus-rcoze: the nx-hook shim, the rerouted
-entries and the veh77 wiring) went live with 7.59.0 when `source.ref` advanced
-to `v7.59.0`._
+ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 

@@ -387,6 +387,13 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
 #: tripwire; the fix is a deliberate classification decision, not a
 #: blanket exemption.
 _COMMAND_LEVEL_REASONS: dict[str, str] = {
+    "SearchEmbeddingProfileMismatchError": (
+        "Read path only (nexus-vply6): raised by search_engine."
+        "search_cross_corpus and built by nexus.errors."
+        "classify_vector_service_error for the MCP query tools, both on "
+        "the query side. No ingest or per-record loop in dt.py or "
+        "index.py performs a search, so no per-record body can raise it."
+    ),
     "CombinedWriteEmbedTimeoutError": (
         "Raised from HttpCatalogClient.write_manifest_many's chunk-"
         "carrying POST (nexus-y9t08 CRITICAL fix) -- a flush-grain "

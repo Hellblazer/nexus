@@ -183,11 +183,13 @@ VERB_TABLE: dict[str, str] = {
     # real .exe shim from the installer. Stdlib-only and storage-free, so
     # the port is the script's body with print() replaced by HookResult.
     "behaviour-census": "nexus.hooks.behaviour_census",
-    # The second, ported in the same bead. Its detached action moved with
-    # it (nexus.hooks.version_lockstep_action) rather than being reached
-    # back into the plugin: one caller is all it takes to keep a
-    # plugin-resident script alive, which is what RDR-215 removes.
-    "version-lockstep": "nexus.hooks.version_lockstep",
+    # No `version-lockstep` verb. nexus-t9klx ported it here, and the port
+    # was the 7.58.0 release blocker: the hook that repairs plugin-ahead CLI
+    # skew cannot depend on the CLI it repairs, and an older nx-hook exits 2
+    # on a verb it lacks. It stays the stdlib plugin script
+    # conexus/hooks/scripts/version_lockstep_hook.py for good (pinned by
+    # tests/hooks/test_lockstep_survives_cli_skew.py); the unwired verb was
+    # deleted at nexus-rcoze.
     # The routing framework's one fail_closed rule (nexus-t9klx). It was
     # already command-tier-only by ruling -- nexus.mcp.hooks._NEVER_TOOL_TIER
     # refuses to register it as an mcp_tool, because a tool-boundary crash

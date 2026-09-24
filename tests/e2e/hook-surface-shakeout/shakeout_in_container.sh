@@ -275,6 +275,14 @@ if [ -n "${SHAKEOUT_CLI_VERSION:-}" ]; then
     BLOCKED="$(awk -F'\t' '$3 == 2' "$EXITS" 2>/dev/null)"
     if [ "${ROWS:-0}" -gt 0 ]; then ok "$ROWS hook invocations recorded with their exit codes"
     else bad "no hook exit codes recorded: the harness shims never ran"; fi
+    INVOKED="$(awk 'END{print NR}' "$RUN/hook-census.tsv" 2>/dev/null || echo 0)"
+    if [ "${INVOKED:-0}" = "${ROWS:-0}" ]; then ok "every one of $INVOKED invocations has an exit row"
+    else bad "$INVOKED invocations but $ROWS exit rows: a hook died or hung without recording one"; fi
+    KILLED="$(awk -F'\t' '$3 == "killed"' "$EXITS" 2>/dev/null)"
+    if [ -n "$KILLED" ]; then
+        printf '  note  invocations killed by a signal (Claude Code hook timeout; non-blocking):\n'
+        printf '%s\n' "$KILLED" | sed 's/^/        /'
+    fi
     if [ -z "$BLOCKED" ]; then ok "no hook invocation exited 2"
     else bad "hook invocations exited 2 (blocking):"; printf '%s\n' "$BLOCKED" | sed 's/^/        /'; fi
     SKIPPED=""

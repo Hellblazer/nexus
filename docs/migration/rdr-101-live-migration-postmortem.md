@@ -1,5 +1,10 @@
 # RDR-101 live-migration post-mortem (Hal's first run, 2026-05-01)
 
+> **Historical forensic record** (2026-05-01). The RDR-101 migration is
+> complete and the verbs it references are retired. See
+> [`README.md`](README.md) for the directory index and the current
+> authoritative record.
+
 This is a forensic record of the first real-world run of the RDR-101
 event-sourced catalog migration against Hal's production state. The
 sandbox harness (`.9.10`/`.9.11`) and the migrate verb (`.9.9`) were

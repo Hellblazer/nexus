@@ -390,6 +390,28 @@ _REGISTRY: dict[str, ExtractorConfig] = {
 }
 
 
+# ── Shape-routing table (nexus-kmbys, unified nexus-kk4ut) ──────────────────
+#
+# The ONE table both :func:`eligible_extractor_names` and
+# :func:`_resolve_config_for_document` read. A base config absent from this
+# table is not shape-routed at all: every document under its prefix carries
+# that one extractor_name. A base config present here maps document SHAPE
+# ("paper" / "prose", see :func:`_classify_document_shape`) to the config
+# that shape actually gets written under. This used to be two independently
+# hand-written ``is _SCHOLARLY_PAPER_CONFIG`` branches — one in each
+# function — which is exactly the shape that lets an eligibility list and
+# the real routing decision drift apart without either function's own tests
+# noticing (nexus-kk4ut pressure-test finding). One table, read by both,
+# makes that drift structurally impossible: change the routing and both
+# callers see it in the same edit.
+_SHAPE_ROUTING_TABLE: dict[str, dict[str, ExtractorConfig]] = {
+    _SCHOLARLY_PAPER_CONFIG.extractor_name: {
+        "paper": _SCHOLARLY_PAPER_CONFIG,
+        "prose": _GENERAL_PROSE_CONFIG,
+    },
+}
+
+
 # ── RDR markdown + frontmatter parser (Phase F) ─────────────────────────────
 
 
@@ -726,15 +748,23 @@ def _truncate(text: str, cap: int) -> str:
 
 
 def select_config(collection: str) -> ExtractorConfig | None:
-    """Return the registered ``ExtractorConfig`` whose prefix matches
+    """Return the registered BASE ``ExtractorConfig`` whose prefix matches
     ``collection``, or ``None`` if no prefix matches.
 
     Two prefixes ship:
 
     * ``knowledge__*`` → ``scholarly-paper-v1`` (Claude-CLI subprocess
-      path, RDR-089 Phase 1).
+      path, RDR-089 Phase 1) as the base config. This is a starting
+      point, not the final word: :func:`_resolve_config_for_document`
+      (nexus-kmbys) re-routes any INDIVIDUAL document classified as
+      general prose to ``general-prose-v1`` instead, so a
+      ``knowledge__*`` collection's rows can carry EITHER extractor_name
+      depending on each document's shape. A caller that needs every
+      extractor_name a collection's rows can actually carry — not just
+      the prefix's base config — wants :func:`eligible_extractor_names`.
     * ``rdr__*`` → ``rdr-frontmatter-v1`` (deterministic markdown +
-      frontmatter parser, RDR-089 Phase F; zero API cost).
+      frontmatter parser, RDR-089 Phase F; zero API cost). Not
+      shape-routed: every ``rdr__*`` row carries this one extractor_name.
 
     Other prefixes (``docs__``, ``code__``, bare ``knowledge``
     without the double-underscore separator, etc.) return ``None``.
@@ -757,6 +787,45 @@ def registered_prefixes() -> list[str]:
     prefix is added or removed.
     """
     return list(_REGISTRY.keys())
+
+
+def eligible_extractor_names(collection: str) -> list[str]:
+    """Every ``extractor_name`` a ``document_aspects`` row for
+    ``collection`` can actually carry (nexus-kk4ut).
+
+    ``select_config`` names only the prefix's BASE config, but per-
+    document shape routing (nexus-kmbys, :func:`_resolve_config_for_document`)
+    can redirect an individual ``knowledge__*`` document's row to
+    ``general-prose-v1`` at write time. A caller auditing rows by
+    extractor identity — ``--re-extract``'s outdated-version query is the
+    motivating case — must consider every extractor that could have
+    written a row for this collection, or it silently misses every
+    ``general-prose-v1`` row: those never match a query pinned to the
+    base config's name alone.
+
+    Reads the SAME ``_SHAPE_ROUTING_TABLE`` that
+    :func:`_resolve_config_for_document` routes documents through
+    (nexus-kk4ut pressure-test finding: this used to be a second,
+    hand-written ``is _SCHOLARLY_PAPER_CONFIG`` branch that could drift
+    from the real routing decision without either branch's own tests
+    catching it — see ``test_eligible_extractor_names_matches_the_real_
+    routing_table`` in tests/test_aspect_extractor.py for the pin).
+
+    Returns ``[]`` when no config is registered for ``collection``.
+    """
+    config = select_config(collection)
+    if config is None:
+        return []
+    routes = _SHAPE_ROUTING_TABLE.get(config.extractor_name)
+    if routes is None:
+        return [config.extractor_name]
+    # dict preserves insertion order (paper, then prose); de-duplicate in
+    # case a future table entry ever maps two shapes to the same config.
+    names: list[str] = []
+    for c in routes.values():
+        if c.extractor_name not in names:
+            names.append(c.extractor_name)
+    return names
 
 
 # ── Per-document shape routing (nexus-kmbys) ─────────────────────────────────
@@ -820,15 +889,20 @@ def _resolve_config_for_document(
 ) -> ExtractorConfig:
     """Refine a prefix-selected config by per-document shape (nexus-kmbys).
 
-    Only the scholarly-paper config is auto-routing-eligible: a knowledge__
-    document classified as prose is routed to ``general-prose-v1`` instead of
-    having paper structure hallucinated onto it. Every other base config
-    (rdr-frontmatter, future recipes) is returned unchanged.
+    Reads ``_SHAPE_ROUTING_TABLE`` (nexus-kk4ut) — the same table
+    :func:`eligible_extractor_names` reads — keyed by ``base_config``'s OWN
+    ``extractor_name``, not object identity: only a base config present in
+    the table is auto-routing-eligible (today, only the scholarly-paper
+    config), a knowledge__ document classified as prose is routed to
+    ``general-prose-v1`` instead of having paper structure hallucinated onto
+    it, and every other base config (rdr-frontmatter, future recipes) is
+    returned unchanged.
     """
-    if base_config is not _SCHOLARLY_PAPER_CONFIG:
+    routes = _SHAPE_ROUTING_TABLE.get(base_config.extractor_name)
+    if routes is None:
         return base_config
     shape = _classify_document_shape(content)
-    chosen = base_config if shape == "paper" else _GENERAL_PROSE_CONFIG
+    chosen = routes.get(shape, base_config)
     if chosen is not base_config:
         _log.info(
             "aspect_extractor_document_routed",
@@ -1663,11 +1737,12 @@ def _run_claude_isolated(
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the child's whole process group; fall back to killing just the
-    child if the group is already gone."""
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    """Hard-kill the child's whole process group; fall back to killing just
+    the child if the group is already gone, or on Windows, where there is no
+    group (nexus-34f7r)."""
+    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if not safe_killpg(proc):
         with contextlib.suppress(Exception):
             proc.kill()
 

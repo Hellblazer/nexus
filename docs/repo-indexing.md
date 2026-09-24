@@ -26,9 +26,10 @@ Every file is classified into one of four categories:
   known-noise config/data extensions — `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
   `.properties`, `.ini`, `.cfg`, `.conf`, `.gradle`, `.html`, `.htm`, `.css`, `.svg`,
   `.cmd`, `.bat`, `.ps1`, `.lock`, `.txt`, `.csv`, `.tsv`, `.dat`, `.log` — plus a
-  separate `_BINARY_EXTENSIONS` set of 66 binary-asset extensions (images, audio,
-  video, fonts, archives, compiled objects, Office documents, embedded databases)
-  that are also classified SKIP. 89 extensions total route to SKIP.
+  separate `_BINARY_EXTENSIONS` set of 76 binary-asset extensions (images, audio,
+  video, fonts, archives, compiled objects, Office documents, embedded databases,
+  git/data containers) that are also classified SKIP. 99 extensions total route to
+  SKIP.
 
 **Extensionless files** (e.g., `Makefile`, `LICENSE`): if the first two bytes are `#!`
 (shebang), the file is classified as CODE; otherwise SKIP.

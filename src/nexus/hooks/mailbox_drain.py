@@ -26,24 +26,20 @@ paragraph above would otherwise assume it is universal:
   surfaced ONCE, from a local seen-file, because the alternative is that
   a session with no channel reached never learns the message existed at
   all. Purging it is a human act; this hook only says it is there.
-* An INSTANCE-NAME address (the ``ListAgents`` row, e.g. ``nexus-19``) is
-  drained only once something has REGISTERED it, because it exists in no
-  environment variable anywhere -- MM-1.3 established that, which is why
-  the SessionStart instruction asks the model to name it explicitly via
-  ``tuple_subscribe("mailbox/<name>")``. The registry is PER-SESSION
-  (nexus-6konb.9 defect fix, corrected from an earlier machine-wide
-  design): subscribing the instance mailbox writes
-  ``<config>/tuple-watch/addresses.d/<session id>`` -- one address per
-  line, keyed to the exact session that subscribed it. This hook reads
-  ONLY the file named by ITS OWN payload session id, never any other
-  session's file and never a machine-wide one: the earlier design read a
-  single shared ``<config>/tuple-watch/addresses`` file for every
-  session, so on a box running more than one session the first one to
-  prompt after subscribing claimed every other session's
-  instance-addressed mail too. A missing per-session file is an empty
-  registry, never a failure. Until a session's own file exists, mail
-  sent to that instance name has no floor. The session id needs no
-  registration: it arrives in this hook's own payload.
+* An INSTANCE-NAME address (the ``ListAgents`` row, e.g. ``nexus-19``)
+  has NO floor here at all, deliberately (RDR-208 Phase 3, bead
+  nexus-galkv.20; the retention window this transition depended on --
+  R2's ship date plus 7 days -- has passed). This hook used to read a
+  per-session registry (``<config>/tuple-watch/addresses.d/<session
+  id>``) that ``tuple_subscribe("mailbox/<name>")`` wrote, and drain
+  whatever names it listed; that file is never written any more
+  (:mod:`nexus.mcp.subscriptions`), and this hook never reads one even
+  if a stale copy from an old install is still sitting on disk. A name
+  still resolves to a session through the `directory/<name>` lease that
+  ``tuple_subscribe`` still arms, so a sender can still reach a peer by
+  name with ``mailbox_send`` -- but the resolved address is always the
+  RECIPIENT'S OWN session id, drained by the ordinary path below, never
+  a ``mailbox/<name>`` subspace this hook would need a registry to find.
 
 CONTRACT WITH THE PROMPT. stdout is injected context, so an empty mailbox
 prints NOTHING and costs an idle prompt nothing. Every failure -- an
@@ -61,15 +57,17 @@ hazard RDR-206 Step 1 closed inside the engine, appearing here between
 two HTTP calls where no transaction can close it -- so the fix is to
 trust only what ``ack`` confirmed.
 
-WHERE IT RUNS. This was a plugin script launched by a bare ``python3``,
-which stock Windows does not have (nexus-t9klx). As an ``nx-hook`` verb it
-rides the console script the installer writes, and it calls the client's
-own primitives -- endpoint discovery, the data-token lease, the persisted
-credentials, the tuple size caps -- instead of the stdlib mirrors a
-plugin script needed because it could not import ``nexus``. The endpoint
-legs are :mod:`nexus.hooks.tuple_ledger_project`'s, the sibling ported for
-the same reason; only the credential policy differs, see
-:func:`_resolve_endpoint`.
+WHERE IT RUNS. Not here yet. hooks.json still runs the plugin script
+``conexus/hooks/scripts/mailbox_drain.py`` under ``python3``: nexus-t9klx
+ported the drain to this ``nx-hook`` verb, but 7.58.0 held the wiring back,
+because an ``nx-hook`` from 7.55.0 to 7.57.x exits 2 on a verb it does not
+register and this hook runs on every prompt. As a verb it calls the
+client's own primitives -- endpoint discovery, the data-token lease, the
+persisted credentials, the tuple size caps -- instead of the stdlib mirrors
+the plugin script carries because it cannot import ``nexus``. The endpoint
+legs are :mod:`nexus.hooks.tuple_ledger_project`'s; only the credential
+policy differs, see :func:`_resolve_endpoint`. Wiring the verb means routing
+it through ``conexus/hooks/scripts/nx_hook_shim.py`` (nexus-rcoze).
 
 OUTPUT IS STREAMED, not returned. ``nx-hook`` writes a verb's
 :class:`~nexus._hook_runtime._io.HookResult` after ``run()`` returns, and a
@@ -192,10 +190,6 @@ def _config_dir() -> Path:
     return Path(nexus_config_dir())
 
 
-def _session_registry_path(config_dir: Path, session_id: str) -> Path:
-    return config_dir / "tuple-watch" / "addresses.d" / session_id
-
-
 def _address_file_name(address: str, suffix: str) -> str:
     """The on-disk filename for one of this hook's per-address files --
     pending, seen/drained, pending-lock -- given *suffix* (e.g.
@@ -232,28 +226,6 @@ def _seen_path(config_dir: Path, address: str) -> Path:
     return config_dir / "tuple-watch" / _address_file_name(address, ".drained.json")
 
 
-def _read_session_registry(config_dir: Path, session_id: str) -> list[str]:
-    """The instance address(es) THIS session subscribed for itself via
-    ``tuple_subscribe("mailbox/<name>")`` (nexus-6konb.9 defect fix), one
-    per line. Blank lines and ``#`` comments are ignored; anything unsafe is
-    dropped. Keyed strictly to *session_id* -- never machine-wide -- so
-    one session can never drain another session's instance-named mailbox.
-    A missing or unreadable file is simply an empty registry -- never a
-    failure, since the session-id address does not depend on it."""
-    try:
-        raw = _session_registry_path(config_dir, session_id).read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return []
-    out: list[str] = []
-    for line in raw.splitlines():
-        entry = line.strip()
-        if not entry or entry.startswith("#"):
-            continue
-        if _valid_address(entry):
-            out.append(entry)
-    return out
-
-
 def _cleared_record_path(config_dir: Path, session_id: str) -> Path:
     """``<config>/tuple-watch/cleared.<session_id>``, from the writer's own
     :func:`nexus.session_marker.cleared_record_path`. *session_id* here is
@@ -271,8 +243,7 @@ def _read_cleared_record(config_dir: Path, session_id: str) -> list[str]:
     the order :func:`nexus.session_marker.record_clear_and_write_session_marker`
     wrote them (the immediately-previous session first, then any chained
     further back). Blank lines and ``#`` comments are ignored. A malformed
-    entry is dropped AND logged -- unlike the silent drop in
-    :func:`_read_session_registry` -- because an operator-visible mailbox id
+    entry is dropped AND logged, because an operator-visible mailbox id
     landing in this record and failing validation is itself worth knowing
     about, not routine noise. A missing or unreadable file is simply no
     record, never a failure: most sessions never ``/clear``.
@@ -1137,16 +1108,14 @@ def _drain_all(payload: dict[str, Any], out: _Out) -> None:
     except Exception as exc:  # noqa: BLE001 — maintenance only, never the prompt's problem
         _log_skip(f"cleared-record prune: unexpected {type(exc).__name__}: {exc}")
 
-    addresses: list[str] = []
-    if _valid_address(session_id):
-        addresses.append(session_id)
-        addresses.extend(_read_session_registry(config_dir, session_id))
-    # First-occurrence dedup: a registry naming this session's own id must not
-    # make the hook drain it twice and render the same row in two blocks.
-    addresses = list(dict.fromkeys(addresses))
+    # RDR-208 Phase 3 (bead nexus-galkv.20): the only address this hook ever
+    # drains from the prompt payload is the session's own id. A registered
+    # instance name (the old `addresses.d/<session id>` registry) is no
+    # longer read here at all -- see the module docstring's "WHERE THE
+    # FLOOR DOES NOT REACH" section.
+    addresses: list[str] = [session_id] if _valid_address(session_id) else []
     if not addresses:
-        _log_skip("no address to drain: the payload carried no usable session id "
-                  "and the address registry is empty")
+        _log_skip("no address to drain: the payload carried no usable session id")
         return
 
     try:

@@ -1553,6 +1553,114 @@ class TestDocumentShapeClassifier:
         assert rec.experimental_baselines == []
 
 
+class TestEligibleExtractorNamesMatchesTheRealRoutingTable:
+    """nexus-kk4ut pressure-test finding: the reviewers disagreed on whether
+    ``eligible_extractor_names`` is DERIVED from the real routing decision or
+    just MIRRORS it by a second hand-written branch. Settled by refactoring
+    both ``eligible_extractor_names`` and ``_resolve_config_for_document`` to
+    read one ``_SHAPE_ROUTING_TABLE`` -- this test is the pin that keeps them
+    from drifting apart again: for every registered prefix, drive
+    ``_resolve_config_for_document`` with an actual paper-shaped and an
+    actual prose-shaped document and assert the set of extractor_names it can
+    return equals what ``eligible_extractor_names`` claims. An unregistered
+    prefix is covered separately -- ``_resolve_config_for_document`` is never
+    called for one in production (``select_config`` returning ``None`` is the
+    caller's abort point), so its coverage here is that
+    ``eligible_extractor_names`` reports the empty set, matching
+    ``select_config`` returning ``None``.
+    """
+
+    _PAPER = (
+        "# Title\n\nAbstract\n\nWe propose a new index. In this paper we show "
+        "gains.\n\n## References\n\n[1] Foo et al. (2020). Bar.\n"
+    )
+    _PROSE = (
+        "# Design Note: Caching\n\nThis note sketches how we might cache plan "
+        "matches. It is a working document, not a published result.\n"
+    )
+
+    @pytest.mark.parametrize("prefix", ["knowledge__", "rdr__"])
+    def test_eligible_names_equals_actual_routing_outcomes(self, prefix):
+        from nexus.aspect_extractor import (
+            _resolve_config_for_document,
+            eligible_extractor_names,
+            select_config,
+        )
+
+        collection = f"{prefix}test"
+        base_config = select_config(collection)
+        assert base_config is not None, f"{prefix} must be a registered prefix"
+
+        actual_names = {
+            _resolve_config_for_document(collection, self._PAPER, base_config).extractor_name,
+            _resolve_config_for_document(collection, self._PROSE, base_config).extractor_name,
+        }
+        assert set(eligible_extractor_names(collection)) == actual_names
+
+    def test_registered_prefixes_are_exactly_what_this_pins(self):
+        """A future third prefix must extend the parametrize list above, not
+        silently go unpinned. Fails loudly if registered_prefixes() ever
+        drifts from the two names this test drives."""
+        from nexus.aspect_extractor import registered_prefixes
+
+        assert set(registered_prefixes()) == {"knowledge__", "rdr__"}
+
+    def test_unregistered_prefix_returns_none_and_empty(self):
+        from nexus.aspect_extractor import eligible_extractor_names, select_config
+
+        assert select_config("docs__test") is None
+        assert eligible_extractor_names("docs__test") == []
+
+    def test_rdr_prefix_is_the_single_non_shape_routed_name(self):
+        """Direct literal-value check, not the general equality-of-sets pin
+        above: rdr__* is never shape-routed, so this must return EXACTLY
+        one name, and it must be rdr-frontmatter-v1."""
+        from nexus.aspect_extractor import eligible_extractor_names
+
+        assert eligible_extractor_names("rdr__anything") == ["rdr-frontmatter-v1"]
+
+    def test_knowledge_prefix_returns_both_shape_routed_names(self):
+        """Direct literal-value check for the shape-routed prefix: both
+        names, paper first (matches the table's own key order)."""
+        from nexus.aspect_extractor import eligible_extractor_names
+
+        assert eligible_extractor_names("knowledge__anything") == [
+            "scholarly-paper-v1",
+            "general-prose-v1",
+        ]
+
+
+class TestShapeRoutedConfigsShareOneModelVersionScheme:
+    """nexus-kk4ut Latent finding: ``nx enrich aspects --re-extract
+    --extractor-version X`` applies ONE caller-supplied threshold across
+    EVERY extractor ``eligible_extractor_names`` returns for a collection
+    (``enrich.py`` ``_select_entries``), unconditionally. That single
+    threshold is only coherent because every extractor sharing a
+    ``_SHAPE_ROUTING_TABLE`` entry currently carries the SAME
+    ``model_version`` scheme — comparing a lexicographic threshold against
+    two DIFFERENT model families would not mean "outdated" in any coherent
+    sense. This is the tripwire, not a per-extractor threshold: the day
+    someone bumps one shape's model but not the sibling shape's, THIS test
+    fails, and ``--extractor-version`` needs a per-extractor threshold (or a
+    documented escape hatch) before the divergent config ships."""
+
+    def test_every_shape_routing_table_entry_shares_one_model_version(self):
+        from nexus.aspect_extractor import _SHAPE_ROUTING_TABLE
+
+        assert _SHAPE_ROUTING_TABLE, "table must not be empty for this test to mean anything"
+        for base_name, routes in _SHAPE_ROUTING_TABLE.items():
+            versions = {config.model_version for config in routes.values()}
+            assert len(versions) == 1, (
+                f"extractors routed from base '{base_name}' carry DIFFERENT "
+                f"model_version schemes ({sorted(versions)}) -- "
+                f"nx enrich aspects --re-extract --extractor-version applies "
+                f"ONE threshold across all of them (enrich.py "
+                f"_select_entries via eligible_extractor_names); see "
+                f"nexus-kk4ut. Give --extractor-version a per-extractor "
+                f"threshold before shipping this divergence."
+            )
+
+
 class TestGap3KnowledgeNoteRouting:
     """RDR-145 Phase 1 (P1.1, nexus-3g0l4): regression test pinning the
     shipped nexus-kmbys shape-aware routing for the ``knowledge__knowledge``

@@ -1,6 +1,6 @@
 # MCP Servers
 
-Nexus ships two MCP servers, bundled in the Claude Code plugin. The Claude Desktop `.mcpb` extension bundles only the first — its manifest's `entry_point` (`mcpb/manifest.json`) runs `nexus.mcp.core:main` alone (`mcpb/src/server.py`), with no `nexus-catalog` process. This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
+Nexus ships two MCP servers, bundled in the Claude Code plugin. The Claude Desktop `.mcpb` extension bundles only the first — its manifest's `entry_point` (`mcpb/manifest.json`) is `mcpb/src/bootstrap.py`, a resolve-with-retry wrapper (nexus-r433b) that execs `mcpb/src/server.py`, which in turn runs `nexus.mcp.core:main` — with no `nexus-catalog` process. This page is the **tool catalog** — every tool, on which server, with a one-line purpose.
 
 For **when to use which retrieval interface**, see [Querying Guide](querying-guide.md). For conceptual background, see [Document Catalog](catalog.md) and [Storage Tiers](storage-tiers.md).
 
@@ -77,9 +77,9 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `tuple_registry` | The boot-loaded template set: `{digest, sources, templates}` |
 | `tuple_list` | Concrete subspaces that exist, optionally filtered by prefix. Pages 100 subspaces by default (bead nexus-xapt8); a truncated page appends `{"_pagination": {"next_cursor": "..."}}`, which you pass back as `after`. `limit=0` or a negative limit clamps to 1 |
 | `tuple_stats` | The census for one subspace |
-| `tuple_subscribe` | Add a board topic or the session's own instance-name mailbox to this session's MCP server subscription list (RDR-211). A queue or a lock is refused naming `in`; any mailbox other than the session's own instance name is refused; at most 32 board topics beyond the two mailboxes. Subscribing the instance mailbox writes the drain hook's registration file and starts the RDR-208 directory lease |
-| `tuple_unsubscribe` | Remove a subspace from the subscription list; unsubscribing the instance mailbox stops its directory lease. The session's own mailbox can never be removed |
-| `tuple_subscriptions` | List the subscription set with each entry's delivery cursor: the session mailbox, then the instance mailbox if any, then board topics |
+| `tuple_subscribe` | Add a board topic to this session's MCP server subscription list (RDR-211), or lease the session's own name in the peer directory (`mailbox/<name>`, RDR-208 Phase 3, bead nexus-galkv.20). A queue or a lock is refused naming `in`; a second leased name is refused; at most 32 board topics beyond the session's own mailbox. A leased name arms its `directory/<name>` lease so `mailbox_send` can resolve it -- it is NEVER a second delivered mailbox: nothing is pushed or drained for it |
+| `tuple_unsubscribe` | Remove a subspace from the subscription list, or (`mailbox/<name>`, for the name this session leases) stop the `directory/<name>` lease. The session's own mailbox can never be removed |
+| `tuple_subscriptions` | List the DELIVERED subscription set with each entry's delivery cursor: the session mailbox, then board topics. A leased name is never listed here -- see `tuple_subscribe` |
 | `mailbox_send` | Send to a session, an agent, or a NAME, resolved at send time (RDR-208). A session or agent id writes directly; a name reads every live `directory/<name>` row and refuses (writing nothing) on zero or more than one distinct holding session. Returns `{tuple_id, to, address_kind, from}` |
 
 **Routing rule of thumb**: `tuple_rd`/`tuple_in` with `timeout_s=0` (the default) are the probe forms — never block. Pass `timeout_s>0` only when the caller intends to wait; a wait of minutes is a loop of parked calls (each capped at 25 s by default), never one long park. There are no separate probe-named tools (`tuple_rdp`/`tuple_inp`) — `timeout_s=0` covers that case on the same tool.
@@ -124,6 +124,33 @@ One further tool rounds out the server (RDR-126): `daemon_uninstall`
 (remove the storage-service OS autostart unit — plus any legacy
 `com.nexus.t2` unit left behind by a pre-retirement install — and stop the
 engine-service + Postgres stack; destructive, `confirm=true` gated).
+
+### Hook-tier tools (internal plumbing, RDR-215)
+
+The remaining 12 of the 64 registered tools are `hook_*` entries
+(`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
+conexus plugin `hooks.json` entry — `PreToolUse`, `PermissionRequest`,
+`SubagentStart`, `SubagentStop`, `Stop`, `PreCompact` — to an `mcp_tool`
+call instead of a bash script. They are wired automatically by the
+plugin's own hook configuration; there is no reason to call one by hand,
+and their own tool descriptions say so ("not meant to be invoked
+directly"). Listed here only so the 64-tool count reconciles with the
+tables above, which cover the 52 tools an agent calls directly:
+
+| Tool | Fires on |
+|---|---|
+| `hook_agent_dispatch_expect` | Agent/Task dispatch — records an RDR-184 EXPECT row before the dispatch |
+| `hook_auto_approve` | PreToolUse / PermissionRequest — auto-approves an allowlisted `mcp__plugin_conexus_*` tool |
+| `hook_subagent_start` | SubagentStart — assembles a starting subagent's context (RDRs, T2, T1, tool guidance) |
+| `hook_subagent_start_stamp` | SubagentStart — records an RDR-184 START row |
+| `hook_subagent_start_tuple` | SubagentStart — projects the RDR-205 ledger START tuple |
+| `hook_subagent_stop` | SubagentStop — blocks a background teammate's stop once if it reported nothing |
+| `hook_subagent_stop_tuple` | SubagentStop — projects the RDR-205 ledger REPORT tuple |
+| `hook_stop_verification` | Stop — warns on uncommitted changes, in-progress beads, outstanding agents |
+| `hook_stop_failure` | StopFailure — observes a transient API failure; debug trace only |
+| `hook_pre_close_verification` | Bash (bd close/create) — refuses a close with no review-completed marker |
+| `hook_post_compact` | PreCompact — re-injects active beads and session scratch after compaction |
+| `hook_divergence_language_guard` | Write/Edit under `docs/rdr/post-mortem/` — flags divergence language (advisory) |
 
 ## `nexus-catalog` — document catalog (10 tools)
 

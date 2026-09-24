@@ -94,20 +94,35 @@ class TestPostCompactHook:
             f"Output exceeds 20-line budget: {len(lines)} lines\n{result.stdout}"
         )
 
-    def test_contains_beads_section_when_active(self) -> None:
-        """Output should contain a beads section when bd has in-progress work."""
-        result = _run_hook()
-        if subprocess.run(["which", "bd"], capture_output=True).returncode == 0:
-            active = subprocess.run(
-                ["bd", "list", "--status=in_progress", "--limit=1"],
-                capture_output=True, text=True,
-            )
-            has_active = active.returncode == 0 and "in_progress" in (active.stdout or "")
-            if has_active:
-                assert any(
-                    kw in result.stdout.lower()
-                    for kw in ("bead", "in-progress", "in_progress", "work")
-                ), f"No beads section in output:\n{result.stdout}"
+    @staticmethod
+    def _stub_bd(tmp_path: Path, output: str) -> dict[str, str]:
+        """A `bd` first on PATH that prints *output* for any arguments.
+
+        The test builds its own condition. It used to ask the machine's live
+        `bd` whether anything was in progress and assert only if so, so its
+        verdict tracked whatever any session on the box was working on, and
+        a slow live `bd` under xdist load came back empty and read as a
+        missing section (red twice on 2026-09-24, in two sessions)."""
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        stub = bindir / "bd"
+        stub.write_text(f"#!{sys.executable}\nimport sys\nsys.stdout.write({output!r})\n")
+        stub.chmod(0o755)
+        return {"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", "")}
+
+    def test_contains_beads_section_when_active(self, tmp_path: Path) -> None:
+        """In-progress beads from `bd` become the Active Work section."""
+        env = self._stub_bd(tmp_path, "nexus-stub1 [P2] [task] in_progress - a stubbed bead\n")
+        result = _run_hook(env_overrides=env)
+        assert result.returncode == 0
+        assert "### Active Work" in result.stdout, result.stdout
+        assert "nexus-stub1" in result.stdout, result.stdout
+
+    def test_no_beads_section_when_nothing_is_in_progress(self, tmp_path: Path) -> None:
+        """An empty `bd` answer adds no Active Work section."""
+        result = _run_hook(env_overrides=self._stub_bd(tmp_path, ""))
+        assert result.returncode == 0
+        assert "### Active Work" not in result.stdout, result.stdout
 
     def test_contains_scratch_section_when_entries_exist(self) -> None:
         """Output should contain a scratch section when nx has entries."""

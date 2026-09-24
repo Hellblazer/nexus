@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.60.0] - 2026-09-24
+
+Pairs with engine-service-v0.1.130, unchanged from 7.59.0: this is a client and plugin release with no engine cut. It is RDR-208's R3 release; the engine half of Phase 3 ships in a later engine cut.
+
+### Added
+
+- **`nx config list --keys-only`, `nx config set --stdin` and `nx config set --from-file`** (nexus-6fvwo). `--keys-only` shows each key as set or not set, with its source, and prints no value characters. `--stdin` and `--from-file` keep a credential off the command line, where any process running as the same user can read it. `--from-file` refuses a file that group or others can read.
+- **An advisory close-gate check at session stop** (nexus-dgl8g). The Stop hook lists beads closed in this session without a review-completed marker, which catches closes the PreToolUse gate cannot see (`bd batch -f`, `bd import`). It never blocks.
+
+### Fixed
+
+- **A search against collections this install cannot embed for now fails loudly** (nexus-vply6). Before, a query whose collections were registered under a model the current embedding mode cannot serve returned an empty or partial result; the typical case is a GUI-launched process without the shell's Voyage key. `search`, the plan runner and `nx_answer` all raise a named error, and a partly degraded answer says which collections were left out.
+- **A storage service that misses its lease heartbeat is no longer treated as down while it still answers** (nexus-wo6sc). When the lease has expired but the supervisor process is alive and the port answers `/health`, clients keep using it, for up to ten lease lifetimes.
+- **Storage-touching MCP tools no longer load numpy, scipy and sklearn on first use** (nexus-fd3zf). Opening T2 imported the whole numeric stack (1.74 s cold), including on the error path, and that import is where the MCP server hung on native Windows.
+- **Process cleanup works where `os.killpg` and `SIGKILL` do not exist** (nexus-34f7r). On Windows the kill helpers raised at import and masked the failures they were cleaning up after, and the SessionEnd launcher ran its cleanup inline until Claude Code cancelled it. It now hands cleanup to a detached child.
+- **`nx enrich aspects --re-extract` finds rows routed to the general-prose extractor** (nexus-kk4ut), which it previously skipped.
+- **A hook killed by its timeout no longer leaves `nx-hook` running** (nexus-rcoze). The plugin's nx-hook shim now passes the signal on to the hook it started.
+
+### Removed
+
+- **Instance-name mailbox delivery** (RDR-208 Phase 3, nexus-galkv.20; the retention window closed at R2/v7.46.0 + 7 days). Subscribing a name with `tuple_subscribe("mailbox/<name>")` still arms its `directory/<name>` lease so `mailbox_send` resolves it, but it no longer registers a second mailbox: the per-session registration file the drain hook used to read is gone, the leased name is never listed by `tuple_subscriptions`, and nothing is pushed over the channel for it. Reach a session by name through `mailbox_send`, which always resolves to its own session id.
+- The unwired `version-lockstep` `nx-hook` verb and its wheel modules (nexus-rcoze). Version lockstep stays the stdlib plugin script, which is what runs; its tests now drive that script again.
+
+### Documentation
+
+- User-facing docs, the site pages and the plugin READMEs were audited against the current release and corrected where they had drifted (tool counts, storage modes, install and onboarding steps, CLI flags).
+
 ## [7.59.0] - 2026-09-24
 
 Pairs with engine-service-v0.1.130, unchanged from 7.58.0: this is a client and plugin release with no engine cut.

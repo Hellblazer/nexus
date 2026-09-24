@@ -1,5 +1,11 @@
 # Field Report: Architecture-as-Code — Lessons from the ART Collection Rebuild
 
+> **Historical (2026-04-15, nexus 4.4.0).** A point-in-time production
+> shakeout report. Its findings (F3, F5, F6, F8, F11, ...) drove design work
+> cited from RDR-081, RDR-082, RDR-083, and RDR-085 — see those RDRs for
+> current disposition; this document is the source record, not a live
+> tooling-gap list.
+
 **Date:** 2026-04-15
 **Source project:** ART (neural architecture for grounded dialog)
 **Nexus version observed:** 4.4.0

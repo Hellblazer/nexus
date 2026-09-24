@@ -22,11 +22,16 @@ it.
 
 Standard library only, and no ``nexus`` import: it has to run under whatever
 CLI is installed, including none. It sets no timeout of its own; the entry's
-``timeout`` in hooks.json bounds the whole call.
+``timeout`` in hooks.json bounds the whole call. When that timeout, or anything
+else, signals the shim with SIGTERM, SIGINT or SIGHUP, the shim terminates the
+``nx-hook`` child before it exits, so the handler is not left running orphaned
+(review finding, nexus-rcoze). A SIGKILL cannot be forwarded; the verbs bound
+their own subprocess work.
 """
 from __future__ import annotations
 
 import re
+import signal
 import subprocess
 import sys
 
@@ -47,14 +52,29 @@ def main(argv: list[str]) -> int:
     verb = argv[0]
     payload = sys.stdin.buffer.read()
     try:
-        proc = subprocess.run(["nx-hook", verb], input=payload, capture_output=True)
+        proc = subprocess.Popen(
+            ["nx-hook", verb],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
     except FileNotFoundError:
         sys.stderr.write(
             f"conexus: `nx-hook` is not installed, so the {verb} hook is skipped. "
             "Upgrade the conexus CLI (nx self install).\n"
         )
         return 0
-    stderr = proc.stderr.decode("utf-8", errors="replace")
+
+    def _forward(signum: int, _frame: object) -> None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, _forward)
+    out, err = proc.communicate(payload)
+    stderr = err.decode("utf-8", errors="replace")
     if proc.returncode == 2 and UNKNOWN_VERB_LINE.search(stderr):
         sys.stderr.write(
             f"conexus: the installed CLI does not know the {verb} hook yet, so it "
@@ -62,7 +82,7 @@ def main(argv: list[str]) -> int:
             "Claude Code after the upgrade the version-lockstep hook starts.\n"
         )
         return 0
-    sys.stdout.buffer.write(proc.stdout)
+    sys.stdout.buffer.write(out)
     sys.stdout.buffer.flush()
     sys.stderr.write(stderr)
     return proc.returncode
