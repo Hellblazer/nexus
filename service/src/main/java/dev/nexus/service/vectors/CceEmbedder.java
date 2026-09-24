@@ -27,27 +27,34 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 
 /**
  * RDR-152 bead nexus-gmiaf.21 — Voyage AI Contextualized Chunk Embedding (CCE) embedder.
  *
- * <p>Mirrors the voyageai Python SDK's {@code contextualized_embed} call EXACTLY, including
- * the Python t3.py per-text calling convention:
+ * <p>Mirrors the voyageai Python SDK's {@code contextualized_embed} call's parameters:
  * <ul>
  *   <li>REST endpoint: {@code POST https://api.voyageai.com/v1/contextualizedembeddings}</li>
- *   <li>Each text is embedded in a SEPARATE API call: {@code inputs=[[text]]} per text.</li>
+ *   <li>Each text is its OWN single-chunk document: {@code inputs=[[t0],[t1],...]}, up to
+ *       {@link #DEFAULT_BATCH_CHUNKS} texts per call (nexus-u2mlh.1, shape C; see below).</li>
  *   <li>{@code encoding_format: "base64"} — Python SDK default; gives exact float32 binary</li>
  *   <li>No {@code output_dtype} field — production _cce_embed does not set it</li>
  *   <li>Response: {@code data[0].data[0].embedding}</li>
  *   <li>No {@code truncation} field — CCE API does not accept it (unlike /v1/embeddings)</li>
  * </ul>
  *
- * <p><strong>CRITICAL: per-text not batch.</strong> The CCE model embeds each document
- * in the context of ALL other documents in the same API call.  Sending multiple texts as
- * {@code inputs=[[t0],[t1],...]} produces DIFFERENT embeddings than sending
- * {@code inputs=[[t0]]} and {@code inputs=[[t1]]} separately (measured cosine ≈ 0.999,
- * not 1.0).  Python's t3.py always calls one text at a time:
+ * <p><strong>Batched as single-chunk documents (nexus-u2mlh.1, Sam 2026-09-24).</strong>
+ * Sending {@code inputs=[[t0],[t1],...]} makes each text its own document, so no text is
+ * embedded in another's context. Measured from the engine host on 2026-09-24 (conexus-1f,
+ * 1024-d): a chunk alone vs the same chunk inside such a batch, cosine 0.999951-0.999999,
+ * which is batch numerics, not context; the control (alone vs alone) was 1.000000. That
+ * keeps content-addressed chunk identity (RDR-108/180) and RDR-181's embed-skip sound,
+ * and needs no reindex. Throughput matched the per-chunk fan-out's best (12.6-13.0 vs
+ * 7.9-13.6 chunks/s) with a twelfth of the HTTP calls and semaphore permits. Grouping one
+ * document's chunks as {@code [[c0..cN]]} is a DIFFERENT shape: it changes the vectors
+ * (cosine 0.83-0.89) and was slower, so it is not used. A batch that Voyage refuses with a
+ * 400 (for example past its 32k-token pre-chunked request cap) falls back to one call per
+ * text, so one oversized text fails alone. The pre-batching convention, kept here as the
+ * record of what the parity oracle used to mirror, was Python's t3.py one text per call:
  * <pre>
  *   result = _voyage_with_retry(
  *       self._voyage_client.contextualized_embed,
@@ -57,7 +64,9 @@ import java.util.function.Function;
  *   )
  *   return result.results[0].embeddings[0]
  * </pre>
- * Java must match this: one API call per text, even for batch inputs.
+ * The parity gate ({@code tests/db/test_embed_parity.py}) sends its oracle request in the
+ * same batched shape and compares by cosine within 1e-3, because CCE output also drifts
+ * between identical calls (nexus-mcgnz measured 2.6e-4 to 3.7e-4).
  *
  * <p><strong>CRITICAL: base64 encoding.</strong>  The Python voyageai SDK uses
  * {@code encoding_format="base64"} by default (see {@code ContextualizedEmbedding.create}).
@@ -74,18 +83,15 @@ import java.util.function.Function;
  * loop as 86.6% of a full reindex's wall time — N fully-serialized Voyage round
  * trips, strictly sequential on the request thread. {@link #embed}, {@link
  * #embedWithUsage}, and {@link #embedDouble} now fan the per-text calls out
- * across a bounded shared executor ({@link #embedParallel}) instead of looping.
- * Vectors stay BIT-IDENTICAL — the request shape ({@code inputs=[[text]]}), model,
- * and every other param are unchanged; only the round trips overlap. Document-
- * grouped CCE ({@code inputs=[[c0..cN]]}, which WOULD change vector values via
- * cross-chunk context) is explicitly out of scope — that is RDR territory
- * (R2 in the analysis), not this fix.
+ * across a bounded shared executor ({@link #embedAll}) instead of looping.
+ * Since nexus-u2mlh.1 each task carries a batch of single-chunk documents rather
+ * than one text (see "Batched as single-chunk documents" above).
  *
  * <p>Thread-safe: {@link #http} and {@link #mapper} are safe for concurrent use
  * (immutable {@link HttpClient}, Jackson {@link ObjectMapper} read/decode calls);
  * {@link #executor} and {@link #inFlight} are the shared, bounded concurrency
  * primitives every {@code embed*} call on THIS instance draws from — see {@link
- * #embedParallel} for the ordering and failure-propagation contract.
+ * #embedAll} for the ordering and failure-propagation contract.
  */
 public final class CceEmbedder implements Embedder {
 
@@ -97,7 +103,7 @@ public final class CceEmbedder implements Embedder {
 
     /**
      * Total wall-clock budget ONE WHOLE embed request (the full
-     * {@link #embedParallel} fan-out, however many texts) may spend absorbing
+     * {@link #embedAll} fan-out, however many texts) may spend absorbing
      * Voyage 429s before failing fast with a typed
      * {@link UpstreamRateLimitedException} (nexus-99r7y). Sized well under
      * the public edge's 30s upstream bound: the 2026-08-15 incident
@@ -147,6 +153,49 @@ public final class CceEmbedder implements Embedder {
      */
     private static final int CCE_PARALLELISM = 12;
 
+    /** Chunks per CCE request, each its own single-chunk document (nexus-u2mlh.1). The
+     *  probe that chose shape C used 12; {@code NX_CCE_BATCH_CHUNKS} overrides. */
+    static final int DEFAULT_BATCH_CHUNKS = 12;
+
+    /** UTF-8 byte budget for one batched request. Voyage caps a pre-chunked request at
+     *  32,000 tokens in total; 48 KiB stays under that for any text averaging at least
+     *  1.5 bytes per token. A single text over the budget still goes alone. */
+    static final int BATCH_MAX_BYTES = 48 * 1024;
+
+    /** A call slower than this is logged at INFO ({@code event=cce_call_slow}); every
+     *  call is logged at DEBUG (nexus-u2mlh.4). */
+    static final long SLOW_CALL_MS = 5_000L;
+
+    /** {@code NX_CCE_PARALLELISM} / {@code NX_CCE_BATCH_CHUNKS} (nexus-u2mlh.4): a blank or
+     *  absent value takes the default; an unparsable or out-of-range one is refused with a
+     *  warning and the default, never a crash at boot. */
+    static int envInt(String name, String raw, int dflt, int min, int max) {
+        if (raw == null || raw.isBlank()) {
+            return dflt;
+        }
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v >= min && v <= max) {
+                return v;
+            }
+        } catch (NumberFormatException ignored) {
+            // fall through to the warning
+        }
+        log.warn("event=cce_config_invalid name={} value={} allowed={}..{} using={}", name, raw, min, max, dflt);
+        return dflt;
+    }
+
+    /** Thrown for a non-2xx CCE status the retry loop gives up on, so the batch path can
+     *  tell a 400 (fall back to one call per text) from anything else. */
+    static final class CceStatusException extends RuntimeException {
+        final int status;
+
+        CceStatusException(int status, String message) {
+            super(message);
+            this.status = status;
+        }
+    }
+
     private final String     apiKey;
     private final String     inputType;  // "document" or "query"
     private final String     url;         // test-injectable; production = CCE_URL
@@ -157,6 +206,8 @@ public final class CceEmbedder implements Embedder {
     private final ExecutorService executor;
     /** Actual concurrency governor — caps in-flight Voyage calls at construction-time bound. */
     private final Semaphore inFlight;
+    /** Texts per request; 1 is the historical one-text-per-call shape. */
+    private final int batchChunks;
     /** The consolidated retry choreography (nexus-1vpal) — owns backoff,
      *  Retry-After, the 429 budget arithmetic, and the shared auth arm. */
     private final VoyageRetryLoop retryLoop;
@@ -184,7 +235,7 @@ public final class CceEmbedder implements Embedder {
     private static final VoyageRetryLoop.Failures CCE_FAILURES = new VoyageRetryLoop.Failures() {
         @Override
         public RuntimeException status(int status, String body) {
-            return new RuntimeException("Voyage AI CCE request failed: HTTP " + status + " body=" + body);
+            return new CceStatusException(status, "Voyage AI CCE request failed: HTTP " + status + " body=" + body);
         }
 
         @Override
@@ -198,7 +249,10 @@ public final class CceEmbedder implements Embedder {
      * @param inputType {@code "document"} for indexing, {@code "query"} for search
      */
     public CceEmbedder(String apiKey, String inputType) {
-        this(apiKey, inputType, CCE_URL, RETRY_BASE_MS, CCE_PARALLELISM, EgressProxy.selector());
+        this(apiKey, inputType, CCE_URL, RETRY_BASE_MS,
+             envInt("NX_CCE_PARALLELISM", System.getenv("NX_CCE_PARALLELISM"), CCE_PARALLELISM, 1, 64),
+             EgressProxy.selector(), new Random(), RATE_LIMIT_BUDGET_MS,
+             envInt("NX_CCE_BATCH_CHUNKS", System.getenv("NX_CCE_BATCH_CHUNKS"), DEFAULT_BATCH_CHUNKS, 1, 128));
     }
 
     /**
@@ -246,6 +300,23 @@ public final class CceEmbedder implements Embedder {
     CceEmbedder(String apiKey, String inputType, String url, long retryBaseMs,
                 int parallelism, Optional<ProxySelector> proxy, Random jitterRandom,
                 long rateLimitBudgetMs) {
+        this(apiKey, inputType, url, retryBaseMs, parallelism, proxy, jitterRandom, rateLimitBudgetMs, 1);
+    }
+
+    /**
+     * Full wiring with the batch size (nexus-u2mlh.1). The shorter test constructors
+     * keep {@code batchChunks=1}, the one-text-per-call shape their fakes and
+     * assertions were written for; production batches at {@link #DEFAULT_BATCH_CHUNKS}.
+     *
+     * @param batchChunks texts per Voyage request, each its own single-chunk document
+     */
+    CceEmbedder(String apiKey, String inputType, String url, long retryBaseMs,
+                int parallelism, Optional<ProxySelector> proxy, Random jitterRandom,
+                long rateLimitBudgetMs, int batchChunks) {
+        if (batchChunks < 1) {
+            throw new IllegalArgumentException("batchChunks must be >= 1, got " + batchChunks);
+        }
+        this.batchChunks = batchChunks;
         this.apiKey      = apiKey;
         this.inputType   = inputType;
         this.url         = url;
@@ -262,6 +333,8 @@ public final class CceEmbedder implements Embedder {
         this.mapper = new ObjectMapper();
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.inFlight = new Semaphore(parallelism);
+        log.info("event=cce_embedder_configured input_type={} parallelism={} batch_chunks={} batch_max_bytes={}",
+                 inputType, parallelism, batchChunks, BATCH_MAX_BYTES);
     }
 
     @Override
@@ -278,47 +351,24 @@ public final class CceEmbedder implements Embedder {
     }
 
     /**
-     * Embed a batch of texts via CCE, one Voyage API call per text, run in
-     * parallel across the bounded executor. See {@link #embedParallel}.
-     *
-     * <p>Each text is still sent as a separate API call ({@code inputs=[[text]]})
-     * to match Python's t3.py per-text behavior.  Batching multiple texts in one
-     * call produces different embeddings due to cross-document context
-     * propagation in the CCE model — that is a DIFFERENT, out-of-scope change
-     * (see the class doc); this method only overlaps the round trips.
+     * Embed texts via CCE, batched as single-chunk documents and run in parallel
+     * across the bounded executor. See {@link #embedAll} and the class doc.
      */
     @Override
     public List<float[]> embed(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
-        // nexus-99r7y critic fold: ONE deadline for the WHOLE request — see
-        // RATE_LIMIT_BUDGET_MS's javadoc. Binding it here (not per worker)
-        // is what makes the budget request-scoped.
-        long deadlineNanos = newEmbedDeadlineNanos();
-        return embedParallel(texts, t -> embedOneFloat(t, deadlineNanos));
+        return embedAll(texts).embeddings();
     }
 
     /**
      * Embed a batch of texts and return vectors plus the accumulated token count
-     * from {@code usage.total_tokens} across all per-text CCE API calls
-     * (bead nexus-ehc4q).
-     *
-     * <p>One API call per text (CCE per-text convention), run in parallel across
-     * the bounded executor (nexus-9okyk; see {@link #embedParallel}); total_tokens
-     * is summed across all N calls in INPUT order (not completion order), so the
-     * sum is identical to the old sequential loop regardless of scheduling.
+     * from {@code usage.total_tokens} summed over every CCE request the call made
+     * (bead nexus-ehc4q), in batch order, so the sum does not depend on scheduling.
      */
     @Override
     public EmbedResult embedWithUsage(List<String> texts) {
         if (texts == null || texts.isEmpty()) return new EmbedResult(List.of(), 0L);
-        long deadlineNanos = newEmbedDeadlineNanos();  // nexus-99r7y: request-scoped budget
-        List<EmbedResult> perChunk = embedParallel(texts, t -> embedOneWithUsage(t, deadlineNanos));
-        List<float[]> result = new ArrayList<>(perChunk.size());
-        long totalTokens = 0L;
-        for (EmbedResult oneResult : perChunk) {
-            result.add(oneResult.embeddings().get(0));
-            totalTokens += oneResult.tokens();
-        }
-        return new EmbedResult(result, totalTokens);
+        return embedAll(texts);
     }
 
     /**
@@ -331,8 +381,14 @@ public final class CceEmbedder implements Embedder {
      */
     public List<double[]> embedDouble(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
-        long deadlineNanos = newEmbedDeadlineNanos();  // nexus-99r7y: request-scoped budget
-        return embedParallel(texts, t -> embedOneDouble(t, deadlineNanos));
+        List<float[]> f32 = embedAll(texts).embeddings();
+        List<double[]> out = new ArrayList<>(f32.size());
+        for (float[] v : f32) {
+            double[] d = new double[v.length];
+            for (int i = 0; i < v.length; i++) d[i] = v[i];  // exact float32 -> float64
+            out.add(d);
+        }
+        return out;
     }
 
     /**
@@ -385,10 +441,70 @@ public final class CceEmbedder implements Embedder {
      * — it composes with this fan-out for free: each of the up-to-{@code
      * CCE_PARALLELISM} concurrent workers retries its OWN call independently.
      */
-    private <T> List<T> embedParallel(List<String> texts, Function<String, T> perText) {
+    /** One batch's vectors and billed tokens, plus how long it queued for a permit
+     *  and how long its Voyage call(s) took (nexus-u2mlh.4). */
+    private record BatchOutcome(List<float[]> vectors, long tokens, long queuedNanos, long callNanos) {
+    }
+
+    /** Splits {@code texts} into consecutive batches of at most {@link #batchChunks}
+     *  texts and {@link #BATCH_MAX_BYTES} UTF-8 bytes; a text over the byte budget
+     *  goes alone. Package-private for tests. */
+    List<int[]> planBatches(List<String> texts) {
+        List<int[]> out = new ArrayList<>();
+        int start = 0;
+        int bytes = 0;
+        for (int i = 0; i < texts.size(); i++) {
+            int len = texts.get(i).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            boolean full = (i - start) >= batchChunks || (i > start && bytes + len > BATCH_MAX_BYTES);
+            if (full) {
+                out.add(new int[] {start, i});
+                start = i;
+                bytes = 0;
+            }
+            bytes += len;
+        }
+        if (start < texts.size()) {
+            out.add(new int[] {start, texts.size()});
+        }
+        return out;
+    }
+
+    /**
+     * The embed path (nexus-9okyk fan-out, batched by nexus-u2mlh.1): one virtual-thread
+     * task per BATCH of up to {@link #batchChunks} texts, gated by {@link #inFlight} to
+     * at most the constructor's {@code parallelism} concurrent Voyage requests.
+     *
+     * <p><strong>Order preservation.</strong> By construction: batch {@code b} covers a
+     * fixed index range, and its vectors are placed at that range, whatever order the
+     * batches complete in or the response lists them in (the parser sorts by index).
+     *
+     * <p><strong>Failure semantics.</strong> Batches are consumed in index order; the first
+     * one whose {@link Future#get()} raises is terminal for the whole request, and every
+     * not-yet-done sibling is cancelled. No partial result is ever returned. A batch Voyage
+     * refuses with a 400 first retries as one call per text ({@link #embedBatch}), so only
+     * a text that fails alone fails the request.
+     *
+     * <p><strong>Accepted cost: billing asymmetry on terminal failure (nexus-9okyk critic
+     * fix 2).</strong> All batches are submitted eagerly, so batches past the failing one
+     * may already be billed; {@code cancelFrom} stops only those not yet started.
+     *
+     * <p><strong>Request deadline (nexus-8hdg9 phase 4).</strong> Checked before each
+     * collected batch; past it, not-yet-started batches are cancelled and a
+     * {@link RequestDeadlineExceededException} is thrown.
+     *
+     * <p><strong>Logging (nexus-u2mlh.4).</strong> Each batch logs its queue wait and call
+     * time at DEBUG, at INFO when the call exceeds {@link #SLOW_CALL_MS}; each request logs
+     * one {@code event=embed_done} summary at INFO.
+     */
+    private EmbedResult embedAll(List<String> texts) {
         int n = texts.size();
-        List<Future<T>> futures = new ArrayList<>(n);
-        for (String text : texts) {
+        // nexus-99r7y critic fold: ONE 429 deadline for the WHOLE request.
+        long deadlineNanos = newEmbedDeadlineNanos();
+        List<int[]> ranges = planBatches(texts);
+        List<Future<BatchOutcome>> futures = new ArrayList<>(ranges.size());
+        for (int[] r : ranges) {
+            List<String> sub = texts.subList(r[0], r[1]);
+            long submittedNanos = System.nanoTime();
             futures.add(executor.submit(() -> {
                 try {
                     inFlight.acquire();
@@ -396,78 +512,129 @@ public final class CceEmbedder implements Embedder {
                     Thread.currentThread().interrupt();
                     throw e;
                 }
+                long startedNanos = System.nanoTime();
                 try {
-                    return perText.apply(text);
+                    BatchOutcome o = embedBatch(sub, deadlineNanos);
+                    long callNanos = System.nanoTime() - startedNanos;
+                    long queuedNanos = startedNanos - submittedNanos;
+                    logCall(sub.size(), queuedNanos, callNanos);
+                    return new BatchOutcome(o.vectors(), o.tokens(), queuedNanos, callNanos);
                 } finally {
                     inFlight.release();
                 }
             }));
         }
-        List<T> results = new ArrayList<>(n);
-        // Bead nexus-s71lr (code-review-expert pass 2 finding a): this call's own
-        // clock — CCE embeds one text per API call (per this class's own "CRITICAL:
-        // per-text not batch" contract above), so "sub_batch_size" here is always 1;
-        // the progress line still needs the SAME rate limiting as Bge768/Voyage, since
-        // a large bulk run is exactly N single-text completions in a tight loop.
+
+        List<float[]> vectors = new ArrayList<>(n);
+        long tokens = 0L;
+        long maxQueuedNanos = 0L;
+        long maxCallNanos = 0L;
+        long sumCallNanos = 0L;
         long callStartNanos = System.nanoTime();
-        // nexus-8hdg9 phase 4: the request's cooperative deadline, read ONCE per call
-        // (RequestDeadlineProbe.NONE outside a filtered request -> never aborts). The
-        // check before each collected future reuses the most recent nanoTime reading
-        // this loop already takes for its progress counters (callStartNanos before the
-        // first get), so the per-iteration cost is one long comparison.
         long requestDeadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
         long lastNanos = callStartNanos;
-        for (int i = 0; i < n; i++) {
+        int chunksDone = 0;
+        for (int b = 0; b < futures.size(); b++) {
             if (RequestDeadlineProbe.expired(requestDeadlineNanos, lastNanos)) {
-                // Stop every future not yet consumed, index i included -- its result will
-                // never be read. Siblings already dispatched to Voyage are still billed
-                // (the class javadoc's documented asymmetry); cancel(true) only prevents
-                // the NOT-YET-STARTED ones from ever acquiring a permit.
-                cancelFrom(futures, i);
+                cancelFrom(futures, b);
                 long elapsedMs = (lastNanos - callStartNanos) / 1_000_000L;
                 long pastDeadlineMs = (lastNanos - requestDeadlineNanos) / 1_000_000L;
                 activityTracker.recordDeadlineAbort();  // GET /v1/status deadline_aborts_total
                 log.warn("event=embed_deadline_exceeded embedder=cce chunks_done={} chunks_total={} "
                         + "elapsed_ms={} past_deadline_ms={} retry_after_s={}",
-                        i, n, elapsedMs, pastDeadlineMs,
+                        chunksDone, n, elapsedMs, pastDeadlineMs,
                         RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
                 throw new RequestDeadlineExceededException(
-                        "embed deadline exceeded after " + i + "/" + n + " chunks ("
+                        "embed deadline exceeded after " + chunksDone + "/" + n + " chunks ("
                                 + elapsedMs + "ms elapsed, " + pastDeadlineMs + "ms past deadline)",
                         RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
             }
+            BatchOutcome outcome;
             try {
-                results.add(futures.get(i).get());
+                outcome = futures.get(b).get();
             } catch (ExecutionException e) {
-                cancelFrom(futures, i + 1);
+                cancelFrom(futures, b + 1);
                 Throwable cause = e.getCause();
                 if (cause instanceof RuntimeException re) throw re;
                 throw new RuntimeException("CCE parallel embed failed", cause);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                cancelFrom(futures, i + 1);
+                cancelFrom(futures, b + 1);
                 throw new RuntimeException("CCE parallel embed interrupted", e);
             }
-            int chunksDone = i + 1;
+            vectors.addAll(outcome.vectors());
+            tokens += outcome.tokens();
+            maxQueuedNanos = Math.max(maxQueuedNanos, outcome.queuedNanos());
+            maxCallNanos = Math.max(maxCallNanos, outcome.callNanos());
+            sumCallNanos += outcome.callNanos();
+            int batchSize = ranges.get(b)[1] - ranges.get(b)[0];
+            chunksDone += batchSize;
             long nowNanos = System.nanoTime();
             lastNanos = nowNanos;
-            double elapsedSecForTracker = (nowNanos - callStartNanos) / 1_000_000_000.0;
-            double chunksPerSecForTracker = elapsedSecForTracker > 0.0 ? chunksDone / elapsedSecForTracker : 0.0;
-            // Bead nexus-s71lr, pass 3: update the wire-visible activity counters on
-            // EVERY completed text, unconditionally — independent of the log line's
-            // own throttling below.
-            activityTracker.record(1, chunksPerSecForTracker, nowNanos);
-
+            double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
+            double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
+            activityTracker.record(batchSize, chunksPerSec, nowNanos);
             if (progressGate.shouldLog(nowNanos)) {
-                double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
-                double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
                 log.info("event=embed_progress embedder=cce chunks_done={} chunks_total={} "
                         + "elapsed_s={} chunks_per_sec={}",
                         chunksDone, n, String.format("%.1f", elapsedSec),
                         String.format("%.1f", chunksPerSec));
             }
         }
-        return results;
+        long elapsedMs = (System.nanoTime() - callStartNanos) / 1_000_000L;
+        log.info("event=embed_done embedder=cce chunks={} batches={} elapsed_ms={} "
+                + "max_queue_ms={} max_call_ms={} mean_call_ms={} tokens={}",
+                n, futures.size(), elapsedMs, maxQueuedNanos / 1_000_000L, maxCallNanos / 1_000_000L,
+                futures.isEmpty() ? 0 : sumCallNanos / futures.size() / 1_000_000L, tokens);
+        return new EmbedResult(vectors, tokens);
+    }
+
+    private void logCall(int chunks, long queuedNanos, long callNanos) {
+        long queuedMs = queuedNanos / 1_000_000L;
+        long callMs = callNanos / 1_000_000L;
+        if (callMs >= SLOW_CALL_MS) {
+            log.info("event=cce_call_slow chunks={} queue_ms={} call_ms={} available_permits={}",
+                     chunks, queuedMs, callMs, inFlight.availablePermits());
+        } else if (log.isDebugEnabled()) {
+            log.debug("event=cce_call chunks={} queue_ms={} call_ms={}", chunks, queuedMs, callMs);
+        }
+    }
+
+    /**
+     * One Voyage request for {@code texts} as single-chunk documents. A 400 on a batch of
+     * more than one retries each text alone (logged {@code event=cce_batch_rejected}), so
+     * a request Voyage refuses for its size succeeds and a bad text fails alone.
+     */
+    private BatchOutcome embedBatch(List<String> texts, long deadlineNanos) {
+        try {
+            return callAndParse(texts, deadlineNanos);
+        } catch (CceStatusException e) {
+            if (e.status != 400 || texts.size() == 1) {
+                throw e;
+            }
+            log.warn("event=cce_batch_rejected status=400 chunks={} fallback=per_text", texts.size());
+            List<float[]> vectors = new ArrayList<>(texts.size());
+            long tokens = 0L;
+            for (String text : texts) {
+                BatchOutcome one = callAndParse(List.of(text), deadlineNanos);
+                vectors.addAll(one.vectors());
+                tokens += one.tokens();
+            }
+            return new BatchOutcome(vectors, tokens, 0L, 0L);
+        }
+    }
+
+    private BatchOutcome callAndParse(List<String> texts, long deadlineNanos) {
+        String body = callApi(buildJson(texts), deadlineNanos);
+        try {
+            return parseBatch(body, texts.size());
+        } catch (CceStatusException e) {
+            throw e;
+        } catch (Exception e) {
+            String first = texts.get(0);
+            throw new RuntimeException("CCE parse failed for a batch of " + texts.size()
+                    + " starting with: " + first.substring(0, Math.min(40, first.length())), e);
+        }
     }
 
     /** Test-only (nexus-8hdg9 phase 4): {@link #inFlight}'s free permits, so a test can
@@ -501,101 +668,22 @@ public final class CceEmbedder implements Embedder {
         }
     }
 
-    // ── Per-text API call helpers ─────────────────────────────────────────────
+    // ── Request and response ──────────────────────────────────────────────────
 
-    private float[] embedOneFloat(String text, long deadlineNanos) {
-        String json = buildJson(text);
-        String body = callApi(json, deadlineNanos);
-        try {
-            return parseOneFloat(body);
-        } catch (Exception e) {
-            throw new RuntimeException("CCE float parse failed for text: " + text.substring(0, Math.min(40, text.length())), e);
-        }
-    }
-
-    /**
-     * Embed one text and return the vector plus the token count from
-     * {@code usage.total_tokens} in the CCE response (bead nexus-ehc4q).
-     *
-     * <p>CCE response root:
-     * <pre>
-     * {
-     *   "data":  [...],
-     *   "usage": {"total_tokens": N}
-     * }
-     * </pre>
-     *
-     * <p>Parses the JSON body ONCE and extracts both the vector and the usage count
-     * from the same {@code root} map (avoids double-deserialisation).
-     */
-    private EmbedResult embedOneWithUsage(String text, long deadlineNanos) {
-        String json = buildJson(text);
-        String body = callApi(json, deadlineNanos);
-        try {
-            return parseOneFloatWithUsage(body);
-        } catch (Exception e) {
-            throw new RuntimeException("CCE embedOneWithUsage failed for text: " + text.substring(0, Math.min(40, text.length())), e);
-        }
-    }
-
-    /** Parse a CCE response body ONCE: extract the float32 vector AND {@code usage.total_tokens}. */
-    @SuppressWarnings("unchecked")
-    private EmbedResult parseOneFloatWithUsage(String body) throws Exception {
-        Map<String, Object> root = mapper.readValue(body, Map.class);
-        // ── vector ────────────────────────────────────────────────────────────────
-        List<Map<String, Object>> outerData = (List<Map<String, Object>>) root.get("data");
-        if (outerData == null || outerData.isEmpty()) {
-            throw new RuntimeException("CCE response missing data array: " + body);
-        }
-        outerData.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
-        List<Map<String, Object>> innerData = (List<Map<String, Object>>) outerData.get(0).get("data");
-        if (innerData == null || innerData.isEmpty()) {
-            throw new RuntimeException("CCE response: doc group has empty data array");
-        }
-        innerData.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
-        Object emb = innerData.get(0).get("embedding");
-        if (emb == null) throw new RuntimeException("CCE response: chunk missing 'embedding'");
-        float[] vec;
-        if (emb instanceof String b64) {
-            vec = decodeBase64Float32(b64);
-        } else {
-            List<Number> rawEmb = (List<Number>) emb;
-            vec = new float[rawEmb.size()];
-            for (int i = 0; i < rawEmb.size(); i++) vec[i] = rawEmb.get(i).floatValue();
-        }
-        // ── usage ─────────────────────────────────────────────────────────────────
-        long tokens = 0L;
-        Map<String, Object> usage = (Map<String, Object>) root.get("usage");
-        if (usage != null) {
-            Object totalTokens = usage.get("total_tokens");
-            if (totalTokens instanceof Number n) tokens = n.longValue();
-        }
-        return new EmbedResult(java.util.List.of(vec), tokens);
-    }
-
-    private double[] embedOneDouble(String text, long deadlineNanos) {
-        String json = buildJson(text);
-        String body = callApi(json, deadlineNanos);
-        try {
-            float[] f32 = parseOneFloat(body);
-            double[] f64 = new double[f32.length];
-            for (int i = 0; i < f32.length; i++) f64[i] = f32[i];  // exact float32 → float64
-            return f64;
-        } catch (Exception e) {
-            throw new RuntimeException("CCE double parse failed for text: " + text.substring(0, Math.min(40, text.length())), e);
-        }
-    }
-
-    private String buildJson(String text) {
-        // Mirror production _cce_embed / ContextualizedEmbedding.create exactly:
-        //   inputs=[[text]]: one doc, one chunk — per-text independent embedding
+    /** Package-private for tests: the wire body for {@code texts}, each its own
+     *  single-chunk document (nexus-u2mlh.1, shape C). */
+    String buildJson(List<String> texts) {
+        // ContextualizedEmbedding.create's parameters:
+        //   inputs=[[t0],[t1],...]: each text its own single-chunk document
         //   input_type: "document" for indexing, "query" for search (passed through)
         //   encoding_format="base64": Python SDK default — gives exact float32 binary
         //   No output_dtype field — production does not set it
         //   No truncation field — CCE API does not accept it
         Map<String, Object> body = new HashMap<>();
         body.put("model",           "voyage-context-3");
-        body.put("inputs",          List.of(List.of(text)));
+        List<List<String>> inputs = new ArrayList<>(texts.size());
+        for (String t : texts) inputs.add(List.of(t));
+        body.put("inputs",          inputs);
         body.put("input_type",      inputType);
         body.put("encoding_format", "base64");
         try {
@@ -685,55 +773,44 @@ public final class CceEmbedder implements Embedder {
     // ── Response parsers ──────────────────────────────────────────────────────
 
     /**
-     * Parse CCE base64 response body for a single-text call (inputs=[[text]]).
-     *
-     * <p>Response structure with encoding_format="base64":
-     * <pre>
-     * {
-     *   "object": "list",
-     *   "data": [
-     *     {
-     *       "object": "list",
-     *       "index": 0,              // outer doc index (always 0 for single-text call)
-     *       "data": [
-     *         {
-     *           "object": "embedding",
-     *           "index": 0,          // chunk index (always 0 for single chunk)
-     *           "embedding": "base64string..."
-     *         }
-     *       ]
-     *     }
-     *   ]
-     * }
-     * </pre>
+     * Parse a CCE base64 response for {@code expected} single-chunk documents: {@code
+     * data[i]} is document {@code i} (sorted by {@code index}), and its one chunk's
+     * {@code embedding} is the vector. {@code usage.total_tokens} is the billed count
+     * (bead nexus-ehc4q). A count mismatch is an error, never a silent misalignment.
      */
     @SuppressWarnings("unchecked")
-    private float[] parseOneFloat(String body) throws Exception {
+    private BatchOutcome parseBatch(String body, int expected) throws Exception {
         Map<String, Object> root = mapper.readValue(body, Map.class);
         List<Map<String, Object>> outerData = (List<Map<String, Object>>) root.get("data");
-        if (outerData == null || outerData.isEmpty()) {
-            throw new RuntimeException("CCE response missing data array: " + body);
+        if (outerData == null || outerData.size() != expected) {
+            throw new RuntimeException("CCE response has " + (outerData == null ? 0 : outerData.size())
+                    + " documents for " + expected + " inputs");
         }
         outerData.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
-
-        List<Map<String, Object>> innerData = (List<Map<String, Object>>) outerData.get(0).get("data");
-        if (innerData == null || innerData.isEmpty()) {
-            throw new RuntimeException("CCE response: doc group has empty data array");
+        List<float[]> vectors = new ArrayList<>(expected);
+        for (Map<String, Object> doc : outerData) {
+            List<Map<String, Object>> innerData = (List<Map<String, Object>>) doc.get("data");
+            if (innerData == null || innerData.isEmpty()) {
+                throw new RuntimeException("CCE response: doc group has empty data array");
+            }
+            innerData.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
+            Object emb = innerData.get(0).get("embedding");
+            if (emb == null) throw new RuntimeException("CCE response: chunk missing 'embedding'");
+            if (emb instanceof String b64) {
+                vectors.add(decodeBase64Float32(b64));
+            } else {
+                List<Number> rawEmb = (List<Number>) emb;
+                float[] vec = new float[rawEmb.size()];
+                for (int i = 0; i < rawEmb.size(); i++) vec[i] = rawEmb.get(i).floatValue();
+                vectors.add(vec);
+            }
         }
-        innerData.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
-
-        Object emb = innerData.get(0).get("embedding");
-        if (emb == null) throw new RuntimeException("CCE response: chunk missing 'embedding'");
-
-        // Decode base64 as float32 binary (same as Python np.frombuffer(b64decode(s), np.float32))
-        if (emb instanceof String b64) {
-            return decodeBase64Float32(b64);
+        long tokens = 0L;
+        Map<String, Object> usage = (Map<String, Object>) root.get("usage");
+        if (usage != null && usage.get("total_tokens") instanceof Number t) {
+            tokens = t.longValue();
         }
-        // Fallback: if API returns JSON array (non-base64 path)
-        List<Number> rawEmb = (List<Number>) emb;
-        float[] vec = new float[rawEmb.size()];
-        for (int i = 0; i < rawEmb.size(); i++) vec[i] = rawEmb.get(i).floatValue();
-        return vec;
+        return new BatchOutcome(vectors, tokens, 0L, 0L);
     }
 
     /**

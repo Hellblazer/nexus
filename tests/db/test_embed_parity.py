@@ -16,8 +16,9 @@ this retirement.
   1. LOCAL ONNX    — Python chromadb ONNXMiniLM_L6_V2 vs Java OnnxEmbedder
   2. CLOUD STANDARD — Python voyageai.Client.embed() oracle (float32)
                      vs Java VoyageEmbedder (same API parameters, no input_type, truncation=True)
-  3. CLOUD CCE      — Python voyageai.Client.contextualized_embed(inputs=[[text]], input_type=...)
-                     vs Java CceEmbedder (same API parameters, one text per call)
+  3. CLOUD CCE      — Python voyageai.Client.contextualized_embed(inputs=[[t0],[t1],...], input_type=...)
+                     vs Java CceEmbedder (same API parameters, texts as single-chunk documents
+                     in one call, nexus-u2mlh.1)
 
 Each path is tested at BOTH the float32 production precision (what Chroma actually stores)
 AND float64 API precision (model/param match signal).
@@ -359,7 +360,7 @@ def cloud_service() -> Generator[tuple[str, str], None, None]:
 
     Cloud routing:
       code__*       → VoyageEmbedder (voyage-code-3, no input_type, truncation=True)
-      knowledge__*  → CceEmbedder (voyage-context-3, input_type=document, per-text)
+      knowledge__*  → CceEmbedder (voyage-context-3, input_type=document, batched single-chunk docs)
     Yields (base_url, token). nexus-wrfiy: owns its PG (see _provision_pg).
     """
     if not _HAS_VOYAGE_KEY:
@@ -617,17 +618,15 @@ class TestEmbedParity:
         reason="VOYAGE_API_KEY not set — skipping CCE parity path",
     )
     def test_cce_parity(self, cloud_service: tuple[str, str]) -> None:
-        """CLOUD CCE: Python _cce_embed == Java CceEmbedder.
+        """CLOUD CCE: a Python SDK oracle == Java CceEmbedder.
 
-        Python PRODUCTION path (_cce_embed from t3.py):
-          vo.contextualized_embed(inputs=[[text]], model='voyage-context-3',
-                                  input_type='document')
-        No output_dtype.  Returns Python floats (float32-precision, as proven by S0.2 probe).
+        Oracle: vo.contextualized_embed(inputs=[[t0],[t1],[t2]], model='voyage-context-3',
+                                        input_type='document'), no output_dtype.
 
-        Java path: CceEmbedder calls the SAME API with same params, one text per call,
-        input_type='document', no output_dtype.
+        Java path: CceEmbedder sends the same parameters, the texts as single-chunk
+        documents in one call (nexus-u2mlh.1; the corpus fits one batch).
 
-        Assert float32 bit-exact AND cosine >= 1-1e-9.
+        Assert cosine within 1e-3 (see the tolerance note below; not bit-exact).
 
         CONCURRENCY NOTE: The Voyage CCE API is deterministic within a server session but
         may return different values across different network sessions (server-side
@@ -648,14 +647,16 @@ class TestEmbedParity:
         def embed_python() -> None:
             try:
                 vo = voyageai.Client(api_key=api_key)
-                for i, text in enumerate(CORPUS):
-                    result = vo.contextualized_embed(
-                        inputs=[[text]],
-                        model="voyage-context-3",
-                        input_type="document",
-                        # No output_dtype — production _cce_embed does not set it
-                    )
-                    python_raw[i] = result.results[0].embeddings[0]
+                # nexus-u2mlh.1: the engine sends up to 12 texts per call, each its own
+                # single-chunk document; the corpus fits one call, so mirror that.
+                result = vo.contextualized_embed(
+                    inputs=[[text] for text in CORPUS],
+                    model="voyage-context-3",
+                    input_type="document",
+                    # No output_dtype — production _cce_embed does not set it
+                )
+                for i in range(len(CORPUS)):
+                    python_raw[i] = result.results[i].embeddings[0]
             except BaseException as exc:
                 errors.append(exc)
 
@@ -690,12 +691,13 @@ class TestEmbedParity:
         # cosine (empirically measured, nexus-mcgnz). The concurrency-alignment hack above
         # routes Python+Java to the same backend within one ~second window and shrinks the
         # typical drift to ~5e-6, but cannot guarantee bit-exactness — only corpus[0]
-        # reliably aligns (Python embeds sequentially while Java batches in one call).
+        # reliably aligns.
         # So we DROP the bit-exact ULP gate for CCE and use a cosine tolerance that clears
         # the API's own call-to-call noise floor (3.7e-4) with margin while still catching
         # gross wiring (input_type mismatch ≈0.95). Fine-grained drift (truncation ≈5e-5,
         # batch contamination ≈4e-4) sits BELOW the API noise floor and is verified
-        # structurally instead (request params: input_type='document', per-text batching).
+        # structurally instead (request params: input_type='document', single-chunk
+        # documents per call, CceEmbedderParallelTest).
         _assert_parity("CCE", python_f32, java_vecs,
                        max_ulp_threshold=None, cosine_threshold=1e-3)
         print("CCE: PASS (cosine within API non-determinism floor)")

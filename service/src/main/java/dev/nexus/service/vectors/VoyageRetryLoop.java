@@ -255,9 +255,16 @@ final class VoyageRetryLoop {
             } catch (Exception e) {
                 transientFailures++;
                 if (transientFailures >= MAX_RETRIES) {
+                    log.warn("event={} attempt={} status=transport error={} giving_up=true",
+                             eventRetry, attempt, e.getClass().getSimpleName());
                     throw failures.wrap(opLabel + " failed after " + MAX_RETRIES + " attempts", e);
                 }
-                try { Thread.sleep(backoffDelayMs(transientFailures)); }
+                // nexus-u2mlh.4: a transport failure (connect, reset, timeout) used to
+                // retry silently; it is the one retry the 5xx/429 arms above did not log.
+                long transportDelay = backoffDelayMs(transientFailures);
+                log.warn("event={} attempt={} status=transport error={} delay_ms={}",
+                         eventRetry, attempt, e.getClass().getSimpleName(), transportDelay);
+                try { Thread.sleep(transportDelay); }
                 catch (InterruptedException ix) {
                     Thread.currentThread().interrupt();
                     throw failures.wrap(opLabel + " interrupted", ix);
