@@ -102,12 +102,19 @@ class _FakeHttpCatalogClient:
             return "1.1.42", True
         return "1.1.42"
 
-    def update(self, tumbler, *, physical_collection=None, meta=None):
+    def update(self, tumbler, *, physical_collection=None, meta=None, source_uri=None):
+        # source_uri (nexus-bb6n2 round 2): the chash-dedup branch now
+        # stamps it defensively too (mirrors the pre-existing ghost-
+        # reconcile branch's own call shape), so this fake's signature
+        # must accept it even where a given test's monkeypatched read
+        # path routes through the by_source_uri branch instead, which
+        # still calls update() without it.
         self.updated.append(
             {
                 "tumbler": tumbler,
                 "physical_collection": physical_collection,
                 "meta": meta,
+                "source_uri": source_uri,
             }
         )
 
@@ -157,12 +164,28 @@ def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
 
     nexus-5axey: the dedup read is now ``docs_for_chashes`` + ``resolve``
     (chash-appropriate), not ``by_doc_id`` (TUMBLER-only, always mismatched
-    a chash-shaped doc_id)."""
+    a chash-shaped doc_id).
+
+    ``physical_collection`` is a REQUIRED field on the real ``Document``
+    (catalog/types.py, no default) -- the fake below must carry it too
+    (nexus-bb6n2 round 3): ``resolve_knowledge_doc_for_chash`` now reads
+    ``entry.physical_collection`` to scope the dedup to THIS collection
+    (round 2's cross-collection fix), and a fake missing the attribute
+    raised ``AttributeError`` here, silently swallowed by
+    ``catalog_store_hook_tracked``'s broad except into a bare "" return
+    -- this test's own assertion caught it (tumbler == "" != "1.1.7"),
+    but the failure mode was a hook-swallowed exception, not a clean
+    assertion mismatch. Set to the SAME collection the put targets, so
+    the dedup this test names ("existing entry short-circuits") is what
+    actually still exercises: a real cross-collection non-match is
+    covered separately in test_5axey_chash_catalog_lookups.py::
+    TestDedupA1::test_same_chash_different_collection_does_not_dedup."""
 
     class _Existing:
         tumbler = "1.1.7"
         content_type = "knowledge"
         file_path = ""
+        physical_collection = _COLLECTION
 
     monkeypatch.setattr(
         _FakeHttpCatalogClient, "docs_for_chashes",
