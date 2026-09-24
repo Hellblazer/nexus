@@ -1280,6 +1280,8 @@ Grouped by verb:
   - `citation-traversal`: Trace the citation chain around a seed document. Walks `cites` edges inward and outward, hydrates matches, summarises.
   - `find-by-author`: Author-index lookup. Routes through the catalog's author index, hydrates matching documents, summarises contributions.
   - `type-scoped-search`: Single-content-type semantic search. Resolves the content-type bucket and runs the query against only those collections.
+  - `document-discovery`: "Which documents/papers/RDRs exist on X" — a single-step `query()` fast path (nexus-h33x8.6) that returns the matching documents themselves, not a synthesized answer.
+  - `corpus-coverage-check`: "Does the corpus have anything on X" — the sibling yes-or-no fast path to `document-discovery`, kept as a separate template so the matcher has two distinct description vectors to rank against.
 - **verb=lookup**
   - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval.
 - **verb=document**
