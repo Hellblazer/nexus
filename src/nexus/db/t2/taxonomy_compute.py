@@ -28,36 +28,33 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-import numpy as np
 import structlog
+
+from nexus._lazy_module import lazy_module
+
+if TYPE_CHECKING:
+    import numpy as np
+else:
+    # Deferred to first use (nexus-fd3zf): T2Database.__init__ imports this
+    # module on every process's first T2 handle, taxonomy or not.
+    np = lazy_module("numpy")
 
 # RDR-070 (nexus-9k5): scikit-learn>=1.3 is a core dep. HDBSCAN for topic
 # discovery with c-TF-IDF labels via CountVectorizer.
 #
-# HDBSCAN itself is NOT imported here -- deferred to call time inside
-# _cluster() (latency fix, 2026-08-21), matching this file's own
-# established pattern: the 4 sibling sklearn.cluster/.metrics imports below
-# (MiniBatchKMeans, cosine_similarity x2, KMeans) are already deferred with
-# the identical `# noqa: PLC0415` convention, so a module-level HDBSCAN
-# import was the one outlier, not a new pattern. This module is imported at
-# every FIRST T2Database construction (http_taxonomy_store.py imports it at
-# module level, and HttpTaxonomyStore is constructed eagerly and
-# unconditionally by T2Database.__init__), so deferring HDBSCAN's import
-# cost previously landed on the first T2Database of every process, not
-# just processes that actually cluster.
-#
-# Measured saving: ~0.14-0.15s on first T2Database construction (alternating
-# fresh-subprocess A/B; independently reconfirmed by a 3-trial subprocess
-# A/B and by fresh-interpreter timing, both landing at the same ~0.14s /
-# ~20% figure) -- NOT the ~0.9s a bare `import sklearn.cluster` costs in an
-# otherwise-cold process. The gap is CountVectorizer/TfidfTransformer
-# (imported below, deliberately left module-level -- out of scope for this
-# fix): they already trigger sklearn's dominant shared package-init cost,
-# so by the time HDBSCAN would be imported, most of that cost is already
-# paid and deferring HDBSCAN alone only recovers its own marginal share.
-from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
+# Every sklearn import in this module is deferred to call time (each one
+# carries the PLC0415 suppression), and numpy is a lazy proxy. This module is
+# imported at every FIRST T2Database construction (http_taxonomy_store.py
+# imports it at module level, and HttpTaxonomyStore is constructed eagerly
+# and unconditionally by T2Database.__init__), so a module-level import here
+# lands on the first T2 handle of every process, not just processes that
+# cluster. HDBSCAN went first (2026-08-21, ~0.14s); CountVectorizer and
+# TfidfTransformer followed with numpy (nexus-fd3zf), because together they
+# pulled numpy, scipy and sklearn into every T2 construction (0.65s warm,
+# 1.9s cold, measured 2026-09-24) and the numpy import is where the MCP
+# server blocked indefinitely on native Windows.
 
 _log = structlog.get_logger()
 
@@ -423,6 +420,7 @@ def compute_split(
     km = KMeans(n_clusters=k, n_init=10, random_state=42)
     labels = km.fit_predict(embeddings)
 
+    from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer  # noqa: PLC0415 — heavy/optional dependency deferred to call time
     vectorizer = CountVectorizer(stop_words="english")
     tfidf_matrix = TfidfTransformer().fit_transform(
         vectorizer.fit_transform(texts),
@@ -558,6 +556,7 @@ def compute_discovered_topics(
         _log.warning("cluster_all_noise", n_docs=n, collection=collection_name)
         return []
 
+    from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer  # noqa: PLC0415 — heavy/optional dependency deferred to call time
     vectorizer = CountVectorizer(stop_words="english")
     tfidf_matrix = TfidfTransformer().fit_transform(
         vectorizer.fit_transform(texts),
@@ -724,6 +723,7 @@ def compute_rebuild_plan(
         _log.warning("rebuild_all_noise", collection=collection_name, n_docs=n)
         return {"specs": [], "manual_transfers": {}}
 
+    from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer  # noqa: PLC0415 — heavy/optional dependency deferred to call time
     vectorizer = CountVectorizer(stop_words="english")
     tfidf_matrix = TfidfTransformer().fit_transform(
         vectorizer.fit_transform(texts),

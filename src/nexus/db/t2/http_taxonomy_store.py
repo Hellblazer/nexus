@@ -52,11 +52,19 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
-import numpy as np
 import structlog
+
+from nexus._lazy_module import lazy_module
+
+if TYPE_CHECKING:
+    import numpy as np
+else:
+    # Deferred to first use (nexus-fd3zf): T2Database.__init__ imports this
+    # module on every process's first T2 handle, taxonomy or not.
+    np = lazy_module("numpy")
 
 from nexus.errors import SplitConservationViolatedError
 
