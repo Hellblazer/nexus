@@ -88,12 +88,29 @@ status (RDR-215 Contracts). The ledger verbs are the one exception: their
 callers branch on the code ``run()`` returns (``undeclared``: 0/1/2/3;
 ``reconcile``: 0/2/4; ``census``: 0/1; ``expect``/``start``: 2 on invalid
 input), so :data:`LEDGER_VERBS` names which verbs propagate their
-``HookResult.exit_code`` instead of having it forced to 0. An unknown or
-missing verb is neither of those: it is a dispatch failure -- a
-misconfigured ``hooks.json`` entry, or a typo -- and gets its own
-diagnosable failure (a one-line message on stderr, exit 2), not the silent
-"hook chose to do nothing" contract every real verb gets via
-:func:`nexus._hook_runtime._io.never_fail`.
+``HookResult.exit_code`` instead of having it forced to 0.
+
+A MISSING verb argument (``hooks.json`` invoking ``nx-hook`` with no verb
+at all) is a genuine invocation error and stays exit 2 with a one-line
+diagnostic -- that shape is always this CLI's own misconfiguration to fix.
+
+An UNKNOWN verb -- one this CLI's :data:`VERB_TABLE` has never heard of --
+exits 0 instead of 2, still with a named stderr diagnostic. The plugin
+marketplace updates ``hooks.json`` before an installed ``nx`` CLI upgrades
+to the wheel that declares a new verb (the CLI upgrade itself runs through
+the version-lockstep hook, on a session's own cadence): a plugin bump can
+therefore name a verb this CLI does not register yet. Exiting 2 for that
+case makes every ``UserPromptSubmit`` and every ``PreToolUse`` on ``Bash``
+refuse outright for the whole session, with no way to self-heal -- measured
+at the 7.58.0 release blocker (nexus-t9klx): seven such entries reached
+``hooks.json`` before the CLI that registers them shipped, and the
+version-lockstep hook that upgrades the CLI was one of the seven, so
+nothing could recover on its own. Exiting 0 here is the same "hook chose to
+do nothing" contract every real verb gets via
+:func:`nexus._hook_runtime._io.never_fail`, applied one layer earlier --
+before dispatch even reaches a verb module -- because from ``nx-hook``'s own
+perspective a verb it was never taught about is indistinguishable from one
+that failed open.
 """
 from __future__ import annotations
 
@@ -309,10 +326,19 @@ def main() -> None:
     verb = argv[0]
     module_path = _resolve_verb_module(verb)
     if module_path is None:
+        # Exit 0, not 2: a plugin ahead of this installed CLI is expected to
+        # name a verb this VERB_TABLE has never heard of (see the module
+        # docstring's "Exit codes" section, nexus-t9klx). Exiting nonzero
+        # here would fail every UserPromptSubmit/PreToolUse for the whole
+        # session with no self-heal path -- exactly the 7.58.0 release
+        # blocker this guards against.
         sys.stderr.write(
-            f"nx-hook: unknown verb {verb!r} -- no hook is registered under that name\n"
+            f"nx-hook: unknown verb {verb!r} -- no hook is registered under that name "
+            "in this installed nx CLI. The conexus plugin may be ahead of the "
+            "installed nx CLI; it upgrades via the version-lockstep hook. "
+            "Failing open (exit 0) rather than blocking this session.\n"
         )
-        sys.exit(2)
+        sys.exit(0)
 
     import importlib  # noqa: PLC0415 — deferred: only a real dispatch pays this
 
