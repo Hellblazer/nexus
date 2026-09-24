@@ -390,6 +390,28 @@ _REGISTRY: dict[str, ExtractorConfig] = {
 }
 
 
+# ── Shape-routing table (nexus-kmbys, unified nexus-kk4ut) ──────────────────
+#
+# The ONE table both :func:`eligible_extractor_names` and
+# :func:`_resolve_config_for_document` read. A base config absent from this
+# table is not shape-routed at all: every document under its prefix carries
+# that one extractor_name. A base config present here maps document SHAPE
+# ("paper" / "prose", see :func:`_classify_document_shape`) to the config
+# that shape actually gets written under. This used to be two independently
+# hand-written ``is _SCHOLARLY_PAPER_CONFIG`` branches — one in each
+# function — which is exactly the shape that lets an eligibility list and
+# the real routing decision drift apart without either function's own tests
+# noticing (nexus-kk4ut pressure-test finding). One table, read by both,
+# makes that drift structurally impossible: change the routing and both
+# callers see it in the same edit.
+_SHAPE_ROUTING_TABLE: dict[str, dict[str, ExtractorConfig]] = {
+    _SCHOLARLY_PAPER_CONFIG.extractor_name: {
+        "paper": _SCHOLARLY_PAPER_CONFIG,
+        "prose": _GENERAL_PROSE_CONFIG,
+    },
+}
+
+
 # ── RDR markdown + frontmatter parser (Phase F) ─────────────────────────────
 
 
@@ -781,14 +803,29 @@ def eligible_extractor_names(collection: str) -> list[str]:
     ``general-prose-v1`` row: those never match a query pinned to the
     base config's name alone.
 
+    Reads the SAME ``_SHAPE_ROUTING_TABLE`` that
+    :func:`_resolve_config_for_document` routes documents through
+    (nexus-kk4ut pressure-test finding: this used to be a second,
+    hand-written ``is _SCHOLARLY_PAPER_CONFIG`` branch that could drift
+    from the real routing decision without either branch's own tests
+    catching it — see ``test_eligible_extractor_names_matches_the_real_
+    routing_table`` in tests/test_aspect_extractor.py for the pin).
+
     Returns ``[]`` when no config is registered for ``collection``.
     """
     config = select_config(collection)
     if config is None:
         return []
-    if config is _SCHOLARLY_PAPER_CONFIG:
-        return [_SCHOLARLY_PAPER_CONFIG.extractor_name, _GENERAL_PROSE_CONFIG.extractor_name]
-    return [config.extractor_name]
+    routes = _SHAPE_ROUTING_TABLE.get(config.extractor_name)
+    if routes is None:
+        return [config.extractor_name]
+    # dict preserves insertion order (paper, then prose); de-duplicate in
+    # case a future table entry ever maps two shapes to the same config.
+    names: list[str] = []
+    for c in routes.values():
+        if c.extractor_name not in names:
+            names.append(c.extractor_name)
+    return names
 
 
 # ── Per-document shape routing (nexus-kmbys) ─────────────────────────────────
@@ -852,15 +889,20 @@ def _resolve_config_for_document(
 ) -> ExtractorConfig:
     """Refine a prefix-selected config by per-document shape (nexus-kmbys).
 
-    Only the scholarly-paper config is auto-routing-eligible: a knowledge__
-    document classified as prose is routed to ``general-prose-v1`` instead of
-    having paper structure hallucinated onto it. Every other base config
-    (rdr-frontmatter, future recipes) is returned unchanged.
+    Reads ``_SHAPE_ROUTING_TABLE`` (nexus-kk4ut) — the same table
+    :func:`eligible_extractor_names` reads — keyed by ``base_config``'s OWN
+    ``extractor_name``, not object identity: only a base config present in
+    the table is auto-routing-eligible (today, only the scholarly-paper
+    config), a knowledge__ document classified as prose is routed to
+    ``general-prose-v1`` instead of having paper structure hallucinated onto
+    it, and every other base config (rdr-frontmatter, future recipes) is
+    returned unchanged.
     """
-    if base_config is not _SCHOLARLY_PAPER_CONFIG:
+    routes = _SHAPE_ROUTING_TABLE.get(base_config.extractor_name)
+    if routes is None:
         return base_config
     shape = _classify_document_shape(content)
-    chosen = base_config if shape == "paper" else _GENERAL_PROSE_CONFIG
+    chosen = routes.get(shape, base_config)
     if chosen is not base_config:
         _log.info(
             "aspect_extractor_document_routed",

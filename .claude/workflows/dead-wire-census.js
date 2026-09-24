@@ -86,7 +86,14 @@ export const meta = {
   ],
 };
 
-// args:
+// args: an object with the fields below, OR a single STRING -- either JSON
+//   text for the object form, or "key: value" lines (surface/scopeHints) --
+//   see parseWorkflowStringArgs below, which the top of this file's body
+//   normalizes into the object form before anything else runs (nexus-kk4ut:
+//   the Skill tool's own `args` parameter is typed as a string, so a
+//   natural-language invocation like "Run the dead-wire-census workflow
+//   over the MCP tool surface" (docs/workflows.md's own example) lands here
+//   as text, not an object).
 //   surface: 'mcp-tools' | 'cli-verbs' | 'skills' | 'routes' | string
 //     A known surface name (see SURFACE_PROMPTS below), or a free-text
 //     description/glob of a custom surface (e.g. "engine HTTP handlers under
@@ -111,6 +118,98 @@ const CLASSIFICATION_SCHEMA = {
 
 const isCandidateDead = (classification) =>
   classification === 'dead' || classification === 'suspected';
+
+// >>> SHARED: parseWorkflowStringArgs (nexus-kk4ut) >>>
+//
+// Kept BYTE-IDENTICAL in pressure-test.js and dead-wire-census.js -- a test
+// in tests/scripts/test_claude_workflows.py extracts this block from both
+// files (by these >>> / <<< markers) and asserts they match exactly. Why
+// duplicated instead of imported from one shared module: the reference
+// workflow runtime (tests/scripts/fixtures/workflow_harness.mjs, built from
+// the workflow-authoring reference) treats a script's ENTIRE source as the
+// BODY of one AsyncFunction (`new AsyncFunction('agent', ..., 'args',
+// source)`) -- a top-level `import` there is a SyntaxError, and whether the
+// real runtime resolves a dynamic `import()` against a sibling file under
+// .claude/workflows/ is undocumented. Guessing at an unverified runtime
+// primitive is exactly what cost this pair of files two rounds already
+// (2026-09-21, nexus-xeoa0: both called `pipeline([stageFns], {})`,
+// mistaking their own stage functions for `pipeline`'s items array, and
+// neither had ever executed). A duplicated, pinned-identical function is a
+// known-good primitive; an unverified shared module is not.
+//
+// Normalizes a workflow's `args` when it arrives as a single STRING rather
+// than the documented object -- the Skill tool's own `args` parameter is
+// typed as a string in its JSON schema, so any natural-language invocation
+// forwarded through it (docs/workflows.md's own "Use the pressure-test
+// workflow on..." example) lands here as text. Two failure-avoiding
+// decisions:
+//
+//  1. Try JSON.parse FIRST. A caller who needs an exact value containing
+//     "key:"-shaped text (a YAML/JSON diff, literally) passes a JSON object
+//     string and gets it back verbatim -- no parsing ambiguity at all.
+//  2. In the key:value fallback, a key is recognized ONLY when its line
+//     starts with it at COLUMN 0 (`^key\s*:`). An indented line ("  spec:"),
+//     a diff-prefixed line ("+spec:", "-spec:"), or any other non-flush-left
+//     line is ALWAYS a continuation of the current value, never a new key.
+//     This is what makes a pasted diff safe as a target: diff output is
+//     never flush left except for its own +/-/space markers, and those do
+//     not spell a recognized key either. (Reviewer-reproduced failure,
+//     nexus-kk4ut: a YAML diff target containing an indented "  spec:" line
+//     used to truncate the target there.)
+//
+// `keys` orders the recognized field names; `keys[0]` is also what a string
+// with NO recognized key at all is treated as (the whole string verbatim --
+// "pressure-test this diff" / "census the CLI verbs" are the common
+// one-line calls). `numericKeys` lists which parsed fields get coerced with
+// `Number(...)`.
+function parseWorkflowStringArgs(raw, keys, numericKeys) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const asJson = JSON.parse(trimmed);
+      if (asJson && typeof asJson === 'object' && !Array.isArray(asJson)) {
+        return asJson;
+      }
+    } catch {
+      // Not valid JSON -- fall through to the key: value form.
+    }
+  }
+  const keyLineRe = new RegExp(`^(${keys.join('|')})\\s*:\\s*(.*)$`);
+  const valueLines = {};
+  let currentKey = null;
+  let sawAnyKey = false;
+  for (const line of raw.split('\n')) {
+    const m = keyLineRe.exec(line);
+    if (m) {
+      sawAnyKey = true;
+      currentKey = m[1];
+      valueLines[currentKey] = [m[2]];
+    } else if (currentKey) {
+      valueLines[currentKey].push(line);
+    }
+  }
+  if (!sawAnyKey) {
+    return { [keys[0]]: raw.trim() };
+  }
+  const parsed = {};
+  for (const key of Object.keys(valueLines)) {
+    parsed[key] = valueLines[key].join('\n').trim();
+  }
+  for (const key of numericKeys ?? []) {
+    if (parsed[key] !== undefined) {
+      const n = Number(parsed[key]);
+      if (!Number.isNaN(n)) {
+        parsed[key] = n;
+      }
+    }
+  }
+  return parsed;
+}
+// <<< SHARED: parseWorkflowStringArgs <<<
+
+if (typeof args === 'string') {
+  args = parseWorkflowStringArgs(args, ['surface', 'scopeHints'], []);
+}
 
 if (!args || !args.surface) {
   throw new Error('dead-wire-census requires args.surface');

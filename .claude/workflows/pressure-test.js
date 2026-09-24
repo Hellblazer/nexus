@@ -77,11 +77,12 @@ export const meta = {
   ],
 };
 
-// args: an object with the fields below, OR a single string of "key: value"
-//   lines (target/spec/probe/votesPerFinding) -- see parseStringArgs below,
-//   which the top of this file's body normalizes into the object form
-//   before anything else runs (nexus-kk4ut). `lenses` cannot be expressed in
-//   the string form; a caller that needs it passes the object form.
+// args: an object with the fields below, OR a single STRING -- either JSON
+//   text for the object form, or "key: value" lines (target/spec/probe/
+//   votesPerFinding) -- see parseWorkflowStringArgs below, which the top of
+//   this file's body normalizes into the object form before anything else
+//   runs (nexus-kk4ut). `lenses` cannot be expressed in the string form; a
+//   caller that needs it passes the object form (or JSON text).
 //   target: string        - description of the change, or a diff/commit
 //     range, that every lens reviews.
 //   spec: string           - the verbatim directive or design decision text
@@ -127,43 +128,96 @@ const FINDING_SCHEMA = {
   },
 };
 
-// args may arrive as a pre-built object (a programmatic caller, or the test
-// harness) or as a single STRING (nexus-kk4ut: the Skill tool's own `args`
-// parameter is typed as a string in its JSON schema, so a natural-language
-// invocation like "Use the pressure-test workflow on this diff against the
-// directive in RDR-XXX Approach" forwarded through that tool lands here as
-// text, not an object -- every such call previously died on "pressure-test
-// requires args.target" even when the string named a target). Parse
-// recognized `key: value` lines rather than assume one caller is wrong; each
-// value runs to the next recognized key so a multi-paragraph spec is not cut
-// at its first embedded newline. A string with no recognized key at all is
-// the whole target verbatim -- "pressure-test this diff" is the common
-// one-line call.
-function parseStringArgs(raw) {
-  const KEYS = ['target', 'spec', 'probe', 'votesPerFinding'];
-  const keyPattern = new RegExp(`(^|\\n)\\s*(${KEYS.join('|')})\\s*:\\s*`, 'g');
-  const hits = [...raw.matchAll(keyPattern)];
-  if (hits.length === 0) {
-    return { target: raw.trim() };
+// >>> SHARED: parseWorkflowStringArgs (nexus-kk4ut) >>>
+//
+// Kept BYTE-IDENTICAL in pressure-test.js and dead-wire-census.js -- a test
+// in tests/scripts/test_claude_workflows.py extracts this block from both
+// files (by these >>> / <<< markers) and asserts they match exactly. Why
+// duplicated instead of imported from one shared module: the reference
+// workflow runtime (tests/scripts/fixtures/workflow_harness.mjs, built from
+// the workflow-authoring reference) treats a script's ENTIRE source as the
+// BODY of one AsyncFunction (`new AsyncFunction('agent', ..., 'args',
+// source)`) -- a top-level `import` there is a SyntaxError, and whether the
+// real runtime resolves a dynamic `import()` against a sibling file under
+// .claude/workflows/ is undocumented. Guessing at an unverified runtime
+// primitive is exactly what cost this pair of files two rounds already
+// (2026-09-21, nexus-xeoa0: both called `pipeline([stageFns], {})`,
+// mistaking their own stage functions for `pipeline`'s items array, and
+// neither had ever executed). A duplicated, pinned-identical function is a
+// known-good primitive; an unverified shared module is not.
+//
+// Normalizes a workflow's `args` when it arrives as a single STRING rather
+// than the documented object -- the Skill tool's own `args` parameter is
+// typed as a string in its JSON schema, so any natural-language invocation
+// forwarded through it (docs/workflows.md's own "Use the pressure-test
+// workflow on..." example) lands here as text. Two failure-avoiding
+// decisions:
+//
+//  1. Try JSON.parse FIRST. A caller who needs an exact value containing
+//     "key:"-shaped text (a YAML/JSON diff, literally) passes a JSON object
+//     string and gets it back verbatim -- no parsing ambiguity at all.
+//  2. In the key:value fallback, a key is recognized ONLY when its line
+//     starts with it at COLUMN 0 (`^key\s*:`). An indented line ("  spec:"),
+//     a diff-prefixed line ("+spec:", "-spec:"), or any other non-flush-left
+//     line is ALWAYS a continuation of the current value, never a new key.
+//     This is what makes a pasted diff safe as a target: diff output is
+//     never flush left except for its own +/-/space markers, and those do
+//     not spell a recognized key either. (Reviewer-reproduced failure,
+//     nexus-kk4ut: a YAML diff target containing an indented "  spec:" line
+//     used to truncate the target there.)
+//
+// `keys` orders the recognized field names; `keys[0]` is also what a string
+// with NO recognized key at all is treated as (the whole string verbatim --
+// "pressure-test this diff" / "census the CLI verbs" are the common
+// one-line calls). `numericKeys` lists which parsed fields get coerced with
+// `Number(...)`.
+function parseWorkflowStringArgs(raw, keys, numericKeys) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const asJson = JSON.parse(trimmed);
+      if (asJson && typeof asJson === 'object' && !Array.isArray(asJson)) {
+        return asJson;
+      }
+    } catch {
+      // Not valid JSON -- fall through to the key: value form.
+    }
+  }
+  const keyLineRe = new RegExp(`^(${keys.join('|')})\\s*:\\s*(.*)$`);
+  const valueLines = {};
+  let currentKey = null;
+  let sawAnyKey = false;
+  for (const line of raw.split('\n')) {
+    const m = keyLineRe.exec(line);
+    if (m) {
+      sawAnyKey = true;
+      currentKey = m[1];
+      valueLines[currentKey] = [m[2]];
+    } else if (currentKey) {
+      valueLines[currentKey].push(line);
+    }
+  }
+  if (!sawAnyKey) {
+    return { [keys[0]]: raw.trim() };
   }
   const parsed = {};
-  for (let i = 0; i < hits.length; i++) {
-    const key = hits[i][2];
-    const valueStart = hits[i].index + hits[i][0].length;
-    const valueEnd = i + 1 < hits.length ? hits[i + 1].index : raw.length;
-    parsed[key] = raw.slice(valueStart, valueEnd).trim();
+  for (const key of Object.keys(valueLines)) {
+    parsed[key] = valueLines[key].join('\n').trim();
   }
-  if (parsed.votesPerFinding !== undefined) {
-    const n = Number(parsed.votesPerFinding);
-    if (!Number.isNaN(n)) {
-      parsed.votesPerFinding = n;
+  for (const key of numericKeys ?? []) {
+    if (parsed[key] !== undefined) {
+      const n = Number(parsed[key]);
+      if (!Number.isNaN(n)) {
+        parsed[key] = n;
+      }
     }
   }
   return parsed;
 }
+// <<< SHARED: parseWorkflowStringArgs <<<
 
 if (typeof args === 'string') {
-  args = parseStringArgs(args);
+  args = parseWorkflowStringArgs(args, ['target', 'spec', 'probe', 'votesPerFinding'], ['votesPerFinding']);
 }
 
 if (!args || !args.target) {

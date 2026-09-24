@@ -1359,6 +1359,21 @@ def _select_entries(
             # a query pinned to scholarly-paper-v1 alone never matches it,
             # so an outdated general-prose-v1 row would sit forever below
             # --extractor-version's threshold, invisible to --re-extract.
+            #
+            # ASSUMPTION (nexus-kk4ut, latent): one caller-supplied
+            # `extractor_version` threshold is applied to EVERY eligible
+            # extractor here, unconditionally. That is only coherent because
+            # every extractor sharing a _SHAPE_ROUTING_TABLE entry currently
+            # carries the SAME model_version scheme (both scholarly-paper-v1
+            # and general-prose-v1 pin to the same Claude model string
+            # today) -- comparing one lexicographic threshold against two
+            # DIFFERENT model families would not mean "outdated" in any
+            # coherent sense. This is NOT re-derived per call; it is pinned
+            # by test_shape_routed_configs_share_one_model_version_scheme in
+            # tests/test_aspect_extractor.py, which fails the day the
+            # assumption breaks. If that test ever fires, --extractor-version
+            # needs a per-extractor threshold (or a documented escape hatch)
+            # before shipping the divergent config.
             outdated_paths: set[str] = set()
             if re_extract:
                 for name in eligible_extractor_names(collection):
