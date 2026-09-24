@@ -90,6 +90,86 @@ def ttl_for_tier(tier: str) -> float:
     return TIER_TTLS.get(tier, DEFAULT_TTL)
 
 
+#: Tiers whose TTL-expired lease is still read as live when the reader can
+#: independently confirm it (nexus-wo6sc half one; Sam DECIDED 2026-09-24):
+#: the recorded owner pid is alive AND the recorded port answers ``/health``
+#: as the expected service. This never narrows ``discover()``'s existing
+#: contract -- a fresh lease is unaffected, and every tier NOT in this set
+#: keeps the plain "liveness is lease freshness, not pid" rule unchanged.
+#: Scoped explicitly to ``storage_service``: it is the only tier whose
+#: published lease names a real HTTP endpoint at all (``aspect_worker`` is
+#: not an HTTP server, so its lease's ``endpoint`` carries no health-probable
+#: port -- the probe below simply cannot succeed for it, and grace never
+#: fires there even if this set is widened by mistake). The 2026-09-12
+#: incident this closes (two heartbeat ticks at 19.098s / 31.622s against a
+#: 15s TTL, the supervisor alive and healthy throughout) was measured
+#: against storage_service specifically. A future tier that earns the same
+#: grace adds itself here once, rather than growing a tier-local copy
+#: (AGENTS.md's standing "no per-tier lifecycle copy" gate).
+TIER_READER_GRACE: frozenset[str] = frozenset({"storage_service"})
+
+#: How far PAST its own TTL a lease may still be graced, as a MULTIPLE of
+#: that lease's own ``ttl`` (never an absolute constant), so the bound scales
+#: with whichever tier's TTL window applies. The worst tick actually
+#: measured (nexus-wo6sc, 2026-09-12) was 31.622s against a 15s TTL — about
+#: 2x. Ten TTL windows is an order of magnitude more headroom than the worst
+#: stall on record while still refusing to resurrect a lease that has been
+#: stale essentially forever (a suspended box, an abandoned record, a
+#: process alive but never heartbeating again): past this bound, an
+#: "alive and healthy"-looking owner that has gone ten TTL windows with no
+#: successful heartbeat is far more likely wedged or orphaned than mid-stall,
+#: and the grace must not paper over that indefinitely.
+STALE_LEASE_GRACE_MAX_TTL_MULTIPLE: float = 10.0
+
+#: Bounded timeout for the grace path's OWN ``/health`` probe. Deliberately
+#: SHORTER than ``storage_service_daemon._HEALTH_TIMEOUT`` (4.0s, which
+#: bounds the SUPERVISOR's own heartbeat tick against ITS OWN
+#: pool-contention tolerance) — this bounds an incidental READER-side probe
+#: that must not itself add multi-second latency to every ``discover()``
+#: call during a genuine outage. Only the stale path pays this cost at all:
+#: a fresh lease never reaches this probe.
+STALE_LEASE_GRACE_HEALTH_TIMEOUT_S: float = 1.5
+
+#: The only hosts a grace probe may ever contact — loopback, never a network
+#: address. Every current lease-serving tier's endpoint IS loopback
+#: (``storage_service_daemon._SERVICE_HOST == "127.0.0.1"`` unconditionally),
+#: but this is a belt-and-suspenders refusal at the primitive itself: a
+#: shared registry must never turn a stale-lease read into an outbound
+#: network call, no matter what a future or malformed record's endpoint
+#: names.
+_GRACE_PROBE_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _probe_health_identity(host: str, port: int, *, timeout: float) -> bool:
+    """True iff ``GET http://{host}:{port}/health`` answers the
+    storage-service's documented shape (``HealthHandler.java``: 200
+    ``{"status": "ok", "db": "up"}``) — not just "something answered on this
+    port". Checking the BODY, not merely the status code, is the identity
+    check the DECISION requires: port reuse means an unrelated local process
+    could be listening where the recorded service used to be, and an
+    unrelated process happening to answer this exact shape on a bare GET
+    ``/health`` is not a realistic accident.
+
+    Bounded and best-effort: any failure at all — timeout, connection
+    refused, a non-200 status, an unparseable or wrong-shaped body — reads
+    as False ("not this service"). Never raises.
+    """
+    import json as _json  # noqa: PLC0415 — deferred import — only the grace path needs it
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local
+    import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    url = f"http://{host}:{port}/health"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed loopback URL built from the recorded endpoint, never user input
+            if resp.status != 200:
+                return False
+            body = _json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 — best-effort probe: any failure reads as "not this service"
+        return False
+    return isinstance(body, dict) and body.get("status") == "ok"
+
+
 _FORMAT_VERSION: int = 1
 
 Clock = Callable[[], float]
@@ -570,22 +650,104 @@ class ServiceRegistry:
     def discover(self, scope_key: str) -> Optional[LeaseRecord]:
         """Resolve the live owner of ``scope_key``, or ``None``.
 
-        Returns ``None`` for a missing, expired (TTL), or shutdown-marked
-        record. An expired record is best-effort reaped so the next
-        lookup is fast. No pid is consulted at this level: liveness here is
-        purely lease freshness. The T2 client-side resolver (discovery.py
-        ``_resolve_lease_record``) adds process-liveness checks on top of the
-        heartbeat-age check for the T2 tier (nexus-md90p): a stale-but-answering
-        UDS rescue and a dead-pid fast-path. The invariant "liveness is purely
-        lease freshness" applies to this registry layer only.
+        Returns ``None`` for a missing, expired (TTL) and ungraced,
+        shutdown-marked, or expired-and-still-dead-on-grace-check record. An
+        expired record that is not resurrected by grace is best-effort
+        reaped so the next lookup is fast. Liveness here is purely lease
+        freshness for every tier NOT in ``TIER_READER_GRACE`` — no pid is
+        consulted, unchanged from before nexus-wo6sc. For a tier IN that set
+        (currently ``storage_service`` only), a TTL-expired-but-``live``
+        record gets ONE more chance before being read as absent: see
+        :meth:`_stale_lease_still_live` (nexus-wo6sc half one, Sam DECIDED
+        2026-09-24) — the recorded owner pid alive AND the recorded port
+        answering ``/health`` as the expected service. This only ever WIDENS
+        a freshness miss into a hit; a fresh record is returned exactly as
+        before and pays no extra cost. The T2 client-side resolver
+        (discovery.py ``_resolve_lease_record``) separately adds its own
+        process-liveness checks on top of the heartbeat-age check for the T2
+        tier (nexus-md90p): a stale-but-answering UDS rescue and a dead-pid
+        fast-path — unrelated to the grace here, which lives in THIS layer
+        instead precisely so every caller of this primitive benefits (AGENTS.md's
+        "no per-tier lifecycle copy" gate).
         """
         record = self._read_record(scope_key)
         if record is None:
             return None
-        if not record.is_fresh(self._clock()):
-            self._reap_if_still_stale(record)
-            return None
-        return record
+        if record.is_fresh(self._clock()):
+            return record
+        if self._tier in TIER_READER_GRACE and self._stale_lease_still_live(record):
+            return record
+        self._reap_if_still_stale(record)
+        return None
+
+    def _stale_lease_still_live(self, record: LeaseRecord) -> bool:
+        """Reader-side grace (nexus-wo6sc half one, Sam DECIDED 2026-09-24).
+
+        True iff a TTL-expired *record* should still be read as live because
+        THIS reader can independently confirm it: the recorded owner pid is
+        alive AND the recorded port answers ``/health`` as the expected
+        service. Liveness must not depend on the heartbeat stamp write
+        landing within TTL, whatever the cause of a miss (an I/O stall or
+        the writer losing the CPU — nexus-wo6sc's own still-open question);
+        only when BOTH checks fail does this return False, matching the
+        DECISION verbatim ("only both failing means down").
+
+        Guards, each independently sufficient to deny grace:
+
+        - ``record.status`` must be ``"live"`` — a published shutdown marker
+          (``mark_shutting_down``) must never be resurrected by this path.
+        - Not too stale: :data:`STALE_LEASE_GRACE_MAX_TTL_MULTIPLE` bounds
+          how far past TTL a lease may still be graced.
+        - A recorded ``payload["supervisor_pid"]`` must be present — a
+          legacy/non-supervised record has nothing to confirm against and is
+          treated as down exactly as before this change (mirrors
+          :func:`reclaim_lease_if_dead_owner`'s identical guard).
+        - :func:`pid_alive` on that pid (THE shared liveness primitive —
+          never a second implementation).
+        - The recorded endpoint host must be loopback
+          (``_GRACE_PROBE_LOOPBACK_HOSTS``) and the port must be positive.
+        - :func:`_probe_health_identity` at that host/port, bounded by
+          :data:`STALE_LEASE_GRACE_HEALTH_TIMEOUT_S`, must answer the
+          expected service's ``/health`` shape — a dead pid gives down; an
+          alive pid whose port does not answer, or answers as something
+          else (pid/port reuse), also gives down.
+
+        Only the stale path pays for any of this — a fresh lease never
+        calls here.
+        """
+        if record.status != "live":
+            return False
+        now = self._clock()
+        age = now - record.heartbeat_epoch
+        if age > record.ttl * STALE_LEASE_GRACE_MAX_TTL_MULTIPLE:
+            return False
+        supervisor_pid = record.payload.get("supervisor_pid")
+        if not (isinstance(supervisor_pid, int) and supervisor_pid > 0):
+            return False
+        if not pid_alive(supervisor_pid):
+            return False
+        host = str(record.endpoint.get("host", ""))
+        if host not in _GRACE_PROBE_LOOPBACK_HOSTS:
+            return False
+        try:
+            port = int(record.endpoint.get("port", 0))
+        except (TypeError, ValueError):
+            return False
+        if port <= 0:
+            return False
+        healthy = _probe_health_identity(
+            host, port, timeout=STALE_LEASE_GRACE_HEALTH_TIMEOUT_S
+        )
+        if healthy:
+            _log.info(
+                "service_registry_stale_lease_grace_accepted",
+                scope_key=record.scope_key,
+                tier=self._tier,
+                heartbeat_age_s=round(age, 3),
+                ttl=record.ttl,
+                supervisor_pid=supervisor_pid,
+            )
+        return healthy
 
     def _reap_if_still_stale(self, stale: LeaseRecord) -> None:
         """Reap an expired record, but only under the election flock and only

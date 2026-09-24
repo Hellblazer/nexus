@@ -211,6 +211,12 @@ printf '%s\n' "$PUT_OUT" | sed 's/^/       /'
 if [ -n "$PRE_ID" ]; then
   ok "seeded pre-upgrade T1 row $PRE_ID"
 else
+  # nexus-wo6sc half two: this is the FIRST client call against the
+  # supervisor in the whole run, so a heartbeat stall (the supervisor alive,
+  # its own lease stamp overrunning the TTL) manifests here as readily as at
+  # the skew-window asserts below -- attribute it at THIS failure site too,
+  # not only at the ones already wired.
+  _stall_note
   bad "could not seed a T1 row after 6 attempts: $PUT_OUT"; say "ABORT"; exit 1
 fi
 
