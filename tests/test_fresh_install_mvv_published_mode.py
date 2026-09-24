@@ -282,11 +282,55 @@ def _cleanup_preserved_evidence(result) -> None:
         shutil.rmtree(Path(match.group(1)).parent, ignore_errors=True)
 
 
+def _write_stub_git(stub_dir, tag_verdict: str) -> None:
+    """A stub `git` for the nexus-tt5vm follow-up discriminator
+    (`_release_tag_exists_on_origin`), which shells out to real `git
+    ls-remote` before the probe loop. ``tag_verdict``:
+    - "yes": reachable, tag present (rc 0, non-empty stdout).
+    - "no": reachable, tag absent (rc 0, empty stdout) — the real
+      `git ls-remote` shape for a genuinely nonexistent ref.
+    - "unreachable": remote could not be contacted at all (nonzero rc,
+      the real shape for a DNS/network failure — verified by hand against
+      a nonexistent host)."""
+    stub_git = stub_dir / "git"
+    if tag_verdict == "yes":
+        body = (
+            "#!/bin/bash\n"
+            'if [ "$1" = "ls-remote" ]; then\n'
+            "    echo 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\trefs/tags/v1.2.3'\n"
+            "    exit 0\n"
+            "fi\n"
+            "exit 1\n"
+        )
+    elif tag_verdict == "no":
+        body = (
+            "#!/bin/bash\n"
+            'if [ "$1" = "ls-remote" ]; then\n'
+            "    exit 0\n"
+            "fi\n"
+            "exit 1\n"
+        )
+    elif tag_verdict == "unreachable":
+        body = (
+            "#!/bin/bash\n"
+            'if [ "$1" = "ls-remote" ]; then\n'
+            "    echo 'fatal: unable to access: Could not resolve host' >&2\n"
+            "    exit 128\n"
+            "fi\n"
+            "exit 1\n"
+        )
+    else:
+        raise ValueError(f"unknown tag_verdict: {tag_verdict!r}")
+    stub_git.write_text(body)
+    stub_git.chmod(0o755)
+
+
 def _run_propagation_branch(
     tmp_path,
     extra_env: dict[str, str],
     probe_fail_count: int,
     install_fail_count: int,
+    tag_verdict: str = "yes",
 ) -> tuple:
     """Drive the rewritten propagation branch (nexus-tt5vm, 2026-09-24
     decision) with no real network and no real sleeping: a stub `uv`
@@ -298,7 +342,10 @@ def _run_propagation_branch(
     then succeeds. `tool dir`/`venv` are no-ops that let the script run
     to (and fail at) the NEXT assertion past the retry machinery, proving
     the loop actually exited via success rather than the process just
-    happening to end.
+    happening to end. A stub `git` answers the tag-existence discriminator
+    (default "yes" — a real release — so these probe/ceiling-focused tests
+    reach the probe loop exactly as before that discriminator existed;
+    see test_propagation_tag_discriminator_* below for its own coverage).
 
     `_uv_sandboxed` runs the stub under `env -i` (deliberate — see the
     script's own nexus-enfoh comment), so ambient env vars set on the
@@ -344,6 +391,7 @@ def _run_propagation_branch(
         "exit 1\n"
     )
     stub_uv.chmod(0o755)
+    _write_stub_git(stub_dir, tag_verdict)
 
     env = dict(os.environ)
     env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
@@ -472,5 +520,76 @@ def test_propagation_non_propagation_error_fails_immediately_no_retry(tmp_path) 
         assert result.returncode != 0
         assert "waiting on uv's own resolution" not in result.stdout
         assert "network unreachable, version not published on PyPI" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+# ── nexus-tt5vm follow-up: the git-tag discriminator (coordinator directive,
+# 2026-09-24) ─────────────────────────────────────────────────────────────
+
+
+def test_propagation_typo_version_fails_in_seconds_no_probe_loop(tmp_path) -> None:
+    """origin has no v1.2.3 tag -> this is an operator typo, not a
+    propagation lag: fail loud in seconds, naming the missing tag, and
+    never enter the probe loop at all (zero probe calls)."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV,
+        # install_fail_count=1: the mandatory FIRST call must fail
+        # (propagation-class) to enter the branch at all; the tag-absent
+        # fast-exit then fires before any second install attempt.
+        probe_fail_count=0, install_fail_count=1, tag_verdict="no",
+    )
+    try:
+        assert result.returncode != 0
+        assert probe_calls == 0, (
+            f"expected the typo fast-exit to enter no probe loop at all, "
+            f"saw {probe_calls} probe calls; stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+        assert install_calls == 1, "only the mandatory first failing install call"
+        assert "has no v1.2.3 tag" in result.stderr
+        assert "operator typo" in result.stderr
+        assert "waiting on uv's own resolution" not in result.stdout
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_propagation_tag_present_proceeds_to_the_probe_loop(tmp_path) -> None:
+    """origin DOES have a v1.2.3 tag -> a real release, not a typo; says so
+    and proceeds into the normal probe/retry loop exactly as before the
+    discriminator existed."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV,
+        probe_fail_count=1, install_fail_count=1, tag_verdict="yes",
+    )
+    try:
+        assert "carries tag v1.2.3" in result.stdout
+        assert "a real release, not a typo" in result.stdout
+        assert "waiting on uv's own resolution (nexus-tt5vm)" in result.stdout
+        assert probe_calls == 2
+        assert install_calls == 2
+        assert "reported success but" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_propagation_tag_check_unreachable_falls_through_with_warning(tmp_path) -> None:
+    """The remote itself could not be contacted (DNS/network failure, rc
+    128 — the real git shape, verified by hand against a nonexistent
+    host) -- this must NEVER be treated as evidence of a typo. One-line
+    warning, then the full propagation wait proceeds unchanged (never a
+    false fast-fail)."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV,
+        probe_fail_count=1, install_fail_count=1, tag_verdict="unreachable",
+    )
+    try:
+        assert "could not reach" in result.stdout
+        assert "proceeding with the full propagation wait" in result.stdout
+        assert "waiting on uv's own resolution (nexus-tt5vm)" in result.stdout
+        assert "has no v1.2.3 tag" not in result.stderr
+        assert probe_calls == 2
+        assert install_calls == 2
+        assert "reported success but" in result.stderr
     finally:
         _cleanup_preserved_evidence(result)

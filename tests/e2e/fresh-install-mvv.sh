@@ -507,6 +507,40 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         grep -qi "conexus" "$LOGS/install.log" \
             && grep -qiE "no solution found|no version of conexus|not found in the package registry" "$LOGS/install.log"
     }
+    # nexus-tt5vm follow-up: a propagation-class uv error is ALSO exactly
+    # what an operator typo in --published looks like (a version that will
+    # never appear). Distinguish the two WITHOUT depending on PyPI itself
+    # (the very surface under test) by asking GitHub whether the release
+    # tag exists. The canonical repo identity, not a local checkout's
+    # `origin` remote: this script deliberately trusts no ambient local
+    # config for anything else either (see _uv_sandboxed's own nexus-enfoh
+    # comment), and a local remote could be misnamed, absent, or point at a
+    # fork/mirror. Same identity other install-time code already hardcodes
+    # (src/nexus/daemon/binary_install.py's `_REPO = "Hellblazer/nexus"`,
+    # mcpb/src/server.py's `_RELEASE_URL`).
+    NEXUS_CANONICAL_REPO_URL="https://github.com/Hellblazer/nexus.git"
+    _release_tag_exists_on_origin() {
+        # $1 = version -> echoes "yes" | "no" | "unreachable". `git
+        # ls-remote` itself distinguishes "reachable, ref absent" (exit 0,
+        # empty stdout) from "could not reach the remote at all" (nonzero
+        # exit, e.g. DNS/network failure) -- verified directly against
+        # github.com. GIT_HTTP_LOW_SPEED_* bounds a stalled connection
+        # without depending on a `timeout`/`gtimeout` binary that may not
+        # be installed. Logged to its own file, never install.log --
+        # keeps _is_propagation_miss's grep scoped to uv's own output only.
+        local version="$1" out
+        if out="$(GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=10 \
+                git ls-remote --tags "$NEXUS_CANONICAL_REPO_URL" "refs/tags/v${version}" \
+                2>"$LOGS/tag-check.log")"; then
+            if [ -n "$out" ]; then
+                echo yes
+            else
+                echo no
+            fi
+        else
+            echo unreachable
+        fi
+    }
     if ! _published_install; then
         # nexus-tt5vm (three live occurrences: 7.26.0 ~90s, 7.55.3 ~6min,
         # 7.57.0 >300s): the original nexus-r433b fix waited on a SEPARATE
@@ -525,6 +559,18 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         # on an explicitly requested version, enter the propagation wait.
         # Every other failure shape still fails immediately, unchanged.
         if [ -n "$PUBLISHED_VERSION" ] && _is_propagation_miss; then
+            TAG_CHECK_VERDICT="$(_release_tag_exists_on_origin "$PUBLISHED_VERSION")"
+            case "$TAG_CHECK_VERDICT" in
+                no)
+                    _fail "uv tool install $PKG_SPEC failed and $NEXUS_CANONICAL_REPO_URL has no v$PUBLISHED_VERSION tag (see $LOGS/tag-check.log) — this version was never released; an operator typo in --published, not a propagation wait; no skip-pass permitted"
+                    ;;
+                unreachable)
+                    echo "  could not reach $NEXUS_CANONICAL_REPO_URL to check for a v$PUBLISHED_VERSION release tag (see $LOGS/tag-check.log) — proceeding with the full propagation wait rather than risking a false fast-fail"
+                    ;;
+                yes)
+                    echo "  $NEXUS_CANONICAL_REPO_URL carries tag v$PUBLISHED_VERSION — a real release, not a typo"
+                    ;;
+            esac
             echo "  resolver does not see conexus==$PUBLISHED_VERSION yet — waiting on uv's own resolution (nexus-tt5vm)"
             # Cheapest uv invocation that exercises the SAME resolution
             # `uv tool install` performs — same _uv_sandboxed env, same
