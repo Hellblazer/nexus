@@ -54,9 +54,9 @@ set +e
 echo '{}' | env -i HOME="$WORK/pc" PATH="$BIN57:/usr/bin:/bin" nx-hook no-such-verb-skew-gate >/dev/null 2>"$WORK/pc.err"
 PRC=$?
 set -e
-[ "$PRC" = 2 ] || _fail "positive control: 7.57.0 nx-hook exited $PRC on an unknown verb, not 2; this environment does not reproduce the failure"
+[ "$PRC" = 2 ] || _fail "positive control: the 7.57.0 CLI exited $PRC on an unknown verb, not 2; this environment does not reproduce the failure"
 grep -q "unknown verb" "$WORK/pc.err" || _fail "positive control: 7.57.0 stderr did not name the unknown verb: $(cat "$WORK/pc.err")"
-echo "  7.57.0 nx-hook exits 2 on an unknown verb, as in the field"
+echo "  the 7.57.0 CLI exits 2 on an unknown verb, as in the field"
 
 echo "── this checkout's wheel ──"
 HEADV="$WORK/cli-head"

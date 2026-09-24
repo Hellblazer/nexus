@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._hook_wiring import events_for
+from tests._hook_wiring import command_verb, events_for
 from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.mcp.hooks import DECIDING_HOOKS, HOOK_TOOLS
 
@@ -114,12 +114,11 @@ def test_a_deciding_hook_is_actually_wired_somewhere(hook_name: str) -> None:
     wired = [
         (event, matcher)
         for event, matcher, hook in _entries()
-        if hook.get("type") == "command"
-        and hook.get("command") == "nx-hook"
-        and verb in (hook.get("args") or [])
+        if command_verb(hook) == verb
     ]
     assert wired, (
-        f"no hooks.json entry runs `nx-hook {verb}` — {hook_name} is "
+        f"no hooks.json entry runs `nx-hook {verb}`, directly or through the "
+        f"nx-hook shim — {hook_name} is "
         f"registered and ported but fires on no event."
     )
 
