@@ -6,7 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.58.0] - 2026-09-23
+
+Pairs with engine-service-v0.1.130 (was engine-service-v0.1.129). The engine carries two new additive catalog routes (`POST /v1/catalog/merge`, `POST /v1/catalog/ghost-sweep`) and no new Liquibase changesets; catalog-016-0 gains a checksum-neutral DATA EFFECT comment only. Every unshipped wire-contract change is additive, so the engine deploys before this client tag.
+
+### Plugin hooks now live (conexus and sn)
+
+This release moves both plugins' pinned source forward, which makes 40 pending plugin-surface changes live at once:
+
+- sn hooks launch through `uv run --no-project --no-config --quiet` instead of bare `python3`, so they work on native Windows and ignore a stray `.python-version` (nexus-j4iy0).
+- The sn worktree guard records each session's startup root and denies a Serena write whose recorded root differs from the tree being edited, closing the relocated-session hazard where a write landed in the primary checkout (nexus-ebx0s).
+- conexus hooks run no bare `python3` scripts at all: the last five entries and the mailbox drain moved into `nx-hook` verbs, and eleven superseded plugin scripts are deleted (nexus-t9klx, nexus-44812, nexus-z9cz2).
+- A new SessionStart entry waits for the MCP server to connect before the session's first turn (nexus-veh77).
+- The orchestration ledger no longer marks in-flight workflow subagents as stranded, and uses the workflow task id rather than the run id as the container identity (nexus-silj0).
+- `rdr-close` archives post-mortems into the RDR research collection (nexus-vupim).
+
 ### Added
+
 
 - **`nx catalog merge <duplicate> <canonical>`** (nexus-z4rpi): collapses a duplicate catalog entry in one transaction, moving its source URI and links. `nx catalog update --alias-of` (nexus-bt8w8) sets only the alias.
 - **`nx catalog sweep-ghosts [--apply]`** and a `ghost-sweep` doctor row (nexus-29drn): collect RDR-204 ghosts created after the one-time automatic sweep.
@@ -16,10 +32,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+
 - **The `attention_guided_v1` salience boost** (nexus-0hqez). It never took effect: the hybrid scorer overwrote it, and nothing extracted the salient sentences it needed.
 - `table_regions[].html` in PDF extraction metadata (nexus-dqe86): written at three sites, read by none.
 
 ### Fixed
+
 
 - **An older nx no longer rolls the engine back** (nexus-b2eaw). The version stamp behind the post-upgrade finish pass was compared by string equality, so with two conexus versions on one box every alternating `nx` call re-ran the finish pass, and an older client converged the engine toward its own older pin. The stamp now only moves forward. A deliberate downgrade of the installed CLI says so and names `nx daemon restart-stale`; a dev checkout stays quiet.
 - **Interactive sessions no longer skip conexus hooks before nx-mcp connects** (nexus-veh77). Interactive Claude Code starts turn 1 without waiting for MCP servers, so every tool-tier hook for a request that began first was silently skipped (measured on macOS and WSL2). A SessionStart verb, `nx-hook mcp-connect-wait`, now waits up to 15 s for this session's nx-mcp and says so if it gives up; `nx-hook mcp-connect-check` warns once if nx-mcp disconnects mid-session.
@@ -91,6 +109,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the failure mode of every storage operation on every platform rather than
   a rider on this fix, so it is `nexus-fd3zf` with both arguments written
   out.
+- Catalog: a nested-worktree path is canonicalized before the repo-owner lookup, so it no longer registers under a second owner (nexus-7or3f).
+- Catalog: the RDR backfill no longer mints curator owners from tumbler-form collection names (nexus-emrsy).
+- `nx doctor`: superseded rows no longer count toward the dormant, disputed, and quarantine checks (nexus-s1rzg).
+- PDF extraction: code that the extractor mis-recognized as LaTeX math in table cells is detected and kept as code (nexus-8eg4w).
+- `config.yml` read-modify-write is locked across processes, not only threads; the HTTP retry classifier's string fallback matches a whole status token, not a digit substring (nexus-cd1k0.16).
+- Daemon: the aspect worker's stop guard uses the fenced value it captured, the warming marker rejects non-dict JSON, and the JVM-launch argv marker is confined to the storage daemon (nexus-cd1k0.6).
+- Daemon: the engine is launched on the IPv4 stack for both native and JVM launch kinds, and the gate is watched (nexus-ijue9.7); both flock sites route through one locking helper and the Java floor is pinned to the pom (nexus-ijue9.9).
+- Hooks: refreshing managed hooks now catches the error a stale repo entry actually raises (nexus-g76yf).
+- Local PG provisioning: every `psql`/`initdb` call carries an explicit timeout, and hook subprocesses are bounded (nexus-9dkxu, nexus-zptvf).
 
 ## [7.57.0] - 2026-09-22
 
