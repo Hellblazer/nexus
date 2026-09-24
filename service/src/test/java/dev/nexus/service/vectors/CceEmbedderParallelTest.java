@@ -885,4 +885,49 @@ class CceEmbedderParallelTest {
         assertThat(CceEmbedder.envInt("X", "65", 12, 1, 64)).isEqualTo(12);
         assertThat(CceEmbedder.envInt("X", "twelve", 12, 1, 64)).isEqualTo(12);
     }
+
+    @Test
+    void expiredDeadlineCancelsUnstartedBatches() throws Exception {
+        int parallelism = 1;
+        List<String> texts = new ArrayList<>();
+        for (int i = 0; i < 36; i++) {
+            String t = "dl-batch-" + i;
+            texts.add(t);
+        }
+        latencyMs.put("dl-batch-0", 50L);
+        try (CceEmbedder cce = batchedEmbedder(parallelism, 12)) {
+            setRequestDeadline(System.nanoTime());  // already expired at the first check
+            try {
+                assertThatThrownBy(() -> cce.embed(texts))
+                        .isInstanceOf(RequestDeadlineExceededException.class)
+                        .hasMessageContaining("0/36 chunks");
+            } finally {
+                clearRequestDeadline();
+            }
+            awaitPermitsBack(cce, parallelism);
+        }
+        assertThat(requestSizes.size()).as("at most the first batch was dispatched").isLessThanOrEqualTo(1);
+    }
+
+    @Test
+    void theFallbackStopsAtAnExpiredDeadlineInsteadOfHoldingItsPermit() throws Exception {
+        maxInputsPerRequest.set(1);  // every multi-text batch is refused
+        List<String> texts = List.of("fb-0", "fb-1", "fb-2", "fb-3");
+        try (CceEmbedder cce = batchedEmbedder(1, 12)) {
+            // Far enough out that the first check passes and the batch is sent and
+            // refused; the fallback then finds it expired between its single calls.
+            latencyMs.put("fb-0", 300L);
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(150));
+            try {
+                assertThatThrownBy(() -> cce.embed(texts))
+                        .isInstanceOf(RequestDeadlineExceededException.class)
+                        .hasMessageContaining("per-text fallback");
+            } finally {
+                clearRequestDeadline();
+            }
+            awaitPermitsBack(cce, 1);
+        }
+        assertThat(requestSizes).as("the refused batch, and no single call after the deadline")
+                .containsExactly(4);
+    }
 }

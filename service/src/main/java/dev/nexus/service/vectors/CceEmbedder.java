@@ -53,7 +53,17 @@ import java.util.concurrent.TimeUnit;
  * document's chunks as {@code [[c0..cN]]} is a DIFFERENT shape: it changes the vectors
  * (cosine 0.83-0.89) and was slower, so it is not used. A batch that Voyage refuses with a
  * 400 (for example past its 32k-token pre-chunked request cap) falls back to one call per
- * text, so one oversized text fails alone. The pre-batching convention, kept here as the
+ * text, so one oversized text fails alone.
+ *
+ * <p><strong>What this does not fix, and what it costs.</strong> The probe ran while Voyage
+ * was fast; shape C was not measured while Voyage is slow, which is when the 2026-09-24
+ * incident happened (1-5 chunks/s). The incident's fix is admission control and deadline
+ * enforcement (nexus-u2mlh.2/.3), not this shape. Two costs grow with the batch: a retried
+ * 5xx or 429 resends the whole batch's payload, and the request deadline is checked between
+ * batches, so one slow batch hides up to {@code batchChunks} texts' worth of work from it.
+ * The drift batching introduces (cosine 0.99995+) is below CCE's own call-to-call noise
+ * (2.6e-4 to 3.7e-4 between identical calls, nexus-mcgnz), which is why nothing was
+ * reindexed; nexus-u2mlh.7 checks recall after deploy. The pre-batching convention, kept here as the
  * record of what the parity oracle used to mirror, was Python's t3.py one text per call:
  * <pre>
  *   result = _voyage_with_retry(
@@ -158,8 +168,10 @@ public final class CceEmbedder implements Embedder {
     static final int DEFAULT_BATCH_CHUNKS = 12;
 
     /** UTF-8 byte budget for one batched request. Voyage caps a pre-chunked request at
-     *  32,000 tokens in total; 48 KiB stays under that for any text averaging at least
-     *  1.5 bytes per token. A single text over the budget still goes alone. */
+     *  32,000 tokens in total; 48 KiB (49,152 bytes) stays under that for text averaging
+     *  at least 1.536 bytes per token. English prose runs near 4 and code near 3; a batch
+     *  that still exceeds the cap gets a 400 and falls back to one text per call. A single
+     *  text over the budget still goes alone. */
     static final int BATCH_MAX_BYTES = 48 * 1024;
 
     /** A call slower than this is logged at INFO ({@code event=cce_call_slow}); every
@@ -500,6 +512,9 @@ public final class CceEmbedder implements Embedder {
         int n = texts.size();
         // nexus-99r7y critic fold: ONE 429 deadline for the WHOLE request.
         long deadlineNanos = newEmbedDeadlineNanos();
+        // Read on the calling thread: the request context does not follow the tasks
+        // onto the executor, and the 400 fallback inside a task needs it.
+        long requestDeadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
         List<int[]> ranges = planBatches(texts);
         List<Future<BatchOutcome>> futures = new ArrayList<>(ranges.size());
         for (int[] r : ranges) {
@@ -514,7 +529,7 @@ public final class CceEmbedder implements Embedder {
                 }
                 long startedNanos = System.nanoTime();
                 try {
-                    BatchOutcome o = embedBatch(sub, deadlineNanos);
+                    BatchOutcome o = embedBatch(sub, deadlineNanos, requestDeadlineNanos);
                     long callNanos = System.nanoTime() - startedNanos;
                     long queuedNanos = startedNanos - submittedNanos;
                     logCall(sub.size(), queuedNanos, callNanos);
@@ -531,7 +546,6 @@ public final class CceEmbedder implements Embedder {
         long maxCallNanos = 0L;
         long sumCallNanos = 0L;
         long callStartNanos = System.nanoTime();
-        long requestDeadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
         long lastNanos = callStartNanos;
         int chunksDone = 0;
         for (int b = 0; b < futures.size(); b++) {
@@ -602,20 +616,42 @@ public final class CceEmbedder implements Embedder {
 
     /**
      * One Voyage request for {@code texts} as single-chunk documents. A 400 on a batch of
-     * more than one retries each text alone (logged {@code event=cce_batch_rejected}), so
-     * a request Voyage refuses for its size succeeds and a bad text fails alone.
+     * more than one retries each text alone (logged {@code event=cce_batch_rejected} with
+     * the start of Voyage's body), so a request Voyage refuses for its size succeeds and a
+     * bad text fails alone. Any 400 triggers it, not only a size error: the contextualized
+     * endpoint's error codes are not documented the way {@code VoyageEmbedder} relies on
+     * {@code TOO_MANY_TOKENS_IN_BATCH}, and a non-size 400 costs at most one extra round
+     * of single calls, stopping at the first text that fails alone.
+     *
+     * <p>The fallback runs inside the batch's one permit, one call at a time: submitting
+     * the texts back to the executor from a task that holds a permit could deadlock when
+     * every permit is held that way. It checks the request deadline between calls, so it
+     * never holds that permit past the point the caller has given up.
      */
-    private BatchOutcome embedBatch(List<String> texts, long deadlineNanos) {
+    private BatchOutcome embedBatch(List<String> texts, long deadlineNanos, long requestDeadlineNanos) {
         try {
             return callAndParse(texts, deadlineNanos);
         } catch (CceStatusException e) {
             if (e.status != 400 || texts.size() == 1) {
                 throw e;
             }
-            log.warn("event=cce_batch_rejected status=400 chunks={} fallback=per_text", texts.size());
+            String msg = String.valueOf(e.getMessage());
+            log.warn("event=cce_batch_rejected status=400 chunks={} fallback=per_text body={}",
+                     texts.size(), msg.substring(0, Math.min(200, msg.length())));
             List<float[]> vectors = new ArrayList<>(texts.size());
             long tokens = 0L;
-            for (String text : texts) {
+            for (int i = 0; i < texts.size(); i++) {
+                String text = texts.get(i);
+                if (RequestDeadlineProbe.expired(requestDeadlineNanos, System.nanoTime())) {
+                    activityTracker.recordDeadlineAbort();
+                    log.warn("event=embed_deadline_exceeded embedder=cce phase=per_text_fallback "
+                            + "chunks_done={} chunks_total={} retry_after_s={}",
+                            i, texts.size(), RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+                    throw new RequestDeadlineExceededException(
+                            "embed deadline exceeded in the per-text fallback after " + i + "/"
+                                    + texts.size() + " texts of a refused batch",
+                            RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+                }
                 BatchOutcome one = callAndParse(List.of(text), deadlineNanos);
                 vectors.addAll(one.vectors());
                 tokens += one.tokens();
