@@ -208,7 +208,7 @@ limit):
 | Embedder (server-side) | bge-768 (ONNX, RDR-160) | Voyage (`voyage-code-3` / `voyage-context-3`) | Voyage (`voyage-code-3` / `voyage-context-3`) |
 | Dimensions | 768 | 1024 | 1024 |
 | Credentials | none required | Voyage API key on the service | Voyage API key on the service |
-| Reranking | available: server-side `ms-marco-MiniLM` cross-encoder (RDR-188) | available: `voyage-rerank-2.5` | available: `voyage-rerank-2.5` |
+| Reranking | available: server-side `ms-marco-MiniLM` cross-encoder (RDR-188) | available: `rerank-2.5` | available: `rerank-2.5` |
 
 A collection embedded under the posture NOT running at the moment is refused
 with a 422 (RDR-204's "reads never refused" is the design intent, not today's

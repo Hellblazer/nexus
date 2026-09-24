@@ -88,7 +88,7 @@ Through 6.x they were read by the ladder's substrate rung so `nx upgrade` could 
 | `pdf.mineru_page_batch` | — | `1` | Pages per MinerU request. Increase for faster throughput at the cost of memory |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
 | `search.hybrid_default` | — | `false` | Default hybrid-scoring mode for `nx search`: blends git frecency into the score for code corpora (0.7*vector + 0.3*frecency). Set `true` to always blend |
-| `search.hnsw_ef` | — | `256` | Legacy client-side HNSW tuning key, inert in production. Every current install (local or cloud) serves T3 through the nexus-service over pgvector, which tunes HNSW server-side — that knob is `NX_HNSW_EF_SEARCH` below, not this key. This value only still applies to a Chroma-backed test double; there is no live SPANN or ChromaDB Cloud path left to be "ignored in" |
+| `search.hnsw_ef` | — | `256` | Legacy client-side HNSW tuning key, inert in production. Every current install (local or cloud) serves T3 through the nexus-service over pgvector, which tunes HNSW server-side — that knob is `NX_HNSW_EF_SEARCH` above, not this key. This value only still applies to a Chroma-backed test double; there is no live SPANN or ChromaDB Cloud path left to be "ignored in" |
 | `search.distance_threshold.code` | — | `0.45` | Maximum distance for code corpus results. Results above this are filtered as noise |
 | `search.distance_threshold.knowledge` | — | `0.65` | Maximum distance for knowledge corpus results |
 | `search.distance_threshold.docs` | — | `0.65` | Maximum distance for docs corpus results |
