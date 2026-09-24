@@ -979,6 +979,85 @@ nx catalog unlink FROM TO [--type TYPE]
 
 Remove link(s). Omit `--type` to remove all link types between the pair.
 
+### nx catalog link-audit (hidden)
+
+```
+nx catalog link-audit [--json]
+```
+
+Hidden from `--help` but fully functional. Reports link graph stats: total
+count, orphaned links (endpoint no longer resolves), duplicates, a
+by-type and by-creator breakdown, and the list of orphaned links
+themselves. `--json` emits the same fields as a machine-readable object.
+
+### nx catalog link-bulk-delete (hidden)
+
+```
+nx catalog link-bulk-delete [--from TUMBLER] [--to TUMBLER] [--type TYPE]
+                             [--created-by NAME] [--created-at-before ISO_TIMESTAMP]
+                             [--no-dry-run --confirm]
+```
+
+Hidden from `--help` but fully functional. Bulk-remove links matching the
+given filters (all optional; omitting every filter matches every link).
+Same double-gate as `nx catalog gc`: report-only by default, and
+`--no-dry-run` alone still only reports — pass `--confirm` alongside it to
+actually delete (nexus-9nim, 4.29.1 inverted the old delete-unless-dry-run
+default). **Not reversible in-product**: the pre-delete JSONL backup
+snapshot died with the local catalog in 7.0.0 (nexus-i711w).
+
+### nx catalog register (hidden)
+
+```
+nx catalog register --title TITLE --owner OWNER [--author NAME] [--year YEAR]
+                     [--type CONTENT_TYPE] [--file-path PATH] [--source-uri URI]
+                     [--corpus NAME]
+```
+
+Hidden from `--help` but fully functional — single-document, explicit
+catalog registration, mirroring the MCP `catalog_register` tool. An
+absolute `--file-path` under a known repo is relativized automatically
+(RDR-060). `--source-uri` accepts an explicit persistent URI (`chroma://`,
+`https://`, `nx-scratch://`, `x-devonthink-item://`) or is omitted to
+derive `file://<abspath>` from `--file-path`; malformed URIs are rejected
+at register time. Refuses (nexus-u8n4r) to register a path that sits under
+an agent worktree or system temp dir unless the owner's own `repo_root` is
+itself rooted there, so an ephemeral checkout can't leave a permanent
+orphan behind. Most indexing paths (`nx index repo`/`pdf`/`md`/`rdr`, `nx dt
+index`) register through their own pipelines; this verb is for one-off or
+scripted registration outside those flows.
+
+### nx catalog backfill (hidden)
+
+```
+nx catalog backfill [--dry-run]
+nx catalog backfill --from-t3 --collection NAME
+nx catalog backfill --from-t3 --all-repo-collections
+```
+
+Hidden from `--help` but fully functional. Bare form (no `--from-t3`)
+populates the catalog from existing T3 collections and the legacy repo
+registry — the standard multi-pass backfill; `--dry-run` reports without
+writing. `--from-t3` is a per-file recovery mode: it enumerates T3 chunks
+directly and registers one catalog row per unique `source_path` under the
+repo owner, skipping the standard passes. It requires either `--collection
+NAME` (a single `docs__<repo>-<hash>` or `code__<repo>-<hash>` collection
+whose repo owner is already registered) or `--all-repo-collections` (run
+recovery against every matching collection in T3); the two are mutually
+exclusive.
+
+### nx catalog compact — RETIRED (hidden from `--help`)
+
+```
+nx catalog compact   # refuses with guidance
+```
+
+Retired in 7.0.0 alongside the local JSONL/SQLite catalog it compacted
+(catalog-git-DECISION Option C) — the nexus service's Postgres is the sole
+catalog authority and needs no client-side compaction. Refuses with
+`click.ClickException` and a pointer to that, rather than the uncaught
+`NotImplementedError` it used to raise.
+
 ### nx catalog sync / pull (retired)
 
 ```
@@ -3646,9 +3725,20 @@ remaining demoted-not-deleted primitives — still callable, out of `--help`:
 
 | Demoted verb | Its only job was | Now done by |
 |---|---|---|
-| `nx migration` | migration-sentinel inspect/recover | crash-recovery plumbing behind the trigger |
+| `nx migration [--clear-state [--force]]` | migration-sentinel inspect/recover | crash-recovery plumbing behind the trigger |
 | `nx collection backfill-hash` | upgrade-era `chunk_text_hash` repair | the ladder's manifest heal |
 | `nx hooks update-all` | manual managed-hook sweep | `nx upgrade` refreshes managed hooks itself |
+
+**`nx migration`** (RDR-159) inspects or recovers the cross-process
+migration-sentinel file that a crashed migration/rekey can leave stranded,
+banner-wrapping every read surface with a "migration in progress" warning
+forever. Bare `nx migration` prints the current sentinel read-only
+(`not-migrating` when none exists). `--clear-state` removes a stranded
+`migrated-failed` sentinel (safe — a resumed migration recomputes
+done-vs-total from live source-vs-target state, never trusts the stale
+marker); clearing a `migrating` sentinel additionally requires `--force`,
+since that phase may be a live migration in another process and dropping
+the banner mid-migration is only safe if that process actually crashed.
 
 Verbs that appeared in the old upgrade graph but have a genuine **non-upgrade**
 job keep their surface — `nx collection reindex` (refresh changed content),
