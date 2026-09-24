@@ -284,14 +284,20 @@ def _cleanup_preserved_evidence(result) -> None:
 
 def _write_stub_git(stub_dir, tag_verdict: str) -> None:
     """A stub `git` for the nexus-tt5vm follow-up discriminator
-    (`_release_tag_exists_on_origin`), which shells out to real `git
-    ls-remote` before the probe loop. ``tag_verdict``:
+    (`_release_tag_exists_on_origin`), which routes `git ls-remote`
+    through python3's subprocess.run(timeout=...) rather than calling it
+    directly from bash (nexus-tt5vm review round 2: GIT_HTTP_LOW_SPEED_*
+    alone does not bound a DNS/connect hang). ``tag_verdict``:
     - "yes": reachable, tag present (rc 0, non-empty stdout).
     - "no": reachable, tag absent (rc 0, empty stdout) — the real
       `git ls-remote` shape for a genuinely nonexistent ref.
     - "unreachable": remote could not be contacted at all (nonzero rc,
       the real shape for a DNS/network failure — verified by hand against
-      a nonexistent host)."""
+      a nonexistent host).
+    - "timeout": the process hangs past the wall-clock bound (verified by
+      hand: subprocess.run(timeout=1.0) against this exact shape raised
+      TimeoutExpired at ~1.0s) — must resolve to the SAME "unreachable"
+      verdict as a hard connection failure, never a false fast-fail."""
     stub_git = stub_dir / "git"
     if tag_verdict == "yes":
         body = (
@@ -316,6 +322,15 @@ def _write_stub_git(stub_dir, tag_verdict: str) -> None:
             'if [ "$1" = "ls-remote" ]; then\n'
             "    echo 'fatal: unable to access: Could not resolve host' >&2\n"
             "    exit 128\n"
+            "fi\n"
+            "exit 1\n"
+        )
+    elif tag_verdict == "timeout":
+        body = (
+            "#!/bin/bash\n"
+            'if [ "$1" = "ls-remote" ]; then\n'
+            "    sleep 5\n"
+            "    exit 0\n"
             "fi\n"
             "exit 1\n"
         )
@@ -351,17 +366,30 @@ def _run_propagation_branch(
     script's own nexus-enfoh comment), so ambient env vars set on the
     test's own subprocess.run(env=...) never reach the stub; the call
     counters are baked into the stub's own source text as absolute paths
-    instead. Returns (result, probe_call_count, install_call_count)."""
+    instead. Returns (result, probe_call_count, install_call_count).
+
+    Every `pip install` (probe) and `tool install` (real install) call's
+    FULL argv is also recorded, one invocation per line, to
+    ``tmp_path / "probe-argv.log"`` / ``"install-argv.log"`` respectively
+    (nexus-tt5vm review round 2, code-review-expert: the old stub matched
+    only argv[1]/argv[2], so dropping a flag like --no-cache — this bead's
+    exact defect class — would have passed green; see
+    test_propagation_probe_argv_is_pinned and
+    test_propagation_install_argv_is_pinned below, which read these files
+    directly rather than threading them through this function's return)."""
     import os
 
     probe_counter = tmp_path / "probe-calls.txt"
     install_counter = tmp_path / "install-calls.txt"
+    probe_argv_log = tmp_path / "probe-argv.log"
+    install_argv_log = tmp_path / "install-argv.log"
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     stub_uv = stub_dir / "uv"
     stub_uv.write_text(
         "#!/bin/bash\n"
         'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'    echo "$@" >> "{install_argv_log}"\n'
         f'    N=$(grep -c x "{install_counter}" 2>/dev/null || echo 0)\n'
         f'    echo x >> "{install_counter}"\n'
         f'    if [ "$N" -ge {install_fail_count} ]; then\n'
@@ -379,6 +407,7 @@ def _run_propagation_branch(
         "    exit 0\n"
         "fi\n"
         'if [ "$1" = "pip" ] && [ "$2" = "install" ]; then\n'
+        f'    echo "$@" >> "{probe_argv_log}"\n'
         f'    N=$(grep -c x "{probe_counter}" 2>/dev/null || echo 0)\n'
         f'    echo x >> "{probe_counter}"\n'
         f'    if [ "$N" -ge {probe_fail_count} ]; then\n'
@@ -591,5 +620,172 @@ def test_propagation_tag_check_unreachable_falls_through_with_warning(tmp_path) 
         assert probe_calls == 2
         assert install_calls == 2
         assert "reported success but" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_propagation_tag_check_timeout_falls_through_not_a_false_fastfail(tmp_path) -> None:
+    """nexus-tt5vm review round 2 (code-review-expert + substantive-critic):
+    GIT_HTTP_LOW_SPEED_LIMIT/TIME does not bound a hung DNS lookup or a
+    connect() that never completes -- only a stalled IN-PROGRESS transfer.
+    A stub `git` that just sleeps past FRESH_MVV_TAG_CHECK_TIMEOUT_SECONDS
+    (never touching HTTP at all) must still resolve to "unreachable" and
+    fall through to the full wait -- never fast-fail as a typo, and the
+    wall-clock bound must actually fire (this test's own timeout=60s
+    subprocess bound would catch a genuinely-unbounded hang, but the
+    assertion on elapsed time below is the real proof)."""
+    import time
+
+    env = dict(_FAST_PROPAGATION_ENV)
+    env["FRESH_MVV_TAG_CHECK_TIMEOUT_SECONDS"] = "1"
+    t0 = time.monotonic()
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, env, probe_fail_count=1, install_fail_count=1, tag_verdict="timeout",
+    )
+    elapsed = time.monotonic() - t0
+    try:
+        assert "could not reach" in result.stdout
+        assert "proceeding with the full propagation wait" in result.stdout
+        assert "waiting on uv's own resolution (nexus-tt5vm)" in result.stdout
+        assert "has no v1.2.3 tag" not in result.stderr
+        # The stub sleeps 5s; a working 1s wall-clock bound means the
+        # WHOLE run (tag check + the fast propagation loop below it)
+        # finishes well under 5s. This is the proof that the bound fired
+        # rather than the process silently completing on its own.
+        assert elapsed < 4.5, (
+            f"expected the 1s tag-check timeout to bound the 5s-sleeping "
+            f"stub git, but the run took {elapsed:.1f}s -- the wall-clock "
+            f"bound did not fire"
+        )
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+# ── nexus-tt5vm review round 2: pin the exact flags, not just argv[1]/[2]
+# (code-review-expert: a stub matching only the first two args would pass
+# green even if --no-cache were dropped from the script -- this bead's own
+# defect class) ──────────────────────────────────────────────────────────
+
+
+def _last_argv_line(log_path) -> list[str]:
+    assert log_path.is_file(), f"no argv recorded at all: {log_path}"
+    lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+    assert lines, f"argv log exists but is empty: {log_path}"
+    return lines[-1].split()
+
+
+def test_propagation_probe_argv_is_pinned(tmp_path) -> None:
+    """The cheap propagation probe must carry --dry-run (never actually
+    install), --no-deps (cheapest resolve of the target package only),
+    and --no-cache (nexus-tt5vm's own defect: a stale negative resolution
+    cached locally would silently defeat the whole retry). Also pins the
+    exact package spec (the version under test, not a drifted one) and
+    the absence of any index-override flag (this is a resolution-layer
+    test against the REAL default PyPI, never an operator's configured
+    mirror -- same invariant _uv_sandboxed's own nexus-enfoh comment
+    states for the install call)."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=2, install_fail_count=1,
+    )
+    try:
+        argv = _last_argv_line(tmp_path / "probe-argv.log")
+        for flag in ("--dry-run", "--no-deps", "--no-cache"):
+            assert flag in argv, f"propagation probe argv missing {flag}: {argv}"
+        assert "conexus==1.2.3" in argv, f"propagation probe argv missing the package spec: {argv}"
+        assert not any(a.startswith("--index") for a in argv), (
+            f"propagation probe argv carries an index-override flag -- "
+            f"this must resolve against the real default PyPI: {argv}"
+        )
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_propagation_probe_argv_loses_no_cache_would_fail_this_test(tmp_path) -> None:
+    """Falsification control (Sam's fix-round directive: 'prove it: remove
+    --no-cache from the script and the test fails'): patches a throwaway
+    copy of the script with --no-cache stripped from the probe call, runs
+    it standalone (never through _run_propagation_branch -- this control
+    needs its own minimal stub, not the shared fixture, to isolate what
+    changed), and asserts the recorded argv reflects exactly that removal.
+    This is the test proving test_propagation_probe_argv_is_pinned has
+    teeth, not a coverage duplicate -- it never runs the real script."""
+    import os
+
+    patched = tmp_path / "fresh-install-mvv-patched.sh"
+    text = SCRIPT.read_text()
+    needle = "pip install --dry-run --no-deps --no-cache \\"
+    assert needle in text, "probe invocation shape changed; update this control's needle"
+    patched.write_text(text.replace(needle, "pip install --dry-run --no-deps \\", 1))
+    patched.chmod(0o755)
+
+    probe_argv_log = tmp_path / "probe-argv.log"
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    stub_uv = stub_dir / "uv"
+    # Minimal stub: fail `tool install` once (propagation-class, enters
+    # the branch), succeed `venv`, record + fail `pip install` forever
+    # (the assertion only needs ONE recorded probe call).
+    stub_uv.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        "    echo '  x No solution found when resolving dependencies:' >&2\n"
+        "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        'if [ "$1" = "venv" ]; then\n'
+        "    exit 0\n"
+        "fi\n"
+        'if [ "$1" = "pip" ] && [ "$2" = "install" ]; then\n'
+        f'    echo "$@" >> "{probe_argv_log}"\n'
+        "    exit 1\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    stub_uv.chmod(0o755)
+    _write_stub_git(stub_dir, "yes")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    # Tiny ceiling: the probe fails forever in this control, so bound the
+    # wait to a fraction of a second rather than needing a success path.
+    env["FRESH_MVV_PROPAGATION_CEILING_SECONDS"] = "1"
+    env["FRESH_MVV_PROPAGATION_INITIAL_BACKOFF_SECONDS"] = "0.05"
+    env["FRESH_MVV_PROPAGATION_MAX_BACKOFF_SECONDS"] = "0.05"
+    result = subprocess.run(
+        [str(patched), "--published", "1.2.3"],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    try:
+        argv = _last_argv_line(probe_argv_log)
+        assert "--no-cache" not in argv, (
+            f"control setup failed: the patch did not actually remove "
+            f"--no-cache from the probe's recorded argv: {argv}"
+        )
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_propagation_install_argv_is_pinned(tmp_path) -> None:
+    """nexus-tt5vm review round 2 (code-review-expert): the retried
+    INSTALL calls (not only the probe) must also carry --no-cache -- a
+    lower-layer instance of the exact same staleness class this bead
+    exists to close. Checks the MANDATORY first install attempt (the one
+    that enters the propagation branch), which is present on every run
+    regardless of install_fail_count."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=1, install_fail_count=1,
+    )
+    try:
+        install_log = tmp_path / "install-argv.log"
+        assert install_log.is_file(), "no install argv recorded at all"
+        for line in install_log.read_text().splitlines():
+            argv = line.split()
+            if not argv:
+                continue
+            assert "--no-cache" in argv, (
+                f"a `uv tool install` retry carries no --no-cache -- stale "
+                f"local-cache class, one layer below the probe's own fix: {argv}"
+            )
+            assert "conexus==1.2.3" in argv
     finally:
         _cleanup_preserved_evidence(result)

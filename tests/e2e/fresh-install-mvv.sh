@@ -411,6 +411,12 @@ mkdir -p "$HOME_DIR" "$LOGS"
 # and set once the install step completes.
 BIN_DIR=""
 PROBE_PYTHON=""
+# nexus-tt5vm: the propagation wait's own elapsed-time data point (Sam's
+# goal -- every release that hits it contributes to a distribution), set
+# ONLY when --published mode's propagation branch actually ran. Declared
+# here (empty) so `set -u` never trips referencing it from the final
+# verdict line in a mode/run that never touched it.
+PROPAGATION_WAIT_S=""
 
 # Optional download cache (CI cost discipline): seed the virgin HOME's
 # ~/.cache/nexus (the 416MB bge ONNX) from FRESH_MVV_CACHE and save it back
@@ -496,7 +502,17 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     # $HOME_DIR/.local/{share/uv/tools,bin} and NEVER touch the operator's
     # live ~/.local/share/uv or ~/.local/bin.
     _published_install() {
-        _uv_sandboxed tool install --python 3.12 "$PKG_SPEC" \
+        # --no-cache (nexus-tt5vm review round 2, code-review-expert +
+        # substantive-critic): the propagation PROBE already carries
+        # --no-cache so a stale negative resolution from an earlier probe
+        # attempt is never served back from uv's own local cache -- but
+        # the retried INSTALL calls did not, leaving local-cache
+        # staleness as a second, lower-layer instance of exactly the
+        # class of bug this bead exists to close. Uniform across every
+        # call this function makes (the mandatory first attempt included,
+        # not only the post-probe retries): one function, one cache
+        # policy, nothing to keep in sync between call sites.
+        _uv_sandboxed tool install --python 3.12 --no-cache "$PKG_SPEC" \
             >"$LOGS/install.log" 2>&1
     }
     # The one propagation-signature test, shared by the retry trigger and
@@ -520,26 +536,68 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     # mcpb/src/server.py's `_RELEASE_URL`).
     NEXUS_CANONICAL_REPO_URL="https://github.com/Hellblazer/nexus.git"
     _release_tag_exists_on_origin() {
-        # $1 = version -> echoes "yes" | "no" | "unreachable". `git
-        # ls-remote` itself distinguishes "reachable, ref absent" (exit 0,
-        # empty stdout) from "could not reach the remote at all" (nonzero
-        # exit, e.g. DNS/network failure) -- verified directly against
-        # github.com. GIT_HTTP_LOW_SPEED_* bounds a stalled connection
-        # without depending on a `timeout`/`gtimeout` binary that may not
-        # be installed. Logged to its own file, never install.log --
-        # keeps _is_propagation_miss's grep scoped to uv's own output only.
-        local version="$1" out
-        if out="$(GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=10 \
-                git ls-remote --tags "$NEXUS_CANONICAL_REPO_URL" "refs/tags/v${version}" \
-                2>"$LOGS/tag-check.log")"; then
-            if [ -n "$out" ]; then
-                echo yes
-            else
-                echo no
-            fi
-        else
-            echo unreachable
-        fi
+        # $1 = version -> echoes "yes" | "no" | "unreachable" on stdout;
+        # diagnostic detail to $LOGS/tag-check.log (never install.log --
+        # keeps _is_propagation_miss's grep scoped to uv's own output).
+        #
+        # nexus-tt5vm review round 2 (code-review-expert + substantive-
+        # critic): GIT_HTTP_LOW_SPEED_LIMIT/TIME only bounds an in-progress
+        # transfer that has already started sending bytes -- it does
+        # nothing for a hung DNS lookup or a connect() that never
+        # completes, which is exactly the "unreachable" case this
+        # discriminator must not mistake for "tag absent" (a false
+        # fast-fail on a genuinely-released version). A hard wall-clock
+        # bound covers every hang shape uniformly. Routed through
+        # python3's subprocess.run(timeout=...) rather than the shell
+        # `timeout`/`gtimeout` binary -- GNU-only, absent on macOS by
+        # default (verified: this box has neither on PATH) -- and this
+        # script already leans on `python3 -c` for verdict/arithmetic
+        # logic elsewhere (_version_check_verdict, the backoff doubling
+        # above), so this is the established pattern, not a new one.
+        # subprocess.run's own timeout kills the whole process tree on
+        # expiry; no zombie git left hanging past the bound either way.
+        #
+        # Same env-isolation allowlist as _uv_sandboxed/_nx (HOME, PATH,
+        # TERM, NX_NO_TELEMETRY, HTTPS_PROXY/HTTP_PROXY passthrough only)
+        # -- passed as explicit argv, not inherited via os.environ, so
+        # this call is exactly as sandboxed as every other network call
+        # this script makes.
+        local version="$1"
+        python3 -c '
+import os
+import subprocess
+import sys
+
+url, version, timeout_s, home_dir, path = sys.argv[1:6]
+env = {
+    "HOME": home_dir,
+    "PATH": path,
+    "TERM": os.environ.get("TERM", "dumb"),
+    "NX_NO_TELEMETRY": "1",
+}
+for k in ("HTTPS_PROXY", "HTTP_PROXY"):
+    v = os.environ.get(k)
+    if v:
+        env[k] = v
+try:
+    result = subprocess.run(
+        ["git", "ls-remote", "--tags", url, f"refs/tags/v{version}"],
+        capture_output=True, text=True, timeout=float(timeout_s), env=env,
+    )
+except subprocess.TimeoutExpired:
+    print(f"TIMEOUT after {timeout_s}s contacting {url}", file=sys.stderr)
+    print("unreachable")
+    sys.exit(0)
+sys.stderr.write(result.stderr)
+if result.returncode != 0:
+    print("unreachable")
+elif result.stdout.strip():
+    print("yes")
+else:
+    print("no")
+' "$NEXUS_CANONICAL_REPO_URL" "$version" \
+            "${FRESH_MVV_TAG_CHECK_TIMEOUT_SECONDS:-15}" "$HOME_DIR" "$PATH" \
+            2>"$LOGS/tag-check.log"
     }
     if ! _published_install; then
         # nexus-tt5vm (three live occurrences: 7.26.0 ~90s, 7.55.3 ~6min,
@@ -1295,8 +1353,20 @@ GATE_OK=1
 # SIGPIPE being promoted over head's own (successful) exit status.
 VERSION_ALL="$(_nx --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 VERSION_STRING="${VERSION_ALL%%$'\n'*}"
+# nexus-tt5vm review round 2 (Sam's data-point goal): on success this
+# script's OWN $WORK (and every log under it, including
+# propagation-probe.log's PROPAGATION_WAIT_S line) is deleted by the
+# cleanup trap above -- the final sentinel line is the ONE thing every
+# caller (a bare standalone run, or the release battery's own log
+# capture) is guaranteed to still have. Append the data point there,
+# never a new line, so the documented "literal sentinel on the last
+# line" contract (this file's own header comment) still holds -- it is
+# still that same line, with the datum folded in when the propagation
+# branch fired, and omitted (not a fabricated "0s") when it never ran.
+PROPAGATION_WAIT_SUFFIX=""
+[ -n "$PROPAGATION_WAIT_S" ] && PROPAGATION_WAIT_SUFFIX=" [PROPAGATION_WAIT_S=$PROPAGATION_WAIT_S]"
 if [ "$PUBLISHED_MODE" = 1 ]; then
-    echo "FRESH-INSTALL MVV PASSED — conexus $VERSION_STRING (PUBLISHED artifact, uv-tool resolution layer)"
+    echo "FRESH-INSTALL MVV PASSED — conexus $VERSION_STRING (PUBLISHED artifact, uv-tool resolution layer)$PROPAGATION_WAIT_SUFFIX"
 else
     echo "FRESH-INSTALL MVV PASSED — conexus $VERSION_STRING (LOCAL WHEEL, release-battery layer)"
 fi

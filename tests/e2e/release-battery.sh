@@ -209,15 +209,31 @@ start_leg() {
 }
 declare -A LEG_PID
 finish_leg() {  # finish_leg <leg> <rc>
-  local leg="$1" rc="$2" line
+  local leg="$1" rc="$2" line clean prop
   LEG_END[$leg]=$(date +%s); LEG_RC[$leg]="$rc"
+  clean="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOGS/$leg.log")"
   # verbatim verdict line: last match after stripping ANSI colour
-  line="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOGS/$leg.log" | grep -E "${LEG_VERDICT[$leg]}" | tail -1 || true)"
+  line="$(printf '%s\n' "$clean" | grep -E "${LEG_VERDICT[$leg]}" | tail -1 || true)"
   LEG_LINE[$leg]="$line"
   if [ "$rc" -eq 0 ] && [ -n "$line" ] && [[ "$line" =~ PASSED|BUILT ]]; then LEG_STATUS[$leg]="PASSED"
   elif [ "$rc" -eq 0 ] && [ -n "$line" ]; then LEG_STATUS[$leg]="FAILED"; line="(exit 0 but the verdict line says otherwise) $line"
   elif [ "$rc" -eq 0 ]; then LEG_STATUS[$leg]="MISSING"; line="(exit 0 but no verdict line matching /${LEG_VERDICT[$leg]}/ — not a pass)"
   else LEG_STATUS[$leg]="FAILED"; [ -n "$line" ] || line="(exit $rc, no verdict line; tail: $(tail -3 "$LOGS/$leg.log" | tr '\n' ' ' | cut -c1-200))"
+  fi
+  # nexus-tt5vm review round 2 (Sam's data-point goal): fresh-install-mvv's
+  # propagation wait, when it fires, folds PROPAGATION_WAIT_S=<n> into its
+  # OWN final verdict line (the same line `line` above already captured
+  # via LEG_VERDICT's regex) -- but that is a property of that child
+  # script's output shape, not something this battery should depend on
+  # staying true forever. Independently grep the FULL log for the literal
+  # (this leg's own $LOGS/$leg.log lives under THIS script's $WORK, never
+  # deleted by the child's cleanup trap) and fold it in here too, skipping
+  # only when `line` already carries it verbatim -- belt and suspenders,
+  # not duplication. A no-op for every other leg; the literal never
+  # appears in their output.
+  prop="$(printf '%s\n' "$clean" | grep -oE 'PROPAGATION_WAIT_S=[0-9]+' | tail -1 || true)"
+  if [ -n "$prop" ] && [[ "$line" != *"$prop"* ]]; then
+    line="$line  [$prop]"
   fi
   LEG_LINE[$leg]="$line"
   echo "[$(date +%H:%M:%S)] END   $leg: ${LEG_STATUS[$leg]} rc=$rc wall=$(( LEG_END[$leg] - LEG_START[$leg] ))s — $line"
