@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 import shlex
 import shutil
 import subprocess
@@ -245,7 +246,7 @@ def _is_pipe_boundary_text(text: str) -> bool:
 
 
 def _quoted_spans(
-    cmd: str, *, skip_spans: list[tuple[int, int]] = ()
+    cmd: str, *, skip_spans: Sequence[tuple[int, int]] = ()
 ) -> list[tuple[int, int]]:
     """Every span of *cmd* lying inside a single- or double-quoted
     string, so a boundary operator found there -- a bare newline
