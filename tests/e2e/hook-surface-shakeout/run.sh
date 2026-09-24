@@ -39,9 +39,15 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 CRED_TOOL="$ROOT/tests/e2e/lib/claude_credentials.py"
 MVV="$ROOT/tests/e2e/rdr208-mvv"
 KEEP=""
+CLI_VERSION=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --keep) KEEP=1; shift ;;
+        # nexus-rcoze: install the PUBLISHED conexus X.Y.Z in place of this
+        # checkout's wheel, keeping this checkout's plugin -- a user whose
+        # plugin updated before their CLI. Asserts nothing blocks; see the
+        # OLD-CLI MODE block in shakeout_in_container.sh.
+        --cli-version) CLI_VERSION="${2:?--cli-version needs X.Y.Z}"; shift 2 ;;
         -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -79,8 +85,14 @@ umask 022
 SHA="$(git -C "$ROOT" rev-parse --short HEAD)"
 echo "[stage] wheel + plugin + checkout from $SHA"
 mkdir -p "$STAGE/wheel" "$STAGE/plugin/.claude-plugin" "$STAGE/plugin/hooks" "$STAGE/checkout"
-uv build --wheel --out-dir "$STAGE/wheel" "$ROOT" > "$STAGE/build.log" 2>&1 \
-    || { cat "$STAGE/build.log" >&2; exit 1; }
+if [ -n "$CLI_VERSION" ]; then
+    echo "conexus==$CLI_VERSION" > "$STAGE/wheel/requirement.txt"
+    echo "[stage] CLI: published conexus $CLI_VERSION (plugin from $SHA)"
+else
+    uv build --wheel --out-dir "$STAGE/wheel" "$ROOT" > "$STAGE/build.log" 2>&1 \
+        || { cat "$STAGE/build.log" >&2; exit 1; }
+    ls "$STAGE/wheel"/*.whl | sed 's#.*/#/home/nexus/wheel/#' > "$STAGE/wheel/requirement.txt"
+fi
 
 cp "$ROOT/conexus/.claude-plugin/plugin.json" "$STAGE/plugin/.claude-plugin/"
 cp -R "$ROOT/conexus/hooks/scripts" "$STAGE/plugin/hooks/scripts"
@@ -151,7 +163,7 @@ chmod +x "$STAGE/mcp_tee.sh"
 # The UNSHIMMED manifest travels too: it is the census denominator.
 cp "$ROOT/conexus/hooks/hooks.json" "$STAGE/hooks.json.original"
 mkdir -p "$STAGE/shims"
-python3 - "$ROOT/conexus/hooks/hooks.json" "$STAGE/plugin/hooks/hooks.json" "$STAGE/shims" <<'PY'
+python3 - "$ROOT/conexus/hooks/hooks.json" "$STAGE/plugin/hooks/hooks.json" "$STAGE/shims" "$HERE/hook_census.py" <<'PY'
 import json, os, stat, sys
 src, dst, shimdir = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(src))
@@ -176,6 +188,9 @@ DROP = {"upgrade-auto", "self-gc"}
 #     Claude Code still expands ${CLAUDE_PLUGIN_ROOT} before the shim sees
 #     them. The shim just execs the real command with "$@".
 CENSUS = "/home/nexus/run/hook-census.tsv"
+EXITS = "/home/nexus/run/hook-exits.tsv"
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[4])))
+from hook_census import label  # noqa: E402 -- one labelling rule for shims and census
 kept = dropped = shimmed = 0
 for event, groups in d["hooks"].items():
     for g in groups:
@@ -187,15 +202,21 @@ for event, groups in d["hooks"].items():
                 continue
             if h.get("type") != "mcp_tool" and h.get("command"):
                 real = h["command"]
-                declared = f"{real} {args[0]}".strip() if args else real
+                declared = label(h)
                 name = f"shim{shimmed:02d}.sh"
                 path = os.path.join(shimdir, name)
+                # Not exec: the shim waits so it can record the handler's exit
+                # code (hook-exits.tsv). Exit 2 is what blocks a session, and
+                # the --cli-version mode asserts no invocation returned it.
                 with open(path, "w") as fh:
                     fh.write(
                         "#!/bin/sh\n"
                         f"printf '%s\\t%s\\t%s\\t%s\\n' "
                         f"'{event}' '{declared}' \"$$\" \"$(date +%s)\" >> {CENSUS}\n"
-                        f"exec {real} \"$@\"\n"
+                        f"{real} \"$@\"\n"
+                        "rc=$?\n"
+                        f"printf '%s\\t%s\\t%s\\n' '{event}' '{declared}' \"$rc\" >> {EXITS}\n"
+                        "exit $rc\n"
                     )
                 os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
                 h["command"] = f"/home/nexus/shims/{name}"
@@ -245,7 +266,7 @@ docker build -q -t "$IMAGE" "$STAGE" > "$STAGE/docker-build.log" 2>&1 \
 # overwrote it, and the load-bearing timestamps survived only as a
 # transcription in a write-up that presented them as verifiable. A harness
 # that erases its own findings between rungs cannot support a ladder.
-_RUNTAG="$(date -u +%Y%m%dT%H%M%SZ)${SHAKEOUT_RACE_DELAY:+-delay${SHAKEOUT_RACE_DELAY}}${SHAKEOUT_PROBE:+-probe}"
+_RUNTAG="$(date -u +%Y%m%dT%H%M%SZ)${SHAKEOUT_RACE_DELAY:+-delay${SHAKEOUT_RACE_DELAY}}${SHAKEOUT_PROBE:+-probe}${CLI_VERSION:+-cli${CLI_VERSION}}"
 ART="${NX_SHAKEOUT_ARTIFACTS:-${TMPDIR:-/tmp}/hook-shakeout-$SHA-$_RUNTAG.artifacts}"
 mkdir -p "$ART"; chmod 777 "$ART"
 
@@ -269,6 +290,7 @@ docker run --rm \
     -e SHAKEOUT_SHA="$SHA" \
     -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}" \
     -e SHAKEOUT_RACE_DELAY="${SHAKEOUT_RACE_DELAY:-}" \
+    -e SHAKEOUT_CLI_VERSION="$CLI_VERSION" \
     "$IMAGE"
 rc=$?
 set -e

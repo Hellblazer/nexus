@@ -26,7 +26,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
     && /home/nexus/.local/bin/claude --version
 RUN uv venv --python 3.12 /home/nexus/nxenv
 COPY --chown=nexus:nexus wheel/ /home/nexus/wheel/
-RUN uv pip install --python /home/nexus/nxenv /home/nexus/wheel/*.whl
+RUN uv pip install --python /home/nexus/nxenv -r /home/nexus/wheel/requirement.txt
 COPY --chown=nexus:nexus plugin/ /home/nexus/plugin/
 # The repo the checkout-reading hooks want. Owned by the run user and made a
 # real git repo: `rdr` walks docs/rdr, the routing rules resolve a repo root,
