@@ -39,8 +39,6 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ---
 
-
-
 ## Awaiting the next release or plugin cut (pinned: v7.57.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line. The parser reads backtick
@@ -80,6 +78,14 @@ nexus-sa187, went live when `source.ref` advanced to `v7.57.0`.)
 
 ## Deferred to the next client release
 
+7.58.0 restored `hooks.json` and the eleven scripts its entries need to their
+v7.57.0 bytes (nexus-t9klx skew fix): an older `nx-hook` exits 2 on a verb it
+does not know, so a plugin that updated before its CLI would have blocked every
+prompt and every Bash call. Their entries were removed from this ledger because
+those paths no longer differ from the pin. The verbs stay in the wheel; the
+entries that name them come back here when hooks.json moves to them, and
+version lockstep never does.
+
 nexus-2x3qy (2026-09-23): these four beads (nexus-t9klx, nexus-z9cz2,
 nexus-silj0, nexus-veh77 -- the RDR-215 hook-migration work) straddle
 wheel content (their commits also touch `src/nexus/hooks/*` and kin):
@@ -94,78 +100,16 @@ cut may take on its own. Move back once RDR-215 is fully wheel-side
 and a fresh straddle check confirms it, or once the next client
 release ships them anyway.
 
-- nexus-t9klx — `conexus/hooks/hooks.json`: all five bare-`python3` entries
-  are re-pointed at `nx-hook` verbs (`behaviour-census`, `version-lockstep`,
-  `phase-review-close-gate`, `subagent-git-write-gate`, `mailbox-drain`), so
-  the manifest names no interpreter and no plugin script at all. Stock
-  Windows has no `python3` on PATH, so those entries could never fire there;
-  a console script gets a real `.exe` shim from the installer. Sessions on
-  v7.57.0 keep running the old entries against their own copies until a new
-  pin ships.
-
-- nexus-t9klx — `conexus/hooks/scripts/behaviour_census.py`: DELETED, ported
-  to the `behaviour-census` verb.
-
-- nexus-t9klx — `conexus/hooks/scripts/version_lockstep_hook.py`: DELETED,
-  ported to the `version-lockstep` verb.
-
-- nexus-t9klx — `conexus/hooks/scripts/version_lockstep_action.py`: DELETED,
-  ported to `nexus.hooks.version_lockstep_action` and dispatched by module.
-  It moved with its dispatcher rather than being reached back into the
-  plugin: one caller is enough to keep a plugin-resident script alive, which
-  is what RDR-215 removes.
-
-- nexus-t9klx — `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py`:
-  DELETED, ported to the `phase-review-close-gate` verb. The routing
-  framework's one fail_closed rule; it stays on the command tier, which is
-  where a rule that must still deny when it crashes belongs. `_lib.py` moved
-  into the wheel with it, dropping the stdlib endpoint mirror for the
-  client's own primitives.
-
-- nexus-t9klx — `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`:
-  DELETED, ported to the `subagent-git-write-gate` verb. The routing
-  framework's other guard, and the deliberately fail-OPEN one: a crash in a
-  broken guard must not brick every agent's Bash, and that posture is carried
-  across unchanged.
-
-- nexus-t9klx — `conexus/hooks/scripts/routing/_lib.py`: DELETED. Its last
-  plugin importer was the guard above; the wheel's `nexus.hooks._routing_lib`
-  is the same library, and two copies of it would drift.
-
-- nexus-t9klx — `conexus/hooks/scripts/routing/registry.yaml`: both rules now
-  declare `hook_verb` plus the wheel `module` instead of a `hook_script`
-  filename, since neither guard is a plugin script any more. Documentation
-  only — `routing_stats` reads hooks.json, never this file — so nothing
-  behaves differently when it goes live; it is declared because it drifted,
-  which is the whole contract.
-
-- nexus-t9klx — `conexus/hooks/scripts/mailbox_drain.py`: DELETED, ported to
-  the `mailbox-drain` verb. The last of the five. Its endpoint and size-limit
-  mirrors are replaced by the client's own primitives, and its output still
-  goes to stdout the moment each row is acked (`_io.stream`), because a
-  harness timeout is a kill and a consumed row must already be shown.
-
-- nexus-t9klx — `conexus/hooks/scripts/_interpreter.py`: DELETED. It re-execed
-  a bare `python3` under an interpreter that could import `nexus`; its last
-  importer was `mailbox_drain.py`, and a console-script verb has no
-  interpreter to choose.
-
-- nexus-t9klx — `conexus/hooks/scripts/routing/README.md`: says the routing
-  framework lives in the wheel as `nexus.hooks._routing_lib` and each rule is
-  an `nx-hook` verb, where it still described a vendored `_lib.py` +
-  `_interpreter.py`. Documentation only.
-
 - nexus-t9klx — `sn/hooks/scripts/_hook_boundary.py`: a docstring reference to
   conexus's drain hook now names the wheel module. Comment only; sn's
   behaviour is unchanged.
 
-
-nexus-z9cz2: the eleven bullets below are DELETIONS of plugin scripts that
-nothing shipped executed any more: hooks.json names none of them since
-nexus-t9klx, and each was superseded by the wheel code named. The one
-plugin script left, which the wheel runs, is divergence-language-scan.py.
-A session on v7.57.0 still carries its own copies until the pin moves, and
-never ran them either.
+nexus-z9cz2: the eight DELETED bullets below are plugin scripts that nothing
+shipped executes: hooks.json names none of them, and each was superseded by
+the wheel code named. (z9cz2 deleted three more helpers, which came back with
+the 7.58.0 skew fix because the restored mailbox drain and routing guards
+import them.) A session on v7.57.0 still carries its own copies until the pin
+moves, and never ran them either.
 
 - nexus-z9cz2 — `conexus/hooks/scripts/t2_prefix_scan.py`: DELETED; superseded by `nexus.hooks.t2_prefix_scan`, which `subagent_start` calls in-process.
 
@@ -183,12 +127,6 @@ never ran them either.
 
 - nexus-z9cz2 — `conexus/hooks/scripts/read_verification_config.py`: DELETED; superseded by `nexus.hooks.verification_config`.
 
-- nexus-z9cz2 — `conexus/hooks/scripts/_endpoint_resolve.py`: DELETED; superseded by nothing: a stdlib mirror of the client's endpoint precedence, needed only by the plugin scripts above.
-
-- nexus-z9cz2 — `conexus/hooks/scripts/_tuple_size_limits.py`: DELETED; superseded by nothing: a stdlib mirror of the tuple size caps, needed only by the plugin scripts above.
-
-- nexus-z9cz2 — `conexus/hooks/scripts/_hook_logging.py`: DELETED; superseded by nothing: its one function has a same-name twin in `nexus._hook_runtime._io`.
-
 - nexus-z9cz2 — `conexus/skills/orchestration/SKILL.md`: names the ledger's VERIFY parser as `nexus.hooks.tuple_ledger_project` instead of the deleted plugin copy. Wording only.
 
 - nexus-silj0 — `conexus/skills/orchestration/SKILL.md`: item 3 of the
@@ -205,23 +143,6 @@ never ran them either.
   exception, so a continuation handoff written under the OLD pin does not
   file a bead for a Workflow-tool run that the new wheel already buckets
   cleanly. Wording only.
-
-- nexus-veh77 — `conexus/hooks/hooks.json`: new `SessionStart` entry under the
-  `startup` matcher, `nx-hook mcp-connect-wait` (timeout 20). Interactive
-  Claude Code has no MCP connection barrier (measured: every submit rung from
-  0 to 2000 ms missed every tool-tier event, macOS 24/24 runs and WSL2 20/20,
-  T2 `nexus/veh77-interactive-ladder-results-2026-09-23`); this verb waits,
-  bounded (15 s) and fail-open, for THIS session's `nx-mcp` to publish its
-  connect marker (`nexus.mcp.connect_marker`, decoupled from T1 health round
-  2) before turn 1 can outrun the connection. On timeout it also injects a
-  visible SessionStart note naming the skip, since `nx-hook preflight` alone
-  does not cover a disabled or failed-to-spawn `nx-mcp` (round 3). Sessions
-  on the pinned tag keep running without the barrier until a new pin ships.
-  Round 5 adds a second entry to this same file: `UserPromptSubmit`,
-  `nx-hook mcp-connect-check` (timeout 5, sibling to `mailbox-drain`) --
-  warns once per episode on a MID-session disconnect (the barrier above
-  only protects the start), reusing `nexus.daemon.service_registry.
-  pid_alive` against the connect marker's now-recorded pid.
 
 - nexus-veh77 — `conexus/README.md`: new hook-table rows for `nx-hook
   mcp-connect-wait` and, round 5, `nx-hook mcp-connect-check`.
