@@ -208,7 +208,7 @@ A wait of minutes is a loop of parked calls, never one long park. Each call park
 
 ## Push delivery: the channel
 
-The session's own nexus MCP server (the delivery endpoint, RDR-211 nexus-rplay.14) and the drain hook (`nx-hook mailbox-drain`, `nexus.hooks.mailbox_drain`) are two renderers of one row that never wait on each other. This follows one message arriving at an idle session that has subscribed its instance-name mailbox per the SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
+The session's own nexus MCP server (the delivery endpoint, RDR-211 nexus-rplay.14) and the drain hook (`nx-hook mailbox-drain`, `nexus.hooks.mailbox_drain`) are two renderers of one row that never wait on each other. This follows one message arriving at an idle session's own mailbox, subscribed automatically from MCP-server startup -- no subscribe call is needed for it. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
 ```mermaid
 sequenceDiagram
@@ -250,7 +250,7 @@ The notification itself carries no content, only the reference (Sam, T2 `nexus_r
 
 When the channel is unreached at all (the session was not launched with the development-channel flag, or it subscribed too late) the row is still delivered: the next prompt fires `nx-hook mailbox-drain`, which probes independently, claims, acks and renders the same row inline in that prompt's context. The drain hook is the unconditional floor and never depends on whether the channel delivered anything first.
 
-A `/clear` or `/resume` puts the conversation on a new session id; the new session's own MCP server loads a fresh subscription set for that id (T1-scoped) and re-subscribes its instance mailbox once the model calls `tuple_subscribe` per the new SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel) for that handoff.
+A `/clear` or `/resume` puts the conversation on a new session id; the new session's own MCP server loads a fresh subscription set for that id (T1-scoped) -- its own mailbox is delivered from startup -- and re-leases its own name once the model calls `tuple_subscribe` per the new SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel) for that handoff.
 
 ## How a blocking read parks
 

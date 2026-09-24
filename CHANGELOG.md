@@ -13,6 +13,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Removed
 
 - The unwired `version-lockstep` `nx-hook` verb and its wheel modules (nexus-rcoze). Version lockstep stays the stdlib plugin script, which is what runs; its tests now drive that script again.
+- **Instance-name mailbox delivery** (RDR-208 Phase 3, nexus-galkv.20; the retention window closed at R2/v7.46.0 + 7 days). Subscribing a name with `tuple_subscribe("mailbox/<name>")` still arms its `directory/<name>` lease so `mailbox_send` resolves it, but it no longer registers a second mailbox: the per-session registration file the drain hook used to read is gone, the leased name is never listed by `tuple_subscriptions`, and nothing is pushed over the channel for it. Reach a session by name through `mailbox_send`, which always resolves to its own session id.
 
 ## [7.59.0] - 2026-09-24
 

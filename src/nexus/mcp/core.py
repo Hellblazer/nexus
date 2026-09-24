@@ -7235,16 +7235,17 @@ def tuple_subscribe(
     subspace: Annotated[str, Field(
         description=(
             "A board topic (`board/<topic>`), or, once, this session's own "
-            "instance-name mailbox (`mailbox/<name>`)."
+            "name (`mailbox/<name>`) to register in the peer directory."
         ),
     )],
 ) -> str:
     """Add `subspace` to this session's MCP server's subscription list (RDR-211, RDR-213).
 
-    The session's MCP server waits on this list and pushes what arrives
-    through the Claude Code channel: the lifespan waiter (`mcp/channel.py`)
-    sends a notification carrying a REFERENCE only (subspace, tuple id) --
-    never the body, never a claim -- which this session claims itself with
+    The session's MCP server waits on its board topics and its own mailbox
+    (`mailbox/<session id>`) and pushes what arrives through the Claude
+    Code channel: the lifespan waiter (`mcp/channel.py`) sends a
+    notification carrying a REFERENCE only (subspace, tuple id) -- never
+    the body, never a claim -- which this session claims itself with
     `tuple_in` (RDR-213: the waiter never claims mail, and `tuple_in`
     returns the body WITH the claim, so there is no separate `tuple_rd`
     read step first). With the plugin's hooks loaded, the notification
@@ -7252,19 +7253,18 @@ def tuple_subscribe(
     renders the body with THAT prompt before the session's own turn, so
     the session claims for itself only when that rendering did not
     already happen. `tuple_subscriptions` lists the current set.
-    Only board topics and the session's own instance-name mailbox are
-    accepted: a queue or a lock is refused naming `in`, since those are
-    never delivered, and any mailbox other than the session's own
-    instance name is refused, since it would claim another session's
-    mail. At most 32 board topics may be subscribed at once, beyond the
-    two mailboxes (the session's own, always present from startup, and at
-    most one instance-name mailbox).
+    Only board topics and the session's own mailbox are ever delivered: a
+    queue or a lock is refused naming `in`, since those are never
+    delivered, and any other `mailbox/<name>` is refused if this session
+    already leases a different name, since only one name is accepted.
+    At most 32 board topics may be subscribed at once, beyond the
+    session's own mailbox.
 
-    Subscribing the session's own instance-name mailbox also takes over
-    what the now-deleted CLI mailbox-watch loop's own `--instance NAME`
-    flag used to do for it: it writes the per-session registration file
-    the `UserPromptSubmit` drain hook reads, and starts the RDR-208
-    `directory/<name>` lease so the name resolves to this session.
+    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
+    lease so `mailbox_send` resolves that name to this session (RDR-208
+    Phase 3, bead nexus-galkv.20: it is NOT a second delivered mailbox --
+    nothing is pushed or drained for it; only this session's own mailbox
+    and its board topics ever are).
 
     A `/resume` (same session id) restores this list; a `/clear` (a new
     session id) starts clean.
@@ -7296,10 +7296,10 @@ def tuple_unsubscribe(
     """Remove `subspace` from this session's MCP server's subscription list (RDR-211).
 
     The session's own mailbox can never be unsubscribed -- it is the
-    floor's address. Unsubscribing the session's instance-name mailbox
-    stops its `directory/<name>` lease. Unsubscribing a board topic, or a
-    subspace not currently subscribed, is otherwise a plain removal (a
-    no-op when it was never subscribed).
+    floor's address. Unsubscribing `mailbox/<name>` for the name this
+    session leases stops its `directory/<name>` lease. Unsubscribing a
+    board topic, or a subspace not currently subscribed or leased, is
+    otherwise a plain removal (a no-op when it was never subscribed).
     """
     try:
         session_id = _current_subscription_session_id()
@@ -7322,10 +7322,12 @@ def tuple_unsubscribe(
 def tuple_subscriptions() -> list[dict]:
     """List this session's MCP server's subscription set (RDR-211).
 
-    Always the session's own mailbox first, then the instance-name
-    mailbox if one was subscribed, then subscribed board topics. There
-    is no cursor: the engine keeps every subspace's delivery position
-    (a row stamp for a mailbox, a per-subscriber stamp for a board).
+    Always the session's own mailbox first, then subscribed board topics.
+    A leased name (RDR-208 Phase 3, bead nexus-galkv.20) never appears
+    here: it is not a delivered mailbox, only a `directory/<name>` lease
+    for `mailbox_send` resolution. There is no cursor: the engine keeps
+    every subspace's delivery position (a row stamp for a mailbox, a
+    per-subscriber stamp for a board).
     """
     try:
         session_id = _current_subscription_session_id()

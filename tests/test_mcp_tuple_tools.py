@@ -716,12 +716,15 @@ class TestTupleSubscriptions:
         entries = tuple_subscriptions()
         assert "board/release-notes" not in {e["subspace"] for e in entries}
 
-    def test_instance_mailbox_takeover_writes_registration_and_lease_refused_for_any_other_name(
+    def test_name_lease_arms_the_directory_and_is_never_a_delivered_mailbox(
         self, t2_service_env, tmp_path, monkeypatch,
     ) -> None:
+        """RDR-208 Phase 3 (bead nexus-galkv.20): subscribing a name arms
+        its `directory/<name>` lease (so `mailbox_send` resolves it), but
+        writes no per-session registration file any more and never
+        appears in `tuple_subscriptions`'s own listing -- it is not a
+        second delivered mailbox."""
         import os
-
-        from nexus.mcp.subscriptions import registration_path
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         session_id = os.environ["NX_T1_SESSION_ID"]
@@ -730,12 +733,20 @@ class TestTupleSubscriptions:
         msg = tuple_subscribe(f"mailbox/{name}")
         assert "Subscribed" in msg
 
-        reg = registration_path(tmp_path, session_id)
-        assert reg.read_text(encoding="utf-8") == f"{name}\n"
+        # THE "THEN STOPS" HALF (Transition Test Plan): no registration
+        # file is written under the config dir any more. Checked as a
+        # specific path, not "the config dir holds nothing at all": this
+        # same dir is now NEXUS_CONFIG_DIR, so an unrelated data-token
+        # lease this call's own T2 access legitimately caches there is not
+        # this test's concern.
+        assert not (tmp_path / "tuple-watch").exists()
 
         rows = tuple_rd(f"directory/{name}", {"name": name})
         assert len(rows) == 1
         assert rows[0]["dims"]["session_id"] == session_id
+
+        entries = tuple_subscriptions()
+        assert f"mailbox/{name}" not in {e["subspace"] for e in entries}
 
         other = f"other-{uuid.uuid4().hex[:8]}"
         refusal = tuple_subscribe(f"mailbox/{other}")

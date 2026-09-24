@@ -493,16 +493,16 @@ class TestDeadLetteredRows:
 
 
 class TestAddressRegistry:
-    """The session id resolves from the hook payload. The INSTANCE NAME is in
-    no environment variable anywhere (MM-1.3), so it can only be drained once
-    something has registered it. Until then instance-addressed mail has no
-    floor, which the bead says out loud.
+    """The session id resolves from the hook payload; the hook drains only
+    that address.
 
-    nexus-6konb.9 defect fix: the registry is PER-SESSION
-    (``<config>/tuple-watch/addresses.d/<session id>``), corrected from an
-    earlier machine-wide ``<config>/tuple-watch/addresses`` file that let
-    whichever session prompted first drain every other session's
-    instance-addressed mail too."""
+    RDR-208 Phase 3 (bead nexus-galkv.20) pins the Transition Test Plan's
+    "then stops" half: a registered instance mailbox -- the old per-session
+    ``<config>/tuple-watch/addresses.d/<session id>`` registry
+    ``tuple_subscribe("mailbox/<name>")`` used to write -- is NOT drained
+    any more, even when a stale copy of that file is still sitting on disk
+    (an old install, or a manual write). The retention window this
+    transition depended on (R2's ship date plus 7 days) has passed."""
 
     def _reg(self, tmp_path, session_id: str = SESSION_ID):
         reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / session_id
@@ -518,26 +518,32 @@ class TestAddressRegistry:
         rd_bodies = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
         assert any(b.get("subspace") == f"mailbox/{SESSION_ID}" for b in rd_bodies)
 
-    def test_a_registered_address_is_drained_too(self, tmp_path, engine) -> None:
+    def test_a_registered_address_is_no_longer_drained(self, tmp_path, engine) -> None:
+        """THE FALSIFIER: reverting this bead's code change (restoring the
+        registry read) makes this fail, since a stale registry file naming
+        ``nexus-19`` would then be drained."""
         eng = engine()
         self._reg(tmp_path).write_text("nexus-19\n", encoding="utf-8")
         _wired(tmp_path, eng)
-        _run(tmp_path=tmp_path)
+        res = _run(tmp_path=tmp_path)
+        assert res.returncode == 0, res.stderr
         rd_bodies = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
-        assert any(b.get("subspace") == "mailbox/nexus-19" for b in rd_bodies)
+        assert not any(b.get("subspace") == "mailbox/nexus-19" for b in rd_bodies)
 
     def test_an_unregistered_instance_address_is_not_drained(
         self, tmp_path, engine,
     ) -> None:
-        """The honest negative: with nothing registered, the hook cannot know
-        this session is also called nexus-19, so that mailbox has no floor."""
+        """The honest negative even with no file at all: the hook never
+        drains an instance-named mailbox, registered or not."""
         eng = engine()
         _wired(tmp_path, eng)
         _run(tmp_path=tmp_path)
         rd_bodies = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
         assert not any(b.get("subspace") == "mailbox/nexus-19" for b in rd_bodies)
 
-    def test_registry_junk_and_duplicates_are_tolerated(self, tmp_path, engine) -> None:
+    def test_a_stale_registry_file_with_junk_and_duplicates_is_still_ignored(
+        self, tmp_path, engine,
+    ) -> None:
         eng = engine()
         self._reg(tmp_path).write_text(
             f"\n  nexus-19  \n\n# a comment\nnexus-19\n{SESSION_ID}\n", encoding="utf-8",
@@ -546,15 +552,13 @@ class TestAddressRegistry:
         res = _run(tmp_path=tmp_path)
         assert res.returncode == 0, res.stderr
         subspaces = [b.get("subspace") for p, b in eng.calls if p == "/v1/tuples/rd"]
-        assert subspaces.count("mailbox/nexus-19") == 1
+        assert subspaces.count("mailbox/nexus-19") == 0
         assert subspaces.count(f"mailbox/{SESSION_ID}") == 1
-        assert not any(s and "#" in s for s in subspaces)
 
     def test_a_machine_wide_flat_registry_file_is_ignored(self, tmp_path, engine) -> None:
         """The old design's flat ``<config>/tuple-watch/addresses`` file, if
         one happens to exist on disk (a relic, or a human who followed the
-        stale doc), must never be read by this hook any more -- only the
-        per-session ``addresses.d/<session id>`` file counts."""
+        stale doc), must never be read by this hook any more."""
         eng = engine()
         flat = tmp_path / "config" / "tuple-watch" / "addresses"
         flat.parent.mkdir(parents=True, exist_ok=True)
@@ -568,12 +572,10 @@ class TestAddressRegistry:
     def test_cross_session_drain_never_leaks_a_peer_sessions_instance_mailbox(
         self, tmp_path, engine,
     ) -> None:
-        """Two sessions on one box. Session A's watcher registered instance
-        NAME_A under A's own session id. Session B's drain (a DIFFERENT
-        payload session id) must NOT drain mailbox/NAME_A -- only A's own
-        drain may. This crosses session ids on purpose: a same-session test
-        would pass even with the retired machine-wide design, which is
-        exactly the bug this fix closes."""
+        """Two sessions on one box. Session A has a (now stale, unread)
+        registry file naming instance NAME_A. Neither session's drain may
+        ever reach ``mailbox/NAME_A`` any more -- not A's own, and
+        certainly not B's."""
         session_a, session_b = "sess-A-owns-instance", "sess-B-different-session"
         instance_a = "nexus-instance-a"
         eng = engine()
@@ -592,7 +594,7 @@ class TestAddressRegistry:
         res_a = _run(tmp_path=tmp_path, stdin=_payload(session_id=session_a))
         assert res_a.returncode == 0, res_a.stderr
         rd_bodies_a = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
-        assert any(b.get("subspace") == f"mailbox/{instance_a}" for b in rd_bodies_a)
+        assert not any(b.get("subspace") == f"mailbox/{instance_a}" for b in rd_bodies_a)
 
 
 class TestNeverBlocksThePrompt:
@@ -856,24 +858,27 @@ class TestPartialFailureNeverLosesDeliveredMail:
             assert f"message {i}" in res.stdout
 
     def test_one_failing_address_does_not_stop_the_other(self, tmp_path, engine) -> None:
-        """_Skip is caught per address, not around the whole loop. The session-id
-        mailbox is probed FIRST and made to fail outright; the registered address
-        must still be drained afterwards."""
+        """``_Skip`` is caught per address, not around the whole loop.
+
+        RDR-208 Phase 3 (bead nexus-galkv.20) retired the per-prompt payload's
+        own address list down to the session's own id alone -- there is no
+        longer a second REGISTERED address to prove isolation against there.
+        The same per-address ``try/except ... continue`` shape still lives in
+        the cleared-record drain (:func:`_drain_cleared_record`, still a list
+        of mailbox ids -- a chained ``/clear`` can name more than one), so this
+        now exercises the property through that path instead: the first named
+        mailbox is made to fail outright, and the second must still be
+        drained."""
         eng = engine()
-        good = _row("z1", body="from the good address")
-        good["keys"] = {"to": "other-addr"}
+        good = _row("z1", body="from the good address", to="old-addr-2")
         eng.rows = [good]
-        # the FIRST rd is the session-id address: kill its connection so the
-        # hook raises _Skip on it before ever reaching the second address
-        eng.fail_rd_for = SESSION_ID
-        reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / SESSION_ID
-        reg.parent.mkdir(parents=True, exist_ok=True)
-        reg.write_text("other-addr\n", encoding="utf-8")
+        eng.fail_rd_for = "old-addr-1"
+        _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-addr-1", "old-addr-2"])
         _wired(tmp_path, eng)
         res = _run(tmp_path=tmp_path)
         assert res.returncode == 0
         assert "SKIP" in res.stderr, "the first address must actually have failed"
-        assert SESSION_ID in res.stderr
+        assert "old-addr-1" in res.stderr
         assert "from the good address" in res.stdout, (
             "a failure on the first address stopped the second"
         )
@@ -890,22 +895,21 @@ class TestPartialFailureNeverLosesDeliveredMail:
         SKIP line; it does NOT preserve "one bad mailbox must not stop the others",
         since it catches outside the loop and every later address is abandoned.
         That is the property only this test pins, and deleting the per-address
-        handler fails it.
+        handler fails it. See the sibling test above for why this now runs
+        through the cleared-record drain rather than a registered instance
+        address (RDR-208 Phase 3, bead nexus-galkv.20).
         """
         eng = engine()
-        good = _row("u1", body="from the second address")
-        good["keys"] = {"to": "other-addr"}
+        good = _row("u1", body="from the second address", to="old-addr-2")
         eng.rows = [good]
-        eng.malformed_rd_for = SESSION_ID
-        reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / SESSION_ID
-        reg.parent.mkdir(parents=True, exist_ok=True)
-        reg.write_text("other-addr\n", encoding="utf-8")
+        eng.malformed_rd_for = "old-addr-1"
+        _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-addr-1", "old-addr-2"])
         _wired(tmp_path, eng)
 
         res = _run(tmp_path=tmp_path)
 
         assert res.returncode == 0
-        assert "SKIP" in res.stderr and SESSION_ID in res.stderr, (
+        assert "SKIP" in res.stderr and "old-addr-1" in res.stderr, (
             "the first address must actually have failed"
         )
         assert "unexpected" in res.stderr, (
