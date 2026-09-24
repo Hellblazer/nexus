@@ -21,11 +21,15 @@ misreading during planning, so the comparison is equality against a token
 set and `test_the_permitted_commands_are_not_rejected_as_substrings` is
 the fixture that fails if anyone rewrites it as `in`.
 
-WHY conexus PERMITS NO python3. Bead .21 left five handlers plugin-resident
-under a bare `python3`, and this lint allowed exactly those five by name.
-nexus-t9klx ported all five to `nx-hook` verbs, because stock Windows has no
-`python3` on PATH and a console script gets an `.exe` shim from the
-installer. A `python3` entry is now simply an unpermitted command.
+WHY THE conexus python3 ALLOWLIST IS BY NAME. Bead .21 left five handlers
+plugin-resident under a bare `python3`, and this lint allows exactly those
+five. nexus-t9klx ported all five to `nx-hook` verbs, but 7.58.0 keeps
+hooks.json on the scripts: an older `nx-hook` exits 2 on a verb it does not
+know, so a plugin that updated before its CLI would block every prompt and
+every Bash call. Four of the five move to their verbs once a CLI that knows
+them is the norm; the lockstep never does, because it is the hook that
+repairs that skew (tests/hooks/test_lockstep_survives_cli_skew.py). A sixth
+script appearing is drift the lint refuses until someone argues for it.
 
 sn left `python3` for the same reason (nexus-j4iy0) by a different route. It
 ships no Python package, so it has no console script to ride; it runs its
@@ -59,8 +63,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: connection barrier (`nx-hook mcp-connect-wait`), `startup` matcher only.
 #: 26 -> 27 at nexus-veh77 round 5: the mid-session disconnect detector
 #: (`nx-hook mcp-connect-check`), `UserPromptSubmit`, sibling to
-#: `mailbox-drain`.
-EXPECTED_CONEXUS_ENTRIES = 27
+#: `mailbox-drain`. 27 -> 25 for 7.58.0: both veh77 entries are held back
+#: with the rest of the new verbs (plugin-ahead skew; see the docstring).
+EXPECTED_CONEXUS_ENTRIES = 25
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -68,7 +73,19 @@ MCP_SERVER = "plugin:conexus:nexus"
 #: Equality targets, never substrings. See the module docstring.
 FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 
-CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher"})
+CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "python3"})
+
+#: The five handlers bead .21 resolved as plugin-resident. See the docstring
+#: for why 7.58.0 still wires them.
+PLUGIN_RESIDENT_SCRIPTS = frozenset(
+    {
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/phase_review_close_requires_gate.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
+    }
+)
 
 SN_SCRIPT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/"
 
@@ -174,6 +191,14 @@ def reject_conexus(event: str, entry: dict) -> str | None:
             f"runs `nx-session-end-launcher` with {len(args)} args; it takes "
             f"none, and its empty `args` is what makes the entry exec form."
         )
+    if command == "python3":
+        if len(args) != 1:
+            return f"runs python3 with {len(args)} args; exactly one script path is permitted"
+        if args[0] not in PLUGIN_RESIDENT_SCRIPTS:
+            return (
+                f"runs python3 on {args[0]!r}, which is not one of the five "
+                f"handlers bead .21 resolved as plugin-resident."
+            )
     return None
 
 
@@ -332,9 +357,21 @@ CONEXUS_REJECTS = [
         {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rdr_hook.py"],
         },
-        id="python3-command",
+        id="python3-on-a-script-outside-the-five",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": [
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+                "--extra",
+            ],
+        },
+        id="python3-with-a-second-argument",
     ),
     # The default-branch gap. Each of these was ACCEPTED before
     # nexus-q02nx.29, because anything that was not `mcp_tool` fell

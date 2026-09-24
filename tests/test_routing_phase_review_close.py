@@ -574,8 +574,15 @@ def test_hooks_json_registers_routing_hook():
     # a `bd close` Bash command and the path assertion stays green. For
     # the routing framework's only fail_closed rule.
     declared = _declared_paths(data, "PreToolUse", matcher="Bash")
+    # 7.58.0 wires the plugin script, not the verb: an older nx-hook exits 2
+    # on a verb it does not know (plugin-ahead skew, nexus-t9klx). Either
+    # shape is accepted under the Bash matcher, and a script entry must name
+    # a file that exists.
+    script = "hooks/scripts/routing/phase_review_close_requires_gate.py"
+    if any(p.endswith(script) for p in declared):
+        assert (PROJECT_ROOT / "conexus" / script).is_file()
+        return
     assert "phase-review-close-gate" in declared, (
-        "the phase-review close gate must be registered under the Bash "
-        "matcher, as `nx-hook phase-review-close-gate` since nexus-t9klx "
-        f"ported it into the wheel. Declared under Bash: {declared}"
+        "the phase-review close gate is registered under the Bash matcher "
+        f"in neither shape. Declared under Bash: {declared}"
     )
