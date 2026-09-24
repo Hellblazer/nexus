@@ -83,16 +83,35 @@ _BD_CLOSE_RE = re.compile(
 #: here already assumes the bead id is the token immediately after the
 #: verb (no flags in between), so this mirrors that same simplifying
 #: assumption for `update` rather than re-deriving a stricter contract
-#: this file never had. `bd batch`/`bd import`'s piped-stdin forms
-#: (nexus-2b24o found both close a bead with no `bd close`/`bd update`
-#: verb anywhere in the command) are NOT covered here -- a phase-review
-#: bead closed that way is a narrower, compound edge case, and widening
-#: this advisory gate to scan piped content is deferred rather than
-#: silently assumed away.
+#: this file never had.
+#:
+#: `bd batch`/`bd import`'s piped-stdin forms and `bd sql`'s raw UPDATE
+#: (all three: nexus-2b24o round 2, closing a bead with NO `bd close`/
+#: `bd update` verb anywhere in the command) are DELIBERATELY NOT covered
+#: here, and that is a decision, not an oversight left to a comment
+#: (nexus-2b24o's own critique named exactly this failure mode: a gap
+#: recorded only in a comment is filed nowhere). This gate is advisory --
+#: a courtesy reminder to run the phase-review-gate script before closing
+#: a gate bead, layered ON TOP of `pre_close_verification.py`'s review-
+#: marker gate, which IS the authoritative close-transition check and
+#: DOES cover batch/import/sql (see that module's `_bd_verbs`). A
+#: phase-review bead closed via batch/import/sql still passes through
+#: the review-marker gate; what it skips is this file's narrower
+#: "did you run the phase gate script" nudge. Widening this file to the
+#: same pipe-stage-scoped machinery the primary gate now carries would
+#: duplicate that machinery for a second-order courtesy check, which is
+#: not worth the maintenance surface -- if that changes, import
+#: `_bd_sql_verdict`/`_pipeline_segments` from the primary module rather
+#: than re-deriving them.
 _BD_UPDATE_RE = re.compile(
     r"\bbd\s+update\s+(?P<bead_id>[A-Za-z0-9._-]+)\b",
     re.IGNORECASE,
 )
+
+#: Shared with the round-2 bound fix in `body()`: the first shell
+#: boundary at or after a match's end marks where THAT bd invocation's
+#: own argument list ends.
+_SHELL_BOUNDARY_RE = re.compile(r"&&|\|\||;|\s\|\s|\bthen\b|\bdo\b")
 
 #: The five spellings `bd update --help` and pflag's shorthand rules
 #: actually accept for setting status to closed, probed against the real
@@ -276,8 +295,25 @@ def body(payload: dict[str, Any]) -> HookResult | None:
         # is found in the text AFTER the matched `bd update <id>` --
         # matching this file's existing convention of not modeling flags
         # between the verb and the id.
+        #
+        # BOUNDED to that bd update invocation's OWN argv (round 2 ship-
+        # blocker, code review of 5ba250e92): the first port searched from
+        # the match's end to the END OF THE WHOLE COMMAND, so
+        # 'bd update nexus-x --status open && echo "ticket --status
+        # closed elsewhere"' and 'bd update nexus-x --priority 1 &&
+        # othertool sync --status closed' both false-positived on a
+        # status-closed-shaped substring sitting in an UNRELATED &&-joined
+        # command. Stop the scan at the first shell boundary
+        # (&&/||/;/|/then/do) after the match, exactly where this bd
+        # invocation's own argument list ends.
         update_match = _BD_UPDATE_RE.search(command)
-        if update_match and _STATUS_CLOSED_RE.search(command[update_match.end():]):
+        if not update_match:
+            return _lib.allow_result()
+        tail_start = update_match.end()
+        boundary = _SHELL_BOUNDARY_RE.search(command, tail_start)
+        tail_end = boundary.start() if boundary else len(command)
+        own_argv_text = command[tail_start:tail_end]
+        if _STATUS_CLOSED_RE.search(own_argv_text):
             match = update_match
         else:
             return _lib.allow_result()

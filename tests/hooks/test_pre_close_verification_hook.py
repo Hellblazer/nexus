@@ -726,6 +726,13 @@ class TestNexus2b24oCloseTransitionSpellings:
         "import JSONL status closed": (
             'echo \'{{"id":"{id}","status":"closed"}}\' | bd import -'
         ),
+        # nexus-2b24o round 2, item 5: `bd sql` is a fourth close
+        # transition, a real bd 1.0.5 subcommand entirely unmentioned by
+        # round 1 -- `bd sql --help`: "Useful for... working around bugs
+        # in higher-level commands."
+        "sql UPDATE issues status closed": (
+            "bd sql \"UPDATE issues SET status='closed' WHERE id='{id}'\""
+        ),
     }
 
     def test_the_table_is_not_vacuous(self) -> None:
@@ -734,7 +741,7 @@ class TestNexus2b24oCloseTransitionSpellings:
         parametrized tests below for the wrong reason -- there would be
         nothing left to catch a regression in. Pin the count so shrinking
         the table under review pressure turns this red on its own."""
-        assert len(self._SPELLINGS) >= 10, self._SPELLINGS
+        assert len(self._SPELLINGS) >= 11, self._SPELLINGS
 
     @pytest.mark.parametrize("label", sorted(_SPELLINGS))
     def test_denies_with_no_marker(self, label, mock_config_env, fake_nx) -> None:
@@ -770,6 +777,136 @@ class TestNexus2b24oCloseTransitionSpellings:
         assert _get_decision(parsed) == "allow", (
             f"{label!r} ({command!r}) did not allow with a full marker: {parsed}"
         )
+
+
+class TestNexus2b24oRound2NegativeControls:
+    """SHIP-BLOCKER fix, round 2 of nexus-2b24o (code-review-expert +
+    substantive-critic both returned on commit 5ba250e92): the missing
+    negative-control class the review named directly -- "the verb is
+    present for an unrelated purpose, and close-shaped text sits
+    elsewhere on the line." The four exact strings from the review, plus
+    the analogous pair for the sibling gate's own scoping bug (covered in
+    ``tests/test_routing_phase_review_close.py`` instead, since that is
+    where the sibling's own harness lives).
+
+    Every case here must FAIL against commit 5ba250e92 (a wrongful deny)
+    and PASS after the pipe-stage/argv-scoping fix (a clean allow).
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo "close nexus-99999: fixed bug" && bd batch --help',
+            'bd update nexus-11111 --reason "will close nexus-99999 later" && bd batch --help',
+        ],
+    )
+    def test_close_shaped_text_in_an_unrelated_segment_never_denies(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        """No review-completed marker exists anywhere for nexus-99999 (or
+        nexus-11111); if the round-1 scan's false positive survived, this
+        would deny. It must allow -- there is no genuine close here at
+        all, for either id."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_a_real_batch_close_joined_by_and_and_to_an_unrelated_command_still_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """Bounds the fix: scoping to the prior pipe stage must not blind
+        the gate to a GENUINE close that happens to be followed by an
+        unrelated &&-joined command."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = "printf 'close nexus-realone reason\\n' | bd batch && echo done"
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-realone" in _get_reason(parsed)
+
+
+class TestNexus2b24oRound2IndeterminateSource:
+    """Item 4: content off the command line (`bd batch -f`, `bd import
+    <file>`, a bare redirect, an opaque shell variable) is now a VISIBLE
+    allow, not the silent bare `_allow()` round 1's docstring incorrectly
+    claimed was already an INDETERMINATE advisory (substantive-critic
+    Finding 1 on 5ba250e92: it was, in fact, indistinguishable from an
+    unrelated Bash call)."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bd batch -f ops.txt",
+            "bd import path/to.jsonl",
+            'OPS=$(cat f); echo "$OPS" | bd batch',
+        ],
+    )
+    def test_content_off_the_command_line_allows_with_a_visible_message(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+        assert "INDETERMINATE" in _get_context(parsed), (
+            f"{command!r} allowed silently -- round 1's docstring claimed "
+            f"this already happened; it did not until this fix."
+        )
+
+    def test_unrelated_content_elsewhere_is_never_re_harvested_by_the_indeterminate_path(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The critical non-regression: routing the indeterminate case
+        into the gate must NOT call `_bead_ids` on the whole command, or
+        an unrelated nexus-id sitting in a sibling segment would be
+        re-harvested and denied -- the ship-blocker reopened one call
+        away. No marker exists for nexus-99999 here; a deny would prove
+        exactly that regression."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = 'echo "close nexus-99999" && bd batch -f ops.txt'
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_on_close_disabled_suppresses_the_indeterminate_message_too(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The indeterminate branch is reached through `_run_gate`
+        specifically so it respects the SAME `on_close` config gate every
+        other branch does -- it must not become a second, ungated
+        advisory channel."""
+        env = mock_config_env({"on_close": False})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="bd batch -f ops.txt"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "on_close is not enabled" in _get_context(parsed)
+        assert "INDETERMINATE" not in _get_context(parsed)
 
 
 class TestT1OnlyCoverage:

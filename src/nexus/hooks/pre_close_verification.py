@@ -107,21 +107,28 @@ def _update_sets_closed_status(tokens: list[str]) -> bool:
     return False
 
 
-#: `bd batch` (RDR-q02nx unrelated; a real bd subcommand, `bd batch
-#: --help`) takes its own one-line-per-op grammar from stdin or -f/--file,
-#: never from an argument this hook tokenizes -- so a genuine close
-#: reaches it as PIPED TEXT, not a `bd close`/`bd update --status` this
-#: file's verb detector was ever built to see. Probed live (bd 1.0.5):
-#: `printf 'close nexus-x reason\n' | bd batch` and
-#: `printf 'update nexus-x status=closed\n' | bd batch` both close
-#: nexus-x. This is a RAW-TEXT scan of the whole command deliberately --
-#: the content lives in a sibling shell segment (the pipe's LEFT side),
-#: not inside the `bd batch` segment itself, so a segment-scoped scan
-#: would never reach it. Anchored on a bead-id-shaped token specifically
+#: `bd batch` (a real bd subcommand, `bd batch --help`) takes its own
+#: one-line-per-op grammar from stdin or -f/--file, never from an argument
+#: this hook tokenizes -- so a genuine close reaches it as PIPED TEXT, not
+#: a `bd close`/`bd update --status` this file's verb detector was ever
+#: built to see. Probed live (bd 1.0.5): `printf 'close nexus-x reason\n'
+#: | bd batch` and `printf 'update nexus-x status=closed\n' | bd batch`
+#: both close nexus-x. Anchored on a bead-id-shaped token specifically
 #: (never a bare `close`/`update`) to keep the same "quoted mention does
 #: not trip it" property nexus-fv65m won for the primary detector: a
 #: reason string that happens to contain the word "close" with no
 #: adjoining id does not match.
+#:
+#: SCOPED to the PRIOR PIPE STAGE(S) of the SAME shell segment, never the
+#: whole command (round 2 ship-blocker, code review of 5ba250e92): round 1
+#: searched this against the whole raw `cmd`, so
+#: `echo "close nexus-99999: fixed bug" && bd batch --help` and
+#: `bd update nexus-11111 --reason "will close nexus-99999 later" && bd
+#: batch --help` both false-positived on prose sitting in an UNRELATED
+#: &&-joined command or an unrelated --reason value -- exactly the
+#: quoted-mention/cross-segment class nexus-fv65m already closed for the
+#: verb-position detector, reopened one call away for batch/import. See
+#: :func:`_pipeline_segments` for what "same shell segment" means here.
 _BD_BATCH_CLOSE_RE = re.compile(
     r'\b(?:close|done)\s+(?:nexus-[a-z0-9]+)\b'
     r'|\bupdate\s+nexus-[a-z0-9]+\s+[^\n]*?\bstatus\s*=\s*closed\b',
@@ -134,41 +141,157 @@ _BD_BATCH_CLOSE_RE = re.compile(
 #: no bd verb this file previously recognized as close-shaped anywhere in
 #: the command. Requires BOTH the id and the closed-status key to appear
 #: (order-independent -- JSONL field order is not guaranteed) so an import
-#: line that only touches unrelated fields does not match.
+#: line that only touches unrelated fields does not match. SCOPED to the
+#: prior pipe stage(s) the same way :data:`_BD_BATCH_CLOSE_RE` is, for the
+#: same round-2 reason.
 _BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"nexus-[a-z0-9]+"', re.IGNORECASE)
 _BD_IMPORT_CLOSED_RE = re.compile(r'"status"\s*:\s*"closed"', re.IGNORECASE)
 
+#: `bd sql <query>` (a real bd subcommand, `bd sql --help`: "Execute a raw
+#: SQL query... Useful for... working around bugs in higher-level
+#: commands") is a FOURTH close transition, missed entirely by the round-1
+#: widening (substantive-critic finding on 5ba250e92): `bd sql "UPDATE
+#: issues SET status='closed' WHERE id='nexus-x'"` closes nexus-x with no
+#: `close`/`done`/`update --status`/`batch`/`import` verb anywhere. Unlike
+#: batch/import the query is a literal ARGUMENT (`bd sql <query>`, not
+#: piped stdin), so this is checked inline in the main token loop below,
+#: no pipe-stage scoping needed -- see :func:`_bd_sql_verdict`.
+_BD_SQL_ISSUES_STATUS_WRITE_RE = re.compile(
+    r'\bUPDATE\s+issues\b.*?\bSET\b.*?\bstatus\s*=',
+    re.IGNORECASE | re.DOTALL,
+)
+_BD_SQL_STATUS_CLOSED_VALUE_RE = re.compile(
+    r'\bstatus\s*=\s*[\'"]closed[\'"]', re.IGNORECASE,
+)
+#: Any OTHER quoted literal status value -- checked AFTER the closed-value
+#: regex above (order matters: "closed" itself would also match this
+#: looser pattern). A clean, non-closed literal means this write is
+#: DEFINITIVELY not a close; only a value this cannot read at all (a bind
+#: parameter, an expression, a subquery) falls through to indeterminate.
+_BD_SQL_STATUS_LITERAL_VALUE_RE = re.compile(
+    r'\bstatus\s*=\s*[\'"][a-z_]+[\'"]', re.IGNORECASE,
+)
+
+
+def _bd_sql_verdict(tokens: list[str]) -> str:
+    """Classify a ``bd sql`` invocation's argument tokens (past ``bd
+    sql``): ``"close"`` (a confirmed ``UPDATE issues SET status='closed'``
+    or equivalent), ``"indeterminate"`` (an UPDATE that writes
+    ``issues.status`` to a value this cannot read literally -- a bind
+    parameter, expression, or subquery), or ``""`` (no status write to the
+    issues table at all, or a status write to some OTHER clean literal
+    value, e.g. ``'open'`` -- definitively not a close).
+
+    The query is bd sql's first non-flag argument (``--csv`` is the only
+    documented flag today; skipping every ``-``-prefixed token is
+    forward-compatible with others). Bead-id harvesting for a confirmed
+    close needs no special WHERE-clause parsing: :func:`_bead_ids`
+    already scans this same token broadly for any ``nexus-*`` shaped
+    text, which is exactly where a literal ``WHERE id='nexus-x'`` sits.
+    """
+    query = ""
+    for tok in tokens:
+        if tok.startswith('-'):
+            continue
+        query = tok
+        break
+    if not query or not _BD_SQL_ISSUES_STATUS_WRITE_RE.search(query):
+        return ""
+    if _BD_SQL_STATUS_CLOSED_VALUE_RE.search(query):
+        return "close"
+    if _BD_SQL_STATUS_LITERAL_VALUE_RE.search(query):
+        return ""
+    return "indeterminate"
+
+
+#: Strong shell boundaries: each starts an entirely new command with NO
+#: stdin relationship to what came before. `_pipeline_segments` splits on
+#: these FIRST, distinctly from a bare pipe, so the batch/import scans
+#: below can tell "stdin flows here" (a `|` within one boundary-delimited
+#: command) from "an unrelated command sits here" (joined only by
+#: &&/||/;/then/do) -- the distinction round 1 did not make.
+_STRONG_BOUNDARY_RE = re.compile(r'(?:&&|\|\||;|\bthen\b|\bdo\b)')
+_PIPE_BOUNDARY_RE = re.compile(r'\s\|\s')
+
+
+def _pipeline_segments(cmd: str) -> tuple[list[str], list[int]]:
+    """Flatten *cmd* into the identical per-stage segments the verb loop
+    below has always used (split on &&/||/;/then/do AND bare ``|``, same
+    total partition as the original combined-regex split), paired with a
+    GROUP id per segment: which strong-boundary-delimited command each
+    pipe stage belongs to.
+
+    Two segments share a group only when they are stages of the SAME
+    pipeline (joined by a bare ``|``); a strong boundary always starts a
+    new group, because it starts a brand new command with no stdin
+    relationship to what came before. This is what lets the batch/import
+    raw-text scans read "the pipeline stage(s) actually feeding this bd
+    invocation's stdin" without ALSO reading an unrelated &&-joined
+    command or a flag value sitting in a sibling group.
+    """
+    segments: list[str] = []
+    groups: list[int] = []
+    group_id = 0
+    for top in _STRONG_BOUNDARY_RE.split(cmd):
+        for stage in _PIPE_BOUNDARY_RE.split(top):
+            segments.append(stage)
+            groups.append(group_id)
+        group_id += 1
+    return segments, groups
+
+
+#: A shell variable reference or command substitution inside the text
+#: feeding a `bd batch`/`bd import` invocation. Either can expand to
+#: ANYTHING at runtime -- the text this hook sees (`echo "$OPS"`) is not
+#: what `bd` actually receives, so a regex match or non-match against the
+#: LITERAL text proves nothing either way. Measured against the
+#: substantive-critic's own example: `OPS=$(cat f); echo "$OPS" | bd
+#: batch` -- correctly indeterminate, not a silent allow and not a false
+#: "definitely not a close" either.
+_SHELL_VARIABLE_RE = re.compile(r'\$\{?\w+\}?|\$\(')
+
 
 def _bd_verbs(cmd: str) -> dict:
-    """Which bd verb this command carries, and whether it inline-overrides.
+    """Which bd verb this command carries, whether it inline-overrides,
+    and whether some bd invocation's close-shaped content is off the
+    command line entirely (``has_indeterminate_source``).
 
     Carried verbatim, THEN WIDENED (nexus-2b24o): the original matched only
     ``bd close``/``bd done`` by VERB POSITION -- ``bd update <id> --status
     closed`` sets the identical status transition and matched nothing,
     because nothing here asked whether a DIFFERENT VERB could close a bead.
     The detector's domain was the close verb; the actual invariant is the
-    close TRANSITION. Three more paths to that transition, enumerated from
+    close TRANSITION. Four more paths to that transition, enumerated from
     the real ``bd`` binary rather than guessed (see the bead for the
     session that found this the hard way):
 
     1. ``bd update ... --status/-s closed`` in any of its five CLI
-       spellings -- :func:`_update_sets_closed_status`.
+       spellings -- :func:`_update_sets_closed_status`. Segment-scoped,
+       exactly as the original ``close``/``done`` match.
     2. ``bd batch``'s own grammar, delivered as piped/heredoc stdin text
-       rather than as an argument -- :data:`_BD_BATCH_CLOSE_RE` against the
-       WHOLE raw command, gated on the ``batch`` verb actually appearing.
+       rather than as an argument -- :data:`_BD_BATCH_CLOSE_RE`.
     3. ``bd import``'s JSONL upsert, same delivery shape -- the
-       :data:`_BD_IMPORT_ID_RE` / :data:`_BD_IMPORT_CLOSED_RE` pair, gated
-       on the ``import`` verb.
+       :data:`_BD_IMPORT_ID_RE` / :data:`_BD_IMPORT_CLOSED_RE` pair.
+    4. ``bd sql``'s raw ``UPDATE issues SET status='closed'`` -- a literal
+       ARGUMENT, not piped stdin -- :func:`_bd_sql_verdict`.
 
-    Segment-scoped for the verb-position matches (1), exactly as before.
-    (2) and (3) are NOT segment-scoped and cannot be: the closing content
-    lives in a DIFFERENT shell segment from the one carrying the verb (the
-    left side of a pipe feeding ``bd batch``/``bd import``), so they scan
-    the full ``cmd`` text once the corresponding verb has been seen
-    anywhere. That is a wider net than the rest of this function casts,
-    and it is deliberately anchored on a bead-id-shaped token (never a
-    bare ``close``/``update``/``"status"``) to keep the false-positive
-    rate down -- see the two regexes' own docstrings.
+    (2) and (3) are scoped to the PRIOR PIPE STAGE(S) OF THE SAME SHELL
+    SEGMENT (round 2, ship-blocker fix): the closing content lives in a
+    DIFFERENT segment from the one carrying the verb (the left side of a
+    pipe feeding ``bd batch``/``bd import``), so a per-verb-segment scan
+    alone would never reach it -- but scanning the WHOLE command (round 1's
+    approach) reads unrelated &&-joined commands and flag values too. See
+    :func:`_pipeline_segments`. Three outcomes per batch/import occurrence:
+    a matching prior stage is a CONFIRMED close; no prior stage at all, or
+    one containing a shell variable/command substitution
+    (:data:`_SHELL_VARIABLE_RE`), is INDETERMINATE (content this hook
+    structurally cannot read, whether that is because it never left a
+    Bash argument at all -- ``-f``/redirect/interactive stdin -- or
+    because it did but through an opaque expansion); a non-matching,
+    fully literal prior stage is DEFINITIVELY not a close.
+
+    (4) needs no such scoping -- ``bd sql``'s query is one of ITS OWN
+    tokens, in the SAME segment as the verb, checked inline in the loop.
 
     KNOWN LIMIT, measured at this port (nexus-q02nx.17) and NOT fixed
     here. The trigger is narrower than it first looks, and the narrow
@@ -196,22 +319,26 @@ def _bd_verbs(cmd: str) -> dict:
     gate detecting real closes, which fails OPEN, so this is recorded for
     a decision rather than patched under time pressure.
 
-    STILL A KNOWN LIMIT after nexus-2b24o's widening: ``bd batch -f
-    file.txt`` and ``bd import path/to.jsonl`` (a real file, not stdin)
-    carry their close-shaped content in a file this hook cannot read
-    without spawning a process on every Bash call. That degrades to the
-    same INDETERMINATE-allow ``_bead_ids`` already produces when it finds
-    no literal id -- not a silent bypass, but not a denial either. Same
-    posture as ``--reason-file`` above: recorded, not chased.
+    ``has_indeterminate_source`` is deliberately NOT folded into
+    ``has_close_or_done``: :func:`_bead_ids` scans the WHOLE raw command
+    broadly by design (its own docstring), so routing an indeterminate
+    batch/import/sql occurrence through the SAME id-harvesting path as a
+    confirmed close would re-harvest whatever unrelated bead id happens to
+    sit in a sibling segment -- the exact false-positive class this
+    widening exists to close, reopened through the id harvester instead of
+    the batch/import regex. ``run()``/``_run_gate`` keep the two signals on
+    separate branches for exactly this reason; see ``_run_gate``'s own
+    docstring.
     """
-    segments = re.split(r'(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)', cmd)
+    segments, seg_groups = _pipeline_segments(cmd)
     has_create = False
     has_close_or_done = False
-    has_batch_verb = False
-    has_import_verb = False
+    has_indeterminate = False
+    batch_indices: list[int] = []
+    import_indices: list[int] = []
     inline_override = False
     env_assign_re = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
-    for seg in segments:
+    for idx, seg in enumerate(segments):
         try:
             variants = [shlex.split(seg, posix=True)]
         except ValueError:
@@ -257,24 +384,45 @@ def _bd_verbs(cmd: str) -> dict:
                 elif rest[1] == 'update' and _update_sets_closed_status(rest[2:]):
                     has_close_or_done = True
                 elif rest[1] == 'batch':
-                    has_batch_verb = True
+                    batch_indices.append(idx)
                 elif rest[1] == 'import':
-                    has_import_verb = True
-    # (2)/(3) above: whole-command text scans, gated on the verb having
-    # actually appeared (never on the regex alone -- that is exactly the
-    # "quoted mention" false-positive class nexus-fv65m fixed for (1), one
-    # level down).
-    if has_batch_verb and _BD_BATCH_CLOSE_RE.search(cmd):
-        has_close_or_done = True
-    if (
-        has_import_verb
-        and _BD_IMPORT_ID_RE.search(cmd)
-        and _BD_IMPORT_CLOSED_RE.search(cmd)
-    ):
-        has_close_or_done = True
+                    import_indices.append(idx)
+                elif rest[1] == 'sql':
+                    verdict = _bd_sql_verdict(rest[2:])
+                    if verdict == "close":
+                        has_close_or_done = True
+                    elif verdict == "indeterminate":
+                        has_indeterminate = True
+
+    # (2)/(3): scoped to the prior pipe stage(s) of the SAME strong-
+    # boundary-delimited segment (round 2 ship-blocker fix -- see the
+    # regexes' own docstrings and _pipeline_segments).
+    group_start: dict[int, int] = {}
+    for idx, g in enumerate(seg_groups):
+        group_start.setdefault(g, idx)
+
+    def _prior_stage_text(idx: int) -> tuple[str, bool]:
+        g = seg_groups[idx]
+        start = group_start[g]
+        return "".join(segments[start:idx]), idx > start
+
+    for idx in batch_indices:
+        prior_text, has_prior = _prior_stage_text(idx)
+        if not has_prior or _SHELL_VARIABLE_RE.search(prior_text):
+            has_indeterminate = True
+        elif _BD_BATCH_CLOSE_RE.search(prior_text):
+            has_close_or_done = True
+    for idx in import_indices:
+        prior_text, has_prior = _prior_stage_text(idx)
+        if not has_prior or _SHELL_VARIABLE_RE.search(prior_text):
+            has_indeterminate = True
+        elif _BD_IMPORT_ID_RE.search(prior_text) and _BD_IMPORT_CLOSED_RE.search(prior_text):
+            has_close_or_done = True
+
     return {
         "has_create": has_create,
         "has_close_or_done": has_close_or_done,
+        "has_indeterminate_source": has_indeterminate,
         "inline_override": inline_override,
     }
 
@@ -689,9 +837,13 @@ def run(payload: dict | None) -> HookResult:
     if not command:
         return _allow()
 
-    # 2. which bd verb, if any. No verb, no gate.
+    # 2. which bd verb, if any. No verb, no indeterminate source, no gate.
     verbs = _bd_verbs(command)
-    if not verbs["has_create"] and not verbs["has_close_or_done"]:
+    if (
+        not verbs["has_create"]
+        and not verbs["has_close_or_done"]
+        and not verbs["has_indeterminate_source"]
+    ):
         return _allow()
 
     return _run_gate(data, command, verbs)
@@ -882,6 +1034,22 @@ def _warn(message: str) -> None:
 # --- the gate ---------------------------------------------------------------
 
 
+#: The indeterminate-source message, carried as a constant so the module
+#: test can assert its shape without re-deriving it, mirroring how
+#: `_deny_message`'s bytes are pinned elsewhere in this file.
+_INDETERMINATE_SOURCE_MESSAGE = (
+    "INDETERMINATE: this command invokes bd batch/import/sql whose "
+    "close-shaped content (if any) sits off the command line -- a file "
+    "argument, a bare redirect, or a shell variable/command substitution "
+    "this hook cannot read statically. Verification is NOT stamped, and "
+    "no bead id is scanned for here (scanning the rest of the command "
+    "would re-harvest unrelated mentions -- the same false-positive class "
+    "the batch/import scoping fix exists to close). If this closes a "
+    "bead, run the review first and record a review-completed marker "
+    "before it does."
+)
+
+
 def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
     """The decision table, in the script's order.
 
@@ -915,6 +1083,20 @@ def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
             ".nexus.yml, so no review-completed marker was checked. This is "
             "an allow by configuration, not by verification."
         )
+
+    if not verbs["has_close_or_done"]:
+        # has_indeterminate_source only (nexus-2b24o round 2, item 4/5):
+        # `bd batch -f file`, `bd import path.jsonl`, an opaque shell
+        # variable feeding either, or a `bd sql` write this cannot read
+        # literally. NEVER call `_bead_ids(command)` here -- that scans
+        # the WHOLE raw command by design, so it would re-harvest whatever
+        # unrelated bead id sits in a sibling &&/;-joined command, exactly
+        # the false-positive class the batch/import scoping fix above
+        # exists to close, reopened one call away. This branch is visible
+        # (a real message, not the prior silent bare `_allow()`) and it
+        # never denies -- the file/opaque-content gap is recorded, not
+        # chased, per this module's own fail-open posture.
+        return _allow(_INDETERMINATE_SOURCE_MESSAGE)
 
     ids = _bead_ids(command)
     if not ids:

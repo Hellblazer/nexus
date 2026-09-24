@@ -349,6 +349,33 @@ def test_non_closing_update_forms_on_a_gate_bead_allow(tmp_env, command):
     assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'bd update nexus-b9lox --status open && echo "ticket --status closed elsewhere"',
+        'bd update nexus-b9lox --priority 1 && othertool sync --status closed',
+    ],
+)
+def test_status_closed_text_in_an_unrelated_and_joined_command_allows(tmp_env, command):
+    """SHIP-BLOCKER, round 2 (code-review-expert + substantive-critic on
+    commit 5ba250e92): the first port of this widening searched from the
+    matched `bd update <id>`'s end to the END OF THE WHOLE COMMAND, so a
+    status-closed-shaped substring sitting in an UNRELATED &&-joined
+    command false-positived even on a genuine phase-review-gate bead.
+    Must fail (deny) against 5ba250e92 and pass (allow) after the fix
+    that bounds the search to this bd update's own argv."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="Phase 3b review gate: /conexus:phase-review-gate RDR-120 --phase 3b",
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
+
+
 def test_update_status_closed_on_a_gate_bead_allows_with_a_passed_sentinel(tmp_env):
     """The widened trigger still runs through the SAME sentinel check --
     a passed, fresh sentinel allows the update-status-closed spelling

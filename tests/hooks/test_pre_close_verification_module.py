@@ -219,6 +219,159 @@ class TestNexus2b24oTransitionNotVerb:
         assert gate._bd_verbs(command)["has_close_or_done"] is False, command
 
 
+class TestNexus2b24oRound2Scoping:
+    """Round 2 of nexus-2b24o: code-review-expert + substantive-critic
+    both returned on commit 5ba250e92. Two SHIP-BLOCKERS (false positives
+    that regressed nexus-fv65m's own quoted-mention protection, one level
+    removed) plus three "also fix" items, addressed together.
+
+    SHIP-BLOCKER: round 1's batch/import raw-text scan ran over the WHOLE
+    ``cmd`` once the verb appeared ANYWHERE, so a close-shaped substring
+    sitting in an unrelated &&-joined command, or in a --reason/-m value
+    of a DIFFERENT command, false-positived. Fixed by scoping the scan to
+    the prior PIPE STAGE(S) of the SAME strong-boundary-delimited shell
+    segment -- see :func:`gate._pipeline_segments` and the two regexes'
+    own docstrings.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f'echo "close nexus-99999: fixed bug" && {BATCH} --help',
+            f'{UPDATE} nexus-11111 --reason "will close nexus-99999 later" && {BATCH} --help',
+        ],
+    )
+    def test_close_shaped_text_in_an_unrelated_segment_does_not_trigger(self, command):
+        """The exact two reproductions from the round-2 code review. Both
+        must fail against 5ba250e92 (has_close_or_done True there) and
+        pass here."""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, (
+            f"false positive: {command!r} -> has_close_or_done=True. "
+            f"The batch scan read text outside bd batch's own pipeline."
+        )
+
+    def test_the_genuine_batch_close_still_survives_the_scoping_fix(self):
+        """The scoping fix must not blind the scan to a REAL close --
+        over-narrowing here is the failure direction that matters, same
+        doctrine as the bead-id harvester fixes above."""
+        command = "printf 'close nexus-aaaaa reason\\n' | " + BATCH
+        assert gate._bd_verbs(command)["has_close_or_done"] is True, command
+
+    # -- Item 4: batch/import content off the command line is now VISIBLE,
+    # not silently allowed. --------------------------------------------
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"{BATCH} -f file.txt",
+            f"{BATCH} < file.txt",
+            f"{IMPORT} path/to.jsonl",
+        ],
+    )
+    def test_content_off_the_command_line_is_indeterminate_not_silent(self, command):
+        """`bd batch -f <file>`, a bare redirect, and `bd import <file>`
+        all carry their close-shaped content (if any) somewhere this hook
+        cannot read without spawning a process. Round 1's docstring
+        claimed this degraded to the module's INDETERMINATE-allow; it did
+        not -- has_close_or_done stayed False AND has_indeterminate_source
+        did not exist, so `run()` took the top-of-function bare `_allow()`
+        with zero message. Now it is a real, distinct signal."""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is True, (
+            f"{command!r} carries content this hook cannot read, but "
+            f"has_indeterminate_source is False -- back to a silent allow."
+        )
+
+    def test_an_opaque_shell_variable_feeding_batch_is_indeterminate(self):
+        """The substantive-critic's own example: a variable populated by
+        an earlier command substitution. The LITERAL text ("$OPS") proves
+        nothing about what bd actually receives -- correctly neither a
+        confirmed close nor a confirmed non-close."""
+        command = 'OPS=$(cat f); echo "$OPS" | ' + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is True, command
+
+    def test_a_fully_visible_non_close_batch_call_stays_silent(self):
+        """Bounds item 4: content that IS visible and definitively is NOT
+        a close (no variable, no close-shaped line) must stay a clean,
+        silent allow -- indeterminate is for content this hook cannot
+        read, not a blanket noise tax on every batch/import call."""
+        command = "printf 'create task 2 \"new feature\"\\n' | " + BATCH
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is False, command
+
+    def test_indeterminate_source_message_names_the_reason_and_never_denies(
+        self, monkeypatch
+    ) -> None:
+        """The message `_run_gate` emits for the indeterminate-only path
+        must be visible (not the bare pre-round-2 `_allow()`) and must
+        NEVER call `_bead_ids` -- doing so would re-harvest whatever
+        unrelated bead id sits in a sibling segment, reopening the
+        ship-blocker one call away."""
+        monkeypatch.setattr(
+            "nexus.hooks.stop_verification._read_config", lambda: {"on_close": True}
+        )
+        called: list[str] = []
+        monkeypatch.setattr(
+            gate, "_bead_ids", lambda cmd: called.append(cmd) or []
+        )
+        command = f'echo "close nexus-99999" && {BATCH} -f ops.txt'
+        verbs = gate._bd_verbs(command)
+        result = gate._run_gate({}, command, verbs)
+        parsed = json.loads(result.stdout)
+        hso = parsed["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "allow"
+        assert "INDETERMINATE" in (hso.get("additionalContext") or "")
+        assert called == [], (
+            "_bead_ids was called on the indeterminate-only path -- this "
+            "re-opens the ship-blocker via the id harvester's own breadth"
+        )
+
+    # -- Item 5: `bd sql` is a fourth close transition. -------------------
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bd sql \"UPDATE issues SET status='closed' WHERE id='nexus-aaaaa'\"",
+            'bd sql \'UPDATE issues SET status="closed" WHERE id="nexus-aaaaa"\'',
+            "bd sql \"UPDATE issues SET priority=1, status='closed' WHERE id='nexus-aaaaa'\"",
+        ],
+    )
+    def test_bd_sql_confirmed_close_is_recognized(self, command):
+        """`bd sql --help`: 'Execute a raw SQL query... Useful for...
+        working around bugs in higher-level commands.' A real bd 1.0.5
+        subcommand, unmentioned by round 1 despite closing a bead with no
+        close/done/update/batch/import verb anywhere in the command."""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-aaaaa" in gate._bead_ids(command)
+
+    def test_bd_sql_write_to_a_different_status_is_definitively_not_a_close(self):
+        command = "bd sql \"UPDATE issues SET status='open' WHERE id='nexus-aaaaa'\""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is False, command
+
+    def test_bd_sql_select_is_not_a_close(self):
+        command = "bd sql \"SELECT * FROM issues WHERE status='closed'\""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is False, command
+
+    def test_bd_sql_unparseable_status_value_is_indeterminate(self):
+        """A bind parameter, expression, or subquery for the status value
+        cannot be read literally -- neither confirmed close nor confirmed
+        non-close."""
+        command = "bd sql \"UPDATE issues SET status=@newval WHERE id='nexus-aaaaa'\""
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is False, command
+        assert v["has_indeterminate_source"] is True, command
+
+
 class TestTheLimitThePortRecords:
     """The body-text defect, pinned as it actually behaves rather than as
     it was first described.
@@ -329,7 +482,13 @@ class TestTheOverridePathKeepsTheBashDifferential:
         )
         command = f"{CLOSE} " + " ".join(status)
         result = gate._run_gate(
-            {}, command, {"has_create": False, "inline_override": True}
+            {}, command,
+            {
+                "has_create": False,
+                "has_close_or_done": True,
+                "has_indeterminate_source": False,
+                "inline_override": True,
+            },
         )
         return result, calls, escapes
 
