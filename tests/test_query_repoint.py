@@ -16,6 +16,8 @@ below.
 """
 from __future__ import annotations
 
+import pytest
+
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -759,6 +761,7 @@ class TestQueryFallbackLocalMode:
         assert not t3.graph_calls
 
 
+@pytest.mark.usefixtures("cloud_mode")
 class TestQueryRepointClassifiesEmbeddingProfileMismatch:
     """nexus-vply6 fix round 2, point 3: query()'s catalog-param branch
     (the metadata-scoped path, via _grouped_combined_query) classifies the
