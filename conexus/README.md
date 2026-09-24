@@ -89,9 +89,22 @@ conexus/
 │   └── *.md                 # Slash commands (/conexus:research, /conexus:create-plan, /conexus:review-code, etc.)
 ├── hooks/
 │   ├── hooks.json                     # Hook event → script wiring (source of truth)
-│   └── scripts/                       # Every hook lives in the conexus WHEEL
-│       │                              # (nexus.hooks.*) — see the table below;
-│       │                              # one plugin script is left.
+│   └── scripts/                       # Plugin-resident hooks and shared helpers.
+│       │                              # Most hooks now live in the conexus WHEEL
+│       │                              # (nexus.hooks.*) — see the table below.
+│       ├── behaviour_census.py        # SessionStart: the previous session's delegation
+│       │                              # and deliberation rates
+│       ├── version_lockstep_hook.py   # SessionStart(startup): plugin↔CLI version skew
+│       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
+│       ├── version_lockstep_action.py # Detached, extras-preserving reinstall the lockstep
+│       │                              # hook dispatches
+│       ├── routing/                   # PreToolUse(Bash) guards + their shared _lib.py
+│       ├── _interpreter.py            # Shared helper: re-exec under an interpreter that
+│       │                              # can serve the hook (3.12 floor, and the
+│       │                              # generation python that can import nexus)
+│       ├── _endpoint_resolve.py       # Shared helper: stdlib endpoint precedence
+│       ├── _tuple_size_limits.py      # Shared helper: stdlib tuple size caps
+│       ├── _hook_logging.py           # Shared helper: configure logging before nexus imports
 │       └── divergence-language-scan.py # Run by the wheel's divergence-language guard
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
@@ -262,20 +275,18 @@ and only the ledger verbs have one.
 | `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
 | `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
-| `SessionStart` | `nx-hook behaviour-census` | Report the PREVIOUS session's raw thinking and decision counts (nexus-4lnn1) |
-| `SessionStart` (matcher `startup`) | `nx-hook version-lockstep` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
-| `SessionStart` (matcher `startup`) | `nx-hook mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, injects a visible note that tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
+| `SessionStart` | `hooks/scripts/behaviour_census.py` | Report the PREVIOUS session's delegation and deliberation rates against baselines from the user's own trailing sessions (nexus-4lnn1) |
+| `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
-| `UserPromptSubmit` | `nx-hook mailbox-drain` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
-| `UserPromptSubmit` | `nx-hook mcp-connect-check` | Warn once per episode when this session's `nx-mcp` connect marker names a pid that is no longer alive, having previously connected (mid-session disconnect detector, RDR-215, nexus-veh77) |
+| `UserPromptSubmit` | `hooks/scripts/mailbox_drain.py` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
 | `SubagentStart` | `hook_subagent_start_tuple` | Project the ledger START tuple, as a sibling of the main hook so its failure does not take the projection with it |
 | `SubagentStop` | `hook_subagent_stop_tuple` | Project the ledger REPORT tuple, same sibling shape |
 | `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |
 | `Stop` | `hook_stop_verification` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
 | `StopFailure` | `hook_stop_failure` | Advisory on abnormal session termination |
 | `PreToolUse` (`Bash`) | `nx-hook pre-close-verification` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
-| `PreToolUse` (`Bash`) | `nx-hook subagent-git-write-gate` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4) |
-| `PreToolUse` (`Bash`) | `nx-hook phase-review-close-gate` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
+| `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4) |
+| `PreToolUse` (`Bash`) | `hooks/scripts/routing/phase_review_close_requires_gate.py` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
 | `PreToolUse` (`Agent\|Task`) | `hook_agent_dispatch_expect` | Write the RDR-184 EXPECT ledger row from the dispatch's own `subagent_type` + `run_in_background`, so orchestration doesn't have to hand-write it (nexus-qc4p1) |
 | `PostToolUse` | `hook_divergence_language_guard` | Advisory scan of RDR post-mortem writes for divergence-language patterns (RDR-065 Gap 2) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
