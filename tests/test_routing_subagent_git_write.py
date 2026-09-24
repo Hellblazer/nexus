@@ -200,13 +200,17 @@ def test_registered_in_hooks_json():
         (PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text()
     )
     declared = _declared_paths(hooks, "PreToolUse")
+    # 7.58.0 wires the plugin script, not the verb: an older nx-hook exits 2
+    # on a verb it does not know (plugin-ahead skew, nexus-t9klx). Either
+    # shape is accepted, and a script entry must name a file that exists.
+    script = "hooks/scripts/routing/subagent_git_write_requires_orchestrator.py"
+    scripts = [p for p in declared if p.endswith(script)]
+    if scripts:
+        assert (PROJECT_ROOT / "conexus" / script).is_file()
+        return
     assert VERB in declared, (
-        f"hooks.json must declare the {VERB!r} verb on a PreToolUse entry. "
-        f"Declared: {declared}"
-    )
-    assert not any("subagent_git_write_requires_orchestrator" in p for p in declared), (
-        "the plugin-resident script is gone (nexus-t9klx); an entry still "
-        f"naming it would spawn a file that does not exist. Declared: {declared}"
+        f"hooks.json declares the git-write guard in neither shape on a "
+        f"PreToolUse entry. Declared: {declared}"
     )
 
 
