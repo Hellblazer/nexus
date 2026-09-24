@@ -52,12 +52,15 @@ right seam. Transcripts are written in the real Claude Code JSONL shape
 "name": "Bash", "input": {"command": ...}}]}}``), matching
 ``nexus.hooks.subagent_stop_scans``'s own fixtures for the same format.
 
-Every test in this module isolates ``XDG_STATE_HOME`` (the
+Every test in this module isolates ``NEXUS_CONFIG_DIR`` (the
 ``isolated_state`` autouse fixture) -- the memoization this follow-up adds
-persists to a REAL file on disk keyed by session_id, and a test that did
-not isolate it would read or write a real ``~/.local/state/nexus/`` file
-and could leak state between test runs (or between tests, since several
-here reuse ``session_id="s1"``).
+persists to a REAL file on disk keyed by session_id, under
+``nexus_config_dir()`` (follow-up 3: checked against the rest of this
+repo's per-session hook state, e.g. ``t1_session_lease.<session_id>`` --
+NOT ``XDG_STATE_HOME``, which here is used narrowly for the RDR-184
+ledger family alone), and a test that did not isolate it would read or
+write a real ``~/.config/nexus/`` file and could leak state between test
+runs (or between tests, since several here reuse ``session_id="s1"``).
 """
 from __future__ import annotations
 
@@ -180,8 +183,8 @@ def isolated_path(monkeypatch):
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
     """Every test's close-gate memoization file lives under a per-test
-    XDG_STATE_HOME -- see the module docstring's closing paragraph."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    NEXUS_CONFIG_DIR -- see the module docstring's closing paragraph."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "nexus-config"))
 
 
 # --- _session_start_dt --------------------------------------------------

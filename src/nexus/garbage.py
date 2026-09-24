@@ -55,6 +55,22 @@ MINT_LOCK_MAX_AGE_DAYS: int = 1
 #: One day, not thirty: the reversible period for a delete, matching
 #: ``nx catalog purge-trash``'s default since 7.32.0.
 TRASH_MAX_AGE_DAYS: int = 1
+#: Subdirectory holding nexus-dgl8g's close-gate reconciliation backstop
+#: per-session memoization files (one small JSON file per session:
+#: transcript offset, pending ids, and every id's terminal verdict --
+#: see ``nexus.hooks.stop_verification``). Named here, not just there, so
+#: this module -- the one place a NEW litter class is supposed to be
+#: registered, per this file's own docstring -- is the single source for
+#: where it lives.
+CLOSE_GATE_STATE_SUBDIR: str = "close-gate-backstop"
+#: A close-gate-backstop state file older than this (AND whose session
+#: has no live T1 lease -- see the two-part guard below) is reaped. The
+#: file's mtime is refreshed on literally every Stop turn, so "old" here
+#: means "no Stop activity for this many days" -- a session quiet that
+#: long is abandoned, never one still running. Matches
+#: ``expectations_sweep()``'s own 7-day floor for the closely related
+#: RDR-184 ledger family.
+CLOSE_GATE_STATE_MAX_AGE_DAYS: int = 7
 
 _ROTATED_LOG_RE = re.compile(r"\.log\.\d+$")
 _OPERATOR_LOG_RE = re.compile(r"^operator-(timeout|budget)-.*\.log$")
@@ -124,6 +140,16 @@ def sweep_local_garbage(config_dir: Path, *, now: float | None = None) -> SweepR
     * ``ripgrep_cache``: ``<repo>-<8 hex>.cache``, the line caches of the
       search path deleted at nexus-06aei. Age-gated by nothing, since
       nothing can read them any more -- see :data:`_RG_CACHE_RE`.
+    * ``close_gate_state``: ``close-gate-backstop/<session>.json`` (the
+      nexus-dgl8g Stop-hook backstop's per-session memoization file)
+      older than :data:`CLOSE_GATE_STATE_MAX_AGE_DAYS` whose session ALSO
+      has no live T1 lease -- same two-part guard as ``mint_lock``
+      (age AND liveness, not either alone), reusing this function's own
+      ``live_sessions`` set. Belt and suspenders: the file's own mtime is
+      already refreshed on every Stop turn for an active session (so pure
+      age already protects a live session in practice), but a live lease
+      is a more direct liveness signal than "wrote something recently"
+      and the set is already computed here for ``mint_lock``.
 
     Never raises on a single file: a failed unlink lands in
     ``report.failed`` and the sweep continues.
@@ -159,6 +185,17 @@ def sweep_local_garbage(config_dir: Path, *, now: float | None = None) -> SweepR
             continue
         if _older_than(path, MINT_LOCK_MAX_AGE_DAYS, now=now):
             _unlink(path, "mint_lock", report)
+
+    close_gate_dir = config_dir / CLOSE_GATE_STATE_SUBDIR
+    if close_gate_dir.is_dir():
+        for path in sorted(close_gate_dir.glob("*.json")):
+            if not path.is_file():
+                continue
+            session_id = path.stem
+            if session_id in live_sessions:
+                continue
+            if _older_than(path, CLOSE_GATE_STATE_MAX_AGE_DAYS, now=now):
+                _unlink(path, "close_gate_state", report)
 
     if report.removed_count or report.failed_count:
         _log.info(

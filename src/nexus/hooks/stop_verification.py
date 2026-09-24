@@ -132,13 +132,24 @@ _SCOPE_FALLBACK_WARNING = (
 #: that function (the PreToolUse gate itself) would also pick up.
 _STOP_COVERAGE_DEADLINE_SECONDS = 5.0
 
-#: nexus-dgl8g follow-up 2: per-session memoization state lives beside the
-#: RDR-184 ledger's own per-session files (``expectations.py``'s
-#: ``_state_dir()``: ``XDG_STATE_HOME/nexus/<subdir>``), in a sibling
-#: subdirectory rather than that same one -- this state has nothing to do
-#: with the EXPECT/START ledger and mixing the two would make a reap of
-#: one accidentally a reap of the other.
-_CLOSE_GATE_STATE_SUBDIR = "close-gate-backstop"
+#: nexus-dgl8g follow-up 2/3: per-session memoization state lives under
+#: ``nexus_config_dir()`` (``NEXUS_CONFIG_DIR``-aware), NOT
+#: ``XDG_STATE_HOME``. Checked, not assumed: ``XDG_STATE_HOME`` in this
+#: codebase is used narrowly for the RDR-184 ledger family alone
+#: (``expectations._state_dir()``, and ``tuple_ledger_project.py``'s own
+#: beside-log, which its comment says "mirrors nexus.hooks.expectations'
+#: own layout" -- that module reaches for ``nexus_config_dir()``
+#: separately, for a DIFFERENT purpose, resolving the T1/engine endpoint).
+#: Every other per-session/per-install hook state this repo has --
+#: ``t1_session_lease.<session_id>``, ``t1_mint_<session_id>.lock``,
+#: ``mcp_connect_check``/``mailbox_drain``/``mcp_connect_wait``'s own
+#: config reads -- uses ``nexus_config_dir()``, which is why an isolated
+#: test ``HOME`` or a ``NEXUS_CONFIG_DIR`` override behaves the same way
+#: here as everywhere else. The literal subdirectory name is owned by
+#: ``nexus.garbage`` (:data:`nexus.garbage.CLOSE_GATE_STATE_SUBDIR`), the
+#: one place a new litter class is supposed to be registered per that
+#: module's own docstring -- imported, never re-declared here, so there
+#: is exactly one spelling of it.
 
 
 def _approve(reason: str = "") -> HookResult:
@@ -351,20 +362,35 @@ def _bd_closed_since(session_start) -> list[str] | None:
 
 
 def _close_gate_state_dir() -> Path:
-    """Sibling of ``expectations._state_dir()``, own subdirectory.
+    """``nexus_config_dir() / "close-gate-backstop"`` -- see the module
+    constant's own comment above for why this is ``nexus_config_dir()``
+    and not ``XDG_STATE_HOME``.
 
-    Same private-by-construction posture (``chmod`` reapplied on every
-    call: the dir may predate a version that created it 0700, and this
-    file names live bead ids).
+    Same private-by-construction posture as ``expectations._state_dir()``
+    (``chmod`` reapplied on every call: the dir may predate a version
+    that created it 0700, and this file names live bead ids).
 
-    KNOWN RESIDUAL, not fixed here: unlike the RDR-184 ledger
-    (``expectations_sweep()``), nothing reaps a session's file after the
-    session ends -- one small JSON file per session, forever. Scoped out
-    of this dispatch; a reap would mirror ``expectations_sweep()``'s own
-    mtime-floor sweep over this sibling directory.
+    REAPED, not a residual (nexus-dgl8g follow-up 3): a file here older
+    than :data:`nexus.garbage.CLOSE_GATE_STATE_MAX_AGE_DAYS` -- and whose
+    session has no live T1 lease -- is removed by
+    ``nexus.garbage.sweep_local_garbage()``'s ``close_gate_state`` class,
+    the same registry every OTHER local litter class in this repo goes
+    through (run by ``nx doctor``/``--fix`` and the SessionEnd launcher's
+    own sweep). Nothing new to wire here: registering the class there was
+    the whole fix, per that module's own "a new litter class is a new
+    row" contract.
+
+    Uses the module-attribute import form (``from nexus import config as
+    _nx_config``), not ``from nexus.config import nexus_config_dir`` --
+    the latter is BY VALUE and tracked by
+    ``tests/test_nexus_config_dir_setattr_lint.py``'s ratchet; the
+    module-attribute form re-resolves ``nexus_config_dir`` on every call
+    (relevant to a test that patches it) and needs no census bump.
     """
-    root = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    directory = Path(root) / "nexus" / _CLOSE_GATE_STATE_SUBDIR
+    from nexus import config as _nx_config  # noqa: PLC0415 — deferred: see the other spawns in this module; module-attribute form, not by-value (see docstring)
+    from nexus.garbage import CLOSE_GATE_STATE_SUBDIR  # noqa: PLC0415 — deferred: see the other spawns in this module
+
+    directory = _nx_config.nexus_config_dir() / CLOSE_GATE_STATE_SUBDIR
     directory.mkdir(parents=True, exist_ok=True)
     try:
         directory.chmod(0o700)
