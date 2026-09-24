@@ -43,9 +43,9 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ## Awaiting the next release or plugin cut (pinned: v7.59.0)
 
-_Empty. Everything listed here (nexus-rcoze: the nx-hook shim, the rerouted
-entries and the veh77 wiring) went live with 7.59.0 when `source.ref` advanced
-to `v7.59.0`._
+ONE PATH PER BULLET, on the bullet's FIRST line.
+
+- nexus-rcoze — `conexus/hooks/scripts/nx_hook_shim.py`: forwards SIGTERM, SIGINT and SIGHUP to its `nx-hook` child (terminate, then kill after 5 s) and exits 128+signal, so a hook killed by its hooks.json timeout no longer leaves the handler running orphaned. Review finding; the new test fails on the 7.59.0 shim.
 
 ## Deferred to the next client release
 

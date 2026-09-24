@@ -91,7 +91,7 @@ def _git_common_root(start: Path) -> Path | None:
     one-per-repo across worktrees — the engine build lease and the
     cached service jar both live in the git common dir for this reason.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by this directory's convention only: the module runs inside nx-mcp as an mcp_tool hook, which has already imported structlog, so the deferral saves nothing here (nexus-rcoze review)
 
     try:
         out = run_bounded(

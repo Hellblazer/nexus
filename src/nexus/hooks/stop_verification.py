@@ -150,7 +150,7 @@ def _reconcile_warning(payload: dict) -> str:
 
 
 def _git_is_dirty(path: str | None = None) -> bool:
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by this directory's convention only: the module runs inside nx-mcp as an mcp_tool hook, which has already imported structlog, so the deferral saves nothing here (nexus-rcoze review)
 
     if shutil.which("git") is None:
         return False
@@ -163,7 +163,7 @@ def _git_is_dirty(path: str | None = None) -> bool:
 
 
 def _beads_in_progress() -> bool:
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by this directory's convention only: the module runs inside nx-mcp as an mcp_tool hook, which has already imported structlog, so the deferral saves nothing here (nexus-rcoze review)
 
     if shutil.which("bd") is None:
         return False

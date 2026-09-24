@@ -26,13 +26,18 @@ from pathlib import Path
 
 import pytest
 
-#: The action's module, ported into the wheel at nexus-t9klx. Fresh per
-#: test for the same reason as the hook's: import-time env reads.
-_ACTION_MODULE = "nexus.hooks.version_lockstep_action"
+SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "conexus" / "hooks" / "scripts" / "version_lockstep_action.py"
+)
 
 
 def _load_module():
-    return importlib.reload(importlib.import_module(_ACTION_MODULE))
+    spec = importlib.util.spec_from_file_location("version_lockstep_action", SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture()
@@ -135,7 +140,7 @@ def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results):
 
 class TestScriptPresence:
     def test_script_exists(self) -> None:
-        assert importlib.util.find_spec(_ACTION_MODULE) is not None
+        assert SCRIPT.exists()
 
 
 class TestEditableGate:
@@ -162,7 +167,7 @@ class TestEditableGate:
                 returncode = 0
             return R()
 
-        monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", fake_run)
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
         assert mod.uv_receipt_present() is True
 
     def test_uv_missing_means_no_receipt(self, mod, monkeypatch) -> None:
@@ -452,19 +457,15 @@ class TestRefDriftRemedyLogging:
         def boom(*a, **k):
             raise OSError("nx not found")
 
-        monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", boom)
+        monkeypatch.setattr(mod.subprocess, "run", boom)
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
         text = log.read_text()
         assert "outcome=nx_upgrade_raised" in text
         assert "remedy=" in text
 
     def test_nonzero_exit_logs_remedy(self, mod, log, monkeypatch) -> None:
-        # nexus-zptvf: the spawn moved to bounded_subprocess.run_bounded, and
-        # the hook imports it INSIDE the function (deferred, so structlog stays
-        # off every tool call), so the name resolves from the source module at
-        # call time rather than from this module's namespace.
         monkeypatch.setattr(
-            "nexus.bounded_subprocess.run_bounded",
+            mod.subprocess, "run",
             lambda *a, **k: self._FakeCompleted(returncode=1, stderr="boom"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
@@ -473,12 +474,8 @@ class TestRefDriftRemedyLogging:
         assert "remedy=" in text
 
     def test_reinstall_failed_text_logs_remedy(self, mod, log, monkeypatch) -> None:
-        # nexus-zptvf: the spawn moved to bounded_subprocess.run_bounded, and
-        # the hook imports it INSIDE the function (deferred, so structlog stays
-        # off every tool call), so the name resolves from the source module at
-        # call time rather than from this module's namespace.
         monkeypatch.setattr(
-            "nexus.bounded_subprocess.run_bounded",
+            mod.subprocess, "run",
             lambda *a, **k: self._FakeCompleted(returncode=0, stdout="reinstall failed for conexus"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
@@ -487,12 +484,8 @@ class TestRefDriftRemedyLogging:
         assert "remedy=" in text
 
     def test_success_does_not_log_remedy(self, mod, log, monkeypatch) -> None:
-        # nexus-zptvf: the spawn moved to bounded_subprocess.run_bounded, and
-        # the hook imports it INSIDE the function (deferred, so structlog stays
-        # off every tool call), so the name resolves from the source module at
-        # call time rather than from this module's namespace.
         monkeypatch.setattr(
-            "nexus.bounded_subprocess.run_bounded",
+            mod.subprocess, "run",
             lambda *a, **k: self._FakeCompleted(
                 returncode=0, stdout="picked up a plugin-only release for conexus",
             ),
@@ -503,12 +496,8 @@ class TestRefDriftRemedyLogging:
         assert "remedy=" not in text
 
     def test_no_drift_confirmed_does_not_log_remedy(self, mod, log, monkeypatch) -> None:
-        # nexus-zptvf: the spawn moved to bounded_subprocess.run_bounded, and
-        # the hook imports it INSIDE the function (deferred, so structlog stays
-        # off every tool call), so the name resolves from the source module at
-        # call time rather than from this module's namespace.
         monkeypatch.setattr(
-            "nexus.bounded_subprocess.run_bounded",
+            mod.subprocess, "run",
             lambda *a, **k: self._FakeCompleted(returncode=0, stdout="nothing to do"),
         )
         mod._run_nx_upgrade_for_ref_drift(timeout=5)
@@ -525,7 +514,7 @@ class TestVersionParsing:
                 returncode = 0
             return R()
 
-        monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", fake_run)
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
         monkeypatch.setattr(mod.shutil, "which", lambda c: "/usr/bin/nx")
         assert mod.installed_nx_version() == "5.7.0"
 

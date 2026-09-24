@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hook killed by its timeout no longer leaves `nx-hook` running** (nexus-rcoze). The plugin's nx-hook shim now passes the signal on to the hook it started.
+
+### Removed
+
+- The unwired `version-lockstep` `nx-hook` verb and its wheel modules (nexus-rcoze). Version lockstep stays the stdlib plugin script, which is what runs; its tests now drive that script again.
+
 ## [7.59.0] - 2026-09-24
 
 Pairs with engine-service-v0.1.130, unchanged from 7.58.0: this is a client and plugin release with no engine cut.

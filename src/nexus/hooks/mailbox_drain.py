@@ -61,15 +61,17 @@ hazard RDR-206 Step 1 closed inside the engine, appearing here between
 two HTTP calls where no transaction can close it -- so the fix is to
 trust only what ``ack`` confirmed.
 
-WHERE IT RUNS. This was a plugin script launched by a bare ``python3``,
-which stock Windows does not have (nexus-t9klx). As an ``nx-hook`` verb it
-rides the console script the installer writes, and it calls the client's
-own primitives -- endpoint discovery, the data-token lease, the persisted
-credentials, the tuple size caps -- instead of the stdlib mirrors a
-plugin script needed because it could not import ``nexus``. The endpoint
-legs are :mod:`nexus.hooks.tuple_ledger_project`'s, the sibling ported for
-the same reason; only the credential policy differs, see
-:func:`_resolve_endpoint`.
+WHERE IT RUNS. Not here yet. hooks.json still runs the plugin script
+``conexus/hooks/scripts/mailbox_drain.py`` under ``python3``: nexus-t9klx
+ported the drain to this ``nx-hook`` verb, but 7.58.0 held the wiring back,
+because an ``nx-hook`` from 7.55.0 to 7.57.x exits 2 on a verb it does not
+register and this hook runs on every prompt. As a verb it calls the
+client's own primitives -- endpoint discovery, the data-token lease, the
+persisted credentials, the tuple size caps -- instead of the stdlib mirrors
+the plugin script carries because it cannot import ``nexus``. The endpoint
+legs are :mod:`nexus.hooks.tuple_ledger_project`'s; only the credential
+policy differs, see :func:`_resolve_endpoint`. Wiring the verb means routing
+it through ``conexus/hooks/scripts/nx_hook_shim.py`` (nexus-rcoze).
 
 OUTPUT IS STREAMED, not returned. ``nx-hook`` writes a verb's
 :class:`~nexus._hook_runtime._io.HookResult` after ``run()`` returns, and a

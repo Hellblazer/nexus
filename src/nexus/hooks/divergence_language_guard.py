@@ -91,7 +91,7 @@ def _scan_script() -> Path:
 def _hits(file_path: str) -> str:
     """The scan's output, or "" on any failure. A missing sibling file
     yields no hits and the advisory no-ops, exactly as in bash."""
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by this directory's convention only: the module runs inside nx-mcp as an mcp_tool hook, which has already imported structlog, so the deferral saves nothing here (nexus-rcoze review)
 
     script = _scan_script()
     if not script.is_file():
@@ -112,7 +112,7 @@ def _log_hit(file_path: str, hit_count: int, env: dict) -> None:
     Best-effort and silent on failure, as in bash. This is the write a
     redirect-shaped grep does not find.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by this directory's convention only: the module runs inside nx-mcp as an mcp_tool hook, which has already imported structlog, so the deferral saves nothing here (nexus-rcoze review)
 
     if shutil.which("nx") is None:
         return

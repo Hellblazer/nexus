@@ -1182,14 +1182,13 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
     observable instead of producing an audit record nobody can trust and
     nobody was told is missing.
     """
-    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
-
     if not ids:
         return
     if shutil.which("bd") is None:
         _warn(f"bd not found on PATH \u2014 cannot stamp verification={state} "
               f"for: {' '.join(ids)}")
         return
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
     for bid in ids:
         try:
             r = run_bounded(

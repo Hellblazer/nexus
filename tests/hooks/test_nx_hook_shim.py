@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -38,6 +41,10 @@ if mode == "echo":
     sys.exit(0)
 if mode == "ledger":
     sys.exit(70)
+if mode == "sleep":
+    import time
+    open(os.environ["FAKE_PIDFILE"], "w").write(str(os.getpid()))
+    time.sleep(60)
 """
 
 
@@ -48,7 +55,7 @@ def _run(tmp_path: Path, mode: str | None, verb: str = "mcp-connect-check", payl
         fake = bindir / "nx-hook"
         fake.write_text(_FAKE.format(python=sys.executable))
         fake.chmod(0o755)
-    env = {"PATH": str(bindir), "FAKE_MODE": mode or ""}
+    env = {"PATH": str(bindir), "FAKE_MODE": mode or "", "FAKE_PIDFILE": str(tmp_path / "child.pid")}
     return subprocess.run(
         [sys.executable, str(_SHIM), verb],
         input=payload, capture_output=True, env=env, timeout=30, check=False,
@@ -85,6 +92,39 @@ def test_no_nx_hook_at_all_is_exit_0_with_a_notice(tmp_path: Path) -> None:
     assert b"`nx-hook` is not installed" in r.stderr
 
 
+def test_a_signalled_shim_takes_its_nx_hook_child_down_with_it(tmp_path: Path) -> None:
+    """hooks.json's timeout ends the shim with a signal; the child must not
+    outlive it (review finding, nexus-rcoze). Verified RED against the shim
+    before its signal forwarding: the child was still alive after the shim
+    exited."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "nx-hook"
+    fake.write_text(_FAKE.format(python=sys.executable))
+    fake.chmod(0o755)
+    pidfile = tmp_path / "child.pid"
+    env = {"PATH": str(bindir), "FAKE_MODE": "sleep", "FAKE_PIDFILE": str(pidfile)}
+    shim = subprocess.Popen([sys.executable, str(_SHIM), "mailbox-drain"],
+                            stdin=subprocess.PIPE, env=env)
+    shim.stdin.write(b"{}")
+    shim.stdin.close()
+    deadline = time.monotonic() + 20
+    while not pidfile.exists() or not pidfile.read_text().strip():
+        assert time.monotonic() < deadline, "the fake nx-hook never started"
+        time.sleep(0.05)
+    child = int(pidfile.read_text())
+    shim.send_signal(signal.SIGTERM)
+    assert shim.wait(timeout=20) == 128 + signal.SIGTERM
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, f"nx-hook child {child} outlived the shim"
+        time.sleep(0.05)
+
+
 def test_the_shim_imports_only_the_standard_library() -> None:
     tree = ast.parse(_SHIM.read_text())
     found: set[str] = set()
@@ -98,7 +138,7 @@ def test_the_shim_imports_only_the_standard_library() -> None:
 
 
 @pytest.mark.lint
-@pytest.mark.parametrize("tag", ["v7.55.0", "v7.56.0", "v7.57.0"])
+@pytest.mark.parametrize("tag", ["v7.55.0", "v7.55.3", "v7.56.0", "v7.57.0"])
 def test_the_shim_matches_the_message_those_releases_print(tag: str) -> None:
     """Rendered from the release's own entry.py text, not retyped."""
     src = subprocess.run(
