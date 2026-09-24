@@ -1,5 +1,38 @@
 # Changelog
 
+## [7.58.0] - 2026-09-23
+
+Plugin version aligned with conexus 7.58.0. This release carries real
+plugin-side changes, which go live as `source.ref` advances to `v7.58.0`.
+
+The conexus hooks no longer name a Python interpreter. Every `hooks.json` entry
+that launched a bare `python3` is now an `nx-hook` verb (`behaviour-census`,
+`version-lockstep`, `phase-review-close-gate`, `subagent-git-write-gate`,
+`mailbox-drain`), and the plugin scripts they replaced, plus eleven more that
+nothing executed any more, are deleted. Stock Windows has no `python3` on PATH,
+so those entries could never fire there; a console script gets a real shim from
+the installer (RDR-215: nexus-t9klx, nexus-z9cz2). The sn hooks launch through
+`uv run --no-project --no-config` for the same reason, so a Context7-only user
+now needs uv for the hooks too (nexus-j4iy0).
+
+Two new hooks watch the MCP connection. `nx-hook mcp-connect-wait` runs at
+startup and waits, bounded at 15 seconds and fail-open, for this session's
+`nx-mcp` to connect before turn 1 can outrun it; on timeout it says so in the
+session. `nx-hook mcp-connect-check` warns once on a mid-session disconnect
+(nexus-veh77).
+
+The sn worktree guard now denies a Serena write from a session that relocated
+into a worktree without starting there. Such a write could succeed against the
+primary checkout, and the tool's own dry-run report could say nothing was
+applied when it had been. A session that genuinely started inside a worktree
+keeps symbol editing there (nexus-ebx0s).
+
+`rdr-close` archives post-mortems into the subject collection
+`{repo}-rdr-research` instead of the repo's own owner-id collection, as
+docs/collections.md Rule 1 requires (nexus-vupim). The orchestration skill and
+the continuation command name the Workflow-tool agent's own ledger bucket, so a
+Workflow run no longer reads as an undeclared dispatch (nexus-silj0).
+
 ## [7.57.0] - 2026-09-22
 
 Plugin version aligned with conexus 7.57.0. No plugin-side changes: nothing
