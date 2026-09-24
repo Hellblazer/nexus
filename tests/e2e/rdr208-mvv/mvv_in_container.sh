@@ -67,6 +67,53 @@ wait_for() {  # SECONDS CMD... : poll until CMD succeeds
     until "$@"; do [ "$(now)" -ge "$deadline" ] && return 1; sleep 1; done
 }
 
+# nexus-4ahul: a resumed session's instance name is Claude Code's OWN, drawn
+# fresh (ListAgents' work-XX, a two-hex suffix) at every process start and
+# not seeded by anything this harness controls -- RDR-208's own table calls
+# it out: "changes: a new random suffix at every process start". A uniform
+# draw over 256 values means the pre-resume and resumed sessions land on the
+# SAME name about once in 256 resumes. That is not the rename failing to
+# happen -- it is two independent draws colliding -- but the harness cannot
+# OBSERVE a rename when its two names happen to be equal, so a bare equality
+# check is wrong in both directions: passing would be false, and failing
+# blames the wrong thing. It also cascades into the release check two steps
+# later, because the pre-resume session was stopped, not released, so its
+# own lease under that name is still live; releasing the resumed session's
+# lease then cannot make the (shared) name stop resolving.
+#
+# The fix is not a wider random space (that only lowers the odds; a
+# collision stays POSSIBLE and stays capable of costing a billed run) and
+# not a seed (Claude Code's own draw is opaque to this harness -- there is
+# nothing here to seed). What actually makes the collision impossible to
+# observe as a false result is redrawing for real: relaunching IS a new
+# process start, so it is a genuinely independent draw, not a retry of the
+# same draw. redraw_until_distinct keeps redrawing until DISCOVER_FN's value
+# differs from PRE_NAME, bounded by CAP so a run that is inconclusive every
+# time cannot be mistaken for a run that is fine (nexus-moht0 non-vacuity):
+# CAP consecutive collisions is reported via a distinct exit code and a named
+# message, never silently folded into PASS or FAIL.
+redraw_until_distinct() {  # PRE_NAME REDRAW_FN DISCOVER_FN CAP -> stdout: final name
+    # exit 0: DISCOVER_FN's value differs from PRE_NAME (0 or more redraws).
+    # exit 1: CAP redraws in a row all collided with PRE_NAME.
+    # exit 2: REDRAW_FN itself failed (the relaunch, not the name draw).
+    local pre="$1" redraw_fn="$2" discover_fn="$3" cap="$4" n=0 cur
+    cur="$("$discover_fn")"
+    while [ "$cur" = "$pre" ]; do
+        n=$((n + 1))
+        if [ "$n" -gt "$cap" ]; then
+            printf '%s\n' "$cur"
+            echo "  redraw cap ($cap) exhausted: every draw collided with $pre" >&2
+            return 1
+        fi
+        echo "  resumed name collided with $pre (draw $n/$cap): redrawing" >&2
+        "$redraw_fn" || { printf '%s\n' "$cur"; return 2; }
+        cur="$("$discover_fn")"
+    done
+    printf '%s\n' "$cur"
+    [ "$n" -gt 0 ] && echo "  distinct name after $n redraw(s): $cur" >&2
+    return 0
+}
+
 # ── sessions ─────────────────────────────────────────────────────────────────
 declare -A SID_OF=() PID_OF=() ANN=() WAKES=() NAME_OF=()
 
@@ -387,7 +434,19 @@ stop A
 RESUME_T="$(now)"
 launch A2 "$SA" || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume"; exit 1; }
 arm A2 || bad "arm A2 (a resumed session subscribes its NEW name)"
-A2_NAME="${NAME_OF[A2]}"
+# nexus-4ahul: redraw (a real relaunch, a genuine new process start) up to
+# COLLISION_RETRY_CAP times if the resumed session's draw collides with the
+# pre-resume name, before asserting anything below -- see redraw_until_distinct.
+COLLISION_RETRY_CAP="${COLLISION_RETRY_CAP:-8}"
+redraw_a2() { T kill-session -t A2 2>/dev/null; launch A2 "$SA" && arm A2; }
+discover_a2_name() { printf '%s' "${NAME_OF[A2]}"; }
+A2_NAME="$(redraw_until_distinct "$A_NAME" redraw_a2 discover_a2_name "$COLLISION_RETRY_CAP")"
+redraw_rc=$?
+if [ "$redraw_rc" = 1 ]; then
+    bad "step 2: $COLLISION_RETRY_CAP redraws in a row all collided with $A_NAME (p ~ (1/256)^$COLLISION_RETRY_CAP under a uniform draw -- report this run INCONCLUSIVE for steps 2 and 4, do not trust PASS or FAIL below for either)"
+elif [ "$redraw_rc" = 2 ]; then
+    echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume (redraw after a name collision)"; exit 1
+fi
 check "the resumed session's name differs from the pre-resume one (a real rename)" test "$A2_NAME" != "$A_NAME"
 check "directory/$A2_NAME resolves to the same session id" wait_for 30 resolves_to "$A2_NAME" "$SA"
 r="$(send "$A2_NAME" s2-new-name "$SB")"
