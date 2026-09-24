@@ -200,6 +200,58 @@ def test_find_last_code_exercised_run_none_when_nothing_qualifies() -> None:
     assert gate.find_last_code_exercised_run(runs) is None
 
 
+# ── run_is_code_tested_red(): the "tested, red" finding (round 5) ──────────
+#
+# nexus-of2x8 critique finding 2: run_is_code_exercised used to require
+# conclusion=="success", so a run whose pytest jobs genuinely RAN and
+# reported red (failure/timed_out) was rejected with the same "did not
+# exercise code" message as a run that never ran pytest at all
+# (skipped/cancelled). DECISION: a tested-red run counts as COVERED (pytest
+# genuinely executed against the tree); it is a distinct finding from
+# "never exercised", not a reason to withhold coverage.
+
+
+def test_run_is_code_exercised_true_when_tested_but_failed() -> None:
+    """The DECISION: a run whose pytest jobs ran and reported red still
+    counts as code-exercised -- pytest genuinely executed against the tree."""
+    assert gate.run_is_code_exercised(_TESTED_RED_JOBS) is True
+
+
+def test_run_is_code_exercised_true_when_timed_out() -> None:
+    jobs = {"pytest (Python 3.12, shard 1/4)": "timed_out"}
+    assert gate.run_is_code_exercised(jobs) is True
+
+
+def test_run_is_code_tested_red_true_when_failed_with_no_success() -> None:
+    assert gate.run_is_code_tested_red(_TESTED_RED_JOBS) is True
+
+
+def test_run_is_code_tested_red_false_when_a_success_is_present() -> None:
+    """A run with a mix of success and failure among pytest-prefixed jobs is
+    NOT tested-red -- at least one job proved pytest ran clean against the
+    tree, which is what run_is_code_exercised already keys on."""
+    jobs = {
+        "pytest (Python 3.12, shard 1/4)": "success",
+        "pytest (Python 3.12, shard 2/4)": "failure",
+    }
+    assert gate.run_is_code_tested_red(jobs) is False
+
+
+def test_run_is_code_tested_red_false_when_skipped() -> None:
+    """The doc-only fast lane shape is NOT tested-red -- it never ran."""
+    assert gate.run_is_code_tested_red(_SKIPPED_JOBS) is False
+
+
+def test_run_is_code_tested_red_false_when_cancelled() -> None:
+    """Cut short by concurrency cancellation is NOT tested-red -- it never
+    concluded on its own merits."""
+    assert gate.run_is_code_tested_red(_CANCELLED_JOBS) is False
+
+
+def test_run_is_code_tested_red_false_on_a_clean_success_run() -> None:
+    assert gate.run_is_code_tested_red(_SUCCESS_JOBS) is False
+
+
 # ── find_uncovered_commits() ────────────────────────────────────────────────
 
 
@@ -347,6 +399,18 @@ _CANCELLED_JOBS = {
     "pytest (Python 3.12, shard 2/4)": "cancelled",
     "service jar (pytest substrate)": "cancelled",
     "pytest-gate": "cancelled",
+}
+_TESTED_RED_JOBS = {
+    # The shape of a run whose pytest matrix genuinely RAN and reported
+    # red -- every code-exercising job concluded (not skipped, not
+    # cancelled), and none of them succeeded. Distinct from _CANCELLED_JOBS
+    # (cut short before concluding) and _SKIPPED_JOBS (never ran at all).
+    "doc-only fast lane predicate": "success",
+    "pytest (Python 3.12, shard 1/4)": "failure",
+    "pytest (Python 3.12, shard 2/4)": "failure",
+    "pytest (lint markers)": "failure",
+    "pytest (mode-declarations census)": "failure",
+    "pytest-gate": "failure",
 }
 
 
@@ -674,6 +738,217 @@ def test_check_stays_blocked_for_a_completed_run_whose_pytest_jobs_skipped(
     assert rc == 1, (
         "a completed-but-skipped run must never excuse a code commit -- BLOCKED, not PENDING"
     )
+
+
+# ── ROUND 5: "tested, red" counts as covered, with its own message ─────────
+#
+# nexus-of2x8 critique finding 2: a run whose pytest jobs genuinely RAN and
+# reported red used to be rejected with the exact same "did not exercise
+# code" message as a run that never ran pytest at all. DECISION: it counts
+# as covered (pytest ran against the tree); these check()-level tests pin
+# both halves -- the coverage outcome AND the distinct message/annotation.
+
+
+def test_check_counts_a_tested_red_floor_as_covered(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A commit whose only covering run's pytest jobs reported red is still
+    COVERED -- pytest genuinely ran -- but the log says "tested, red", not
+    the misleading "did not exercise code"."""
+    repo = _init_repo(tmp_path)
+    tip_sha = _commit(repo, "src/nexus/foo.py", "code", "add code")
+    router = _RunRouter(
+        runs_page=[{"id": 1, "head_sha": tip_sha, "status": "completed"}],
+        jobs_by_run_id={1: _TESTED_RED_JOBS},
+    )
+    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc == 0, "a tested-red run must still count as coverage (see the DECISION)"
+    err = capsys.readouterr().err
+    assert "tested, red" in err
+    assert "did not exercise code" not in err, (
+        "the tested-red finding must not be reported under the misleading "
+        "never-exercised message"
+    )
+
+
+def test_check_emits_tested_red_annotation_under_github_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    repo = _init_repo(tmp_path)
+    tip_sha = _commit(repo, "src/nexus/foo.py", "code", "add code")
+    router = _RunRouter(
+        runs_page=[{"id": 7, "head_sha": tip_sha, "status": "completed"}],
+        jobs_by_run_id={7: _TESTED_RED_JOBS},
+    )
+    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "::warning title=Coverage floor is a RED run" in out
+    assert tip_sha[:12] in out
+
+
+def test_check_tested_red_annotation_is_silent_outside_github_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    repo = _init_repo(tmp_path)
+    tip_sha = _commit(repo, "src/nexus/foo.py", "code", "add code")
+    router = _RunRouter(
+        runs_page=[{"id": 7, "head_sha": tip_sha, "status": "completed"}],
+        jobs_by_run_id={7: _TESTED_RED_JOBS},
+    )
+    rc = gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    assert rc == 0
+    assert "::warning" not in capsys.readouterr().out
+
+
+# ── ROUND 5: the BLOCKED path gets an ::error:: annotation + job summary ───
+#
+# nexus-of2x8 critique finding 1: BLOCKED -- covered by nothing at all --
+# used to print only to stderr, a full level softer than the out-of-scope
+# PENDING case's own ::warning::. It now mirrors that case with ::error::
+# (the harder finding deserves at least as much visibility) plus a
+# GITHUB_STEP_SUMMARY line, both checked directly here.
+
+
+def test_blocked_annotation_is_emitted_under_github_actions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    gate._emit_blocked_annotation(
+        [
+            _annot_commit("a" * 40, ("src/nexus/x.py",)),
+            _annot_commit("b" * 40, ("src/nexus/y.py",)),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert out.startswith("::error title="), f"not a workflow command: {out!r}"
+    assert "a" * 12 in out
+    assert "b" * 12 in out
+    assert "gh run rerun" in out, "the annotation must carry the actionable remedy"
+    assert out.count("::error") == 1
+
+
+def test_blocked_annotation_is_silent_outside_github_actions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    gate._emit_blocked_annotation([_annot_commit("a" * 40, ("src/nexus/x.py",))])
+    assert capsys.readouterr().out == ""
+
+
+def test_check_emits_error_annotation_when_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The full check()-level wiring: a genuinely BLOCKED commit must
+    surface an ::error:: annotation on stdout when running under Actions,
+    not just the pre-existing stderr text."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
+    uncovered_sha = _commit(
+        repo, "src/nexus/pdf_extractor.py", "new code", "touches code, run cancelled"
+    )
+    tip_sha = _commit(
+        repo, "docs/a.md", "doc", "docs only, supersedes the cancelled run"
+    )
+    router = _RunRouter(
+        runs_page=[
+            {"id": 3, "head_sha": tip_sha, "status": "completed"},
+            {"id": 2, "head_sha": uncovered_sha, "status": "completed"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={3: _SKIPPED_JOBS, 2: _CANCELLED_JOBS, 1: _SUCCESS_JOBS},
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "::error title=" in out
+    assert uncovered_sha[:12] in out
+
+
+def test_check_writes_job_summary_when_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GITHUB_STEP_SUMMARY line must be visible on the run page, not only
+    in the log -- the same motivation as the ::error:: annotation, on the
+    surface designed for exactly this."""
+    summary_path = tmp_path / "step_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "known-good floor")
+    uncovered_sha = _commit(
+        repo, "src/nexus/pdf_extractor.py", "new code", "touches code, run cancelled"
+    )
+    tip_sha = _commit(
+        repo, "docs/a.md", "doc", "docs only, supersedes the cancelled run"
+    )
+    router = _RunRouter(
+        runs_page=[
+            {"id": 3, "head_sha": tip_sha, "status": "completed"},
+            {"id": 2, "head_sha": uncovered_sha, "status": "completed"},
+            {"id": 1, "head_sha": floor_sha, "status": "completed"},
+        ],
+        jobs_by_run_id={3: _SKIPPED_JOBS, 2: _CANCELLED_JOBS, 1: _SUCCESS_JOBS},
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+    )
+    assert rc == 1
+    assert summary_path.exists(), "GITHUB_STEP_SUMMARY must be written on BLOCKED"
+    content = summary_path.read_text(encoding="utf-8")
+    assert "BLOCKED" in content
+    assert uncovered_sha in content
+
+
+def test_write_job_summary_is_a_noop_without_the_env_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    # No exception, no file created anywhere -- nothing to assert on disk
+    # beyond "this did not raise".
+    gate._write_job_summary("should not be written anywhere")
+
+
+def test_write_job_summary_appends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(path))
+    gate._write_job_summary("first line")
+    gate._write_job_summary("second line")
+    content = path.read_text(encoding="utf-8")
+    assert "first line" in content
+    assert "second line" in content
+
+
+# ── ROUND 5: the remedy text is actually actionable (finding 5) ────────────
+
+
+def test_remedy_does_not_claim_ci_yml_can_be_rerun_directly() -> None:
+    """ci.yml has no workflow_dispatch trigger (verified against the live
+    workflow file) -- the remedy must not tell a human to do something that
+    does not exist."""
+    assert "re-run ci.yml against this commit's tree directly" not in gate._REMEDY
+
+
+def test_remedy_names_an_actionable_command() -> None:
+    assert "gh run rerun" in gate._REMEDY
+    assert "workflow_dispatch" in gate._REMEDY  # explains WHY that path is unavailable
+
+
+def test_ci_yml_genuinely_has_no_workflow_dispatch_trigger() -> None:
+    """Non-vacuity for the remedy text above: pin against a live read of
+    ci.yml so a future addition of workflow_dispatch there is caught rather
+    than leaving a now-stale remedy in place."""
+    ci_yml = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    on_block = ci_yml[ci_yml.index("\non:") : ci_yml.index("\nconcurrency:")]
+    assert "workflow_dispatch" not in on_block
 
 
 # ── THE MANDATORY FALSIFICATION CHECK ───────────────────────────────────────
@@ -1006,6 +1281,19 @@ class _FlakyRunRouter(_RunRouter):
         return super().__call__(url)
 
 
+class _FakeSleep:
+    """Records the delays :func:`check` asks for instead of actually
+    sleeping -- ROUND 5 (nexus-of2x8 critique finding 3): the retry used to
+    have zero delay between attempts; these tests must prove a real,
+    injectable backoff now happens WITHOUT costing wall-clock time."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
 def _stale_window_repo(tmp_path: Path):
     """A repo plus the two windows: an ancient stale one, and the true one."""
     repo = _init_repo(tmp_path)
@@ -1025,8 +1313,10 @@ def test_a_stale_window_is_refetched_rather_than_believed(tmp_path: Path) -> Non
     """One stale page must not cost a red check; the retry sees through it."""
     repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
     router = _FlakyRunRouter(stale, fresh, jobs, stale_count=1)
+    sleep = _FakeSleep()
     rc = gate.check(
-        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
     )
     assert rc == 0, "a single stale window must be retried through, not believed"
     assert router.runs_calls == 2, (
@@ -1040,8 +1330,10 @@ def test_the_retry_is_bounded_and_still_refuses(tmp_path: Path) -> None:
     the answer to it is still CANNOT VERIFY, not a floor picked out of it."""
     repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
     router = _FlakyRunRouter(stale, fresh, jobs, stale_count=99)
+    sleep = _FakeSleep()
     rc = gate.check(
-        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
     )
     assert rc == 2, "a window that never reaches the head is still CANNOT VERIFY"
     assert router.runs_calls == gate.WINDOW_FETCH_ATTEMPTS, (
@@ -1056,6 +1348,57 @@ def test_the_stale_attempt_is_logged_not_swallowed(
     """A retry that hides the phenomenon would let its rate change unseen."""
     repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
     router = _FlakyRunRouter(stale, fresh, jobs, stale_count=1)
-    gate.check("o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router)
+    gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
     err = capsys.readouterr().err
     assert "attempt 1/" in err and "refetching" in err
+
+
+# ── ROUND 5: a real, injectable backoff between retry attempts ─────────────
+#
+# nexus-of2x8 critique finding 3: the retry above had ZERO delay between
+# attempts, so the compounded "1/2000" residual-rate figure assumed an
+# independence between attempts the measurement never established. These
+# tests prove a real delay is requested (via the injectable `sleep`
+# parameter, so nothing here actually sleeps) and that it is bounded --
+# never fired after the FINAL attempt, since a refusal that follows does not
+# need one more delay before reporting CANNOT VERIFY.
+
+
+def test_backoff_is_requested_between_stale_attempts_not_after_the_last(
+    tmp_path: Path,
+) -> None:
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _FlakyRunRouter(stale, fresh, jobs, stale_count=99)
+    sleep = _FakeSleep()
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
+    )
+    assert rc == 2
+    # WINDOW_FETCH_ATTEMPTS attempts, all stale -> WINDOW_FETCH_ATTEMPTS - 1
+    # backoffs (one before each retry; none after the final, refused
+    # attempt -- there is no next fetch left to wait for).
+    assert len(sleep.calls) == gate.WINDOW_FETCH_ATTEMPTS - 1, (
+        f"expected {gate.WINDOW_FETCH_ATTEMPTS - 1} backoff sleep(s), got "
+        f"{sleep.calls}"
+    )
+    assert all(s > 0 for s in sleep.calls), "a zero-delay backoff is the defect this fixes"
+
+
+def test_backoff_is_not_requested_when_the_first_window_already_reaches_head(
+    tmp_path: Path,
+) -> None:
+    """No staleness at all -> no retry -> no sleep. A backoff that fires on
+    the common, un-stale case would slow down every ordinary invocation."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _FlakyRunRouter(stale, fresh, jobs, stale_count=0)
+    sleep = _FakeSleep()
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
+    )
+    assert rc == 0
+    assert sleep.calls == []
