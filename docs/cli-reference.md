@@ -2646,15 +2646,37 @@ nx config init
 | Subcommand | Description |
 |------------|-------------|
 | `init` | Interactive managed-service (cloud) credential wizard — collects `service_url` + `service_token`. Local mode uses `nx init` instead. |
-| `list` | Show all config values |
+| `list` | Show all config values (secrets masked to their first and last four characters) |
 | `get KEY` | Get single value (masked by default) |
-| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form. |
+| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form, or `KEY --stdin` / `KEY --from-file PATH`. |
 
 **`get` flags:**
 
 | Flag | Description |
 |------|-------------|
 | `--show` | Reveal the full value instead of masking |
+
+**`list` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--keys-only` | Print each key with `set` / `not set` and its source, and no value characters at all. Use this whenever the output leaves your own terminal, instead of redacting the default listing yourself (nexus-6fvwo). |
+
+**`set` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--stdin` | Read the value from stdin, so it never appears in the process list. |
+| `--from-file PATH` | Read the value from a file. Refused unless the file is readable by you alone (mode `0600`). |
+
+A secret given inline (`KEY VALUE` or `KEY=VALUE`) is visible to every process
+you run through `ps`; `set` still accepts it and prints a note pointing at
+`--stdin`. The two ways that keep it off the command line:
+
+```
+printf %s "$VOYAGE_KEY" | nx config set voyage_api_key --stdin
+nx config set voyage_api_key --from-file ~/.secrets/voyage.key
+```
 
 **Managed-service credentials** (RDR-166 greenfield onboarding):
 

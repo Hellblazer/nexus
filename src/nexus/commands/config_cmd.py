@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx config — manage credentials and settings."""
 import os
+import stat
+import sys
+from pathlib import Path
 
 import click
 import yaml
@@ -61,22 +64,65 @@ def config_group() -> None:
 
 # ── set ───────────────────────────────────────────────────────────────────────
 
+def _is_secret(key: str) -> bool:
+    """A credential that is not a plain setting (nexus-ssqk9's exemptions)."""
+    return "." not in key and key not in NON_SECRET_CREDENTIALS
+
+
+def _read_private_file(path: Path) -> str:
+    """Read a value file, refusing one other users can read (nexus-6fvwo).
+
+    The point of ``--from-file`` is a credential that never becomes visible
+    to another process; a file group or others can read has already failed
+    that, so it is refused with the remedy rather than read.
+    """
+    mode = path.stat().st_mode
+    if os.name == "posix" and mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise click.UsageError(
+            f"{path} is readable by group or others (mode {stat.S_IMODE(mode):04o}); "
+            f"a credential file must be 0600. Run: chmod 600 {path}"
+        )
+    return path.read_text()
+
+
 @config_group.command("set")
 @click.argument("key_value")
 @click.argument("value", required=False)
-def config_set(key_value: str, value: str | None) -> None:
+@click.option(
+    "--stdin", "from_stdin", is_flag=True, default=False,
+    help="Read the value from stdin, so it never appears in the process list.",
+)
+@click.option(
+    "--from-file", "from_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+    help="Read the value from a file that only you can read (mode 0600).",
+)
+def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: Path | None) -> None:
     """Set a credential or config value.
 
-    Accepts KEY=VALUE or KEY VALUE forms:
+    Accepts KEY=VALUE or KEY VALUE forms, or KEY with --stdin / --from-file.
+    For a secret, prefer --stdin or --from-file: a value on the command line
+    is visible to every process you run (ps).
 
     \b
-      nx config set voyage_api_key=pa-...
-      nx config set voyage_api_key pa-...
+      printf %s "$VOYAGE_KEY" | nx config set voyage_api_key --stdin
+      nx config set voyage_api_key --from-file ~/.secrets/voyage.key
+      nx config set pdf.extractor=mineru
     """
-    if value is None:
+    inline = value is not None or "=" in key_value
+    sources = [inline, from_stdin, from_file is not None]
+    if sum(sources) > 1:
+        raise click.UsageError("Give the value one way: inline, --stdin or --from-file.")
+    if from_stdin or from_file is not None:
+        key = key_value
+        raw = sys.stdin.read() if from_stdin else _read_private_file(from_file)
+        value = raw.rstrip("\r\n")
+        if not value.strip():
+            raise click.UsageError("The value read was empty; nothing was set.")
+    elif value is None:
         # KEY=VALUE form
         if "=" not in key_value:
-            raise click.UsageError("Provide KEY=VALUE or KEY VALUE.")
+            raise click.UsageError("Provide KEY=VALUE, KEY VALUE, or KEY --stdin.")
         key, value = key_value.split("=", 1)
     else:
         key = key_value
@@ -88,6 +134,12 @@ def config_set(key_value: str, value: str | None) -> None:
     else:
         set_credential(key, value.strip())
     click.echo(f"Set {key}  →  {_global_config_path()}")
+    if inline and _is_secret(key):
+        click.echo(
+            f"Note: {key} was on the command line, where other processes can read "
+            f"it. Next time: nx config set {key} --stdin (or --from-file PATH).",
+            err=True,
+        )
     if key in RESTART_HINT_KEYS:
         click.echo(SERVICE_RESTART_HINT)
 
@@ -136,8 +188,17 @@ def _mask(value: str) -> str:
 
 
 @config_group.command("list")
-def config_list() -> None:
-    """Show all credentials and config settings."""
+@click.option(
+    "--keys-only", is_flag=True, default=False,
+    help="Show which keys are set and where, with no value characters at all.",
+)
+def config_list(keys_only: bool) -> None:
+    """Show all credentials and config settings.
+
+    Secrets are masked but keep their first and last four characters. When
+    the output goes anywhere but your own terminal, use --keys-only, which
+    prints none, rather than redacting it yourself (nexus-6fvwo).
+    """
     click.echo("Credentials  (env var takes precedence over config file)\n")
 
     path = _global_config_path()
@@ -150,8 +211,11 @@ def config_list() -> None:
         env_val = os.environ.get(env_var, "")
         file_val = file_creds.get(cred, "")
 
-        unmasked = cred in NON_SECRET_CREDENTIALS
-        if env_val:
+        unmasked = cred in NON_SECRET_CREDENTIALS and not keys_only
+        if keys_only:
+            source = f"env:{env_var}" if env_val else ("config.yml" if file_val else "")
+            display = "set" if source else "not set"
+        elif env_val:
             source = f"env:{env_var}"
             display = env_val if unmasked else _mask(env_val)
         elif file_val:
@@ -173,9 +237,9 @@ def config_list() -> None:
             continue
         if isinstance(values, dict):
             for k, v in values.items():
-                click.echo(f"  {section}.{k:<18} {v}")
+                click.echo(f"  {section}.{k}" if keys_only else f"  {section}.{k:<18} {v}")
         else:
-            click.echo(f"  {section:<24} {values}")
+            click.echo(f"  {section}" if keys_only else f"  {section:<24} {values}")
 
 
 # ── init ──────────────────────────────────────────────────────────────────────

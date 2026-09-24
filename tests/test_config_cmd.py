@@ -384,3 +384,100 @@ def test_restart_hint_matches_the_documented_recipe() -> None:
     section = text[start : text.index("**What happens to a corpus", start)]
     assert SERVICE_RESTART_COMMAND in section
     assert "a restart is required" in section
+
+
+# ── nexus-6fvwo: credentials never on argv, never partially printed ─────────
+#
+# Relayed from conexus-fbbj. `nx config list` printed the first and last four
+# characters of every secret, and a caller that hand-redacted that output
+# leaked 8 characters of a live credential when its sed missed the aligned
+# column (2026-08-25, rotated as conexus-g8a6). `nx config set KEY VALUE`
+# put the value on argv, where any same-user process can read it with ps.
+
+_SECRET = "sk-live-0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def test_config_list_keys_only_prints_no_value_characters(runner, fake_home) -> None:
+    _write_config(fake_home, {
+        "credentials": {"voyage_api_key": _SECRET},
+        "pdf": {"extractor": "mineru-settings-value"},
+    })
+    result = runner.invoke(main, ["config", "list", "--keys-only"])
+    assert result.exit_code == 0, result.output
+    # Not even the masked fragments the default listing shows.
+    for fragment in (_SECRET, _SECRET[:4], _SECRET[-4:], "mineru-settings-value"):
+        assert fragment not in result.output
+    assert "voyage_api_key" in result.output
+    assert "pdf.extractor" in result.output
+    voyage_line = next(line for line in result.output.splitlines() if "voyage_api_key" in line)
+    assert "set" in voyage_line and "config.yml" in voyage_line
+
+
+def test_config_list_keys_only_reports_unset_and_env_sources(runner, fake_home, monkeypatch) -> None:
+    monkeypatch.setenv("VOYAGE_API_KEY", _SECRET)
+    result = runner.invoke(main, ["config", "list", "--keys-only"])
+    assert result.exit_code == 0, result.output
+    assert _SECRET[:4] not in result.output
+    voyage_line = next(line for line in result.output.splitlines() if "voyage_api_key" in line)
+    assert "env:VOYAGE_API_KEY" in voyage_line
+    assert any("not set" in line for line in result.output.splitlines() if "service_token" in line)
+
+
+def test_config_set_stdin_reads_the_value_off_argv(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "set", "voyage_api_key", "--stdin"], input=_SECRET + "\n")
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"]["voyage_api_key"] == _SECRET
+    assert _SECRET not in result.output
+
+
+def test_config_set_from_file_reads_a_private_file(runner, fake_home, tmp_path) -> None:
+    secret_file = tmp_path / "voyage.key"
+    secret_file.write_text(_SECRET + "\n")
+    secret_file.chmod(0o600)
+    result = runner.invoke(main, ["config", "set", "voyage_api_key", "--from-file", str(secret_file)])
+    assert result.exit_code == 0, result.output
+    assert _read_config(fake_home)["credentials"]["voyage_api_key"] == _SECRET
+
+
+def test_config_set_from_file_refuses_a_group_or_world_readable_file(runner, fake_home, tmp_path) -> None:
+    secret_file = tmp_path / "voyage.key"
+    secret_file.write_text(_SECRET)
+    secret_file.chmod(0o644)
+    result = runner.invoke(main, ["config", "set", "voyage_api_key", "--from-file", str(secret_file)])
+    assert result.exit_code != 0
+    assert "0600" in result.output or "chmod" in result.output
+    assert not _config_path(fake_home).exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["voyage_api_key", "inline", "--stdin"],
+        ["voyage_api_key=inline", "--stdin"],
+        ["voyage_api_key", "--stdin", "--from-file", "/dev/null"],
+    ],
+    ids=["value-and-stdin", "key-equals-and-stdin", "stdin-and-file"],
+)
+def test_config_set_refuses_two_value_sources(runner, fake_home, args) -> None:
+    result = runner.invoke(main, ["config", "set", *args], input="x\n")
+    assert result.exit_code != 0
+    assert "Give the value one way" in result.output  # our refusal, not an unknown option
+    assert not _config_path(fake_home).exists()
+
+
+def test_config_set_stdin_refuses_an_empty_value(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "set", "voyage_api_key", "--stdin"], input="\n")
+    assert result.exit_code != 0
+    assert not _config_path(fake_home).exists()
+
+
+def test_config_set_secret_on_argv_points_at_stdin(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "set", "voyage_api_key", _SECRET])
+    assert result.exit_code == 0, result.output
+    assert "--stdin" in result.output
+
+
+def test_config_set_non_secret_on_argv_gets_no_hint(runner, fake_home) -> None:
+    result = runner.invoke(main, ["config", "set", "pdf.extractor", "mineru"])
+    assert result.exit_code == 0, result.output
+    assert "--stdin" not in result.output
