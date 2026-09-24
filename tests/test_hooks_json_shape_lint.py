@@ -47,6 +47,7 @@ from pathlib import Path
 
 import pytest
 
+from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.mcp.hooks import HOOK_TOOLS
 
 pytestmark = pytest.mark.lint
@@ -65,7 +66,8 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: (`nx-hook mcp-connect-check`), `UserPromptSubmit`, sibling to
 #: `mailbox-drain`. 27 -> 25 for 7.58.0: both veh77 entries are held back
 #: with the rest of the new verbs (plugin-ahead skew; see the docstring).
-EXPECTED_CONEXUS_ENTRIES = 25
+#: 25 -> 27 for 7.59.0: both veh77 entries return through the nx-hook shim.
+EXPECTED_CONEXUS_ENTRIES = 27
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -74,6 +76,11 @@ MCP_SERVER = "plugin:conexus:nexus"
 FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 
 CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "python3"})
+
+#: The stdlib wrapper an entry uses for a verb that some fail-closed CLI
+#: (7.55.0 through 7.57.x) does not register: `python3 <shim> <verb>`.
+#: tests/test_hooks_json_verb_release_floor.py decides which entries must use it.
+NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
 
 #: The five handlers bead .21 resolved as plugin-resident. See the docstring
 #: for why 7.58.0 still wires them.
@@ -192,6 +199,12 @@ def reject_conexus(event: str, entry: dict) -> str | None:
             f"none, and its empty `args` is what makes the entry exec form."
         )
     if command == "python3":
+        if args and args[0] == NX_HOOK_SHIM:
+            if len(args) != 2:
+                return f"runs the nx-hook shim with {len(args) - 1} verbs; exactly one is permitted"
+            if args[1] not in VERB_TABLE:
+                return f"runs the nx-hook shim on {args[1]!r}, which this wheel does not register"
+            return None
         if len(args) != 1:
             return f"runs python3 with {len(args)} args; exactly one script path is permitted"
         if args[0] not in PLUGIN_RESIDENT_SCRIPTS:
@@ -372,6 +385,28 @@ CONEXUS_REJECTS = [
             ],
         },
         id="python3-with-a-second-argument",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "no-such-verb"],
+        },
+        id="shim-on-an-unregistered-verb",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": [
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+                "mailbox-drain",
+                "mcp-connect-check",
+            ],
+        },
+        id="shim-with-two-verbs",
     ),
     # The default-branch gap. Each of these was ACCEPTED before
     # nexus-q02nx.29, because anything that was not `mcp_tool` fell

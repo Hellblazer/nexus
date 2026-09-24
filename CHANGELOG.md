@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plugin that updates before its CLI no longer blocks the session, under any CLI from 7.55.0 on** (nexus-rcoze). `nx-hook` in conexus 7.55.0 to 7.57.x exits 2 on a hook verb it does not know, and exit 2 blocks prompts, Bash calls and MCP tool calls. hooks.json now runs every verb one of those releases lacks through a stdlib shim that skips it with a notice instead. That covers three hooks the 7.58.0 plugin still ran directly (`auto-approve`, `pre-close-verification`, `subagent-stop`), which a 7.55.0 CLI does not register. A new release-battery gate fires every hook against each published CLI from 7.55.0 on.
+
+### Added
+
+- **The MCP connection hooks held back from 7.58.0 are live** (nexus-veh77). At session start the plugin waits, up to 15 s and fail-open, for nx-mcp to connect before the first turn, and says so if it gives up; a mid-session disconnect is reported once. Both run through the shim, so an older CLI skips them for one session instead of blocking.
+
 ## [7.58.0] - 2026-09-23
 
 Pairs with engine-service-v0.1.130 (was engine-service-v0.1.129). The engine carries two new additive catalog routes (`POST /v1/catalog/merge`, `POST /v1/catalog/ghost-sweep`) and no new Liquibase changesets; catalog-016-0 gains a checksum-neutral DATA EFFECT comment only. Every unshipped wire-contract change is additive, so the engine deploys before this client tag.

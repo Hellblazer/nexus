@@ -43,8 +43,11 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ## Awaiting the next release or plugin cut (pinned: v7.58.0)
 
-_Empty. Everything listed here (nexus-j4iy0, nexus-ebx0s, nexus-vupim) went live with 7.58.0
-when `source.ref` advanced to `v7.58.0`._
+ONE PATH PER BULLET, on the bullet's FIRST line.
+
+- nexus-rcoze — `conexus/hooks/scripts/nx_hook_shim.py`: NEW. A stdlib wrapper that runs `nx-hook <verb>` and turns exactly one outcome, exit 2 with the unknown-verb line that conexus 7.55.0 to 7.57.x print, into exit 0 with a notice; every other result passes through, so a real deny still denies. No `nx-hook` at all is also exit 0.
+- nexus-rcoze — `conexus/hooks/hooks.json`: `auto-approve` (PreToolUse and PermissionRequest), `pre-close-verification` and `subagent-stop` now run through the shim, because a 7.55.0 CLI does not register them and exits 2 on every conexus MCP tool call, Bash call and subagent stop (measured against the published wheel). The two nexus-veh77 entries held back from 7.58.0 return through the shim: `mcp-connect-wait` (SessionStart, `startup`) and `mcp-connect-check` (UserPromptSubmit). tests/e2e/hook-cli-skew/run.sh fires every entry against each published CLI from 7.55.0 on.
+- nexus-rcoze — `conexus/README.md`: hook-table rows for the shim entries, the veh77 rows, a paragraph on why the shim exists, and the shim in the scripts tree.
 
 ## Deferred to the next client release
 

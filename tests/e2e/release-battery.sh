@@ -180,6 +180,9 @@ define_leg smoke      group  "SMOKE (PASSED|FAILED)"                    env "NEX
 define_leg upshakeout group  "UPGRADE-SHAKEOUT PASSED"                  tests/e2e/upgrade-shakeout.sh run
 define_leg genflip    group  "GEN-FLIP LIVE-HOLDER (PASSED|FAILED)"     tests/e2e/gen-flip-live-holder.sh
 define_leg pluginls   group  "PLUGIN-LOCKSTEP GATE (PASSED|FAILED|UNVERIFIED)"  tests/e2e/plugin-lockstep-gate.sh
+# nexus-rcoze: this checkout's hooks.json fired against every published CLI a
+# user may still have (7.55.0 on), this wheel, and none -- no entry may block.
+define_leg hookskew   group  "HOOK-CLI SKEW GATE (PASSED|FAILED|UNVERIFIED)"   tests/e2e/hook-cli-skew/run.sh
 define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
 ONLY_SKIPPED=0
