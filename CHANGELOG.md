@@ -6,7 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.58.0] - 2026-09-23
+
+Pairs with engine-service-v0.1.130 (was engine-service-v0.1.129). The engine carries two new additive catalog routes (`POST /v1/catalog/merge`, `POST /v1/catalog/ghost-sweep`) and no new Liquibase changesets; catalog-016-0 gains a checksum-neutral DATA EFFECT comment only. Every unshipped wire-contract change is additive, so the engine deploys before this client tag.
+
+### Plugin hooks now live (conexus and sn)
+
+This release moves both plugins' pinned source forward, which makes the pending plugin-surface changes live, with one deliberate hold-back:
+
+- sn hooks launch through `uv run --no-project --no-config --quiet` instead of bare `python3`, so they work on native Windows and ignore a stray `.python-version` (nexus-j4iy0).
+- The sn worktree guard records each session's startup root and denies a Serena write whose recorded root differs from the tree being edited, closing the relocated-session hazard where a write landed in the primary checkout (nexus-ebx0s).
+- **Held back: conexus hooks.json keeps its plugin-script entries this release.** The wheel now carries `nx-hook` verbs for the behaviour census, version lockstep, both routing guards and the mailbox drain (nexus-t9klx, nexus-44812), plus `mcp-connect-wait` and `mcp-connect-check` (nexus-veh77), but hooks.json does not name them yet. An older `nx-hook` exits 2 on a verb it does not know, so a plugin that updates before its CLI would have blocked every prompt and every Bash call, and the lockstep hook that repairs that skew was itself one of the new verbs. The entries move once a CLI that knows them is the norm. Version lockstep stays a stdlib-only plugin script permanently, pinned by `tests/hooks/test_lockstep_survives_cli_skew.py`. Eight plugin scripts that nothing ran are deleted (nexus-z9cz2).
+- The orchestration ledger no longer marks in-flight workflow subagents as stranded, and uses the workflow task id rather than the run id as the container identity (nexus-silj0).
+- `rdr-close` archives post-mortems into the RDR research collection (nexus-vupim).
+
 ### Added
+
 
 - **`nx catalog merge <duplicate> <canonical>`** (nexus-z4rpi): collapses a duplicate catalog entry in one transaction, moving its source URI and links. `nx catalog update --alias-of` (nexus-bt8w8) sets only the alias.
 - **`nx catalog sweep-ghosts [--apply]`** and a `ghost-sweep` doctor row (nexus-29drn): collect RDR-204 ghosts created after the one-time automatic sweep.
@@ -16,14 +31,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+
 - **The `attention_guided_v1` salience boost** (nexus-0hqez). It never took effect: the hybrid scorer overwrote it, and nothing extracted the salient sentences it needed.
 - `table_regions[].html` in PDF extraction metadata (nexus-dqe86): written at three sites, read by none.
 
 ### Fixed
 
+- **nx-hook no longer blocks a session when the plugin is ahead of the installed CLI** (nexus-t9klx). An unknown verb is skipped with a visible notice instead of exiting 2, which on `UserPromptSubmit` and `PreToolUse` would have blocked every prompt and Bash call. An unknown verb shaped like a ledger verb, whose exit code is its answer, exits 70 instead, so a caller never reads a skipped check as a pass.
+
 - **An older nx no longer rolls the engine back** (nexus-b2eaw). The version stamp behind the post-upgrade finish pass was compared by string equality, so with two conexus versions on one box every alternating `nx` call re-ran the finish pass, and an older client converged the engine toward its own older pin. The stamp now only moves forward. A deliberate downgrade of the installed CLI says so and names `nx daemon restart-stale`; a dev checkout stays quiet.
-- **Interactive sessions no longer skip conexus hooks before nx-mcp connects** (nexus-veh77). Interactive Claude Code starts turn 1 without waiting for MCP servers, so every tool-tier hook for a request that began first was silently skipped (measured on macOS and WSL2). A SessionStart verb, `nx-hook mcp-connect-wait`, now waits up to 15 s for this session's nx-mcp and says so if it gives up; `nx-hook mcp-connect-check` warns once if nx-mcp disconnects mid-session.
-- **The RDR-184 ledger projector works on clients configured by `NX_SERVICE_*`** (nexus-08cfl). It presents the same credential the real client does when no `mint_token` is configured; persistent skips show in `nx doctor --check-tuple-projection`.
+- **The RDR-184 ledger projector works on clients configured by `NX_SERVICE_*`** (nexus-08cfl). It presents the same credential the real client does when no `mint_token` is configured; persistent skips show in `nx doctor`.
 - **Serena write tools are denied from a session relocated into another git tree** (nexus-ebx0s). The write used to succeed against the tree Serena started in, dry runs included. A session that started in a worktree keeps its writes.
 - **Mutating sweeps are never auto-retried on a gateway error** (nexus-ll31n). GC, purge-trash and other non-idempotent sweep routes across every client store no longer replay on 502/503/504; the catalog client also stopped raising a TypeError when asked not to retry.
 - **`store_put` no longer adopts another collection's document** (nexus-bb6n2). A re-put into a different collection whose text overlapped an existing same-titled note rewrote that note's manifest; dedup is now scoped to the target collection. Superseding a note also reaps its now-unreferenced chunks.
@@ -91,6 +108,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the failure mode of every storage operation on every platform rather than
   a rider on this fix, so it is `nexus-fd3zf` with both arguments written
   out.
+- Catalog: a nested-worktree path is canonicalized before the repo-owner lookup, so it no longer registers under a second owner (nexus-7or3f).
+- Catalog: the RDR backfill no longer mints curator owners from tumbler-form collection names (nexus-emrsy).
+- `nx doctor`: superseded rows no longer count toward the dormant, disputed, and quarantine checks (nexus-s1rzg).
+- PDF extraction: code that the extractor mis-recognized as LaTeX math in table cells is detected and kept as code (nexus-8eg4w).
+- `config.yml` read-modify-write is locked across processes, not only threads; the HTTP retry classifier's string fallback matches a whole status token, not a digit substring (nexus-cd1k0.16).
+- Daemon: the aspect worker's stop guard uses the fenced value it captured, the warming marker rejects non-dict JSON, and the JVM-launch argv marker is confined to the storage daemon (nexus-cd1k0.6).
+- Daemon: the engine is launched on the IPv4 stack for both native and JVM launch kinds, and the gate is watched (nexus-ijue9.7); both flock sites route through one locking helper and the Java floor is pinned to the pom (nexus-ijue9.9).
+- Hooks: refreshing managed hooks now catches the error a stale repo entry actually raises (nexus-g76yf).
+- Local PG provisioning: every `psql`/`initdb` call carries an explicit timeout, and hook subprocesses are bounded (nexus-9dkxu, nexus-zptvf).
 
 ## [7.57.0] - 2026-09-22
 

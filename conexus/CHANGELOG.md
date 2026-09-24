@@ -1,5 +1,37 @@
 # Changelog
 
+## [7.58.0] - 2026-09-23
+
+Plugin version aligned with conexus 7.58.0. This release carries real
+plugin-side changes, which go live as `source.ref` advances to `v7.58.0`.
+
+The conexus hooks keep their plugin scripts this release, deliberately. The
+wheel now carries `nx-hook` verbs for the behaviour census, version lockstep,
+both routing guards and the mailbox drain (nexus-t9klx), plus two new MCP
+connection hooks (nexus-veh77), but `hooks.json` does not name them yet. An
+older `nx-hook` exits 2 on a verb it does not know, so a plugin that updated
+before its CLI would have blocked every prompt and every Bash call, and the
+lockstep hook that repairs that skew was itself one of the new verbs. The
+entries move once a CLI that knows them is the norm. Version lockstep stays a
+stdlib-only plugin script permanently, so plugin-ahead skew can always repair
+itself. Eight plugin scripts nothing ran are deleted (nexus-z9cz2).
+
+The sn hooks launch through `uv run --no-project --no-config` instead of bare
+`python3`, which stock Windows lacks, so a Context7-only user now needs uv for
+the hooks too (nexus-j4iy0).
+
+The sn worktree guard now denies a Serena write from a session that relocated
+into a worktree without starting there. Such a write could succeed against the
+primary checkout, and the tool's own dry-run report could say nothing was
+applied when it had been. A session that genuinely started inside a worktree
+keeps symbol editing there (nexus-ebx0s).
+
+`rdr-close` archives post-mortems into the subject collection
+`{repo}-rdr-research` instead of the repo's own owner-id collection, as
+docs/collections.md Rule 1 requires (nexus-vupim). The orchestration skill and
+the continuation command name the Workflow-tool agent's own ledger bucket, so a
+Workflow run no longer reads as an undeclared dispatch (nexus-silj0).
+
 ## [7.57.0] - 2026-09-22
 
 Plugin version aligned with conexus 7.57.0. No plugin-side changes: nothing
