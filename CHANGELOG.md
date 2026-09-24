@@ -12,12 +12,11 @@ Pairs with engine-service-v0.1.130 (was engine-service-v0.1.129). The engine car
 
 ### Plugin hooks now live (conexus and sn)
 
-This release moves both plugins' pinned source forward, which makes 40 pending plugin-surface changes live at once:
+This release moves both plugins' pinned source forward, which makes the pending plugin-surface changes live, with one deliberate hold-back:
 
 - sn hooks launch through `uv run --no-project --no-config --quiet` instead of bare `python3`, so they work on native Windows and ignore a stray `.python-version` (nexus-j4iy0).
 - The sn worktree guard records each session's startup root and denies a Serena write whose recorded root differs from the tree being edited, closing the relocated-session hazard where a write landed in the primary checkout (nexus-ebx0s).
-- conexus hooks run no bare `python3` scripts at all: the last five entries and the mailbox drain moved into `nx-hook` verbs, and eleven superseded plugin scripts are deleted (nexus-t9klx, nexus-44812, nexus-z9cz2).
-- A new SessionStart entry waits for the MCP server to connect before the session's first turn (nexus-veh77).
+- **Held back: conexus hooks.json keeps its plugin-script entries this release.** The wheel now carries `nx-hook` verbs for the behaviour census, version lockstep, both routing guards and the mailbox drain (nexus-t9klx, nexus-44812), plus `mcp-connect-wait` and `mcp-connect-check` (nexus-veh77), but hooks.json does not name them yet. An older `nx-hook` exits 2 on a verb it does not know, so a plugin that updates before its CLI would have blocked every prompt and every Bash call, and the lockstep hook that repairs that skew was itself one of the new verbs. The entries move once a CLI that knows them is the norm. Version lockstep stays a stdlib-only plugin script permanently, pinned by `tests/hooks/test_lockstep_survives_cli_skew.py`. Eight plugin scripts that nothing ran are deleted (nexus-z9cz2).
 - The orchestration ledger no longer marks in-flight workflow subagents as stranded, and uses the workflow task id rather than the run id as the container identity (nexus-silj0).
 - `rdr-close` archives post-mortems into the RDR research collection (nexus-vupim).
 
@@ -40,8 +39,7 @@ This release moves both plugins' pinned source forward, which makes 40 pending p
 
 
 - **An older nx no longer rolls the engine back** (nexus-b2eaw). The version stamp behind the post-upgrade finish pass was compared by string equality, so with two conexus versions on one box every alternating `nx` call re-ran the finish pass, and an older client converged the engine toward its own older pin. The stamp now only moves forward. A deliberate downgrade of the installed CLI says so and names `nx daemon restart-stale`; a dev checkout stays quiet.
-- **Interactive sessions no longer skip conexus hooks before nx-mcp connects** (nexus-veh77). Interactive Claude Code starts turn 1 without waiting for MCP servers, so every tool-tier hook for a request that began first was silently skipped (measured on macOS and WSL2). A SessionStart verb, `nx-hook mcp-connect-wait`, now waits up to 15 s for this session's nx-mcp and says so if it gives up; `nx-hook mcp-connect-check` warns once if nx-mcp disconnects mid-session.
-- **The RDR-184 ledger projector works on clients configured by `NX_SERVICE_*`** (nexus-08cfl). It presents the same credential the real client does when no `mint_token` is configured; persistent skips show in `nx doctor --check-tuple-projection`.
+- **The RDR-184 ledger projector works on clients configured by `NX_SERVICE_*`** (nexus-08cfl). It presents the same credential the real client does when no `mint_token` is configured; persistent skips show in `nx doctor`.
 - **Serena write tools are denied from a session relocated into another git tree** (nexus-ebx0s). The write used to succeed against the tree Serena started in, dry runs included. A session that started in a worktree keeps its writes.
 - **Mutating sweeps are never auto-retried on a gateway error** (nexus-ll31n). GC, purge-trash and other non-idempotent sweep routes across every client store no longer replay on 502/503/504; the catalog client also stopped raising a TypeError when asked not to retry.
 - **`store_put` no longer adopts another collection's document** (nexus-bb6n2). A re-put into a different collection whose text overlapped an existing same-titled note rewrote that note's manifest; dedup is now scoped to the target collection. Superseding a note also reaps its now-unreferenced chunks.

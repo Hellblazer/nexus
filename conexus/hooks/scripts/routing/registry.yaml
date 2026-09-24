@@ -34,12 +34,7 @@
 
 rules:
   subagent_git_write_requires_orchestrator:
-    # `hook_verb`, not `hook_script`: both rules were ported into the wheel
-    # at nexus-t9klx and hooks.json names an nx-hook VERB. The rule key above
-    # is unchanged and is still what the guard logs -- `routing_stats`
-    # maps verb to rule name explicitly for exactly that reason.
-    hook_verb: subagent-git-write-gate
-    module: nexus.hooks.subagent_git_write_gate
+    hook_script: subagent_git_write_requires_orchestrator.py
     matcher: Bash
     mode: block
     rationale: >-
@@ -61,8 +56,7 @@ rules:
     # and CLOSED for the working-tree destroyers (silent data loss).
     fail_closed: false
   phase_review_close_requires_gate:
-    hook_verb: phase-review-close-gate
-    module: nexus.hooks.phase_review_close_gate
+    hook_script: phase_review_close_requires_gate.py
     matcher: Bash
     mode: block
     rationale: >-

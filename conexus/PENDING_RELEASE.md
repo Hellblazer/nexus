@@ -50,4 +50,7 @@ when `source.ref` advanced to `v7.58.0`._
 
 _Empty. The four RDR-215 straddling beads deferred here by nexus-2x3qy
 (nexus-t9klx, nexus-z9cz2, nexus-silj0, nexus-veh77) shipped with the 7.58.0
-client release, as the deferral note said they would._
+client release, except their hooks.json entries: 7.58.0 kept the v7.57.0
+plugin-script entries, because an older `nx-hook` exits 2 on a verb it does not
+know. Moving those entries to `nx-hook` verbs is future plugin-surface drift
+and gets declared here when it lands; version lockstep never moves._

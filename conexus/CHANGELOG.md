@@ -5,21 +5,20 @@
 Plugin version aligned with conexus 7.58.0. This release carries real
 plugin-side changes, which go live as `source.ref` advances to `v7.58.0`.
 
-The conexus hooks no longer name a Python interpreter. Every `hooks.json` entry
-that launched a bare `python3` is now an `nx-hook` verb (`behaviour-census`,
-`version-lockstep`, `phase-review-close-gate`, `subagent-git-write-gate`,
-`mailbox-drain`), and the plugin scripts they replaced, plus eleven more that
-nothing executed any more, are deleted. Stock Windows has no `python3` on PATH,
-so those entries could never fire there; a console script gets a real shim from
-the installer (RDR-215: nexus-t9klx, nexus-z9cz2). The sn hooks launch through
-`uv run --no-project --no-config` for the same reason, so a Context7-only user
-now needs uv for the hooks too (nexus-j4iy0).
+The conexus hooks keep their plugin scripts this release, deliberately. The
+wheel now carries `nx-hook` verbs for the behaviour census, version lockstep,
+both routing guards and the mailbox drain (nexus-t9klx), plus two new MCP
+connection hooks (nexus-veh77), but `hooks.json` does not name them yet. An
+older `nx-hook` exits 2 on a verb it does not know, so a plugin that updated
+before its CLI would have blocked every prompt and every Bash call, and the
+lockstep hook that repairs that skew was itself one of the new verbs. The
+entries move once a CLI that knows them is the norm. Version lockstep stays a
+stdlib-only plugin script permanently, so plugin-ahead skew can always repair
+itself. Eight plugin scripts nothing ran are deleted (nexus-z9cz2).
 
-Two new hooks watch the MCP connection. `nx-hook mcp-connect-wait` runs at
-startup and waits, bounded at 15 seconds and fail-open, for this session's
-`nx-mcp` to connect before turn 1 can outrun it; on timeout it says so in the
-session. `nx-hook mcp-connect-check` warns once on a mid-session disconnect
-(nexus-veh77).
+The sn hooks launch through `uv run --no-project --no-config` instead of bare
+`python3`, which stock Windows lacks, so a Context7-only user now needs uv for
+the hooks too (nexus-j4iy0).
 
 The sn worktree guard now denies a Serena write from a session that relocated
 into a worktree without starting there. Such a write could succeed against the
