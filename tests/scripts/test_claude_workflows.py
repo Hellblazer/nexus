@@ -524,6 +524,67 @@ def test_pressure_test_requires_target_and_spec(tmp_path: Path) -> None:
     assert "args.spec" in missing_spec["error"]["message"]
 
 
+def test_pressure_test_accepts_string_args(tmp_path: Path) -> None:
+    """nexus-kk4ut: the Skill tool's own `args` param is typed as a string,
+
+    so a natural-language pressure-test invocation forwarded through it
+    lands here as text, not an object -- every such call used to die on
+    "pressure-test requires args.target" even though the string named one.
+    A multi-line string with recognized `key: value` lines must parse into
+    the same object shape a direct object caller would pass, including a
+    numeric `votesPerFinding` that actually changes the vote fan-out (2
+    votes for the critical finding here, not the default 3).
+    """
+    agents = _pt_reviews()
+    for i in range(2):
+        agents[f"verify:code-mechanics:0:{i}"] = {
+            "refuted": False,
+            "reasoning": "stands",
+        }
+    agents["verify:spec-fidelity:1:0"] = {"refuted": True, "reasoning": "wrong"}
+    agents["synthesize"] = {
+        "verdict": "fix-then-ship",
+        "ranked": [{"severity": "critical", "claim": "c1", "evidence": "e1"}],
+    }
+    scenario = {
+        "args": "target: diff X\nspec: directive Y\nvotesPerFinding: 2",
+        "agents": agents,
+    }
+    report = run_workflow(PRESSURE_TEST, scenario, tmp_path)
+    assert report["error"] is None
+    result = report["result"]
+
+    assert result["findingCount"] == 2
+    assert result["survivingCount"] == 1
+    assert result["verdict"] == "fix-then-ship"
+    assert result["complete"] is True
+
+    labels = [d["label"] for d in report["dispatched"]]
+    assert labels.count("verify:code-mechanics:0:0") == 1
+    assert labels.count("verify:code-mechanics:0:1") == 1
+    # The default is 3 votes for a critical/significant finding; a string
+    # `votesPerFinding: 2` that fell back to the default would dispatch a
+    # third one nobody stubbed and the run would error instead of complete.
+    assert "verify:code-mechanics:0:2" not in labels
+
+
+def test_pressure_test_string_args_with_no_key_is_the_whole_target(
+    tmp_path: Path,
+) -> None:
+    """A string with no recognized `key:` line is the target verbatim --
+
+    "pressure-test this diff" is the common one-line call, and it must not
+    be swallowed as an empty/malformed args object.
+    """
+    report = run_workflow(
+        PRESSURE_TEST, {"args": "just review this diff, no keys here"}, tmp_path
+    )
+    # target parsed fine; spec is still missing, so THAT is the error --
+    # proving the whole string landed in args.target, not args itself.
+    assert report["error"] is not None
+    assert "args.spec" in report["error"]["message"]
+
+
 # --- shared shape -----------------------------------------------------------
 
 

@@ -1171,13 +1171,23 @@ def enrich_aspects(
     documents already triggered at ingest), and upserts AspectRecords
     to ``document_aspects``.
 
-    Two extractor configs ship: ``knowledge__*`` routes to the
-    Claude-CLI scholarly-paper-v1 extractor; ``rdr__*`` routes to
-    the deterministic markdown + frontmatter parser
-    (rdr-frontmatter-v1; zero API cost). Other collection prefixes
-    error out at the config-selection step.
+    Two prefixes are supported: ``knowledge__*`` and ``rdr__*``. Other
+    collection prefixes error out at the config-selection step.
+
+    ``rdr__*`` always uses the deterministic markdown + frontmatter
+    parser (rdr-frontmatter-v1; zero API cost).
+
+    ``knowledge__*`` is ROUTED PER DOCUMENT (nexus-kmbys), by a
+    structural heuristic, not a blanket collection-wide choice:
+    paper-shaped documents (an Abstract/References heading, "et al.",
+    "we propose"/"we present", an arXiv/DOI id -- two or more of these)
+    get the Claude-CLI scholarly-paper-v1 extractor; everything else
+    gets general-prose-v1, which never fabricates datasets, baselines,
+    or a venue onto a design note or essay. A single ``nx enrich
+    aspects knowledge__x`` run can therefore write rows under BOTH
+    extractor names.
     """
-    from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.aspect_extractor import eligible_extractor_names, select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     config = select_config(collection)
@@ -1214,7 +1224,6 @@ def enrich_aspects(
         re_extract=re_extract,
         extract_all=extract_all,
         extractor_version=extractor_version,
-        config_extractor_name=config.extractor_name,
     )
     if entries is None:  # catalog missing
         return
@@ -1239,9 +1248,22 @@ def enrich_aspects(
             f"Estimated cost: ~${cost_estimate:.2f} "
             f"(mean of measured {config.model_version} dispatches)"
         )
+    # nexus-kk4ut: a knowledge__* collection is routed PER DOCUMENT
+    # (nexus-kmbys) — select_config's `config` is only the prefix's base
+    # extractor, and a batch can write rows under BOTH extractor names.
+    # Naming just the base one here would be honest for rdr__* (never
+    # shape-routed) but a lie for knowledge__* the instant one document
+    # in the batch turns out to be general prose. The eligible-name count
+    # decides which is true, rather than hardcoding per prefix.
+    eligible = eligible_extractor_names(collection)
+    extractor_desc = (
+        config.extractor_name
+        if len(eligible) <= 1
+        else f"routed per document ({' or '.join(eligible)})"
+    )
     click.echo(
         f"{len(entries)} document(s) in '{collection}' "
-        f"(extractor={config.extractor_name}, "
+        f"(extractor={extractor_desc}, "
         f"version={config.model_version}). {cost_str}."
     )
 
@@ -1292,11 +1314,11 @@ def _select_entries(
     collection: str,
     re_extract: bool,
     extractor_version: str,
-    config_extractor_name: str,
     extract_all: bool = False,
 ) -> list | None:
     """Return the catalog entries to process, or None if the catalog
     is missing (terminal error already echoed)."""
+    from nexus.aspect_extractor import eligible_extractor_names  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
@@ -1330,12 +1352,22 @@ def _select_entries(
                 r.source_path
                 for r in db.document_aspects.list_by_collection(collection)
             }
-            outdated_paths = {
-                r.source_path
-                for r in db.document_aspects.list_by_extractor_version(
-                    config_extractor_name, extractor_version,
-                )
-            } if re_extract else set()
+            # nexus-kk4ut: query EVERY extractor_name this collection's rows
+            # can carry, not just select_config's base config. A
+            # knowledge__* document routed to general-prose-v1 at write
+            # time (nexus-kmbys) writes a row under THAT extractor_name --
+            # a query pinned to scholarly-paper-v1 alone never matches it,
+            # so an outdated general-prose-v1 row would sit forever below
+            # --extractor-version's threshold, invisible to --re-extract.
+            outdated_paths: set[str] = set()
+            if re_extract:
+                for name in eligible_extractor_names(collection):
+                    outdated_paths |= {
+                        r.source_path
+                        for r in db.document_aspects.list_by_extractor_version(
+                            name, extractor_version,
+                        )
+                    }
         orphan_rows = len(existing_paths)
         if not entries:
             raise click.ClickException(unknown_collection_message(collection, orphan_rows=orphan_rows, row_label="aspect row"))
@@ -1606,6 +1638,11 @@ def _run_extraction(
     skipped_unreadable = 0
     write_skipped = 0
     by_reason: dict[str, int] = {}
+    # nexus-kk4ut: the ACTUAL extractor_name each successful record was
+    # written under, not `config.extractor_name` (the base config) --
+    # a knowledge__* batch is routed per document (nexus-kmbys) and can
+    # mix scholarly-paper-v1 and general-prose-v1 rows in one run.
+    by_extractor: dict[str, int] = {}
 
     # nexus-o6aa.10.1: a single catalog projection serves every entry
     # in this collection. Built once outside the loop because the SQL
@@ -1758,6 +1795,9 @@ def _run_extraction(
             else:
                 success += 1
                 extracted.append((source_path, record, lookup_path))
+                by_extractor[record.extractor_name] = (
+                    by_extractor.get(record.extractor_name, 0) + 1
+                )
                 click.echo(
                     f"  [{i}/{len(entries)}] {Path(source_path).name}: extracted"
                 )
@@ -1771,6 +1811,12 @@ def _run_extraction(
     if by_reason:
         reasons_str = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
         summary += f". by_reason: {reasons_str}"
+    # nexus-kk4ut: report what was ACTUALLY used, not what the pre-run
+    # estimate named -- the only honest source for a shape-routed
+    # collection is the routed records themselves.
+    if len(by_extractor) > 1:
+        extractor_str = ", ".join(f"{k}={v}" for k, v in sorted(by_extractor.items()))
+        summary += f". by_extractor: {extractor_str}"
     click.echo(summary)
     return extracted
 

@@ -445,7 +445,7 @@ highlights. Each flag degrades cleanly when DEVONthink is absent (zero edges /
 no write-back / primary-backend-only enrich / no highlight ingest); the index
 itself always succeeds. See [`docs/rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md`](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md).
 
-**Default routing by extension** (nexus-cvaw): `nx dt index --uuid X` without `--collection` picks the home based on file type. PDFs land in `knowledge__<corpus>-papers` so `nx enrich aspects` can extract structured fields via `scholarly-paper-v1`. Markdown notes land in `docs__<corpus>` (no aspect extraction; `docs__` is reserved for non-paper prose per nexus-z70w). Pre-nexus-cvaw both extensions defaulted to `docs__default`, which stranded paper PDFs.
+**Default routing by extension** (nexus-cvaw): `nx dt index --uuid X` without `--collection` picks the home based on file type. PDFs land in `knowledge__<corpus>-papers`, where `nx enrich aspects` routes each document by shape (nexus-kmbys): paper-shaped documents get `scholarly-paper-v1`, other prose gets `general-prose-v1` — a `knowledge__*` collection is never paper-only. Markdown notes land in `docs__<corpus>`, which gets no aspect extraction at all (`docs__` is reserved for repo/non-paper prose per nexus-z70w). Pre-nexus-cvaw both extensions defaulted to `docs__default`, which stranded paper PDFs.
 
 Multi-database default is the right behaviour for tags shared across
 libraries (a `nexus-test` tag in both `Inbox` and a project library

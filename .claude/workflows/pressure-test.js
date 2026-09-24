@@ -77,7 +77,11 @@ export const meta = {
   ],
 };
 
-// args:
+// args: an object with the fields below, OR a single string of "key: value"
+//   lines (target/spec/probe/votesPerFinding) -- see parseStringArgs below,
+//   which the top of this file's body normalizes into the object form
+//   before anything else runs (nexus-kk4ut). `lenses` cannot be expressed in
+//   the string form; a caller that needs it passes the object form.
 //   target: string        - description of the change, or a diff/commit
 //     range, that every lens reviews.
 //   spec: string           - the verbatim directive or design decision text
@@ -122,6 +126,45 @@ const FINDING_SCHEMA = {
     evidence: { type: 'string' },
   },
 };
+
+// args may arrive as a pre-built object (a programmatic caller, or the test
+// harness) or as a single STRING (nexus-kk4ut: the Skill tool's own `args`
+// parameter is typed as a string in its JSON schema, so a natural-language
+// invocation like "Use the pressure-test workflow on this diff against the
+// directive in RDR-XXX Approach" forwarded through that tool lands here as
+// text, not an object -- every such call previously died on "pressure-test
+// requires args.target" even when the string named a target). Parse
+// recognized `key: value` lines rather than assume one caller is wrong; each
+// value runs to the next recognized key so a multi-paragraph spec is not cut
+// at its first embedded newline. A string with no recognized key at all is
+// the whole target verbatim -- "pressure-test this diff" is the common
+// one-line call.
+function parseStringArgs(raw) {
+  const KEYS = ['target', 'spec', 'probe', 'votesPerFinding'];
+  const keyPattern = new RegExp(`(^|\\n)\\s*(${KEYS.join('|')})\\s*:\\s*`, 'g');
+  const hits = [...raw.matchAll(keyPattern)];
+  if (hits.length === 0) {
+    return { target: raw.trim() };
+  }
+  const parsed = {};
+  for (let i = 0; i < hits.length; i++) {
+    const key = hits[i][2];
+    const valueStart = hits[i].index + hits[i][0].length;
+    const valueEnd = i + 1 < hits.length ? hits[i + 1].index : raw.length;
+    parsed[key] = raw.slice(valueStart, valueEnd).trim();
+  }
+  if (parsed.votesPerFinding !== undefined) {
+    const n = Number(parsed.votesPerFinding);
+    if (!Number.isNaN(n)) {
+      parsed.votesPerFinding = n;
+    }
+  }
+  return parsed;
+}
+
+if (typeof args === 'string') {
+  args = parseStringArgs(args);
+}
 
 if (!args || !args.target) {
   throw new Error('pressure-test requires args.target');

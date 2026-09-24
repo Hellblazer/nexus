@@ -726,15 +726,23 @@ def _truncate(text: str, cap: int) -> str:
 
 
 def select_config(collection: str) -> ExtractorConfig | None:
-    """Return the registered ``ExtractorConfig`` whose prefix matches
+    """Return the registered BASE ``ExtractorConfig`` whose prefix matches
     ``collection``, or ``None`` if no prefix matches.
 
     Two prefixes ship:
 
     * ``knowledge__*`` → ``scholarly-paper-v1`` (Claude-CLI subprocess
-      path, RDR-089 Phase 1).
+      path, RDR-089 Phase 1) as the base config. This is a starting
+      point, not the final word: :func:`_resolve_config_for_document`
+      (nexus-kmbys) re-routes any INDIVIDUAL document classified as
+      general prose to ``general-prose-v1`` instead, so a
+      ``knowledge__*`` collection's rows can carry EITHER extractor_name
+      depending on each document's shape. A caller that needs every
+      extractor_name a collection's rows can actually carry — not just
+      the prefix's base config — wants :func:`eligible_extractor_names`.
     * ``rdr__*`` → ``rdr-frontmatter-v1`` (deterministic markdown +
-      frontmatter parser, RDR-089 Phase F; zero API cost).
+      frontmatter parser, RDR-089 Phase F; zero API cost). Not
+      shape-routed: every ``rdr__*`` row carries this one extractor_name.
 
     Other prefixes (``docs__``, ``code__``, bare ``knowledge``
     without the double-underscore separator, etc.) return ``None``.
@@ -757,6 +765,30 @@ def registered_prefixes() -> list[str]:
     prefix is added or removed.
     """
     return list(_REGISTRY.keys())
+
+
+def eligible_extractor_names(collection: str) -> list[str]:
+    """Every ``extractor_name`` a ``document_aspects`` row for
+    ``collection`` can actually carry (nexus-kk4ut).
+
+    ``select_config`` names only the prefix's BASE config, but per-
+    document shape routing (nexus-kmbys, :func:`_resolve_config_for_document`)
+    can redirect an individual ``knowledge__*`` document's row to
+    ``general-prose-v1`` at write time. A caller auditing rows by
+    extractor identity — ``--re-extract``'s outdated-version query is the
+    motivating case — must consider every extractor that could have
+    written a row for this collection, or it silently misses every
+    ``general-prose-v1`` row: those never match a query pinned to the
+    base config's name alone.
+
+    Returns ``[]`` when no config is registered for ``collection``.
+    """
+    config = select_config(collection)
+    if config is None:
+        return []
+    if config is _SCHOLARLY_PAPER_CONFIG:
+        return [_SCHOLARLY_PAPER_CONFIG.extractor_name, _GENERAL_PROSE_CONFIG.extractor_name]
+    return [config.extractor_name]
 
 
 # ── Per-document shape routing (nexus-kmbys) ─────────────────────────────────
