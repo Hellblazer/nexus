@@ -41,14 +41,9 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.59.0)
+## Awaiting the next release or plugin cut (pinned: v7.60.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- nexus-rcoze — `conexus/hooks/scripts/nx_hook_shim.py`: forwards SIGTERM, SIGINT and SIGHUP to its `nx-hook` child (terminate, then kill after 5 s) and exits 128+signal, so a hook killed by its hooks.json timeout no longer leaves the handler running orphaned. Review finding; the new test fails on the 7.59.0 shim.
-- nexus-galkv.20 — `conexus/hooks/scripts/mailbox_drain.py`: RDR-208 Phase 3 (the retention window closed: R2/v7.46.0 + 7 days). Drops the per-session `addresses.d/<session id>` registry read outright -- a registered instance-name mailbox is no longer drained. The hook still drains the session's own mailbox and any `/clear` cleared-record mailboxes, unchanged.
-- nexus-galkv.20 — `conexus/skills/mailbox/SKILL.md`: rewrites the push-delivery and instance-address guidance to match -- `tuple_subscribe("mailbox/<name>")` only arms the `directory/<name>` lease for `mailbox_send` resolution now; it is never a second delivered mailbox, so push delivery and the drain floor cover the session's own mailbox and board topics only.
-- nexus-galkv.20 — `conexus/skills/peer-messaging/SKILL.md`: a send to a peer's name now says it lands in the peer's own session mailbox, and that subscribing a name only lets it resolve; the old text said the subscribe registered the name for the drain hook.
 
 ## Deferred to the next client release
 

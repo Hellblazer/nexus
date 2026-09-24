@@ -628,8 +628,7 @@ public final class CatalogHandler implements HttpHandler {
      * forces apart and that a failure between any two calls could tear.
      *
      * <p>Body: {"duplicate": "1.1.2", "canonical": "1.1.1"}
-     * Response: {"duplicate", "canonical", "source_uri_moved",
-     * "links_remapped", "links_collapsed", "links_dropped"} — see
+     * Response: {"duplicate", "canonical", "source_uri_moved"} — see
      * {@link CatalogRepository#mergeDocuments} for the exact semantics and
      * refusal conditions. A refusal is a {@link CatalogRepository.MergeRefused},
      * mapped to 409 by the shared catch ladder below.
