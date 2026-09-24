@@ -37,6 +37,7 @@ This release moves both plugins' pinned source forward, which makes the pending 
 
 ### Fixed
 
+- **nx-hook no longer blocks a session when the plugin is ahead of the installed CLI** (nexus-t9klx). An unknown verb is skipped with a visible notice instead of exiting 2, which on `UserPromptSubmit` and `PreToolUse` would have blocked every prompt and Bash call. A verb that answers through its exit code exits 70 instead, so a caller never mistakes a skipped verb for a pass.
 
 - **An older nx no longer rolls the engine back** (nexus-b2eaw). The version stamp behind the post-upgrade finish pass was compared by string equality, so with two conexus versions on one box every alternating `nx` call re-ran the finish pass, and an older client converged the engine toward its own older pin. The stamp now only moves forward. A deliberate downgrade of the installed CLI says so and names `nx daemon restart-stale`; a dev checkout stays quiet.
 - **The RDR-184 ledger projector works on clients configured by `NX_SERVICE_*`** (nexus-08cfl). It presents the same credential the real client does when no `mint_token` is configured; persistent skips show in `nx doctor`.
