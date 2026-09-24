@@ -134,8 +134,9 @@ ORDER BY created_at;
 
 ## Templates change with an engine release, not with a data changeset
 
-The v1 templates (`ledger/<session_id>`, `mailbox/<address>`,
-`directory/<name>`) ship as YAML in engine resources
+The six templates (`ledger/<session_id>`, `mailbox/<address>`,
+`directory/<name>`, and, since RDR-211, `board/<topic>`, `queue/<name>`,
+`lock/<resource>`) ship as YAML in engine resources
 (`service/src/main/resources/tuples/templates/`), loaded and validated at
 boot; a breach fails boot with the file and field
 named. Changing a template's shape is an engine-release event — the same

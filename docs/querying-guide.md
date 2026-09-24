@@ -77,6 +77,7 @@ search(query="extraction pipeline", topic="Math-aware PDF Extraction")
 | `cluster_by` | string | `""` | Set to `semantic` to group results by topic (Ward fallback below 50% coverage) |
 | `topic` | string | `""` | Pre-filter to a named topic. Run `nx taxonomy list` for available topics |
 | `threshold` | float | per-corpus config | Override the distance threshold uniformly (raw cosine distance, lower = stricter; `inf` disables filtering — RDR-087) |
+| `lexical` | boolean | `false` | Also search the engine's exact-text indexes (full-text + trigram) and add those hits to the vector results, for a rare identifier or exact token a semantic search misses (measured 0.167 → 0.698 precision@10 on rare tokens). Lexical hits are exempt from the distance threshold. Unrelated to the CLI's `--hybrid`, which only re-ranks |
 | `structured` | boolean | `false` | Return `{ids, tumblers, distances, collections}` instead of the human-readable string (plan-runner use) |
 
 ## query() MCP tool
