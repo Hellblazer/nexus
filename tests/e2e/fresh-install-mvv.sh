@@ -508,53 +508,69 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
             && grep -qiE "no solution found|no version of conexus|not found in the package registry" "$LOGS/install.log"
     }
     if ! _published_install; then
-        # nexus-r433b: PyPI's simple index lags the upload API by ~10-25 min,
-        # and uv resolves from the simple index — this gate's first
-        # post-publish run died on exactly that lag on 4 consecutive
-        # releases and passed on manual rerun. When (and only when) the
-        # failure is the resolver's no-matching-version class on an
-        # explicitly requested version, wait on the resolver-visible signal
-        # (the simple index itself, PEP 691 JSON — never the JSON API,
-        # which led every time), instead of normalizing the rerun ritual.
-        # The wait script fast-exits when the index is already past the
-        # requested version (an operator typo is not a propagation wait),
-        # and the retry then fails loud with uv's own error. Every other
-        # failure shape fails immediately, unchanged.
-        # FRESH_MVV_INDEX_URL exists for the unit test's fake index only.
+        # nexus-tt5vm (three live occurrences: 7.26.0 ~90s, 7.55.3 ~6min,
+        # 7.57.0 >300s): the original nexus-r433b fix waited on a SEPARATE
+        # HTTP probe of PyPI's simple index (PEP 691 JSON, even down to the
+        # exact wheel-in-files-array check) — a DIFFERENT surface than the
+        # one `uv tool install` actually resolves against. All three live
+        # occurrences show that surface passing green while uv itself kept
+        # failing for minutes afterward; the 7.55.3/7.57.0 occurrences also
+        # show the follow-on fixed 300s install-retry bound (fitted to the
+        # single 7.26.0 measurement) getting exceeded. Sam's decision
+        # (2026-09-24, bead notes): probe THROUGH uv's own resolution — the
+        # exact path the real install uses — instead of a bespoke HTTP
+        # client, retry to a ~30min ceiling with bounded backoff, and log
+        # the elapsed wait so every release adds a data point. When (and
+        # only when) the failure is the resolver's no-matching-version class
+        # on an explicitly requested version, enter the propagation wait.
+        # Every other failure shape still fails immediately, unchanged.
         if [ -n "$PUBLISHED_VERSION" ] && _is_propagation_miss; then
-            echo "  resolver does not see conexus==$PUBLISHED_VERSION yet — waiting on the PyPI simple index (nexus-r433b)"
-            WAIT_RC=0
-            python3 "$REPO_ROOT/scripts/wait_pypi_simple_index.py" \
-                --package conexus --version "$PUBLISHED_VERSION" \
-                --index-url "${FRESH_MVV_INDEX_URL:-https://pypi.org/simple}" \
-                --timeout-seconds 1800 --poll-seconds 30 \
-                || WAIT_RC=$?
-            if [ "$WAIT_RC" = 3 ]; then
-                # The wait's below-max fast-exit: the version is absent and
-                # will never appear — NOT a propagation wait, so the bounded
-                # window below must not burn on it (nexus-tt5vm critic
-                # finding 2). One retry, then uv's own error, in seconds.
-                _published_install \
-                    || _fail "uv tool install $PKG_SPEC failed and the simple index says conexus==$PUBLISHED_VERSION will not appear by waiting (below the index's max — an operator typo, not a propagation wait; see $LOGS/install.log); no skip-pass permitted"
-            elif [ "$WAIT_RC" != 0 ]; then
-                _fail "PyPI simple index never served conexus==$PUBLISHED_VERSION within 30 min (propagation window exceeded — nexus-r433b; see $LOGS/install.log)"
-            else
-                # nexus-tt5vm (7.26.0 publish, first live run): the wait's
-                # green is THIS box's vantage of the index; the CDN edge uv
-                # resolves against was measured up to ~2 min staler. Retry
-                # the install itself for a bounded window while (and only
-                # while) the failure stays the propagation class — a
-                # different failure shape or the deadline fails loud
-                # immediately. Env overrides exist for the unit tests only.
-                RETRY_DEADLINE=$(( $(date +%s) + ${FRESH_MVV_RETRY_WINDOW_SECONDS:-300} ))
-                until _published_install; do
-                    _is_propagation_miss \
-                        || _fail "uv tool install $PKG_SPEC failed after the PyPI propagation wait with a non-propagation error (see $LOGS/install.log); no skip-pass permitted"
-                    [ "$(date +%s)" -lt "$RETRY_DEADLINE" ] \
-                        || _fail "uv tool install $PKG_SPEC failed even after the PyPI propagation wait and ${FRESH_MVV_RETRY_WINDOW_SECONDS:-300}s of install retries (stale CDN edge outlived the bound — nexus-tt5vm; see $LOGS/install.log); no skip-pass permitted"
-                    sleep "${FRESH_MVV_RETRY_POLL_SECONDS:-15}"
-                done
-            fi
+            echo "  resolver does not see conexus==$PUBLISHED_VERSION yet — waiting on uv's own resolution (nexus-tt5vm)"
+            # Cheapest uv invocation that exercises the SAME resolution
+            # `uv tool install` performs — same _uv_sandboxed env, same
+            # ambient index config — without paying for a real
+            # download+install on every attempt: a --dry-run --no-deps
+            # resolve of the exact version, against a disposable venv built
+            # once. --no-cache on every call: the staleness under test lives
+            # upstream on PyPI's CDN edge, but a locally cached "no version"
+            # answer from an earlier attempt would independently mask a
+            # since-resolved edge and defeat the retry outright.
+            PROPAGATION_PROBE_VENV="$WORK/propagation-probe-venv"
+            _uv_sandboxed venv --python 3.12 -q "$PROPAGATION_PROBE_VENV" \
+                >>"$LOGS/propagation-probe.log" 2>&1
+            _propagation_probe() {
+                _uv_sandboxed pip install --dry-run --no-deps --no-cache \
+                    --python "$PROPAGATION_PROBE_VENV/bin/python" "$PKG_SPEC" \
+                    >>"$LOGS/propagation-probe.log" 2>&1
+            }
+            # Env overrides exist for the unit tests only (a small ceiling +
+            # small backoff makes the retry loop exercise for real, no
+            # sleeping injected, in well under a second).
+            PROPAGATION_WAIT_START=$(date +%s)
+            PROPAGATION_CEILING_SECONDS="${FRESH_MVV_PROPAGATION_CEILING_SECONDS:-1800}"
+            PROPAGATION_DEADLINE=$(( PROPAGATION_WAIT_START + PROPAGATION_CEILING_SECONDS ))
+            PROPAGATION_BACKOFF_SECONDS="${FRESH_MVV_PROPAGATION_INITIAL_BACKOFF_SECONDS:-15}"
+            PROPAGATION_MAX_BACKOFF_SECONDS="${FRESH_MVV_PROPAGATION_MAX_BACKOFF_SECONDS:-60}"
+            PROPAGATION_ATTEMPT=1
+            until _propagation_probe; do
+                NOW=$(date +%s)
+                if [ "$NOW" -ge "$PROPAGATION_DEADLINE" ]; then
+                    ELAPSED_MIN=$(( (NOW - PROPAGATION_WAIT_START) / 60 ))
+                    _fail "conexus==$PUBLISHED_VERSION's PyPI CDN edge stayed stale for ~${ELAPSED_MIN} min (ceiling ${PROPAGATION_CEILING_SECONDS}s exceeded — nexus-tt5vm) — re-run this leg; this is a post-publish propagation lag, not an install failure; see $LOGS/propagation-probe.log"
+                fi
+                PROPAGATION_ATTEMPT=$((PROPAGATION_ATTEMPT + 1))
+                echo "  uv still does not resolve $PKG_SPEC (attempt $PROPAGATION_ATTEMPT, $(( NOW - PROPAGATION_WAIT_START ))s elapsed, next retry in ${PROPAGATION_BACKOFF_SECONDS}s)"
+                sleep "$PROPAGATION_BACKOFF_SECONDS"
+                PROPAGATION_BACKOFF_SECONDS="$(python3 -c "print(min(float(\"$PROPAGATION_BACKOFF_SECONDS\") * 2, float(\"$PROPAGATION_MAX_BACKOFF_SECONDS\")))")"
+            done
+            PROPAGATION_WAIT_S=$(( $(date +%s) - PROPAGATION_WAIT_START ))
+            echo "  PROPAGATION_WAIT_S=$PROPAGATION_WAIT_S  (uv now resolves conexus==$PUBLISHED_VERSION; probe attempts=$PROPAGATION_ATTEMPT)"
+            # The probe confirming resolvability an instant ago does not
+            # guarantee the real `uv tool install` call hits the identical
+            # edge/cache state; retry a small, fixed handful of times (NOT
+            # a second propagation window) before giving up.
+            _published_install || _published_install \
+                || _fail "uv tool install $PKG_SPEC failed even though uv's own resolve just confirmed conexus==$PUBLISHED_VERSION is visible (see $LOGS/install.log); no skip-pass permitted"
         else
             _fail "uv tool install $PKG_SPEC failed (see $LOGS/install.log) — network unreachable, version not published on PyPI, or dependency resolution failed at the uv-tool layer (the nexus-l2ku5 layer); no skip-pass permitted"
         fi

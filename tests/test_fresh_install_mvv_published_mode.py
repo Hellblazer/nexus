@@ -274,97 +274,6 @@ def test_retry_signature_parity_with_mcpb_bootstrap() -> None:
     assert 'grep -qi "conexus" "$LOGS/install.log"' in text
 
 
-_DEFAULT_INDEX_PAYLOAD = {
-    "versions": ["1.2.3", "7.25.0"],
-    "files": [
-        {"filename": "conexus-1.2.3-py3-none-any.whl"},
-        {"filename": "conexus-7.25.0-py3-none-any.whl"},
-    ],
-}
-
-
-def _run_retry_branch(
-    tmp_path,
-    extra_env: dict[str, str],
-    index_payload: dict | None = None,
-    succeed_on_call: int | None = None,
-) -> tuple:
-    """Drive the published-mode retry branch with no real network: a stub
-    uv fails `tool install` with uv's real no-solution text (succeeding
-    from call number ``succeed_on_call`` when given), and
-    FRESH_MVV_INDEX_URL points the wait script at a local fake index
-    serving ``index_payload`` (default: the requested version's wheel
-    present, so the wait exits 0 immediately — versions alone no longer
-    green the wait, nexus-tt5vm). Returns (result, install_call_count)."""
-    import http.server
-    import json as _json
-    import os
-    import threading
-
-    payload = _DEFAULT_INDEX_PAYLOAD if index_payload is None else index_payload
-
-    class _Index(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = _json.dumps(payload).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/vnd.pypi.simple.v1+json")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Index)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-
-    counter = tmp_path / "install-calls.txt"
-    stub_dir = tmp_path / "stub-bin"
-    stub_dir.mkdir()
-    stub_uv = stub_dir / "uv"
-    succeed_gate = (
-        ""
-        if succeed_on_call is None
-        else (
-            f'    if [ "$(grep -c x "{counter}")" -ge {succeed_on_call} ]; then\n'
-            "        exit 0\n"
-            "    fi\n"
-        )
-    )
-    stub_uv.write_text(
-        "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
-        f'    echo x >> "{counter}"\n'
-        f"{succeed_gate}"
-        "    echo '  x No solution found when resolving dependencies:' >&2\n"
-        "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
-        "    exit 1\n"
-        "fi\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
-        "    echo /nonexistent-stub-uv-tool-dir\n"
-        "    exit 0\n"
-        "fi\n"
-        "exit 1\n"
-    )
-    stub_uv.chmod(0o755)
-
-    env = dict(os.environ)
-    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
-    env["FRESH_MVV_INDEX_URL"] = f"http://127.0.0.1:{httpd.server_address[1]}"
-    env.update(extra_env)
-
-    try:
-        result = subprocess.run(
-            [str(SCRIPT), "--published", "1.2.3"],
-            env=env, capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-    calls = counter.read_text().count("x") if counter.is_file() else 0
-    return result, calls
-
-
 def _cleanup_preserved_evidence(result) -> None:
     match = re.search(r"FAILURE EVIDENCE PRESERVED: (\S+)", result.stderr)
     if match:
@@ -373,103 +282,195 @@ def _cleanup_preserved_evidence(result) -> None:
         shutil.rmtree(Path(match.group(1)).parent, ignore_errors=True)
 
 
-def test_retry_branch_waits_then_retries_once_then_fails_loud(tmp_path) -> None:
-    """Functional pin of the retry branch (code-review-expert finding 2):
-    with the retry window collapsed to 0 the loop degenerates to exactly
-    one post-wait attempt — initial + retry = 2 install calls — before
-    failing loud with the propagation message."""
-    result, calls = _run_retry_branch(
-        tmp_path, {"FRESH_MVV_RETRY_WINDOW_SECONDS": "0"}
+def _run_propagation_branch(
+    tmp_path,
+    extra_env: dict[str, str],
+    probe_fail_count: int,
+    install_fail_count: int,
+) -> tuple:
+    """Drive the rewritten propagation branch (nexus-tt5vm, 2026-09-24
+    decision) with no real network and no real sleeping: a stub `uv`
+    fails `pip install --dry-run` (the cheap probe) for the first
+    ``probe_fail_count`` calls, then succeeds; separately fails
+    `tool install` (the real install — always at least once, since the
+    FIRST top-level call must fail with the propagation signature to
+    enter the branch at all) for the first ``install_fail_count`` calls,
+    then succeeds. `tool dir`/`venv` are no-ops that let the script run
+    to (and fail at) the NEXT assertion past the retry machinery, proving
+    the loop actually exited via success rather than the process just
+    happening to end.
+
+    `_uv_sandboxed` runs the stub under `env -i` (deliberate — see the
+    script's own nexus-enfoh comment), so ambient env vars set on the
+    test's own subprocess.run(env=...) never reach the stub; the call
+    counters are baked into the stub's own source text as absolute paths
+    instead. Returns (result, probe_call_count, install_call_count)."""
+    import os
+
+    probe_counter = tmp_path / "probe-calls.txt"
+    install_counter = tmp_path / "install-calls.txt"
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    stub_uv = stub_dir / "uv"
+    stub_uv.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'    N=$(grep -c x "{install_counter}" 2>/dev/null || echo 0)\n'
+        f'    echo x >> "{install_counter}"\n'
+        f'    if [ "$N" -ge {install_fail_count} ]; then\n'
+        "        exit 0\n"
+        "    fi\n"
+        "    echo '  x No solution found when resolving dependencies:' >&2\n"
+        "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        "    echo /nonexistent-stub-uv-tool-dir\n"
+        "    exit 0\n"
+        "fi\n"
+        'if [ "$1" = "venv" ]; then\n'
+        "    exit 0\n"
+        "fi\n"
+        'if [ "$1" = "pip" ] && [ "$2" = "install" ]; then\n'
+        f'    N=$(grep -c x "{probe_counter}" 2>/dev/null || echo 0)\n'
+        f'    echo x >> "{probe_counter}"\n'
+        f'    if [ "$N" -ge {probe_fail_count} ]; then\n'
+        "        exit 0\n"
+        "    fi\n"
+        "    echo '  x No solution found when resolving dependencies:' >&2\n"
+        "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    stub_uv.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    env.update(extra_env)
+
+    result = subprocess.run(
+        [str(SCRIPT), "--published", "1.2.3"],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    probe_calls = probe_counter.read_text().count("x") if probe_counter.is_file() else 0
+    install_calls = (
+        install_counter.read_text().count("x") if install_counter.is_file() else 0
+    )
+    return result, probe_calls, install_calls
+
+
+# Tiny, test-only overrides of the propagation ceiling/backoff (real
+# defaults: 1800s ceiling, 15s initial backoff, 60s cap) so the retry
+# loop's own logic runs for real — no stubbed `sleep`, no injected clock —
+# in well under a second of actual wall time.
+_FAST_PROPAGATION_ENV = {
+    "FRESH_MVV_PROPAGATION_CEILING_SECONDS": "3",
+    "FRESH_MVV_PROPAGATION_INITIAL_BACKOFF_SECONDS": "0.05",
+    "FRESH_MVV_PROPAGATION_MAX_BACKOFF_SECONDS": "0.05",
+}
+
+
+def test_propagation_retries_probe_then_succeeds_and_logs_elapsed_wait(tmp_path) -> None:
+    """The core mechanism this bead's decision (b) asks for: the wait
+    probes THROUGH uv's own resolution (a cheap `pip install --dry-run`
+    against a throwaway venv), not a separate HTTP client. Stub uv's probe
+    fails twice then succeeds; the real install then succeeds immediately.
+    Pins: exactly 3 probe calls, exactly 1 install call after the initial
+    (mandatory) failing one — 2 total — and a PROPAGATION_WAIT_S=<n>
+    line (decision (a): elapsed wait logged on success)."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=2, install_fail_count=1,
     )
     try:
-        assert result.returncode != 0
-        assert calls == 2, (
-            f"expected exactly 2 install attempts (initial + one post-wait "
-            f"retry at window=0), saw {calls}; stdout={result.stdout!r} "
-            f"stderr={result.stderr!r}"
+        assert probe_calls == 3, (
+            f"expected exactly 3 probe calls (2 failing + 1 succeeding), "
+            f"saw {probe_calls}; stdout={result.stdout!r} stderr={result.stderr!r}"
         )
-        assert "waiting on the PyPI simple index (nexus-r433b)" in result.stdout
-        assert "after the PyPI propagation wait" in result.stderr
-    finally:
-        _cleanup_preserved_evidence(result)
-
-
-def test_retry_branch_bounded_window_keeps_retrying_then_fails_loud(tmp_path) -> None:
-    """nexus-tt5vm: the wait's green is this box's vantage of the index;
-    uv's CDN edge measured up to ~2 min staler at the 7.26.0 publish, so
-    one post-wait retry is not enough. While the failure stays the
-    propagation class the install retries for a bounded window, then fails
-    loud naming the bound — never a silent pass, never unbounded."""
-    result, calls = _run_retry_branch(
-        tmp_path,
-        {"FRESH_MVV_RETRY_WINDOW_SECONDS": "2", "FRESH_MVV_RETRY_POLL_SECONDS": "0.2"},
-    )
-    try:
-        assert result.returncode != 0
-        assert calls >= 3, (
-            f"expected the bounded window to allow multiple post-wait "
-            f"retries, saw only {calls} install attempts; "
-            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        assert install_calls == 2, (
+            f"expected exactly 2 install calls (the mandatory first "
+            f"failure that enters the branch, then one success), saw "
+            f"{install_calls}; stdout={result.stdout!r} stderr={result.stderr!r}"
         )
-        assert "install retries" in result.stderr
-        assert "no skip-pass permitted" in result.stderr
-    finally:
-        _cleanup_preserved_evidence(result)
-
-
-def test_retry_branch_succeeds_mid_window_and_proceeds(tmp_path) -> None:
-    """The happy path the fix exists to deliver (critic finding 3): the
-    live tt5vm incident was fail-then-succeed-~90s-later, so the loop must
-    EXIT into the rest of the gate when a mid-window retry succeeds — not
-    only fail loud at the bound. Stub uv succeeds on install call 3
-    (initial + retry1 fail, retry2 succeeds); the script then proceeds
-    past the retry machinery and fails at the NEXT assertion (the stub's
-    fake tool venv does not exist), proving the loop exited via success."""
-    result, calls = _run_retry_branch(
-        tmp_path,
-        {"FRESH_MVV_RETRY_WINDOW_SECONDS": "30", "FRESH_MVV_RETRY_POLL_SECONDS": "0.2"},
-        succeed_on_call=3,
-    )
-    try:
-        assert result.returncode != 0
-        assert calls == 3, (
-            f"expected exactly 3 install attempts (initial + 2 loop "
-            f"retries, succeeding on the 3rd), saw {calls}; "
-            f"stdout={result.stdout!r} stderr={result.stderr!r}"
-        )
+        assert "waiting on uv's own resolution (nexus-tt5vm)" in result.stdout
+        wait_match = re.search(r"PROPAGATION_WAIT_S=(\d+)", result.stdout)
+        assert wait_match, f"no PROPAGATION_WAIT_S= line in stdout: {result.stdout!r}"
+        assert int(wait_match.group(1)) >= 0
+        # Proceeded past the retry machinery into the next leg (the stub's
+        # fake tool venv doesn't exist) — proves the loop exited via
+        # success, not merely that the process ended.
         assert "reported success but" in result.stderr, (
-            f"script did not proceed past the retry loop after the "
-            f"successful install; stderr={result.stderr!r}"
+            f"script did not proceed past the retry loop; stderr={result.stderr!r}"
         )
-        assert "install retries" not in result.stderr
+        assert "stale for" not in result.stderr
     finally:
         _cleanup_preserved_evidence(result)
 
 
-def test_retry_branch_typo_version_fails_in_seconds_not_the_window(tmp_path) -> None:
-    """nexus-tt5vm critic finding 2: the wait's below-max fast-exit (rc 3)
-    must NOT feed the bounded retry window — a typo'd `--published`
-    version (absent, below the index's max, never going to appear) gets
-    exactly one post-wait retry and uv's own error in seconds, exactly the
-    pre-bounded-window behavior the fast-exit was built for."""
-    result, calls = _run_retry_branch(
-        tmp_path,
-        # Deliberately NO window/poll overrides: the point is that the
-        # 300s default window is never entered on this path.
-        {},
-        index_payload={
-            "versions": ["7.25.0"],
-            "files": [{"filename": "conexus-7.25.0-py3-none-any.whl"}],
-        },
+def test_propagation_ceiling_hit_reports_stale_edge_message(tmp_path) -> None:
+    """nexus-tt5vm DECIDED (2026-09-24): drop the 300s bound fitted to one
+    measurement; retry to a ~30min ceiling. Stub uv's probe never
+    succeeds, so the tiny test ceiling is exceeded — the failure message
+    must name the stale-edge cause and tell the operator to re-run the
+    leg, textually distinct from a genuine (non-propagation) install
+    failure's message."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=10_000, install_fail_count=1,
     )
     try:
         assert result.returncode != 0
-        assert calls == 2, (
-            f"expected exactly 2 install attempts (initial + the single "
-            f"fast-exit retry), saw {calls}; stdout={result.stdout!r} "
-            f"stderr={result.stderr!r}"
+        assert probe_calls >= 2, (
+            f"expected the ceiling to allow multiple probe attempts, saw "
+            f"only {probe_calls}; stdout={result.stdout!r} stderr={result.stderr!r}"
         )
-        assert "will not appear by waiting" in result.stderr
-        assert "install retries" not in result.stderr
+        # install_calls stays at 1 (the mandatory first failure): the
+        # ceiling fires from inside the PROBE loop, so the real install is
+        # never retried again.
+        assert install_calls == 1
+        assert "stayed stale for" in result.stderr
+        assert "re-run this leg" in result.stderr
+        assert "not an install failure" in result.stderr
+        assert "nexus-tt5vm" in result.stderr
+        # Distinguishable from the non-propagation-error message (see
+        # test_propagation_non_propagation_error_fails_immediately below):
+        # never claims "even though uv's own resolve just confirmed".
+        assert "just confirmed" not in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_propagation_non_propagation_error_fails_immediately_no_retry(tmp_path) -> None:
+    """A failure shape outside the propagation signature set (unrelated
+    dependency conflict, network genuinely down, etc.) must fail loud on
+    the FIRST attempt — no probe venv built, no waiting, no retry — since
+    `_is_propagation_miss` requires BOTH a `conexus` mention AND one of the
+    propagation phrases (parity-pinned above)."""
+    import os
+
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    stub_uv = stub_dir / "uv"
+    stub_uv.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        "    echo 'error: some unrelated dependency conflict' >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    stub_uv.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    env.update(_FAST_PROPAGATION_ENV)
+
+    result = subprocess.run(
+        [str(SCRIPT), "--published", "1.2.3"],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    try:
+        assert result.returncode != 0
+        assert "waiting on uv's own resolution" not in result.stdout
+        assert "network unreachable, version not published on PyPI" in result.stderr
     finally:
         _cleanup_preserved_evidence(result)
