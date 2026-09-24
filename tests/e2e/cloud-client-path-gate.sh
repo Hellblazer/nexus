@@ -464,12 +464,14 @@ HOOK_LOG="$HOME/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
 # this leg would report a false FAIL. Joining the tuple-projection-*
 # thread is what makes the drive equivalent to the bash's detachment.
 _drive_projection() {
-    # $1 = "start"|"stop"; stdin = the JSON payload.
-    HOOK_VERB="$1" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
+    # $1 = "start"|"stop"; stdin = the JSON payload. Read it HERE: the
+    # heredoc below is python's stdin (its program), so a sys.stdin.read()
+    # inside it returns '' and json.loads('') throws before anything runs.
+    HOOK_PAYLOAD="$(cat)" HOOK_VERB="$1" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
     uv run python - <<'PY'
 import json, os, sys, threading
 from nexus.hooks.tuple_projection import run_start, run_stop
-payload = json.loads(sys.stdin.read())
+payload = json.loads(os.environ["HOOK_PAYLOAD"])
 (run_start if os.environ["HOOK_VERB"] == "start" else run_stop)(payload)
 # _TIMEOUT_S on the projector subprocess is 120s; join past it so a
 # wedged projector is reported as wedged rather than silently truncated.
