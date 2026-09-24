@@ -176,7 +176,7 @@ def mailbox_arm_instruction(session_id: str) -> str:
     from a FRESH ``ListAgents`` call rather than memory (nexus-6konb.20):
     ListAgents renames a session on resume (measured nexus-58 to nexus-03,
     2026-09-14), and reusing an old name from memory would subscribe the
-    wrong instance mailbox. The session's own ``mailbox/<session id>`` is
+    wrong name. The session's own ``mailbox/<session id>`` is
     already subscribed from MCP-server startup and needs no call here
     (:mod:`nexus.mcp.subscriptions`).
 

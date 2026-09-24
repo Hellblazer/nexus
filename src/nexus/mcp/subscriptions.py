@@ -175,7 +175,7 @@ def _release_directory_entry(
     store: Any, name: str, session_id: str, lease: _DirectoryLease,
 ) -> None:
     """Release this lease's live ``directory/<name>`` row on a DELIBERATE
-    stop (an ``unsubscribe`` of the instance mailbox, or ``shutdown`` on
+    stop (an ``unsubscribe`` of the leased name, or ``shutdown`` on
     a session handoff): re-send the SAME nonce with ``ttl_seconds=1``, so
     the idempotent tuple id updates the live row's expiry and it lapses
     within about a second instead of at :data:`DIRECTORY_TTL_S` (RDR-208
@@ -205,7 +205,7 @@ def _lease_loop(
     heartbeat_s: float,
     poll_s: float,
 ) -> None:
-    """Background re-send loop for one instance mailbox's directory
+    """Background re-send loop for one leased name's directory
     lease. *store_factory* is called on every tick (never held across
     ticks) and must return a CONTEXT MANAGER yielding a T2Database-shaped
     object with a ``.tuples`` attribute -- ``_t2_ctx()``'s own contract --

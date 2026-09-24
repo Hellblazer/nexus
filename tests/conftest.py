@@ -1055,8 +1055,8 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # the CLI ping-then-pull watcher this comment originally named was
     # deleted at RDR-211 nexus-rplay.14): the SessionStart hook writes
     # session.<claude_pid> on every source and the arm-probe cache, the
-    # session's own MCP server writes its per-session instance registration
-    # (addresses.d/) on subscribe, and the UserPromptSubmit drain
+    # session's own MCP server wrote a per-session instance registration
+    # (addresses.d/) on subscribe until RDR-208 P3, and the UserPromptSubmit drain
     # hook (nexus.hooks.mailbox_drain) keeps its pending and
     # seen files here, all independent of pytest. MEASURED 2026-09-13: with
     # live watchers armed by restarted sessions, every run of

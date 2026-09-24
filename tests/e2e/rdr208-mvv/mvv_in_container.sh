@@ -353,7 +353,7 @@ arm() {  # NAME: the session subscribes ITS OWN instance name
     # this journey then uses is the REAL one, so the rename across a
     # /resume is a genuine rename rather than a scripted one.
     local t; t="$(tok DONE-ARM)"
-    prompt "$1" "Call ListAgents to read this session's own instance name, then call the nexus MCP tool tuple_subscribe with subspace \"mailbox/<that exact name>\" -- your own instance-name mailbox, which is what that tool accepts. Then reply with exactly $t and nothing else." "$t" || return 1
+    prompt "$1" "Call ListAgents to read this session's own instance name, then call the nexus MCP tool tuple_subscribe with subspace \"mailbox/<that exact name>\" -- this arms your own name in the session directory, which is what that tool accepts. Then reply with exactly $t and nothing else." "$t" || return 1
     wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
     NAME_OF[$1]="$(discover_name "$1")"
     echo "  session $1 armed its own name: ${NAME_OF[$1]}"
