@@ -397,6 +397,101 @@ class TestReferenceOnlyRowContentCoercion:
         assert "None" not in text
 
 
+class _EngineModelUnavailableT3:
+    """Every combined-query method raises the engine's verbatim
+    ``EmbeddingModelUnavailableException`` text (nexus-vply6 fix round 2,
+    point 3 — "every read path names it identically"). Mirrors
+    ``tests/test_vply6_search_embedding_profile_mismatch.py``'s
+    ``_MismatchedModeT3`` for the plain ``search`` tool; this is the same
+    shape for the FOUR combined-query tools + ``query()``'s catalog branch,
+    which reach the identical engine 422 through
+    ``_grouped_combined_query`` / ``search_topic_scoped``'s own loop rather
+    than ``search_cross_corpus``.
+    """
+
+    _MESSAGE = (
+        "POST /v1/vectors/search-metadata-scoped → HTTP 422: this install's "
+        "profile names a model this mode cannot serve — collection "
+        "'knowledge__seam-b-test__voyage-context-3__v1' resolves to model "
+        "'voyage-context-3', which embedding mode onnx-local has no "
+        "embedder for. Available models: [bge-base-en-v15-768]. Voyage "
+        "collections need NX_VOYAGE_API_KEY in the service environment "
+        "(supervisor plumbs it from the nexus credential chain when set)."
+    )
+
+    def embedding_mode(self) -> str:
+        return "onnx-local"
+
+    def _raise(self):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        raise VectorServiceError(self._MESSAGE, code=422)
+
+    def search_metadata_scoped(self, *args, **kwargs):
+        self._raise()
+
+    def search_topic_scoped(self, *args, **kwargs):
+        self._raise()
+
+    def search_graph_hop(self, *args, **kwargs):
+        self._raise()
+
+    def search_aspect_scoped(self, *args, **kwargs):
+        self._raise()
+
+
+class TestScopedToolsClassifyEmbeddingProfileMismatch:
+    """nexus-vply6 fix round 2, point 3: search_metadata_scoped /
+    search_topic_scoped / search_graph_hop / search_aspect_scoped and
+    query()'s catalog-param branch classify the engine's model-unavailable
+    422 into the SAME nexus.errors.SearchEmbeddingProfileMismatchError
+    search_cross_corpus already raises for the plain search/query tools —
+    surfaced as MCP tool text via _mcp_tool_error (these tools catch
+    Exception at their own boundary, never raise across the wire)."""
+
+    def test_search_metadata_scoped_names_the_mismatch(self, monkeypatch):
+        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
+
+        t3 = _EngineModelUnavailableT3()
+        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+
+        out = core.search_metadata_scoped("q", corpus="knowledge")
+
+        assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
+        assert "onnx-local" in out
+        assert "NX_VOYAGE_API_KEY" in out
+
+    def test_search_topic_scoped_names_the_mismatch(self, monkeypatch):
+        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
+
+        t3 = _EngineModelUnavailableT3()
+        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+
+        out = core.search_topic_scoped("q", topic="anything", corpus="knowledge")
+
+        assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
+
+    def test_search_graph_hop_names_the_mismatch(self, monkeypatch):
+        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
+
+        t3 = _EngineModelUnavailableT3()
+        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+
+        out = core.search_graph_hop("q", seeds="1.1", corpus="knowledge")
+
+        assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
+
+    def test_search_aspect_scoped_names_the_mismatch(self, monkeypatch):
+        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
+
+        t3 = _EngineModelUnavailableT3()
+        _wire(monkeypatch, t3, ["knowledge__seam-b-test__voyage-context-3__v1"])
+
+        out = core.search_aspect_scoped("q", corpus="knowledge")
+
+        assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
+
+
 class TestPlanRunnerRegistration:
     def test_tools_registered_as_retrieval(self):
         from nexus.plans.runner import _RETRIEVAL_TOOLS

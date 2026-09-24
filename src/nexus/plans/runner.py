@@ -65,6 +65,7 @@ __all__ = [
     "PlanRunOperatorOutputError",
     "PlanRunOperatorSchemaVersionError",
     "PlanRunOperatorUnavailableError",
+    "PlanRunRetrievalRefusedError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
     "PlanRunUnresolvedVarError",
@@ -186,6 +187,46 @@ class PlanRunOperatorUnavailableError(RuntimeError):
             f"operator_{operator}: unavailable — {reason}. "
             "Run `claude auth login` or set ANTHROPIC_API_KEY to enable "
             "operator-backed plan steps; retrieval-only plans still work."
+        )
+
+
+class PlanRunRetrievalRefusedError(RuntimeError):
+    """Raised when a retrieval step's tool refused outright rather than
+    returning results (nexus-vply6 fix round 2, SHIP-BLOCKER).
+
+    ``_default_dispatcher`` normally synthesizes an empty structured
+    result ``{ids: [], ..., error: <text>}`` for a retrieval tool's bare
+    ``"Error: ..."`` return (a bad subtree, an uninitialized catalog, an
+    unresolvable filter — a plan-BINDING issue the next operator step can
+    still degrade past, e.g. via ``_hydrate_operator_args``'s zero-
+    evidence short-circuit). A search/query whose embedder cannot serve
+    one of its targeted collections is a DIFFERENT class: the collection
+    exists and may hold exactly the evidence the plan needs, but this
+    install's current embedding mode cannot reach it. Synthesizing an
+    empty result here reproduces the EXACT silent-empty-result shape
+    nexus-vply6 exists to close, one layer up from the MCP tool boundary
+    the bead's own fix already covers — ``nx_answer`` would confidently
+    answer "no evidence" while never having searched the collection that
+    held it (critique T2 [26773], ship-blocker 1).
+
+    Recognized via :func:`nexus.errors.is_search_embedding_profile_mismatch_text`
+    against the bare error STRING (not the exception object — by the time
+    a retrieval tool's result reaches ``_default_dispatcher`` it has
+    already been rendered to text by ``_mcp_tool_error``, at the MCP tool
+    boundary), so this fires for every retrieval tool in
+    :data:`_RETRIEVAL_TOOLS` — ``search``/``query`` (via
+    ``search_cross_corpus``) and the four combined-query tools (via
+    ``_grouped_combined_query`` / ``search_topic_scoped`` in
+    :mod:`nexus.mcp.core`) alike, since fix round 2 point 3 made all of
+    them raise the identical named error.
+    """
+
+    def __init__(self, *, tool: str, message: str) -> None:
+        self.tool = tool
+        self.message = message
+        super().__init__(
+            f"plan_run: retrieval step ({tool!r}) refused rather than "
+            f"returning results: {message}"
         )
 
 
@@ -2215,7 +2256,19 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # summarize in local mode rather than raising PlanRunStepRefError.
     if isinstance(result, str):
         if tool in _RETRIEVAL_TOOLS:
-            # Retrieval error strings usually indicate a plan-binding
+            # nexus-vply6 fix round 2, SHIP-BLOCKER (critique T2 [26773]):
+            # an embedding-profile-mismatch refusal is NOT a plan-binding
+            # issue the empty-result synthesis below exists for — fail the
+            # WHOLE plan loudly instead of handing the next operator step
+            # an empty result it cannot distinguish from a genuine
+            # no-match. Checked BEFORE the generic synthesis so this
+            # specific class never reaches it. See
+            # PlanRunRetrievalRefusedError's docstring.
+            from nexus.errors import is_search_embedding_profile_mismatch_text  # noqa: PLC0415 — deferred to avoid a module-load-time nexus.errors dependency in this hot-path module
+
+            if is_search_embedding_profile_mismatch_text(result):
+                raise PlanRunRetrievalRefusedError(tool=tool, message=result)
+            # Other retrieval error strings usually indicate a plan-binding
             # issue (bad subtree, missing catalog, unresolvable filter).
             # Synthesize the empty structured shape so ``$stepN.tumblers``
             # resolves, but log at warning level so the next operator
