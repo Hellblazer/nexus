@@ -95,22 +95,56 @@ at all) is a genuine invocation error and stays exit 2 with a one-line
 diagnostic -- that shape is always this CLI's own misconfiguration to fix.
 
 An UNKNOWN verb -- one this CLI's :data:`VERB_TABLE` has never heard of --
-exits 0 instead of 2, still with a named stderr diagnostic. The plugin
-marketplace updates ``hooks.json`` before an installed ``nx`` CLI upgrades
-to the wheel that declares a new verb (the CLI upgrade itself runs through
-the version-lockstep hook, on a session's own cadence): a plugin bump can
+exits 0 instead of 2 for a NON-ledger verb (2 for a ledger-SHAPED one --
+see below), still with a named stderr diagnostic AND, for the exit-0 case,
+a ``systemMessage`` written to the real stdout envelope so the diagnostic
+actually reaches the person running the session (stderr from a hook does
+not; see the ``main`` dispatch code). The plugin marketplace updates
+``hooks.json`` before an installed ``nx`` CLI upgrades to the wheel that
+declares a new verb (the CLI upgrade itself runs through the
+version-lockstep hook, on a session's own cadence): a plugin bump can
 therefore name a verb this CLI does not register yet. Exiting 2 for that
 case makes every ``UserPromptSubmit`` and every ``PreToolUse`` on ``Bash``
 refuse outright for the whole session, with no way to self-heal -- measured
 at the 7.58.0 release blocker (nexus-t9klx): seven such entries reached
 ``hooks.json`` before the CLI that registers them shipped, and the
 version-lockstep hook that upgrades the CLI was one of the seven, so
-nothing could recover on its own. Exiting 0 here is the same "hook chose to
-do nothing" contract every real verb gets via
-:func:`nexus._hook_runtime._io.never_fail`, applied one layer earlier --
-before dispatch even reaches a verb module -- because from ``nx-hook``'s own
-perspective a verb it was never taught about is indistinguishable from one
-that failed open.
+nothing could recover on its own.
+
+**Be plain about what fail-open COSTS for a DECIDING gate.** Two of the
+seven verbs nexus-t9klx measured are deciding gates --
+``pre-close-verification`` and ``phase-review-close-gate`` -- registered
+in ``nexus.mcp.hooks._NEVER_TOOL_TIER`` precisely because a crash at the
+tool boundary renders as allow and these two rules must still deny. This
+exit-0 path is a THIRD way for that same failure shape to occur, at the
+command-tier boundary instead: on a CLI older than the plugin, an unknown
+deciding-gate verb means the gate LITERALLY DOES NOT RUN and the action it
+would have gated -- a ``bd close`` with no review marker, a phase boundary
+closed without its cross-walk -- is ALLOWED, exactly as if the gate had
+been deleted. This is NOT "the same contract every real verb gets" (an
+earlier draft of this docstring claimed that, and it was wrong): a real
+verb's ``never_fail`` failure is a crash inside code that ran; this is code
+that never ran at all, and calling the two the same thing hides the
+difference between "the gate tried and gave up" and "the gate was never
+invoked." The trade actually being made is: a session blocked outright
+with no self-heal path (exit 2, the 7.58.0 incident) against a gate that
+is silently absent for the minutes-to-hours between the plugin update
+landing and the session's own version-lockstep hook finishing its
+detached upgrade. That window is bounded and self-closing; a blocked
+session is not. Nothing here narrows the window further than that -- it is
+the accepted cost of choosing recoverable over safe for this one case, not
+a claim that the gate is somehow still enforced.
+
+A ledger-SHAPED unknown verb (its name starts with
+:data:`_LEDGER_VERB_PREFIX`, ``"expectations_"``) is the one case that
+still exits nonzero: :data:`_LEDGER_CRASH_EXIT` (70), never 0. A real
+ledger verb's exit code IS its contract (see :data:`LEDGER_VERBS` above),
+and 0 means "clean" in that vocabulary -- so an UNKNOWN ledger verb failing
+open at exit 0 would read as a clean audit that examined nothing, the
+exact silent miss RDR-184 exists to catch. This cannot be checked against
+:data:`LEDGER_VERBS` membership, because that table only names verbs that
+already resolve; the prefix is the only signal available for a verb this
+CLI has never registered.
 """
 from __future__ import annotations
 
@@ -253,6 +287,17 @@ LEDGER_VERBS: frozenset[str] = frozenset(
     }
 )
 
+#: Every real ledger verb starts with this prefix (see :data:`LEDGER_VERBS`
+#: above), so it also identifies a ledger-SHAPED verb this CLI has never
+#: registered -- an UNKNOWN verb nx-hook cannot look up in ``LEDGER_VERBS``,
+#: because that table only names verbs that resolve. The unknown-verb branch
+#: in :func:`main` uses this prefix check, not membership, precisely because
+#: membership is unavailable for a verb with no resolved module (code review
+#: on 69b6cac76): a plugin naming a NEW ledger verb the installed CLI
+#: predates must not read as 0 ("clean"), which is what plain fail-open
+#: would do.
+_LEDGER_VERB_PREFIX = "expectations_"
+
 #: Test-only dispatch override, read solely by
 #: ``tests/hooks/test_nx_hook_entry.py``. A JSON object string mapping verb
 #: name to dotted module path, e.g. ``{"probe": "probe_verb"}``. Exists
@@ -326,18 +371,56 @@ def main() -> None:
     verb = argv[0]
     module_path = _resolve_verb_module(verb)
     if module_path is None:
-        # Exit 0, not 2: a plugin ahead of this installed CLI is expected to
-        # name a verb this VERB_TABLE has never heard of (see the module
-        # docstring's "Exit codes" section, nexus-t9klx). Exiting nonzero
-        # here would fail every UserPromptSubmit/PreToolUse for the whole
-        # session with no self-heal path -- exactly the 7.58.0 release
-        # blocker this guards against.
+        # A plugin ahead of this installed CLI is expected to name a verb
+        # this VERB_TABLE has never heard of (see the module docstring's
+        # "Exit codes" section, nexus-t9klx). Exiting nonzero here for a
+        # NON-ledger verb would fail every UserPromptSubmit/PreToolUse for
+        # the whole session with no self-heal path -- exactly the 7.58.0
+        # release blocker this guards against. The stderr line is the same
+        # in both branches below; only the exit code (and, for a non-ledger
+        # verb, a stdout signal) differs.
         sys.stderr.write(
             f"nx-hook: unknown verb {verb!r} -- no hook is registered under that name "
             "in this installed nx CLI. The conexus plugin may be ahead of the "
-            "installed nx CLI; it upgrades via the version-lockstep hook. "
-            "Failing open (exit 0) rather than blocking this session.\n"
+            "installed nx CLI; it upgrades via the version-lockstep hook.\n"
         )
+        if verb.startswith(_LEDGER_VERB_PREFIX):
+            # LEDGER SAFETY (code review on 69b6cac76): a ledger verb's exit
+            # code IS its contract (undeclared 0/1/2/3, reconcile 0/2/4,
+            # census 0/1), and 0 there means "clean". Fail-open's plain
+            # exit 0 would make a plugin/CLI skew on THIS surface read as a
+            # clean audit that examined nothing -- the exact silent miss
+            # RDR-184 exists to catch. Reserved code instead, the same one
+            # a CRASHED known ledger verb gets: "I could not run this" is
+            # not "there was nothing to report", for the same reason in
+            # both cases. No stdout write here -- an unknown ledger verb
+            # produces no JSON body, same as a crashed one.
+            sys.exit(_LEDGER_CRASH_EXIT)
+        # Non-ledger unknown verb: fail open (exit 0), but say so on the
+        # REAL envelope channel too -- stderr from a hook never reaches the
+        # person running the session (Claude Code does not surface it), so
+        # exit 0 plus a stderr line alone is silent to the one audience that
+        # can act on it (substantive-critic finding on 69b6cac76). This
+        # write happens BEFORE the stdout/stderr fd-redirect dance below (it
+        # returns via sys.exit before reaching that code), so `sys.stdout`
+        # here is genuinely the real channel Claude Code parses -- exactly
+        # what a plain top-level `systemMessage` field is for: Claude
+        # Code's own hooks contract accepts it "on every event" (it is not
+        # nested under `hookSpecificOutput`, which IS event-shaped), so no
+        # per-event branch is needed here.
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "systemMessage": (
+                        "conexus plugin is ahead of the installed nx CLI: hook verb "
+                        f"{verb!r} is not in this CLI and was skipped. Run `nx upgrade` "
+                        "(or restart after the background upgrade finishes)."
+                    )
+                }
+            )
+            + "\n"
+        )
+        sys.stdout.flush()
         sys.exit(0)
 
     import importlib  # noqa: PLC0415 — deferred: only a real dispatch pays this

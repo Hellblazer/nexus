@@ -58,20 +58,56 @@ def _run(argv: list[str], env: dict[str, str], stdin: str = "") -> subprocess.Co
 # -- unknown / missing verb ---------------------------------------------
 #
 # A MISSING verb argument is this CLI's own invocation error and stays a
-# hard failure (exit 2). An UNKNOWN verb fails OPEN (exit 0) instead: a
-# plugin bump can name a verb this installed CLI has not registered yet
-# (nexus-t9klx, the 7.58.0 release blocker -- see the module docstring's
-# "Exit codes" section), and exiting nonzero there blocks every
+# hard failure (exit 2). An UNKNOWN NON-LEDGER verb fails OPEN (exit 0)
+# instead: a plugin bump can name a verb this installed CLI has not
+# registered yet (nexus-t9klx, the 7.58.0 release blocker -- see the module
+# docstring's "Exit codes" section), and exiting nonzero there blocks every
 # UserPromptSubmit/PreToolUse for the whole session with no self-heal path.
+#
+# An UNKNOWN LEDGER-SHAPED verb (name starts with "expectations_") does NOT
+# fail open: it exits _LEDGER_CRASH_EXIT (70), because 0 means "clean" in
+# the ledger's own exit-code vocabulary and a plugin/CLI skew on that
+# surface must not read as a clean audit that examined nothing (code
+# review on 69b6cac76).
 
 def test_unknown_verb_exits_zero_with_a_named_diagnostic(tmp_path: Path) -> None:
     proc = _run(["frobnicate"], _env(tmp_path))
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == ""
     assert "frobnicate" in proc.stderr
     assert "unknown verb" in proc.stderr
     assert "plugin" in proc.stderr.lower()
     assert "cli" in proc.stderr.lower()
+
+
+def test_unknown_non_ledger_verb_writes_a_systemMessage_to_real_stdout(tmp_path: Path) -> None:
+    """Exit 0 plus a stderr line alone is invisible to the person running
+    the session -- Claude Code does not surface a hook's stderr to them.
+    ``systemMessage`` is a top-level field accepted on every hook event
+    (Claude Code's own hooks contract), so this is the one write that
+    actually reaches that audience (substantive-critic finding on
+    69b6cac76)."""
+    proc = _run(["frobnicate"], _env(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    envelope = json.loads(proc.stdout)
+    assert "frobnicate" in envelope["systemMessage"]
+    assert "nx upgrade" in envelope["systemMessage"]
+    assert set(envelope) == {"systemMessage"}
+
+
+def test_unknown_ledger_shaped_verb_exits_the_reserved_code_not_zero(tmp_path: Path) -> None:
+    proc = _run(["expectations_nonsense"], _env(tmp_path))
+    assert proc.returncode == 70, proc.stderr
+    assert proc.stdout == "", "a ledger verb's body must stay empty on a crash-shaped exit"
+    assert "expectations_nonsense" in proc.stderr
+    assert "unknown verb" in proc.stderr
+
+
+def test_unknown_non_ledger_verb_with_a_hyphenated_name_still_exits_zero(tmp_path: Path) -> None:
+    """Negative control for the ledger-prefix check: a verb that merely
+    LOOKS unusual, but does not start with "expectations_", stays on the
+    fail-open path."""
+    proc = _run(["foo-bar"], _env(tmp_path))
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_missing_verb_exits_two_with_a_named_diagnostic(tmp_path: Path) -> None:
