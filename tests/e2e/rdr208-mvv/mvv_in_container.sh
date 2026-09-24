@@ -50,6 +50,13 @@ T() { command tmux -L "$SOCK" "$@"; }
 PASS=0
 FAIL=0
 SEQ=0
+# nexus-4ahul: name-collision redraw config and per-site counters, shared by
+# the A/B launch site and the step-2 resume site. Set once, here, so both
+# call sites (the second of which is defined far below the first) agree.
+COLLISION_RETRY_CAP="${COLLISION_RETRY_CAP:-8}"
+REDRAW_ANOMALY_THRESHOLD="${REDRAW_ANOMALY_THRESHOLD:-2}"
+B_REDRAWS=0
+A2_REDRAWS=0
 say() { printf '\n== %s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$*"; }
@@ -92,26 +99,61 @@ wait_for() {  # SECONDS CMD... : poll until CMD succeeds
 # time cannot be mistaken for a run that is fine (nexus-moht0 non-vacuity):
 # CAP consecutive collisions is reported via a distinct exit code and a named
 # message, never silently folded into PASS or FAIL.
-redraw_until_distinct() {  # PRE_NAME REDRAW_FN DISCOVER_FN CAP -> stdout: final name
+#
+# nexus-4ahul round 2: an EMPTY discovered name (DISCOVER_FN reads an
+# associative-array slot that arm() never got to set, e.g. because the arm
+# prompt itself timed out) is not a collision and is not a rename either --
+# but "" != PRE_NAME is true, so treating it as "distinct" is a FALSE PASS on
+# a broken arm, not evidence of anything. That gets its OWN exit code (3), so
+# the caller can never mistake "arm never produced a name" for "the resumed
+# name differs from the pre-resume one".
+redraw_until_distinct() {  # PRE_NAME REDRAW_FN DISCOVER_FN CAP -> stdout: "NAME\nREDRAW_COUNT"
     # exit 0: DISCOVER_FN's value differs from PRE_NAME (0 or more redraws).
     # exit 1: CAP redraws in a row all collided with PRE_NAME.
     # exit 2: REDRAW_FN itself failed (the relaunch, not the name draw).
+    # exit 3: DISCOVER_FN returned an EMPTY name -- never treated as "distinct".
+    # REDRAW_COUNT (line 2 of stdout, always printed) is how many collisions
+    # were redrawn before returning, so the caller can report and threshold
+    # the rate rather than absorbing it silently (nexus-4ahul round 2).
     local pre="$1" redraw_fn="$2" discover_fn="$3" cap="$4" n=0 cur
     cur="$("$discover_fn")"
+    if [ -z "$cur" ]; then
+        printf '%s\n%s\n' "" "$n"
+        echo "  discovered name is EMPTY (the arm never produced one): treating as a hard failure, not a rename" >&2
+        return 3
+    fi
     while [ "$cur" = "$pre" ]; do
-        n=$((n + 1))
-        if [ "$n" -gt "$cap" ]; then
-            printf '%s\n' "$cur"
+        if [ "$n" -ge "$cap" ]; then
+            printf '%s\n%s\n' "$cur" "$n"
             echo "  redraw cap ($cap) exhausted: every draw collided with $pre" >&2
             return 1
         fi
+        n=$((n + 1))
         echo "  resumed name collided with $pre (draw $n/$cap): redrawing" >&2
-        "$redraw_fn" || { printf '%s\n' "$cur"; return 2; }
+        "$redraw_fn" || { printf '%s\n%s\n' "$cur" "$n"; return 2; }
         cur="$("$discover_fn")"
+        if [ -z "$cur" ]; then
+            printf '%s\n%s\n' "" "$n"
+            echo "  discovered name is EMPTY after redraw $n (the re-arm never produced one): treating as a hard failure, not a rename" >&2
+            return 3
+        fi
     done
-    printf '%s\n' "$cur"
+    printf '%s\n%s\n' "$cur" "$n"
     [ "$n" -gt 0 ] && echo "  distinct name after $n redraw(s): $cur" >&2
     return 0
+}
+# SITE COUNT: bad() if COUNT exceeds REDRAW_ANOMALY_THRESHOLD. The stated
+# model is a uniform 1-in-256 independent draw, so P(>=3 redraws in a row)
+# is (1/256)^3 ~ 1-in-16.7M; a redraw count past the threshold is itself
+# worth failing loudly on even when the run went on to succeed (rc=0),
+# because it is the only signal this harness has that the draw stopped
+# being uniform -- a rate rise silently absorbed by an unbounded redraw
+# would be invisible in every other assertion this MVV makes.
+check_redraw_rate() {
+    local site="$1" count="$2"
+    if [ "$count" -gt "$REDRAW_ANOMALY_THRESHOLD" ]; then
+        bad "$site: $count consecutive name redraws (> $REDRAW_ANOMALY_THRESHOLD; (1/256)^$((REDRAW_ANOMALY_THRESHOLD + 1)) under the stated uniform-draw model) -- the collision rate may have risen, investigate rather than accept"
+    fi
 }
 
 # ── sessions ─────────────────────────────────────────────────────────────────
@@ -407,10 +449,27 @@ say "launch A and B (serialized); each arms its OWN instance name"
 launch A || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch A"; exit 1; }
 SA="${SID_OF[A]}"
 arm A || bad "arm A"
+A_NAME="${NAME_OF[A]:-}"
 launch B || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch B"; exit 1; }
-SB="${SID_OF[B]}"
 arm B || bad "arm B"
-A_NAME="${NAME_OF[A]}"; B_NAME="${NAME_OF[B]}"
+# nexus-4ahul round 2 (RDR-208 Gap 2): A and B are two INDEPENDENT process
+# starts (no resume), carrying the identical ~1-in-256 collision risk as the
+# step-2 resume site below -- redraw B (a fresh relaunch, not a resume)
+# until its name is distinct from A's, via the SAME redraw_until_distinct.
+redraw_b() { T kill-session -t B 2>/dev/null; launch B && arm B; }
+discover_b_name() { printf '%s' "${NAME_OF[B]:-}"; }
+_rd_out="$(redraw_until_distinct "$A_NAME" redraw_b discover_b_name "$COLLISION_RETRY_CAP")"
+b_redraw_rc=$?
+B_NAME="${_rd_out%%$'\n'*}"
+B_REDRAWS="${_rd_out#*$'\n'}"
+SB="${SID_OF[B]}"
+case "$b_redraw_rc" in
+    1) bad "launch: $COLLISION_RETRY_CAP redraws in a row all collided with $A_NAME (p ~ (1/256)^$COLLISION_RETRY_CAP under a uniform draw -- report this run INCONCLUSIVE for B, do not trust PASS or FAIL below for it)" ;;
+    2) echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): relaunch B after a name collision"; exit 1 ;;
+    3) bad "launch: arm B never produced a name (discover returned empty) -- a real arm failure, not a rename or a collision" ;;
+esac
+check_redraw_rate "launch (A/B)" "$B_REDRAWS"
+echo "  name redraws so far: ab=$B_REDRAWS"
 check "directory/$A_NAME resolves to A's session" wait_for 30 resolves_to "$A_NAME" "$SA"
 check "directory/$B_NAME resolves to B's session" wait_for 30 resolves_to "$B_NAME" "$SB"
 
@@ -437,17 +496,37 @@ arm A2 || bad "arm A2 (a resumed session subscribes its NEW name)"
 # nexus-4ahul: redraw (a real relaunch, a genuine new process start) up to
 # COLLISION_RETRY_CAP times if the resumed session's draw collides with the
 # pre-resume name, before asserting anything below -- see redraw_until_distinct.
-COLLISION_RETRY_CAP="${COLLISION_RETRY_CAP:-8}"
 redraw_a2() { T kill-session -t A2 2>/dev/null; launch A2 "$SA" && arm A2; }
-discover_a2_name() { printf '%s' "${NAME_OF[A2]}"; }
-A2_NAME="$(redraw_until_distinct "$A_NAME" redraw_a2 discover_a2_name "$COLLISION_RETRY_CAP")"
+discover_a2_name() { printf '%s' "${NAME_OF[A2]:-}"; }
+_rd_out="$(redraw_until_distinct "$A_NAME" redraw_a2 discover_a2_name "$COLLISION_RETRY_CAP")"
 redraw_rc=$?
-if [ "$redraw_rc" = 1 ]; then
-    bad "step 2: $COLLISION_RETRY_CAP redraws in a row all collided with $A_NAME (p ~ (1/256)^$COLLISION_RETRY_CAP under a uniform draw -- report this run INCONCLUSIVE for steps 2 and 4, do not trust PASS or FAIL below for either)"
-elif [ "$redraw_rc" = 2 ]; then
-    echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume (redraw after a name collision)"; exit 1
+A2_NAME="${_rd_out%%$'\n'*}"
+A2_REDRAWS="${_rd_out#*$'\n'}"
+# nexus-4ahul round 2: re-anchor step 3b's TTL wait to the moment this WHOLE
+# redraw sequence finished, not to RESUME_T (when it started). A collided
+# intermediate arm still subscribes to directory/$A_NAME for real (arm()
+# subscribes to whatever ListAgents actually returns, which on a collision
+# IS $A_NAME) before being killed and redrawn, and that stray lease is never
+# released -- it lapses on its own 300 s TTL, measured from whenever IT was
+# written, which can be well after RESUME_T if any redraw happened. Anchoring
+# to the redraw sequence's own end time is a safe upper bound: every possible
+# subscribe-to-$A_NAME event in this step happens no later than this moment,
+# by construction (the loop cannot write to $A_NAME after it returns). A
+# non-colliding run costs this nothing -- the anchor lands within a few
+# seconds of RESUME_T, same as before.
+A_NAME_LEASE_ANCHOR="$(now)"
+case "$redraw_rc" in
+    1) bad "step 2: $COLLISION_RETRY_CAP redraws in a row all collided with $A_NAME (p ~ (1/256)^$COLLISION_RETRY_CAP under a uniform draw -- report this run INCONCLUSIVE for steps 2 and 4, do not trust PASS or FAIL below for either)" ;;
+    2) echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume (redraw after a name collision)"; exit 1 ;;
+    3) bad "step 2: arm A2 never produced a name (discover returned empty) -- a real arm failure, not a rename or a collision" ;;
+esac
+check_redraw_rate "step 2 (resume)" "$A2_REDRAWS"
+echo "  name redraws so far: resume=$A2_REDRAWS ab=$B_REDRAWS"
+if [ "$redraw_rc" = 3 ]; then
+    bad "the resumed session's name differs from the pre-resume one (a real rename) -- SKIPPED: discover returned an empty name, nothing to compare"
+else
+    check "the resumed session's name differs from the pre-resume one (a real rename)" test "$A2_NAME" != "$A_NAME"
 fi
-check "the resumed session's name differs from the pre-resume one (a real rename)" test "$A2_NAME" != "$A_NAME"
 check "directory/$A2_NAME resolves to the same session id" wait_for 30 resolves_to "$A2_NAME" "$SA"
 r="$(send "$A2_NAME" s2-new-name "$SB")"
 check "B -> $A2_NAME resolved to A's unchanged session id" test "$(jq -r .to <<<"$r")" = "$SA"
@@ -553,8 +632,12 @@ else
 fi
 
 # ── step 3b: the old name after its lease lapses ─────────────────────────────
-say "step 3b: old name after its TTL (plain exit at $(date -u -d "@$RESUME_T" +%H:%M:%SZ))"
-wait_s=$(( RESUME_T + 300 + 20 - $(now) ))
+# nexus-4ahul round 2: anchored to A_NAME_LEASE_ANCHOR (the end of step 2's
+# redraw sequence), not RESUME_T (its start) -- see the comment where that
+# variable is set. Equal to RESUME_T plus a few seconds on a run with no
+# collision.
+say "step 3b: old name after its TTL (plain exit at $(date -u -d "@$RESUME_T" +%H:%M:%SZ), lease anchor $(date -u -d "@$A_NAME_LEASE_ANCHOR" +%H:%M:%SZ))"
+wait_s=$(( A_NAME_LEASE_ANCHOR + 300 + 20 - $(now) ))
 [ "$wait_s" -gt 0 ] && { echo "  waiting ${wait_s}s for the 300 s lease to lapse"; sleep "$wait_s"; }
 before="$(total_rows "$SA")"
 r="$(send "$A_NAME" s3b-lapsed "$SB")"
@@ -562,7 +645,7 @@ check "the lapsed name is refused, naming the name" grep -q "no live holder for 
 check "  and nothing is written" test "$(total_rows "$SA")" = "$before"
 
 stop A2; stop B
-say "summary: $PASS passed, $FAIL failed"
+say "summary: $PASS passed, $FAIL failed (name redraws: resume=$A2_REDRAWS ab=$B_REDRAWS)"
 if [ "$FAIL" -eq 0 ]; then
     echo "RDR-208 LOCAL-MODE MVV PASSED ($MVV_LABEL, expect_branch_fix=$EXPECT_BRANCH_FIX, $PASS checks)"
     exit 0
