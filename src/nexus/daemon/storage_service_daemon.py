@@ -2756,13 +2756,29 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
     Never reports "already stopped" while a matching process exists; see
     :class:`StopOutcome`.
 
-    Freshness gate (mirrors stop_t3_daemon CRITICAL P3 guard): only trust
-    ``supervisor_pid`` from the lease payload when ``registry.discover()``
-    returns a fresh record (TTL-live). If a SIGKILL'd supervisor left a
-    stale lease, the kernel may have recycled its pid to an unrelated process;
-    trusting that pid would SIGTERM the wrong process. Since
-    ``ServiceRegistry.discover()`` already reaps expired leases (returning
-    None for stale ones), a non-None return is the freshness proxy.
+    Freshness gate (mirrors stop_t3_daemon CRITICAL P3 guard), REVISED
+    nexus-wo6sc (2026-09-24): a non-None ``registry.discover()`` return is
+    no longer a pure freshness proxy for ``storage_service`` — reader-side
+    grace (``ServiceRegistry._stale_lease_still_live``, per
+    ``docs/rdr/rdr-149-unified-service-registry-substrate.md``'s Revision
+    History and ``src/nexus/daemon/AGENTS.md``'s "Third documented
+    exception") can also return a TTL-EXPIRED record when the recorded
+    ``supervisor_pid`` is alive AND the recorded port answers ``/health``
+    as the expected service. This is still safe: it never trusts the
+    lease's pid ON THE STRENGTH OF ``discover()`` alone. The very next
+    line below independently re-checks ``_pid_is_alive(supervisor_pid)``
+    AT SIGNAL TIME, immediately before ``os.kill(..., SIGTERM)`` — so a
+    supervisor that has since genuinely died (its pid dead, or since
+    reaped) between ``discover()`` and this check is never signalled,
+    grace-accepted record or not. What a pid-alive check can never rule
+    out — the kernel recycling that exact pid to an unrelated process in
+    the narrow window between the two checks — is the same accepted
+    trade-off every other pid-based mechanism in this primitive documents
+    (``reclaim_lease_if_dead_owner``'s docstring names it explicitly); it
+    is not new here, and the discovery-time grace path independently
+    requires that SAME pid's process to also be serving the recorded
+    port's ``/health`` with the exact expected body, which a coincidental
+    pid-reuse victim answering by accident is not a realistic risk.
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         storage_service_stack_matcher,

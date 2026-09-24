@@ -1655,6 +1655,40 @@ class TestStaleLeaseReaderGrace:
             record = reg.discover("scope")
         assert record is None
 
+    def test_shutting_down_marker_denies_grace_even_with_alive_pid_and_healthy_port(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """TEST GAP (nexus-wo6sc review round, 2026-09-24). A published
+        shutdown marker (``mark_shutting_down`` -- ``status="shutting_down"``)
+        must never be resurrected by grace: the owner explicitly said stop
+        resolving me, and an alive pid + a healthy port on the SAME
+        endpoint (nothing stopped listening yet -- only the marker
+        published) must not override that. Guards the
+        ``record.status != "live"`` check at the top of
+        ``_stale_lease_still_live`` -- delete that guard and this is the
+        test that goes red, because without it the pid+health checks below
+        it would otherwise happily pass."""
+        reg = self._registry(config_dir, clock)
+        owner = _live_pid()
+        try:
+            with _health_server() as port:
+                published = reg.publish(
+                    "scope", endpoint={"host": "127.0.0.1", "port": port},
+                    version="1", owner_token="A", payload={"supervisor_pid": owner.pid},
+                )
+                reg.mark_shutting_down(published)
+                clock.advance(5.0)  # past ttl=1.0, well inside the 10x grace bound
+                record = reg.discover("scope")
+            assert record is None, (
+                "a published shutdown marker must deny grace even when the "
+                "owner pid is alive and the port answers /health healthy -- "
+                "the owner explicitly said stop resolving me"
+            )
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)
+
     def test_non_storage_service_tier_never_grants_grace(
         self, config_dir: Path, clock: _FakeClock,
     ) -> None:

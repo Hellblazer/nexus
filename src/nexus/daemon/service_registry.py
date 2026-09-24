@@ -136,8 +136,22 @@ STALE_LEASE_GRACE_HEALTH_TIMEOUT_S: float = 1.5
 #: but this is a belt-and-suspenders refusal at the primitive itself: a
 #: shared registry must never turn a stale-lease read into an outbound
 #: network call, no matter what a future or malformed record's endpoint
-#: names.
-_GRACE_PROBE_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+#: names. Deliberately NOT ``"::1"`` (code review, nexus-wo6sc review
+#: round, 2026-09-24): ``_probe_health_identity`` builds its URL as
+#: ``f"http://{host}:{port}/health"``, which is malformed for a bare IPv6
+#: literal (needs bracketing: ``http://[::1]:{port}/health``) — admitting
+#: it here without also bracketing the URL would have been dead code that
+#: MISBEHAVED the one time it was ever reached, rather than dead code that
+#: is merely unreachable. Chose removal over bracketing: ``_SERVICE_HOST``
+#: is a hardcoded literal (``"127.0.0.1"``), never ``"::1"``, in every
+#: current caller, so there is no real endpoint this would ever admit —
+#: bracketing would be correctness work for a case that cannot occur,
+#: adding branch complexity to a function this primitive's own standing
+#: gate wants easy to audit. ``"localhost"`` stays: URL construction with
+#: it is syntactically correct (no bracketing hazard), so it costs nothing
+#: to keep as headroom for a future caller that names loopback by hostname
+#: rather than literal IP.
+_GRACE_PROBE_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost"})
 
 
 def _probe_health_identity(host: str, port: int, *, timeout: float) -> bool:
@@ -687,10 +701,19 @@ class ServiceRegistry:
         THIS reader can independently confirm it: the recorded owner pid is
         alive AND the recorded port answers ``/health`` as the expected
         service. Liveness must not depend on the heartbeat stamp write
-        landing within TTL, whatever the cause of a miss (an I/O stall or
-        the writer losing the CPU — nexus-wo6sc's own still-open question);
-        only when BOTH checks fail does this return False, matching the
-        DECISION verbatim ("only both failing means down").
+        landing within TTL for the two stall causes the DECISION was
+        written against — an I/O stall or the writer losing the CPU
+        (nexus-wo6sc's own still-open question about which one the
+        2026-09-12 incident was); only when BOTH checks fail does this
+        return False, matching the DECISION verbatim ("only both failing
+        means down"). NOT a claim that grace always resolves a stall: under
+        SYSTEM-WIDE CPU contention (not just the writer starved, the whole
+        box is), this reader-side ``/health`` probe can itself starve the
+        same way the stamp did, and the bounded timeout below simply times
+        it out. That FAILS SAFE — the caller sees "down", the same answer
+        it got before this change existed — but it is not a guarantee that
+        grace helps under that specific condition, only that it never makes
+        the outcome worse.
 
         Guards, each independently sufficient to deny grace:
 
