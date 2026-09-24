@@ -226,16 +226,14 @@ _HEREDOC_RE = re.compile(
     r'[ \t]*(?P=hdname)(?=[ \t]*(?:\n|$))'
 )
 
-#: Strong shell boundaries: each starts an entirely new command with NO
-#: stdin relationship to what came before. A bare NEWLINE is one of these
-#: (nexus-2b24o round 3, code review of 8853ee707: `echo hi` then a real
-#: newline then `bd close nexus-x` was a full silent allow, because the
-#: whole two-line string tokenized as ONE segment and the verb check only
-#: ever looks at position 0 of a segment -- "echo", not "bd"). `|&`
-#: (bash's stdout+stderr pipe) is a PIPE boundary, the same "stdin flows
-#: here" relationship a bare `|` has, added to the same round-3 fix.
-_STRONG_BOUNDARY_RE = re.compile(r'&&|\|\||;|\bthen\b|\bdo\b|\n')
-_PIPE_BOUNDARY_RE = re.compile(r'\s\|&\s|\s\|\s')
+#: Every shell boundary this module recognizes: &&/||/;/then/do, a bare
+#: newline, or a pipe (``|``/``|&``) -- as ONE alternation, so
+#: :func:`iter_shell_boundaries` finds them all in a single left-to-right
+#: scan (nexus-2b24o round 3: a bare NEWLINE is a boundary because `echo
+#: hi` then a real newline then `bd close nexus-x` was a full silent
+#: allow -- the verb check only ever looks at position 0 of a segment,
+#: "echo", not "bd" -- and `|&`, bash's stdout+stderr pipe, was invisible
+#: to both of round 1/2's boundary regexes).
 _ANY_BOUNDARY_RE = re.compile(r'&&|\|\||;|\bthen\b|\bdo\b|\n|\s\|&\s|\s\|\s')
 
 
@@ -246,37 +244,154 @@ def _is_pipe_boundary_text(text: str) -> bool:
     return bool(re.fullmatch(r'\s\|&?\s', text))
 
 
+def _quoted_spans(
+    cmd: str, *, skip_spans: list[tuple[int, int]] = ()
+) -> list[tuple[int, int]]:
+    """Every span of *cmd* lying inside a single- or double-quoted
+    string, so a boundary operator found there -- a bare newline
+    included -- is literal quoted TEXT, never a real shell boundary
+    (nexus-2b24o round 4, substantive-critic on 47f635dcd: ``bd update
+    nexus-1 --reason "line one`` + a real newline + ``bd close nexus-x``
+    + a real newline + ``line three"`` false-positived, because round 3's
+    new bare-newline boundary is not quote-aware -- only heredoc bodies
+    were protected).
+
+    Single quotes are fully literal in POSIX shell (no escapes, no
+    substitution) and scanned as such: everything up to the next ``'``
+    is inside the span. Double quotes track backslash escapes (the
+    escaped character is skipped, so ``\\"`` never closes the string) and
+    ``$(...)`` command-substitution nesting -- tracked only as parenthesis
+    DEPTH, far enough to find where the substitution's matching ``)``
+    closes without also being confused by a quote character living
+    INSIDE it (e.g. ``"$(echo "x")"``), never a full recursive quote
+    state machine inside the substitution: this module does not otherwise
+    model command substitution, and going further would be building a
+    shell parser rather than fixing the newline gap.
+
+    A quote left unterminated by truncation is NOT protected at all --
+    deliberately, not an oversight. Protecting "opening quote to end of
+    string" would swallow any operator sitting after it too, which can
+    hide a genuine close following a merely-malformed argument
+    (`TestMalformedQuotingNeverBypasses` already covers the existing,
+    accepted behavior for that case: the naive split exposes the real
+    verb). An unterminated quote is exactly the shape a truncated or
+    otherwise malformed command has, and under-protecting it is the same
+    "fewer false negatives over fewer false positives" trade this whole
+    file makes everywhere else.
+
+    *skip_spans* (heredoc bodies) are never quote-scanned: a heredoc
+    body is raw DATA text, not shell syntax, so a quote-shaped character
+    inside it is not a real shell quote -- it must not ALSO protect an
+    operator the heredoc known-limit deliberately still exposes. Found
+    by the exact test that pins that limit: a Python string literal
+    (``'x && bd close y'``) inside a heredoc body was newly (and
+    wrongly) treated as a real single-quoted span, hiding the ``&&`` that
+    test requires to still split.
+    """
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(cmd)
+
+    def _skip_end(pos: int) -> int | None:
+        for s_start, s_end in skip_spans:
+            if s_start <= pos < s_end:
+                return s_end
+        return None
+
+    while i < n:
+        skip_to = _skip_end(i)
+        if skip_to is not None:
+            i = skip_to
+            continue
+        ch = cmd[i]
+        if ch == "'":
+            start = i
+            i += 1
+            while i < n and cmd[i] != "'" and _skip_end(i) is None:
+                i += 1
+            if i < n and cmd[i] == "'":  # closing quote; else unterminated
+                spans.append((start, i + 1))
+                i += 1
+        elif ch == '"':
+            start = i
+            i += 1
+            paren_depth = 0
+            closed = False
+            while i < n and _skip_end(i) is None:
+                c = cmd[i]
+                if c == '\\' and i + 1 < n:
+                    i += 2
+                    continue
+                if paren_depth == 0 and c == '"':
+                    closed = True
+                    i += 1
+                    break
+                if c == '$' and i + 1 < n and cmd[i + 1] == '(':
+                    paren_depth += 1
+                    i += 2
+                    continue
+                if paren_depth > 0 and c == '(':
+                    paren_depth += 1
+                elif paren_depth > 0 and c == ')':
+                    paren_depth -= 1
+                i += 1
+            if closed:  # unterminated -> no span, same posture as above
+                spans.append((start, i))
+        else:
+            i += 1
+    return spans
+
+
 def iter_shell_boundaries(cmd: str):
     """Every shell boundary in *cmd* -- &&/||/;/then/do, a bare newline,
     or a pipe (``|``/``|&``) -- as ``(match, is_strong)`` pairs, in order.
 
-    A bare newline INSIDE a heredoc's body span is never yielded: the
-    heredoc's multi-line construct is syntactically ONE command from the
-    shell's perspective, even though it spans several physical lines, and
-    treating each of its lines as a fresh command would let a heredoc
-    BODY that merely contains bd-close-shaped TEXT (data being fed to the
-    preceding command, never executed) trigger the gate as if it were a
-    real invocation. An operator token (&&, ;, |, then, do) INSIDE a
-    heredoc body still splits it -- that KNOWN LIMIT (shlex has no
-    heredoc concept) is unchanged and deliberately so, per this module's
-    other docstrings; only the bare-newline case is heredoc-aware.
+    TWO INDEPENDENT protections, deliberately asymmetric:
+
+    * A boundary inside a single- or double-quoted string (see
+      :func:`_quoted_spans`) is NEVER yielded, regardless of boundary
+      TYPE -- a literal ``&&``/``;``/newline/pipe sitting inside a quoted
+      ``--reason``/``-m`` VALUE is quoted TEXT, not shell syntax, full
+      stop (nexus-2b24o round 4: ``--reason "line one`` + a real newline
+      + ``bd close nexus-x`` + a real newline + ``line three"`` false-
+      positived, because round 3's new bare-newline boundary was not
+      quote-aware).
+    * A bare NEWLINE inside a heredoc's body span is never yielded EITHER
+      -- the heredoc's multi-line construct is syntactically ONE command
+      from the shell's perspective even though it spans several physical
+      lines, so treating each of its lines as a fresh command would let a
+      heredoc BODY that merely contains bd-close-shaped text trigger the
+      gate as if it were a real invocation. Every OTHER operator token
+      (&&, ;, |, then, do) INSIDE a heredoc body still splits it, on
+      purpose -- that KNOWN LIMIT (shlex has no heredoc concept) predates
+      this module's newline fix and is unchanged;
+      :class:`TestTheLimitThePortRecords` pins it. Quoting is stricter
+      than heredoc protection precisely because it protects every
+      boundary type, not only the newline: a quoted value's content is
+      genuinely never shell syntax, where a heredoc's body CAN contain a
+      real embedded shell fragment via that same known limit.
 
     Shared by :func:`_pipeline_segments` (this module's own segmentation)
     and ``phase_review_close_gate``'s narrower argv-bounding search
-    (nexus-2b24o round 3), so the heredoc awareness and the ``|&``
+    (nexus-2b24o round 3), so the heredoc/quote awareness and the ``|&``
     boundary live in exactly one place rather than two copies that can
     drift.
     """
-    protected: list[tuple[int, int]] = [
+    heredoc_spans: list[tuple[int, int]] = [
         (m.start(), m.end()) for m in _HEREDOC_RE.finditer(cmd)
     ]
+    quoted_spans = _quoted_spans(cmd, skip_spans=heredoc_spans)
 
-    def _in_a_heredoc_body(pos: int) -> bool:
-        return any(start <= pos < end for start, end in protected)
+    def _in_heredoc_body(pos: int) -> bool:
+        return any(start <= pos < end for start, end in heredoc_spans)
+
+    def _in_quotes(pos: int) -> bool:
+        return any(start <= pos < end for start, end in quoted_spans)
 
     for m in _ANY_BOUNDARY_RE.finditer(cmd):
+        if _in_quotes(m.start()):
+            continue
         text = m.group()
-        if text == '\n' and _in_a_heredoc_body(m.start()):
+        if text == '\n' and _in_heredoc_body(m.start()):
             continue
         yield m, not _is_pipe_boundary_text(text)
 

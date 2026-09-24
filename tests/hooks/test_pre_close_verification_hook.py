@@ -989,6 +989,55 @@ class TestNexus2b24oRound3ShellBoundaries:
         assert _get_decision(json.loads(result.stdout)) == "allow", command
 
 
+class TestNexus2b24oRound4QuoteAwareBoundaries:
+    """Round 4 of nexus-2b24o (substantive-critic on commit 47f635dcd):
+    round 3's bare-newline boundary is not quote-aware. Full deny/allow
+    gate for the primary repro, not just the `_bd_verbs` boolean."""
+
+    _REASON_MULTILINE = (
+        "line one" + chr(10) + "bd close nexus-nlb03" + chr(10) + "line three"
+    )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f'bd update nexus-1 --reason "{_REASON_MULTILINE}"',
+            f'bd update nexus-1 -m "{_REASON_MULTILINE}"',
+            f"bd update nexus-1 --reason '{_REASON_MULTILINE}'",
+        ],
+    )
+    def test_a_close_shaped_line_inside_a_quoted_multiline_value_allows(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_a_genuine_close_after_a_closed_multiline_quoted_value_still_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = (
+            f'bd update nexus-1 --reason "{self._REASON_MULTILINE}"'
+            + chr(10) + "bd close nexus-nlb04"
+        )
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-nlb04" in _get_reason(parsed)
+
+
 class TestT1OnlyCoverage:
     """nexus-fgekf (2026-08-30): the T2 memory leg is RETIRED. It existed
     for a CLI/MCP T1 scope divergence (nexus-4av2n round 2) whose both

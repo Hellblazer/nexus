@@ -439,6 +439,95 @@ class TestNexus2b24oRound3ShellBoundaries:
         assert v_no_operator["has_close_or_done"] is False
 
 
+class TestNexus2b24oRound4QuoteAwareBoundaries:
+    """Round 4 of nexus-2b24o (substantive-critic on commit 47f635dcd):
+    round 3's new bare-newline boundary is not QUOTE-aware -- only
+    heredoc bodies were protected. A multi-line ``--reason``/``-m`` VALUE
+    is a normal, common shape (a multi-paragraph close reason), and its
+    embedded newlines are literal quoted text, not command boundaries:
+
+        bd update nexus-1 --reason "line one
+        bd close nexus-x
+        line three"
+
+    tokenized the SECOND line as its own segment starting with ``bd``,
+    a full false positive. Fixed by :func:`gate._quoted_spans`, wired
+    into :func:`gate.iter_shell_boundaries` -- see that function's own
+    docstring for the two independent protections (quotes protect EVERY
+    boundary type; heredoc bodies protect only the newline).
+    """
+
+    _REASON_MULTILINE = (
+        'line one' + chr(10) + 'bd close nexus-x' + chr(10) + 'line three'
+    )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f'{UPDATE} nexus-1 --reason "{_REASON_MULTILINE}"',
+            f'{UPDATE} nexus-1 -m "{_REASON_MULTILINE}"',
+            f"{UPDATE} nexus-1 --reason '{_REASON_MULTILINE}'",
+        ],
+    )
+    def test_a_close_shaped_line_inside_a_quoted_multiline_value_does_not_trigger(
+        self, command
+    ):
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_operator_inside_a_quoted_value_also_does_not_trigger(self):
+        """Quoting protects EVERY boundary type, not only the newline --
+        a literal `&&` inside a quoted --reason value is equally not a
+        real shell boundary."""
+        command = (
+            f'{UPDATE} nexus-1 --reason "supersedes nexus-y && ' + CLOSE + ' nexus-fake"'
+        )
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_command_substitution_nesting_inside_double_quotes_does_not_confuse_the_scanner(
+        self,
+    ):
+        """`"$(echo "nested")"` -- a double-quoted string containing its
+        own nested double quotes via $(...) -- must not make the scanner
+        think the outer quote closes early and then misread the rest."""
+        command = (
+            f'{UPDATE} nexus-1 --reason "output: $(echo "nested ' + CLOSE + ' nexus-fake")"'
+        )
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_a_genuine_close_after_a_closed_multiline_quoted_value_is_still_caught(self):
+        """Bounds the fix: protection ends at the REAL closing quote. A
+        close on its own line AFTER the quoted string properly closes
+        must still be caught."""
+        command = (
+            f'{UPDATE} nexus-1 --reason "{self._REASON_MULTILINE}"'
+            + chr(10) + CLOSE + " nexus-z"
+        )
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-z" in gate._bead_ids(command)
+
+    def test_an_unterminated_quote_does_not_crash(self):
+        """Defined posture, not a crash: an unterminated quote is simply
+        NOT protected (see `_quoted_spans`'s own docstring for why under-
+        protecting here is the safe direction, matching
+        `TestMalformedQuotingNeverBypasses`'s existing, accepted
+        behavior for a malformed --reason value)."""
+        command = f'{CLOSE} nexus-abc12 --reason="unterminated'
+        gate._bd_verbs(command)  # must not raise
+
+    def test_the_operator_inside_heredoc_body_limit_survives_quote_awareness(self):
+        """The exact regression this fix's first draft introduced: a
+        heredoc body containing a Python string literal (`'x && bd close
+        y'`) was newly (and wrongly) read as a REAL single-quoted span,
+        hiding the `&&` the heredoc known-limit test requires to still
+        split. Heredoc bodies are excluded from quote-scanning entirely
+        (`_quoted_spans`'s `skip_spans` parameter)."""
+        command = (
+            "python3 - <<'PY'" + chr(10) + "s = 'x && " + CLOSE + " y'" + chr(10) + "PY"
+        )
+        assert gate._bd_verbs(command)["has_close_or_done"] is True, command
+
+
 class TestTheLimitThePortRecords:
     """The body-text defect, pinned as it actually behaves rather than as
     it was first described.
