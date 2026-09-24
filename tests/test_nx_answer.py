@@ -5348,7 +5348,7 @@ class TestContinuationGoLiveMidPrefixFailure:
 
     @pytest.mark.asyncio
     async def test_embedding_profile_mismatch_surfaces_in_final_text_not_no_evidence(
-        self,
+        self, cloud_mode: None,
     ) -> None:
         """nexus-vply6 fix round 2, SHIP-BLOCKER (critique T2 [26773]),
         end-to-end through the REAL _default_dispatcher (plan_run itself

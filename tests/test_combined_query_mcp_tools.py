@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from nexus.mcp import core
 
 
@@ -440,6 +442,7 @@ class _EngineModelUnavailableT3:
         self._raise()
 
 
+@pytest.mark.usefixtures("cloud_mode")
 class TestScopedToolsClassifyEmbeddingProfileMismatch:
     """nexus-vply6 fix round 2, point 3: search_metadata_scoped /
     search_topic_scoped / search_graph_hop / search_aspect_scoped and
