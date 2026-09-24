@@ -401,7 +401,7 @@ via `plan_run`, and falls through to an inline planner on miss.  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 52 MCP tools and the nexus-catalog server exposes 10 catalog tools, for 62 registered tools total (3 tools demoted to Python-only). These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 52 MCP tools and the nexus-catalog server exposes 10 catalog tools, 62 tools an agent calls (3 more are demoted to Python-only). The core server also registers 12 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

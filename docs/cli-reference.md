@@ -1014,7 +1014,7 @@ nx catalog register --title TITLE --owner OWNER [--author NAME] [--year YEAR]
                      [--corpus NAME]
 ```
 
-Hidden from `--help` but fully functional — single-document, explicit
+Hidden from `--help` but fully functional: single-document, explicit
 catalog registration, mirroring the MCP `catalog_register` tool. An
 absolute `--file-path` under a known repo is relativized automatically
 (RDR-060). `--source-uri` accepts an explicit persistent URI (`chroma://`,

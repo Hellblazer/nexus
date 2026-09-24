@@ -195,7 +195,7 @@ Conventional `created_by` values:
 - `rdr_implements_pass` — generator pass walked accepted RDRs and emitted strict `implements`
 - `code_rdr_heuristic` — looser pass; emitted `implements-heuristic` on path/symbol substring match
 - `manual` — user authored via `nx catalog link`
-- `auto_linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
+- `auto-linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
 - `llm_linker` — Claude-suggested edge; advisory, manual review recommended before traversing in an audit
 
 When auditing graph traversal, prefer `created_by IN ('bib_enricher', 'rdr_implements_pass', 'manual')` over heuristic creators.
