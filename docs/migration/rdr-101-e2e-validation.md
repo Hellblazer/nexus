@@ -1,5 +1,10 @@
 # RDR-101 Phase 3 — sandbox e2e migration validation report
 
+> **Historical forensic record** (2026-05-01). The RDR-101 migration is
+> complete and the harness this report ran is deleted. See
+> [`README.md`](README.md) for the directory index and the current
+> authoritative record.
+
 Run date: 2026-05-01
 Bead: `nexus-o6aa.9.10`
 Harness: `scripts/validate/rdr-101-migration-e2e.sh`

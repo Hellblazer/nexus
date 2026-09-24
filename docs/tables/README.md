@@ -14,9 +14,7 @@ lives in `scripts/release_messages.py`, keyed by row id; the parity harness
 scripts to each other cell by cell.
 
 `tests/test_tables_lint.py` globs `*.toml` here (in addition to
-`src/nexus/tables/`) and lints every table it finds. This file exists so
-the directory has something to hold before the first repo-only table
-lands.
+`src/nexus/tables/`) and lints every table it finds.
 
 ## `[[impossible]]` blocks (nexus-q9u2n)
 

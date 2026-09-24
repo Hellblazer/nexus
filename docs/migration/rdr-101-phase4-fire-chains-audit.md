@@ -1,5 +1,9 @@
 # RDR-101 Phase 4: `fire_post_document_hooks` Chain Audit
 
+> **Historical forensic record.** The RDR-101 migration is complete. See
+> [`README.md`](README.md) for the directory index and the current
+> authoritative record.
+
 **Bead:** `nexus-buv0`
 **Goal:** Catalogue every consumer of the document-grain post-store chain
 that reads `source_path` from the chain payload, and decide each one's

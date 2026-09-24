@@ -95,17 +95,23 @@ See [architecture.md](architecture.md) for the full module map.
 
 ## Adding a T2 Domain Feature
 
-T2 is split into domain stores under `src/nexus/db/t2/`, each an HTTP
+T2 is split into nine domain stores under `src/nexus/db/t2/`, each an HTTP
 client against the engine's Postgres (the SQLite twins were deleted in
 RDR-158 P4, nexus-i711w): `http_memory_store.py`,
 `http_plan_library.py`, `http_taxonomy_store.py`,
 `http_telemetry_store.py`, `http_chash_index.py`,
-`http_document_aspects_store.py`, `http_aspect_queue.py`, and
-`http_document_highlights_store.py`. See
+`http_document_aspects_store.py`, `http_aspect_queue.py`,
+`http_document_highlights_store.py`, and `http_tuple_store.py` (the Linda
+tuple space, RDR-205). See
 [architecture.md § T2 Domain Stores](architecture.md#t2-domain-stores)
-for the map (note: `chash_index`, `taxonomy`, `document_aspects`, and
-`aspect_queue` are reached directly via their attributes, not through
-facade delegates).
+for the map (note: `chash_index`, `taxonomy`, `document_aspects`,
+`aspect_queue`, `document_highlights`, and `tuples` are reached directly
+via their attributes, not through facade delegates — `memory`, `plans`,
+and `telemetry` are the three with facade delegate methods). Two more
+`Http*Store` modules live in the same directory but are not part of this
+nine-store facade set: `http_centroid_store.py` and `http_token_store.py`
+back other subsystems (taxonomy clustering and data-token minting
+respectively) and are constructed independently of `T2Database`.
 
 **Adding a method to an existing store** (the common case):
 

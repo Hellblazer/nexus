@@ -1,5 +1,10 @@
 # Postmortem: nx index pdf fix not applied in v2.4.0
 
+> **Historical (2026-03-24, nx 2.4.0).** Describes a Chroma-Cloud-era bug and
+> reproduction against a version predating the PG17+pgvector substrate
+> (RDR-155/158). ChromaDB is not a live substrate in any mode today. For
+> current collection-naming rules see [`docs/collections.md`](../collections.md).
+
 **Date**: 2026-03-24
 **Severity**: High — believed-fixed bug still present in installed version
 **Related**: [2026-03-23 original postmortem](2026-03-23-pdf-index-collection-mismatch.md)
