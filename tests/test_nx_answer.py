@@ -4107,6 +4107,113 @@ class TestNxAnswerBudgetUsdEnforcement:
         )
 
 
+class TestNxAnswerExcludedCollectionsWarning:
+    """nexus-vply6 fix round 2 (coordinator follow-up, "never silent" for
+    the PERSON READING THE ANSWER): a retrieval step's own output can
+    carry an additive ``warnings`` list (search()'s structured branch,
+    populated when ``SearchDiagnostics.failed_collections`` is non-empty
+    — one collection dimension-skipped, real results still returned from
+    the healthy majority). ``nx_answer`` reads it straight off
+    ``PlanResult.steps`` (no new StepRecord/T2 plumbing) and threads it
+    through the SAME ``_emit_budget_warning`` accumulator
+    ``budget_warnings`` / dropped-reduce-steps already use — same
+    pattern as ``TestNxAnswerDroppedReduceStepsEnvelope`` immediately
+    below, one line up in the file for exactly that reason."""
+
+    @pytest.mark.asyncio
+    async def test_partial_collection_skip_names_it_in_final_text_and_envelope(
+        self, tmp_path,
+    ):
+        """A plan whose retrieval step touched two collections, one of
+        them dimension-skipped, still runs to a real answer -- but that
+        answer's final_text NAMES the skipped collection and the reason,
+        and the structured envelope carries the same note as a
+        ``budget_warnings`` entry with kind ``"excluded-collections"``."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)  # search + operator_summarize
+        excluded_note = (
+            "Note: 1 collection(s) were excluded by service errors and "
+            "NOT searched: knowledge__seam-b-test__minilm-l6-v2-384__v1: "
+            "HTTP 400: query embedder produced a 1024-dim vector but the "
+            "collection dispatches to the embedding_384 column"
+        )
+        run_result = PlanResult(
+            steps=[
+                {
+                    "ids": ["r1"], "tumblers": [""], "distances": [0.12],
+                    "collections": ["code__healthy"],
+                    "warnings": [excluded_note],
+                },
+                {"text": "the real answer"},
+            ],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert isinstance(text_result, str)
+        assert "budget warning (excluded-collections)" in text_result
+        assert "knowledge__seam-b-test__minilm-l6-v2-384__v1" in text_result
+        assert "the real answer" in text_result, (
+            "a partial skip is a warning, not a refusal -- the real "
+            "answer from the healthy collection must still surface"
+        )
+
+        assert isinstance(struct_result, dict)
+        excluded_entries = [
+            w for w in struct_result["budget_warnings"]
+            if w["kind"] == "excluded-collections"
+        ]
+        assert len(excluded_entries) == 1
+        assert excluded_entries[0]["detail"] == excluded_note
+        assert "the real answer" in struct_result["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_no_excluded_collections_yields_no_warning(self, tmp_path):
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[
+                {"ids": ["r1"], "collections": ["code__healthy"]},
+                {"text": "the real answer"},
+            ],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert "excluded-collections" not in text_result
+        assert text_result == "the real answer"
+        assert [
+            w for w in struct_result["budget_warnings"]
+            if w["kind"] == "excluded-collections"
+        ] == []
+
+
 class TestNxAnswerDroppedReduceStepsEnvelope:
     """nexus-4h0oh follow-up (code-review T2 [24199]):
     ``PlanResult.dropped_reduce_steps`` never reached the ``nx_answer``

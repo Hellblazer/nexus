@@ -10342,7 +10342,17 @@ async def nx_answer(
         check may have been blind for part of this run — the mid-run
         stop-line itself is UNCHANGED and still enforces on every
         MEASURED StepRecord cost; only the coverage gap needs
-        surfacing, once per run).
+        surfacing, once per run). ``"excluded-collections"``
+        (nexus-vply6 fix round 2, coordinator follow-up: the FIRST
+        non-budget kind — a retrieval step returned real results but
+        also skipped one or more collections due to a dimension-
+        mismatch/embedding-profile issue; the detail is the SAME
+        "N collection(s) were excluded by service errors..." sentence
+        the CLI/MCP-text surfaces already render, read back off each
+        executed step's own ``warnings`` output field. Confirms this
+        emitter generalizes past "budget" in its literal name to "every
+        warning this call can produce", exactly as this docstring's
+        "never grow a second, parallel warning mechanism" rule intends).
 
         Appends rather than overwrites: independent kinds can co-occur
         in one call (e.g. a `"no-estimate"` pre-flight warning and an
@@ -11230,6 +11240,32 @@ async def nx_answer(
     _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
     if not isinstance(_dropped_reduce_steps, list):
         _dropped_reduce_steps = []
+    # nexus-vply6 fix round 2 (coordinator follow-up, "never silent" for
+    # the person reading the answer): a retrieval step's own structured
+    # output carries an additive "warnings" list when
+    # SearchDiagnostics.failed_collections was non-empty (search()'s
+    # structured branch — see _search_render's "warnings" spread literal)
+    # -- one collection skipped, real results still returned from the
+    # healthy majority. result.steps already holds every executed step's
+    # raw output dict (RDR-078 §Phase 1 contract); this reads it, it does
+    # NOT add new StepRecord/T2 plumbing. Fed through the SAME
+    # _emit_budget_warning accumulator every other run-level warning
+    # uses, per that function's own docstring ("never grow a second,
+    # parallel warning mechanism") -- so the note reaches BOTH final_text
+    # (the "[budget warning (kind): detail]" line) and the structured
+    # envelope's budget_warnings list, the one place every exit path this
+    # call can take already threads a caller-visible warning through.
+    # Same placement rule as _dropped_reduce_steps immediately above:
+    # BEFORE _budget_exhausted_response has a chance to build and return
+    # an envelope, so a budget-cut partial run still surfaces a warning
+    # from a retrieval step that DID execute.
+    _result_steps = getattr(result, "steps", None)
+    if isinstance(_result_steps, list):
+        for _step_output in _result_steps:
+            if not isinstance(_step_output, dict):
+                continue
+            for _excluded_note in _step_output.get("warnings") or []:
+                _emit_budget_warning("excluded-collections", _excluded_note)
     # nexus-yg49g: the success record USED to be here — before final_text is
     # even extracted (below) and ~60 lines before the empty-retrieval guard that
     # already knows the run produced nothing. It could not have been right: at
