@@ -380,8 +380,13 @@ class TestArgumentHandling:
         assert "payload_json" in r.stderr
 
     def test_an_unknown_verb_is_refused_by_the_entry_point(self, tmp_path):
+        """Unknown (not missing) verbs fail OPEN, exit 0 -- nexus-t9klx, the
+        7.58.0 release blocker: a plugin bump can name a verb this CLI has
+        not registered yet, and exiting nonzero there blocks every prompt
+        for the whole session with no self-heal path. Still diagnosable on
+        stderr, which is what this test actually pins."""
         r = _nx_hook("expectations_nonsense", "sess", state=tmp_path)
-        assert r.returncode == 2
+        assert r.returncode == 0
         assert "unknown verb" in r.stderr
 
 

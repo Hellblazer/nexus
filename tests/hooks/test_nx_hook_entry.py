@@ -55,14 +55,23 @@ def _run(argv: list[str], env: dict[str, str], stdin: str = "") -> subprocess.Co
     )
 
 
-# -- unknown / missing verb: a dispatch failure, not a silent hook ----------
+# -- unknown / missing verb ---------------------------------------------
+#
+# A MISSING verb argument is this CLI's own invocation error and stays a
+# hard failure (exit 2). An UNKNOWN verb fails OPEN (exit 0) instead: a
+# plugin bump can name a verb this installed CLI has not registered yet
+# (nexus-t9klx, the 7.58.0 release blocker -- see the module docstring's
+# "Exit codes" section), and exiting nonzero there blocks every
+# UserPromptSubmit/PreToolUse for the whole session with no self-heal path.
 
-def test_unknown_verb_exits_two_with_a_named_diagnostic(tmp_path: Path) -> None:
+def test_unknown_verb_exits_zero_with_a_named_diagnostic(tmp_path: Path) -> None:
     proc = _run(["frobnicate"], _env(tmp_path))
-    assert proc.returncode == 2, proc.stderr
+    assert proc.returncode == 0, proc.stderr
     assert proc.stdout == ""
     assert "frobnicate" in proc.stderr
     assert "unknown verb" in proc.stderr
+    assert "plugin" in proc.stderr.lower()
+    assert "cli" in proc.stderr.lower()
 
 
 def test_missing_verb_exits_two_with_a_named_diagnostic(tmp_path: Path) -> None:
@@ -76,7 +85,7 @@ def test_a_malformed_test_override_is_swallowed_as_unknown_verb(tmp_path: Path) 
     """The test-only override itself must never crash nx-hook on bad input --
     it gets the same never-fail posture as everything else in this module."""
     proc = _run(["anything"], _env(tmp_path, _NX_HOOK_TEST_VERB_OVERRIDE="{not json"))
-    assert proc.returncode == 2, proc.stderr
+    assert proc.returncode == 0, proc.stderr
     assert "unknown verb" in proc.stderr
 
 
