@@ -292,6 +292,30 @@ def test_config_init_skips_keys_already_in_env(runner, fake_home, monkeypatch) -
     assert "already set" in result.output.lower() or "environment" in result.output.lower()
 
 
+def test_config_init_names_an_env_credential_without_any_of_its_characters(
+    runner, fake_home, monkeypatch,
+) -> None:
+    monkeypatch.setenv("NX_SERVICE_TOKEN", _SECRET)
+    result = runner.invoke(main, ["config", "init"], input="\n\n")
+    assert "NX_SERVICE_TOKEN" in result.output
+    assert _SECRET[:4] not in result.output and _SECRET[-4:] not in result.output
+
+
+def test_config_set_from_file_off_posix_reads_and_says_it_did_not_check(
+    runner, fake_home, tmp_path, monkeypatch,
+) -> None:
+    import nexus.commands.config_cmd as config_cmd
+
+    secret_file = tmp_path / "voyage.key"
+    secret_file.write_text(_SECRET)
+    secret_file.chmod(0o644)
+    monkeypatch.setattr(config_cmd, "_POSIX_MODES", False)
+    result = runner.invoke(main, ["config", "set", "voyage_api_key", "--from-file", str(secret_file)])
+    assert result.exit_code == 0, result.output
+    assert "not checked" in result.stderr
+    assert _read_config(fake_home)["credentials"]["voyage_api_key"] == _SECRET
+
+
 # ── get_credential() fallback ───────────────────────────────────────────────
 
 
@@ -442,7 +466,7 @@ def test_config_set_from_file_reads_a_private_file(runner, fake_home, tmp_path) 
 def test_config_set_from_file_refuses_a_group_or_world_readable_file(runner, fake_home, tmp_path) -> None:
     secret_file = tmp_path / "voyage.key"
     secret_file.write_text(_SECRET)
-    secret_file.chmod(0o644)
+    secret_file.chmod(0o640)
     result = runner.invoke(main, ["config", "set", "voyage_api_key", "--from-file", str(secret_file)])
     assert result.exit_code != 0
     assert "0600" in result.output or "chmod" in result.output
@@ -474,7 +498,18 @@ def test_config_set_stdin_refuses_an_empty_value(runner, fake_home) -> None:
 def test_config_set_secret_on_argv_points_at_stdin(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "set", "voyage_api_key", _SECRET])
     assert result.exit_code == 0, result.output
-    assert "--stdin" in result.output
+    # On stderr, so a caller capturing stdout gets only the "Set ..." line.
+    assert "--stdin" in result.stderr
+    assert "--stdin" not in result.stdout
+    assert _SECRET not in result.stderr
+
+
+def test_config_set_inline_empty_value_clears_without_a_hint(runner, fake_home) -> None:
+    # KEY= is the existing way to blank a credential; nothing secret was
+    # typed, so there is nothing to warn about.
+    result = runner.invoke(main, ["config", "set", "voyage_api_key="])
+    assert result.exit_code == 0, result.output
+    assert "--stdin" not in result.output
 
 
 def test_config_set_non_secret_on_argv_gets_no_hint(runner, fake_home) -> None:

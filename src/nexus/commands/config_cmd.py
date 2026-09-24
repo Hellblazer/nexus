@@ -69,20 +69,35 @@ def _is_secret(key: str) -> bool:
     return "." not in key and key not in NON_SECRET_CREDENTIALS
 
 
+#: Whether file permissions are POSIX mode bits, which ``--from-file`` checks.
+_POSIX_MODES: bool = os.name == "posix"
+
+
 def _read_private_file(path: Path) -> str:
     """Read a value file, refusing one other users can read (nexus-6fvwo).
 
     The point of ``--from-file`` is a credential that never becomes visible
-    to another process; a file group or others can read has already failed
+    to another process; a file group or others can reach has already failed
     that, so it is refused with the remedy rather than read.
+
+    The mode is checked on the open handle and the value read from that same
+    handle, so the file checked is the file read. POSIX only: Windows has no
+    mode bits to check, and its ACLs are not inspected.
     """
-    mode = path.stat().st_mode
-    if os.name == "posix" and mode & (stat.S_IRWXG | stat.S_IRWXO):
-        raise click.UsageError(
-            f"{path} is readable by group or others (mode {stat.S_IMODE(mode):04o}); "
-            f"a credential file must be 0600. Run: chmod 600 {path}"
-        )
-    return path.read_text()
+    with path.open(encoding="utf-8") as handle:
+        mode = os.fstat(handle.fileno()).st_mode
+        if not _POSIX_MODES:
+            click.echo(
+                f"Note: {path}'s permissions were not checked (no POSIX mode "
+                "bits on this platform); make sure only you can read it.",
+                err=True,
+            )
+        elif mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise click.UsageError(
+                f"{path} is accessible to group or others (mode {stat.S_IMODE(mode):04o}); "
+                f"a credential file must be 0600. Run: chmod 600 {path}"
+            )
+        return handle.read()
 
 
 @config_group.command("set")
@@ -134,7 +149,7 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
     else:
         set_credential(key, value.strip())
     click.echo(f"Set {key}  →  {_global_config_path()}")
-    if inline and _is_secret(key):
+    if inline and value.strip() and _is_secret(key):
         click.echo(
             f"Note: {key} was on the command line, where other processes can read "
             f"it. Next time: nx config set {key} --stdin (or --from-file PATH).",
@@ -276,7 +291,9 @@ def config_init() -> None:
         click.echo(_SEP)
         if existing_env:
             click.echo(f"{label}")
-            click.echo(f"  Already set via environment: {env_var}={_mask(existing_env)}")
+            # Named, not masked: the wizard's screen is shared and pasted, and
+            # a partial mask is how 8 characters leaked once (nexus-6fvwo).
+            click.echo(f"  Already set via environment: {env_var}")
             click.echo("  (skipping — unset the environment variable to override here)")
             continue
 

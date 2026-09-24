@@ -2667,7 +2667,7 @@ nx config init
 | Flag | Description |
 |------|-------------|
 | `--stdin` | Read the value from stdin, so it never appears in the process list. |
-| `--from-file PATH` | Read the value from a file. Refused unless the file is readable by you alone (mode `0600`). |
+| `--from-file PATH` | Read the value from a file. On POSIX it is refused unless only you can access it (mode `0600`, or stricter such as `0400`); on Windows the file's ACL is not checked, and `set` says so on stderr. |
 
 A secret given inline (`KEY VALUE` or `KEY=VALUE`) is visible to every process
 you run through `ps`; `set` still accepts it and prints a note pointing at

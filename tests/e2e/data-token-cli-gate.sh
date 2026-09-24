@@ -213,8 +213,8 @@ MINT_LOCKED_TOKEN="$(sed -n '/^Token (shown once/{n;p;}' "$WORK/issue.out")"
 [ -n "$MINT_LOCKED_TOKEN" ] || _fail "could not extract the issued mint-locked token"
 
 echo "── 4/10 nx config set mint_token / mint_tenant — masking assertions ──"
-_nx config set mint_token "$MINT_LOCKED_TOKEN" >"$LOGS/config-set-token.log" 2>&1 \
-    || _fail "config set mint_token failed"
+printf %s "$MINT_LOCKED_TOKEN" | _nx config set mint_token --stdin >"$LOGS/config-set-token.log" 2>&1 \
+    || _fail "config set mint_token --stdin failed (the token stays off argv, nexus-6fvwo)"
 _nx config set mint_tenant gate-dtok >"$LOGS/config-set-tenant.log" 2>&1 \
     || _fail "config set mint_tenant failed"
 if grep -qF "$MINT_LOCKED_TOKEN" "$LOGS/config-set-token.log"; then
