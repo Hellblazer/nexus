@@ -327,13 +327,57 @@ class TestScanTranscriptTail:
         assert declared == {}
         assert offset == size
 
+    def test_a_half_written_trailing_line_is_not_advanced_past(self, tmp_path):
+        """nexus-dgl8g follow-up 3 (coupled to the fingerprint fix):
+        Claude Code can fire Stop between writing a JSONL entry's bytes
+        and its trailing newline. The old ``fh.tell()``-after-the-loop
+        offset advanced past that half-written line even though it was
+        never parsed, so the REST of the same line, written moments
+        later, was never re-read -- an entry split across a Stop
+        boundary went permanently missing."""
+        transcript = tmp_path / "t.jsonl"
+        full_line = json.dumps(_bash_entry("bd close nexus-partial"))
+        half = len(full_line) // 2
+        transcript.write_text(full_line[:half])  # no trailing newline: incomplete
+
+        declared, offset = hook._scan_transcript_tail(str(transcript), 0)
+        assert declared == {}
+        assert offset == 0, "nothing complete yet -- must not advance at all"
+
+        with open(transcript, "a") as f:  # noqa: PTH123
+            f.write(full_line[half:] + "\n")  # complete the SAME line
+
+        declared2, offset2 = hook._scan_transcript_tail(str(transcript), offset)
+        assert declared2 == {"nexus-partial": False}
+        assert offset2 == len(full_line) + 1
+
+    def test_a_complete_line_before_a_partial_one_still_advances_to_it(self, tmp_path):
+        """The partial-line guard must only hold back the LAST line, not
+        regress the whole scan: a complete line followed by a partial one
+        still reports the complete line and its own correct offset."""
+        transcript = tmp_path / "t.jsonl"
+        complete_line = json.dumps(_bash_entry("bd close nexus-full"))
+        partial_line = json.dumps(_bash_entry("bd close nexus-half"))
+        half = len(partial_line) // 2
+        transcript.write_text(complete_line + "\n" + partial_line[:half])
+
+        declared, offset = hook._scan_transcript_tail(str(transcript), 0)
+        assert declared == {"nexus-full": False}
+        assert offset == len(complete_line) + 1
+
 
 # --- close-gate memoization state -------------------------------------------
 
 
 class TestCloseGateState:
     def test_round_trips(self, tmp_path):
-        state = {"offset": 42, "pending": {"nexus-a": True}, "resolved": {"nexus-b": "clean"}}
+        state = {
+            "transcript_path": "/tmp/t.jsonl",
+            "fingerprint": {"dev": 1, "ino": 2, "head_hash": "abc123"},
+            "offset": 42,
+            "pending": {"nexus-a": True},
+            "resolved": {"nexus-b": "clean"},
+        }
         hook._write_close_gate_state("s1", state)
         assert hook._read_close_gate_state("s1") == state
 
@@ -350,6 +394,67 @@ class TestCloseGateState:
         path = hook._close_gate_state_path("s1")
         path.write_text("not json")
         assert hook._read_close_gate_state("s1") == hook._empty_close_gate_state()
+
+    def test_a_malformed_fingerprint_reads_as_none_not_a_crash(self, tmp_path):
+        """A hand-edited or half-written state file must fail open on the
+        fingerprint field specifically, not just on the whole file."""
+        path = hook._close_gate_state_path("s1")
+        path.write_text(json.dumps({
+            "transcript_path": "/tmp/t.jsonl",
+            "fingerprint": {"dev": 1},  # missing ino/head_hash
+            "offset": 5,
+            "pending": {},
+            "resolved": {},
+        }))
+        state = hook._read_close_gate_state("s1")
+        assert state["fingerprint"] is None
+        assert state["offset"] == 5  # the rest of the file is still trusted
+
+
+class TestTranscriptFingerprint:
+    def test_same_file_same_fingerprint(self, tmp_path):
+        path = tmp_path / "t.jsonl"
+        path.write_text("line one\n")
+        fp1 = hook._transcript_fingerprint(str(path))
+        fp2 = hook._transcript_fingerprint(str(path))
+        assert fp1 is not None
+        assert fp1 == fp2
+
+    def test_replacement_file_same_path_different_fingerprint(self, tmp_path):
+        """A NEW file written to the SAME path (rotation, /resume onto a
+        different saved state) gets a new inode -- dev/ino differ even
+        though the path is identical."""
+        path = tmp_path / "t.jsonl"
+        path.write_text("original content\n")
+        fp1 = hook._transcript_fingerprint(str(path))
+
+        path.unlink()
+        path.write_text("entirely different content\n")
+        fp2 = hook._transcript_fingerprint(str(path))
+
+        assert fp1 is not None and fp2 is not None
+        assert fp1 != fp2
+
+    def test_in_place_append_keeps_dev_ino_but_head_hash_is_stable(self, tmp_path):
+        """An ordinary append (the common case, every idle-then-growing
+        Stop turn) must NOT look like a replacement: dev/ino AND the
+        first-256-bytes hash all stay the same, since the head of the
+        file did not change. The initial content must already EXCEED the
+        fingerprint's head-byte window (:data:`hook._FINGERPRINT_HEAD_BYTES`)
+        for this to hold -- appending to a file SMALLER than that window
+        changes the hash too, since the "head" is still the whole file;
+        that shape is real transcripts (which cross the window almost
+        immediately) rather than this test's synthetic content."""
+        path = tmp_path / "t.jsonl"
+        path.write_text("x" * (hook._FINGERPRINT_HEAD_BYTES + 100) + "\n")
+        fp1 = hook._transcript_fingerprint(str(path))
+        with open(path, "a") as f:  # noqa: PTH123
+            f.write("line two\n")
+        fp2 = hook._transcript_fingerprint(str(path))
+        assert fp1 == fp2
+
+    def test_none_for_missing_file(self, tmp_path):
+        assert hook._transcript_fingerprint(str(tmp_path / "nope.jsonl")) is None
 
 
 # --- _undeclared_close_warning (the integrated backstop) ------------------
@@ -661,6 +766,167 @@ class TestUndeclaredCloseWarning:
         state = hook._read_close_gate_state("s1")
         assert state["resolved"] == {"nexus-bad": "undeclared"}
         assert state["pending"] == {}
+
+    # --- SHIP-BLOCKER: transcript replacement/shrink (T2 nexus/verification-nexus-dgl8g-close-gate-backstop-46139ed9d-shrink-defect) ---
+
+    def test_transcript_shrink_repro_is_detected_not_silently_dark(self, tmp_path, isolated_path, monkeypatch):
+        """The exact live repro: a transcript starts past 5000 bytes with
+        nothing to report, then gets REPLACED (same path) by a much
+        smaller file carrying an undeclared close. Before the fingerprint
+        fix, `size > offset` stayed false forever once the persisted
+        offset (~5000+) exceeded the replacement's size, and three
+        subsequent calls all returned '' -- reproduced here as the same
+        shape (an old file, then a short replacement, then three calls)."""
+        rows = json.dumps([_bd_row("nexus-abc123", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows))
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {b: "missing" for b in ids}
+            },
+        )
+
+        transcript_path = tmp_path / "shrink.jsonl"
+        lines = [
+            json.dumps({"type": "mode", "mode": "normal"}),
+            json.dumps({"type": "file-history-snapshot", "timestamp": "2026-09-24T10:00:00Z"}),
+        ]
+        padding_line = json.dumps({"type": "user", "message": {"content": "x" * 200}})
+        while sum(len(entry) + 1 for entry in lines) < 5001:
+            lines.append(padding_line)
+        transcript_path.write_text("\n".join(lines) + "\n")
+        assert transcript_path.stat().st_size > 5000
+
+        payload = {"session_id": "s1", "transcript_path": str(transcript_path)}
+        assert hook._undeclared_close_warning(payload) == ""
+        assert hook._read_close_gate_state("s1")["offset"] > 5000
+
+        replacement = "\n".join([
+            json.dumps({"type": "mode", "mode": "normal"}),
+            json.dumps({"type": "file-history-snapshot", "timestamp": "2026-09-24T10:00:00Z"}),
+            json.dumps(_bash_entry("bd close nexus-abc123 --reason done")),
+        ]) + "\n"
+        transcript_path.write_text(replacement)
+        assert transcript_path.stat().st_size < 5001
+
+        warnings = [hook._undeclared_close_warning(payload) for _ in range(3)]
+        assert any("nexus-abc123" in w for w in warnings), (
+            f"the replacement file's undeclared close must be detected; got {warnings!r}"
+        )
+
+    def test_content_swap_without_shrinking_is_caught_by_fingerprint(self, tmp_path, isolated_path, monkeypatch):
+        """Belt-and-suspenders proof for the OTHER trigger: a same-path
+        replacement that is NOT smaller than the persisted offset (so
+        `size < offset` never fires) must still be caught -- by the
+        dev/ino/head-hash fingerprint disagreeing, independent of size."""
+        rows = json.dumps([_bd_row("nexus-swap", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows))
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {b: "missing" for b in ids}
+            },
+        )
+        transcript_path = tmp_path / "swap.jsonl"
+        original = "\n".join([
+            json.dumps({"type": "mode", "mode": "normal", "marker": "ORIGINAL"}),
+            json.dumps({"type": "file-history-snapshot", "timestamp": "2026-09-24T10:00:00Z"}),
+        ]) + "\n"
+        transcript_path.write_text(original)
+        payload = {"session_id": "s1", "transcript_path": str(transcript_path)}
+        assert hook._undeclared_close_warning(payload) == ""
+        offset_after_first = hook._read_close_gate_state("s1")["offset"]
+
+        replacement = "\n".join([
+            json.dumps({"type": "mode", "mode": "normal", "marker": "REPLACED"}),
+            json.dumps({"type": "file-history-snapshot", "timestamp": "2026-09-24T10:00:00Z"}),
+            json.dumps(_bash_entry("bd close nexus-swap --reason done")),
+        ]) + "\n"
+        # Pad, if needed, so the replacement is not smaller than the old
+        # offset -- isolates the fingerprint path from the size<offset one.
+        while len(replacement.encode("utf-8")) <= offset_after_first:
+            replacement += json.dumps({"type": "user", "pad": "x" * 50}) + "\n"
+        transcript_path.write_text(replacement)
+        assert len(replacement.encode("utf-8")) > offset_after_first
+
+        warning = hook._undeclared_close_warning(payload)
+        assert "nexus-swap" in warning
+
+    def test_transcript_path_change_also_resets_and_detects(self, tmp_path, isolated_path, monkeypatch):
+        """A /resume onto a DIFFERENT transcript file (a new path, same
+        stable session_id) must reset and rescan too, not just a
+        same-path replacement."""
+        rows = json.dumps([_bd_row("nexus-newpath", "2026-09-24T10:30:00Z")])
+        isolated_path(_fake_bd(tmp_path, rows))
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: {
+                "t1_reachable": True, "status": {b: "missing" for b in ids}
+            },
+        )
+        first_payload = {
+            "session_id": "s1",
+            "transcript_path": _write_transcript(tmp_path, "2026-09-24T10:00:00Z", name="first.jsonl"),
+        }
+        assert hook._undeclared_close_warning(first_payload) == ""
+
+        second_payload = {
+            "session_id": "s1",
+            "transcript_path": _write_transcript(
+                tmp_path, "2026-09-24T10:00:00Z",
+                bash_commands=("bd close nexus-newpath",), name="second.jsonl",
+            ),
+        }
+        warning = hook._undeclared_close_warning(second_payload)
+        assert "nexus-newpath" in warning
+
+    def test_already_resolved_id_is_not_reverified_or_reported_twice_across_a_reset(
+        self, tmp_path, isolated_path, monkeypatch
+    ):
+        """A reset drops `pending` but KEEPS `resolved` -- an id already
+        verified before the transcript was replaced must not be
+        re-verified (no second bd/T1 round trip) and must not appear
+        twice."""
+        rows = json.dumps([
+            _bd_row("nexus-old", "2026-09-24T10:15:00Z"),
+            _bd_row("nexus-fresh", "2026-09-24T10:45:00Z"),
+        ])
+        isolated_path(_fake_bd(tmp_path, rows))
+        calls = []
+        monkeypatch.setattr(
+            "nexus.hooks.pre_close_verification._coverage",
+            lambda ids, session_id="", deadline_seconds=None: calls.append(sorted(ids)) or {
+                "t1_reachable": True, "status": {b: "missing" for b in ids}
+            },
+        )
+        transcript_path = tmp_path / "reset.jsonl"
+        transcript_path.write_text(
+            "\n".join([
+                json.dumps({"type": "mode", "mode": "normal"}),
+                json.dumps({"type": "file-history-snapshot", "timestamp": "2026-09-24T10:00:00Z"}),
+                json.dumps(_bash_entry("bd close nexus-old")),
+            ]) + "\n"
+        )
+        payload = {"session_id": "s1", "transcript_path": str(transcript_path)}
+        first = hook._undeclared_close_warning(payload)
+        assert "nexus-old" in first
+        assert calls == [["nexus-old"]]
+
+        # Replace (same path) with a file that does NOT mention nexus-old
+        # at all, but does declare a genuinely new close -- content
+        # differs early enough to change the head-hash fingerprint
+        # regardless of the exact byte-size relationship.
+        transcript_path.write_text(
+            "\n".join([
+                json.dumps({"type": "mode", "mode": "normal"}),
+                json.dumps({"type": "file-history-snapshot", "timestamp": "2026-09-24T10:00:00Z"}),
+                json.dumps(_bash_entry("bd close nexus-fresh")),
+            ]) + "\n"
+        )
+        second = hook._undeclared_close_warning(payload)
+        assert "nexus-old" in second  # still reported, from cache
+        assert "nexus-fresh" in second  # the new one, freshly verified
+        assert calls == [["nexus-old"], ["nexus-fresh"]]  # nexus-old never re-verified
 
 
 # --- run() integration: still only ever approves ---------------------------

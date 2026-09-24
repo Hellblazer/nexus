@@ -42,6 +42,7 @@ file that stopped being written, not data that stops being saved.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -65,6 +66,17 @@ __all__ = ["run"]
 #: tight fit.
 _TRANSCRIPT_SCAN_LINES = 200
 _TRANSCRIPT_SCAN_BYTES = 65536
+
+#: How many leading bytes of the transcript this hashes as part of its
+#: content fingerprint (nexus-dgl8g SHIP-BLOCKER fix, T2
+#: nexus/verification-nexus-dgl8g-close-gate-backstop-46139ed9d-shrink-defect).
+#: See :func:`_transcript_fingerprint`'s own docstring for what this
+#: guards against; 256 bytes is enough to distinguish any two transcripts
+#: that do not share an identical opening (in practice: a different
+#: session, or the same session /resumed onto an unrelated saved state)
+#: without reading meaningfully more than :func:`_session_start_dt`
+#: already does on every call.
+_FINGERPRINT_HEAD_BYTES = 256
 
 #: The reconcile exit code that means "the ledger lists background agents
 #: the harness no longer tracks". Every other code, and every failure path,
@@ -413,12 +425,38 @@ def _close_gate_state_path(session_id: str) -> Path | None:
 
 #: The state a fresh session (or a path-unsafe/corrupt one) starts from.
 #: A fresh dict every call -- callers mutate their own copy.
+#: ``transcript_path``/``fingerprint`` (nexus-dgl8g SHIP-BLOCKER fix) are
+#: what the transcript was IDENTIFIED as the last time this ran -- see
+#: :func:`_transcript_fingerprint`. Empty/``None`` on a fresh session,
+#: which is correct: there is nothing yet to detect a replacement AGAINST.
 def _empty_close_gate_state() -> dict:
-    return {"offset": 0, "pending": {}, "resolved": {}}
+    return {
+        "transcript_path": "",
+        "fingerprint": None,
+        "offset": 0,
+        "pending": {},
+        "resolved": {},
+    }
+
+
+def _valid_fingerprint(value: object) -> dict | None:
+    """*value* if it has the exact shape :func:`_transcript_fingerprint`
+    produces, else ``None`` -- a corrupt or hand-edited state file must
+    not crash the comparison, only fail it open (treated the same as "no
+    fingerprint yet", never as a forced reset)."""
+    if (
+        isinstance(value, dict)
+        and isinstance(value.get("dev"), int)
+        and isinstance(value.get("ino"), int)
+        and isinstance(value.get("head_hash"), str)
+    ):
+        return {"dev": value["dev"], "ino": value["ino"], "head_hash": value["head_hash"]}
+    return None
 
 
 def _read_close_gate_state(session_id: str) -> dict:
-    """This session's memoized offset/pending/resolved state, or empty.
+    """This session's memoized transcript identity + offset/pending/resolved
+    state, or empty.
 
     Fail-open on every axis (missing file, corrupt JSON, wrong shape):
     the WORST this can do wrong is re-scan-from-zero and re-verify
@@ -438,7 +476,10 @@ def _read_close_gate_state(session_id: str) -> dict:
     offset = data.get("offset")
     pending = data.get("pending")
     resolved = data.get("resolved")
+    transcript_path = data.get("transcript_path")
     return {
+        "transcript_path": transcript_path if isinstance(transcript_path, str) else "",
+        "fingerprint": _valid_fingerprint(data.get("fingerprint")),
         "offset": offset if isinstance(offset, int) and offset >= 0 else 0,
         "pending": dict(pending) if isinstance(pending, dict) else {},
         "resolved": dict(resolved) if isinstance(resolved, dict) else {},
@@ -462,6 +503,54 @@ def _write_close_gate_state(session_id: str, state: dict) -> None:
         tmp.replace(path)
     except OSError:
         pass
+
+
+def _transcript_fingerprint(transcript_path: str) -> dict | None:
+    """``(dev, ino, head-bytes hash)`` -- the transcript's CONTENT
+    identity, not just its path or size.
+
+    SHIP-BLOCKER, live-repro'd (T2
+    nexus/verification-nexus-dgl8g-close-gate-backstop-46139ed9d-shrink-defect):
+    the persisted ``offset`` was compared only against the CURRENT file's
+    size (``size > offset``) to decide whether there was anything new to
+    scan. A transcript at a STABLE session_id can be REPLACED --
+    rotation, ``/resume`` onto a shorter saved state, truncation -- while
+    the persisted offset stays wherever it was pointed at the OLD file.
+    If the replacement is smaller than the old offset, ``size > offset``
+    is false FOREVER: the backstop goes silently dark for the rest of the
+    session, no warning, no error, nothing. Reproduced exactly as
+    reported: a 5001-byte transcript, then replaced by a 147-byte file
+    containing an undeclared ``bd close nexus-abc123``; three subsequent
+    calls all returned ``''``.
+
+    ``dev``+``ino`` changes on any real file replacement (a new inode,
+    even reusing the same path) and is cheap (one ``stat``, already
+    paid). The head-bytes hash is the second, independent signal: it
+    catches the pathological case where an inode gets REUSED (some
+    filesystems recycle aggressively under churn) or where inode
+    identity is not trustworthy at all on some platform this hook runs
+    on -- content identity is the fallback inode identity is itself only
+    a PROXY for. Deliberately NOT mtime: a legitimate in-place APPEND
+    also changes mtime, so mtime alone cannot distinguish "grew" from
+    "replaced" the way dev/ino/content-prefix can.
+
+    Returns ``None`` on any stat/read failure -- fail-open, matching the
+    rest of this module. A fingerprint that could not be computed THIS
+    turn must not itself force a reset (see the caller, which keeps the
+    last known-good fingerprint rather than overwriting it with
+    ``None`` on a transient failure).
+    """
+    try:
+        st = os.stat(transcript_path)  # noqa: PTH116 — carried: a plain path from the payload, consistent with this module's other os-level reads
+        with open(transcript_path, "rb") as fh:  # noqa: PTH123 — carried: see the other binary opens in this module
+            head = fh.read(_FINGERPRINT_HEAD_BYTES)
+    except OSError:
+        return None
+    return {
+        "dev": st.st_dev,
+        "ino": st.st_ino,
+        "head_hash": hashlib.sha256(head).hexdigest(),
+    }
 
 
 def _scan_transcript_tail(
@@ -495,6 +584,20 @@ def _scan_transcript_tail(
     with ``new_declarations`` empty) -- the caller falls back to an
     UNSCOPED report only on the former, never treats the latter as
     anything but "nothing new to check".
+
+    ADVANCES *new_offset* ONLY PAST COMPLETE LINES (nexus-dgl8g follow-up
+    3, coupled to the fingerprint fix above): Claude Code can write a
+    JSONL entry to the transcript and fire Stop before that entry's
+    trailing newline lands -- a half-written line at exactly the moment
+    this reads it. The naive version (``fh.tell()`` after the loop)
+    advanced PAST that partial line's bytes even though it was never
+    parsed as JSON (a bare ``json.loads`` failure on a truncated line is
+    silently skipped, same as any other unparseable line), so the
+    REMAINING bytes of that same line, written moments later, would
+    never be re-read -- an entry split exactly across a Stop boundary is
+    permanently invisible. A line with no trailing ``\n`` at EOF is
+    therefore NOT advanced past at all; it is re-read, whole, once
+    complete, on a later call.
     """
     from nexus.hooks.pre_close_verification import _bd_verbs, _bead_ids  # noqa: PLC0415 — deferred: see the other spawns in this module
 
@@ -502,7 +605,13 @@ def _scan_transcript_tail(
     try:
         with open(transcript_path, "rb") as fh:  # noqa: PTH123 — carried: binary, see the byte-offset note above
             fh.seek(start_offset)
+            complete_offset = start_offset
             for raw in fh:
+                if not raw.endswith(b"\n"):
+                    # Incomplete trailing line (no terminator yet): do
+                    # not advance past it. See the docstring above.
+                    break
+                complete_offset += len(raw)
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line or '"Bash"' not in line:
                     continue
@@ -533,7 +642,7 @@ def _scan_transcript_tail(
                     is_override = bool(verbs.get("inline_override"))
                     for bid in _bead_ids(command):
                         declarations[bid] = declarations.get(bid, False) or is_override
-            new_offset = fh.tell()
+            new_offset = complete_offset
     except OSError:
         return None
     return declarations, new_offset
@@ -710,6 +819,8 @@ def _undeclared_close_warning(payload: dict) -> str:
     offset = state["offset"]
     pending = state["pending"]
     resolved = state["resolved"]
+    stored_transcript_path = state["transcript_path"]
+    stored_fingerprint = state["fingerprint"]
 
     try:
         size = os.path.getsize(transcript_path)
@@ -751,6 +862,36 @@ def _undeclared_close_warning(payload: dict) -> str:
                 )
         return fallback + _render_resolved_warning(resolved)
 
+    # SHIP-BLOCKER fix: a stable session_id's transcript can be REPLACED
+    # (rotation, /resume onto a shorter saved state, in-place truncation)
+    # while `offset` still points at the OLD file -- see
+    # :func:`_transcript_fingerprint`'s docstring for the live repro.
+    # Three INDEPENDENT triggers, any one of which invalidates the
+    # persisted read position: the path itself changed; the current
+    # fingerprint (dev/ino/head-hash) disagrees with the stored one; or
+    # size has dropped below offset even if dev/ino/head somehow did not
+    # change (an in-place truncate at the END of the same inode leaves
+    # the HEAD bytes, and therefore the fingerprint, unchanged). `pending`
+    # is dropped on a reset (it may name ids from content that is no
+    # longer there; a full rescan below rediscovers whatever is still
+    # present) -- `resolved` is KEPT, so an id already verified is never
+    # re-verified or re-reported as new.
+    current_fingerprint = _transcript_fingerprint(transcript_path)
+    reset = False
+    if stored_transcript_path and stored_transcript_path != transcript_path:
+        reset = True
+    elif (
+        stored_fingerprint is not None
+        and current_fingerprint is not None
+        and current_fingerprint != stored_fingerprint
+    ):
+        reset = True
+    elif size < offset:
+        reset = True
+    if reset:
+        offset = 0
+        pending = {}
+
     transient_note = ""
     if size > offset:
         tail = _scan_transcript_tail(transcript_path, offset)
@@ -768,7 +909,18 @@ def _undeclared_close_warning(payload: dict) -> str:
         transient_note = _resolve_pending(session_id, transcript_path, pending, resolved)
 
     _write_close_gate_state(
-        session_id, {"offset": offset, "pending": pending, "resolved": resolved}
+        session_id,
+        {
+            # A failed fingerprint computation THIS turn keeps the last
+            # known-good one rather than overwriting it with None --
+            # a transient stat/read hiccup must not blind the NEXT
+            # turn's comparison (see _transcript_fingerprint's docstring).
+            "transcript_path": transcript_path,
+            "fingerprint": current_fingerprint if current_fingerprint is not None else stored_fingerprint,
+            "offset": offset,
+            "pending": pending,
+            "resolved": resolved,
+        },
     )
     return transient_note + _render_resolved_warning(resolved)
 
