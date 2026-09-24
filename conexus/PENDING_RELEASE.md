@@ -41,17 +41,9 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.60.0)
+## Awaiting the next release or plugin cut (pinned: v7.61.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/skills/mailbox/SKILL.md`:
-  bead: nexus-galkv.24 — RDR-208 Phase 3: the skill's address/template rules
-  and its cross-instance request/ack pattern move from `address_kind:
-  instance` to `address_kind: session`, ahead of (and independent of) the
-  engine half retiring the value outright. The v7.60.0 skill still told
-  sessions to send `address_kind: instance`; this ships that fix on its own
-  so it can land in a plugin cut before the engine change does.
 
 ## Deferred to the next client release
 
