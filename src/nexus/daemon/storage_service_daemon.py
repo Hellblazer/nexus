@@ -1539,7 +1539,9 @@ class StorageServiceSupervisor:
 
     def _kill_after_readiness_failure(self, proc: subprocess.Popen[bytes]) -> None:
         """SIGTERM + grace window + SIGKILL, matching ``_stop_service`` (not
-        a bare SIGKILL) so the service can flush before it dies. Best-effort
+        a bare SIGKILL) so the service can flush before it dies (POSIX: the
+        supervisor does not run on native Windows, where SIGTERM would be
+        TerminateProcess; nexus-6y4e0). Best-effort
         — a signal failure (process already gone) must never mask the
         ``StorageServiceStartError`` this precedes.
 

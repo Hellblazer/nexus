@@ -30,21 +30,71 @@ _FORBIDDEN: frozenset[tuple[str, str]] = frozenset(
 #: module path (relative to src/nexus) -> the guard that makes it safe.
 _ALLOWED: dict[str, str] = {
     "util/process_group.py": "the helper itself; every use is behind getattr(os, 'killpg', None)",
-    "bounded_subprocess.py": "_kill_tree returns before any reference when getattr(os, 'killpg', None) is None",
+    "bounded_subprocess.py": "kill_child_and_descendants returns before any reference when getattr(os, 'killpg', None) is None",
     "pdeathsig.py": "Linux-only: the prctl call is gated on sys.platform",
 }
 
 
 def _references(tree: ast.AST) -> list[tuple[int, str]]:
+    """Every reference to a forbidden primitive, however it was imported.
+
+    An attribute walk that assumes the module is bound as ``os``/``signal``
+    misses ``import signal as s`` and ``from signal import SIGKILL``, the
+    blind spot this project has already paid for once with an AST lint. So
+    the names each import binds are collected first: a module alias
+    (``import os as o``) maps to its module, and a directly imported
+    forbidden name (``from os import killpg as k``) is itself a reference.
+    ``getattr(module, "NAME")`` with a literal name counts too, unless it
+    passes a default, which is exactly the guarded form.
+    """
+    module_names: dict[str, str] = {"os": "os", "signal": "signal"}
     found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("os", "signal"):
+                    module_names[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module in ("os", "signal"):
+            for alias in node.names:
+                if (node.module, alias.name) in _FORBIDDEN:
+                    found.append((node.lineno, f"from {node.module} import {alias.name}"))
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
-            and (node.value.id, node.attr) in _FORBIDDEN
+            and (module_names.get(node.value.id), node.attr) in _FORBIDDEN
         ):
             found.append((node.lineno, f"{node.value.id}.{node.attr}"))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) == 2
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Constant)
+            and (module_names.get(node.args[0].id), node.args[1].value) in _FORBIDDEN
+        ):
+            found.append((node.lineno, f"getattr({node.args[0].id}, {node.args[1].value!r})"))
     return found
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import signal as s\ns.SIGKILL\n",
+        "from signal import SIGKILL\n",
+        "from os import killpg as k\n",
+        "import os as o\no.getpgid(1)\n",
+        "import signal\ngetattr(signal, 'SIGKILL')\n",
+    ],
+    ids=["module-alias", "from-import", "from-import-aliased", "os-alias", "getattr-no-default"],
+)
+def test_census_sees_aliased_and_indirect_forms(source: str) -> None:
+    assert _references(ast.parse(source)), source
+
+
+def test_census_passes_the_guarded_getattr_form() -> None:
+    assert _references(ast.parse("import signal\ngetattr(signal, 'SIGKILL', 15)\n")) == []
 
 
 def test_no_bare_posix_only_kill_primitives() -> None:

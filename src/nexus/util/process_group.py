@@ -86,6 +86,14 @@ def safe_killpg(
        itself with ``os.kill``. The reach is weaker, one process instead of
        its tree, and ``True`` then means that process was signalled.
 
+    ON WINDOWS THERE IS NO GRACEFUL SIGNAL. ``os.kill`` with anything but a
+    console CTRL event is TerminateProcess, so a caller's ``signal.SIGTERM``
+    meant as "stop, then escalate" is the hard kill and its grace window is
+    gone. That is still better than the alternative: refusing would return
+    ``False``, which callers read as "already gone". A real graceful stop
+    there needs CTRL_BREAK_EVENT to a child spawned with
+    CREATE_NEW_PROCESS_GROUP, which is nexus-6y4e0's design question.
+
     The helper is intentionally *not* async: every call site is already
     synchronous (a subprocess-cleanup branch inside an ``except`` or
     ``finally``) and adding awaitability would require every caller to
@@ -113,6 +121,7 @@ def safe_killpg(
         return False
     killpg = getattr(os, "killpg", None)
     if killpg is None:
+        # Windows: one process, and any sig is TerminateProcess (docstring).
         try:
             os.kill(pid, sig)
             return True

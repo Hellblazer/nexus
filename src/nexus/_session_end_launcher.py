@@ -233,12 +233,13 @@ def _spawn_detached_cleanup() -> bool:
     without knowing. The qwentescence check on nexus-34f7r settles it.
     """
     import subprocess  # noqa: PLC0415 — deferred: off the POSIX pre-fork path (module docstring)
+    import warnings  # noqa: PLC0415 — deferred with subprocess, for the same reason
 
     argv = [sys.executable, "-c", _DETACHED_CHILD_CODE]
     base = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
     for flags in (base | _CREATE_BREAKAWAY_FROM_JOB, base):
         try:
-            subprocess.Popen(
+            child = subprocess.Popen(
                 argv,
                 creationflags=flags,
                 stdin=subprocess.DEVNULL,
@@ -248,6 +249,12 @@ def _spawn_detached_cleanup() -> bool:
             )
         except (OSError, ValueError):
             continue
+        # The child is deliberately never waited on. Dropping the handle
+        # here makes Popen.__del__ print "subprocess N is still running" as
+        # a ResourceWarning on the hook's stderr, so drop it quietly.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            del child
         return True
     return False
 

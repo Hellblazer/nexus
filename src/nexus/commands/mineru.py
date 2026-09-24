@@ -222,6 +222,9 @@ def _stop_under_election() -> None:
     # killable pgid.
     # Both signals go through safe_killpg for mock-guard + error-swallow
     # consistency with every other subprocess cleanup site.
+    # On Windows neither half holds: there is no group, so only the server
+    # process is reached, and its SIGTERM is already TerminateProcess, so
+    # there is no grace window before the escalation (nexus-6y4e0).
     from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     if not safe_killpg(pid, signal.SIGTERM):

@@ -2413,6 +2413,8 @@ class PDFExtractor:
                 # across every subprocess cleanup site in the codebase.
                 from nexus.util.process_group import safe_killpg, safe_killpg_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+                # On Windows the group sweep refuses and only the worker
+                # itself is killed; its pool children survive (nexus-6y4e0).
                 safe_killpg(proc)
                 safe_killpg_group(worker_pgid)
 
@@ -2436,7 +2438,7 @@ class PDFExtractor:
                 # breach. The SIGKILL-only mapping would miss (2) and (3) — the
                 # gate finding that motivated this classification.
                 is_oom = (
-                    returncode == -KILL_SIGNAL
+                    returncode == -KILL_SIGNAL  # POSIX only: Windows exit codes are never negative
                     or returncode == _MINERU_OOM_EXIT
                     or self._mineru_ceiling_applied
                 )
