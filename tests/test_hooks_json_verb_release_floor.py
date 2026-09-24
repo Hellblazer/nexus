@@ -251,6 +251,93 @@ def test_hooks_json_extraction_is_not_vacuous() -> None:
     )
 
 
+# ── Positive controls (mutation-verify) ─────────────────────────────────────
+#
+# The tests above prove the pipeline finds SOMETHING; they do not prove it
+# discriminates a bad manifest from a clean one -- a detector that always
+# reports zero offenders passes every assertion above just as well as a
+# working one. These feed the REAL extractor + resolution logic a
+# deliberately broken manifest via `_nx_hook_verbs_in_hooks_json`'s `path`
+# parameter (critique on 69b6cac76/cfe9c923c) and require the offender to
+# actually be flagged.
+
+
+def test_mutation_a_synthetic_unregistered_verb_is_detected(tmp_path: Path) -> None:
+    """A verb absent from EVERY VERB_TABLE this module will ever resolve to
+    (not just the previous-released tag's) -- the simplest possible bad
+    manifest."""
+    tag = _previous_released_tag()
+    verb_table = _verb_table_at_tag(tag)
+    made_up_verb = "totally-made-up-verb-nexus-t9klx-followup"
+    assert made_up_verb not in verb_table, "fixture collided with a real verb -- pick another name"
+
+    synthetic = {
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "nx-hook", "args": [made_up_verb]}]}
+            ]
+        }
+    }
+    perturbed = tmp_path / "hooks.json"
+    perturbed.write_text(json.dumps(synthetic))
+
+    invocations = _nx_hook_verbs_in_hooks_json(perturbed)
+    assert invocations == [(made_up_verb, f"nx-hook {made_up_verb}")], (
+        f"extractor found {invocations!r} in the synthetic manifest, expected "
+        f"exactly one invocation of {made_up_verb!r} -- the extraction itself "
+        "is broken, before offender-detection even runs"
+    )
+    offenders = [(verb, line) for verb, line in invocations if verb not in verb_table]
+    assert offenders, (
+        "the synthetic unregistered verb was NOT flagged as an offender -- "
+        "the resolution/comparison logic is broken, not merely the extractor"
+    )
+
+
+def test_mutation_a_verb_new_on_head_but_absent_from_v7_57_0_is_detected(tmp_path: Path) -> None:
+    """The EXACT shape nexus-t9klx actually shipped, not a stand-in for it:
+    a verb this dev tree's own VERB_TABLE registers -- so
+    ``tests/test_release_artifact_verb_rot.py``'s live-tree check would
+    call it perfectly fine -- but the PREVIOUS RELEASED tag does not. Uses
+    ``behaviour-census``, one of the seven real offenders that motivated
+    this module: registered on HEAD, absent from v7.57.0. If this verb ever
+    stops being newer than the resolved floor (once a release ships that
+    includes it), the asserts below say so by name rather than passing
+    vacuously.
+    """
+    from nexus._hook_runtime.entry import VERB_TABLE as head_verb_table  # noqa: PLC0415
+
+    verb = "behaviour-census"
+    assert verb in head_verb_table, (
+        f"{verb!r} is no longer registered on HEAD -- pick a still-current "
+        "example of a verb newer than the previous released tag."
+    )
+    tag = _previous_released_tag()
+    verb_table = _verb_table_at_tag(tag)
+    assert verb not in verb_table, (
+        f"{verb!r} is now registered in {tag}'s VERB_TABLE too -- this test's "
+        "premise (a verb newer than the previous release) no longer holds; "
+        "pick a different verb or retire this test."
+    )
+
+    synthetic = {
+        "hooks": {
+            "UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": "nx-hook", "args": [verb]}]}
+            ]
+        }
+    }
+    perturbed = tmp_path / "hooks.json"
+    perturbed.write_text(json.dumps(synthetic))
+
+    invocations = _nx_hook_verbs_in_hooks_json(perturbed)
+    offenders = [(v, line) for v, line in invocations if v not in verb_table]
+    assert offenders and offenders[0][0] == verb, (
+        f"a verb registered on HEAD but absent from {tag} was not flagged -- "
+        "exactly the nexus-t9klx defect shape this module exists to catch"
+    )
+
+
 # ── The guard itself ─────────────────────────────────────────────────────────
 
 
@@ -283,8 +370,14 @@ def test_hooks_json_nx_hook_verbs_resolve_in_the_previous_released_wheel() -> No
         f"everywhere nx CLI):\n"
         + "\n".join(f"  {verb!r}: {line}" for verb, line in offenders)
         + f"\n\nA session on the {tag} CLI with this plugin pinned would see "
-        "nx-hook exit on every one of these hook events until it self-upgrades "
-        "via the version-lockstep hook -- which cannot happen if the lockstep "
-        "hook itself is one of the offenders (nexus-t9klx, the 7.58.0 release "
-        "blocker this test exists to catch before the NEXT one repeats it)."
+        "nx-hook SILENTLY NO-OP on every one of these hook events (exit 0 -- or "
+        "exit 70, a diagnosable non-zero, for a ledger-shaped verb whose name "
+        "starts with 'expectations_') until it self-upgrades via the "
+        "version-lockstep hook, which cannot happen if the lockstep hook itself "
+        "is one of the offenders. For a DECIDING gate among them "
+        "(pre-close-verification, phase-review-close-gate), 'silently no-op' "
+        "means the gate DOES NOT RUN AT ALL and the action it would have gated "
+        "is ALLOWED -- not merely delayed or degraded (nexus-t9klx, the 7.58.0 "
+        "release blocker this test exists to catch before the NEXT one repeats "
+        "it)."
     )

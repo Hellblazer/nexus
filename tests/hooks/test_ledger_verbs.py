@@ -380,13 +380,22 @@ class TestArgumentHandling:
         assert "payload_json" in r.stderr
 
     def test_an_unknown_verb_is_refused_by_the_entry_point(self, tmp_path):
-        """Unknown (not missing) verbs fail OPEN, exit 0 -- nexus-t9klx, the
+        """A NON-ledger unknown verb fails OPEN, exit 0 -- nexus-t9klx, the
         7.58.0 release blocker: a plugin bump can name a verb this CLI has
         not registered yet, and exiting nonzero there blocks every prompt
-        for the whole session with no self-heal path. Still diagnosable on
-        stderr, which is what this test actually pins."""
+        for the whole session with no self-heal path.
+
+        This particular verb, ``expectations_nonsense``, is LEDGER-SHAPED
+        (starts with ``expectations_``), which changes the exit code: a
+        ledger verb's exit code IS its contract, and 0 means "clean" in
+        that vocabulary, so an unknown ledger verb must not exit 0 --
+        that would read as a clean audit that examined nothing (code
+        review on 69b6cac76, and this test's name predates that finding by
+        one edit -- ``test_unknown_non_ledger_verb_...`` in
+        test_nx_hook_entry.py covers the exit-0 path this test's docstring
+        used to describe)."""
         r = _nx_hook("expectations_nonsense", "sess", state=tmp_path)
-        assert r.returncode == 0
+        assert r.returncode == 70
         assert "unknown verb" in r.stderr
 
 
