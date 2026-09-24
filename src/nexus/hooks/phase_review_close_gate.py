@@ -63,6 +63,7 @@ from typing import Any
 
 from nexus._hook_runtime._io import HookResult, configure_hook_logging
 from nexus.hooks import _routing_lib as _lib
+from nexus.hooks.pre_close_verification import iter_shell_boundaries
 
 RULE_NAME = "phase_review_close_requires_gate"
 
@@ -108,10 +109,13 @@ _BD_UPDATE_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: Shared with the round-2 bound fix in `body()`: the first shell
-#: boundary at or after a match's end marks where THAT bd invocation's
-#: own argument list ends.
-_SHELL_BOUNDARY_RE = re.compile(r"&&|\|\||;|\s\|\s|\bthen\b|\bdo\b")
+#: Round 3 (nexus-2b24o): the bound fix in `body()` below now finds this
+#: boundary via `pre_close_verification.iter_shell_boundaries` -- the
+#: SHARED, heredoc-aware boundary finder that also knows a bare newline
+#: and `|&` are boundaries (a two-line `bd update nexus-x --status
+#: open\nbd close nexus-y` on one shell segment was invisible to the
+#: plain regex this constant used to be). No local regex left to drift
+#: from the primary module's own.
 
 #: The five spellings `bd update --help` and pflag's shorthand rules
 #: actually accept for setting status to closed, probed against the real
@@ -303,14 +307,19 @@ def body(payload: dict[str, Any]) -> HookResult | None:
         # closed elsewhere"' and 'bd update nexus-x --priority 1 &&
         # othertool sync --status closed' both false-positived on a
         # status-closed-shaped substring sitting in an UNRELATED &&-joined
-        # command. Stop the scan at the first shell boundary
-        # (&&/||/;/|/then/do) after the match, exactly where this bd
-        # invocation's own argument list ends.
+        # command. Stop the scan at the first shell boundary after the
+        # match, exactly where this bd invocation's own argument list
+        # ends -- via the SHARED, heredoc-aware finder (round 3: a bare
+        # newline and `|&` are boundaries too, the same class of gap this
+        # file's own scoping fix closed for &&/;/|/then/do).
         update_match = _BD_UPDATE_RE.search(command)
         if not update_match:
             return _lib.allow_result()
         tail_start = update_match.end()
-        boundary = _SHELL_BOUNDARY_RE.search(command, tail_start)
+        boundary = next(
+            (m for m, _is_strong in iter_shell_boundaries(command) if m.start() >= tail_start),
+            None,
+        )
         tail_end = boundary.start() if boundary else len(command)
         own_argv_text = command[tail_start:tail_end]
         if _STATUS_CLOSED_RE.search(own_argv_text):

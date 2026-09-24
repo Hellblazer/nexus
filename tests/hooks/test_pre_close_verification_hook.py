@@ -909,6 +909,86 @@ class TestNexus2b24oRound2IndeterminateSource:
         assert "INDETERMINATE" not in _get_context(parsed)
 
 
+class TestNexus2b24oRound3ShellBoundaries:
+    """Round 3 of nexus-2b24o (substantive-critic on commit 8853ee707):
+    two PRE-EXISTING silent bypasses in the shared segment splitter --
+    a bare newline between commands, and `|&` -- fixed in the shared
+    heredoc-aware boundary finder. Full deny/allow gate, not just the
+    `_bd_verbs` boolean, for the same reason `TestNexus2b24oCloseTransitionSpellings`
+    drives the primary table through the harness."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hi" + chr(10) + "bd close nexus-nlb01",
+            "echo foo |& bd close nexus-nlb01",
+        ],
+    )
+    def test_the_two_reproductions_deny_with_no_marker(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-nlb01" in _get_reason(parsed)
+
+    def test_a_heredoc_body_containing_close_shaped_text_does_not_trigger(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = "cat <<'EOF'" + chr(10) + "bd close nexus-hdoc2" + chr(10) + "EOF"
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", (command, parsed)
+
+    def test_a_multi_line_command_with_a_genuine_close_on_line_three_is_caught(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        command = chr(10).join(["echo one", "echo two", "bd close nexus-nlb02"])
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (command, parsed)
+        assert "nexus-nlb02" in _get_reason(parsed)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hi" + chr(10) + "bd close nexus-nlb01",
+            "echo foo |& bd close nexus-nlb01",
+        ],
+    )
+    def test_the_two_reproductions_allow_with_a_full_marker(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(
+            _marker("review-completed,nexus-nlb01", "review-completed: nexus-nlb01")
+        )
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "allow", command
+
+
 class TestT1OnlyCoverage:
     """nexus-fgekf (2026-08-30): the T2 memory leg is RETIRED. It existed
     for a CLI/MCP T1 scope divergence (nexus-4av2n round 2) whose both

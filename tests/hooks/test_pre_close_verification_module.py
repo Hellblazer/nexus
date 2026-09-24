@@ -372,6 +372,73 @@ class TestNexus2b24oRound2Scoping:
         assert v["has_indeterminate_source"] is True, command
 
 
+class TestNexus2b24oRound3ShellBoundaries:
+    """Round 3 of nexus-2b24o (substantive-critic on commit 8853ee707):
+    two PRE-EXISTING silent bypasses in the shared segment splitter, not
+    caused by round 1 or 2 but walked through by a literal close all the
+    same:
+
+    * a bare NEWLINE between two commands. The verb-position check only
+      ever looks at position 0 of a segment (``rest[0] == 'bd'``); with no
+      newline boundary, ``echo hi\\nbd close nexus-x`` tokenized as ONE
+      segment starting with ``echo``, so the real close at token position
+      2 was invisible -- a full silent allow, not even the INDETERMINATE
+      message.
+    * ``|&`` (bash's stdout+stderr pipe), invisible to both boundary
+      regexes -- same failure shape, one operator this file never knew
+      about.
+
+    Fixed in the SHARED boundary finder (:func:`gate.iter_shell_boundaries`)
+    so both this module and ``phase_review_close_gate`` inherit it -- see
+    that module's own tests for its half.
+    """
+
+    def test_bare_newline_between_commands_is_a_boundary(self):
+        command = "echo hi" + chr(10) + "bd close nexus-99999"
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-99999" in gate._bead_ids(command)
+
+    def test_stdout_stderr_pipe_is_a_boundary(self):
+        command = "echo foo |& bd close nexus-99999"
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-99999" in gate._bead_ids(command)
+
+    def test_a_genuine_close_on_line_three_is_caught(self):
+        """The multi-line shape named directly: several unrelated lines,
+        then a real close."""
+        command = chr(10).join(["echo one", "echo two", "bd close nexus-line3"])
+        v = gate._bd_verbs(command)
+        assert v["has_close_or_done"] is True, command
+        assert "nexus-line3" in gate._bead_ids(command)
+
+    def test_a_heredoc_body_containing_close_shaped_text_still_does_not_trigger(self):
+        """The newline boundary must NOT reach inside a heredoc's body --
+        a heredoc's multi-line construct is syntactically ONE command from
+        the shell's perspective, and its body is DATA fed to the
+        preceding command, never executed. Without this exclusion, adding
+        `\\n` as a boundary would turn every heredoc line into its own
+        fake "segment" and this exact case would become a false
+        positive."""
+        command = "cat <<'EOF'" + chr(10) + "bd close nexus-hdoc1" + chr(10) + "EOF"
+        assert gate._bd_verbs(command)["has_close_or_done"] is False, command
+
+    def test_the_two_pinned_heredoc_limit_tests_are_unaffected(self):
+        """Non-regression against `TestTheLimitThePortRecords` below: the
+        operator-inside-heredoc-body trip and the no-operator-heredoc
+        no-op must both still hold with `\\n` now a boundary too."""
+        v_operator = gate._bd_verbs(
+            "python3 - <<'PY'" + chr(10) + "s = 'x && " + CLOSE + " y'" + chr(10) + "PY"
+        )
+        assert v_operator["has_close_or_done"] is True
+
+        v_no_operator = gate._bd_verbs(
+            "cat <<'EOF'" + chr(10) + "run " + CLOSE + " to finish" + chr(10) + "EOF"
+        )
+        assert v_no_operator["has_close_or_done"] is False
+
+
 class TestTheLimitThePortRecords:
     """The body-text defect, pinned as it actually behaves rather than as
     it was first described.

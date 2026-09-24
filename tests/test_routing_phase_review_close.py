@@ -376,6 +376,33 @@ def test_status_closed_text_in_an_unrelated_and_joined_command_allows(tmp_env, c
     assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bd update nexus-b9lox --status open\nothertool --status closed",
+        "bd update nexus-b9lox --priority 1 |& othertool --status closed",
+    ],
+)
+def test_status_closed_text_across_a_newline_or_stderr_pipe_allows(tmp_env, command):
+    """Round 3 (substantive-critic on commit 8853ee707): the SHARED
+    boundary finder this gate now calls (`pre_close_verification.
+    iter_shell_boundaries`) closed two pre-existing gaps -- a bare
+    newline and `|&` -- for BOTH gates at once. This is the sibling's own
+    half of that fix: a status-closed-shaped substring sitting across
+    either boundary from an unrelated command must not false-positive
+    here either."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="Phase 3b review gate: /conexus:phase-review-gate RDR-120 --phase 3b",
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
+
+
 def test_update_status_closed_on_a_gate_bead_allows_with_a_passed_sentinel(tmp_env):
     """The widened trigger still runs through the SAME sentinel check --
     a passed, fresh sentinel allows the update-status-closed spelling

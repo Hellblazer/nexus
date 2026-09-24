@@ -204,39 +204,110 @@ def _bd_sql_verdict(tokens: list[str]) -> str:
     return "indeterminate"
 
 
+#: A heredoc's multi-line body/closing-delimiter span, so a bare newline
+#: inside it is never treated as a command boundary (see
+#: :func:`iter_shell_boundaries`'s docstring, nexus-2b24o round 3).
+#: Handles ``<<``/``<<-``, an optional single/double/back-quote around the
+#: delimiter word, and requires the closing line to be exactly that word
+#: (optionally indented) followed by end-of-line or end-of-string.
+#:
+#: A heuristic, not a shell parser: it can over-match an unrelated ``<<``
+#: (e.g. inside arithmetic, ``$((1 << 2))``) that happens to be followed
+#: by a word-shaped token and, much later, a line consisting of exactly
+#: that word. Rare enough in a Bash ``tool_input`` to accept -- matching
+#: this file's established heuristic posture elsewhere (case-insensitive
+#: status matching, the two rough shlex-failure variants, ...) -- and the
+#: failure direction is over-protection (fewer newline boundaries seen),
+#: not under-protection, so a false match only widens what counts as one
+#: command, never narrows the detector's reach.
+_HEREDOC_RE = re.compile(
+    r'<<-?[ \t]*(?P<hdq>["\'`]?)(?P<hdname>\w+)(?P=hdq)[^\n]*\n'
+    r'(?:.*\n)*?'
+    r'[ \t]*(?P=hdname)(?=[ \t]*(?:\n|$))'
+)
+
 #: Strong shell boundaries: each starts an entirely new command with NO
-#: stdin relationship to what came before. `_pipeline_segments` splits on
-#: these FIRST, distinctly from a bare pipe, so the batch/import scans
-#: below can tell "stdin flows here" (a `|` within one boundary-delimited
-#: command) from "an unrelated command sits here" (joined only by
-#: &&/||/;/then/do) -- the distinction round 1 did not make.
-_STRONG_BOUNDARY_RE = re.compile(r'(?:&&|\|\||;|\bthen\b|\bdo\b)')
-_PIPE_BOUNDARY_RE = re.compile(r'\s\|\s')
+#: stdin relationship to what came before. A bare NEWLINE is one of these
+#: (nexus-2b24o round 3, code review of 8853ee707: `echo hi` then a real
+#: newline then `bd close nexus-x` was a full silent allow, because the
+#: whole two-line string tokenized as ONE segment and the verb check only
+#: ever looks at position 0 of a segment -- "echo", not "bd"). `|&`
+#: (bash's stdout+stderr pipe) is a PIPE boundary, the same "stdin flows
+#: here" relationship a bare `|` has, added to the same round-3 fix.
+_STRONG_BOUNDARY_RE = re.compile(r'&&|\|\||;|\bthen\b|\bdo\b|\n')
+_PIPE_BOUNDARY_RE = re.compile(r'\s\|&\s|\s\|\s')
+_ANY_BOUNDARY_RE = re.compile(r'&&|\|\||;|\bthen\b|\bdo\b|\n|\s\|&\s|\s\|\s')
+
+
+def _is_pipe_boundary_text(text: str) -> bool:
+    """Whether a matched :data:`_ANY_BOUNDARY_RE` boundary is a bare pipe
+    (``|`` or the stdout+stderr pipe ``|&``) -- same PIPELINE, not a new
+    command."""
+    return bool(re.fullmatch(r'\s\|&?\s', text))
+
+
+def iter_shell_boundaries(cmd: str):
+    """Every shell boundary in *cmd* -- &&/||/;/then/do, a bare newline,
+    or a pipe (``|``/``|&``) -- as ``(match, is_strong)`` pairs, in order.
+
+    A bare newline INSIDE a heredoc's body span is never yielded: the
+    heredoc's multi-line construct is syntactically ONE command from the
+    shell's perspective, even though it spans several physical lines, and
+    treating each of its lines as a fresh command would let a heredoc
+    BODY that merely contains bd-close-shaped TEXT (data being fed to the
+    preceding command, never executed) trigger the gate as if it were a
+    real invocation. An operator token (&&, ;, |, then, do) INSIDE a
+    heredoc body still splits it -- that KNOWN LIMIT (shlex has no
+    heredoc concept) is unchanged and deliberately so, per this module's
+    other docstrings; only the bare-newline case is heredoc-aware.
+
+    Shared by :func:`_pipeline_segments` (this module's own segmentation)
+    and ``phase_review_close_gate``'s narrower argv-bounding search
+    (nexus-2b24o round 3), so the heredoc awareness and the ``|&``
+    boundary live in exactly one place rather than two copies that can
+    drift.
+    """
+    protected: list[tuple[int, int]] = [
+        (m.start(), m.end()) for m in _HEREDOC_RE.finditer(cmd)
+    ]
+
+    def _in_a_heredoc_body(pos: int) -> bool:
+        return any(start <= pos < end for start, end in protected)
+
+    for m in _ANY_BOUNDARY_RE.finditer(cmd):
+        text = m.group()
+        if text == '\n' and _in_a_heredoc_body(m.start()):
+            continue
+        yield m, not _is_pipe_boundary_text(text)
 
 
 def _pipeline_segments(cmd: str) -> tuple[list[str], list[int]]:
     """Flatten *cmd* into the identical per-stage segments the verb loop
-    below has always used (split on &&/||/;/then/do AND bare ``|``, same
-    total partition as the original combined-regex split), paired with a
-    GROUP id per segment: which strong-boundary-delimited command each
-    pipe stage belongs to.
+    below has always used (split on &&/||/;/then/do/newline AND a pipe,
+    ``|`` or ``|&``), paired with a GROUP id per segment: which strong-
+    boundary-delimited command each pipe stage belongs to.
 
     Two segments share a group only when they are stages of the SAME
-    pipeline (joined by a bare ``|``); a strong boundary always starts a
-    new group, because it starts a brand new command with no stdin
+    pipeline (joined by a pipe); a strong boundary always starts a new
+    group, because it starts a brand new command with no stdin
     relationship to what came before. This is what lets the batch/import
     raw-text scans read "the pipeline stage(s) actually feeding this bd
     invocation's stdin" without ALSO reading an unrelated &&-joined
-    command or a flag value sitting in a sibling group.
+    command, a different line of a multi-line command, or a flag value
+    sitting in a sibling group.
     """
     segments: list[str] = []
     groups: list[int] = []
     group_id = 0
-    for top in _STRONG_BOUNDARY_RE.split(cmd):
-        for stage in _PIPE_BOUNDARY_RE.split(top):
-            segments.append(stage)
-            groups.append(group_id)
-        group_id += 1
+    pos = 0
+    for m, is_strong in iter_shell_boundaries(cmd):
+        segments.append(cmd[pos:m.start()])
+        groups.append(group_id)
+        if is_strong:
+            group_id += 1
+        pos = m.end()
+    segments.append(cmd[pos:])
+    groups.append(group_id)
     return segments, groups
 
 
