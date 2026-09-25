@@ -316,7 +316,7 @@ def _matches_variable_print(command: str) -> str | None:
 _PYTHON_ENV_ACCESS_RES: dict[str, re.Pattern[str]] = {
     var: re.compile(
         r"\b(?:os\.)?(?:environ\s*\[\s*|environ\.get\(\s*|getenv\(\s*)"
-        # An optional backslash before the quote: `python3 -c "...os.environ[\\"NAME\\"]..."`
+        # An optional backslash before the quote: `python3 -c "...os.environ[\"NAME\"]..."`
         # is the ordinary way to nest a double-quoted literal in a double-quoted
         # -c argument (Phase 3 code review round 3).
         r"""\\?(['"])""" + re.escape(var)
