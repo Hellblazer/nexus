@@ -28,6 +28,7 @@ that decision; do not reach for :func:`never_fail` on that hook by habit.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import IO
@@ -397,4 +398,13 @@ def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
         if isinstance(exc, BaseExceptionGroup) and exc.subgroup(asyncio.CancelledError):
             raise
         _emit("warning", "hook_boundary_swallowed_exception", hook=hook, error=str(exc))
+        # Also one line on stderr (nexus-3lc5s). The log file alone made a
+        # swallowed crash indistinguishable, to anyone holding only the
+        # process's streams, from a verb that ran and had nothing to say:
+        # exit 0, both streams empty. stderr is never a decision channel.
+        try:
+            sys.stderr.write(f"[nx-hook] {hook}: swallowed {type(exc).__name__}: {exc}\n")
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001, S110 — a diagnostic must not become the crash it reports
+            pass
         return HookResult(crashed=True)

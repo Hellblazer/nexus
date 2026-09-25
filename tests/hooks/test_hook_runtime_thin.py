@@ -293,6 +293,10 @@ def test_a_swallowed_crash_still_reaches_the_hook_log(tmp_path: Path) -> None:
         f"the crash-swallow diagnostic never reached {log}; contents: {body!r}"
     )
     assert "deliberate crash" in body
+    # nexus-3lc5s: the streams must tell a crash from a verb with nothing to
+    # say; before this both were exit 0 with stdout and stderr empty.
+    assert "[nx-hook] probe: swallowed RuntimeError: deliberate crash" in proc.stderr
+    assert proc.stdout == ""
 
 
 # ---------------------------------------------------------------------------

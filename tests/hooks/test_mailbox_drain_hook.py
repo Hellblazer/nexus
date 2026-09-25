@@ -89,6 +89,16 @@ def _run(
     )
 
 
+def _hook_log(tmp_path: Path) -> str:
+    """The subprocess's hook.log, where nx-hook's boundary records a swallowed
+    crash (nexus-3lc5s): a precondition failure carries its own evidence."""
+    log = tmp_path / "config" / "logs" / "hook.log"
+    try:
+        return log.read_text()[-4000:]
+    except OSError:
+        return "<absent>"
+
+
 def _write_storage_lease(config_dir: Path, *, host: str, port: int) -> None:
     record = {
         "scope_key": str(os.getuid()),
@@ -1085,7 +1095,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
         assert eng.calls, (
             f"the hook never reached the mock engine, so this test never exercised "
             f"status handling at all. rc={res.returncode} "
-            f"stdout={res.stdout!r} stderr={res.stderr!r}"
+            f"stdout={res.stdout!r} stderr={res.stderr!r} hook.log={_hook_log(tmp_path)!r}"
         )
 
         assert res.returncode == 0
@@ -1121,7 +1131,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
         assert eng.calls, (
             f"the hook never reached the mock engine, so this test never exercised "
             f"status handling at all. rc={res.returncode} "
-            f"stdout={res.stdout!r} stderr={res.stderr!r}"
+            f"stdout={res.stdout!r} stderr={res.stderr!r} hook.log={_hook_log(tmp_path)!r}"
         )
 
         assert res.returncode == 0
