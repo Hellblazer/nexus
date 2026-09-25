@@ -635,9 +635,10 @@ class TestPluginEntryPointParity:
     plugin script, launched under exec-form ``python3`` with no ``-m`` and no
     args -- in PRODUCTION. Every other test in this module drives only the
     wheel copy, ``src/nexus/hooks/mailbox_drain.py``, through ``nx-hook``'s own
-    ``-m nexus._hook_runtime.entry`` dispatch. The two copies carry identical
-    code today, but nothing here tested the one that actually runs, and
-    nothing caught drift between them.
+    ``-m nexus._hook_runtime.entry`` dispatch. The two copies are written
+    differently (the plugin script is stdlib-only; the wheel copy uses
+    ``nexus`` helpers), but they must behave the same, and nothing here tested
+    the one that actually runs or caught drift between them.
 
     These three cases -- the address-registry behaviour that RDR-208 Phase 3
     changed, plus a positive control that the ordinary session-id mailbox is
