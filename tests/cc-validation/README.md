@@ -29,37 +29,43 @@ silently nullified scenarios for an hour-plus at least once.
 
 ## Auth
 
-The sandbox session reads `$TEST_HOME/.claude/.credentials.json` (and
-`.env.test` unsets `ANTHROPIC_API_KEY` so this file is the auth source).
+No credential file, ever (RDR-219). `runner.sh` starts its own private tmux
+SERVER under `tests/e2e/lib/claude_credentials.py run --` (`_cred_tool()`
+wraps it), which execs the `new-session` call with `CLAUDE_CODE_OAUTH_TOKEN`
+set in the process's own environment — the harness's dedicated automation
+token, from keychain item `nexus-automation-oauth-token` (created once with
+`claude setup-token`), never the operator's own interactive login
+(`Claude Code-credentials`). A tmux session inherits its environment from the
+SERVER, not from whatever later asks for the session, so every pane spawned
+afterward — including the one that launches `claude` — already carries the
+token.
 
-**OAuth access tokens are short-lived (~1h) and the refresh token rotates.** A
-frozen snapshot at `tests/e2e/.claude-auth/.credentials.json` goes stale within
-hours: once the live CLI refreshes, the snapshot's refresh token is invalidated
-and the sandbox 401s before the model runs anything. Every scenario then
-false-fails.
+Check the automation token's health any time with:
 
-`runner.sh::provision_credentials` handles this: it provisions from the **live
-macOS keychain** (`security find-generic-password -s 'Claude Code-credentials'`)
-at runtime and refreshes the on-disk snapshot for the Linux/CI fallback. The
-`tests/e2e/.claude-auth/` dir is gitignored, so live tokens are never committed.
+```bash
+python3 tests/e2e/lib/claude_credentials.py status
+```
 
-A well-written scenario is **fail-closed**: it asserts the *presence* of an
-expected marker, so a 401 lands in the `else` branch (a real fail), never a
-vacuous pass. Keep it that way.
+which reports present/absent, creation date, and days to expiry, and never
+prints the token itself. If it's absent or expired, `claude setup-token`
+mints a fresh one; store it in keychain item `nexus-automation-oauth-token`
+under your own account.
 
-### More than one keychain item carries the service name (2026-08-28)
+A well-written scenario is still **fail-closed**: it asserts the *presence*
+of an expected marker, so an auth failure lands in the `else` branch (a real
+fail), never a vacuous pass. Keep it that way.
 
-`security find-generic-password -s 'Claude Code-credentials' -w` with **no
-`-a`** returns an ARBITRARY match. Measured on this box: two items share that
-service name — an `acct="unknown"` item created 2026-08-23 whose
-`claudeAiOauth` is an empty husk (`accessToken ""`, `refreshToken ""`,
-`expiresAt 0`), and the `acct="<login user>"` item the live CLI actually
-refreshes. The bare lookup returned the husk.
+### History: the operator's interactive login used to leak in (closed, RDR-219)
 
-`provision_credentials` used to validate only that the blob parsed as JSON —
-which a husk does — so it printed `[auth] provisioned from macOS keychain
-(live)` and every scenario ran against a **logged-out** session. Scenarios 16
-and 28 then reported `hook_fired=0 tool_ran=0` and their guards blamed the MCP
+Before RDR-219, `runner.sh` provisioned from the operator's own interactive
+Keychain item (`Claude Code-credentials`) via a bare, unscoped `security
+find-generic-password` and cached the result at
+`tests/e2e/.claude-auth/.credentials.json`. More than one keychain item can
+carry that service name — an `acct="unknown"` husk (`accessToken ""`,
+`refreshToken ""`, `expiresAt 0`) alongside the account the live CLI actually
+refreshes — and the bare lookup could silently select the husk. Every
+scenario then ran against a **logged-out** session: scenarios 16 and 28
+reported `hook_fired=0 tool_ran=0` and their guards blamed the MCP
 connection, while the pane had said the real thing the whole time:
 
 ```
@@ -67,30 +73,21 @@ connection, while the pane had said the real thing the whole time:
                         Not logged in · Run /login   # in the status bar
 ```
 
-Worse, the same code path then ran `cp "$dest" "$AUTH_DIR/.credentials.json"`,
-so the husk **overwrote the fallback snapshot** — the harness destroyed its own
-only alternative credential source.
+Worse, `provision_credentials` then overwrote the harness's own fallback
+snapshot with the husk, destroying its own only alternative credential
+source.
 
-Both are fixed: `runner.sh::_cred_tool pick` enumerates the accounts under the
-service (attribute-only `security dump-keychain`, no secret read, no prompt),
-rejects any item with no `accessToken` and no `refreshToken` (and any expired
-one with no refresh token), takes the freshest survivor, and **fails loud**
-naming `claude /login` when nothing is usable. The snapshot is refreshed only
-from a credential that passed that check.
-
-**The picker itself lives in `tests/e2e/lib/claude_credentials.py`**
-(nexus-galkv.19), not in this file — `_cred_tool` here is a thin wrapper
-around it. Two more callers fetched the same keychain service with the
-identical bare, unscoped `security find-generic-password` this section warns
-against, and hit the identical husk-selection failure on 2026-09-15:
-`tests/e2e/auth-login.sh` (which then wrote the husk over its own fallback
-snapshot) and the `--fullstack`/`--shakeout-e2e` legs of
-`tests/e2e/migration-rehearsal/run.sh` (which mount it into a container). All
-three now share one picker (`pick` / `check FILE`) instead of three copies of
-this same fix drifting apart again.
+RDR-219 closed the class rather than the symptom: the harness uses its own
+automation token instead of the operator's login, and never writes a
+credential to disk at all, so there is no snapshot left to overwrite and no
+husk to choose between. The shared helper this section used to describe,
+`tests/e2e/lib/claude_credentials.py` (nexus-galkv.19), now carries `run`/
+`status` for the automation token alongside its original husk-avoiding
+`Claude Code-credentials` picker, still used by the few call sites RDR-219
+has not yet migrated.
 
 **Lesson (same class as the 2026-05-31 trio below): a successful FETCH is not
-a valid CREDENTIAL.** `[auth] provisioned …` is a provenance line, not an auth
+a valid CREDENTIAL.** An `[auth] ...` line on stderr is provenance, not
 verification — never read it as "auth is fine".
 
 ### Watching a run: `CC_VAL_DEBUG_CAPTURE=1`
@@ -225,8 +222,8 @@ carry the warmup turn as of 2026-05-31; a new MCP scenario must too.
 before spending minutes on an interactive run:
 
 ```bash
-PROBE=/tmp/mcp-probe; mkdir -p "$PROBE/.claude" "$PROBE/proj"
-security find-generic-password -s 'Claude Code-credentials' -w > "$PROBE/.claude/.credentials.json"
+REPO="$PWD"
+PROBE=/tmp/mcp-probe; mkdir -p "$PROBE/proj"
 cat > "$PROBE/.claude.json" <<EOF
 { "hasCompletedOnboarding": true,
   "mcpServers": { "stub": { "type":"stdio",
@@ -234,7 +231,10 @@ cat > "$PROBE/.claude.json" <<EOF
     "args":["$PWD/tests/cc-validation/fixtures/stub_server.py"],
     "env":{"STUB_LOG":"/tmp/mcp-probe-stub.log","STUB_NAME":"stub"} } } }
 EOF
-(cd "$PROBE/proj" && HOME="$PROBE" claude mcp list)   # -> stub: ... - ✓ Connected
+# No credential file, ever (RDR-219): launch under claude_credentials.py
+# run --, which execs `claude` with the harness's own automation token
+# (CLAUDE_CODE_OAUTH_TOKEN) already in its environment.
+(cd "$PROBE/proj" && HOME="$PROBE" python3 "$REPO/tests/e2e/lib/claude_credentials.py" run -- claude mcp list)   # -> stub: ... - ✓ Connected
 ```
 
 ## tmux isolation
@@ -409,11 +409,11 @@ desktop backends). Two of its patterns are already ported; two remain.
 ## Layout
 
 ```
-runner.sh                       # setup (auth, isolated HOME, tmux), scenario loop
+runner.sh                       # setup (isolated HOME, tmux server under run --), scenario loop
 scenarios/NN_*.sh               # one scenario each; source lib.sh helpers
 fixtures/stub_server.py         # FastMCP stub (needs an interpreter with `mcp`)
 ../e2e/lib.sh                   # _tmux, claude_start, claude_prompt, claude_wait, capture
-../e2e/.claude-auth/            # gitignored; OAuth snapshot (fallback for non-macOS)
+../e2e/lib/claude_credentials.py # shared credential helper (run/status); no file, ever (RDR-219)
 ```
 
 Companion gist (older notes): `4a7d73baa4409e02af7af222023b8b9d`.
