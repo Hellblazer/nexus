@@ -442,8 +442,11 @@ servers were found holding the token for about seven hours, T2
 `nexus_rdr/219-leftover-tmux-servers-2026-09-25`): a process of the current
 user whose environment names `CLAUDE_CODE_OAUTH_TOKEN` or
 `NX_HARNESS_CLAUDE_OAUTH_TOKEN` (macOS `ps -E`, Linux `/proc/<pid>/environ`),
-and a live tmux server on a harness socket name, each older than two hours
-so a harness running at the same time is not flagged. It reports the pid,
+older than two hours so a harness running at the same time is not flagged.
+A tmux server holding the token is such a process, so it is caught whatever
+its socket name. As a second signal it also names live tmux servers on a
+fixed, hand-kept list of harness socket names; a server on any other name is
+caught only by the process check. It reports the pid,
 age and command name, never a value or the command line.
 
 ### Existing Infrastructure Audit
@@ -585,9 +588,12 @@ through `run --`; after each, the janitor finds zero credential files under
 the known roots on this Mac, and on qwentescence an ssh `find`, scoped to the
 remote run's own output and stage folders and /tmp and /var/tmp to depth 4
 (never a whole home or disk), finds none after the remote run; and an
-agent session's attempt to run `security
-find-generic-password -s "Claude Code-credentials" -w` is denied by the plugin
-guard. With the dispatch grant (amendment): the three Phase 3b proofs pass
+agent session's attempt to read a keychain credential item with `security
+find-generic-password` is denied by the plugin guard. The guard's rule matches
+the command and the item name whether or not `-w` or `-g` is present, so the
+metadata-only form stands for the printing form; in the 2026-09-25 run the
+model refused the `-w` form on its own, and the denial was observed on the
+metadata-only form (T2 `nexus_rdr/219-mvv-2026-09-25`). With the dispatch grant (amendment): the three Phase 3b proofs pass
 with ANTHROPIC_API_KEY absent, and a Bash-tool child in that session does not
 inherit the harness name.
 
@@ -821,3 +827,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Amendment round 3 (critique: partial, 1 Significant): the guard's design section lists the ps and /proc environment shapes and the narrowed variable-print rule; the Risks entry states them as specified, not shipped.
 - 2026-09-25: The print guard stops denying whole-environment dumps: Claude deletes the token from its own environment, so a dump from its Bash tool cannot contain it; the guard keeps keychain reads, credential-file reads, references to a protected name, and other processes' environments (Phase 3 code review round 2, nexus-wauo1.26).
 - 2026-09-25: The janitor also fails on leftover processes holding a token variable and on leftover harness tmux servers (Sam's decision, after five were found).
+- 2026-09-25: Phase 3 critique round 2: the janitor text states the tmux name list is a second signal behind the process check; the MVV guard criterion states what the run observed.
