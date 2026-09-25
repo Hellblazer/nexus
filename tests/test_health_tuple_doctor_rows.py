@@ -1274,7 +1274,7 @@ class TestCheckTupleChannelDelivery:
         assert "newer channel waiter" in r.detail
         assert not any("current engine" in s for s in r.fix_suggestions)
 
-    def test_no_wait_support_names_the_cause_and_suggests_rebuilding_the_engine(
+    def test_no_wait_support_names_the_cause_and_suggests_the_local_convergence_verbs(
         self, monkeypatch, tmp_path: Path,
     ) -> None:
         """Same class as `no_announce_support` above, for an engine that

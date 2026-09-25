@@ -37,11 +37,13 @@ Layers, cheapest first:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import threading
 import time
 import uuid
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -369,6 +371,38 @@ class _Db:
 
 def _fake_store_factory(fake: _FakeTupleStore):
     return lambda: _Db(fake)
+
+
+async def _poll_until(predicate, *, timeout_s: float = 5.0, interval_s: float = 0.05) -> None:
+    """Bounded-poll a synchronous *predicate* until it is true, or raise.
+
+    Replaces a fixed `asyncio.sleep(N)` before an assertion (nexus-6konb.15
+    fix round, critic-reproduced flake: 3/5 failures once against a fixed
+    0.2s/0.3s sleep) -- the flake was a race against the FIRST
+    `asyncio.to_thread` call's executor spin-up (`ThreadPoolExecutor`
+    thread creation on first use), which a fixed sleep can lose under load
+    but a bounded poll on the actual condition cannot: it simply keeps
+    checking until the condition holds or the 5s budget is spent, well
+    past any plausible spin-up delay."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(interval_s)
+    raise AssertionError(f"condition not met within {timeout_s}s: {predicate!r}")
+
+
+async def _cancel_and_await(task: "asyncio.Task") -> None:
+    """Cancel *task* and await it, tolerating either outcome: the task may
+    already have finished on its own (a below-floor stop exits `run()`'s
+    loop before ever needing cancellation, so `cancel()` is then a no-op
+    and awaiting raises nothing) or still be running (a genuine
+    `CancelledError`). Centralizing this in one helper, called from every
+    test's `finally`, is what guarantees a failed assertion can never leak
+    a live background task into the next test."""
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 class _CountingTuples:
@@ -1597,6 +1631,101 @@ class TestWaiterSupersession:
         assert sender.calls == []
 
 
+class TestProbeServingEngineVersion:
+    """Direct tests of `channel._probe_serving_engine_version` -- nexus-6konb.15
+    fix round (both reviewers): the earlier round only exercised this probe
+    indirectly, through `ChannelWaiter`'s injectable `engine_version_probe`.
+    Mirrors `tests/test_http_engine_status.py`'s pattern for the sibling
+    `fetch_engine_status` probe: patch `nexus.db.service_endpoint.
+    resolve_service_endpoint_with_evidence_gate` and `channel.httpx.get`."""
+
+    def test_returns_none_when_endpoint_unresolvable(self) -> None:
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            side_effect=RuntimeError("no lease"),
+        ):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_transport_error(self) -> None:
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", side_effect=httpx.ConnectError("refused")):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_non_200(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=MagicMock(status_code=404),
+        )
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_non_dict_body(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = ["not", "a", "dict"]
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_missing_release_version(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"app_version": "1.0-SNAPSHOT"}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_blank_release_version(self) -> None:
+        """A dev-checkout jar reports an empty string, not a null field."""
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"release_version": ""}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_the_parsed_tuple_on_a_good_body(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"release_version": "0.1.127", "app_version": "1.0-SNAPSHOT"}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() == (0, 1, 127)  # noqa: SLF001
+
+    def test_calls_the_exact_version_url_with_no_authorization_header(self) -> None:
+        """`/version` is unauthenticated by contract (Java `VersionHandler`,
+        same as `probe_managed_service`'s own comment) -- unlike
+        `fetch_engine_status`'s auth-gated `/v1/status`, this probe sends
+        no bearer even when the resolver hands one back."""
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"release_version": "0.1.131"}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1/", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp) as mock_get:
+            channel._probe_serving_engine_version()  # noqa: SLF001
+        mock_get.assert_called_once()
+        assert mock_get.call_args.args[0] == "http://127.0.0.1:1/version", (
+            "trailing slash on the resolved base must not become a double slash"
+        )
+        assert mock_get.call_args.kwargs.get("timeout") == 5.0
+        assert "headers" not in mock_get.call_args.kwargs, "no Authorization header for the unauthenticated /version route"
+
+
 class TestEngineVersionFloorAtStart:
     """nexus-6konb.15 (RDR-213 MVV finding L1, T2 `nexus_rdr/6konb15-mvv-
     2026-09-25`): an engine below the announce floor answers `/wait` and
@@ -1608,7 +1737,14 @@ class TestEngineVersionFloorAtStart:
     row-based stop. `ChannelWaiter.run()` now checks the SAME floor
     against the engine's own `/version` identity once, before the first
     `tick()`, via the injectable `engine_version_probe` callable -- these
-    tests drive that callable directly rather than touching real HTTP."""
+    tests drive that callable directly rather than touching real HTTP.
+
+    Every test polls the actual condition (`_poll_until`) instead of a
+    fixed sleep, and cancels+awaits its `run_task` in a `finally`
+    (`_cancel_and_await`) -- fix round, critic-reproduced flake (3/5
+    failures once against a fixed 0.2s/0.3s sleep racing the first
+    `asyncio.to_thread` call's executor spin-up). A failed assertion must
+    not leak a live background task into the next test either way."""
 
     @pytest.mark.asyncio
     async def test_an_engine_below_the_announce_floor_never_reports_alive(self) -> None:
@@ -1616,10 +1752,10 @@ class TestEngineVersionFloorAtStart:
         has nothing to look at, so the waiter would stay `alive=True`
         indefinitely against engine-service-v0.1.127 (below
         `CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION == (0, 1, 128)`) -- this is
-        the exact reproduction of the MVV's measured 16+ minute gap,
-        compressed to a short sleep. Fails on the pre-fix code (no
-        at-start check existed, so the fake `_FakeTupleStore` would just
-        keep ticking and `alive` would stay `True`); passes after it."""
+        the exact reproduction of the MVV's measured 16+ minute gap. Fails
+        on the pre-fix code (no at-start check existed, so the fake
+        `_FakeTupleStore` would just keep ticking and `alive` would stay
+        `True`); passes after it."""
         session_id = str(uuid.uuid4())
         fake = _FakeTupleStore()  # never seeded: an empty mailbox throughout
         sender = _FakeSender()
@@ -1628,14 +1764,14 @@ class TestEngineVersionFloorAtStart:
             engine_version_probe=lambda: (0, 1, 127),
         )
         run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.2)
-
-        assert waiter.status()["alive"] is False
-        assert waiter.status()["stopped_reason"] == "no_announce_support"
-        assert fake.wait_calls == [], "must stop BEFORE ever parking a wait on a known below-floor engine"
-        assert sender.calls == []
-
-        await run_task  # the loop already exited on its own; nothing left to cancel
+        try:
+            await _poll_until(lambda: waiter.status()["stopped_reason"] is not None)
+            assert waiter.status()["alive"] is False
+            assert waiter.status()["stopped_reason"] == "no_announce_support"
+            assert fake.wait_calls == [], "must stop BEFORE ever parking a wait on a known below-floor engine"
+            assert sender.calls == []
+        finally:
+            await _cancel_and_await(run_task)
 
     @pytest.mark.asyncio
     async def test_an_engine_below_the_subscriber_floor_but_at_or_above_the_announce_floor_stops_with_no_subscriber_support(
@@ -1651,13 +1787,13 @@ class TestEngineVersionFloorAtStart:
             engine_version_probe=lambda: (0, 1, 128),
         )
         run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.2)
-
-        assert waiter.status()["alive"] is False
-        assert waiter.status()["stopped_reason"] == "no_subscriber_support"
-        assert fake.wait_calls == []
-
-        await run_task  # the loop already exited on its own; nothing left to cancel
+        try:
+            await _poll_until(lambda: waiter.status()["stopped_reason"] is not None)
+            assert waiter.status()["alive"] is False
+            assert waiter.status()["stopped_reason"] == "no_subscriber_support"
+            assert fake.wait_calls == []
+        finally:
+            await _cancel_and_await(run_task)
 
     @pytest.mark.asyncio
     async def test_an_engine_at_or_above_both_floors_starts_normally(self) -> None:
@@ -1669,15 +1805,12 @@ class TestEngineVersionFloorAtStart:
             engine_version_probe=lambda: (0, 1, 129),
         )
         run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.2)
-
-        assert waiter.status()["alive"] is True
-        assert waiter.status()["stopped_reason"] is None
-        assert len(fake.wait_calls) >= 1
-
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 1)
+            assert waiter.status()["alive"] is True
+            assert waiter.status()["stopped_reason"] is None
+        finally:
+            await _cancel_and_await(run_task)
 
     @pytest.mark.asyncio
     async def test_a_blank_or_dev_release_version_does_not_stop_the_waiter(self) -> None:
@@ -1696,15 +1829,37 @@ class TestEngineVersionFloorAtStart:
             engine_version_probe=lambda: None,
         )
         run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.2)
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 1)
+            assert waiter.status()["alive"] is True
+            assert waiter.status()["stopped_reason"] is None
+        finally:
+            await _cancel_and_await(run_task)
 
-        assert waiter.status()["alive"] is True
-        assert waiter.status()["stopped_reason"] is None
-        assert len(fake.wait_calls) >= 1
+    @pytest.mark.asyncio
+    async def test_a_raising_probe_does_not_stop_the_waiter(self) -> None:
+        """nexus-6konb.15 fix round (both reviewers): `engine_version_probe`
+        is caller-injectable, so a raising implementation must be treated
+        exactly like a `None` result -- logged, then the row-based
+        fallback takes over -- never a crash of `run()`'s start."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
 
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
+        def probe():
+            raise RuntimeError("boom")
+
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=probe,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 1)
+            assert waiter.status()["alive"] is True
+            assert waiter.status()["stopped_reason"] is None
+        finally:
+            await _cancel_and_await(run_task)
 
     @pytest.mark.asyncio
     async def test_the_probe_runs_off_the_event_loop_not_per_tick(self) -> None:
@@ -1725,13 +1880,11 @@ class TestEngineVersionFloorAtStart:
             engine_version_probe=probe, min_tick_interval_s=0.0,
         )
         run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.3)
-        assert len(fake.wait_calls) >= 2, "the loop must have ticked more than once"
-        assert calls == [1], "the probe must run exactly once, not once per tick"
-
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 2)
+            assert calls == [1], "the probe must run exactly once, not once per tick"
+        finally:
+            await _cancel_and_await(run_task)
 
 
 class TestWaiterSupersessionRealEngine:

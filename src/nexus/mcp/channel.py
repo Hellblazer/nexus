@@ -391,6 +391,17 @@ def _probe_serving_engine_version() -> tuple[int, int, int] | None:
     fetch_engine_status` already use, but never raises.
 
     Called once, at :meth:`ChannelWaiter.run`'s start -- never per tick.
+
+    Worst-case start delay: in the local cold-lease path only --
+    ``resolve_service_endpoint_with_evidence_gate`` retrying with
+    ``DEFAULT_LEASE_WAIT_BUDGET_S`` (12.0s, as of this writing) after a
+    first resolution fails for a process that has previously seen a live
+    lease -- plus this probe's own 5s HTTP timeout, for up to roughly 17s
+    total. That budget belongs to endpoint resolution and is unrelated to
+    this probe's own failure handling. It delays only this waiter's FIRST
+    tick, never the MCP server's own startup (the probe runs inside
+    `run()`, which is already an independent asyncio task by the time it
+    executes) and never a cloud-mode session (no lease to wait on there).
     """
     try:
         from nexus.db.service_endpoint import (  # noqa: PLC0415 — rare/branch-local: one call per waiter lifetime
@@ -692,8 +703,22 @@ class ChannelWaiter:
         NOTHING: this is "don't know", never "assume below floor". The
         loop starts normally and the row-based fallback stays the only
         detector for that case, exactly as it was before this check
-        existed."""
-        version = await asyncio.to_thread(self.engine_version_probe)
+        existed.
+
+        `_probe_serving_engine_version` itself never raises (it fails
+        closed to `None` internally), but `self.engine_version_probe` is
+        an injectable callable -- a caller-supplied replacement, or a
+        test double, could still raise. Reviewer fold: a raising probe
+        must never crash the waiter's start any more than a failing one
+        does, so it is treated identically to a `None` result -- logged,
+        then the row-based fallback takes over."""
+        try:
+            version = await asyncio.to_thread(self.engine_version_probe)
+        except Exception as exc:  # noqa: BLE001 — best-effort: a raising probe must never crash the waiter's start
+            _log.warning(
+                "channel_waiter_version_probe_raised", session_id=self.session_id, error=repr(exc),
+            )
+            return
         if version is None:
             return
         from nexus.engine_version import (  # noqa: PLC0415 — leaf module, rare/branch-local path
