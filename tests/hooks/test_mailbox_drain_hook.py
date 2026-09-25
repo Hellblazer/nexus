@@ -34,6 +34,16 @@ from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
 #: against this checkout's code, through the same ``main()`` the shim calls.
 _VERB_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", "mailbox-drain"]
 
+#: The PLUGIN copy (RDR-208 Phase 3 close gate, nexus-galkv.27): hooks.json
+#: launches this exact script under a bare ``python3`` -- PATH decides the
+#: interpreter, not ``sys.executable`` -- with no ``-m`` and no args, matching
+#: the exec-form entry ``conexus/hooks/hooks.json`` declares for
+#: ``UserPromptSubmit``. This is the copy that actually runs in production;
+#: every test in this module besides :class:`TestPluginEntryPointParity`
+#: exercises only the wheel copy above.
+_PLUGIN_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
+_PLUGIN_ARGV = ["python3", str(_PLUGIN_SCRIPT)]
+
 SESSION_ID = "sess-mailbox-drain"
 
 
@@ -62,9 +72,10 @@ def _run(
     tmp_path: Path,
     stdin: str | None = None,
     env_overrides: dict[str, str] | None = None,
+    argv: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        _VERB_ARGV,
+        argv if argv is not None else _VERB_ARGV,
         input=stdin if stdin is not None else _payload(),
         capture_output=True,
         text=True,
@@ -383,6 +394,15 @@ def _wired(tmp_path: Path, eng: _MockEngine) -> None:
     _write_storage_lease(tmp_path / "config", host="127.0.0.1", port=eng.port)
 
 
+def _registry_path(tmp_path: Path, session_id: str = SESSION_ID) -> Path:
+    """The old per-session ``addresses.d/<session id>`` registry file path,
+    shared by :class:`TestAddressRegistry` and :class:`TestPluginEntryPointParity`
+    so the same stale-registry fixture drives both."""
+    reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / session_id
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    return reg
+
+
 class TestDrainDelivers:
     def test_empty_mailbox_injects_nothing_and_exits_zero(self, tmp_path, engine) -> None:
         eng = engine()
@@ -505,9 +525,7 @@ class TestAddressRegistry:
     transition depended on (R2's ship date plus 7 days) has passed."""
 
     def _reg(self, tmp_path, session_id: str = SESSION_ID):
-        reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / session_id
-        reg.parent.mkdir(parents=True, exist_ok=True)
-        return reg
+        return _registry_path(tmp_path, session_id)
 
     def test_the_session_id_address_is_always_drained(self, tmp_path, engine) -> None:
         eng = engine()
@@ -592,6 +610,94 @@ class TestAddressRegistry:
 
         eng.calls.clear()
         res_a = _run(tmp_path=tmp_path, stdin=_payload(session_id=session_a))
+        assert res_a.returncode == 0, res_a.stderr
+        rd_bodies_a = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
+        assert not any(b.get("subspace") == f"mailbox/{instance_a}" for b in rd_bodies_a)
+
+
+_ENTRY_POINTS = pytest.mark.parametrize("argv", [_VERB_ARGV, _PLUGIN_ARGV], ids=["wheel", "plugin"])
+
+
+class TestPluginEntryPointParity:
+    """RDR-208 Phase 3 close gate (bead nexus-galkv.27, test-validator gap).
+
+    ``hooks.json`` runs ``conexus/hooks/scripts/mailbox_drain.py`` -- a stdlib
+    plugin script, launched under exec-form ``python3`` with no ``-m`` and no
+    args -- in PRODUCTION. Every other test in this module drives only the
+    wheel copy, ``src/nexus/hooks/mailbox_drain.py``, through ``nx-hook``'s own
+    ``-m nexus._hook_runtime.entry`` dispatch. The two copies carry identical
+    code today, but nothing here tested the one that actually runs, and
+    nothing caught drift between them.
+
+    These three cases -- the address-registry behaviour that RDR-208 Phase 3
+    changed, plus a positive control that the ordinary session-id mailbox is
+    still drained -- run against BOTH entry points, parametrized rather than
+    duplicated (independent signal: the argv, not the assertions), so a
+    regression in one copy fails its own parametrize id while the other stays
+    green. The plugin script is launched exactly as ``hooks.json`` launches
+    it (:data:`_PLUGIN_ARGV`): ``python3`` resolved off ``PATH`` (this
+    module's ``_env`` sets ``PATH=/usr/bin:/bin`` for both entry points
+    already, unchanged from the wheel-only tests above), the script's own
+    path, and no other args -- the script re-execs itself into a capable
+    interpreter internally (``_interpreter.reexec_if_needed``) exactly as it
+    does under the real harness.
+    """
+
+    @_ENTRY_POINTS
+    def test_the_session_id_mailbox_is_drained(self, tmp_path, engine, argv) -> None:
+        """Positive control: an ordinary, unregistered session-id mailbox is
+        drained by both entry points -- the floor this whole hook exists to
+        be must survive in the copy that actually ships."""
+        eng = engine()
+        eng.rows = [_row("jj10", body="to my session id")]
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path, argv=argv)
+        assert res.returncode == 0, res.stderr
+        assert "to my session id" in res.stdout
+        rd_bodies = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
+        assert any(b.get("subspace") == f"mailbox/{SESSION_ID}" for b in rd_bodies)
+
+    @_ENTRY_POINTS
+    def test_a_registered_address_is_no_longer_drained(self, tmp_path, engine, argv) -> None:
+        """THE FALSIFIER: reverting this bead's code change (restoring the
+        registry read) in a given entry point's script makes THAT
+        parametrize case fail, since a stale registry file naming
+        ``nexus-19`` would then be drained, while the other entry point's
+        case -- unchanged -- stays green. See
+        :meth:`TestAddressRegistry.test_a_registered_address_is_no_longer_drained`,
+        which pins this same property for the wheel copy alone."""
+        eng = engine()
+        _registry_path(tmp_path).write_text("nexus-19\n", encoding="utf-8")
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path, argv=argv)
+        assert res.returncode == 0, res.stderr
+        rd_bodies = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
+        assert not any(b.get("subspace") == "mailbox/nexus-19" for b in rd_bodies)
+
+    @_ENTRY_POINTS
+    def test_cross_session_drain_never_leaks_a_peer_sessions_instance_mailbox(
+        self, tmp_path, engine, argv,
+    ) -> None:
+        """Two sessions on one box. Session A has a (now stale, unread)
+        registry file naming instance NAME_A. Neither session's drain may
+        ever reach ``mailbox/NAME_A`` any more -- not A's own, and certainly
+        not B's -- in either entry point."""
+        session_a, session_b = "sess-A-owns-instance", "sess-B-different-session"
+        instance_a = "nexus-instance-a"
+        eng = engine()
+        eng.rows = [_row("kk11", sender="peer", body="for instance A")]
+        eng.rows[0]["keys"] = {"to": instance_a}
+        eng.rows[0]["subspace"] = f"mailbox/{instance_a}"
+        _wired(tmp_path, eng)
+        _registry_path(tmp_path, session_a).write_text(instance_a + "\n", encoding="utf-8")
+
+        res_b = _run(tmp_path=tmp_path, argv=argv, stdin=_payload(session_id=session_b))
+        assert res_b.returncode == 0, res_b.stderr
+        rd_bodies_b = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
+        assert not any(b.get("subspace") == f"mailbox/{instance_a}" for b in rd_bodies_b)
+
+        eng.calls.clear()
+        res_a = _run(tmp_path=tmp_path, argv=argv, stdin=_payload(session_id=session_a))
         assert res_a.returncode == 0, res_a.stderr
         rd_bodies_a = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
         assert not any(b.get("subspace") == f"mailbox/{instance_a}" for b in rd_bodies_a)
