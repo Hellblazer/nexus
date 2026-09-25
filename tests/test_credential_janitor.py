@@ -31,9 +31,11 @@ state (no real ``$TMPDIR``, no real ``~/nexus-sandbox``, no real
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -474,3 +476,356 @@ def test_token_pattern_matches_the_bead_documented_shapes(cj):
 def test_credential_filenames_constant_has_both_known_shapes(cj):
     assert ".credentials.json" in cj.CREDENTIAL_FILENAMES
     assert ".claude-credentials.json" in cj.CREDENTIAL_FILENAMES
+
+
+def test_protected_env_var_names_constant_has_both_known_shapes(cj):
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in cj.PROTECTED_ENV_VAR_NAMES
+    assert "NX_HARNESS_CLAUDE_OAUTH_TOKEN" in cj.PROTECTED_ENV_VAR_NAMES
+
+
+# ===========================================================================
+# Process scan -- a live process holding a protected token in its
+# environment, not merely a file on disk (T2 nexus_rdr/219-leftover-tmux-
+# servers-2026-09-25: five orphaned tmux servers, each holding the
+# automation token in process memory only, invisible to every sweep above).
+# ===========================================================================
+
+
+def test_process_scan_with_protected_var_fails_and_never_prints_value(cj):
+    """macOS path: a fake `ps -Eww` line whose command text carries a
+    protected env var, older than the threshold, is flagged -- and the
+    matched VALUE never reaches the report, only pid/etime/comm."""
+    secret = "FAKESECRETVALUE_MUST_NEVER_APPEAR_IN_OUTPUT_00000"
+    fake_output = (
+        f"12345 02:00:00 python3 /usr/bin/python3 NX_HARNESS_CLAUDE_OAUTH_TOKEN={secret} --foo bar\n"
+    )
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="darwin",
+        ps_runner=lambda: fake_output,
+    )
+    assert len(findings) == 1
+    assert findings[0].pid == 12345
+    assert findings[0].comm == "python3"
+    result = cj.ScanResult(process_findings=findings)
+    report = cj.format_report(result)
+    assert "pid=12345" in report
+    assert "etime=02:00:00" in report
+    assert "comm=python3" in report
+    assert secret not in report
+    assert "CREDENTIAL JANITOR FAILED" in report
+
+
+def test_process_scan_younger_than_threshold_passes(cj):
+    fake_output = "12345 00:05:00 python3 /usr/bin/python3 NX_HARNESS_CLAUDE_OAUTH_TOKEN=whatever\n"
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="darwin",
+        ps_runner=lambda: fake_output,
+    )
+    assert findings == []
+
+
+def test_process_scan_without_a_protected_var_is_not_flagged(cj):
+    fake_output = "12345 05:00:00 bash /bin/bash SOME_OTHER_VAR=x --foo bar\n"
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="darwin",
+        ps_runner=lambda: fake_output,
+    )
+    assert findings == []
+
+
+def test_process_scan_excludes_a_pid_in_the_exclude_set(cj):
+    """The janitor's own process and its ancestors are excluded by pid,
+    passed in via `exclude_pids` -- `main()` populates this from
+    `_own_ancestor_pids()`."""
+    fake_output = "12345 02:00:00 python3 /usr/bin/python3 NX_HARNESS_CLAUDE_OAUTH_TOKEN=whatever\n"
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids={12345}, platform_name="darwin",
+        ps_runner=lambda: fake_output,
+    )
+    assert findings == []
+
+
+def test_own_ancestor_pids_includes_self(cj):
+    assert os.getpid() in cj._own_ancestor_pids()
+
+
+def _write_fake_proc_pid(
+    proc_root: pathlib.Path, pid: int, *, comm: str, environ: bytes, starttime_ticks: int,
+) -> None:
+    pid_dir = proc_root / str(pid)
+    pid_dir.mkdir()
+    (pid_dir / "comm").write_text(f"{comm}\n")
+    (pid_dir / "environ").write_bytes(environ)
+    # /proc/<pid>/stat: `pid (comm) state ppid ... starttime ...` -- starttime
+    # is field 22 (1-indexed), i.e. index 19 of the tokens after the comm
+    # parenthetical. Padded with enough trailing zero fields to be a
+    # plausible stat line; only index 19 is ever read by this module.
+    after = ["S", "1", str(pid), str(pid), "0", "-1", "4194304"] + ["0"] * 8 + [
+        "20", "0", "1", "0", str(starttime_ticks),
+    ] + ["0"] * 18
+    (pid_dir / "stat").write_text(f"{pid} ({comm}) {' '.join(after)}\n")
+
+
+def test_linux_process_scan_flags_old_protected_env_process_via_proc(tmp_path, cj):
+    """Linux path: /proc/<pid>/environ read directly (NUL-separated), age
+    derived from /proc/<pid>/stat's starttime against /proc/uptime -- no
+    `ps` involved, matching this box class's actual read mechanism."""
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    (proc_root / "uptime").write_text("100000.0 0.0\n")
+    secret = b"FAKESECRETVALUE_MUST_NEVER_APPEAR_00000"
+    _write_fake_proc_pid(
+        proc_root, 54321, comm="python3",
+        environ=b"PATH=/usr/bin\x00CLAUDE_CODE_OAUTH_TOKEN=" + secret + b"\x00",
+        starttime_ticks=100,  # started ~1s after boot (clk_tck=100) -> age ~99999s
+    )
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="linux",
+        proc_root=proc_root, clk_tck=100,
+    )
+    assert len(findings) == 1
+    assert findings[0].pid == 54321
+    assert findings[0].comm == "python3"
+    report = cj.format_report(cj.ScanResult(process_findings=findings))
+    assert secret.decode() not in report
+
+
+def test_linux_process_scan_does_not_flag_a_young_process(tmp_path, cj):
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    (proc_root / "uptime").write_text("100000.0 0.0\n")
+    _write_fake_proc_pid(
+        proc_root, 54322, comm="python3",
+        environ=b"CLAUDE_CODE_OAUTH_TOKEN=$NOT_A_LITERAL_FAKE_VALUE\x00",
+        starttime_ticks=9999000,  # started ~99990s -> age ~10s, well under threshold
+    )
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="linux",
+        proc_root=proc_root, clk_tck=100,
+    )
+    assert findings == []
+
+
+def test_linux_process_scan_without_a_protected_var_is_not_flagged(tmp_path, cj):
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    (proc_root / "uptime").write_text("100000.0 0.0\n")
+    _write_fake_proc_pid(
+        proc_root, 54323, comm="bash",
+        environ=b"PATH=/usr/bin\x00",
+        starttime_ticks=100,
+    )
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="linux",
+        proc_root=proc_root, clk_tck=100,
+    )
+    assert findings == []
+
+
+def test_linux_process_scan_excludes_a_pid_in_the_exclude_set(tmp_path, cj):
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    (proc_root / "uptime").write_text("100000.0 0.0\n")
+    _write_fake_proc_pid(
+        proc_root, 54324, comm="python3",
+        environ=b"CLAUDE_CODE_OAUTH_TOKEN=$NOT_A_LITERAL_FAKE_VALUE\x00",
+        starttime_ticks=100,
+    )
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids={54324}, platform_name="linux",
+        proc_root=proc_root, clk_tck=100,
+    )
+    assert findings == []
+
+
+# ===========================================================================
+# Tmux socket discovery -- a live tmux server on a known harness socket
+# name is exactly the shape that stranded five orphaned servers for ~7
+# hours (T2 nexus_rdr/219-leftover-tmux-servers-2026-09-25); each held the
+# automation token in the server's own environment, invisible to any file
+# sweep.
+# ===========================================================================
+
+
+def test_tmux_socket_matching_harness_pattern_is_flagged(tmp_path, cj):
+    root = tmp_path / "tmux-501"
+    root.mkdir()
+    sock = root / "nexus-e2e-4242"
+    sock.write_bytes(b"")
+    old_time = time.time() - 3 * 3600
+    os.utime(sock, (old_time, old_time))
+    findings = cj.discover_tmux_sockets(
+        roots=[root], min_age_seconds=7200, tmux_runner=lambda name: True,
+    )
+    assert len(findings) == 1
+    assert findings[0].socket_name == "nexus-e2e-4242"
+
+
+def test_tmux_socket_not_matching_any_pattern_is_not_flagged(tmp_path, cj):
+    root = tmp_path / "tmux-501"
+    root.mkdir()
+    sock = root / "some-unrelated-socket"
+    sock.write_bytes(b"")
+    old_time = time.time() - 3 * 3600
+    os.utime(sock, (old_time, old_time))
+    findings = cj.discover_tmux_sockets(
+        roots=[root], min_age_seconds=7200, tmux_runner=lambda name: True,
+    )
+    assert findings == []
+
+
+def test_tmux_socket_younger_than_threshold_is_not_flagged(tmp_path, cj):
+    root = tmp_path / "tmux-501"
+    root.mkdir()
+    sock = root / "cc-val-sock"
+    sock.write_bytes(b"")  # mtime is "now" -- well under the threshold
+    findings = cj.discover_tmux_sockets(
+        roots=[root], min_age_seconds=7200, tmux_runner=lambda name: True,
+    )
+    assert findings == []
+
+
+def test_tmux_socket_with_no_live_server_is_not_flagged(tmp_path, cj):
+    """A stale socket FILE with no server behind it (`tmux -L <name> ls`
+    fails) is not a finding -- there is nothing to kill and nothing holding
+    the token."""
+    root = tmp_path / "tmux-501"
+    root.mkdir()
+    sock = root / "release-sandbox-sock"
+    sock.write_bytes(b"")
+    old_time = time.time() - 3 * 3600
+    os.utime(sock, (old_time, old_time))
+    findings = cj.discover_tmux_sockets(
+        roots=[root], min_age_seconds=7200, tmux_runner=lambda name: False,
+    )
+    assert findings == []
+
+
+def test_tmux_socket_veh77_ladder_glob_variant_is_flagged(tmp_path, cj):
+    root = tmp_path / "tmux-501"
+    root.mkdir()
+    sock = root / "veh77-ladder-9981"
+    sock.write_bytes(b"")
+    old_time = time.time() - 3 * 3600
+    os.utime(sock, (old_time, old_time))
+    findings = cj.discover_tmux_sockets(
+        roots=[root], min_age_seconds=7200, tmux_runner=lambda name: True,
+    )
+    assert len(findings) == 1
+    assert findings[0].socket_name == "veh77-ladder-9981"
+
+
+def test_tmux_socket_report_never_prints_more_than_name_and_remedy(tmp_path, cj):
+    root = tmp_path / "tmux-501"
+    root.mkdir()
+    sock = root / "shakeout-sock"
+    sock.write_bytes(b"")
+    old_time = time.time() - 3 * 3600
+    os.utime(sock, (old_time, old_time))
+    findings = cj.discover_tmux_sockets(
+        roots=[root], min_age_seconds=7200, tmux_runner=lambda name: True,
+    )
+    report = cj.format_report(cj.ScanResult(tmux_findings=findings))
+    assert "shakeout-sock" in report
+    assert "kill-server" in report
+    assert "CREDENTIAL JANITOR FAILED" in report
+
+
+# ===========================================================================
+# main() wiring: process/tmux findings reach the report and the exit code,
+# via the injected `scan_processes`/`discover_tmux_sockets` module
+# functions (so this test touches no real host process table).
+# ===========================================================================
+
+
+def test_main_reports_and_fails_on_a_process_finding(tmp_path, cj, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / "README.md").write_text("hi\n")
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    fake_cred_tool = tmp_path / "fake_claude_credentials.py"
+    fake_cred_tool.write_text("import sys\nsys.exit(0)\n")
+
+    monkeypatch.setattr(
+        cj, "scan_processes",
+        lambda **kwargs: [cj.ProcessFinding(pid=999, etime="03:00:00", comm="tmux")],
+    )
+    monkeypatch.setattr(cj, "discover_tmux_sockets", lambda **kwargs: [])
+
+    rc = cj.main(
+        [
+            "--repo-root", str(repo),
+            "--tmpdir", str(tmpdir),
+            "--home", str(tmp_path / "home"),
+            "--scratchpad-parent", str(tmp_path / "no-scratchpad-parent"),
+            "--cred-tool", str(fake_cred_tool),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "CREDENTIAL JANITOR FAILED" in out
+    assert "pid=999" in out
+    assert "comm=tmux" in out
+
+
+def test_main_reports_and_fails_on_a_tmux_finding(tmp_path, cj, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / "README.md").write_text("hi\n")
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    fake_cred_tool = tmp_path / "fake_claude_credentials.py"
+    fake_cred_tool.write_text("import sys\nsys.exit(0)\n")
+
+    monkeypatch.setattr(cj, "scan_processes", lambda **kwargs: [])
+    monkeypatch.setattr(
+        cj, "discover_tmux_sockets",
+        lambda **kwargs: [
+            cj.TmuxFinding(socket_name="nexus-e2e-777", socket_path=tmp_path / "nexus-e2e-777")
+        ],
+    )
+
+    rc = cj.main(
+        [
+            "--repo-root", str(repo),
+            "--tmpdir", str(tmpdir),
+            "--home", str(tmp_path / "home"),
+            "--scratchpad-parent", str(tmp_path / "no-scratchpad-parent"),
+            "--cred-tool", str(fake_cred_tool),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "CREDENTIAL JANITOR FAILED" in out
+    assert "nexus-e2e-777" in out
+    assert "kill-server" in out
+
+
+def test_main_passes_when_process_and_tmux_scans_find_nothing(tmp_path, cj, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / "README.md").write_text("hi\n")
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    fake_cred_tool = tmp_path / "fake_claude_credentials.py"
+    fake_cred_tool.write_text("import sys\nsys.exit(0)\n")
+
+    monkeypatch.setattr(cj, "scan_processes", lambda **kwargs: [])
+    monkeypatch.setattr(cj, "discover_tmux_sockets", lambda **kwargs: [])
+
+    rc = cj.main(
+        [
+            "--repo-root", str(repo),
+            "--tmpdir", str(tmpdir),
+            "--home", str(tmp_path / "home"),
+            "--scratchpad-parent", str(tmp_path / "no-scratchpad-parent"),
+            "--cred-tool", str(fake_cred_tool),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "CREDENTIAL JANITOR PASSED" in out
