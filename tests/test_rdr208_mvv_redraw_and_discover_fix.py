@@ -56,8 +56,13 @@ _MVV_SH = _ROOT / "tests" / "e2e" / "rdr208-mvv" / "mvv_in_container.sh"
 
 
 def _extract_function(text: str, name: str) -> str:
-    """The full `name() { ... }` block (header line through the closing
-    brace at column 0), extracted verbatim from `text`."""
+    """The full `name() { ... }` block, extracted verbatim from `text`.
+    Tries the one-liner shape first (`name() { ...; }` all on one line,
+    e.g. `armed_name_known`), then the multi-line shape (header line
+    through a closing brace at column 0, e.g. `arm`/`discover_name`)."""
+    m = re.search(rf"^{re.escape(name)}\(\) \{{[^\n]*\}}\n", text, re.M)
+    if m:
+        return m.group(0)
     m = re.search(rf"^{re.escape(name)}\(\) \{{.*?\n(?:.*?\n)*?^\}}\n", text, re.M)
     assert m, f"could not find a `{name}() {{ ... }}` block"
     return m.group(0)
@@ -209,3 +214,119 @@ def test_discover_a2_name_falls_back_to_the_pre_resume_name_when_no_rename_yet()
     proc = _run_bash(script)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "work-79", proc.stdout
+
+
+# ──────────────────── armed_name_known / arm(): the vacuous-pass gap ─────────
+
+
+_ARM_STUB = r"""
+set -uo pipefail
+declare -A SID_OF=([A2]="SID1") NAME_OF=()
+prompt() { return 0; }
+wait_for() { shift; "$@"; }
+tok() { printf 'TOK'; }
+"""
+
+
+def test_armed_name_known_is_not_vacuously_true_when_excluding_the_stale_entry() -> None:
+    """The coordinator's exact complaint: with ONLY A's stale entry
+    present for this session id, armed_name_known must NOT report success
+    when asked to exclude that entry -- RED against the pre-fix
+    `armed_name_known() { [ -n "$(discover_name "$1")" ]; }` (a single
+    positional arg, silently ignoring a second one under `set -u`, so the
+    call below would still see the stale entry and return 0)."""
+    mvv = _MVV_SH.read_text(encoding="utf-8")
+    fn = _extract_function(mvv, "discover_name") + _extract_function(mvv, "armed_name_known")
+    script = fn + _STALE_ENTRY_STUB.replace("__EXTRA_SUBSPACE__", "") + "\narmed_name_known A2 work-79\n"
+    proc = _run_bash(script)
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+
+
+def test_armed_name_known_excluding_the_stale_entry_finds_a_genuinely_new_one() -> None:
+    """The positive case: a genuinely different entry exists alongside
+    the stale one -- excluding the stale name must still report success."""
+    mvv = _MVV_SH.read_text(encoding="utf-8")
+    fn = _extract_function(mvv, "discover_name") + _extract_function(mvv, "armed_name_known")
+    script = (
+        fn
+        + _STALE_ENTRY_STUB.replace("__EXTRA_SUBSPACE__", ',{"subspace":"directory/work-2a"}')
+        + '\nSECOND_NAME=work-2a armed_name_known A2 work-79\n'
+    )
+    proc = _run_bash(script)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_arm_reports_the_genuinely_new_name_when_one_exists() -> None:
+    """arm()'s primary, happy-path branch: EXCLUDE is given, and a
+    genuinely distinct entry already exists (as if the model's
+    tuple_subscribe call, stubbed here via a no-op prompt(), had already
+    landed) -- arm() must report success and record the NEW name, not the
+    excluded stale one."""
+    mvv = _MVV_SH.read_text(encoding="utf-8")
+    fn = (
+        _extract_function(mvv, "discover_name")
+        + _extract_function(mvv, "armed_name_known")
+        + _extract_function(mvv, "arm")
+    )
+    script = (
+        fn
+        + _ARM_STUB
+        + _STALE_ENTRY_STUB.replace("__EXTRA_SUBSPACE__", ',{"subspace":"directory/work-2a"}')
+        + '\nSECOND_NAME=work-2a arm A2 work-79\n'
+        + 'rc=$?\n'
+        + 'printf \'RC=%s\\nNAME=%s\\n\' "$rc" "${NAME_OF[A2]:-}"\n'
+    )
+    proc = _run_bash(script)
+    assert proc.returncode == 0, proc.stderr
+    out = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    assert out.get("RC") == "0", proc.stdout
+    assert out.get("NAME") == "work-2a", proc.stdout
+
+
+def test_arm_treats_a_same_name_recollision_as_success_not_a_failure() -> None:
+    """Only the excluded (pre-resume) name exists -- an irreducible
+    ambiguity (see the in-code comment: a resubscribe to an already-held
+    name leaves no distinct trace). arm() must NOT report this as a
+    failure -- that would newly introduce a false FAIL on a benign ~1/256
+    same-name re-collision, exactly the kind of mis-measurement this
+    whole fix removes elsewhere. It falls back to the unqualified check,
+    finds the excluded name itself, and succeeds."""
+    mvv = _MVV_SH.read_text(encoding="utf-8")
+    fn = (
+        _extract_function(mvv, "discover_name")
+        + _extract_function(mvv, "armed_name_known")
+        + _extract_function(mvv, "arm")
+    )
+    script = (
+        fn
+        + _ARM_STUB
+        + _STALE_ENTRY_STUB.replace("__EXTRA_SUBSPACE__", "")
+        + '\narm A2 work-79\n'
+        + 'rc=$?\n'
+        + 'printf \'RC=%s\\nNAME=%s\\n\' "$rc" "${NAME_OF[A2]:-}"\n'
+    )
+    proc = _run_bash(script)
+    assert proc.returncode == 0, proc.stderr
+    out = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    assert out.get("RC") == "0", proc.stdout
+    assert out.get("NAME") == "work-79", proc.stdout
+
+
+def test_arm_reports_a_real_failure_when_nothing_exists_at_all() -> None:
+    """Not even the excluded name's own entry exists for this session id
+    -- a genuine arm failure (the model never subscribed anything, and
+    somehow not even the pre-resume entry survives, which should not
+    happen but is checked rather than assumed). arm() must return
+    non-zero."""
+    mvv = _MVV_SH.read_text(encoding="utf-8")
+    fn = (
+        _extract_function(mvv, "discover_name")
+        + _extract_function(mvv, "armed_name_known")
+        + _extract_function(mvv, "arm")
+    )
+    stub = _STALE_ENTRY_STUB.replace("__EXTRA_SUBSPACE__", "").replace(
+        '[ "$3" = work-79 ]', '[ "$3" = nothing-matches-anything ]'
+    )
+    script = fn + _ARM_STUB + stub + '\narm A2 work-79\n'
+    proc = _run_bash(script)
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)

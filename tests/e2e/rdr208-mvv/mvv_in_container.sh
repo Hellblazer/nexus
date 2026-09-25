@@ -376,21 +376,47 @@ discover_name() {  # NAME [EXCLUDE] -> the instance name this session actually a
     done
     return 1
 }
-armed_name_known() { [ -n "$(discover_name "$1")" ]; }
-arm() {  # NAME: the session subscribes ITS OWN instance name
-    # The harness no longer assigns the name. Three billed runs died here
-    # because it did: a session's instance name comes from ListAgents, the
-    # tool's contract is "this session's OWN instance-name mailbox", and a
-    # model asked to subscribe some other string checks, finds the mismatch
-    # and declines -- correctly, and unpredictably (2026-09-18: in one run
-    # session A complied and session B refused, same prompt). Asking for the
-    # session's own name removes the false premise entirely, and the name
-    # this journey then uses is the REAL one, so the rename across a
-    # /resume is a genuine rename rather than a scripted one.
-    local t; t="$(tok DONE-ARM)"
+armed_name_known() { [ -n "$(discover_name "$1" "${2:-}")" ]; }
+arm() {  # NAME [EXCLUDE]: the session subscribes ITS OWN instance name.
+    # EXCLUDE (optional, nexus-wauo1.13 coordinator finding, 2026-09-25): a
+    # directory name known to be a STALE, still-live entry for this session
+    # id -- passed only by the /resume site (step 2), where A2 shares A's
+    # session id and A's own pre-resume entry survives a plain /exit (see
+    # stop()'s own comment). WITHOUT it, "did I arm at all" is vacuously
+    # true from the moment step 2 begins: A's stale entry alone satisfies
+    # "some entry exists for this session id", so the check could never
+    # catch a genuine arm FAILURE on a resumed session -- it proves
+    # nothing, exactly as reported. The default (empty) leaves every OTHER
+    # caller (A, B, C, and A2's own re-arm after /clear at step 4, a
+    # DIFFERENT session id with no stale entry to exclude) unchanged.
+    local t exclude="${2:-}"; t="$(tok DONE-ARM)"
     prompt "$1" "Call ListAgents to read this session's own instance name, then call the nexus MCP tool tuple_subscribe with subspace \"mailbox/<that exact name>\" -- this arms your own name in the session directory, which is what that tool accepts. Then reply with exactly $t and nothing else." "$t" || return 1
-    wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
-    NAME_OF[$1]="$(discover_name "$1")"
+    if [ -n "$exclude" ] && ! wait_for 30 armed_name_known "$1" "$exclude"; then
+        # Nothing OTHER than $exclude showed up within 30s. That is either
+        # a genuine arm failure, or a genuine SAME-NAME re-collision
+        # (Claude re-assigned the identical pre-resume name) -- the two
+        # cannot be told apart from directory state alone, since a
+        # resubscribe to an already-held name leaves no distinct trace
+        # here (the same irreducible ambiguity discover_name's own EXCLUDE
+        # comment names). Fall back to the UNQUALIFIED check: if even that
+        # finds nothing (implausible, since $exclude's own entry should
+        # still be live, but checked rather than assumed), it is a real
+        # failure. If it succeeds, treat this as a benign collision, not a
+        # failure -- redraw_until_distinct's own comparison against
+        # $exclude will correctly redraw for it, same as any other
+        # collision.
+        if ! armed_name_known "$1"; then
+            echo "  no directory entry for ${SID_OF[$1]} after the arm"
+            return 1
+        fi
+        echo "  session $1 re-armed a name matching the excluded $exclude (a same-name collision, not an arm failure)"
+        NAME_OF[$1]="$exclude"
+        return 0
+    fi
+    if [ -z "$exclude" ]; then
+        wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
+    fi
+    NAME_OF[$1]="$(discover_name "$1" "$exclude")"
     echo "  session $1 armed its own name: ${NAME_OF[$1]}"
 }
 model_send() {  # NAME TO CORR: a send with the DEFAULT sender, from inside the session
@@ -527,11 +553,15 @@ say "step 2: /resume (new process, same session id, new name)"
 stop A
 RESUME_T="$(now)"
 launch A2 "$SA" || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume"; exit 1; }
-arm A2 || bad "arm A2 (a resumed session subscribes its NEW name)"
+# $A_NAME excludes A's own still-live pre-resume entry from arm()'s
+# "did I arm at all" verification (nexus-wauo1.13 coordinator finding,
+# 2026-09-25) -- without it the check is vacuously true here, since A2
+# shares A's session id.
+arm A2 "$A_NAME" || bad "arm A2 (a resumed session subscribes its NEW name)"
 # nexus-4ahul: redraw (a real relaunch, a genuine new process start) up to
 # COLLISION_RETRY_CAP times if the resumed session's draw collides with the
 # pre-resume name, before asserting anything below -- see redraw_until_distinct.
-redraw_a2() { T kill-session -t A2 2>/dev/null; launch A2 "$SA" && arm A2; }
+redraw_a2() { T kill-session -t A2 2>/dev/null; launch A2 "$SA" && arm A2 "$A_NAME"; }
 discover_a2_name() {  # -> A2's CURRENT name, distinct from A's still-held pre-resume entry
     # NAME_OF[A2] (set by arm()'s own unqualified discover_name call,
     # line 358) is exactly the ambiguous read discover_name's EXCLUDE
