@@ -265,7 +265,18 @@ def _printenv_reason(command: str) -> str | None:
 #: harness script) must never be denied. `|` is handled separately below
 #: (a pipe target can be a provably-safe filter), unlike the old bare-tail
 #: regex that treated ANY pipe as bare.
-_ENV_OR_SET_INVOKE_RE = re.compile(r"\b(env|set)\b(?P<tail>[^;&#\n]*)", re.MULTILINE)
+#: `env`/`set` must be in COMMAND position -- the start of the command, or
+#: right after `;`, `&`, `|`, `(`, a newline, `$(` or a backtick, with
+#: optional whitespace and `VAR=value` prefixes allowed -- so `cat .env`,
+#: `source .env` and `tmux set-environment` are not read as a dump, while
+#: `$(env)` and a backticked env are. The tail stops at a segment terminator,
+#: a closing `)` or a backtick, so a substitution's own close does not read
+#: as an argument.
+_ENV_OR_SET_INVOKE_RE = re.compile(
+    r"(?:^|[;&|(\n`]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(env|set)(?![\w.-])"
+    r"(?P<tail>[^;&#\n)`]*)",
+    re.MULTILINE,
+)
 #: A `grep`/`egrep`/`fgrep` invocation in COUNT (`-c`/`--count`) or QUIET
 #: (`-q`/`--quiet`/`--silent`) mode never prints a matched line's value,
 #: so it is safe regardless of pattern -- `env | grep -c NAME`, `env |
@@ -286,18 +297,30 @@ def _grep_pattern_matches_protected_name(grep_segment: str) -> str | None:
     `env | grep OAUTH`/`env | grep TOKEN` match (both are substrings of
     `CLAUDE_CODE_OAUTH_TOKEN`); `env | grep FOO` does not."""
     tokens = grep_segment.split()
-    pattern = None
-    for tok in tokens[1:]:
-        if tok.startswith("-"):
+    patterns: list[str] = []
+    positional_taken = False
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-e", "--regexp") and i + 1 < len(tokens):
+            patterns.append(tokens[i + 1])
+            i += 2
             continue
-        pattern = tok.strip("'\"")
-        break
-    if not pattern:
-        return None
-    pattern_lower = pattern.lower()
-    for var in CREDENTIAL_ENV_VARS:
-        if pattern_lower in var.lower():
-            return var
+        if tok.startswith("--regexp="):
+            patterns.append(tok.split("=", 1)[1])
+        elif tok.startswith("-e") and len(tok) > 2:
+            patterns.append(tok[2:])
+        elif not tok.startswith("-") and not positional_taken and not patterns:
+            patterns.append(tok)
+            positional_taken = True
+        i += 1
+    for raw in patterns:
+        pattern_lower = raw.strip("'\"").lower()
+        if not pattern_lower:
+            continue
+        for var in CREDENTIAL_ENV_VARS:
+            if pattern_lower in var.lower():
+                return var
     return None
 
 

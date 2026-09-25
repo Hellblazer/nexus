@@ -89,6 +89,18 @@ def _reason(proc: subprocess.CompletedProcess) -> str:
 
 DENIED_SHAPES = [
     pytest.param(
+        'echo "$(env)"',
+        id="env-dump-in-command-substitution",
+    ),
+    pytest.param(
+        "x=`env`",
+        id="env-dump-in-backticks",
+    ),
+    pytest.param(
+        "env | grep -e FOO -e TOKEN",
+        id="env-grep-second-pattern-matches-protected-name",
+    ),
+    pytest.param(
         'security find-generic-password -s "Claude Code-credentials" -w',
         id="find-generic-password-interactive-login-item",
     ),
@@ -333,6 +345,10 @@ def test_routing_allow_escape_does_not_apply(command: str) -> None:
 # ---------------------------------------------------------------------------
 
 ALLOWED_SHAPES = [
+    pytest.param("cat .env", id="dotenv-file-read-is-not-an-env-dump"),
+    pytest.param("source .env", id="dotenv-source-is-not-an-env-dump"),
+    pytest.param("tmux set-environment -g X 1", id="tmux-set-environment"),
+    pytest.param("env | grep -e FOO -e BAR", id="env-grep-multiple-unrelated-patterns"),
     pytest.param(
         'python3 "$CRED_TOOL" status',
         id="cred-tool-status-tests-e2e-run-sh",
