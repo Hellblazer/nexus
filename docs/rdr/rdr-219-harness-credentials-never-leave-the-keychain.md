@@ -392,10 +392,16 @@ the same environment pass-through.
 naming the helper:
 - `security find-generic-password` or `security dump-keychain -d` naming either
   credential item;
-- reading a `.credentials.json` file to stdout (`cat`, `less`, `head`, `tail`,
-  `jq`, `python -c` open/print shapes);
-- printing `CLAUDE_CODE_OAUTH_TOKEN` (`echo $CLAUDE_CODE_OAUTH_TOKEN`, `env`,
-  `printenv`, `set` piped to a file or displayed).
+- reading a `.credentials.json` file to stdout (`cat`, `less`, `more`, `head`,
+  `tail`, `jq`, `awk`, `sed`, `od`, `xxd`, `strings`, `base64`, and `python -c`
+  or python-heredoc open/print shapes);
+- printing a protected variable's value (`CLAUDE_CODE_OAUTH_TOKEN`, and with the
+  amendment `NX_HARNESS_CLAUDE_OAUTH_TOKEN`): `echo $NAME`, `printenv NAME`, a
+  python snippet reading it, an unfiltered `env`, `env -0` or `set` dump, or a
+  filter that would print a matching line. `printenv PATH`, `env | grep -c
+  NAME` and `set -euo pipefail` are allowed, since they cannot print the value;
+- printing other processes' environments: `ps` with `-E` or BSD `e`, and reads
+  of `/proc/<pid>/environ` (added after the Phase 3 reviews, nexus-wauo1.22).
 
 It ships as a self-contained stdlib plugin script with no `nexus` import,
 declared directly under the PreToolUse Bash matcher in `conexus/hooks/hooks.json`,
@@ -510,7 +516,9 @@ not documented, and it does not apply in bare mode.
   threat model is accidental disclosure (see "The nx-mcp dispatch grant"). The
   accidental form, a debugging command that prints other processes'
   environments into a transcript (`ps` with `-E` or BSD `e`, a read of
-  `/proc/<pid>/environ`), is in scope, and the print guard denies it. The token is the revocable
+  `/proc/<pid>/environ`), is in scope. The print guard is specified to deny it
+  ("The plugin guard", added in the Phase 3 review fix round of
+  nexus-wauo1.22). The token is the revocable
   automation token, never the operator's login. Getting the token into
   containers over stdin or a file descriptor would narrow the container case;
   that is outside this RDR.
@@ -791,3 +799,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Amendment (nexus-wauo1.35, Sam: "amend"): harnesses may grant the automation token to nx-mcp's LLM dispatch under NX_HARNESS_CLAUDE_OAUTH_TOKEN, mapped in one helper in src/nexus; the Claude Code finding corrected (it deletes the token from its own environment, it does not filter names); Phase 3b added.
 - 2026-09-25: Amendment revised after critique (not-justified, 3 Critical): the grant moves from Claude's environment to a piped `--mcp-config` env block, so only nx-mcp holds it (T3 analysis-deep-rdr219-devfd-mcp-config-2026-09-25). The stray-variable failure mode is restated as detected (startup warning, `nx doctor`), not prevented; the threat model (accidental disclosure, not a same-user reader) and the `docker -e` exposure are stated. Proofs now cover all four claimed paths, and the Test Plan and MVV include them. The janitor scans `~/.config/nexus/logs`. The first draft's reversal of the renamed-variable objection is reconciled.
 - 2026-09-25: Amendment round 2 (critique: not-justified, 1 Critical): the grant is limited to harnesses that use `--strict-mcp-config`; plugin-loaded harnesses need a hook-resolution proof first (nexus-wauo1.37). The janitor's filename-versus-content scope is stated as built, and the accidental-versus-deliberate limitation is added to the Contradiction Check.
+- 2026-09-25: Amendment round 3 (critique: partial, 1 Significant): the guard's design section lists the ps and /proc environment shapes and the narrowed variable-print rule; the Risks entry states them as specified, not shipped.
