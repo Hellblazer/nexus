@@ -145,10 +145,13 @@ Modes (argv[1]):
                  ``ANTHROPIC_API_KEY`` above ``CLAUDE_CODE_OAUTH_TOKEN``,
                  so `run` prints exactly one stderr line naming that the
                  child bills the API key, not the automation token,
-                 whenever it's present — local or remote alike (ssh
-                 never forwards the caller's local environment either
-                 way, so the warning is the only signal that matters for
-                 --remote).
+                 whenever it's present. Locally that is the caller's own
+                 environment. For --remote the check runs on the REMOTE
+                 side, inside the helper's reader, because ssh never
+                 forwards the caller's environment: a local key never
+                 reaches the remote child, and a key set on the remote
+                 host does (the reader prints the same line there; the
+                 local check stays quiet for --remote).
   status         -- print whether the automation token is present, its
                  creation date and days to expiry (creation date + 365
                  days), with a warning line at 30 days or fewer. Never
@@ -213,12 +216,20 @@ TOKEN_WARN_DAYS = 30
 DEFAULT_REMOTE_SHELL = "bash -s --"
 
 #: The fixed, vetted POSIX reader the helper's own remote side runs. Never
-#: echoes (no `set -x`, no printing the variable). `_remote_stdin_payload`
+#: expands the token variable and never traces (no `set -x`); its only
+#: output is the fixed ANTHROPIC_API_KEY warning, on stderr, when the
+#: remote environment carries a key that outranks the token. `_remote_stdin_payload`
 #: splices the token in as DATA right after the `read` line -- see the
 #: `run` docstring entry above for why that placement, not the ssh argv
 #: or environment, is where the token travels.
 _REMOTE_READER_READ_LINE = "IFS= read -r CLAUDE_CODE_OAUTH_TOKEN"
-_REMOTE_READER_TAIL = 'export CLAUDE_CODE_OAUTH_TOKEN\nexec "$@"\n'
+_REMOTE_READER_TAIL = (
+    "export CLAUDE_CODE_OAUTH_TOKEN\n"
+    'test -n "${ANTHROPIC_API_KEY-}" && echo "[auth] ANTHROPIC_API_KEY is set'
+    ' on the remote host -- the child bills the API key, not the automation'
+    ' token" >&2\n'
+    'exec "$@"\n'
+)
 
 _CDAT_RE = re.compile(r'"cdat"<timedate>=0x[0-9A-Fa-f]+\s+"(\d{14})Z')
 
@@ -413,6 +424,17 @@ def _remedy(account: str) -> str:
     )
 
 
+def _names_token_env(tok: str) -> bool:
+    """True when a docker argv token passes CLAUDE_CODE_OAUTH_TOKEN itself:
+    `NAME`, `NAME=...`, `-eNAME`, `--env=NAME`. An exact name match, so a
+    variable whose name merely contains the token's name does not count."""
+    for prefix in ("--env=", "-e"):
+        if tok.startswith(prefix) and tok != prefix:
+            tok = tok[len(prefix):]
+            break
+    return tok.split("=", 1)[0] == TOKEN_ENV_VAR
+
+
 def _ensure_docker_flags(command: list[str]) -> list[str]:
     """If `command` invokes `docker run` at the TOP LEVEL (`command[0]` is
     literally `docker`, or ends in `/docker`; any leading docker global
@@ -438,7 +460,7 @@ def _ensure_docker_flags(command: list[str]) -> list[str]:
     result = command[: run_idx + 1]
     if "--rm" not in tail:
         result = result + ["--rm"]
-    if not any(TOKEN_ENV_VAR in tok for tok in tail):
+    if not any(_names_token_env(tok) for tok in tail):
         result = result + ["-e", TOKEN_ENV_VAR]
     return result + command[run_idx + 1 :]
 
@@ -519,7 +541,7 @@ def _cmd_run(
     if not token:
         print(f"[auth] automation token unreadable -- {_remedy(account)}", file=sys.stderr)
         return 1
-    if "ANTHROPIC_API_KEY" in os.environ:
+    if not remote and "ANTHROPIC_API_KEY" in os.environ:
         print(
             "[auth] ANTHROPIC_API_KEY is set -- the child bills the API key, "
             "not the automation token",
@@ -572,7 +594,7 @@ def _parse_run_args(
     `[--remote HOST [--remote-shell ENTRY]] -- <command> [args...]`.
     Returns (remote_host_or_None, remote_shell_or_None, command), or None
     if malformed (no `--`, an empty command, `--remote`/`--remote-shell`
-    with no value)."""
+    with no value, `--remote-shell` without `--remote`)."""
     remote: "str | None" = None
     remote_shell: "str | None" = None
     i = 0
@@ -591,7 +613,7 @@ def _parse_run_args(
             continue
         if argv[i] == "--":
             command = argv[i + 1 :]
-            if not command:
+            if not command or (remote_shell is not None and remote is None):
                 return None
             return remote, remote_shell, command
         return None

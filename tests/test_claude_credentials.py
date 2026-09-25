@@ -357,6 +357,29 @@ def test_run_does_not_duplicate_an_already_present_docker_env_flag(cc, tmp_path,
     assert argv.count("--rm") == 1  # still added, since it was absent
 
 
+def test_run_inserts_docker_env_flag_despite_a_similarly_named_variable(cc, tmp_path, monkeypatch) -> None:
+    """Round-2 review: the dedup matched by substring, so an unrelated
+    variable whose name merely contains the token's name suppressed the
+    insertion."""
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["docker", "run", "-e", "OLD_CLAUDE_CODE_OAUTH_TOKEN_PATH", "myimage"])
+    argv, _env = spy.calls[0]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in argv
+    assert argv[argv.index("CLAUDE_CODE_OAUTH_TOKEN") - 1] == "-e"
+
+
+def test_run_recognises_docker_env_flag_in_its_joined_forms(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    for form in (["--env=CLAUDE_CODE_OAUTH_TOKEN"], ["--env", "CLAUDE_CODE_OAUTH_TOKEN"]):
+        spy = _ExecSpy(rc=0)
+        monkeypatch.setattr(cc, "_exec", spy)
+        cc._cmd_run(["docker", "run", *form, "myimage"])
+        argv, _env = spy.calls[0]
+        assert sum("CLAUDE_CODE_OAUTH_TOKEN" in a for a in argv) == 1, argv
+
+
 def test_run_leaves_a_non_docker_command_untouched(cc, tmp_path, monkeypatch) -> None:
     _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
     spy = _ExecSpy(rc=0)
@@ -496,8 +519,11 @@ def test_remote_stdin_payload_token_appears_once_right_after_the_read_line(cc) -
 
 
 def test_remote_reader_never_echoes(cc) -> None:
+    """The reader may print its one fixed API-key warning, but never
+    expands the token variable anywhere, and never traces."""
     reader_text = cc._REMOTE_READER_READ_LINE + "\n" + cc._REMOTE_READER_TAIL
-    assert "echo" not in reader_text
+    assert "$CLAUDE_CODE_OAUTH_TOKEN" not in reader_text
+    assert "${CLAUDE_CODE_OAUTH_TOKEN" not in reader_text
     assert "set -x" not in reader_text
     assert "printf" not in reader_text
 
@@ -549,6 +575,46 @@ def test_remote_reader_real_shell_delivers_token_and_leaves_child_stdin_empty(cc
     # Nothing token-shaped leaked anywhere except the deliberate boolean line.
     assert _FAKE_TOKEN not in proc.stdout
     assert _FAKE_TOKEN not in proc.stderr
+
+
+@pytest.mark.skipif(not _HAS_BASH, reason="bash not on PATH")
+def test_remote_reader_warns_when_the_remote_side_has_an_api_key(cc) -> None:
+    """Round-2 review: ssh never forwards the caller's environment, so the
+    API-key check for --remote runs on the REMOTE side, inside the reader.
+    With ANTHROPIC_API_KEY in the remote shell's own environment the reader
+    prints the one warning line to stderr, and the token still arrives."""
+    payload = cc._remote_stdin_payload(_FAKE_TOKEN)
+    proc = _run_remote_probe(payload, {"ANTHROPIC_API_KEY": "sk-ant-api03-not-a-real-key"})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    warn = [line for line in proc.stderr.splitlines() if "ANTHROPIC_API_KEY" in line]
+    assert len(warn) == 1 and "bills" in warn[0], proc.stderr
+    assert "TOKEN_MATCH=yes" in proc.stdout
+    assert "STDIN_EMPTY=yes" in proc.stdout
+    assert _FAKE_TOKEN not in proc.stderr
+
+
+@pytest.mark.skipif(not _HAS_BASH, reason="bash not on PATH")
+def test_remote_reader_silent_when_the_remote_side_has_no_api_key(cc) -> None:
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env["EXPECTED_TOKEN"] = _FAKE_TOKEN
+    proc = subprocess.run(
+        ["bash", "-s", "--", sys.executable, "-c", _REMOTE_PROBE_CODE],
+        input=cc._remote_stdin_payload(_FAKE_TOKEN), text=True,
+        capture_output=True, env=env, timeout=10,
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "ANTHROPIC_API_KEY" not in proc.stderr
+
+
+def test_run_remote_does_not_warn_from_the_local_environment(cc, tmp_path, monkeypatch, capsys) -> None:
+    """A local ANTHROPIC_API_KEY never reaches the remote child, so the
+    local check must stay quiet for --remote (the remote reader owns it)."""
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-not-a-real-key")
+    monkeypatch.setattr(cc, "_run_remote", lambda *a, **k: 0)
+    monkeypatch.setattr(cc, "_exec", _ExecSpy())
+    assert cc._cmd_run(["echo", "hi"], remote="fake-host.example") == 0
+    assert "ANTHROPIC_API_KEY" not in capsys.readouterr().err
 
 
 @pytest.mark.skipif(not _HAS_BASH, reason="bash not on PATH")
@@ -671,6 +737,12 @@ def test_parse_run_args_rejects_remote_without_host() -> None:
 def test_parse_run_args_rejects_remote_shell_without_value() -> None:
     cc = _load_module()
     assert cc._parse_run_args(["--remote", "h", "--remote-shell"]) is None
+
+
+def test_parse_run_args_rejects_remote_shell_without_remote() -> None:
+    """Round-2 review: --remote-shell alone was accepted and silently ignored."""
+    cc = _load_module()
+    assert cc._parse_run_args(["--remote-shell", "sh -s --", "--", "cmd"]) is None
 
 
 def test_main_dispatches_run(cc, monkeypatch) -> None:
