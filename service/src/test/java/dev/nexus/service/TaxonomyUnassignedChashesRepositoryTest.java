@@ -401,6 +401,17 @@ class TaxonomyUnassignedChashesRepositoryTest {
                 + " tenant/collection), only this (tenant, collection)'s own range."
                 + " Plan was:%n%s", plan)
             .doesNotContain("Seq Scan on chunks");
+        // Round-2 review (code-review-expert): the two probed tables must stay
+        // index-backed too. At 50k rows a sequential scan of either would not
+        // trip the time bound above, so only the plan can catch it.
+        assertThat(plan)
+            .as("the manifest-liveness EXISTS must probe catalog_document_chunks by"
+                + " index, not scan it. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on catalog_document_chunks");
+        assertThat(plan)
+            .as("the unassigned antijoin must probe topic_assignments by index, not"
+                + " scan it. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on topic_assignments");
     }
 
     // ── helpers (mirrors TaxonomyAssignFromChashesRepositoryTest's own idiom) ────
