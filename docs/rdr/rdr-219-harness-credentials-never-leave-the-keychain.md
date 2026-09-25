@@ -30,8 +30,8 @@ remote test hosts, and many of those copies are never deleted.
 
 On 2026-09-25 a subagent running the nexus-6konb.15 MVV printed the credential
 into its own transcript through a redirect mistake. A search the same day found
-it in that transcript and in 34 files on disk, from four earlier sessions'
-harness runs. Rotating the login fixes that one leak. It does not stop the next
+it in that transcript and in 35 files on disk: 34 from four earlier sessions'
+harness runs, plus the persistent repo snapshot. Rotating the login fixes that one leak. It does not stop the next
 one, because the practice that produces the copies is unchanged.
 
 ### Enumerated gaps to close
@@ -113,8 +113,8 @@ and ad hoc MVV scripts in agent scratchpads.
 A read-only inventory of the repository (2026-09-25) found 26 sites that read,
 copy, write or print a Claude credential, plus the manual transfer recorded in
 project memory and RDR-215. A search of the local disk the same day found
-credential-shaped strings in 34 files under `/private/tmp` and `/tmp` and in one
-subagent transcript.
+credential-shaped strings in 34 files under `/private/tmp` and `/tmp`, in the
+persistent repo snapshot, and in one subagent transcript (35 files in total).
 
 The documentation for Claude Code's automation authentication was read for the
 alternatives to a copied login.
@@ -229,9 +229,11 @@ naming the helper:
 - printing `CLAUDE_CODE_OAUTH_TOKEN` (`echo $CLAUDE_CODE_OAUTH_TOKEN`, `env`,
   `printenv`, `set` piped to a file or displayed).
 
-It ships as a stdlib plugin script routed through `nx_hook_shim.py`, so it
-behaves the same under every supported CLI version (the RDR-215 skew rule). It
-protects every conexus user, not only this repository.
+It ships as a self-contained stdlib plugin script with no `nexus` import,
+declared directly under the PreToolUse Bash matcher in `conexus/hooks/hooks.json`,
+as `routing/subagent_git_write_requires_orchestrator.py` is. It depends on no
+CLI verb, so an older installed CLI cannot change its behaviour. It protects
+every conexus user, not only this repository.
 
 **The lint.** `tests/test_claude_credentials_single_source_lint.py` widens to
 all tracked text files, `.md` included, and forbids outside the helper:
@@ -248,7 +250,7 @@ pattern and names each one, as a release-battery leg that fails on any find.
 | --- | --- | --- |
 | Credential helper | `tests/e2e/lib/claude_credentials.py` | Extend: add `run`, `status`; remove `pick`'s stdout mode |
 | Single-source lint | `tests/test_claude_credentials_single_source_lint.py` | Extend: scope and forbidden shapes |
-| Plugin guard | `conexus/hooks/hooks.json`, `nx_hook_shim.py` | Extend: one new PreToolUse Bash entry |
+| Plugin guard | `conexus/hooks/hooks.json`, `routing/subagent_git_write_requires_orchestrator.py` (precedent) | Extend: one new PreToolUse Bash entry |
 | Janitor | release battery (`tests/e2e/release-battery.sh`) | Extend: one new leg |
 | Persistent snapshot | `tests/e2e/auth-login.sh`, `.claude-auth/` | Replace: deleted |
 
@@ -390,7 +392,8 @@ plaintext API-key writes, and rewrite the README probe recipe.
 
 #### Step 1: The plugin PreToolUse guard
 
-Add the guard as a stdlib plugin script through `nx_hook_shim.py`, declared in
+Add the guard as a self-contained stdlib plugin script, declared directly under
+the PreToolUse Bash matcher in `conexus/hooks/hooks.json` and listed in
 `conexus/PENDING_RELEASE.md`, with a positive control for each denied shape.
 
 #### Step 2: The widened lint and the janitor leg
@@ -473,8 +476,9 @@ The Minimum Viable Validation is in scope and runs in Phase 3.
   30-day warning; override by `ANTHROPIC_API_KEY` through the same helper.
 - **Incremental adoption**: harnesses migrate one at a time; `pick` is removed
   only after the last caller.
-- **Deployment model**: the guard ships in the conexus plugin (plugin-surface
-  change, declared in `conexus/PENDING_RELEASE.md`).
+- **Deployment model**: the guard ships in the conexus plugin as a plugin-surface
+  change with no CLI dependency, listed in `conexus/PENDING_RELEASE.md`, so a
+  plugin-only cut or a client release carries it.
 - Others: N/A.
 
 ### Proportionality
@@ -489,7 +493,8 @@ them site by site. Nothing is designed for launch shapes not in the inventory.
 - `tests/e2e/lib/claude_credentials.py`, `tests/test_claude_credentials_single_source_lint.py`
 - The 2026-09-25 credential inventory (26 sites, 9 mechanisms), from this
   RDR's research pass
-- T2 `nexus_rdr/6konb15-mvv-2026-09-25` (the leak and the mid-run 401)
+- T2 `nexus_rdr/6konb15-mvv-2026-09-25` (the mid-run 401)
+- T2 `nexus_rdr/219-research-2` (the transcript leak and the disk scan)
 - Claude Code documentation: authentication, `claude setup-token`,
   `CLAUDE_CODE_OAUTH_TOKEN`, `apiKeyHelper`
 
@@ -500,3 +505,4 @@ them site by site. Nothing is designed for launch shapes not in the inventory.
 Drafted at Sam's direction after the credential leak in the nexus-6konb.15 MVV:
 fix the practice that makes copies before cleaning up the copies. Sam chose an
 RDR over an epic, and the conexus plugin as the guard's home.
+- 2026-09-25: Gate round 1 — BLOCKED (1 Critical, 2 Significant, 1 ship-blocker(s)); commit `36217ae7f`; critique `nexus_rdr/219-gate-critique-2026-09-25-r1`.
