@@ -1,0 +1,15 @@
+{
+  "armed_at": "2026-09-24T23:19:43.637056Z",
+  "armed_by": "hellblazer@sha256:8a5df547",
+  "engine_tag": "engine-service-v0.1.131",
+  "image_digest": "sha256:dce64ff49cb60ebf0d44c620eb889d63efae19ea9868f651af37aad2f80c24c3",
+  "redeploy_doc": "conexus-dev-engine-redeploy",
+  "signature_verified": {
+    "image_ref": "conexus/engine:nexus-service-0.1.131@sha256:dce64ff49cb60ebf0d44c620eb889d63efae19ea9868f651af37aad2f80c24c3",
+    "kms_key": "awskms:///alias/conexus-dev-image-signing",
+    "verified": true
+  },
+  "ssm_param": "/conexus/dev/engine/image-tag",
+  "ssm_param_version": 116,
+  "walk_rehearsed": "not-required: no Liquibase changesets between engine-service-v0.1.130 and engine-service-v0.1.131 (db/changelog diff empty; list_data_effects: none)"
+}

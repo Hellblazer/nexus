@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.61.0] - 2026-09-24
+
+Pairs with engine-service-v0.1.131. The engine refuses a change old clients could make (below), so its deploy is armed with conexus and fires when this client tag is pushed. It is RDR-208's R4 release.
+
+### Changed
+
+- **The engine refuses `address_kind: instance` in a mailbox tuple** (RDR-208 Phase 3, nexus-galkv.24). Writing one now fails with a schema violation; rows already stored with it stay readable, claimable and ackable. `mailbox_send` never sent it, so normal messaging is unaffected. The `mailbox` skill's low-level request/ack pattern now uses `address_kind: session`; a session still on an older plugin that follows the old pattern gets the error until it updates.
+- **CCE embedding sends up to 12 chunks per Voyage request** (nexus-u2mlh). Each chunk is still its own single-chunk document. An index run makes about a twelfth of the calls it did, which removes the edge timeouts a large run hit, and each call now logs its latency.
+
+### Fixed
+
+- **A replaced channel waiter no longer marks mail as delivered to nobody** (nexus-rxuiq). A waiter's parked wait that outlived it could stamp the next row as announced, so no live waiter ever received it. The engine now fences each wait by a waiter token.
+- **MinerU formulas keep the space after a LaTeX control word** (nexus-pwlqq). `\alpha A(e)` was stored as `\alphaA(e)`, an undefined macro. Re-index affected PDFs to repair existing chunks.
+
 ## [7.60.0] - 2026-09-24
 
 Pairs with engine-service-v0.1.130, unchanged from 7.59.0: this is a client and plugin release with no engine cut. It is RDR-208's R3 release; the engine half of Phase 3 ships in a later engine cut.
