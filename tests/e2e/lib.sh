@@ -111,6 +111,13 @@ claude_start() {
 
         if [[ $_trust_done -eq 0 ]] && echo "$pane" | grep -qiE "trust this folder|project you trust"; then
             echo "    [auth] Workspace trust — accepting..."
+            # The highlighted default differs by Claude Code build: 2.1.282
+            # highlights "No, exit", so a bare Enter quits Claude. Move the
+            # cursor to "Yes" when it is not already there.
+            if echo "$pane" | grep -qE "❯ *(2\. *)?No, exit"; then
+                _tmux send-keys -t "${TMUX_SESSION}" Up
+                sleep 0.5
+            fi
             _tmux send-keys -t "${TMUX_SESSION}" Enter
             _trust_done=1
             sleep 2

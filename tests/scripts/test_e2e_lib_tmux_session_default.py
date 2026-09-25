@@ -116,7 +116,6 @@ def test_no_caller_regresses_after_the_fix(script: Path) -> None:
     """End-to-end: run.sh (unset) and runner.sh (pre-set "cc-val") each
     get the exact same effective TMUX_SESSION with the fixed lib.sh as
     they did before it."""
-    text = script.read_text()
     pre_source = None
     if script is RUNNER_SH:
         pre_source = "cc-val"
