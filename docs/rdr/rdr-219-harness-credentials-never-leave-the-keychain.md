@@ -269,6 +269,11 @@ Transport rules the Phase 0 spike established (T2 `nexus_rdr/219-spike-script`):
   persistent storage (for example under `/home/nexus`), not `/tmp`, which the
   WSL2 VM on qwentescence was observed to clear between launches (T2
   `nexus_rdr/219-review-fix-round-2`).
+- Staging is a separate, token-free ssh call made before `run --remote`, and a
+  multi-file harness is staged whole as a tar stream, whose remote command has no
+  metacharacters:
+  `tar -C <parent> -cf - <dir> | ssh <host> wsl -d Ubuntu -u nexus --exec tar -xf - -C <persistent-dir>`.
+  The `run --remote` command then names the staged copy by bare path.
 - A launched session's trust and bypass-permissions dialogs default to exit, so
   a harness pre-seeds them or selects the proceed option.
 
@@ -489,7 +494,7 @@ contradictory project memories and the stale cc-validation notes.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Keychain item `nexus-automation-oauth-token` | N/A | `claude_credentials.py status` | `security delete-generic-password` (operator) removes the local copy; a leaked token is revoked on claude.ai Settings, Claude Code | `status` and the janitor | None: regenerate with `claude setup-token` |
+| Keychain item `nexus-automation-oauth-token` | N/A | `claude_credentials.py status` | `security delete-generic-password` (operator) removes the local copy; a leaked token is revoked on claude.ai Settings, Claude Code | `status` and the janitor | None: regenerate with `claude setup-token`. Rotate by delete-then-add (`security delete-generic-password`, then `add-generic-password` without `-U`): `-U` keeps the item's creation date, which `status` reads, so the 365-day count would run from the first token (T2 `nexus_rdr/219-review-fix-round-2`) |
 | Automation token after an operator `/logout` | N/A | a harness run fails to authenticate | N/A | the next harness run | Regenerate with `claude setup-token` and store it again (A4 is only partly verified) |
 
 ## Test Plan
