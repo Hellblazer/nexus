@@ -63,6 +63,11 @@ also breaks runs: during the 6konb.15 MVV the operator's keychain credential
 rotated and revoked the copy the harness had picked, which failed a session
 mid-run with a 401.
 
+Revocation (Phase 0): a `setup-token` token is listed on claude.ai Settings,
+Claude Code, with its own revoke control, so the harness token can be revoked
+without the operator's login (T2 `nexus_rdr/219-research-8`; seen by the
+operator, not exercised).
+
 #### Gap 4: moving a credential to a test host is manual and the guidance contradicts itself
 
 No script moves a credential to the Windows test host (qwentescence) or
@@ -158,20 +163,30 @@ alternatives to a copied login.
 
 ### Critical Assumptions
 
-- [ ] A1: an interactive Claude Code session under tmux, with an isolated `HOME`
+- [x] A1: an interactive Claude Code session under tmux, with an isolated `HOME`
   (no keychain) and the harness flags (`--dangerously-skip-permissions`,
   `--dangerously-load-development-channels`, `--mcp-config`,
   `--plugin-dir`), authenticates from `CLAUDE_CODE_OAUTH_TOKEN` alone.
-  — **Status**: Unverified — **Method**: Spike
-- [ ] A2: the same holds inside the Linux containers the harnesses use, with the
-  token passed as `docker run -e`. — **Status**: Unverified — **Method**: Spike
-- [ ] A3: the same holds on qwentescence's WSL2 Ubuntu with the token passed in
-  the environment of the ssh command. — **Status**: Unverified — **Method**: Spike
-- [ ] A4: the token keeps working after the operator runs `/logout` and `/login`
-  on the Mac. — **Status**: Unverified — **Method**: Spike
+  — **Status**: Verified (T2 `nexus_rdr/219-research-9`) — **Method**: Spike
+- [x] A2: the same holds inside the Linux containers the harnesses use, with the
+  token passed as `docker run -e`. — **Status**: Verified (T2
+  `nexus_rdr/219-research-10`) — **Method**: Spike
+- [x] A3: the same holds on qwentescence's WSL2 Ubuntu with the token passed on
+  the ssh channel's stdin and read inside the remote user's shell. — **Status**:
+  Verified (T2 `nexus_rdr/219-research-11`) — **Method**: Spike
+- [x] A4: the token keeps working after the operator logs in again on the Mac.
+  — **Status**: Verified for an operator re-login after token creation, not
+  confirmed to be an explicit `/logout` then `/login` (T2
+  `nexus_rdr/219-research-12`) — **Method**: Spike
 
-If A1 fails, the design falls back to a file for the interactive case only
-(see Failure Modes). A4 and per-token revocation decide how Gap 3 is closed.
+Phase 0 outcome (2026-09-25): all four pass, so no launch shape uses the file
+fallback in Failure Modes. Claude Code wrote the environment token to no file in
+any run (T2 `nexus_rdr/219-research-13`), so rule 2 holds. The `oauthAccount`
+seed in `.claude.json` is not needed: a `.claude.json` holding only
+`{"hasCompletedOnboarding":true}` authenticated in all three shapes (T2
+`nexus_rdr/219-research-14`). A negative control, the same isolated home with
+no token, showed "Not logged in", so the operator's own login does not reach an
+isolated `HOME`.
 
 ## Proposed Solution
 
@@ -212,9 +227,25 @@ claude_credentials.py status
 Harnesses launch their `claude` (or the tmux server, container or remote shell
 that will launch it) under `run --`.
 
+Transport rules the Phase 0 spike established (T2 `nexus_rdr/219-spike-script`):
+- The token never appears on any process's argument list. `env -i
+  CLAUDE_CODE_OAUTH_TOKEN=<value> ...` puts it on `env`'s argv, so `run` sets it
+  in the environment it passes to `exec`, never as an argument.
+- tmux sessions take their environment from the tmux server, so a harness
+  starts a private tmux server (`tmux -L <name>`) under `run --`, never a
+  session on a shared server.
+- `docker run -e CLAUDE_CODE_OAUTH_TOKEN` (no value) keeps the token off docker's
+  argv, but `docker inspect` can read it while the container exists, so
+  containers run with `--rm`.
+- On qwentescence the ssh endpoint is PowerShell, which splits a command at `|`
+  even inside double quotes, so `--remote` ships the remote script and the token
+  on the ssh channel's stdin and enters WSL with `wsl -d Ubuntu -u nexus`.
+- A launched session's trust and bypass-permissions dialogs default to exit, so
+  a harness pre-seeds them or selects the proceed option.
+
 **Migration of the 26 sites.** Each site from the inventory moves to `run --`
 and drops its `.credentials.json` write. The persistent snapshot and
-`auth-login.sh`'s file path are deleted. `~/nexus-sandbox` stops receiving a
+`auth-login.sh` are deleted. `~/nexus-sandbox` stops receiving a
 credential. `run_ladder.py`'s `--cred-cmd`/`--cred-file` become the
 environment pass-through. Plaintext `ANTHROPIC_API_KEY` writes into
 `.env.test` and `activate` are removed; a harness that needs an API key uses
@@ -386,8 +417,10 @@ Each commit is proved by that harness's own run.
 
 #### Step 2: Delete the persistent copies
 
-Delete the snapshot path in `auth-login.sh`, the sandbox credential, and the
-plaintext API-key writes, and rewrite the README probe recipe.
+Delete `auth-login.sh` and `tests/e2e/.claude-auth/` outright (the
+`oauthAccount` seed is not needed, T2 `nexus_rdr/219-research-14`), the sandbox
+credential, and the plaintext API-key writes, and rewrite the README probe
+recipe.
 
 ### Phase 3: Guards
 
@@ -512,3 +545,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `a50c35f27`; critique `nexus_rdr/219-gate-critique-2026-09-25-r2`.
 - 2026-09-25: Gate round 2 Significants fixed before accept in `e833d41a4` (fix check `nexus_rdr/219-fix-check-e833d41a4`, PASS).
 - 2026-09-25: Accepted by Sam.
+- 2026-09-25: Phase 0 outcome recorded (nexus-wauo1.2): A1 to A4 verified, no fallback shape, no disk write, seed not needed, revocation per token; spike transport rules added to Technical Design.
