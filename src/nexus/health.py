@@ -7843,19 +7843,22 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
 
 
 #: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
-#: skipping it saves one request per code collection.
+#: ``rdr__`` holds only RDR markdown; skipping both saves one request each.
 _PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
 #: Pages read per collection before the scan of that collection stops and
 #: is reported as partial. The filter matches only placeholder chunks
 #: (111 on the production tenant, 2026-09-24), so one page is the norm.
 _PDF_STUB_MAX_PAGES = 20
 #: Concurrent collection reads. Matches the search fan-out ceiling
-#: (``search_engine``); the round trip, not the query, is the cost:
-#: measured 2026-09-25 at about 0.4 s per request against the managed
-#: service, 58 collections, so a serial scan added about 25 s to doctor.
+#: (``search_engine``); the round trip, not the query, is the cost.
+#: Measured 2026-09-25 against the managed service, 58 collections, during
+#: a period of 1.9 s requests: 6.3 s for the whole check (a 47 s baseline
+#: doctor run).
 _PDF_STUB_WORKERS = 8
 #: How many affected documents the WARN detail names.
 _PDF_STUB_MAX_NAMED = 10
+#: Source-key prefix for a chunk whose catalog source URI did not resolve.
+_PDF_STUB_NO_URI = "content_hash "
 
 
 def _is_pdf_stub_metadata(meta: dict) -> bool:
@@ -7872,12 +7875,19 @@ def _is_pdf_stub_metadata(meta: dict) -> bool:
 def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], bool]:
     """Placeholder-metadata PDF chunks in one collection, keyed by source.
 
-    Returns ``(source -> chunk count, truncated)``. The engine filters on
-    ``content_type`` and the literal empty ``title`` the uploader writes;
-    ``extraction_method`` is checked here, because the vector bridge has no
-    absent-key predicate. Raises on a read failure; the caller names it.
+    Returns ``(source -> chunk count, truncated)``. The source is the
+    catalog source URI, or ``"content_hash <prefix>"`` when the engine
+    resolves none: it returns null both for a chunk no manifest names and
+    for a document registered without a URI, so the two cannot be told
+    apart here. The engine filters on ``content_type`` and the literal empty
+    ``title`` the uploader writes; ``extraction_method`` is checked here,
+    because the vector bridge has no absent-key predicate. Raises on a read
+    failure; the caller names it.
     """
-    col = t3.get_collection(name)  # type: ignore[attr-defined]
+    # Not get_collection(): that re-lists every collection in the tenant to
+    # prove existence, one extra stats round trip per collection, and the
+    # caller has just listed them.
+    col = t3.get_or_create_collection(name)  # type: ignore[attr-defined]
     stubs: dict[str, int] = {}
     for page_no in range(_PDF_STUB_MAX_PAGES):
         page = col.get(
@@ -7894,12 +7904,20 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
             if not _is_pdf_stub_metadata(meta):
                 continue
             source = (uris[i] if i < len(uris) else "") or (
-                f"content_hash {str(meta.get('content_hash', ''))[:12] or '?'}"
+                _PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?")
             )
             stubs[source] = stubs.get(source, 0) + 1
         if len(metas) < page_size:
             return stubs, False
-    return stubs, True
+    # Every page was full. Truncated only if a row exists past the cap; an
+    # exact multiple of the page size ends here too.
+    beyond = col.get(
+        where={"content_type": "pdf", "title": ""},
+        include=[],
+        limit=1,
+        offset=_PDF_STUB_MAX_PAGES * page_size,
+    )
+    return stubs, bool(beyond.get("ids"))
 
 
 def _check_pdf_stub_metadata() -> list[HealthResult]:
@@ -7975,26 +7993,50 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         )
 
     if stubs:
-        total = sum(stubs.values())
-        named = sorted(stubs.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
-        listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)
-        more = f" (+{len(stubs) - len(named)} more)" if len(stubs) > len(named) else ""
+        documents = {k: n for k, n in stubs.items() if not k[1].startswith(_PDF_STUB_NO_URI)}
+        unowned = {k: n for k, n in stubs.items() if k[1].startswith(_PDF_STUB_NO_URI)}
+        parts: list[str] = []
+        fixes: list[str] = []
+        if documents:
+            total = sum(documents.values())
+            named = sorted(documents.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
+            listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)
+            more = f" (+{len(documents) - len(named)} more)" if len(documents) > len(named) else ""
+            parts.append(
+                f"{total} PDF chunk(s) in {len(documents)} document(s) still carry "
+                "the upload placeholder metadata (empty title, no "
+                "extraction_method): the post-pass never landed, or a late "
+                "write overwrote it (nexus-w94eo). Title-keyed tools such as "
+                f"`nx enrich bib` skip them. {listing}{more}."
+            )
+            fixes += [
+                "nx index pdf <path> --force        (file-backed document)",
+                "nx dt index --uuid <uuid> --force  (DEVONthink record)",
+                "nx enrich bib <collection>         (after the re-index)",
+            ]
+        if unowned:
+            named = sorted(unowned.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
+            listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)
+            more = f" (+{len(unowned) - len(named)} more)" if len(unowned) > len(named) else ""
+            parts.append(
+                f"{sum(unowned.values())} {'more ' if documents else ''}placeholder PDF chunk(s) resolve "
+                "to no catalog source URI, so they cannot be named for a "
+                "re-index: either no manifest names them, or their document "
+                f"was registered without a URI. {listing}{more}."
+            )
+            # No verb reclaims manifest-less chunks: purge-trash sweeps
+            # chunks whose documents are tombstoned, and `nx t3 gc`
+            # hard-deletes. RDR-192 is the design for them.
+            fixes.append(
+                "no source URI: find the owning document first; if no manifest "
+                "names the chunks, see RDR-192 before any delete"
+            )
         return [HealthResult(
             label=label,
             ok=False,
             warn=True,
-            detail=(
-                f"{total} PDF chunk(s) in {len(stubs)} document(s) still carry "
-                "the upload placeholder metadata (empty title, no "
-                "extraction_method): the post-pass never landed, or a late "
-                "write overwrote it (nexus-w94eo). Title-keyed tools such as "
-                f"`nx enrich bib` skip them. {listing}{more}.{gaps}"
-            ),
-            fix_suggestions=[
-                "nx index pdf <path> --force        (file-backed document)",
-                "nx dt index --uuid <uuid> --force  (DEVONthink record)",
-                "nx enrich bib <collection>         (after the re-index)",
-            ],
+            detail=" ".join(parts) + gaps,
+            fix_suggestions=fixes,
         )]
     if gaps:
         return [HealthResult(

@@ -28,6 +28,7 @@ import pytest
 from nexus import health
 from nexus.db import make_t3
 from nexus.health import _is_pdf_stub_metadata
+from tests._catalog_fixture_ops import ActiveCatalog
 
 _COLLECTION = "knowledge__rte90-pdf-stub__bge-base-en-v15-768__v1"
 _LABEL = "PDF chunk metadata"
@@ -44,13 +45,30 @@ def _meta(**kw) -> dict:
     return base
 
 
-def _seed(t3, rows: list[tuple[str, dict]]) -> None:
+def _seed(t3, rows: list[tuple[str, dict]]) -> list[str]:
+    ids = [f"{i:064x}" for i in range(1, len(rows) + 1)]
     t3.upsert_chunks_with_embeddings(
         _COLLECTION,
-        ids=[f"{i:064x}" for i in range(1, len(rows) + 1)],
+        ids=ids,
         documents=[text for text, _ in rows],
         embeddings=[],
         metadatas=[meta for _, meta in rows],
+    )
+    return ids
+
+
+def _own(chashes: list[str], file_path: str) -> None:
+    """Register a paper document at *file_path* whose manifest names *chashes*."""
+    cat = ActiveCatalog()
+    owner = cat.register_owner("rte90-owner", "curator")
+    tumbler = str(cat.register(
+        owner, file_path.rsplit("/", 1)[-1], content_type="paper",
+        file_path=file_path, physical_collection=_COLLECTION,
+        chunk_count=len(chashes),
+    ))
+    cat.write_manifest(
+        tumbler, [{"chash": c, "position": i} for i, c in enumerate(chashes)],
+        collection=_COLLECTION,
     )
 
 
@@ -61,12 +79,13 @@ def _row(results):
 
 
 def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
-
     t3 = make_t3()
-    _seed(t3, [
+    ids = _seed(t3, [
         # Two stub chunks of one document: the w94eo signature.
         ("stub page two text", _meta(title="", content_hash="a" * 64)),
         ("stub page three text", _meta(title="", content_hash="a" * 64)),
+        # A stub chunk no manifest names.
+        ("orphan stub text", _meta(title="", content_hash="b" * 64)),
         # Healthy post-pass chunk.
         ("healthy mineru chunk", _meta(title="FootprintRAG", extraction_method="mineru")),
         # Pre-nexus-1oguj PDF chunk: titled, no extraction_method. Healthy.
@@ -75,17 +94,21 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
         ("markdown chunk", _meta(content_type="markdown", title="")),
     ])
 
+    _own(ids[:2], "/tmp/rte90/FootprintRAG.pdf")
+
     row = _row(health._check_pdf_stub_metadata())
 
     assert not row.ok and row.warn, row.detail
-    assert "2 PDF chunk(s)" in row.detail, row.detail
-    assert _COLLECTION in row.detail, row.detail
-    assert "1 document(s)" in row.detail, row.detail
-    assert row.fix_suggestions, "a WARN row must name its remedy"
+    assert "2 PDF chunk(s) in 1 document(s)" in row.detail, row.detail
+    assert "FootprintRAG.pdf (2)" in row.detail, row.detail
+    # The orphan is reported apart, by content hash, with its own remedy.
+    assert "1 more placeholder PDF chunk(s) resolve to no catalog source URI" in row.detail, row.detail
+    assert "content_hash bbbbbbbbbbbb (1)" in row.detail, row.detail
+    assert any("RDR-192" in f for f in row.fix_suggestions), row.fix_suggestions
+    assert any("--force" in f for f in row.fix_suggestions), row.fix_suggestions
 
 
 def test_healthy_pdf_chunks_pass_with_a_count(t2_service_env) -> None:
-
     _seed(make_t3(), [
         ("healthy one", _meta(title="Paper", extraction_method="docling")),
         ("legacy one", _meta(title="Old Paper")),
@@ -99,7 +122,6 @@ def test_healthy_pdf_chunks_pass_with_a_count(t2_service_env) -> None:
 
 
 def test_no_collections_is_not_applicable(t2_service_env) -> None:
-
     row = _row(health._check_pdf_stub_metadata())
 
     assert row.ok and not row.warn, row.detail
@@ -107,8 +129,8 @@ def test_no_collections_is_not_applicable(t2_service_env) -> None:
 
 
 def test_a_collection_past_the_page_cap_is_partial(monkeypatch) -> None:
-
     full_page = {
+        "ids": ["x"] * 3,
         "metadatas": [{"content_type": "pdf", "title": ""}] * 3,
         "source_uris": ["file:///big.pdf"] * 3,
     }
@@ -121,7 +143,7 @@ def test_a_collection_past_the_page_cap_is_partial(monkeypatch) -> None:
         def list_collections(self):
             return [{"name": _COLLECTION}]
 
-        def get_collection(self, name):
+        def get_or_create_collection(self, name):
             return _Col()
 
     monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
@@ -134,7 +156,6 @@ def test_a_collection_past_the_page_cap_is_partial(monkeypatch) -> None:
 
 
 def test_a_collection_that_cannot_be_read_is_not_a_clean_verdict(monkeypatch) -> None:
-
     class _Col:
         def get(self, **kw):
             raise RuntimeError("engine 503")
@@ -143,7 +164,7 @@ def test_a_collection_that_cannot_be_read_is_not_a_clean_verdict(monkeypatch) ->
         def list_collections(self):
             return [{"name": _COLLECTION}]
 
-        def get_collection(self, name):
+        def get_or_create_collection(self, name):
             return _Col()
 
     monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
@@ -155,7 +176,6 @@ def test_a_collection_that_cannot_be_read_is_not_a_clean_verdict(monkeypatch) ->
 
 
 def test_t3_unavailable_degrades_to_a_skip(monkeypatch) -> None:
-
     def _boom():
         raise RuntimeError("no service")
 
@@ -166,8 +186,36 @@ def test_t3_unavailable_degrades_to_a_skip(monkeypatch) -> None:
     assert row.ok and "skipped" in row.detail, row.detail
 
 
-def test_wired_into_run_health_checks() -> None:
+def test_an_exact_multiple_of_the_page_size_is_complete(monkeypatch) -> None:
+    """Every page full, nothing past the cap: the scan finished."""
+    full_page = {
+        "ids": ["x"] * 3,
+        "metadatas": [{"content_type": "pdf", "title": ""}] * 3,
+        "source_uris": ["file:///big.pdf"] * 3,
+    }
+    cap = health._PDF_STUB_MAX_PAGES * 3
 
+    class _Col:
+        def get(self, **kw):
+            return full_page if kw["offset"] < cap else {"ids": [], "metadatas": []}
+
+    class _T3:
+        def list_collections(self):
+            return [{"name": _COLLECTION}]
+
+        def get_or_create_collection(self, name):
+            return _Col()
+
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
+    monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 3)
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert "PARTIAL" not in row.detail, row.detail
+    assert f"{cap} PDF chunk(s) in 1 document(s)" in row.detail, row.detail
+
+
+def test_wired_into_run_health_checks() -> None:
     assert "_check_pdf_stub_metadata()" in inspect.getsource(health.run_health_checks)
 
 
@@ -179,7 +227,6 @@ def test_wired_into_run_health_checks() -> None:
     (None, None, True),
 ])
 def test_stub_predicate(title, method, flagged) -> None:
-
     meta: dict = {"content_type": "pdf"}
     if title is not None:
         meta["title"] = title
