@@ -624,6 +624,9 @@ def test_dual_population_baseline_locked():
     # the key the aspect_sql operators match byte-equal, so those rows
     # matched nothing and the miss surfaced as "does not match" rather than
     # as an error (481 of 2232 rows, all in knowledge__ collections).
+    # 28 since nexus-iygza: `nx index repo`'s unassigned-chunk drain lists
+    # pages through a third read-only construction in commands/index.py, on
+    # the command's shared client; its assigns go through t2_index_write.
     assert result.t2database_constructions == sum(
         T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
     ), (
@@ -631,7 +634,7 @@ def test_dual_population_baseline_locked():
         f"{result.t2database_constructions} != allowlist sum "
         f"{sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values())}"
     )
-    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 27
+    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 28
 
 
 def test_named_allowlists_point_at_live_files():

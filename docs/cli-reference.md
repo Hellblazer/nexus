@@ -1821,6 +1821,7 @@ nx taxonomy review --auto --accept-only         # apply accept/rename only; leav
 nx taxonomy review --auto --batch-size 20       # topics per claude_dispatch call (default 40)
 nx taxonomy label                               # batch-relabel with Claude haiku
 nx taxonomy assign doc-id "topic label"         # manually assign a doc (see below)
+nx taxonomy drain -c COLLECTION                 # assign chunks that have no topic (see below)
 nx taxonomy rename "old label" "new label"      # rename a topic
 nx taxonomy merge "source" "target"             # merge topics
 nx taxonomy split "label" --k 3                 # split into sub-topics
@@ -1856,6 +1857,12 @@ assignment was, when it was made, or which collection it came from
 (same default as the plain `show`, 20); rows are additionally filtered to the
 requested topic id defensively, in case a doc_id was reassigned between the
 doc-id lookup and the detail fetch.
+
+### `nx taxonomy drain`
+
+Assign every chunk a collection holds with no topic from its own taxonomy: `nx taxonomy drain -c COLLECTION [-c ...] [--max-chunks N]`, or `--all` for every live collection. It asks the engine for the collection's manifest-backed chunks that carry no assignment to the collection's own topics (`POST /v1/taxonomy/assignments/unassigned`, engine-service-v0.1.132) and assigns them page by page through the same retrying path indexing uses. This recovers assignments lost when a batch still failed after the split-in-half retry (nexus-mg8gx), when a run crashed, or when a hook deferred its assign; it is derived from state, so it finds losses from any box (nexus-iygza). A chunk that HDBSCAN left as noise at discover time also gets its nearest topic, as every chunk the per-flush hook assigns does. A chunk with no catalog manifest is not listed (that population is RDR-192's). Per collection it prints how many were unassigned, assigned and lost, and says so when the chunk budget (default 2000) left more for the next run; a collection with no topics is reported and left alone, and an engine below v0.1.132 is a named skip. Exits 1 when any chunk still failed to assign; the next drain lists it again.
+
+`nx index repo` runs the same drain for the repo's collections at the end of every run, including a run with no changed files, and prints a line only for a collection where it found something.
 
 ### `nx taxonomy assign`
 

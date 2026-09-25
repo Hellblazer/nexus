@@ -1606,6 +1606,34 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             totals["unmatched_chashes"].extend(resp.get("unmatched_chashes", []))
         return totals
 
+    def unassigned_chashes(
+        self, collection: str, *, limit: int = 1000, after: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of *collection*'s chunks that have no assignment to the
+        collection's own topics (nexus-iygza; engine-service-v0.1.132).
+
+        POST ``/v1/taxonomy/assignments/unassigned``. Only chunks a catalog
+        manifest references are listed: a manifest-less chunk is RDR-192's
+        population, not a lost assignment. Pages are keyset-ordered by
+        chash; pass the previous page's ``next_after`` as *after*, which is
+        ``None`` once a page comes back short.
+
+        Returns ``{"chashes": list[str], "has_taxonomy": bool,
+        "next_after": str | None}``. ``has_taxonomy`` is false when the
+        collection has no centroids at its dim, so "nothing to assign to"
+        and "fully assigned" are told apart. An engine below v0.1.132 has
+        no such route and 404s; the error propagates.
+        """
+        body: dict[str, Any] = {"collection": collection, "limit": limit}
+        if after:
+            body["after"] = after
+        resp = self._post("/assignments/unassigned", body, mutates=False)
+        return {
+            "chashes": list(resp.get("chashes") or []),
+            "has_taxonomy": bool(resp.get("has_taxonomy")),
+            "next_after": resp.get("next_after") or None,
+        }
+
     def rebuild_taxonomy(
         self,
         collection_name: str,

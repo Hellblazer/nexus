@@ -10,6 +10,7 @@ import contextlib
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from nexus.config import default_db_path
@@ -1245,6 +1246,119 @@ def _assign_from_chashes_with_retry(
             ],
         }
         return merged, [*left_lost, *right_lost], [*left_failures, *right_failures]
+
+
+# nexus-iygza (indexing-brittleness P0.1, client half; Sam's design
+# 2026-09-25): recover assignments from STATE, not from a record of what
+# failed. The tripwire's hook_failures row keeps only doc_ids[0], so nothing
+# could replay a lost batch; the engine (v0.1.132) now lists a taxonomized
+# collection's manifest-backed chunks that carry no assignment to the
+# collection's own topics, and the drain feeds each page through the same
+# split-in-half retry the per-flush hook uses. It recovers losses from any
+# box, any crash, and any hook that deferred its assign, at the cost that
+# chunks HDBSCAN left as noise at discover time get their nearest topic too
+# (accepted: the per-flush hook already does that for every new chunk).
+
+#: Chashes requested per page; the size of one flush's assign batch.
+_DRAIN_PAGE = 270
+#: Default ceiling on chunks one drain call handles, so a large backlog is
+#: worked off over several runs rather than inside one post-commit index.
+_DRAIN_MAX_CHUNKS = 2000
+
+
+@dataclass(frozen=True)
+class DrainResult:
+    """Outcome of one :func:`drain_unassigned_chunks` call.
+
+    ``found`` counts chashes the engine listed, ``assigned`` those whose
+    assign call succeeded, ``lost`` those that still failed after the retry.
+    ``truncated`` means the budget or deadline stopped the drain with pages
+    left. ``skipped_reason`` is non-empty when nothing could be asked at all
+    (an engine without the route).
+    """
+
+    collection: str
+    has_taxonomy: bool = False
+    found: int = 0
+    assigned: int = 0
+    lost: int = 0
+    truncated: bool = False
+    skipped_reason: str = ""
+
+
+def drain_unassigned_chunks(
+    collection: str,
+    *,
+    page_size: int = _DRAIN_PAGE,
+    max_chunks: int = _DRAIN_MAX_CHUNKS,
+    deadline_s: float = _TAXONOMY_ASSIGN_MAX_RETRY_SECONDS,
+    now_fn: Any = time.monotonic,
+    taxonomy: Any = None,
+) -> DrainResult:
+    """Assign *collection*'s manifest-backed chunks that have no assignment
+    to its own topics, page by page, up to *max_chunks* or *deadline_s*.
+
+    Pages advance on the engine's keyset cursor, so a chunk that fails to
+    assign never blocks the ones after it. A lost chunk is recorded on the
+    same tripwire the per-flush hook uses and is listed again by the next
+    drain, which is the recovery.
+
+    *taxonomy* is an open taxonomy store for the page reads, so a command
+    that already holds a shared-client ``T2Database`` (``nx index repo``,
+    nexus-m20mf) reads through it; ``None`` routes each read through
+    :func:`t2_index_write`. The assigns always go through the same retrying
+    path the per-flush hook uses.
+    """
+    import httpx  # noqa: PLC0415 — deferred; see _is_retryable_taxonomy_assign_error
+
+    deadline = now_fn() + deadline_s
+    after: str | None = None
+    has_taxonomy = False
+    found = assigned = lost = 0
+    while True:
+        remaining = max_chunks - found
+        if remaining <= 0 or now_fn() >= deadline:
+            return DrainResult(collection, has_taxonomy, found, assigned, lost, truncated=True)
+        try:
+            n = min(page_size, remaining)
+            if taxonomy is not None:
+                page = taxonomy.unassigned_chashes(collection, limit=n, after=after)
+            else:
+                page = t2_index_write(
+                    lambda db, _a=after, _n=n: db.taxonomy.unassigned_chashes(
+                        collection, limit=_n, after=_a),
+                    op="taxonomy_unassigned",
+                )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return DrainResult(
+                    collection,
+                    skipped_reason="engine has no /v1/taxonomy/assignments/unassigned "
+                    "(below engine-service-v0.1.132)",
+                )
+            raise
+        has_taxonomy = bool(page.get("has_taxonomy"))
+        chashes = list(page.get("chashes") or [])
+        if not has_taxonomy or not chashes:
+            return DrainResult(collection, has_taxonomy, found, assigned, lost)
+        found += len(chashes)
+        _record_taxonomy_assign_attempt()
+        _result, lost_ids, failures = _assign_from_chashes_with_retry(
+            collection, chashes, deadline=deadline,
+        )
+        if lost_ids:
+            _record_taxonomy_tripwire(
+                collection, lost_ids,
+                f"drain: {len(lost_ids)}/{len(chashes)} chashes lost after retry/split: "
+                + "; ".join(failures),
+                kind="drain",
+            )
+            _record_taxonomy_assign_batch_failure(len(lost_ids))
+        assigned += len(chashes) - len(lost_ids)
+        lost += len(lost_ids)
+        after = page.get("next_after") or None
+        if after is None:
+            return DrainResult(collection, has_taxonomy, found, assigned, lost)
 
 
 def taxonomy_assign_batch_hook(

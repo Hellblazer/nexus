@@ -1168,6 +1168,49 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
         click.echo(f"Assigned '{doc_id}' to topic '{topic_label}' (id={topic_id}).")
 
 
+@taxonomy.command("drain")
+@click.option("--collection", "-c", "collections", multiple=True,
+              help="Collection to drain (repeatable).")
+@click.option("--all", "all_collections", is_flag=True, default=False,
+              help="Drain every live collection.")
+@click.option("--max-chunks", type=click.IntRange(min=1), default=None,
+              help="Chunks per collection this run (default 2000); the rest wait for the next drain.")
+def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: int | None) -> None:
+    """Assign chunks that have no topic in their collection's taxonomy.
+
+    Lists, per collection, the manifest-backed chunks with no assignment to
+    the collection's own topics and assigns them through the same retrying
+    path indexing uses (nexus-iygza). Recovers assignments lost to a failed
+    batch, a crash, or a deferred hook. Collections without topics are
+    reported and left alone. Exits 1 when any chunk still failed to assign.
+    """
+    from nexus.mcp_infra import (  # noqa: PLC0415 - deferred to avoid circular import at module load
+        _DRAIN_MAX_CHUNKS,
+        drain_unassigned_chunks,
+        get_live_collection_names,
+    )
+
+    if bool(collections) == all_collections:
+        raise click.UsageError("name collections with -c, or pass --all (one of the two).")
+    names = list(collections)
+    if all_collections:
+        names = sorted(get_live_collection_names())
+    budget = max_chunks or _DRAIN_MAX_CHUNKS
+    any_lost = False
+    for name in names:
+        r = drain_unassigned_chunks(name, max_chunks=budget)
+        if r.skipped_reason:
+            click.echo(f"{name}: skipped ({r.skipped_reason})")
+        elif not r.has_taxonomy:
+            click.echo(f"{name}: no taxonomy, nothing to assign to")
+        else:
+            more = "; more remain, run again" if r.truncated else ""
+            click.echo(f"{name}: {r.found} unassigned, {r.assigned} assigned, {r.lost} lost{more}")
+        any_lost = any_lost or r.lost > 0
+    if any_lost:
+        raise SystemExit(1)
+
+
 @taxonomy.command("rename")
 @click.argument("topic_label")
 @click.argument("new_label")

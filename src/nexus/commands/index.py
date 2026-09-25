@@ -1600,6 +1600,13 @@ def index_repo_cmd(
                 )
             else:
                 click.echo("  Taxonomy: no files changed — skipping discovery")
+            # nexus-iygza (indexing-brittleness P0.1): assign any chunk the
+            # per-flush hook lost or deferred, derived from state. Runs on a
+            # no-change run too, since that is exactly when an earlier run's
+            # loss would otherwise sit forever. Bounded per collection
+            # (drain_unassigned_chunks' own budget and deadline) and silent
+            # when there is nothing to do.
+            _drain_repo_collections(collections, client=_t2_client)
 
         if not frecency_only:
             try:
@@ -1821,6 +1828,48 @@ def _taxonomy_incomplete(collections: list[str], *, client=None) -> bool:
     an active ``nx index`` invocation passes its own shared client in.
     """
     return bool(_collections_without_topics(collections, client=client))
+
+
+def _drain_repo_collections(collections: list[str], *, client=None) -> None:
+    """Drain unassigned chunks in *collections* (nexus-iygza).
+
+    Prints one line per collection that had any, and nothing otherwise.
+    Never raises: a drain problem is reported and left for the next run,
+    which lists the same chunks again. A lost chunk also lands in the
+    taxonomy-assign run stats the exit-code check reads (nexus-7lw6a).
+
+    *client* is the command's shared T2 client (nexus-m20mf): the page
+    reads go through one ``T2Database`` built on it, like
+    :func:`_collections_without_topics`.
+    """
+    if not collections:
+        return
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
+    from nexus.mcp_infra import drain_unassigned_chunks  # noqa: PLC0415 — deferred to avoid circular import
+
+    try:
+        with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only unassigned listing; assigns route through the hook's own retrying path
+            for name in collections:
+                _drain_one(name, drain_unassigned_chunks, taxonomy=db.taxonomy)
+    except Exception as exc:  # noqa: BLE001 — best-effort; _drain_one already contains per-collection failures, so this is the T2 open itself
+        _log.warning("taxonomy_drain_t2_unavailable", error=str(exc))
+
+
+def _drain_one(name: str, drain, *, taxonomy) -> None:
+    """One collection's drain and its report line (see :func:`_drain_repo_collections`)."""
+    try:
+        r = drain(name, taxonomy=taxonomy)
+    except Exception as exc:  # noqa: BLE001 — best-effort; the next run lists the same chunks
+        _log.warning("taxonomy_drain_failed", collection=name, error=str(exc))
+        click.echo(f"  Taxonomy drain: {name} failed ({type(exc).__name__}); next run retries")
+        return
+    if r.found:
+        more = ", more remain" if r.truncated else ""
+        click.echo(
+            f"  Taxonomy drain: {name}: {r.assigned} of {r.found} unassigned chunk(s) "
+            f"assigned, {r.lost} lost{more}"
+        )
 
 
 def _collections_without_topics(collections: list[str], *, client=None) -> set[str]:
