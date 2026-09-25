@@ -1182,7 +1182,8 @@ def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: i
     the collection's own topics and assigns them through the same retrying
     path indexing uses (nexus-iygza). Recovers assignments lost to a failed
     batch, a crash, or a deferred hook. Collections without topics are
-    reported and left alone. Exits 1 when any chunk still failed to assign.
+    reported and left alone. Exits 1 when any chunk still failed to assign
+    or any collection could not be drained.
     """
     from nexus.mcp_infra import (  # noqa: PLC0415 - deferred to avoid circular import at module load
         _DRAIN_MAX_CHUNKS,
@@ -1195,10 +1196,24 @@ def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: i
     names = list(collections)
     if all_collections:
         names = sorted(get_live_collection_names())
+        # Same exclusion the per-flush hook honours in local mode
+        # (taxonomy.local_exclude_collections; code__* by default, since
+        # general-purpose local embeddings cluster code poorly).
+        from fnmatch import fnmatch  # noqa: PLC0415 - stdlib, only this branch needs it
+
+        from nexus.config import is_local_mode, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
+        if is_local_mode():
+            exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
+            names = [n for n in names if not any(fnmatch(n, pat) for pat in exclude)]
     budget = max_chunks or _DRAIN_MAX_CHUNKS
     any_lost = False
     for name in names:
-        r = drain_unassigned_chunks(name, max_chunks=budget)
+        try:
+            r = drain_unassigned_chunks(name, max_chunks=budget)
+        except Exception as exc:  # noqa: BLE001 - one collection's failure is reported; the rest still drain
+            click.echo(f"{name}: failed ({type(exc).__name__}: {exc})")
+            any_lost = True
+            continue
         if r.skipped_reason:
             click.echo(f"{name}: skipped ({r.skipped_reason})")
         elif not r.has_taxonomy:

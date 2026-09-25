@@ -1606,7 +1606,20 @@ def index_repo_cmd(
             # loss would otherwise sit forever. Bounded per collection
             # (drain_unassigned_chunks' own budget and deadline) and silent
             # when there is nothing to do.
+            # The exit-code check below (nexus-7lw6a) reads `stats`, which
+            # index_repository snapshotted before the drain ran. Add the
+            # drain's own share of the run counters to it, so a chunk the
+            # drain still lost fails the run like any other lost assignment.
+            from nexus.mcp_infra import taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import
+            _before = taxonomy_assign_run_stats()
             _drain_repo_collections(collections, client=_t2_client)
+            _after = taxonomy_assign_run_stats()
+            for _key, _counter in (
+                ("taxonomy_assign_batches_attempted", "attempted"),
+                ("taxonomy_assign_batches_failed", "failed_batches"),
+                ("taxonomy_assign_chunks_failed", "failed_chunks"),
+            ):
+                stats[_key] = stats.get(_key, 0) + _after[_counter] - _before[_counter]
 
         if not frecency_only:
             try:
@@ -1833,10 +1846,12 @@ def _taxonomy_incomplete(collections: list[str], *, client=None) -> bool:
 def _drain_repo_collections(collections: list[str], *, client=None) -> None:
     """Drain unassigned chunks in *collections* (nexus-iygza).
 
-    Prints one line per collection that had any, and nothing otherwise.
-    Never raises: a drain problem is reported and left for the next run,
-    which lists the same chunks again. A lost chunk also lands in the
-    taxonomy-assign run stats the exit-code check reads (nexus-7lw6a).
+    Prints one line per collection that had any, one line when the engine
+    has no drain route (below engine-service-v0.1.132), and nothing
+    otherwise. Never raises: a drain problem is reported and left for the
+    next run, which lists the same chunks again. A lost chunk lands in the
+    taxonomy-assign run stats, which the caller re-reads before its
+    exit-code check (nexus-7lw6a).
 
     *client* is the command's shared T2 client (nexus-m20mf): the page
     reads go through one ``T2Database`` built on it, like
@@ -1851,25 +1866,36 @@ def _drain_repo_collections(collections: list[str], *, client=None) -> None:
     try:
         with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only unassigned listing; assigns route through the hook's own retrying path
             for name in collections:
-                _drain_one(name, drain_unassigned_chunks, taxonomy=db.taxonomy)
+                if _drain_one(name, drain_unassigned_chunks, taxonomy=db.taxonomy):
+                    # Engine below v0.1.132: every collection would skip for
+                    # the same reason, so say it once and stop asking.
+                    break
     except Exception as exc:  # noqa: BLE001 — best-effort; _drain_one already contains per-collection failures, so this is the T2 open itself
         _log.warning("taxonomy_drain_t2_unavailable", error=str(exc))
 
 
-def _drain_one(name: str, drain, *, taxonomy) -> None:
-    """One collection's drain and its report line (see :func:`_drain_repo_collections`)."""
+def _drain_one(name: str, drain, *, taxonomy) -> bool:
+    """One collection's drain and its report line (see :func:`_drain_repo_collections`).
+
+    Returns True when the engine has no drain route, so the caller stops.
+    """
     try:
         r = drain(name, taxonomy=taxonomy)
     except Exception as exc:  # noqa: BLE001 — best-effort; the next run lists the same chunks
         _log.warning("taxonomy_drain_failed", collection=name, error=str(exc))
         click.echo(f"  Taxonomy drain: {name} failed ({type(exc).__name__}); next run retries")
-        return
+        return False
+    if r.skipped_reason:
+        _log.info("taxonomy_drain_skipped", collection=name, reason=r.skipped_reason)
+        click.echo(f"  Taxonomy drain: skipped, {r.skipped_reason}")
+        return True
     if r.found:
         more = ", more remain" if r.truncated else ""
         click.echo(
             f"  Taxonomy drain: {name}: {r.assigned} of {r.found} unassigned chunk(s) "
             f"assigned, {r.lost} lost{more}"
         )
+    return False
 
 
 def _collections_without_topics(collections: list[str], *, client=None) -> set[str]:

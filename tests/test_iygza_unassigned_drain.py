@@ -18,6 +18,8 @@ import hashlib
 import inspect
 import itertools
 
+from unittest.mock import MagicMock, patch
+
 import httpx
 import pytest
 from click.testing import CliRunner
@@ -191,3 +193,107 @@ def test_index_drain_reports_work_and_survives_a_failure(monkeypatch, capsys) ->
 
 def test_index_repo_calls_the_drain() -> None:
     assert "_drain_repo_collections(collections, client=_t2_client)" in inspect.getsource(index_mod)
+
+
+def test_cli_drain_all_isolates_a_failing_collection(monkeypatch) -> None:
+    def _drain(name, **kw):
+        if name == "a-bad":
+            raise httpx.ConnectError("engine unreachable")
+        return DrainResult(name, True, found=1, assigned=1)
+
+    monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", _drain)
+    monkeypatch.setattr(mcp_infra, "get_live_collection_names", lambda: ["a-bad", "b-good"])
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+
+    out = CliRunner().invoke(main, ["taxonomy", "drain", "--all"])
+
+    assert out.exit_code == 1, out.output
+    assert "a-bad: failed (ConnectError" in out.output
+    assert "b-good: 1 unassigned, 1 assigned, 0 lost" in out.output
+
+
+def test_cli_drain_all_honours_the_local_exclusion(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def _drain(name, **kw):
+        seen.append(name)
+        return DrainResult(name, True)
+
+    monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", _drain)
+    monkeypatch.setattr(mcp_infra, "get_live_collection_names", lambda: ["code__r", "docs__r"])
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr(
+        "nexus.config.load_config",
+        lambda: {"taxonomy": {"local_exclude_collections": ["code__*"]}},
+    )
+
+    out = CliRunner().invoke(main, ["taxonomy", "drain", "--all"])
+
+    assert out.exit_code == 0, out.output
+    assert seen == ["docs__r"]
+
+
+def _index_repo(tmp_path, monkeypatch):
+    """A real `nx index repo` invocation with the indexer internals mocked
+    (the tests/test_index_cmd_shared_client_fanout.py convention); the
+    taxonomy step, drain and exit-code check run for real."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    reg = MagicMock()
+    # docs_collection too: local mode excludes code__* from taxonomy work.
+    reg.get.return_value = {"collection": "code__myrepo", "docs_collection": "docs__myrepo"}
+    mcp_infra.reset_taxonomy_assign_run_stats()
+    with patch("nexus.commands.index._registry", return_value=reg), \
+            patch("nexus.indexer.index_repository", return_value={"files_changed": 0}):
+        return CliRunner().invoke(main, ["index", "repo", str(repo)])
+
+
+def test_index_repo_fails_when_the_drain_loses_a_chunk(tmp_path, monkeypatch, t2_service_env) -> None:
+    """Both reviewers' Critical: the exit-code check read a stats snapshot
+    taken before the drain, so a drain loss exited 0."""
+    def _lossy(name, **kw):
+        mcp_infra._record_taxonomy_assign_attempt()
+        mcp_infra._record_taxonomy_assign_batch_failure(3)
+        return DrainResult(name, True, found=3, assigned=0, lost=3)
+
+    monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", _lossy)
+
+    out = _index_repo(tmp_path, monkeypatch)
+
+    assert out.exit_code != 0, out.output
+    assert "3 chunk(s) affected" in out.output and "(nexus-7lw6a)" in out.output, out.output
+
+
+def test_index_repo_passes_when_the_drain_assigns_everything(tmp_path, monkeypatch, t2_service_env) -> None:
+    def _clean(name, **kw):
+        mcp_infra._record_taxonomy_assign_attempt()
+        return DrainResult(name, True, found=2, assigned=2)
+
+    monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", _clean)
+
+    out = _index_repo(tmp_path, monkeypatch)
+
+    assert out.exit_code == 0, out.output
+    assert "2 of 2 unassigned chunk(s) assigned, 0 lost" in out.output
+
+
+def test_index_drain_says_once_that_the_engine_has_no_route(monkeypatch, capsys) -> None:
+    calls: list[str] = []
+
+    def _old_engine(name, **kw):
+        calls.append(name)
+        return DrainResult(name, skipped_reason="engine has no /v1/taxonomy/assignments/unassigned")
+
+    monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", _old_engine)
+    _drain_repo_collections(["code__a", "docs__a", "rdr__a"])
+
+    out = capsys.readouterr().out
+    assert out.count("Taxonomy drain: skipped") == 1, out
+    assert calls == ["code__a"]
+
+
+def test_drain_of_an_unregistered_collection_is_a_quiet_no_op(t2_service_env) -> None:
+    result = drain_unassigned_chunks("knowledge__iygza-never-registered__bge-base-en-v15-768__v1")
+    assert result.found == 0 and result.skipped_reason == "" and not result.has_taxonomy

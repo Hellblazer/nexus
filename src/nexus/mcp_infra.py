@@ -1336,6 +1336,10 @@ def drain_unassigned_chunks(
                     skipped_reason="engine has no /v1/taxonomy/assignments/unassigned "
                     "(below engine-service-v0.1.132)",
                 )
+            if exc.response.status_code == 422:
+                # Not registered for this tenant: the collection holds no
+                # chunks, so there is nothing to assign and nothing to report.
+                return DrainResult(collection)
             raise
         has_taxonomy = bool(page.get("has_taxonomy"))
         chashes = list(page.get("chashes") or [])
