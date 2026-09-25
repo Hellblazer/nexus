@@ -9,7 +9,10 @@
 # Prerequisites:
 #   - tmux, claude (Claude Code CLI) on PATH
 #   - .env file at repo root with ANTHROPIC_API_KEY, VOYAGE_API_KEY, CHROMA_* set
-#   - tests/e2e/.claude-auth/ populated (run auth-login.sh once)
+#   - the automation token present in the keychain (RDR-219): run
+#     `claude setup-token` and store the result in item
+#     'nexus-automation-oauth-token' under your own account; verify with
+#     `python3 tests/e2e/lib/claude_credentials.py status`
 
 set -euo pipefail
 
@@ -20,12 +23,24 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ONLY_SCENARIO=""
-AUTH_DIR="$SCRIPT_DIR/.claude-auth"
+CRED_TOOL="$SCRIPT_DIR/lib/claude_credentials.py"
 
 # Isolated home for this test run — Claude and nx configs go here, not ~/.claude
 TEST_HOME="${TMPDIR%/}/nexus-e2e-home"
 TEST_HOME="${TEST_HOME:-/tmp/nexus-e2e-home}"
 export TEST_HOME REPO_ROOT
+
+# Private tmux socket for THIS run only (RDR-219 tmux trap, nexus-wauo1.11
+# item 6): a tmux session takes its environment from the tmux SERVER, not
+# from the command that asks for the session. A fresh, PID-scoped socket
+# guarantees the `new-session` call below actually spawns a new server —
+# never adds this session to a server that's already running on the shared
+# default socket, which would silently leave the automation token out of
+# the pane. lib.sh's `_tmux()` wrapper (sourced below) honors this for
+# every tmux call scenarios make; the calls in this script route through it
+# too.
+NX_TMUX_SOCKET="nexus-e2e-$$"
+export NX_TMUX_SOCKET
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -52,15 +67,21 @@ if [[ "$NX_LOCAL" == "1" ]]; then
     unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
 fi
 
-# Accept either a real ``ANTHROPIC_API_KEY`` in the environment OR a cached
-# OAuth credential file at ``tests/e2e/.claude-auth/.credentials.json``. A
-# placeholder API key WITH real OAuth creds is worse than no key — Claude
-# Code prefers an explicit env-var key and rejects the placeholder with
-# "Invalid API key" on every request.
-if [[ -z "${ANTHROPIC_API_KEY:-}" && ! -f "$AUTH_DIR/.credentials.json" ]]; then
-    echo "Error: neither ANTHROPIC_API_KEY nor tests/e2e/.claude-auth/.credentials.json is present." >&2
-    echo "  Set ANTHROPIC_API_KEY in .env, or run ./tests/e2e/auth-login.sh to cache OAuth." >&2
-    exit 1
+# Accept either a real ``ANTHROPIC_API_KEY`` in the environment OR a
+# present, unexpired automation token in the keychain (RDR-219: the
+# harness's own identity, `nexus-automation-oauth-token`, never the
+# operator's interactive login). A placeholder API key WITH a real
+# automation token is worse than no key — Claude Code prefers an explicit
+# env-var key and rejects the placeholder with "Invalid API key" on every
+# request.
+if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    if ! CRED_STATUS="$(python3 "$CRED_TOOL" status)"; then
+        echo "Error: neither ANTHROPIC_API_KEY nor the automation token is usable." >&2
+        echo "  $CRED_STATUS" >&2
+        echo "  Set ANTHROPIC_API_KEY in .env, or run \`claude setup-token\` and store the" >&2
+        echo "  result in keychain item 'nexus-automation-oauth-token' (RDR-219)." >&2
+        exit 1
+    fi
 fi
 : "${VOYAGE_API_KEY:?'VOYAGE_API_KEY must be set'}"
 
@@ -73,7 +94,7 @@ source "$SCRIPT_DIR/lib.sh"
 cleanup() {
     echo ""
     echo "Cleaning up tmux session..."
-    tmux kill-session -t e2e 2>/dev/null || true
+    _tmux kill-session -t e2e 2>/dev/null || true
     rm -rf "$TEST_HOME"
 }
 trap cleanup EXIT
@@ -84,21 +105,14 @@ echo "Setting up isolated test home at $TEST_HOME..."
 rm -rf "$TEST_HOME"
 mkdir -p "$TEST_HOME/.claude/plugins"
 
-# Inject Claude credentials so interactive mode works without OAuth browser flow.
-if [[ -f "$AUTH_DIR/.credentials.json" ]]; then
-    cp "$AUTH_DIR/.credentials.json" "$TEST_HOME/.claude/.credentials.json"
-    if [[ -f "$AUTH_DIR/claude.json" ]]; then
-        cp "$AUTH_DIR/claude.json" "$TEST_HOME/.claude.json"
-        echo "Claude credentials + account config injected."
-    else
-        echo '{"hasCompletedOnboarding":true}' > "$TEST_HOME/.claude.json"
-        echo "Claude credentials injected (no claude.json — run auth-login.sh again)."
-    fi
-else
-    echo '{"hasCompletedOnboarding":true}' > "$TEST_HOME/.claude.json"
-    echo "No credentials cached — run ./tests/e2e/auth-login.sh first."
-    echo "  Interactive Claude tests may fail without pre-cached credentials."
-fi
+# No credential file is written here (RDR-219 rule 1: a harness never
+# touches ~/.claude/.credentials.json, the operator's own interactive
+# login). Authentication happens via CLAUDE_CODE_OAUTH_TOKEN in the
+# environment of the tmux server started below — the oauthAccount seed
+# (tests/e2e/.claude-auth/claude.json) isn't needed either: Phase 0's A1
+# spike (T2 nexus_rdr/219-research-9) confirmed this exact isolated-HOME
+# interactive-tmux launch shape passes with a plain onboarding-only stub.
+echo '{"hasCompletedOnboarding":true}' > "$TEST_HOME/.claude.json"
 
 # Register plugins so Claude Code discovers and loads them.
 # Claude Code uses two files:
@@ -162,9 +176,10 @@ export HOME="$TEST_HOME"
 export PATH="$TEST_HOME/.local/bin:\$PATH"
 # ANTHROPIC_API_KEY: pass through when set so CI callers can provide one
 # explicitly; otherwise explicitly unset so Claude Code falls through to
-# the OAuth creds we copied into \$TEST_HOME/.claude/.credentials.json.
-# Exporting a placeholder here would make Claude prefer the bogus key
-# over OAuth and reject every request with "Invalid API key."
+# the automation token (CLAUDE_CODE_OAUTH_TOKEN) already in the tmux
+# server's own environment (RDR-219 — see the NX_TMUX_SOCKET / \`run --\`
+# setup above). Exporting a placeholder here would make Claude prefer the
+# bogus key over the token and reject every request with "Invalid API key."
 EOF
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\"" >> "$TEST_HOME/.env.test"
@@ -195,14 +210,21 @@ chmod 600 "$TEST_HOME/.env.test"
 
 # ─── Start tmux session ───────────────────────────────────────────────────────
 
-echo "Starting tmux session 'e2e'..."
-echo "  (Run 'tmux attach -t e2e' in another terminal to watch)"
+echo "Starting tmux session 'e2e' on private socket '$NX_TMUX_SOCKET'..."
+echo "  (Run 'tmux -L $NX_TMUX_SOCKET attach -t e2e' in another terminal to watch)"
 
-tmux kill-session -t e2e 2>/dev/null || true
-tmux new-session -d -s e2e -x 220 -y 50
+_tmux kill-session -t e2e 2>/dev/null || true
+# RDR-219 tmux trap (item 6): this new-session call is what actually spawns
+# the server on a fresh private socket, so it — and only it — needs to run
+# under claude_credentials.py `run --`: that's what gets
+# CLAUDE_CODE_OAUTH_TOKEN into the SERVER's own environment, which every
+# pane's shell then inherits. Every later tmux call in this harness targets
+# the same already-running server via _tmux/NX_TMUX_SOCKET and needs no
+# further wrapping.
+python3 "$CRED_TOOL" run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s e2e -x 220 -y 50
 
 # Source the env file in the pane so subsequent commands use TEST_HOME
-tmux send-keys -t "e2e" "source $TEST_HOME/.env.test" Enter
+_tmux send-keys -t "e2e" "source $TEST_HOME/.env.test" Enter
 sleep 1
 
 # Suppress zsh new-user wizard (would absorb keystrokes before Claude starts)
