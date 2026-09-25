@@ -130,7 +130,18 @@ redraw_until_distinct() {  # PRE_NAME REDRAW_FN DISCOVER_FN CAP -> stdout: "NAME
         fi
         n=$((n + 1))
         echo "  resumed name collided with $pre (draw $n/$cap): redrawing" >&2
-        "$redraw_fn" || { printf '%s\n%s\n' "$cur" "$n"; return 2; }
+        # REDRAW_FN is launch()+arm() for real (nexus-wauo1.13 coordinator
+        # finding, 2026-09-25): both print PASS/FAIL/echo progress lines to
+        # STDOUT, not stderr. Left unredirected, that noise becomes part of
+        # THIS function's own `_rd_out="$(redraw_until_distinct ...)"`
+        # capture at the call site below, corrupting the two-line
+        # "NAME\nREDRAW_COUNT" contract this function promises -- the
+        # caller's `A2_NAME="${_rd_out%%$'\n'*}"` / `A2_REDRAWS="${_rd_out#*
+        # $'\n'}"` parse then split on the WRONG newlines, producing a
+        # garbled name and a multi-line "count" that later fails an
+        # integer comparison outright. `1>&2` here sends it to the
+        # terminal/log same as before, just not into this capture.
+        "$redraw_fn" 1>&2 || { printf '%s\n%s\n' "$cur" "$n"; return 2; }
         cur="$("$discover_fn")"
         if [ -z "$cur" ]; then
             printf '%s\n%s\n' "" "$n"
@@ -328,12 +339,36 @@ stop() {  # NAME: /exit, a plain process exit (releases nothing, as Claude Code 
     wait_for 30 exited "$1" || { kill -TERM "${PID_OF[$1]}" 2>/dev/null; sleep 1; }
     T kill-session -t "$1" 2>/dev/null
 }
-discover_name() {  # NAME -> the instance name this session actually armed
+discover_name() {  # NAME [EXCLUDE] -> the instance name this session actually armed
     # Read from the ENGINE, never from the model's words: scan the live
-    # directory subspaces for the one whose holders include this session id.
-    local sid="${SID_OF[$1]}" sub n
+    # directory subspaces for the one whose holders include this session
+    # id. EXCLUDE (optional) skips one specific candidate name even when it
+    # matches.
+    #
+    # nexus-wauo1.13 coordinator finding, 2026-09-25: without EXCLUDE, this
+    # scan is ambiguous for a RESUMED session. `/resume` keeps the SAME
+    # session id as the pre-resume launch, and `stop()`'s own comment says
+    # plainly that a plain `/exit` "releases nothing" -- the pre-resume
+    # launch's own directory/<name> entry stays live for its full TTL. So
+    # once A2 (the resume) shares A's session id, EVERY subspace A ever
+    # armed also lists A2's session id as a holder (they are the same id),
+    # and an unqualified scan cannot tell "A's still-live, stale entry"
+    # apart from "A2's own, just-armed one" -- it returns whichever the
+    # underlying query happens to enumerate first, which was measured
+    # (two consecutive real proof runs, 2026-09-25) to be the STALE
+    # pre-resume name on 4 of 5, then 1 of 2, consecutive arm attempts.
+    # That produced the exact symptom nexus-4ahul's own comments predict
+    # for a genuine ~1-in-256 collision (`redraw_until_distinct` seeing
+    # `cur = pre` and redrawing) -- but it was not a real collision each
+    # time: A2 may already have armed a genuinely different name, and this
+    # scan simply failed to surface it. Passing EXCLUDE lets a caller ask
+    # "is there any OTHER entry for this session id" -- which is exactly
+    # "has a rename actually happened" -- without depending on the scan's
+    # enumeration order at all.
+    local sid="${SID_OF[$1]}" exclude="${2:-}" sub n
     for sub in $(nx tuple list --prefix directory/ --json 2>/dev/null | jq -r '.[] | .subspace // empty'); do
         n="${sub#directory/}"
+        [ -n "$exclude" ] && [ "$n" = "$exclude" ] && continue
         if nx tuple directory "$n" --json 2>/dev/null | jq -e --arg s "$sid" '.holders | index($s)' > /dev/null 2>&1; then
             printf '%s' "$n"
             return 0
@@ -497,7 +532,24 @@ arm A2 || bad "arm A2 (a resumed session subscribes its NEW name)"
 # COLLISION_RETRY_CAP times if the resumed session's draw collides with the
 # pre-resume name, before asserting anything below -- see redraw_until_distinct.
 redraw_a2() { T kill-session -t A2 2>/dev/null; launch A2 "$SA" && arm A2; }
-discover_a2_name() { printf '%s' "${NAME_OF[A2]:-}"; }
+discover_a2_name() {  # -> A2's CURRENT name, distinct from A's still-held pre-resume entry
+    # NAME_OF[A2] (set by arm()'s own unqualified discover_name call,
+    # line 358) is exactly the ambiguous read discover_name's EXCLUDE
+    # parameter exists to correct -- re-derive directly here, excluding
+    # the known pre-resume name $A_NAME (a top-level variable, set at line
+    # 452 before step 2 begins), rather than trusting that cached value.
+    # Falling back to $A_NAME itself when nothing else is found is
+    # correct either way: that means the ONLY entry for this session id is
+    # still the pre-resume one, which is genuinely "not yet distinct"
+    # (arm() hasn't run yet, or Claude Code really did re-assign the
+    # identical name) -- both cases should make redraw_until_distinct's
+    # `cur = pre` comparison hold and trigger a real redraw, same as
+    # before.
+    local fresh
+    fresh="$(discover_name A2 "$A_NAME")"
+    if [ -n "$fresh" ]; then printf '%s' "$fresh"; return 0; fi
+    printf '%s' "$A_NAME"
+}
 _rd_out="$(redraw_until_distinct "$A_NAME" redraw_a2 discover_a2_name "$COLLISION_RETRY_CAP")"
 redraw_rc=$?
 A2_NAME="${_rd_out%%$'\n'*}"
