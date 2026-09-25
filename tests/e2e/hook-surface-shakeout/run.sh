@@ -292,14 +292,37 @@ set +e
 # bare `-e CLAUDE_CODE_OAUTH_TOKEN` (no `=value` -- docker copies the value
 # from ITS OWN client environment, which `run` already set) alongside the
 # `--rm` this invocation already carries. No credential file, no mount.
-python3 "$CRED_TOOL" run -- docker run --rm \
-    -e NX_NO_TELEMETRY=1 \
-    -v "$ART:/artifacts" \
-    -e SHAKEOUT_SHA="$SHA" \
-    -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}" \
-    -e SHAKEOUT_RACE_DELAY="${SHAKEOUT_RACE_DELAY:-}" \
-    -e SHAKEOUT_CLI_VERSION="$CLI_VERSION" \
-    "$IMAGE"
+DOCKER_ARGS=(
+    -e NX_NO_TELEMETRY=1
+    -v "$ART:/artifacts"
+    -e SHAKEOUT_SHA="$SHA"
+    -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}"
+    -e SHAKEOUT_RACE_DELAY="${SHAKEOUT_RACE_DELAY:-}"
+    -e SHAKEOUT_CLI_VERSION="$CLI_VERSION"
+)
+if [ -n "$KEEP" ]; then
+    # --keep (header comment above: "leave the container up"): a bare
+    # `docker run --rm ...` NEVER survives past this call, and
+    # claude_credentials.py's `run --` wrapper forces `--rm` into any
+    # `docker run` invocation it can SEE (RDR-219 review requirement 3 --
+    # a token-bearing container must not outlive the run; no opt-out at
+    # that layer, by design). The wrapper's own docs name the one caller-
+    # side escape hatch: nest the invocation inside a shell string so
+    # argv[0] is `bash`, not `docker`, and write both the token flag and
+    # the container's lifetime yourself. Used ONLY for this explicit,
+    # operator-requested debug path -- never the default (bare) run
+    # above -- and the container must be removed by hand right after
+    # inspecting it; it still carries the raw token in `docker inspect`
+    # for as long as it exists, so that command must never be run on it.
+    CONTAINER_NAME="hook-shakeout-$SHA"
+    docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1 || true
+    echo "[run] --keep: container will survive as $CONTAINER_NAME for inspection -- remove it yourself (docker rm -f $CONTAINER_NAME) when done" >&2
+    python3 "$CRED_TOOL" run -- \
+        bash -c 'exec docker run --name "$0" -e CLAUDE_CODE_OAUTH_TOKEN "$@"' \
+        "$CONTAINER_NAME" "${DOCKER_ARGS[@]}" "$IMAGE"
+else
+    python3 "$CRED_TOOL" run -- docker run --rm "${DOCKER_ARGS[@]}" "$IMAGE"
+fi
 rc=$?
 set -e
 echo "[run] artifacts:"

@@ -104,6 +104,29 @@ def test_run_sh_wraps_the_docker_run_with_claude_credentials_run() -> None:
     )
 
 
+def test_run_sh_default_docker_run_keeps_rm() -> None:
+    # The default (no --keep) path must still be `docker run --rm ...` so
+    # the automation token never outlives the run in the container's own
+    # config (RDR-219 review requirement 3).
+    text = _text(RUN_SH)
+    assert re.search(r'docker run --rm "\$\{DOCKER_ARGS\[@\]\}"', text)
+
+
+def test_run_sh_keep_path_names_and_removes_the_container_itself() -> None:
+    # --keep is the one documented, operator-initiated exception (header
+    # comment: "leave the container up") -- it must give the container a
+    # fixed name (so a proof/debug docker exec can find it) and must not
+    # rely on claude_credentials.py's own docker-run auto-detection, which
+    # unconditionally forces --rm back in.
+    text = _text(RUN_SH)
+    assert 'CONTAINER_NAME="hook-shakeout-$SHA"' in text
+    assert re.search(r'--name\s+"\$0"', text), (
+        "the --keep branch must name the kept container so it can be "
+        "docker exec'd into afterward"
+    )
+    assert "docker rm -f" in text
+
+
 def test_run_sh_gates_on_automation_token_status_not_a_credential_file() -> None:
     text = _text(RUN_SH)
     assert re.search(r'"\$CRED_TOOL"\s+status\b', text), (
