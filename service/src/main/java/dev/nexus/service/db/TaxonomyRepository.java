@@ -907,6 +907,65 @@ public final class TaxonomyRepository {
         return rows;
     }
 
+    /** Upper bound on {@code limit} accepted by {@link #unassignedChashes} per call. */
+    public static final int MAX_UNASSIGNED_CHASHES = 1000;
+
+    /**
+     * Bead nexus-iygza (P0.1, remaining half after nexus-mg8gx) — state-derived
+     * drain of chunks in {@code collection} that carry NO own-collection
+     * {@code topic_assignments} row (a topic whose {@code topics.collection} is
+     * {@code collection} itself), for a collection that HAS centroids at its own
+     * registered dim. Recovers a batch lost to a failed/skipped post-flush
+     * {@code assign_from_chashes} own pass from ANY box or crash, since it is
+     * recomputed from current state rather than read from a client-recorded
+     * pending list (Sam's design, 2026-09-25: "derive from state, not a pending
+     * table").
+     *
+     * <p>Deliberately silent on the CROSS ("projection") pass: a chunk that
+     * already carries a foreign-collection projection assignment but no
+     * own-collection one is still reported here — the two passes are
+     * independent, and this route closes gaps in the own pass specifically.
+     *
+     * @return {@code {chashes: List<String>, has_taxonomy: boolean}} —
+     *         {@code has_taxonomy=false} means {@code collection} has no
+     *         centroids at its own dim yet, and {@code chashes} is always empty
+     *         in that case; {@code has_taxonomy=true} with an empty
+     *         {@code chashes} means every chunk in scope already carries its
+     *         own-collection assignment.
+     * @throws IllegalArgumentException if {@code limit} is not in
+     *         {@code [1, MAX_UNASSIGNED_CHASHES]}
+     */
+    public Map<String, Object> unassignedChashes(String tenant, String collection, int limit) {
+        if (limit < 1 || limit > MAX_UNASSIGNED_CHASHES) {
+            throw new IllegalArgumentException(
+                "limit must be in [1, " + MAX_UNASSIGNED_CHASHES + "]");
+        }
+        // Fail loud BEFORE opening a transaction, same discipline as
+        // assignFromChashes: an unresolvable dim means no per-dim function
+        // exists to call at all.
+        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
+        return tenantScope.withTenant(tenant, ctx -> {
+            org.jooq.Table<?> fn = switch (dim) {
+                case 384  -> TAXONOMY_UNASSIGNED_CHASHES_384.call(collection, limit);
+                case 768  -> TAXONOMY_UNASSIGNED_CHASHES_768.call(collection, limit);
+                case 1024 -> TAXONOMY_UNASSIGNED_CHASHES_1024.call(collection, limit);
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+            // Exactly one row always (the function aggregates to a single row,
+            // even when the underlying chunk scan matched nothing) — see the
+            // function's own SQL for why a bare empty result set here would be
+            // ambiguous between "no centroids yet" and "fully assigned".
+            var rec = ctx.selectFrom(fn).fetchOne();
+            boolean hasTaxonomy = rec != null
+                && Boolean.TRUE.equals(rec.get("has_taxonomy", Boolean.class));
+            String[] chashArr = rec == null ? null : rec.get("chashes", String[].class);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("chashes", chashArr == null ? List.<String>of() : List.of(chashArr));
+            out.put("has_taxonomy", hasTaxonomy);
+            return out;
+        });
+    }
+
     /** Return doc_ids assigned to a topic. limit=0 means no limit. */
     public List<String> getTopicDocIds(String tenant, long topicId, int limit) {
         return tenantScope.withTenant(tenant, ctx -> {

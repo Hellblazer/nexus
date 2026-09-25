@@ -51,6 +51,8 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/assignments/assign_many batch upsert assignments
  *   POST  /v1/taxonomy/assignments/assign_from_chashes server-side compute+persist
  *         from just-upserted chashes (nexus-lns3o engine half)
+ *   POST  /v1/taxonomy/assignments/unassigned state-derived drain of chunks with
+ *         no own-collection topic_assignments row (nexus-iygza engine half)
  *   GET   /v1/taxonomy/assignments/docs    doc_ids for topic_id=
  *   POST  /v1/taxonomy/assignments/for_docs assignments for doc_ids list
  *   POST  /v1/taxonomy/assignments/details full assignment rows incl. quality cols (nexus-onjvy)
@@ -146,6 +148,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/assignments/assign"        -> handleAssign(exchange, tenant, method);
                 case "/assignments/assign_many"   -> handleAssignMany(exchange, tenant, method);
                 case "/assignments/assign_from_chashes" -> handleAssignFromChashes(exchange, tenant, method);
+                case "/assignments/unassigned"     -> handleUnassignedChashes(exchange, tenant, method);
                 case "/assignments/docs"          -> handleGetDocIds(exchange, tenant, method);
                 case "/assignments/for_docs"      -> handleGetAssignmentsForDocs(exchange, tenant, method);
                 case "/assignments/details"       -> handleGetAssignmentDetails(exchange, tenant, method);
@@ -566,6 +569,30 @@ public final class TaxonomyHandler implements HttpHandler {
         // disables it.
         boolean crossCollection = !(body.get("cross_collection") instanceof Boolean b) || b;
         Map<String, Object> result = repo.assignFromChashes(tenant, collection, chashes, crossCollection);
+        HttpUtil.send(ex, 200, json(result));
+    }
+
+    /**
+     * POST /v1/taxonomy/assignments/unassigned (nexus-iygza engine half, P0.1
+     * remaining half after nexus-mg8gx).
+     *
+     * <p>Body {@code {"collection": str, "limit"?: int (default/max
+     * MAX_UNASSIGNED_CHASHES)}}. Names chunks in {@code collection} with a
+     * non-null embedding at the collection's registered dim that carry NO
+     * own-collection {@code topic_assignments} row, so a caller can drain the
+     * gap in bounded batches — see {@link TaxonomyRepository#unassignedChashes}
+     * for the full state-derivation contract this replaces a client-recorded
+     * pending list with. Response 200
+     * {@code {"chashes": [...], "has_taxonomy": bool}} — {@code has_taxonomy}
+     * is {@code false} only when {@code collection} has no centroids at its
+     * own dim yet, in which case {@code chashes} is always empty.
+     */
+    private void handleUnassignedChashes(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        int limit = optIntDefault(body, "limit", TaxonomyRepository.MAX_UNASSIGNED_CHASHES);
+        Map<String, Object> result = repo.unassignedChashes(tenant, collection, limit);
         HttpUtil.send(ex, 200, json(result));
     }
 

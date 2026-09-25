@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-iygza (indexing-brittleness P0.1, remaining half after
+    nexus-mg8gx's split-in-half retry). Sam's design (bd comment,
+    2026-09-25): derive from state, never a pending table — a batch that
+    still fails after the retry is lost today, and no client-recorded
+    pending list can recover it (the hook_failures tripwire row keeps only
+    doc_ids[0]). Instead, an engine function names every chunk in a
+    taxonomized collection that carries NO own-collection topic assignment,
+    so the client can drain it (bounded batches) at the start of an index
+    run or on demand — this recovers a loss from ANY box, crash, or
+    skipped hook, which a client-recorded pending list structurally cannot.
+
+    This changeset is the READ-ONLY half only: nexus.taxonomy_unassigned_
+    chashes_<dim>(p_collection, p_limit), returning ONE row
+    (has_taxonomy boolean, chashes text[]) — never one row per chash, so
+    the caller can tell "no centroids yet" (has_taxonomy=false, chashes
+    empty) apart from "fully assigned already" (has_taxonomy=true, chashes
+    empty) even when the chash list itself is empty in both cases.
+
+    "Unassigned" here means specifically: a chunk with a non-null embedding
+    at the collection's own dim, in a collection that HAS centroids at that
+    dim, with no nexus.topic_assignments row whose topic BELONGS TO THIS
+    COLLECTION (topics.collection = p_collection) — i.e. a gap in the
+    OWN-collection ("centroid") assign_from_chashes pass specifically. A
+    chunk that already carries a foreign ("projection") cross-collection
+    assignment but no own-collection one is still reported here: cross
+    assignment is an unrelated, independently-run pass (assign_from_chashes'
+    p_cross_collection branch, taxonomy-018), and this route's whole
+    purpose is closing gaps in the OWN pass the post-flush hook is supposed
+    to run on every batch.
+
+    Deterministic order: ORDER BY chash (nexus.chunks_pk is
+    (tenant_id, collection, chash), so this is the SAME leading-column PK
+    scan `assign_from_chashes`'s existence probes already use — no new
+    index). Tenant scoping is RLS, exactly like every other taxonomy route:
+    LANGUAGE sql / SECURITY INVOKER inside TenantScope#withTenant, no
+    explicit tenant_id predicate in the query text (nexus.chunks,
+    nexus.taxonomy_centroids, nexus.topic_assignments, and nexus.topics all
+    carry FORCE ROW LEVEL SECURITY tenant_isolation policies).
+
+    p_limit is NOT separately clamped in SQL — the route (TaxonomyHandler)
+    enforces the <=1000 request-shape bound before this function is ever
+    called, matching assign_from_chashes' own MAX_ASSIGN_FROM_CHASHES
+    discipline (validate at the boundary, once).
+
+    No SQL strings in Java anywhere in this route (nexus-zrcj7 directive):
+    the whole read is one schema function per dim, called through generated
+    jOOQ, exactly like taxonomy_ann_query_<dim> (vectors-013) and
+    assign_from_chashes_<dim> (taxonomy-006/hygiene-003/taxonomy-018).
+
+    New changeset, appended per the late-append convention (D0.1) — placed
+    after taxonomy-018-assign-cross-lateral-hnsw.xml (current tail among the
+    taxonomy family) and before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-019-1" author="nexus-iygza">
+        <comment>nexus.taxonomy_unassigned_chashes_384/768/1024: state-derived read naming chunks with no own-collection topic_assignments row, for the client's bounded drain (nexus-iygza).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_unassigned_chashes_384(
+    p_collection text,
+    p_limit      int
+) RETURNS TABLE(has_taxonomy boolean, chashes text[])
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+        ) AS v
+    ),
+    unassigned AS (
+        SELECT c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_384 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.topic_assignments ta
+                 JOIN nexus.topics t ON t.id = ta.topic_id
+                WHERE ta.doc_id = c.chash
+                  AND t.collection = p_collection
+           )
+         ORDER BY c.chash
+         LIMIT p_limit
+    )
+    SELECT (SELECT v FROM has_tax) AS has_taxonomy,
+           COALESCE((SELECT array_agg(encode(u.chash, 'hex') ORDER BY u.chash) FROM unassigned u),
+                    ARRAY[]::text[]) AS chashes
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_unassigned_chashes_768(
+    p_collection text,
+    p_limit      int
+) RETURNS TABLE(has_taxonomy boolean, chashes text[])
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+        ) AS v
+    ),
+    unassigned AS (
+        SELECT c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_768 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.topic_assignments ta
+                 JOIN nexus.topics t ON t.id = ta.topic_id
+                WHERE ta.doc_id = c.chash
+                  AND t.collection = p_collection
+           )
+         ORDER BY c.chash
+         LIMIT p_limit
+    )
+    SELECT (SELECT v FROM has_tax) AS has_taxonomy,
+           COALESCE((SELECT array_agg(encode(u.chash, 'hex') ORDER BY u.chash) FROM unassigned u),
+                    ARRAY[]::text[]) AS chashes
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_unassigned_chashes_1024(
+    p_collection text,
+    p_limit      int
+) RETURNS TABLE(has_taxonomy boolean, chashes text[])
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+        ) AS v
+    ),
+    unassigned AS (
+        SELECT c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_1024 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.topic_assignments ta
+                 JOIN nexus.topics t ON t.id = ta.topic_id
+                WHERE ta.doc_id = c.chash
+                  AND t.collection = p_collection
+           )
+         ORDER BY c.chash
+         LIMIT p_limit
+    )
+    SELECT (SELECT v FROM has_tax) AS has_taxonomy,
+           COALESCE((SELECT array_agg(encode(u.chash, 'hex') ORDER BY u.chash) FROM unassigned u),
+                    ARRAY[]::text[]) AS chashes
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.taxonomy_unassigned_chashes_384(text, int);
+DROP FUNCTION IF EXISTS nexus.taxonomy_unassigned_chashes_768(text, int);
+DROP FUNCTION IF EXISTS nexus.taxonomy_unassigned_chashes_1024(text, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
