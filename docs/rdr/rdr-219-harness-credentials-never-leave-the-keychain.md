@@ -317,10 +317,19 @@ shell, so a harness that exercises them grants the token to nx-mcp alone:
   pipe once and keeps the parsed config: a `/mcp` reconnect restarts the
   server with the value still present (T3
   `analysis-deep-rdr219-devfd-mcp-config-2026-09-25`).
-- **Harnesses that load the conexus plugin** name that entry
-  `plugin:conexus:nexus`, which replaces the plugin's own copy of the server
-  and keeps the same tool names. A harness can also pass
-  `--strict-mcp-config`, which suppresses plugin servers altogether.
+- **Harnesses that load the conexus plugin are not supported by the grant
+  yet.** The grant is for harnesses that run Claude with
+  `--strict-mcp-config` and their own nexus server entry, as
+  migration-rehearsal `--fullstack` does. Replacing the plugin's server
+  instead, with an entry named `plugin:conexus:nexus`, resolves the model's
+  tool calls (spike, T3 `analysis-deep-rdr219-devfd-mcp-config-2026-09-25`
+  Q5), but whether the plugin's `mcp_tool` hooks resolve to that entry is
+  unmeasured. An earlier override in hook-surface-shakeout, named `nexus`,
+  broke the tool-tier hooks without stopping the session
+  (`tests/e2e/hook-surface-shakeout/shakeout_in_container.sh`). No harness
+  that loads the plugin needs the grant today. One that does needs a proof
+  first that a `mcp_tool` hook still fires with the override in place
+  (nexus-wauo1.37).
 - **The mapping.** nx-mcp never reads the harness name itself. The two places
   in `src/nexus` that start `claude` build the child's environment through one
   helper. It sets `CLAUDE_CODE_OAUTH_TOKEN` from
@@ -402,6 +411,16 @@ writing a `.credentials.json`, reading either keychain item, and assigning
 **The janitor.** A check that scans `$TMPDIR`, the agent scratchpad roots, the
 repository tree and `~/nexus-sandbox` for files containing the credential
 pattern and names each one, as a release-battery leg that fails on any find.
+As built (nexus-wauo1.24), it searches for credential FILE NAMES
+(`.credentials.json`, `.claude-credentials.json`) in the repository tree,
+`$TMPDIR` and the scratchpad roots, depth-limited in the latter two. It
+searches file CONTENTS for the token pattern only in the harness-output
+folders (`$TMPDIR/*.artifacts`, `rdr208-mvv.*` stage folders),
+`~/nexus-sandbox` and, with the amendment, `~/.config/nexus/logs`. A content
+grep over the whole of `$TMPDIR` or a scratchpad did not finish in minutes:
+the temp volume has about 79,000 top-level entries, and one scratchpad held
+65 GB (T2 `nexus_rdr/219-continuation-p3-2b`). A token pasted into a file of
+another name elsewhere in those roots is therefore not caught.
 
 ### Existing Infrastructure Audit
 
@@ -487,8 +506,11 @@ not documented, and it does not apply in bare mode.
   environment route: the `run --` tmux server, Claude's exec-time environment,
   nx-mcp under the dispatch grant, and every process in a `docker run -e`
   container.
-  **Mitigation**: none within this RDR, whose threat model is accidental
-  disclosure (see "The nx-mcp dispatch grant"). The token is the revocable
+  **Mitigation**: none within this RDR against a deliberate reader, since its
+  threat model is accidental disclosure (see "The nx-mcp dispatch grant"). The
+  accidental form, a debugging command that prints other processes'
+  environments into a transcript (`ps` with `-E` or BSD `e`, a read of
+  `/proc/<pid>/environ`), is in scope, and the print guard denies it. The token is the revocable
   automation token, never the operator's login. Getting the token into
   containers over stdin or a file descriptor would narrow the container case;
   that is outside this RDR.
@@ -702,7 +724,12 @@ solution. One tension is stated and resolved: the rule "no credential file"
 and the fallback that writes one for a launch shape where A1, A2 or A3 fails.
 The fallback applies only to a shape Phase 0 shows cannot use the environment,
 holds only the automation token (never the interactive login), and is caught by
-the janitor if left behind.
+the janitor if left behind. A second limitation is stated rather than hidden:
+the guards defend against accidental disclosure (a credential written to a
+file, printed, or put on argv), not against a deliberate reader running as
+the same user, who can read any process's environment (see "The nx-mcp
+dispatch grant" and Risks). The title's "never leave the keychain" means
+never land in a file, on argv or in a transcript.
 
 ### Assumption Verification
 
@@ -763,3 +790,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Phase 2 finding: Claude Code strips the token from its children; harnesses start nested `claude -p` processes from their own shell; nx-mcp's LLM dispatch under the token is open as nexus-wauo1.35.
 - 2026-09-25: Amendment (nexus-wauo1.35, Sam: "amend"): harnesses may grant the automation token to nx-mcp's LLM dispatch under NX_HARNESS_CLAUDE_OAUTH_TOKEN, mapped in one helper in src/nexus; the Claude Code finding corrected (it deletes the token from its own environment, it does not filter names); Phase 3b added.
 - 2026-09-25: Amendment revised after critique (not-justified, 3 Critical): the grant moves from Claude's environment to a piped `--mcp-config` env block, so only nx-mcp holds it (T3 analysis-deep-rdr219-devfd-mcp-config-2026-09-25). The stray-variable failure mode is restated as detected (startup warning, `nx doctor`), not prevented; the threat model (accidental disclosure, not a same-user reader) and the `docker -e` exposure are stated. Proofs now cover all four claimed paths, and the Test Plan and MVV include them. The janitor scans `~/.config/nexus/logs`. The first draft's reversal of the renamed-variable objection is reconciled.
+- 2026-09-25: Amendment round 2 (critique: not-justified, 1 Critical): the grant is limited to harnesses that use `--strict-mcp-config`; plugin-loaded harnesses need a hook-resolution proof first (nexus-wauo1.37). The janitor's filename-versus-content scope is stated as built, and the accidental-versus-deliberate limitation is added to the Contradiction Check.
