@@ -284,8 +284,7 @@ time, so nothing is written.
 **Cons**: documented for API keys; its interaction with subscription login is
 not documented, and it does not apply in bare mode.
 
-**Reason for rejection**: it relies on undocumented behaviour; kept as the
-fallback if A1 fails.
+**Reason for rejection**: it relies on undocumented behaviour.
 
 ### Briefly Rejected
 
@@ -342,7 +341,9 @@ With the automation token in its own keychain item and no
 `Claude Code-credentials` read anywhere: the cc-validation runner, an
 rdr208-mvv container run and one interactive tmux session each authenticate
 through `run --`; after each, the janitor finds zero credential files under
-the known roots; and an agent session's attempt to run `security
+the known roots on this Mac, and on qwentescence an ssh `find` over the
+remote home and temporary directories finds none after the remote run; and an
+agent session's attempt to run `security
 find-generic-password -s "Claude Code-credentials" -w` is denied by the plugin
 guard.
 
@@ -440,7 +441,9 @@ contradictory project memories and the stale cc-validation notes.
 
 ### Testing Strategy
 
-The Minimum Viable Validation above, run on this Mac and on qwentescence.
+The Minimum Viable Validation above, run on this Mac and on qwentescence. The
+janitor's roots are local to this Mac, so the qwentescence leg is checked by
+the ssh `find` the Minimum Viable Validation names, not by the janitor.
 
 ### Performance Expectations
 
