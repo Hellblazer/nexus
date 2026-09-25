@@ -51,6 +51,10 @@ _WINDOWS = 4
 _WORKERS = 4
 #: Worst rows named per collection.
 _MAX_NAMED = 5
+#: Attempts per engine call, through ``nexus.retry._vector_with_retry``.
+#: Fewer than its default 5: a doctor probe should report a sick engine,
+#: not wait out a minute of backoff on each of several collections.
+_ATTEMPTS = 3
 
 
 @dataclass
@@ -61,6 +65,9 @@ class CollectionDrift:
     size: int
     cosines: dict[str, float] = field(default_factory=dict)
     skipped_empty_text: int = 0
+    #: Sampled ids with text but no stored vector at the collection's dim:
+    #: a re-embed in progress, or a row deleted between the two reads.
+    no_vector: int = 0
     error: str | None = None
 
     @property
@@ -81,20 +88,32 @@ def default_seed(today: datetime | None = None) -> int:
 
 
 def window_offsets(size: int, sample: int, rng: random.Random) -> list[tuple[int, int]]:
-    """``(offset, limit)`` windows covering ``sample`` rows of ``size``.
+    """``(offset, limit)`` windows covering exactly ``min(sample, size)`` rows.
 
-    The whole collection when it is no bigger than the sample. Otherwise
-    up to :data:`_WINDOWS` windows at distinct random offsets; windows may
-    overlap, and duplicate ids are removed by the caller.
+    The whole collection when it is no bigger than the sample. Below twice
+    the sample, one window at a random offset. Otherwise the collection is
+    cut into :data:`_WINDOWS` equal strata and each gets one window at a
+    random offset inside it, so windows never overlap and the sample is
+    never short. At twice the sample every stratum is at least as long as
+    its window (``floor(2s/w) >= ceil(s/w)`` for ``w <= s``).
+
+    Rows are ordered by chash on the engine (``getWhere``), and a chash is
+    the hash of the text, so a window is not a run of one document's
+    chunks or one indexing era.
     """
     if size <= 0 or sample <= 0:
         return []
     if size <= sample:
         return [(0, size)]
+    if size < 2 * sample:
+        return [(rng.randrange(size - sample + 1), sample)]
     windows = min(_WINDOWS, sample)
-    per = -(-sample // windows)
-    starts = sorted(rng.sample(range(size - per + 1), windows)) if size - per + 1 >= windows else [0]
-    return [(s, per) for s in starts]
+    parts = [sample // windows + (1 if i < sample % windows else 0) for i in range(windows)]
+    out: list[tuple[int, int]] = []
+    for i, part in enumerate(parts):
+        lo, hi = i * size // windows, (i + 1) * size // windows
+        out.append((lo + rng.randrange(hi - lo - part + 1), part))
+    return out
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -116,6 +135,11 @@ def probe_collection(t3: Any, name: str, size: int, sample: int, rng: random.Ran
     Any failure is recorded in ``error``; the collection then counts as
     not probed.
     """
+    from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred, only the probe needs it
+
+    def _call(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        return _vector_with_retry(fn, *args, max_attempts=_ATTEMPTS, **kwargs)
+
     result = CollectionDrift(collection=name, size=size)
     try:
         # Not get_collection(): it re-lists the whole tenant to prove the
@@ -123,7 +147,7 @@ def probe_collection(t3: Any, name: str, size: int, sample: int, rng: random.Ran
         col = t3.get_or_create_collection(name)
         texts: dict[str, str] = {}
         for offset, limit in window_offsets(size, sample, rng):
-            page = col.get(include=["documents"], limit=limit, offset=offset)
+            page = _call(col.get, include=["documents"], limit=limit, offset=offset)
             for cid, text in zip(page.get("ids") or [], page.get("documents") or []):
                 if text:
                     texts.setdefault(cid, text)
@@ -131,14 +155,14 @@ def probe_collection(t3: Any, name: str, size: int, sample: int, rng: random.Ran
                     result.skipped_empty_text += 1
         if not texts:
             return result
-        ids = list(texts)
-        stored = t3.get_embeddings_by_id(name, ids)
-        fresh = t3.embed_for_collection(name, [texts[i] for i in ids])
+        stored = _call(t3.get_embeddings_by_id, name, list(texts))
+        ids = [i for i in texts if i in stored]
+        result.no_vector = len(texts) - len(ids)
+        if not ids:
+            return result
+        fresh = _call(t3.embed_for_collection, name, [texts[i] for i in ids])
         if len(fresh) != len(ids):
             raise RuntimeError(f"embed returned {len(fresh)} vectors for {len(ids)} texts")
-        missing = [i for i in ids if i not in stored]
-        if missing:
-            raise RuntimeError(f"{len(missing)} sampled id(s) have no stored vector, e.g. {missing[0][:12]}")
         result.cosines = {i: _cosine(stored[i], f) for i, f in zip(ids, fresh)}
     except Exception as exc:  # noqa: BLE001 — one collection's failure is reported, never hides the rest
         _log.debug("doctor_embeddings_probe_failed", collection=name, error=str(exc))
@@ -195,9 +219,18 @@ def format_report(results: list[CollectionDrift], *, sample: int, seed: int) -> 
         lines.append(f"      ✗ {r.collection}: NOT PROBED ({r.error})")
     if empty:
         lines.append(
-            f"      {len(empty)} collection(s) had no chunk text to sample: "
+            f"      NOT CHECKED: {len(empty)} collection(s) gave no comparable chunk "
+            "(no stored text, as with reference-only rows, or no stored vector): "
             + ", ".join(r.collection for r in empty[:5])
             + (f" (+{len(empty) - 5} more)" if len(empty) > 5 else "")
+        )
+    no_vector = [r for r in results if r.error is None and r.no_vector]
+    if no_vector:
+        lines.append(
+            f"      {sum(r.no_vector for r in no_vector)} sampled chunk(s) have text but "
+            "no stored vector at the collection's dim (a re-embed in progress, or "
+            "deleted mid-probe), not compared: "
+            + ", ".join(f"{r.collection} ({r.no_vector})" for r in no_vector[:5])
         )
     if total == 0 and not failed:
         lines.append("      nothing was compared, so this is not a clean result")

@@ -75,12 +75,22 @@ def test_window_offsets_whole_collection_when_small() -> None:
     assert window_offsets(0, 20, random.Random(1)) == []
 
 
-def test_window_offsets_spread_and_in_range() -> None:
+@pytest.mark.parametrize("sample", [1, 2, 3, 4, 5, 7, 20, 21, 300])
+@pytest.mark.parametrize("size", [1, 5, 21, 22, 39, 40, 41, 44, 47, 67, 116, 1308, 10_000])
+def test_window_offsets_cover_exactly_the_sample_without_overlap(size: int, sample: int) -> None:
+    """The nexus-tysei collections were 32 to 1,724 chunks; the small ones
+    sit where overlapping windows would silently shrink the sample."""
+    windows = window_offsets(size, sample, random.Random(size * 1000 + sample))
+    rows = [r for o, n in windows for r in range(o, o + n)]
+    assert all(0 <= o and o + n <= size for o, n in windows), windows
+    assert len(rows) == len(set(rows)), f"overlap: {windows}"
+    assert len(rows) == min(size, sample), windows
+
+
+def test_window_offsets_spread_across_strata() -> None:
     windows = window_offsets(10_000, 20, random.Random(7))
     assert len(windows) == 4
-    assert len({o for o, _ in windows}) == 4
-    assert all(0 <= o and o + n <= 10_000 for o, n in windows)
-    assert sum(n for _, n in windows) >= 20
+    assert [o // 2500 for o, _ in windows] == [0, 1, 2, 3]
 
 
 def test_window_offsets_is_deterministic_per_seed() -> None:
@@ -95,6 +105,35 @@ def test_report_is_not_clean_when_nothing_was_compared() -> None:
     lines, ok = format_report([CollectionDrift(collection="c", size=3)], sample=20, seed=1)
     assert not ok
     assert any("not a clean result" in line for line in lines)
+    assert any("NOT CHECKED: 1 collection(s)" in line for line in lines)
+
+
+def test_a_sampled_chunk_without_a_stored_vector_is_counted_not_fatal() -> None:
+    """Mid-re-embed, a row can carry text and no vector at the dim; that row
+    is counted and skipped, and the rest of the collection is compared."""
+
+    class _Col:
+        def get(self, **kw):
+            return {"ids": ["a" * 64, "b" * 64], "documents": ["text a", "text b"]}
+
+    class _T3:
+        def get_or_create_collection(self, name):
+            return _Col()
+
+        def get_embeddings_by_id(self, name, ids):
+            return {"a" * 64: [1.0, 0.0]}
+
+        def embed_for_collection(self, name, texts):
+            assert texts == ["text a"]
+            return [[1.0, 0.0]]
+
+    r = probe_collection(_T3(), "c", 2, 20, random.Random(1))
+
+    assert r.error is None and r.no_vector == 1
+    assert r.cosines == {"a" * 64: pytest.approx(1.0)}
+    lines, ok = format_report([r], sample=20, seed=1)
+    assert ok
+    assert any("1 sampled chunk(s) have text but no stored vector" in line for line in lines)
 
 
 def test_report_names_unprobed_collections() -> None:
