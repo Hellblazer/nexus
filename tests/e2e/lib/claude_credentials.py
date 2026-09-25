@@ -1,47 +1,27 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Shared Claude Code OAuth credential picker (nexus-galkv.19).
+"""Claude Code automation-token exec helper (nexus-galkv.19 archive; RDR-219 P1.1).
 
-THE DEFECT THIS CLOSES. Three scripts fetched the Claude Code OAuth
-credential with a bare ``security find-generic-password -s 'Claude
-Code-credentials' -w`` (no ``-a``): ``tests/e2e/auth-login.sh`` (which then
-WRITES the result to ``tests/e2e/.claude-auth/.credentials.json``), and both
-the ``--fullstack`` and ``--shakeout-e2e`` legs of
-``tests/e2e/migration-rehearsal/run.sh`` (which mount it into a container).
-More than one keychain item can carry that service name — on this box an
-``acct="unknown"`` item is an empty husk (``accessToken ""``,
-``refreshToken ""``, ``expiresAt 0``) sitting alongside the live
-``acct=<login user>`` item the CLI actually refreshes — and the bare,
-unscoped lookup returns an ARBITRARY match, which on 2026-09-15 was the
-husk: ``auth-login.sh`` overwrote its own snapshot with it and interactive
-Claude Code showed "Not logged in", while ``claude -p`` failed with "OAuth
-session expired and could not be refreshed".
-
-``tests/cc-validation/runner.sh``'s ``_cred_tool`` (nexus-qs1g6, 2026-08-28;
-see ``tests/cc-validation/README.md`` § "Auth" / "History: the operator's
-interactive login used to leak in") already solved
-this by choosing the credential by CONTENT rather than trusting the first
-match: enumerate every account under the service (attribute-only
-``security dump-keychain``, no secret read, no unlock prompt), fetch each
-with ``-a``, reject any item that carries no usable token, and take the
-freshest survivor. That fix was never shared with the two callers above —
-this module is the one shared home, so a fourth caller finds it here too
-instead of re-deriving it a third time.
+HISTORY. This module originally picked the operator's interactive-login
+OAuth credential by CONTENT across every keychain item under its service,
+because more than one such item could exist and a bare, unscoped lookup
+returned an arbitrary match — on 2026-09-15 that arbitrary match was an
+empty husk, and both ``tests/e2e/auth-login.sh`` and
+``tests/e2e/migration-rehearsal/run.sh`` broke from it (nexus-galkv.19,
+nexus-qs1g6). RDR-219 replaced that design outright: harnesses now
+authenticate under a dedicated automation identity, never the operator's
+interactive login, so nothing here reads that item anymore. The
+``pick``/``check FILE`` modes that did the old picking were removed once
+every caller had migrated to ``run`` (nexus-wauo1.18) — see git history
+before this bead if the old mechanics are ever needed again.
 
 Modes (argv[1]):
-  pick        -- print the freshest usable keychain credential JSON on
-                 stdout, exit 0. Exit 1 with a reason on stderr if no
-                 keychain item under the service is usable (or `security`
-                 is unavailable — non-macOS, missing binary).
-  check FILE  -- exit 0 iff FILE holds JSON that `verdict()` below judges
-                 usable. Exit 1 with a reason on stderr otherwise. Never
-                 writes anything.
   run [--remote HOST [--remote-shell ENTRY]] -- <command> [args...]
                  (RDR-219 P1.1.) Reads the harness's OWN automation token
                  from the keychain item ``nexus-automation-oauth-token``
-                 (account ``$USER`` — never ``Claude Code-credentials``,
-                 never the operator's interactive login) and execs
+                 (account ``$USER`` — never the operator's interactive
+                 login) and execs
                  <command> with ``CLAUDE_CODE_OAUTH_TOKEN`` set in its
                  environment. Exit non-zero naming ``claude setup-token``
                  and the keychain item if the token is absent or expired;
@@ -162,30 +142,20 @@ Modes (argv[1]):
                  distinct code from 0-2: this is a `security` output-shape
                  problem, not a token-lifecycle state).
 
-Diagnostic ``[auth] ...`` lines go to stderr only; stdout carries the
-credential JSON (mode ``pick``) and nothing else, so a caller can safely
-capture it via command substitution without capturing diagnostics too, and
-a credential is never accidentally echoed into a log via stderr. ``run``
-and ``status`` print no credential material on any path, by construction:
-``run`` prints only a named error (or nothing, on success, before the exec
-that replaces the process), and ``status`` never issues the keychain read
-(`-w`) that would return the secret at all.
-
-`verdict()` and `pick_usable_credential()` are importable directly for unit
-tests — see ``tests/test_claude_credentials.py``.
+Diagnostic ``[auth] ...`` lines go to stderr only. ``run`` and ``status``
+print no credential material on any path, by construction: ``run`` prints
+only a named error (or nothing, on success, before the exec that replaces
+the process), and ``status`` never issues the keychain read (`-w`) that
+would return the secret at all.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-
-SERVICE = "Claude Code-credentials"
 
 #: RDR-219: the harness's own automation identity, never the operator's
 #: interactive login. Created once with `claude setup-token` and stored
@@ -232,112 +202,6 @@ _REMOTE_READER_TAIL = (
 )
 
 _CDAT_RE = re.compile(r'"cdat"<timedate>=0x[0-9A-Fa-f]+\s+"(\d{14})Z')
-
-
-def verdict(data: dict | None) -> tuple[bool, str]:
-    """(ok, reason). Usable == carries a token we can authenticate or
-    refresh with."""
-    oauth = (data or {}).get("claudeAiOauth") or {}
-    access = oauth.get("accessToken") or ""
-    refresh = oauth.get("refreshToken") or ""
-    if not access and not refresh:
-        return False, "empty husk — accessToken and refreshToken are both blank"
-    expires = oauth.get("expiresAt") or 0
-    if expires and expires <= int(time.time() * 1000) and not refresh:
-        return False, "accessToken expired and no refreshToken to renew it"
-    return True, ""
-
-
-def expiry(data: dict | None) -> int:
-    return ((data or {}).get("claudeAiOauth") or {}).get("expiresAt") or 0
-
-
-def _fetch(acct: str | None) -> dict | None:
-    cmd = ["security", "find-generic-password", "-s", SERVICE]
-    if acct is not None:
-        cmd += ["-a", acct]
-    proc = subprocess.run(cmd + ["-w"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return None
-    try:
-        return json.loads(proc.stdout)
-    except Exception:
-        return None
-
-
-def _accounts() -> list[str]:
-    """Enumerate keychain accounts under SERVICE via an ATTRIBUTE-ONLY dump
-    (no ``-d``, so no secret is read and no unlock prompt fires)."""
-    accounts: list[str] = []
-    block: list[str] = []
-    dump = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True).stdout
-    for line in dump.splitlines() + ["keychain: <eof>"]:
-        if line.startswith("keychain: "):
-            text = "\n".join(block)
-            svce = re.search(r'"svce"<blob>="([^"]*)"', text)
-            acct = re.search(r'"acct"<blob>="([^"]*)"', text)
-            if svce and acct and svce.group(1) == SERVICE:
-                accounts.append(acct.group(1))
-            block = [line]
-        else:
-            block.append(line)
-    return accounts
-
-
-def pick_usable_credential() -> dict | None:
-    """The freshest usable credential across every keychain account under
-    SERVICE, or None if none is usable (including when `security` itself
-    is unavailable). Emits ``[auth]`` progress/skip lines to stderr;
-    NEVER prints a credential to stderr."""
-    try:
-        accounts = _accounts()
-    except FileNotFoundError:
-        print("[auth] `security` not found — not macOS or no Keychain access", file=sys.stderr)
-        return None
-    usable: list[tuple[int, str, dict]] = []
-    seen: set[str | None] = set()
-    for acct in accounts + [None]:  # None == the old first-match form, tried last
-        if acct in seen:
-            continue
-        seen.add(acct)
-        payload = _fetch(acct)
-        if payload is None:
-            continue
-        label = acct if acct is not None else "<first-match>"
-        ok, why = verdict(payload)
-        if ok:
-            usable.append((expiry(payload), label, payload))
-        else:
-            print(f"[auth] skipping keychain item acct={label!r}: {why}", file=sys.stderr)
-    if not usable:
-        return None
-    usable.sort(key=lambda row: row[0], reverse=True)
-    exp, label, payload = usable[0]
-    print(f"[auth] keychain item acct={label!r} selected (expiresAt={exp})", file=sys.stderr)
-    return payload
-
-
-def _cmd_pick() -> int:
-    payload = pick_usable_credential()
-    if payload is None:
-        print("[auth] no usable keychain credential found", file=sys.stderr)
-        return 1
-    sys.stdout.write(json.dumps(payload))
-    return 0
-
-
-def _cmd_check(path: str) -> int:
-    try:
-        with open(path) as fh:
-            payload = json.load(fh)
-    except Exception as exc:
-        print(f"[auth] unreadable: {exc}", file=sys.stderr)
-        return 1
-    ok, why = verdict(payload)
-    if not ok:
-        print(f"[auth] {why}", file=sys.stderr)
-        return 1
-    return 0
 
 
 # ===========================================================================
@@ -623,19 +487,12 @@ def _parse_run_args(
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print(
-            "usage: claude_credentials.py pick | check FILE | "
+            "usage: claude_credentials.py "
             "run [--remote HOST [--remote-shell ENTRY]] -- <command> [args...] | status",
             file=sys.stderr,
         )
         return 2
     mode = argv[1]
-    if mode == "pick":
-        return _cmd_pick()
-    if mode == "check":
-        if len(argv) < 3:
-            print("usage: claude_credentials.py check FILE", file=sys.stderr)
-            return 2
-        return _cmd_check(argv[2])
     if mode == "run":
         parsed = _parse_run_args(argv[2:])
         if parsed is None:

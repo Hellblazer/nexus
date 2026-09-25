@@ -180,6 +180,7 @@ def test_no_tracked_script_bypasses_the_shared_picker() -> None:
         "'Claude Code-credentials' service directly -- this can silently "
         "select an arbitrary keychain item, including a token-less husk "
         "(nexus-galkv.19, nexus-qs1g6): route through "
-        "tests/e2e/lib/claude_credentials.py's `pick`/`check` instead:\n"
+        "tests/e2e/lib/claude_credentials.py's `run`/`status` "
+        "(the automation token) instead:\n"
         + "\n".join(bad)
     )
