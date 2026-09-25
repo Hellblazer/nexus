@@ -204,7 +204,7 @@ cat >> "$TEST_HOME/.env.test" << EOF
 # NX_LOCAL=1 by default so the sandbox uses \`\`chromadb.PersistentClient\`\`
 # + local ONNX embeddings instead of the cloud tenant configured in the
 # real .env. Otherwise an ambient CHROMA_API_KEY / CHROMA_TENANT bleeds
-# into the harness and ``nx index`` hits production. Override by
+# into the harness and \`\`nx index\`\` hits production. Override by
 # exporting NX_LOCAL=0 before invoking run.sh.
 export NX_LOCAL="\${NX_LOCAL:-1}"
 export VOYAGE_API_KEY="${VOYAGE_API_KEY:-}"

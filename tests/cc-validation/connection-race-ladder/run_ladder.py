@@ -228,6 +228,18 @@ def build_home(run_dir: Path, args, server_delay: float, broken: bool,
 
 def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: int,
             ss_sleep: float = 0.0) -> dict:
+    # The per-run private server holds the automation token in its
+    # environment, so it is killed on every exit path: a tmux call that
+    # raises mid-run, or a Ctrl-C during a sleep, would otherwise leave it
+    # running (RDR-219 Phase 2 review, round 2).
+    try:
+        return _run_one(args, label, server_delay, submit, kind, rep, ss_sleep)
+    finally:
+        tmux(args.sock, "kill-server", check=False)
+
+
+def _run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: int,
+             ss_sleep: float = 0.0) -> dict:
     barrier_tag = "-barrier" if getattr(args, "barrier", False) else ""
     run_dir = (Path(args.out) / "runs"
                / f"{label}-S{server_delay:g}-{submit}-{kind}-ss{ss_sleep:g}{barrier_tag}-{rep}")

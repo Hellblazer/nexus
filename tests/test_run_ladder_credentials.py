@@ -227,3 +227,32 @@ def test_docstring_no_longer_describes_cred_cmd_cred_file() -> None:
     assert "--cred-cmd" not in docstring
     assert "--cred-file" not in docstring
     assert "--oauth-seed" not in docstring
+
+
+def test_server_is_killed_when_run_one_raises(monkeypatch, tmp_path: pathlib.Path) -> None:
+    """Round-2 review: the token-bearing private server must be killed on
+    every exit path, not only on run_one()'s explicit returns. A tmux call
+    that fails mid-run (check=True raises CalledProcessError) or a Ctrl-C
+    during a sleep propagates out of run_one(); the server still has to go."""
+    mod = _load_run_ladder()
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", FAKE_TOKEN)
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *a, **kw):
+        calls.append(list(cmd))
+        if "send-keys" in cmd:
+            raise subprocess.CalledProcessError(1, cmd)
+        stdout = "Bypass permissions on\n" if "capture-pane" in cmd else ""
+        return types.SimpleNamespace(stdout=stdout, returncode=0, args=cmd)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(
+        out=str(tmp_path / "out"), python=sys.executable, hook_python="python3",
+        claude="fake-claude-binary-not-executed", sock="test-veh77-sock",
+        ready_regex=r"[Bb]ypass permissions on", turn_timeout=0.0, barrier=False,
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        mod.run_one(args, "t", 0.0, "0", "bash", 0)
+    started = max(i for i, c in enumerate(calls) if "new-session" in c)
+    assert any("kill-server" in c for c in calls[started + 1:]), calls
