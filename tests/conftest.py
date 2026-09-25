@@ -693,6 +693,46 @@ _AMBIENT_DAEMON_DIRS: tuple[str, ...] = ("logs/",)
 _DiffEntry = tuple[str, str]
 
 
+#: nexus-pfuns follow-up (2026-09-25): index.log's single-generation
+#: rotation (``src/nexus/commands/hooks.py``'s post-commit stanza -- when
+#: ``NX_INDEX_LOG`` exceeds 4 MiB it does a same-filesystem
+#: ``mv -f "$NX_INDEX_LOG" "$NX_INDEX_LOG.1"`` before a fresh ``index.log``
+#: is appended to). A same-filesystem ``mv`` is a rename: it does not touch
+#: the renamed inode's content or (mtime, size) at all. So the ONE thing
+#: this exact rotation produces -- and nothing else does -- is
+#: ``index.log.1``'s POST-session stat landing byte-for-byte equal to
+#: ``index.log``'s PRE-session stat (see :func:`_is_index_log_rotation`).
+#: An in-place rewrite of ``index.log`` (the case that must still fail)
+#: leaves ``index.log.1`` untouched, so it can never produce that equality.
+#:
+#: Deliberately two exact names, not a prefix: ``index.log`` stays governed
+#: SOLELY by this module (nexus-wjkc7) -- it must never be added to
+#: :data:`_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES`, which would make this
+#: stricter, shape-checked rule unreachable, and a blanket ``index.log*``
+#: prefix here would swallow the in-place-rewrite case this rule exists to
+#: keep failing.
+#:
+#: Known narrow limitation, accepted rather than papered over: a SECOND
+#: rotation within one pytest session (two hook runs each crossing the 4
+#: MiB threshold before the session ends) clobbers ``index.log.1`` a second
+#: time, so its final stat no longer matches this session's baseline
+#: ``index.log`` and the guard correctly falls through to reporting it --
+#: a false positive investigation-worthy on a genuinely rare double-
+#: rotation, preferred over a broader rule that could mask a real leak.
+_ROTATED_LOG_NAME = "index.log"
+_ROTATED_LOG_BACKUP_NAME = "index.log.1"
+
+
+def _is_index_log_rotation(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]],
+) -> bool:
+    """True iff ``index.log.1``'s current stat exactly matches
+    ``index.log``'s session-start stat -- see :data:`_ROTATED_LOG_NAME`."""
+    before_log = before.get(_ROTATED_LOG_NAME)
+    after_backup = after.get(_ROTATED_LOG_BACKUP_NAME)
+    return before_log is not None and after_backup is not None and before_log == after_backup
+
+
 def _split_appends_from_state(
     changed: list[_DiffEntry],
     before: dict[str, tuple[int, int]],
@@ -752,6 +792,10 @@ def _split_appends_from_state(
     """
     state: list[_DiffEntry] = []
     appends: list[_DiffEntry] = []
+    # Computed once (not per-entry): both `changed` entries a rotation can
+    # produce (`index.log` and `index.log.1`) test the SAME before/after
+    # pair, so there is exactly one verdict for the whole diff.
+    index_log_rotated = _is_index_log_rotation(before, after)
     for entry in changed:
         _verb, rel = entry
         b, a = before.get(rel), after.get(rel)
@@ -784,6 +828,18 @@ def _split_appends_from_state(
             # Deliberately the ONLY content-driven exemption left: unlike a
             # version-mismatch, "before == after byte-for-byte" cannot be
             # produced by a genuine state mutation, in-session or not.
+            appends.append(entry)
+        elif (
+            rel in (_ROTATED_LOG_NAME, _ROTATED_LOG_BACKUP_NAME)
+            and index_log_rotated
+        ):
+            # index.log's single-generation rotation (mv -f index.log ->
+            # index.log.1, then a fresh index.log). See
+            # _is_index_log_rotation's docstring for the exact signature.
+            # An in-place rewrite of index.log without a rotation never
+            # reaches this branch (index_log_rotated is False for it), so
+            # it still falls through to the append-only growth check below
+            # (fails on shrink) or the state verdict.
             appends.append(entry)
         elif name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
             appends.append(entry)

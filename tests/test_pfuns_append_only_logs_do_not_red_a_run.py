@@ -143,3 +143,82 @@ def test_a_truncated_log_still_reddens_through_the_diff(guard):
     state, appends = guard._split_appends_from_state(changed, before, after)
     assert state == [("MODIFIED", "routing_log.jsonl")]
     assert appends == []
+
+
+# ── nexus-pfuns follow-up (2026-09-25): index.log's single-generation
+# rotation ────────────────────────────────────────────────────────────────
+#
+# src/nexus/commands/hooks.py's post-commit stanza rotates index.log itself
+# when it exceeds 4 MiB: `mv -f "$NX_INDEX_LOG" "$NX_INDEX_LOG.1"`, then a
+# fresh index.log is appended to. A same-filesystem `mv` is a rename -- it
+# does not touch the renamed inode's content or (mtime, size) -- so the ONE
+# shape this rotation produces, and nothing else does, is index.log.1's
+# post-session stat landing byte-for-byte equal to index.log's pre-session
+# stat. MEASURED 2026-09-25: a clean `pytest -m lint` run (0 assertion
+# failures) exited 1 over exactly `MODIFIED index.log, MODIFIED
+# index.log.1`, coinciding with real git-commit activity on this shared box
+# during the run.
+#
+# index.log is governed SOLELY by this module (nexus-wjkc7): it must never
+# be added to `_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES`, which would make this
+# stricter, shape-checked rule unreachable. This rotation rule is likewise
+# scoped to the two exact names below, not a blanket `index.log*` prefix --
+# an in-place rewrite of index.log that does NOT rotate must still fail.
+
+
+def test_index_log_rotation_is_benign(guard):
+    """The exact shape a size-triggered rotation produces: index.log.1
+    (newly created here) lands exactly where index.log's baseline was."""
+    before = {"index.log": (1_000, 4_200_000)}
+    after = {"index.log": (5_000, 300), "index.log.1": (1_000, 4_200_000)}
+    changed = guard._diff_config_dir_snapshots(before, after)
+    assert changed, "the diff itself found nothing -- this test would be vacuous"
+    state, appends = guard._split_appends_from_state(changed, before, after)
+    assert state == []
+    assert appends == [
+        ("ADDED", "index.log.1"), ("MODIFIED", "index.log"),
+    ]
+
+
+def test_index_log_second_rotation_is_also_benign(guard):
+    """index.log.1 already existed (a prior rotation, on an earlier
+    session) -- the second rotation's `mv -f` clobbers it, which is still
+    exactly the rotation shape: the NEW index.log.1 stat matches THIS
+    session's baseline index.log stat."""
+    before = {
+        "index.log": (10_000, 4_300_000),
+        "index.log.1": (500, 4_100_000),
+    }
+    after = {
+        "index.log": (20_000, 150),
+        "index.log.1": (10_000, 4_300_000),
+    }
+    changed = guard._diff_config_dir_snapshots(before, after)
+    state, appends = guard._split_appends_from_state(changed, before, after)
+    assert state == []
+    assert sorted(appends) == [
+        ("MODIFIED", "index.log"), ("MODIFIED", "index.log.1"),
+    ]
+
+
+def test_index_log_in_place_rewrite_without_rotation_still_fails(guard):
+    """THE CASE WORTH CATCHING: index.log changed (shrank) but index.log.1
+    did not move at all -- no rotation happened, so this must still fail."""
+    before = {"index.log": (1_000, 5_000)}
+    after = {"index.log": (2_000, 3_000)}
+    changed = guard._diff_config_dir_snapshots(before, after)
+    state, appends = guard._split_appends_from_state(changed, before, after)
+    assert state == [("MODIFIED", "index.log")]
+    assert appends == []
+
+
+def test_index_log_1_change_that_does_not_match_index_log_baseline_still_fails(guard):
+    """index.log.1 changed, but NOT to index.log's pre-session stat -- some
+    other rewrite, not this rotation. Must still fail (no index.log entry
+    in this session at all, so there is nothing for it to match)."""
+    before = {"index.log.1": (1, 10)}
+    after = {"index.log.1": (2, 20)}
+    changed = guard._diff_config_dir_snapshots(before, after)
+    state, appends = guard._split_appends_from_state(changed, before, after)
+    assert state == [("MODIFIED", "index.log.1")]
+    assert appends == []
