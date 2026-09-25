@@ -752,9 +752,12 @@ Day 2 Ops: show the full aspect record for a single document. Takes no options �
 
 ```
 nx enrich delete COLLECTION SOURCE_PATH [--yes]
+nx enrich delete COLLECTION --all [--no-dry-run] [--yes]
 ```
 
-Day 2 Ops: remove a single aspect row. Use when re-indexing a document with a content change that should drop the prior aspects rather than overwrite. Requires `--yes` for confirmation. Safe: the underlying chunks in T3 are untouched.
+Day 2 Ops: remove aspect rows. Pass SOURCE_PATH to remove a single row — use when re-indexing a document with a content change that should drop the prior aspects rather than overwrite. `--yes` skips the confirmation prompt. Safe: the underlying chunks in T3 are untouched.
+
+`--all` (nexus-3foc9) removes every aspect row in COLLECTION instead — the cleanup step after opting a collection out of `aspects.docs_collections` (opting out stops new extraction but leaves rows already written fully visible to aspect-scoped search and groupby). Exactly one of SOURCE_PATH or `--all` is required. `--all` is **dry-run by default**: it reports the row count and collection and writes nothing; pass `--no-dry-run --yes` (or answer the confirmation prompt) to actually delete. Refuses on a collection name the catalog does not know at all; a known collection with zero aspect rows is reported as a no-op.
 
 ### nx enrich aspects-promote-field
 

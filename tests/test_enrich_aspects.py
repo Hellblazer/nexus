@@ -1596,6 +1596,151 @@ class TestDay2Ops:
             ) is not None
 
 
+# ── nexus-3foc9: nx enrich delete COLLECTION --all (bulk removal) ────────────
+
+
+class TestDeleteAll:
+    """`nx enrich delete COLLECTION --all`: bulk removal of every aspect
+    row in one collection. Dry-run by default; `--no-dry-run --yes` (or
+    the confirmation prompt) actually deletes. The cleanup step for a
+    collection opted out of `aspects.docs_collections` (nexus-kk4ut),
+    whose rows extraction wrote stay behind and fully visible to
+    aspect-scoped search/groupby until removed."""
+
+    @staticmethod
+    def _seed(db_path: Path, *, collection: str, source_paths: list[str]) -> None:
+        from nexus.aspect_readers import uri_for
+        from nexus.db.t2 import T2Database
+        from nexus.db.t2.records import AspectRecord
+
+        with T2Database(db_path) as db:
+            for sp in source_paths:
+                db.document_aspects.upsert(AspectRecord(
+                    collection=collection,
+                    source_path=sp,
+                    problem_formulation="P", proposed_method="M",
+                    experimental_datasets=["d1"], experimental_baselines=["b1"],
+                    experimental_results="R", extras={"venue": "V"},
+                    confidence=0.9,
+                    extracted_at=datetime.now(UTC).isoformat(),
+                    model_version="claude-haiku-4-5-20251001",
+                    extractor_name="scholarly-paper-v1",
+                    source_uri=uri_for(collection, sp),
+                    doc_id=_shared_doc_id(),
+                ))
+
+    # ── argument validation ──────────────────────────────────────────────
+
+    def test_requires_source_path_or_all(self, env) -> None:
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["delete", "knowledge__delos"])
+        assert result.exit_code != 0
+        assert "Pass SOURCE_PATH, or --all" in result.output
+
+    def test_rejects_both_source_path_and_all(self, env) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["delete", "knowledge__delos", "/p1.pdf", "--all"],
+        )
+        assert result.exit_code != 0
+        assert "not both" in result.output
+
+    # ── dry-run default ──────────────────────────────────────────────────
+
+    def test_dry_run_reports_count_and_writes_nothing(self, env) -> None:
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        self._seed(
+            db_path, collection="knowledge__delos",
+            source_paths=["/p1.pdf", "/p2.pdf", "/p3.pdf"],
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["delete", "knowledge__delos", "--all"])
+        assert result.exit_code == 0, result.output
+        assert "3 aspect row(s) in 'knowledge__delos'" in result.output
+        assert "dry-run" in result.output.lower()
+
+        with T2Database(db_path) as db:
+            assert len(db.document_aspects.list_by_collection("knowledge__delos")) == 3
+
+    # ── actual bulk delete ───────────────────────────────────────────────
+
+    def test_no_dry_run_removes_every_row_for_collection_only(
+        self, env,
+    ) -> None:
+        """--no-dry-run --yes removes every row of the named collection and
+        none of a different collection's rows."""
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        self._seed(
+            db_path, collection="knowledge__delos",
+            source_paths=["/p1.pdf", "/p2.pdf"],
+        )
+        self._seed(
+            db_path, collection="knowledge__other",
+            source_paths=["/o1.pdf"],
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["delete", "knowledge__delos", "--all", "--no-dry-run", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Deleted 2 aspect row(s)" in result.output
+
+        with T2Database(db_path) as db:
+            assert db.document_aspects.list_by_collection("knowledge__delos") == []
+            assert len(db.document_aspects.list_by_collection("knowledge__other")) == 1
+
+    def test_no_dry_run_requires_confirmation_without_yes(self, env) -> None:
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        self._seed(
+            db_path, collection="knowledge__delos", source_paths=["/p1.pdf"],
+        )
+
+        runner = CliRunner()
+        # Send "n\n" to the prompt to abort.
+        result = runner.invoke(
+            enrich,
+            ["delete", "knowledge__delos", "--all", "--no-dry-run"],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+
+        with T2Database(db_path) as db:
+            assert len(db.document_aspects.list_by_collection("knowledge__delos")) == 1
+
+    # ── unknown / empty collection ───────────────────────────────────────
+
+    def test_unknown_collection_refuses(self, env) -> None:
+        """A name with zero aspect rows AND zero catalog entries is a
+        refusal, not a silent zero-row dry run."""
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["delete", "knowledge__totally-unregistered-xyz", "--all"],
+        )
+        assert result.exit_code != 0
+        assert "No catalog rows in" in result.output
+
+    def test_known_collection_with_no_aspect_rows_is_a_noop(self, env) -> None:
+        """A collection the catalog DOES know (has documents) but with zero
+        aspect rows is a no-op, not a refusal -- there is nothing wrong
+        with it, just nothing to delete."""
+        _, _, cat = env
+        _register_entries(cat, ["/untouched.pdf"])
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["delete", "knowledge__delos", "--all"])
+        assert result.exit_code == 0, result.output
+        assert "nothing to delete" in result.output
+
+
 # ── nexus-r0kum (review S2): the CLI batch path applies the same refusal ──────
 
 

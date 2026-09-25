@@ -631,7 +631,7 @@ def test_dual_population_baseline_locked():
         f"{result.t2database_constructions} != allowlist sum "
         f"{sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values())}"
     )
-    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 26
+    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 27
 
 
 def test_named_allowlists_point_at_live_files():

@@ -2178,21 +2178,53 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
 
 @enrich.command(name="delete")
 @click.argument("collection")
-@click.argument("source_path")
+@click.argument("source_path", required=False, default="")
+@click.option(
+    "--all", "delete_all",
+    is_flag=True,
+    help="Remove every aspect row in COLLECTION instead of one row by SOURCE_PATH.",
+)
+@click.option(
+    "--no-dry-run",
+    is_flag=True,
+    help=(
+        "With --all: actually delete the rows. Without it, --all only "
+        "reports the row count and makes no writes (dry-run by default)."
+    ),
+)
 @click.option(
     "--yes", "-y",
     is_flag=True,
     help="Skip the confirmation prompt.",
 )
 def enrich_aspects_delete(
-    collection: str, source_path: str, yes: bool,
+    collection: str, source_path: str, delete_all: bool, no_dry_run: bool, yes: bool,
 ) -> None:
-    """Remove one aspect row by (COLLECTION, SOURCE_PATH).
+    """Remove one aspect row by (COLLECTION, SOURCE_PATH), or every row in
+    COLLECTION with --all.
 
     Idempotent: deleting a non-existent row prints a notice and
     exits 0. Re-extraction (``nx enrich aspects --re-extract``)
     will repopulate the row when run.
+
+    ``--all`` (nexus-3foc9) removes every aspect row in COLLECTION in
+    one shot -- the cleanup step for a collection that was opted OUT
+    of extraction (``aspects.docs_collections``): opting out stops new
+    writes but leaves rows already written fully visible to
+    aspect-scoped search and groupby. It is DRY-RUN BY DEFAULT: it
+    reports the row count and writes nothing. Pass ``--no-dry-run
+    --yes`` (or answer the confirmation prompt) to actually delete.
     """
+    if delete_all and source_path:
+        raise click.UsageError("Pass either SOURCE_PATH or --all, not both.")
+    if not delete_all and not source_path:
+        raise click.UsageError(
+            "Pass SOURCE_PATH, or --all to remove every aspect row in COLLECTION."
+        )
+
+    if delete_all:
+        _enrich_aspects_delete_all(collection, dry_run=not no_dry_run, yes=yes)
+        return
 
     if not yes:
         click.confirm(
@@ -2219,6 +2251,86 @@ def enrich_aspects_delete(
             f"No aspect row for ({collection!r}, "
             f"{source_path!r}) — nothing to delete."
         )
+
+
+def _enrich_aspects_delete_all(collection: str, *, dry_run: bool, yes: bool) -> None:
+    """nexus-3foc9: bulk-remove every ``document_aspects`` row in *collection*.
+
+    Pages ``list_by_collection`` at <=300 rows per call (the paging
+    ceiling every T3/T2 list verb in this codebase honors; see
+    AGENTS.md's quota table) and, when not a dry run, deletes row by
+    row through the same routed write ``nx enrich delete`` uses for a
+    single row -- the store exposes no bulk-delete RPC (see
+    ``HttpDocumentAspectsStore``'s docstring), so per-row is the only
+    available primitive.
+
+    Refuses only when there is NOTHING to act on and the name itself
+    looks unknown to the catalog (zero aspect rows AND zero catalog
+    entries for *collection* -- the same ``raw_empty`` test the
+    ``aspects``/``aspects-list --missing`` verbs in this file use,
+    via ``unknown_collection_message``). A collection with real aspect
+    rows is always actionable regardless of catalog state -- that is
+    precisely the opted-out-collection scenario this bead exists for:
+    the catalog still lists the collection's documents (indexing
+    itself didn't stop), only extraction did, so refusing here would
+    block the exact cleanup being asked for.
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    rows = []
+    with T2Database(default_db_path()) as db:  # boundary-allow: read-only paged listing (nexus-3foc9)
+        offset = 0
+        while True:
+            batch = db.document_aspects.list_by_collection(
+                collection, limit=300, offset=offset,
+            )
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(batch) < 300:
+                break
+            offset += 300
+
+    if not rows:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+        cat = make_catalog_reader()  # nexus-kmo9h: None ⇔ sqlite opt-out + uninitialised
+        catalog_entries = cat.list_by_collection(collection) if cat is not None else []
+        if not catalog_entries:
+            raise click.ClickException(unknown_collection_message(collection))
+        click.echo(f"No aspect rows for '{collection}' — nothing to delete.")
+        return
+
+    total = len(rows)
+    click.echo(f"{total} aspect row(s) in '{collection}'.")
+
+    if dry_run:
+        click.echo(
+            "--dry-run (default): no rows deleted. Pass --no-dry-run "
+            "--yes to delete them."
+        )
+        return
+
+    if not yes:
+        click.confirm(
+            f"Delete all {total} aspect row(s) in {collection!r}?",
+            abort=True,
+        )
+
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    _PROGRESS_EVERY = 100
+    deleted = 0
+    for i, r in enumerate(rows, start=1):
+        source_path = r.source_path
+        deleted += t2_index_write(
+            lambda db, sp=source_path: db.document_aspects.delete(collection, sp)
+        )
+        if i % _PROGRESS_EVERY == 0 or i == total:
+            click.echo(f"  deleted {i}/{total} row(s)...")
+
+    click.echo(f"Deleted {deleted} aspect row(s) from '{collection}'.")
 
 
 # ── extras → fixed-column promotion: history only (RDR-089 Phase E) ─────────

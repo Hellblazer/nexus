@@ -615,6 +615,7 @@ nexus-3f0o
 nexus-3f95
 nexus-3fab5
 nexus-3fab5.1
+nexus-3foc9
 nexus-3fsyx
 nexus-3g05n
 nexus-3g05n.1
@@ -1239,6 +1240,8 @@ nexus-6konb.19
 nexus-6konb.2
 nexus-6konb.20
 nexus-6konb.21
+nexus-6konb.22
+nexus-6konb.23
 nexus-6konb.3
 nexus-6konb.4
 nexus-6konb.5
@@ -3987,6 +3990,8 @@ nexus-k8s4v
 nexus-k9er
 nexus-k9i56
 nexus-k9i56.1
+nexus-k9zom
+nexus-k9zom.1
 nexus-kard5
 nexus-kas9u
 nexus-kas9u.1
@@ -4032,6 +4037,7 @@ nexus-kjjab
 nexus-kjjab.1
 nexus-kjknj
 nexus-kk4ut
+nexus-kk4ut.1
 nexus-kk63b
 nexus-kk9h
 nexus-kkd
@@ -4090,6 +4096,7 @@ nexus-kpgy
 nexus-kpjk1
 nexus-kpnqy
 nexus-kqij
+nexus-kqnlg
 nexus-kren
 nexus-krhr
 nexus-ks40
@@ -4150,6 +4157,7 @@ nexus-l3yuc.6
 nexus-l3yuc.7
 nexus-l3yuc.8
 nexus-l3yuc.9
+nexus-l46pu
 nexus-l52ms
 nexus-l53s
 nexus-l5c1p
@@ -5933,6 +5941,7 @@ nexus-ty81p
 nexus-ty81p.1
 nexus-tyiht
 nexus-tysei
+nexus-tysei.1
 nexus-tyxnh
 nexus-tz1cx
 nexus-tzeop
