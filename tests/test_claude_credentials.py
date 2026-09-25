@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
+import sys
 import time
 
 import pytest
@@ -31,6 +33,11 @@ def _load_module():
     spec = importlib.util.spec_from_file_location("claude_credentials", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    # Register in sys.modules BEFORE exec: the module uses `@dataclass`
+    # under `from __future__ import annotations`, which resolves its
+    # fields' string annotations via `sys.modules[cls.__module__]` --
+    # without this, that lookup returns None and the class body raises.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -145,3 +152,328 @@ def test_check_file_rejects_invalid_json(cc, tmp_path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("not json")
     assert cc._cmd_check(str(bad)) == 1
+
+
+# ===========================================================================
+# RDR-219 P1.1: `run [--remote HOST] -- <command>` and `status`
+#
+# These never touch the real Keychain. A fake `security` (and, for the
+# --remote tests, a fake `ssh`) is written to a throwaway directory that is
+# prepended to PATH for the duration of each test, exactly as the bead's
+# TESTS FIRST section calls for. A fake token, shaped like a real
+# `claude setup-token` output (`sk-ant-oat01-...`) but never a real
+# credential, stands in for the keychain secret.
+# ===========================================================================
+
+_FAKE_TOKEN = "sk-ant-oat01-FAKE00000000000000000000000000000000000000000000"
+
+_FAKE_SECURITY = '''#!/usr/bin/env python3
+"""Fake `security` for tests -- never touches the real Keychain."""
+import os
+import sys
+
+args = sys.argv[1:]
+mode = os.environ.get("FAKE_SECURITY_MODE", "present")
+if mode == "absent":
+    sys.exit(44)
+cdat = os.environ.get("FAKE_SECURITY_CDAT", "20260101000000")
+token = os.environ.get("FAKE_SECURITY_TOKEN", "sk-ant-oat01-DEFAULTFAKE")
+if "-w" in args:
+    sys.stdout.write(token + "\\n")
+else:
+    sys.stdout.write('keychain: "fake"\\n')
+    sys.stdout.write("version: 512\\n")
+    sys.stdout.write('class: "genp"\\n')
+    sys.stdout.write("attributes:\\n")
+    sys.stdout.write(f'    "cdat"<timedate>=0x00  "{cdat}Z\\\\000"\\n')
+sys.exit(0)
+'''
+
+_FAKE_SSH = '''#!/usr/bin/env python3
+"""Fake `ssh` for tests -- records its own argv and stdin, connects nowhere."""
+import json
+import os
+import sys
+
+argv_path = os.environ["FAKE_SSH_ARGV_FILE"]
+stdin_path = os.environ["FAKE_SSH_STDIN_FILE"]
+with open(argv_path, "w") as fh:
+    json.dump(sys.argv[1:], fh)
+with open(stdin_path, "w") as fh:
+    fh.write(sys.stdin.read())
+sys.exit(0)
+'''
+
+
+def _write_fake_bin(tmp_path, name: str, script: str):
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    path = bin_dir / name
+    path.write_text(script)
+    path.chmod(0o755)
+    return bin_dir
+
+
+def _prepend_path(monkeypatch, bin_dir) -> None:
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+
+def _install_fake_security(monkeypatch, tmp_path, mode="present", cdat="20260101000000", token=_FAKE_TOKEN):
+    bin_dir = _write_fake_bin(tmp_path, "security", _FAKE_SECURITY)
+    _prepend_path(monkeypatch, bin_dir)
+    monkeypatch.setenv("FAKE_SECURITY_MODE", mode)
+    monkeypatch.setenv("FAKE_SECURITY_CDAT", cdat)
+    monkeypatch.setenv("FAKE_SECURITY_TOKEN", token)
+
+
+class _ExecSpy:
+    """Stands in for `cc._exec`, capturing the argv/env it would have
+    handed to `os.execvpe` without ever replacing the test process."""
+
+    def __init__(self, rc: int = 0):
+        self.calls: list[tuple[list, dict]] = []
+        self.rc = rc
+
+    def __call__(self, command, env):
+        self.calls.append((list(command), dict(env)))
+        return self.rc
+
+
+def test_run_absent_token_is_non_zero_and_never_execs(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="absent")
+    spy = _ExecSpy()
+    monkeypatch.setattr(cc, "_exec", spy)
+    rc = cc._cmd_run(["true"])
+    assert rc != 0
+    assert spy.calls == []
+
+
+def test_run_absent_token_names_the_remedy_on_stderr(cc, tmp_path, monkeypatch, capsys) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="absent")
+    monkeypatch.setattr(cc, "_exec", _ExecSpy())
+    cc._cmd_run(["true"])
+    captured = capsys.readouterr()
+    assert "claude setup-token" in captured.err
+    assert cc.AUTOMATION_SERVICE in captured.err
+    assert captured.out == ""
+
+
+def test_run_expired_token_is_non_zero_and_never_execs(cc, tmp_path, monkeypatch, capsys) -> None:
+    long_ago = (_NOW() - __import__("datetime").timedelta(days=400)).strftime("%Y%m%d%H%M%S")
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=long_ago)
+    spy = _ExecSpy()
+    monkeypatch.setattr(cc, "_exec", spy)
+    rc = cc._cmd_run(["true"])
+    assert rc != 0
+    assert spy.calls == []
+    captured = capsys.readouterr()
+    assert "claude setup-token" in captured.err
+    assert cc.AUTOMATION_SERVICE in captured.err
+
+
+def test_run_present_token_execs_command_unchanged_with_token_in_env(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    rc = cc._cmd_run(["mycommand", "arg1", "arg2"])
+    assert rc == 0
+    assert len(spy.calls) == 1
+    argv, env = spy.calls[0]
+    assert argv == ["mycommand", "arg1", "arg2"]
+    assert _FAKE_TOKEN not in argv
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == _FAKE_TOKEN
+
+
+def test_run_prints_nothing_of_its_own_on_the_success_path(cc, tmp_path, monkeypatch, capsys) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    monkeypatch.setattr(cc, "_exec", _ExecSpy(rc=0))
+    cc._cmd_run(["mycommand"])
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert _FAKE_TOKEN not in captured.out
+    assert _FAKE_TOKEN not in captured.err
+
+
+def test_run_unsets_anthropic_api_key_by_default(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-not-a-real-key")
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["mycommand"])
+    _argv, env = spy.calls[0]
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_run_keeps_anthropic_api_key_when_explicitly_allowed(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-not-a-real-key")
+    monkeypatch.setenv(cc.KEEP_ANTHROPIC_API_KEY_ENV, "1")
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["mycommand"])
+    _argv, env = spy.calls[0]
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-api03-not-a-real-key"
+
+
+def test_run_forces_docker_rm_when_wrapping_a_bare_docker_run(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["docker", "run", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "myimage"])
+    argv, _env = spy.calls[0]
+    assert "--rm" in argv
+    assert argv.index("--rm") > argv.index("run")
+
+
+def test_run_does_not_duplicate_an_already_present_docker_rm(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["docker", "run", "--rm", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "myimage"])
+    argv, _env = spy.calls[0]
+    assert argv.count("--rm") == 1
+
+
+def test_run_leaves_a_non_docker_command_untouched(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["claude", "--dangerously-skip-permissions"])
+    argv, _env = spy.calls[0]
+    assert "--rm" not in argv
+    assert argv == ["claude", "--dangerously-skip-permissions"]
+
+
+def test_status_absent(cc, tmp_path, monkeypatch, capsys) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="absent")
+    rc = cc._cmd_status()
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "claude setup-token" in captured.out or "claude setup-token" in captured.err
+    assert _FAKE_TOKEN not in captured.out
+    assert _FAKE_TOKEN not in captured.err
+
+
+def test_status_present_and_not_expiring_soon(cc, tmp_path, monkeypatch, capsys) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    rc = cc._cmd_status()
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "warning" not in captured.out.lower()
+    assert "warning" not in captured.err.lower()
+    assert _FAKE_TOKEN not in captured.out
+    assert _FAKE_TOKEN not in captured.err
+
+
+def test_status_warns_at_30_days_but_not_at_31(cc, tmp_path, monkeypatch, capsys) -> None:
+    import datetime as _dt
+
+    now = _dt.datetime(2026, 6, 1, tzinfo=_dt.timezone.utc)
+
+    cdat_30 = (now - _dt.timedelta(days=365 - 30)).strftime("%Y%m%d%H%M%S")
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=cdat_30)
+    rc = cc._cmd_status(now=now)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "warning" in out.lower()
+
+    cdat_31 = (now - _dt.timedelta(days=365 - 31)).strftime("%Y%m%d%H%M%S")
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=cdat_31)
+    rc = cc._cmd_status(now=now)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "warning" not in out.lower()
+
+
+def test_status_reports_expired_as_exit_2(cc, tmp_path, monkeypatch, capsys) -> None:
+    import datetime as _dt
+
+    now = _dt.datetime(2026, 6, 1, tzinfo=_dt.timezone.utc)
+    long_ago = (now - _dt.timedelta(days=400)).strftime("%Y%m%d%H%M%S")
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=long_ago)
+    rc = cc._cmd_status(now=now)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert _FAKE_TOKEN not in out
+
+
+def test_remote_ssh_argv_excludes_token_stdin_carries_it(cc, tmp_path, monkeypatch) -> None:
+    argv_file = tmp_path / "ssh_argv.json"
+    stdin_file = tmp_path / "ssh_stdin.txt"
+    bin_dir = _write_fake_bin(tmp_path, "ssh", _FAKE_SSH)
+    _prepend_path(monkeypatch, bin_dir)
+    monkeypatch.setenv("FAKE_SSH_ARGV_FILE", str(argv_file))
+    monkeypatch.setenv("FAKE_SSH_STDIN_FILE", str(stdin_file))
+
+    rc = cc._run_remote("fake-host.example", ["echo", "hello"], _FAKE_TOKEN)
+
+    assert rc == 0
+    argv = json.loads(argv_file.read_text())
+    assert argv == ["fake-host.example", "echo", "hello"]
+    assert _FAKE_TOKEN not in argv
+    assert _FAKE_TOKEN in stdin_file.read_text()
+
+
+def test_run_dash_dash_remote_routes_through_run_remote(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    calls = []
+
+    def fake_run_remote(host, command, token):
+        calls.append((host, list(command), token))
+        return 0
+
+    monkeypatch.setattr(cc, "_run_remote", fake_run_remote)
+    monkeypatch.setattr(cc, "_exec", _ExecSpy())
+    rc = cc._cmd_run(["echo", "hi"], remote="fake-host.example")
+    assert rc == 0
+    assert calls == [("fake-host.example", ["echo", "hi"], _FAKE_TOKEN)]
+
+
+def test_parse_run_args_local() -> None:
+    cc = _load_module()
+    assert cc._parse_run_args(["--", "cmd", "arg"]) == (None, ["cmd", "arg"])
+
+
+def test_parse_run_args_remote() -> None:
+    cc = _load_module()
+    assert cc._parse_run_args(["--remote", "host1", "--", "cmd", "arg"]) == ("host1", ["cmd", "arg"])
+
+
+def test_parse_run_args_rejects_missing_separator() -> None:
+    cc = _load_module()
+    assert cc._parse_run_args(["cmd", "arg"]) is None
+
+
+def test_parse_run_args_rejects_empty_command() -> None:
+    cc = _load_module()
+    assert cc._parse_run_args(["--"]) is None
+
+
+def test_parse_run_args_rejects_remote_without_host() -> None:
+    cc = _load_module()
+    assert cc._parse_run_args(["--remote"]) is None
+
+
+def test_main_dispatches_run(cc, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(cc, "_cmd_run", lambda command, remote=None: calls.append((command, remote)) or 5)
+    rc = cc.main(["claude_credentials.py", "run", "--remote", "h", "--", "cmd", "a"])
+    assert rc == 5
+    assert calls == [(["cmd", "a"], "h")]
+
+
+def test_main_dispatches_status(cc, monkeypatch) -> None:
+    monkeypatch.setattr(cc, "_cmd_status", lambda: 7)
+    rc = cc.main(["claude_credentials.py", "status"])
+    assert rc == 7
+
+
+def _NOW():
+    import datetime as _dt
+
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _TODAY_CDAT() -> str:
+    return _NOW().strftime("%Y%m%d%H%M%S")
