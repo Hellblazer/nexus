@@ -395,13 +395,23 @@ naming the helper:
 - reading a `.credentials.json` file to stdout (`cat`, `less`, `more`, `head`,
   `tail`, `jq`, `awk`, `sed`, `od`, `xxd`, `strings`, `base64`, and `python -c`
   or python-heredoc open/print shapes);
-- printing a protected variable's value (`CLAUDE_CODE_OAUTH_TOKEN`, and with the
-  amendment `NX_HARNESS_CLAUDE_OAUTH_TOKEN`): `echo $NAME`, `printenv NAME`, a
-  python snippet reading it, an unfiltered `env`, `env -0` or `set` dump, or a
-  filter that would print a matching line. `printenv PATH`, `env | grep -c
-  NAME` and `set -euo pipefail` are allowed, since they cannot print the value;
-- printing other processes' environments: `ps` with `-E` or BSD `e`, and reads
-  of `/proc/<pid>/environ` (added after the Phase 3 reviews, nexus-wauo1.22).
+- referring to a protected variable by name (`CLAUDE_CODE_OAUTH_TOKEN`, and with
+  the amendment `NX_HARNESS_CLAUDE_OAUTH_TOKEN`): `$NAME` or `${NAME}`,
+  `printenv NAME`, and python code reading it;
+- printing other processes' environments, which do hold the token (the tmux
+  server `run --` started, Claude's exec-time environment): `ps` with `-E` or
+  BSD `e`, and reads of `/proc/<pid>/environ` (including bash's `$(< file)`),
+  matched anywhere in the command, so `eval` and `bash -c` wrappers are
+  covered.
+
+It does not deny whole-environment dumps (`env`, `set`, bare `printenv`).
+Claude Code deletes `CLAUDE_CODE_OAUTH_TOKEN` from its own environment, so
+nothing its Bash tool starts holds it, and under the amendment the harness
+name exists only in nx-mcp (T2 `nexus_rdr/219-research-15`). A dump from
+Claude's Bash tool therefore cannot print a protected value. Rules for dumps
+protected nothing, denied ordinary work (`cat .env`, a quoted heredoc
+mentioning `env`), and could not be made complete (`env 2>/dev/null`,
+`eval env`); the Phase 3 code review found all three (nexus-wauo1.26).
 
 It ships as a self-contained stdlib plugin script with no `nexus` import,
 declared directly under the PreToolUse Bash matcher in `conexus/hooks/hooks.json`,
@@ -800,3 +810,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Amendment revised after critique (not-justified, 3 Critical): the grant moves from Claude's environment to a piped `--mcp-config` env block, so only nx-mcp holds it (T3 analysis-deep-rdr219-devfd-mcp-config-2026-09-25). The stray-variable failure mode is restated as detected (startup warning, `nx doctor`), not prevented; the threat model (accidental disclosure, not a same-user reader) and the `docker -e` exposure are stated. Proofs now cover all four claimed paths, and the Test Plan and MVV include them. The janitor scans `~/.config/nexus/logs`. The first draft's reversal of the renamed-variable objection is reconciled.
 - 2026-09-25: Amendment round 2 (critique: not-justified, 1 Critical): the grant is limited to harnesses that use `--strict-mcp-config`; plugin-loaded harnesses need a hook-resolution proof first (nexus-wauo1.37). The janitor's filename-versus-content scope is stated as built, and the accidental-versus-deliberate limitation is added to the Contradiction Check.
 - 2026-09-25: Amendment round 3 (critique: partial, 1 Significant): the guard's design section lists the ps and /proc environment shapes and the narrowed variable-print rule; the Risks entry states them as specified, not shipped.
+- 2026-09-25: The print guard stops denying whole-environment dumps: Claude deletes the token from its own environment, so a dump from its Bash tool cannot contain it; the guard keeps keychain reads, credential-file reads, references to a protected name, and other processes' environments (Phase 3 code review round 2, nexus-wauo1.26).
