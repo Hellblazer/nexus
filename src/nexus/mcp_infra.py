@@ -224,6 +224,9 @@ def reset_service_t2_op_stats(slot: SharedClientSlot | None = None) -> None:
 # "every batch failed" total-loss determination.
 _taxonomy_assign_run_stats: dict[str, int] = {
     "attempted": 0, "failed_batches": 0, "failed_chunks": 0,
+    # nexus-tawfg: chunks whose assign was deferred this run. Not a loss:
+    # the nexus-iygza drain assigns them on a later run.
+    "deferred_chunks": 0,
 }
 _taxonomy_assign_stats_lock = threading.Lock()
 
@@ -258,6 +261,121 @@ def reset_taxonomy_assign_run_stats() -> None:
         _taxonomy_assign_run_stats["attempted"] = 0
         _taxonomy_assign_run_stats["failed_batches"] = 0
         _taxonomy_assign_run_stats["failed_chunks"] = 0
+        _taxonomy_assign_run_stats["deferred_chunks"] = 0
+
+
+# nexus-tawfg (indexing-brittleness P0.3): defer taxonomy assignment while
+# the engine is freshly restarted or assign failed recently. mg8gx lost 800
+# chunks' topics in the minutes after an engine restart (cold cache), and
+# r0vkh's 782 s pool wedge was the same shape: sending more assign work to a
+# sick engine makes it sicker. Deferring is safe because the nexus-iygza
+# drain assigns any chunk left without a topic on a later run, so a deferred
+# assign is neither attempted nor counted as a loss.
+#
+# The flag is process-wide and set only by `nx index repo` (and by the
+# in-run breaker in taxonomy_assign_batch_hook); the MCP store_put path and
+# `nx taxonomy drain` never set it, so they always assign.
+
+#: Engine uptime below which a run defers. The engine's own javadoc: low
+#: uptime reliably means a recent restart; high uptime does NOT mean a warm
+#: cache, so this only ever excludes.
+TAXONOMY_DEFER_UPTIME_S = 600
+#: How long after a recorded assign failure later runs defer.
+TAXONOMY_FAILURE_BACKOFF_S = 900
+#: File under the nexus config dir holding the wall-clock time of the last
+#: run that lost an assignment (seconds since the epoch).
+TAXONOMY_FAILURE_MARKER = "taxonomy_assign_failed_at"
+
+_taxonomy_deferral = ""
+_taxonomy_breaker_armed = False
+_taxonomy_deferral_lock = threading.Lock()
+
+
+def set_taxonomy_deferral(reason: str, *, arm_breaker: bool = False) -> None:
+    """Defer taxonomy assignment for this process (``""`` clears it).
+
+    *arm_breaker* lets a lost batch defer the rest of the run (see
+    :func:`taxonomy_assign_batch_hook`). Only ``nx index repo`` arms it, for
+    the duration of the command: a long-lived process such as the MCP
+    server must never have one failure switch its assigns off for good.
+    Clearing (``""``) disarms it.
+    """
+    global _taxonomy_deferral, _taxonomy_breaker_armed
+    with _taxonomy_deferral_lock:
+        _taxonomy_deferral = reason
+        _taxonomy_breaker_armed = arm_breaker
+
+
+def _trip_taxonomy_breaker() -> None:
+    """Defer the rest of an armed run after a lost batch; no-op unarmed."""
+    global _taxonomy_deferral
+    with _taxonomy_deferral_lock:
+        if _taxonomy_breaker_armed and not _taxonomy_deferral:
+            _taxonomy_deferral = "taxonomy assign failed earlier in this run"
+
+
+def taxonomy_deferral() -> str:
+    """The current deferral reason, or ``""`` when assignment runs."""
+    with _taxonomy_deferral_lock:
+        return _taxonomy_deferral
+
+
+def _record_taxonomy_deferred(chunk_count: int) -> None:
+    with _taxonomy_assign_stats_lock:
+        _taxonomy_assign_run_stats["deferred_chunks"] += chunk_count
+
+
+def engine_process_uptime_seconds() -> int | None:
+    """The engine's ``/version`` ``process_uptime_seconds``, or ``None``.
+
+    ``None`` for anything but an integer (an older engine or edge omits the
+    field; a bool is not an uptime) and for any failure to ask. Callers
+    must treat ``None`` as "no evidence of a restart", never as "warm".
+    """
+    try:
+        from nexus.db.http_vector_client import _get  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
+
+        info = _get("/version")
+    except Exception as exc:  # noqa: BLE001 — advisory probe; absence defers nothing
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().debug("engine_uptime_probe_failed", error=str(exc))
+        return None
+    value = info.get("process_uptime_seconds") if isinstance(info, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def record_taxonomy_failure(marker: Any, *, now: float) -> None:
+    """Record that a run lost an assignment at wall-clock *now*."""
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    path = Path(marker)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{now:.0f}\n")
+
+
+def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str:
+    """Why this run should defer taxonomy assignment, or ``""``.
+
+    Two exclusions, checked in order: the engine restarted less than
+    :data:`TAXONOMY_DEFER_UPTIME_S` ago; or a run lost an assignment less
+    than :data:`TAXONOMY_FAILURE_BACKOFF_S` ago (the *marker* file). Unknown
+    uptime and an unreadable marker both defer nothing.
+    """
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    uptime = uptime_fn()
+    if uptime is not None and uptime < TAXONOMY_DEFER_UPTIME_S:
+        return f"engine restarted {uptime} s ago"
+    try:
+        failed_at = float(Path(marker).read_text().strip())
+    except (OSError, ValueError):
+        return ""
+    age = now_fn() - failed_at
+    if 0 <= age < TAXONOMY_FAILURE_BACKOFF_S:
+        return f"taxonomy assign failed {age:.0f} s ago"
+    return ""
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
@@ -1311,6 +1429,9 @@ def drain_unassigned_chunks(
     """
     import httpx  # noqa: PLC0415 — deferred; see _is_retryable_taxonomy_assign_error
 
+    reason = taxonomy_deferral()
+    if reason:
+        return DrainResult(collection, skipped_reason=f"deferred: {reason}")
     deadline = now_fn() + deadline_s
     after: str | None = None
     has_taxonomy = False
@@ -1437,6 +1558,11 @@ def taxonomy_assign_batch_hook(
         # that (or any other transport failure) is caught below and reported
         # via the SAME tripwire every other service-path failure uses — the
         # hook fails loud and reports, it never recomputes client-side.
+        if taxonomy_deferral():
+            # nexus-tawfg: deferred, not attempted and not a loss; the
+            # nexus-iygza drain assigns these chunks on a later run.
+            _record_taxonomy_deferred(len(doc_ids))
+            return
         # nexus-7lw6a: counted regardless of outcome — the denominator the
         # run-summary exit-code check uses to tell "some batches failed"
         # from "every batch failed" (total loss).
@@ -1462,6 +1588,11 @@ def taxonomy_assign_batch_hook(
             # taxonomy assignment. Scoped to what's actually still lost
             # (nexus-mg8gx), not the whole original batch.
             _record_taxonomy_assign_batch_failure(len(lost))
+            # nexus-tawfg breaker: a batch still lost after the split-in-half
+            # retry means the engine is struggling now. Stop sending it
+            # assign work for the rest of this run (only an armed run, i.e.
+            # nx index repo); the drain recovers the deferred chunks later.
+            _trip_taxonomy_breaker()
         unmatched = result.get("unmatched_chashes") if isinstance(result, dict) else None
         if unmatched:
             # Route contract: a chash never actually upserted into

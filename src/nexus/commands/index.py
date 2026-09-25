@@ -1486,6 +1486,33 @@ def index_repo_cmd(
         from nexus.commands._helpers import t2_shared_client_from_context  # noqa: PLC0415 — deferred to avoid circular import at module load
         _t2_client = t2_shared_client_from_context()
 
+        # nexus-tawfg (indexing-brittleness P0.3): defer taxonomy assignment
+        # (the per-flush hook and the drain below) when the engine restarted
+        # moments ago or a recent run lost assignments. Deferred chunks are
+        # not losses: a later run's drain assigns them. Cleared when the
+        # command ends so nothing else in the process inherits it.
+        import nexus.config as _nx_config  # noqa: PLC0415 — circular-dep avoidance; module attribute so a patched nexus_config_dir is seen (nexus-78blw)
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+            TAXONOMY_FAILURE_MARKER,
+            decide_taxonomy_deferral,
+            engine_process_uptime_seconds,
+            set_taxonomy_deferral,
+        )
+        _failure_marker = _nx_config.nexus_config_dir() / TAXONOMY_FAILURE_MARKER
+        _deferred_at_start = ""
+        if not frecency_only and not no_taxonomy:
+            _deferred_at_start = decide_taxonomy_deferral(
+                uptime_fn=engine_process_uptime_seconds, marker=_failure_marker,
+                now_fn=time.time,
+            )
+        set_taxonomy_deferral(_deferred_at_start, arm_breaker=True)
+        click.get_current_context().call_on_close(lambda: set_taxonomy_deferral(""))
+        if _deferred_at_start:
+            click.echo(
+                f"  Taxonomy deferred: {_deferred_at_start}; a later run's drain "
+                "assigns what this run skips"
+            )
+
         stats: dict = {}
         try:
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
@@ -1612,7 +1639,8 @@ def index_repo_cmd(
             # drain still lost fails the run like any other lost assignment.
             from nexus.mcp_infra import taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import
             _before = taxonomy_assign_run_stats()
-            _drain_repo_collections(collections, client=_t2_client)
+            if not _deferred_at_start:
+                _drain_repo_collections(collections, client=_t2_client)
             _after = taxonomy_assign_run_stats()
             for _key, _counter in (
                 ("taxonomy_assign_batches_attempted", "attempted"),
@@ -1620,6 +1648,13 @@ def index_repo_cmd(
                 ("taxonomy_assign_chunks_failed", "failed_chunks"),
             ):
                 stats[_key] = stats.get(_key, 0) + _after[_counter] - _before[_counter]
+            if stats.get("taxonomy_assign_batches_failed"):
+                # nexus-tawfg: later runs back off for a while.
+                from nexus.mcp_infra import record_taxonomy_failure  # noqa: PLC0415 — deferred to avoid circular import
+                try:
+                    record_taxonomy_failure(_failure_marker, now=time.time())
+                except OSError as exc:
+                    _log.warning("taxonomy_failure_marker_write_failed", error=str(exc))
 
         if not frecency_only:
             try:

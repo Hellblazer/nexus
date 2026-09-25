@@ -245,6 +245,9 @@ def _index_repo(tmp_path, monkeypatch):
     # docs_collection too: local mode excludes code__* from taxonomy work.
     reg.get.return_value = {"collection": "code__myrepo", "docs_collection": "docs__myrepo"}
     mcp_infra.reset_taxonomy_assign_run_stats()
+    # A warm engine: the substrate engine really did start seconds ago, and
+    # nexus-tawfg defers taxonomy on a fresh restart.
+    monkeypatch.setattr(mcp_infra, "engine_process_uptime_seconds", lambda: None)
     with patch("nexus.commands.index._registry", return_value=reg), \
             patch("nexus.indexer.index_repository", return_value={"files_changed": 0}):
         return CliRunner().invoke(main, ["index", "repo", str(repo)])
