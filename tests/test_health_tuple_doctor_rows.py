@@ -1172,41 +1172,91 @@ class TestCheckTupleChannelDelivery:
         assert any("/mcp" in s for s in r.fix_suggestions)
         assert not any("current engine" in s for s in r.fix_suggestions)
 
-    def test_no_announce_support_names_the_cause_and_suggests_rebuilding_the_engine(
+    def test_no_announce_support_names_the_cause_and_suggests_the_local_convergence_verbs(
         self, monkeypatch, tmp_path: Path,
     ) -> None:
         """bead nexus-vsipz review round: `stopped_reason="no_announce_
-        support"` means the LOCAL ENGINE predates announce mode -- the
-        detail must name that (not the generic "not alive"), and the fix
-        must point at rebuilding/reinstalling the engine, never `/mcp`
-        restart (a restart alone would hit the identical stale engine)."""
+        support"` means the engine this session is serving through
+        predates announce mode -- the detail must name that (not the
+        generic "not alive"), and the fix must point at the LIVE
+        local-mode convergence verbs, never `/mcp` restart (a restart
+        alone would hit the identical stale engine). nexus-6konb.15 (D1):
+        the old text named `nx daemon service install a current engine`,
+        which is not a real command -- `nx daemon service install`
+        registers the autostart unit and installs no engine at all."""
         monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
-        r = h._check_tuple_channel_delivery()[0]
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.service_endpoint.is_dev_checkout_process", return_value=False,
+        ):
+            r = h._check_tuple_channel_delivery()[0]
         assert r.ok is False and r.warn is True
         assert "announce_count" in r.detail
-        assert any("current engine" in s for s in r.fix_suggestions)
+        assert any("nx daemon restart-stale" in s for s in r.fix_suggestions)
+        assert any("nx daemon service install-binary" in s for s in r.fix_suggestions)
+        assert not any("install a current engine" in s for s in r.fix_suggestions)
         assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
 
-    def test_no_subscriber_support_names_the_cause_and_suggests_rebuilding_the_engine(
+    def test_no_announce_support_dev_checkout_also_gets_the_rebuild_advice(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """nexus-6konb.15 (D1): the dev-checkout rebuild advice is shown
+        ONLY when this process itself is a dev checkout -- an installed
+        user has no `service/` tree to rebuild from."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.service_endpoint.is_dev_checkout_process", return_value=True,
+        ):
+            r = h._check_tuple_channel_delivery()[0]
+        assert any("dev checkout" in s and "rebuild" in s for s in r.fix_suggestions)
+        assert any("nx daemon restart-stale" in s for s in r.fix_suggestions)
+
+    def test_no_announce_support_cloud_mode_names_no_local_fix(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """nexus-6konb.15 (D1): a cloud-mode session has no local engine to
+        install, converge, or rebuild -- the managed deployment is
+        conexus's to upgrade, never this box's, so none of the local-mode
+        verbs belong in a cloud user's fix suggestions."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
+        with patch("nexus.config.is_local_mode", return_value=False):
+            r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert not any("nx daemon restart-stale" in s for s in r.fix_suggestions)
+        assert not any("install-binary" in s for s in r.fix_suggestions)
+        assert not any("rebuild the local engine's cached build" in s for s in r.fix_suggestions)
+        assert any("managed" in s and "conexus" in s for s in r.fix_suggestions)
+
+    def test_no_subscriber_support_names_the_cause_and_suggests_the_local_convergence_verbs(
         self, monkeypatch, tmp_path: Path,
     ) -> None:
         """Bead nexus-q82tk: `stopped_reason="no_subscriber_support"` means
-        the local engine accepted `announce` but never read its
+        the serving engine accepted `announce` but never read its
         `subscriber` (v0.1.128), the window between a client upgrade and
-        a local engine's convergence. Named, with the engine fix, and
+        a local engine's convergence. Named, with the live engine fix, and
         with the reassurance that mail still arrives."""
         monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_subscriber_support")
-        r = h._check_tuple_channel_delivery()[0]
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.service_endpoint.is_dev_checkout_process", return_value=False,
+        ):
+            r = h._check_tuple_channel_delivery()[0]
         assert r.ok is False and r.warn is True
         assert "subscriber" in r.detail
         assert "drain hook" in r.detail
-        assert any("current engine" in s for s in r.fix_suggestions)
+        assert any("nx daemon restart-stale" in s for s in r.fix_suggestions)
+        assert any("nx daemon service install-binary" in s for s in r.fix_suggestions)
+        assert not any("install a current engine" in s for s in r.fix_suggestions)
         assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
 
     def test_superseded_names_the_duplicate_session_cause(
@@ -1233,10 +1283,14 @@ class TestCheckTupleChannelDelivery:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_wait_support")
-        r = h._check_tuple_channel_delivery()[0]
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.service_endpoint.is_dev_checkout_process", return_value=False,
+        ):
+            r = h._check_tuple_channel_delivery()[0]
         assert r.ok is False and r.warn is True
         assert "/wait" in r.detail
-        assert any("current engine" in s for s in r.fix_suggestions)
+        assert any("nx daemon restart-stale" in s for s in r.fix_suggestions)
+        assert not any("install a current engine" in s for s in r.fix_suggestions)
         assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
 
 

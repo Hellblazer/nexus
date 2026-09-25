@@ -1597,6 +1597,143 @@ class TestWaiterSupersession:
         assert sender.calls == []
 
 
+class TestEngineVersionFloorAtStart:
+    """nexus-6konb.15 (RDR-213 MVV finding L1, T2 `nexus_rdr/6konb15-mvv-
+    2026-09-25`): an engine below the announce floor answers `/wait` and
+    silently ignores the announce fields, so the row-based detection in
+    `_engine_ignores_announce`/`_engine_ignores_subscriber` only catches
+    it once a mail row actually arrives -- measured, against a real
+    engine-service-v0.1.127, the waiter reported `alive` for 16+ minutes
+    with an empty mailbox before the first send finally tripped the
+    row-based stop. `ChannelWaiter.run()` now checks the SAME floor
+    against the engine's own `/version` identity once, before the first
+    `tick()`, via the injectable `engine_version_probe` callable -- these
+    tests drive that callable directly rather than touching real HTTP."""
+
+    @pytest.mark.asyncio
+    async def test_an_engine_below_the_announce_floor_never_reports_alive(self) -> None:
+        """Before this fix: with no mail ever sent, the row-based detector
+        has nothing to look at, so the waiter would stay `alive=True`
+        indefinitely against engine-service-v0.1.127 (below
+        `CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION == (0, 1, 128)`) -- this is
+        the exact reproduction of the MVV's measured 16+ minute gap,
+        compressed to a short sleep. Fails on the pre-fix code (no
+        at-start check existed, so the fake `_FakeTupleStore` would just
+        keep ticking and `alive` would stay `True`); passes after it."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()  # never seeded: an empty mailbox throughout
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: (0, 1, 127),
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.2)
+
+        assert waiter.status()["alive"] is False
+        assert waiter.status()["stopped_reason"] == "no_announce_support"
+        assert fake.wait_calls == [], "must stop BEFORE ever parking a wait on a known below-floor engine"
+        assert sender.calls == []
+
+        await run_task  # the loop already exited on its own; nothing left to cancel
+
+    @pytest.mark.asyncio
+    async def test_an_engine_below_the_subscriber_floor_but_at_or_above_the_announce_floor_stops_with_no_subscriber_support(
+        self,
+    ) -> None:
+        """v0.1.128 sits at the announce floor but below
+        `CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION == (0, 1, 129)`."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: (0, 1, 128),
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.2)
+
+        assert waiter.status()["alive"] is False
+        assert waiter.status()["stopped_reason"] == "no_subscriber_support"
+        assert fake.wait_calls == []
+
+        await run_task  # the loop already exited on its own; nothing left to cancel
+
+    @pytest.mark.asyncio
+    async def test_an_engine_at_or_above_both_floors_starts_normally(self) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: (0, 1, 129),
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.2)
+
+        assert waiter.status()["alive"] is True
+        assert waiter.status()["stopped_reason"] is None
+        assert len(fake.wait_calls) >= 1
+
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    @pytest.mark.asyncio
+    async def test_a_blank_or_dev_release_version_does_not_stop_the_waiter(self) -> None:
+        """A dev-checkout jar reports no parseable `release_version` at
+        all -- `engine_version_probe` returning `None` (exactly what
+        `_probe_serving_engine_version` returns for an unresolvable
+        endpoint, a non-200, or an unparseable/blank/dev release, per
+        `nexus.engine_version.parse_engine_version`) must NOT stop the
+        waiter: "don't know" is not evidence of a below-floor engine, and
+        the row-based fallback stays the only detector in that case."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: None,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.2)
+
+        assert waiter.status()["alive"] is True
+        assert waiter.status()["stopped_reason"] is None
+        assert len(fake.wait_calls) >= 1
+
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    @pytest.mark.asyncio
+    async def test_the_probe_runs_off_the_event_loop_not_per_tick(self) -> None:
+        """`engine_version_probe` is called exactly once per waiter
+        lifetime (at `run()`'s start), never once per `tick()` -- the
+        opposite would add an HTTP round trip to every wake."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        calls = []
+
+        def probe():
+            calls.append(1)
+            return (0, 1, 131)
+
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=probe, min_tick_interval_s=0.0,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.3)
+        assert len(fake.wait_calls) >= 2, "the loop must have ticked more than once"
+        assert calls == [1], "the probe must run exactly once, not once per tick"
+
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+
 class TestWaiterSupersessionRealEngine:
     """The reproduction behind nexus-rxuiq, against the real engine: the first
     waiter lives in a process that dies with its wait still parked, and a

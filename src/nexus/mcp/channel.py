@@ -373,6 +373,50 @@ def _mint_waiter_token() -> str:
     return f"{now}-{uuid.uuid4().hex}"
 
 
+def _probe_serving_engine_version() -> tuple[int, int, int] | None:
+    """Best-effort ``GET /version`` ``release_version`` for the engine THIS
+    session is actually talking to (local or cloud, whichever
+    :func:`~nexus.db.service_endpoint.resolve_service_endpoint_with_
+    evidence_gate` resolves) -- nexus-6konb.15 (RDR-213 MVV finding L1).
+
+    Fails closed to ``None`` on ANY resolution, transport, non-200, or
+    parse failure, INCLUDING a blank/dev ``release_version`` (a
+    dev-checkout jar reports none): this call site has no fatal to raise
+    on a probe failure, since "don't know" simply leaves the row-based
+    fallback (:meth:`ChannelWaiter._engine_ignores_announce`/
+    :meth:`~ChannelWaiter._engine_ignores_subscriber`) as the only
+    detector, exactly as it was before this probe existed. Mirrors the
+    ``GET /version`` probe idiom :func:`nexus.db.managed_endpoint.
+    probe_managed_service` and :func:`nexus.db.http_engine_status.
+    fetch_engine_status` already use, but never raises.
+
+    Called once, at :meth:`ChannelWaiter.run`'s start -- never per tick.
+    """
+    try:
+        from nexus.db.service_endpoint import (  # noqa: PLC0415 — rare/branch-local: one call per waiter lifetime
+            resolve_service_endpoint_with_evidence_gate,
+        )
+        base_url, _token = resolve_service_endpoint_with_evidence_gate()
+    except Exception as exc:  # noqa: BLE001 — best-effort: an unresolvable endpoint means "don't know", not a crash
+        _log.debug("channel_waiter_version_probe_endpoint_unresolvable", error=str(exc))
+        return None
+
+    try:
+        resp = httpx.get(f"{base_url.rstrip('/')}/version", timeout=5.0)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — best-effort: a transport blip or a pre-/version engine means "don't know"
+        _log.debug("channel_waiter_version_probe_failed", error=str(exc))
+        return None
+
+    if not isinstance(body, dict):
+        return None
+
+    from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — leaf module, rare/branch-local path
+
+    return parse_engine_version(body.get("release_version"))
+
+
 class ChannelWaiter:
     """One session's lifespan waiter: loops ``HttpTupleStore.wait`` over
     its :class:`~nexus.mcp.subscriptions.SubscriptionSet`, delivering
@@ -443,11 +487,17 @@ class ChannelWaiter:
         max_announces: int = DEFAULT_MAX_ANNOUNCES,
         tick_error_backoff_s: float = DEFAULT_TICK_ERROR_BACKOFF_S,
         min_tick_interval_s: float = DEFAULT_MIN_TICK_INTERVAL_S,
+        engine_version_probe: Callable[[], tuple[int, int, int] | None] = _probe_serving_engine_version,
     ) -> None:
         self.session_id = session_id
         self.store_factory = store_factory
         self.subs = subs
         self.sender = sender
+        #: nexus-6konb.15: a real ``GET /version`` probe by default (see
+        #: :func:`_probe_serving_engine_version`); tests inject a fake
+        #: returning a fixed tuple (or `None`) instead of touching HTTP.
+        #: Called once, at :meth:`run`'s start.
+        self.engine_version_probe = engine_version_probe
         #: `None` (the default; tests that do not care about the on-disk
         #: status record) means :meth:`_publish_status` is a no-op. A real
         #: caller (`nexus.mcp.core._start_channel_waiter`) passes
@@ -578,11 +628,21 @@ class ChannelWaiter:
         healthy tick never returns faster than a genuine wake or its own
         capped timeout for either shape; the floor below is a defensive
         belt on top of that, not the fix -- see
-        `DEFAULT_MIN_TICK_INTERVAL_S`."""
+        `DEFAULT_MIN_TICK_INTERVAL_S`.
+
+        nexus-6konb.15 (RDR-213 MVV finding L1): before the first tick,
+        `_check_engine_floor_at_start` asks the SAME question
+        `_engine_ignores_announce`/`_engine_ignores_subscriber` answer from
+        a returned row's shape, but from the engine's own `/version`
+        identity instead -- so a below-floor engine never gets to report
+        "alive" even while its mailbox stays empty (measured: 16+ minutes
+        against engine-service-v0.1.127 with nothing sent, T2
+        `nexus_rdr/6konb15-mvv-2026-09-25`)."""
         self._loop = asyncio.get_running_loop()
         self._alive = True
         self._publish_status()
         try:
+            await self._check_engine_floor_at_start()
             while not self._stopped:
                 tick_started = time.monotonic()
                 try:
@@ -612,6 +672,38 @@ class ChannelWaiter:
         finally:
             self._alive = False
             self._publish_status()
+
+    async def _check_engine_floor_at_start(self) -> None:
+        """nexus-6konb.15: ask the engine's own `/version` identity, once,
+        whether it is below the announce/subscriber floor -- BEFORE the
+        first `tick()`, so a confirmed below-floor engine never reports
+        `alive` at all rather than only after its first mail row arrives
+        (`_engine_ignores_announce`/`_engine_ignores_subscriber`'s own
+        row-based detection, unchanged and still the fallback here).
+
+        `self.engine_version_probe` runs off the event loop
+        (`asyncio.to_thread`) exactly like every other blocking call this
+        waiter makes -- it is a real synchronous `httpx.get` in production
+        (see `_probe_serving_engine_version`).
+
+        A probe that cannot resolve a version -- unreachable, a
+        non-nexus/non-200 response, or a blank/dev `release_version` (a
+        dev-checkout jar reports none) -- returns `None` and changes
+        NOTHING: this is "don't know", never "assume below floor". The
+        loop starts normally and the row-based fallback stays the only
+        detector for that case, exactly as it was before this check
+        existed."""
+        version = await asyncio.to_thread(self.engine_version_probe)
+        if version is None:
+            return
+        from nexus.engine_version import (  # noqa: PLC0415 — leaf module, rare/branch-local path
+            CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION,
+            CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION,
+        )
+        if version < CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION:
+            self._stop_no_announce_support()
+        elif version < CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION:
+            self._stop_no_subscriber_support()
 
     def _call(self, fn: Callable[[Any], Any]) -> Any:
         """Run *fn* against a freshly opened tuples store, closing it

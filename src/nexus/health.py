@@ -5895,6 +5895,56 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
 _TUPLE_CHANNEL_DELIVERY_LABEL = "tuples.channel_delivery"
 
 
+def _channel_waiter_engine_fix_suggestions() -> list[str]:
+    """nexus-6konb.15 (D1): the remedy for a below-floor serving engine
+    differs by how this box reaches its engine at all.
+
+    The old text here said "nx daemon service install a current engine" --
+    `nx daemon service install` registers the autostart UNIT, it installs
+    no engine, and there is no `nx daemon service install` verb that takes
+    a bare "a current engine" argument either; the line named nothing a
+    user could actually run. The two LIVE local-mode verbs are
+    `nx daemon restart-stale` (converges to the pinned dependency and
+    cycles the service -- the same suggestion the adjacent "Engine
+    convergence" doctor row already gives) and `nx daemon service
+    install-binary <tag>` (installs one named tag directly).
+
+    "rebuild the local engine's cached build" is dev-checkout advice -- a
+    `service/` tree to rebuild from -- and misleads every installed user,
+    who has no such tree; shown only when THIS process is a dev checkout
+    (:func:`nexus.db.service_endpoint.is_dev_checkout_process`), never
+    unconditionally.
+
+    A cloud-mode session has no local engine to install, converge, or
+    rebuild at all: the managed deployment is conexus's to upgrade, never
+    this box's, so the local-mode verbs above would send a cloud user at
+    commands that do not apply to their install.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+    if not is_local_mode():
+        return [
+            "this is a managed-service engine below the version this client "
+            "expects -- there is nothing to install or rebuild locally; "
+            "report it (conexus owns the managed deployment's upgrade)",
+        ]
+
+    fixes = [
+        "nx daemon restart-stale  # converges to the pinned engine and cycles the service",
+        "nx daemon service install-binary <tag>  # install one named engine tag directly",
+    ]
+
+    from nexus.db.service_endpoint import is_dev_checkout_process  # noqa: PLC0415 — deferred to avoid circular import
+
+    if is_dev_checkout_process():
+        fixes.append(
+            "this process is a dev checkout — rebuild the local engine's cached build "
+            "(see AGENTS.md's Engine-service release section for the exact script) if "
+            "you are iterating on service/ code locally",
+        )
+    return fixes
+
+
 def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[HealthResult]:
     """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13), rewritten
     under RDR-213: the `claude/channel` push-delivery waiter's own status
@@ -5935,10 +5985,14 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     delivery for this session is not actually happening. `stopped_reason`
     (bead nexus-vsipz review round) names WHY when the waiter itself
     knows: `"no_announce_support"`, `"no_subscriber_support"` (bead
-    nexus-q82tk) or `"no_wait_support"` all mean the LOCAL ENGINE
-    predates a feature this client's waiter depends on, so
-    the fix is to rebuild/reinstall the engine, not to restart the MCP
-    server (a restart would hit the identical stale engine); any other
+    nexus-q82tk) or `"no_wait_support"` all mean the ENGINE this session
+    is serving through predates a feature this client's waiter depends
+    on, so `/mcp` restart alone cannot fix it (a restart would hit the
+    identical stale engine) -- `_channel_waiter_engine_fix_suggestions`
+    (bead nexus-6konb.15) names the actual remedy, which differs by mode:
+    local-mode verbs (`nx daemon restart-stale` / `install-binary <tag>`)
+    for a local install, and no local fix at all (report it; conexus owns
+    the managed deployment) for a cloud-mode session. Any other
     not-alive or stale case has no known cause and the fix stays
     `/mcp` restart. The drain hook still delivers at the next prompt
     either way, so this is a soft warning, never fatal.
@@ -6015,23 +6069,19 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         # module, and this is a doctor-row fix suggestion, not a launch
         # path -- see AGENTS.md's Engine-service release section for the
         # exact script name and invocation.
-        rebuild_fix = [
-            "rebuild the local engine's cached build (see AGENTS.md's Engine-service "
-            "release section for the exact script), or nx daemon service install a "
-            "current engine",
-        ]
+        rebuild_fix = _channel_waiter_engine_fix_suggestions()
         restart_fix = ["Restart the MCP server: /mcp"]
         if not alive and stopped_reason == "no_announce_support":
-            reason = "the waiter stopped: the local engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
+            reason = "the waiter stopped: the engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "no_subscriber_support":
             reason = (
-                "the waiter stopped: the local engine never echoes announce.subscriber on a board result "
+                "the waiter stopped: the engine never echoes announce.subscriber on a board result "
                 "(predates the per-subscriber board stamp, bead nexus-q82tk); mailboxes still arrive through the drain hook"
             )
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "no_wait_support":
-            reason = "the waiter stopped: the local engine predates /wait entirely (a bare 404)"
+            reason = "the waiter stopped: the engine predates /wait entirely (a bare 404)"
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "superseded":
             reason = (
