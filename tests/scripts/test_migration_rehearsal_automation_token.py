@@ -261,7 +261,7 @@ def test_rehearse_fullstack_prestart_block_shellchecks_clean(
     comment header to the following `ok`/`bad` liveness assertion) and
     shellchecks it in isolation."""
     start = rehearse_fullstack_text.index("# 0. Pre-start")
-    end_marker = 'bad "leased aspect-worker daemon did not come up after pre-start"; fi'
+    end_marker = "the real proof)\"; fi"
     end = rehearse_fullstack_text.index(end_marker) + len(end_marker)
     block = rehearse_fullstack_text[start:end]
     probe_src = (
