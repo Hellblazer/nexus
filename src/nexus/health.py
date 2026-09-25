@@ -7842,6 +7842,176 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     )]
 
 
+#: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
+#: skipping it saves one request per code collection.
+_PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
+#: Pages read per collection before the scan of that collection stops and
+#: is reported as partial. The filter matches only placeholder chunks
+#: (111 on the production tenant, 2026-09-24), so one page is the norm.
+_PDF_STUB_MAX_PAGES = 20
+#: Concurrent collection reads. Matches the search fan-out ceiling
+#: (``search_engine``); the round trip, not the query, is the cost:
+#: measured 2026-09-25 at about 0.4 s per request against the managed
+#: service, 58 collections, so a serial scan added about 25 s to doctor.
+_PDF_STUB_WORKERS = 8
+#: How many affected documents the WARN detail names.
+_PDF_STUB_MAX_NAMED = 10
+
+
+def _is_pdf_stub_metadata(meta: dict) -> bool:
+    """True when a PDF chunk still carries the streaming uploader's
+    placeholder metadata: empty title AND no ``extraction_method``.
+
+    Both halves are needed. A PDF chunk written before nexus-1oguj has no
+    ``extraction_method`` but has a title, and is healthy. ``normalize``
+    drops an empty ``extraction_method``, so absent and empty mean the same.
+    """
+    return not meta.get("title") and not meta.get("extraction_method")
+
+
+def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], bool]:
+    """Placeholder-metadata PDF chunks in one collection, keyed by source.
+
+    Returns ``(source -> chunk count, truncated)``. The engine filters on
+    ``content_type`` and the literal empty ``title`` the uploader writes;
+    ``extraction_method`` is checked here, because the vector bridge has no
+    absent-key predicate. Raises on a read failure; the caller names it.
+    """
+    col = t3.get_collection(name)  # type: ignore[attr-defined]
+    stubs: dict[str, int] = {}
+    for page_no in range(_PDF_STUB_MAX_PAGES):
+        page = col.get(
+            where={"content_type": "pdf", "title": ""},
+            include=["metadatas"],
+            limit=page_size,
+            offset=page_no * page_size,
+            include_source_uri=True,
+        )
+        metas = page.get("metadatas") or []
+        uris = page.get("source_uris") or []
+        for i, meta in enumerate(metas):
+            meta = meta or {}
+            if not _is_pdf_stub_metadata(meta):
+                continue
+            source = (uris[i] if i < len(uris) else "") or (
+                f"content_hash {str(meta.get('content_hash', ''))[:12] or '?'}"
+            )
+            stubs[source] = stubs.get(source, 0) + 1
+        if len(metas) < page_size:
+            return stubs, False
+    return stubs, True
+
+
+def _check_pdf_stub_metadata() -> list[HealthResult]:
+    """Count PDF chunks whose post-pass metadata never landed
+    (nexus-rte90, indexing-brittleness P0.6; the defect is nexus-w94eo).
+
+    The streaming PDF uploader writes ``title=''`` and no
+    ``extraction_method``; ``_enrich_metadata_from_extraction`` fills both
+    in after the upload. A late upsert-chunks retry that commits after the
+    post-pass, or a run that dies before it, leaves the placeholder in
+    place, and ``nx enrich bib`` (keyed on chunk title) then skips those
+    chunks without saying so. Measured 2026-09-24: 111 chunks in 2
+    documents, both of which this check names.
+
+    Blind spot: a PDF chunk with NO ``title`` key at all is not matched,
+    because the engine filter is the literal empty string. The uploader
+    always writes the key, so the known failure shapes carry it.
+
+    Read-only; degrades to a skip when T3 is unreachable; a collection it
+    could not read, or read only in part, is named, never counted as clean.
+    """
+    label = "PDF chunk metadata"
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches make_t3
+
+        t3 = make_t3()
+        names = sorted(
+            str(c.get("name", "")) for c in t3.list_collections()
+            if str(c.get("name", "")).startswith(_PDF_STUB_SCAN_PREFIXES)
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_pdf_stub_metadata_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (T3 unavailable)")]
+
+    if not names:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable (no knowledge or docs collections)",
+        )]
+
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
+
+    def _scan(name: str) -> tuple[str, dict[str, int] | None, bool]:
+        try:
+            found, cut = _pdf_stubs_in_collection(t3, name, MAX_QUERY_RESULTS)
+            return name, found, cut
+        except Exception as exc:  # noqa: BLE001 — one unreadable collection must not hide the rest
+            _log.debug("doctor_pdf_stub_metadata_collection_failed", collection=name, error=str(exc))
+            return name, None, False
+
+    with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
+        scanned = list(pool.map(_scan, names))
+
+    unreadable = [n for n, found, _ in scanned if found is None]
+    partial = [n for n, found, cut in scanned if found is not None and cut]
+    stubs: dict[tuple[str, str], int] = {
+        (n, src): count
+        for n, found, _ in scanned if found
+        for src, count in found.items()
+    }
+
+    gaps = ""
+    if unreadable:
+        shown = ", ".join(unreadable[:5])
+        more = f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""
+        gaps += f" NOT CHECKED: {len(unreadable)} collection(s) could not be read: {shown}{more}."
+    if partial:
+        gaps += (
+            f" PARTIAL: {len(partial)} collection(s) hit the "
+            f"{_PDF_STUB_MAX_PAGES}-page cap, so their count is a floor: "
+            f"{', '.join(partial[:5])}."
+        )
+
+    if stubs:
+        total = sum(stubs.values())
+        named = sorted(stubs.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
+        listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)
+        more = f" (+{len(stubs) - len(named)} more)" if len(stubs) > len(named) else ""
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"{total} PDF chunk(s) in {len(stubs)} document(s) still carry "
+                "the upload placeholder metadata (empty title, no "
+                "extraction_method): the post-pass never landed, or a late "
+                "write overwrote it (nexus-w94eo). Title-keyed tools such as "
+                f"`nx enrich bib` skip them. {listing}{more}.{gaps}"
+            ),
+            fix_suggestions=[
+                "nx index pdf <path> --force        (file-backed document)",
+                "nx dt index --uuid <uuid> --force  (DEVONthink record)",
+                "nx enrich bib <collection>         (after the re-index)",
+            ],
+        )]
+    if gaps:
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=f"no placeholder metadata found, but the scan is incomplete.{gaps}",
+        )]
+    return [HealthResult(
+        label=label, ok=True,
+        detail=(
+            f"{len(names)} knowledge/docs collection(s) checked, no PDF chunk "
+            "carries placeholder metadata"
+        ),
+    )]
+
+
 def _check_next_seq_drift() -> list[HealthResult]:
     """Name owners whose tumbler allocator has fallen BEHIND its own children
     (nexus-0ehwe item 4).
@@ -8245,6 +8415,9 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
     results.extend(_check_stale_indexing_runs())
+    # nexus-rte90: PDF chunks left with the upload placeholder metadata
+    # (nexus-w94eo). Degrades internally.
+    results.extend(_check_pdf_stub_metadata())
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
