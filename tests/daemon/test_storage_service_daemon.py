@@ -218,7 +218,7 @@ class TestStorageServiceSupervisorUnit:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         with (
-            patch.object(sup, "_service_healthy", return_value=True),
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK),
             patch.object(sup, "_pg_reachable", return_value=True),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
@@ -275,7 +275,7 @@ class TestStorageServiceSupervisorUnit:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         with (
-            patch.object(sup, "_service_healthy", return_value=True),
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK),
             patch.object(sup, "_pg_reachable", return_value=False),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
@@ -626,7 +626,7 @@ class TestPGIndependentRecovery:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         with (
-            patch.object(sup, "_service_healthy", return_value=True),
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK),
             patch.object(sup, "_pg_reachable", return_value=False),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
@@ -805,7 +805,8 @@ class TestStuckJvmDetection:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         with (
-            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN),
+            patch.object(sup, "_probe_service_liveness", return_value=False),
             patch.object(sup, "_pg_reachable", return_value=True),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
@@ -828,7 +829,8 @@ class TestStuckJvmDetection:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         with (
-            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN),
+            patch.object(sup, "_probe_service_liveness", return_value=False),
             patch.object(sup, "_pg_reachable", return_value=True),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
@@ -853,7 +855,8 @@ class TestStuckJvmDetection:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         with (
-            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN),
+            patch.object(sup, "_probe_service_liveness", return_value=False),
             patch.object(sup, "_pg_reachable", return_value=True),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
@@ -1004,7 +1007,8 @@ class TestStuckJvmDetection:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         with (
-            patch.object(sup, "_service_healthy", return_value=False),
+            patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN),
+            patch.object(sup, "_probe_service_liveness", return_value=False),
             patch.object(sup, "_pg_reachable", return_value=False),
             patch.object(ssd_mod, "_pid_is_alive", return_value=True),
         ):
