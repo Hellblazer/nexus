@@ -2195,7 +2195,7 @@ def _run_check_mineru() -> None:
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
-    "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep",
+    "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep", "harness-grant",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -2237,6 +2237,7 @@ def _run_supplementary_checks() -> None:
         "fanout-floor": _run_check_fanout_floor,
         "tuple-projection": _run_check_tuple_projection,
         "ghost-sweep": _run_check_ghost_sweep,
+        "harness-grant": _run_check_harness_grant,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -3260,6 +3261,35 @@ def _run_check_ghost_sweep() -> None:
         f"[!] Ghost collections: {ghosts} collection(s) would be reclaimed -- "
         f"run 'nx catalog sweep-ghosts --apply' to reclaim "
         f"(preview: 'nx catalog sweep-ghosts')"
+    )
+
+
+def _run_check_harness_grant() -> None:
+    """Diagnostic: is this process running under the RDR-219 amendment's
+    nx-mcp dispatch grant (nexus-wauo1.35 / .38)?
+
+    Reads ``NX_HARNESS_CLAUDE_OAUTH_TOKEN`` from the current process's own
+    environment -- nothing else, no engine call, no I/O -- so it cannot
+    fail for a reason unrelated to the harness name itself.
+
+    nexus-7zhag doctrine: a NEW doctor row must be not-applicable on a
+    virgin box, never allowlisted in the fresh-install MVV. The harness
+    name is absent on every install that has not deliberately opted into a
+    harness's dispatch grant -- the overwhelming majority, including every
+    fresh install -- so absence reads not-applicable, never red or warn.
+    """
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+
+    from nexus.claude_child_env import HARNESS_OAUTH_TOKEN_ENV_VAR  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if not os.environ.get(HARNESS_OAUTH_TOKEN_ENV_VAR):
+        click.echo("[ ] Harness dispatch grant: not applicable (NX_HARNESS_CLAUDE_OAUTH_TOKEN absent)")
+        return
+    click.echo(
+        "[!] Harness dispatch grant: NX_HARNESS_CLAUDE_OAUTH_TOKEN is present -- "
+        "LLM dispatch (claude -p children) authenticates via the harness "
+        "grant, not the operator's own login (RDR-219). Expected only "
+        "under a harness launched through tests/e2e/lib/claude_mcp_grant.sh."
     )
 
 

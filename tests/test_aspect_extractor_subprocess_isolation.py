@@ -69,6 +69,73 @@ def test_happy_path_returns_completed_process() -> None:
     assert cp.stdout == "hello-stdin"
 
 
+# ── RDR-219 amendment (nexus-wauo1.35 / .38): the nx-mcp dispatch grant ────
+#
+# _run_claude_isolated is the second of the two launch sites that must
+# route a harness's NX_HARNESS_CLAUDE_OAUTH_TOKEN into the child's own
+# CLAUDE_CODE_OAUTH_TOKEN through the shared nexus.claude_child_env helper,
+# via an explicit env= (not implicit Popen inheritance). Fake token values
+# only -- see the project CLAUDE.md TOKEN RULE.
+
+_ENV_PROBE_ARGV = [
+    "python", "-c",
+    "import os, sys; sys.stdout.write(os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', ''))",
+]
+
+
+def test_no_harness_name_child_gets_no_claude_token(monkeypatch) -> None:
+    """Production unchanged: with no harness name, the child sees no
+    CLAUDE_CODE_OAUTH_TOKEN it did not already have."""
+    monkeypatch.delenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    cp = ax._run_claude_isolated("hello", timeout=10, _argv=_ENV_PROBE_ARGV)
+
+    assert cp.stdout == ""
+
+
+def test_harness_name_grants_claude_token_to_child_without_touching_os_environ(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "fake-harness-token-xyz")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    cp = ax._run_claude_isolated("hello", timeout=10, _argv=_ENV_PROBE_ARGV)
+
+    assert cp.stdout == "fake-harness-token-xyz"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ, (
+        "the parent's own os.environ must never be mutated by this call"
+    )
+
+
+def test_existing_claude_token_wins_for_the_child(monkeypatch) -> None:
+    monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "fake-harness-token")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fake-existing-token")
+
+    cp = ax._run_claude_isolated("hello", timeout=10, _argv=_ENV_PROBE_ARGV)
+
+    assert cp.stdout == "fake-existing-token"
+
+
+def test_run_claude_isolated_routes_through_the_shared_helper(monkeypatch) -> None:
+    """Route-through proof (fails if _run_claude_isolated stops calling
+    apply_harness_oauth_grant)."""
+    import nexus.claude_child_env as child_env
+
+    calls: list[dict] = []
+    original = child_env.apply_harness_oauth_grant
+
+    def _spy(base):
+        calls.append(dict(base))
+        return original(base)
+
+    monkeypatch.setattr(child_env, "apply_harness_oauth_grant", _spy)
+
+    ax._run_claude_isolated("hello-stdin", timeout=10, _argv=["python", "-c", "pass"])
+
+    assert calls, "_run_claude_isolated must call apply_harness_oauth_grant"
+
+
 def test_timeout_kills_grandchild_not_just_direct_child(tmp_path) -> None:
     """NON-VACUOUS group-kill: the child spawns a REAL grandchild in the same
     group and blocks; on TimeoutExpired the whole group is SIGKILL'd, so the

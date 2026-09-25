@@ -2822,8 +2822,9 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-`tuple-projection`, `ghost-sweep` (the last three have no `--check-fanout-floor`
-/ `--check-tuple-projection` / `--check-ghost-sweep` flag; they only run as
+`tuple-projection`, `ghost-sweep`, `harness-grant` (the last four have no
+`--check-fanout-floor` / `--check-tuple-projection` / `--check-ghost-sweep`
+/ `--check-harness-grant` flag; they only run as
 part of this supplementary set).
 `tuple-projection` (nexus-08cfl) reports whether
 this session's RDR-205 ledger tuple projector
@@ -2837,7 +2838,12 @@ that verb when the count is nonzero — see that section for why this row
 exists (the automatic per-tenant sweep runs at most once for the life of the
 estate). Reads `[ ]` not-applicable, never a red/warn, when the catalog
 writer cannot be resolved, the engine is unreachable, or the engine predates
-the route. Before 7.11.0 all fourteen `--check-*` modes were
+the route. `harness-grant` (RDR-219 amendment, nexus-wauo1.35 / .38) reports
+whether this process's own environment carries
+`NX_HARNESS_CLAUDE_OAUTH_TOKEN` — present only under a harness launched
+through `tests/e2e/lib/claude_mcp_grant.sh`'s nx-mcp dispatch grant, so
+`[ ]` not-applicable is the expected reading on every ordinary install.
+Before 7.11.0 all fourteen `--check-*` modes were
 opt-in only, so a real backlog was invisible unless an operator happened to
 run its exact flag (the motivating case: an aspect-queue throwing hundreds of
 claim failures while nothing in the default run watched it). These are

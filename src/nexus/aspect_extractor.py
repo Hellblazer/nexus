@@ -1751,6 +1751,14 @@ def _run_claude_isolated(
     scheduling delay. Reuses ``operators.dispatch._write_prompt_file``
     rather than duplicating it -- that helper is already pure-sync (no
     asyncio), so it drops in here unchanged.
+
+    **Environment (RDR-219 amendment, nexus-wauo1.38)**: ``env=`` is now
+    passed explicitly, built from ``os.environ`` through
+    ``nexus.claude_child_env.apply_harness_oauth_grant`` -- the same
+    mapping ``operators.dispatch._build_dispatch_env`` applies. A
+    production run (no ``NX_HARNESS_CLAUDE_OAUTH_TOKEN``) gets the same
+    inheritance ``Popen`` would have given it implicitly with no ``env=``
+    at all.
     """
     argv = _argv or [
         "claude", "-p", "--output-format", "json",
@@ -1767,6 +1775,15 @@ def _run_claude_isolated(
         # stamped with, so it is what the child runs on.
         argv = [*argv, "--model", model]
     prompt_path = _write_prompt_file(prompt)
+    # RDR-219 amendment (nexus-wauo1.35 / .38): map a harness's dispatch
+    # grant (NX_HARNESS_CLAUDE_OAUTH_TOKEN) into this child's own
+    # CLAUDE_CODE_OAUTH_TOKEN, never into os.environ. No-op when the
+    # harness name is absent, so a production run (no harness) gets
+    # byte-identical inheritance to before this -- the same dict Popen
+    # would otherwise inherit implicitly.
+    from nexus.claude_child_env import apply_harness_oauth_grant  # noqa: PLC0415 — deferred to avoid import-time cost on the aspect-extraction hot path
+
+    child_env = apply_harness_oauth_grant(os.environ)
     try:
         # The file object is only needed to hand Popen a real fd to
         # redirect the child's stdin from; the child gets its own
@@ -1782,6 +1799,7 @@ def _run_claude_isolated(
                 stderr=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
+                env=child_env,
                 preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
             )
         try:

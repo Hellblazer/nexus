@@ -1365,6 +1365,27 @@ from contextlib import asynccontextmanager
 from pathlib import Path as _Path
 
 
+def _warn_if_harness_oauth_grant_present() -> None:
+    """RDR-219 amendment detection (nexus-wauo1.35 / .38): log one warning,
+    at nx-mcp startup, when ``NX_HARNESS_CLAUDE_OAUTH_TOKEN`` is present --
+    LLM dispatch (every ``claude -p`` child this process starts) will
+    authenticate under the harness's dispatch grant, not the operator's own
+    login. This never logs the harness value, only that it is present.
+    Absence is the common, unremarkable case and logs nothing.
+    """
+    from nexus.claude_child_env import HARNESS_OAUTH_TOKEN_ENV_VAR  # noqa: PLC0415 — deferred to avoid import-time cost; startup-only call site
+
+    if _os.environ.get(HARNESS_OAUTH_TOKEN_ENV_VAR):
+        _log.warning(
+            "nx_mcp_harness_oauth_grant_active",
+            detail=(
+                "NX_HARNESS_CLAUDE_OAUTH_TOKEN is present -- LLM dispatch "
+                "(claude -p children) will authenticate via the harness "
+                "dispatch grant, not the operator's own login (RDR-219)."
+            ),
+        )
+
+
 @asynccontextmanager
 async def _t1_lifespan(_app: Any):
     """T1 session lifespan (RDR-105 P4, reshaped at RDR-155 P4b / RDR-158 P3).
@@ -1399,6 +1420,12 @@ async def _t1_lifespan(_app: Any):
     import structlog as _structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     _svc_log = _structlog.get_logger(__name__)
     _svc_log.info("t1_service_path_active", backend="service")
+
+    # RDR-219 amendment (nexus-wauo1.38): one startup warning when this
+    # process is running under a harness's dispatch grant, unconditional
+    # (before the T1 routing-branch split below) so it fires exactly once
+    # per nx-mcp start regardless of which branch this session resolves to.
+    _warn_if_harness_oauth_grant_present()
 
     # nexus-h5olw: anonymous daily install ping, daemon thread, never
     # blocks; opt-out via NX_NO_TELEMETRY=1 / `nx telemetry off`.
