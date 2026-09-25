@@ -171,22 +171,38 @@ alternatives to a copied login.
 - [x] A2: the same holds inside the Linux containers the harnesses use, with the
   token passed as `docker run -e`. — **Status**: Verified (T2
   `nexus_rdr/219-research-10`) — **Method**: Spike
-- [x] A3: the same holds on qwentescence's WSL2 Ubuntu with the token passed on
-  the ssh channel's stdin and read inside the remote user's shell. — **Status**:
-  Verified (T2 `nexus_rdr/219-research-11`) — **Method**: Spike
-- [x] A4: the token keeps working after the operator logs in again on the Mac.
-  — **Status**: Verified for an operator re-login after token creation, not
-  confirmed to be an explicit `/logout` then `/login` (T2
-  `nexus_rdr/219-research-12`) — **Method**: Spike
+- [x] A3: the same holds on qwentescence's WSL2 Ubuntu with the token passed in
+  the environment of the ssh command. — **Status**: Verified (T2
+  `nexus_rdr/219-research-11`) — **Method**: Spike
+  Tested shape, disclosed: the token was not placed in the ssh command's
+  environment. It travelled on the ssh channel's stdin and was read and exported
+  inside the remote user's shell, the transport this RDR's Technical Design
+  already specifies for `--remote`. The assumption as worded was not tested
+  literally; the shape the design uses was.
+- [~] A4: the token keeps working after the operator runs `/logout` and `/login`
+  on the Mac. — **Status**: Partly verified (T2 `nexus_rdr/219-research-12`)
+  — **Method**: Spike
+  Tested shape, disclosed: the token kept working after an operator re-login
+  that followed its creation. That re-login is not confirmed to have been an
+  explicit `/logout` then `/login`, and the operator chose not to test it
+  further. Day 2 Operations carries the remedy if a later `/logout` does break
+  it.
 
 Phase 0 outcome (2026-09-25): all four pass, so no launch shape uses the file
 fallback in Failure Modes. Claude Code wrote the environment token to no file in
-any run (T2 `nexus_rdr/219-research-13`), so rule 2 holds. The `oauthAccount`
+any run, so rule 2 holds (T2 `nexus_rdr/219-research-13`). The first runs
+searched only the isolated `HOME`; a rerun of A1 also searched `/private/tmp`,
+the operator's per-user temp directory under `/private/var/folders` and
+`/private/var/tmp`, before and after the run, and the only new match was the
+Claude Code binary itself, byte-identical to the installed one. The `oauthAccount`
 seed in `.claude.json` is not needed: a `.claude.json` holding only
 `{"hasCompletedOnboarding":true}` authenticated in all three shapes (T2
 `nexus_rdr/219-research-14`). A negative control, the same isolated home with
-no token, showed "Not logged in", so the operator's own login does not reach an
-isolated `HOME`.
+no token, recorded "Not logged in · Run /login" in the status bar and answered
+the prompt with "Not logged in · Please run /login" (captured on the second
+attempt; the first scripted control exited at the trust dialog and captured
+nothing, T2 `nexus_rdr/219-research-9`), so the operator's own login does not
+reach an isolated `HOME`.
 
 ## Proposed Solution
 
@@ -201,7 +217,10 @@ Three rules:
 2. **The token travels in the environment, never in a file.** One helper sets
    `CLAUDE_CODE_OAUTH_TOKEN` in a child process's environment and runs the
    child. The token never passes through a caller's shell variable, stdout or
-   a file, so there is nothing to leave behind and nothing to print.
+   a file, so there is nothing to leave behind and nothing to print. (The
+   caller is the local code that invokes the helper; on `--remote`, the
+   helper's own remote side reads the token from stdin into the environment it
+   then execs.)
 3. **Guards, not discipline.** A plugin PreToolUse hook denies commands that
    would print a keychain credential. A lint forbids credential files and
    keychain reads anywhere outside the helper, markdown included. A janitor
@@ -337,6 +356,14 @@ not documented, and it does not apply in bare mode.
 
 ### Risks and Mitigations
 
+- **Risk**: every fresh isolated `HOME` makes Claude Code self-install about
+  222 MB on first launch, and a container or WSL session may auto-update
+  mid-run, so two runs can use different versions (T2
+  `nexus_rdr/219-research-13`).
+  **Mitigation**: Phase 2 harnesses share one installed Claude Code binary
+  across isolated homes (for example a read-only mount of
+  `.local/share/claude/versions`, which holds no secret) and disable the
+  auto-update, so a run's version is chosen, not discovered.
 - **Risk**: A1 fails for interactive sessions.
   **Mitigation**: the fallback below; the environment path still serves
   containers and `-p` runs.
@@ -452,7 +479,8 @@ contradictory project memories and the stale cc-validation notes.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Keychain item `nexus-automation-oauth-token` | N/A | `claude_credentials.py status` | `security delete-generic-password` (operator) | `status` and the janitor | None: regenerate with `claude setup-token` |
+| Keychain item `nexus-automation-oauth-token` | N/A | `claude_credentials.py status` | `security delete-generic-password` (operator) removes the local copy; a leaked token is revoked on claude.ai Settings, Claude Code | `status` and the janitor | None: regenerate with `claude setup-token` |
+| Automation token after an operator `/logout` | N/A | a harness run fails to authenticate | N/A | the next harness run | Regenerate with `claude setup-token` and store it again (A4 is only partly verified) |
 
 ## Test Plan
 
@@ -495,9 +523,10 @@ the janitor if left behind.
 
 ### Assumption Verification
 
-A1 to A4 and per-token revocation are unverified (T2 `nexus_rdr/219-research-4`
-and `-5`, both assumed, docs only). Phase 0 settles them before any migration,
-and Phase 0 Step 2 records the path for each one that fails. No other
+At gate time (before Phase 0), A1 to A4 and per-token revocation were unverified
+(T2 `nexus_rdr/219-research-4` and `-5`, both assumed, docs only). Phase 0 has
+since settled them; the current status is in Critical Assumptions above (A1 to
+A3 verified, A4 partly verified) and revocation under Gap 3. No other
 assumption carries the design: the inventory and the disk scan are recorded
 evidence (`219-research-1` and `-2`).
 
@@ -546,3 +575,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Gate round 2 Significants fixed before accept in `e833d41a4` (fix check `nexus_rdr/219-fix-check-e833d41a4`, PASS).
 - 2026-09-25: Accepted by Sam.
 - 2026-09-25: Phase 0 outcome recorded (nexus-wauo1.2): A1 to A4 verified, no fallback shape, no disk write, seed not needed, revocation per token; spike transport rules added to Technical Design.
+- 2026-09-25: Phase 0 critique fixes (nexus-wauo1.4): accepted A3/A4 wording restored with disclosed tested shapes (A4 partly verified), negative control and wider disk check re-run and cited, gate section pointed at the Phase 0 outcome, self-install cost and Day 2 revocation added.
