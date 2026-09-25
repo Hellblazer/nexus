@@ -1367,6 +1367,43 @@ def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_
     assert upsert_calls[0]["embeddings"] is None
 
 
+def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, cloud_mode) -> None:
+    """nexus-tysei: every chunk in an upsert is embedded before the request
+    answers, and the edge gives upsert-chunks 55 s, so a 300-row page goes
+    out in requests of _REEMBED_UPSERT_BATCH, in order, with nothing lost."""
+    import uuid
+
+    from nexus.commands.collection import _REEMBED_UPSERT_BATCH
+
+    coll_name = f"knowledge__rem{uuid.uuid4().hex[:10]}__voyage-context-3__v1"
+    client = make_vector_test_client()
+    col = client.get_or_create_collection(coll_name)
+    n = 2 * _REEMBED_UPSERT_BATCH + 50
+    ids = [f"id{i:04d}" for i in range(n)]
+    col.add(ids=ids, documents=[f"text {i}" for i in range(n)],
+            metadatas=[{"content_hash": f"h{i}"} for i in range(n)])
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
+    sizes: list[int] = []
+    seen: list[str] = []
+
+    def _capture_upsert(collection, ids, documents, metadatas=None, *,
+                        force_re_embed=None, embeddings=None, skip_existing=None):
+        sizes.append(len(ids))
+        seen.extend(ids)
+        assert force_re_embed is True and embeddings is None
+
+    fake_db.upsert_chunks.side_effect = _capture_upsert
+    result = _invoke(
+        runner, fake_db,
+        ["re-embed", coll_name, "--to", "voyage-context-3", "--no-dry-run", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert max(sizes) <= _REEMBED_UPSERT_BATCH
+    assert sorted(seen) == sorted(ids)
+    assert len(seen) == n
+
+
 def test_reembed_skips_empty_documents(
     runner, env_creds, monkeypatch,
 ) -> None:

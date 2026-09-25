@@ -1333,6 +1333,14 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
 
 _REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3", "voyage-context-3")
 
+#: Chunks per upsert request during a re-embed (nexus-tysei). Every chunk in
+#: the request is embedded server-side before it answers, and the edge gives
+#: /v1/vectors/upsert-chunks 55 s (the engine is told 50 s and aborts CCE work
+#: past it). A 300-row page is about 25 Voyage calls in three waves: 10-30 s
+#: on a normal minute, past 50 s on a slow one, and an abort loses the whole
+#: request. 100 keeps one wave's worth of margin.
+_REEMBED_UPSERT_BATCH = 100
+
 
 def _reembed_collection(
     db,
@@ -1426,11 +1434,13 @@ def _reembed_collection(
             # server re-embeds with the correct model. force_re_embed=True
             # bypasses the existence-partition skip so every chash is
             # genuinely recomputed, not treated as already-current.
-            db.upsert_chunks(
-                col_name, v_ids, v_docs,
-                metadatas=v_metas,
-                force_re_embed=True,
-            )
+            for s in range(0, len(v_ids), _REEMBED_UPSERT_BATCH):
+                db.upsert_chunks(
+                    col_name, v_ids[s:s + _REEMBED_UPSERT_BATCH],
+                    v_docs[s:s + _REEMBED_UPSERT_BATCH],
+                    metadatas=v_metas[s:s + _REEMBED_UPSERT_BATCH],
+                    force_re_embed=True,
+                )
             # nexus-bw65 / nexus-9099: fire post-store chains so the
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
