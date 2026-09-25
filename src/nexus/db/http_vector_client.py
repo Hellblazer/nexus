@@ -126,6 +126,12 @@ _store_get_truncated_logged: bool = False
 #: ``_ServiceCollectionStub.get`` docstring (nexus-hdx2u).
 _WHERE_GET_DEFAULT_LIMIT = 10
 
+#: Texts per ``/v1/vectors/embed`` request from :meth:`embed_for_collection`.
+#: Small on purpose: the edge cuts the exchange at 30 s, and a CCE embed is
+#: one Voyage call per text behind the engine-wide semaphore (nexus-u2mlh).
+#: The nexus-tysei probes used 5 against the managed service.
+_EMBED_PROBE_BATCH = 10
+
 
 #: nexus-hdx2u E4: log ``_ServiceCollectionStub.get``'s count-unreported
 #: notice once per process, not once per call — same log-once shape as
@@ -4074,6 +4080,45 @@ class HttpVectorClient:
             if on_progress is not None:
                 on_progress(start + len(batch), len(ids))
         return np.array(rows, dtype=np.float32)
+
+    def get_embeddings_by_id(self, collection_name: str, ids: list[str]) -> dict[str, list[float]]:
+        """Stored vectors for *ids*, keyed by id (nexus-f9duo).
+
+        :meth:`get_embeddings` returns rows by position and drops ids the
+        service does not find, so one missing id misaligns every row after
+        it. The route already returns ``ids``; this keeps them. Absent ids
+        are simply absent from the result.
+        """
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
+
+        out: dict[str, list[float]] = {}
+        for start in range(0, len(ids), QUOTAS.MAX_RECORDS_PER_WRITE):
+            batch = ids[start : start + QUOTAS.MAX_RECORDS_PER_WRITE]
+            result = _post(
+                "/v1/vectors/get-embeddings",
+                {"collection": collection_name, "ids": batch},
+                tenant=self._tenant,
+            )
+            out.update(zip(result.get("ids", []), result.get("embeddings", [])))
+        return out
+
+    def embed_for_collection(self, collection_name: str, texts: list[str]) -> list[list[float]]:
+        """Embed *texts* with *collection_name*'s registered model, storing
+        nothing (``POST /v1/vectors/embed``; nexus-f9duo).
+
+        The engine embeds each text as its own document, which is how it
+        embeds chunks on write, so a stored vector the engine wrote should
+        match a fresh one to within the model's call-to-call noise.
+        """
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), _EMBED_PROBE_BATCH):
+            result = _post(
+                "/v1/vectors/embed",
+                {"collection": collection_name, "texts": texts[start : start + _EMBED_PROBE_BATCH]},
+                tenant=self._tenant,
+            )
+            vectors.extend(result.get("embeddings", []))
+        return vectors
 
     # ── Stubs for T3Database surface not used by Seam B ─────────────────────
 
