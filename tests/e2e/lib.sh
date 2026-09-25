@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E test helpers — local tmux-based Claude Code interaction
 
-TMUX_SESSION="e2e"
+TMUX_SESSION="${TMUX_SESSION:-e2e}"
 # Optional dedicated tmux socket. When NX_TMUX_SOCKET is set, every tmux
 # command runs against that private socket (tmux -L <name>), so the harness
 # cannot see or kill sessions on the user's default socket. Empty = default
