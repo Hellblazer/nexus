@@ -283,6 +283,17 @@ Transport rules the Phase 0 spike established (T2 `nexus_rdr/219-spike-script`):
   then names the staged copy by bare path.
 - A launched session's trust and bypass-permissions dialogs default to exit, so
   a harness pre-seeds them or selects the proceed option.
+- Claude Code strips `CLAUDE_CODE_OAUTH_TOKEN` from every process it starts:
+  Bash-tool commands and MCP servers alike, even when an MCP server's `env`
+  block names the variable (an ordinary variable passes through the same
+  block). `claude_credentials.py run -- claude -p 'run: env | grep -c
+  CLAUDE_CODE_OAUTH_TOKEN' --allowedTools Bash` prints 0 (T2
+  `nexus_rdr/219-research-15`). So a `claude -p` descended from another
+  Claude process cannot authenticate on the token. A harness starts any such
+  process from its own shell instead: migration-rehearsal starts the RDR-173
+  aspect worker before its Claude workload, and nx-mcp then reuses that
+  worker's lease rather than spawning its own. Forwarding the token under
+  another variable name is not a remedy, because it defeats the boundary.
 
 **Migration of the 26 sites.** Each site from the inventory moves to `run --`
 and drops its `.credentials.json` write. The persistent snapshot and
@@ -406,6 +417,12 @@ not documented, and it does not apply in bare mode.
   catches a leftover.
 - Guard false positive on a legitimate command: the message names `status`
   and the helper.
+- A harness exercises an LLM subprocess that nx-mcp dispatches (nx_answer's
+  inline planner, the operator tools, nx_tidy): that subprocess has no
+  credential, because nx-mcp is Claude's child and the token does not reach
+  it. Production is unaffected, since a user's nested `claude -p` reads the
+  user's own login. Whether harnesses accept this gap or the RDR allows a
+  narrowly scoped mechanism is open (nexus-wauo1.35).
 
 ## Implementation Plan
 
@@ -599,3 +616,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Phase 0 outcome recorded (nexus-wauo1.2): A1 to A4 verified, no fallback shape, no disk write, seed not needed, revocation per token; spike transport rules added to Technical Design.
 - 2026-09-25: Phase 0 critique fixes (nexus-wauo1.4): accepted A3/A4 wording restored with disclosed tested shapes (A4 partly verified), negative control and wider disk check re-run and cited, gate section pointed at the Phase 0 outcome, self-install cost and Day 2 revocation added.
 - 2026-09-25: Phase 1 review fixes reflected in Technical Design: the helper reads the token on the remote side, PowerShell re-parses the remote command so it must be a bare staged script path, remote scripts are staged on persistent storage.
+- 2026-09-25: Phase 2 finding: Claude Code strips the token from its children; harnesses start nested `claude -p` processes from their own shell; nx-mcp's LLM dispatch under the token is open as nexus-wauo1.35.
