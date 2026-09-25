@@ -259,9 +259,16 @@ Transport rules the Phase 0 spike established (T2 `nexus_rdr/219-spike-script`):
 - `docker run -e CLAUDE_CODE_OAUTH_TOKEN` (no value) keeps the token off docker's
   argv, but `docker inspect` can read it while the container exists, so
   containers run with `--rm`.
-- On qwentescence the ssh endpoint is PowerShell, which splits a command at `|`
-  even inside double quotes, so `--remote` ships the remote script and the token
-  on the ssh channel's stdin and enters WSL with `wsl -d Ubuntu -u nexus`.
+- On qwentescence the ssh endpoint is PowerShell, which re-parses the whole
+  assembled remote command line before `wsl.exe` runs: `|`, `;`, brackets and
+  quotes in it become PowerShell syntax, even inside double quotes. So
+  `--remote` sends the token and the helper's own reader on the ssh channel's
+  stdin, enters WSL through `--remote-shell 'wsl -d Ubuntu -u nexus --exec
+  /bin/bash -s --'`, and the command it runs there is a bare path to a script
+  staged in advance, with no shell metacharacters. Scripts are staged on
+  persistent storage (for example under `/home/nexus`), not `/tmp`, which the
+  WSL2 VM on qwentescence was observed to clear between launches (T2
+  `nexus_rdr/219-review-fix-round-2`).
 - A launched session's trust and bypass-permissions dialogs default to exit, so
   a harness pre-seeds them or selects the proceed option.
 
@@ -579,3 +586,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Accepted by Sam.
 - 2026-09-25: Phase 0 outcome recorded (nexus-wauo1.2): A1 to A4 verified, no fallback shape, no disk write, seed not needed, revocation per token; spike transport rules added to Technical Design.
 - 2026-09-25: Phase 0 critique fixes (nexus-wauo1.4): accepted A3/A4 wording restored with disclosed tested shapes (A4 partly verified), negative control and wider disk check re-run and cited, gate section pointed at the Phase 0 outcome, self-install cost and Day 2 revocation added.
+- 2026-09-25: Phase 1 review fixes reflected in Technical Design: the helper reads the token on the remote side, PowerShell re-parses the remote command so it must be a bare staged script path, remote scripts are staged on persistent storage.
