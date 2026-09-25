@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from nexus.claude_child_env import (
     CLAUDE_OAUTH_TOKEN_ENV_VAR,
     HARNESS_OAUTH_TOKEN_ENV_VAR,
@@ -115,4 +117,35 @@ def test_no_grant_logs_nothing() -> None:
     with capture_logs() as logs:
         apply_harness_oauth_grant({"PATH": "/usr/bin"})
 
+    assert logs == []
+
+
+@pytest.fixture(autouse=True)
+def _fresh_grant_log_flag(monkeypatch) -> None:
+    """The grant logs once per process; reset that state per test."""
+    import nexus.claude_child_env as mod
+
+    monkeypatch.setattr(mod, "_grant_logged", False)
+
+
+def test_grant_logs_once_per_process_not_per_dispatch() -> None:
+    """Review of nexus-wauo1.38: every operator dispatch and aspect
+    extraction retry applies the grant, so a per-call warning floods a
+    harness run's log. One line per process is enough; nx-mcp's startup
+    warning already names the grant."""
+    from structlog.testing import capture_logs
+
+    base = {HARNESS_OAUTH_TOKEN_ENV_VAR: "fake-value"}
+    with capture_logs() as logs:
+        for _ in range(5):
+            apply_harness_oauth_grant(base)
+    assert len(logs) == 1
+
+
+def test_existing_token_wins_and_logs_nothing() -> None:
+    from structlog.testing import capture_logs
+
+    base = {HARNESS_OAUTH_TOKEN_ENV_VAR: "fake-h", CLAUDE_OAUTH_TOKEN_ENV_VAR: "fake-c"}
+    with capture_logs() as logs:
+        apply_harness_oauth_grant(base)
     assert logs == []

@@ -46,6 +46,11 @@ HARNESS_OAUTH_TOKEN_ENV_VAR = "NX_HARNESS_CLAUDE_OAUTH_TOKEN"
 #: unless something maps the harness name into it first.
 CLAUDE_OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 
+#: The grant is applied on every claude dispatch and aspect-extraction
+#: retry, so it is logged once per process, not per call; nx-mcp's
+#: startup warning already names the grant.
+_grant_logged = False
+
 
 def apply_harness_oauth_grant(base: Mapping[str, str]) -> dict[str, str]:
     """Return a NEW child-environment dict with the harness grant applied.
@@ -59,7 +64,7 @@ def apply_harness_oauth_grant(base: Mapping[str, str]) -> dict[str, str]:
     harness name itself is always kept in the result (never stripped, so a
     tool-granting dispatch whose nested nx-mcp dispatches again still has
     it to map). Neither value is ever logged -- at most one log line
-    records that a grant was applied, naming neither.
+    records, once per process, that a grant was applied, naming neither.
     """
     result = dict(base)
     harness_value = result.get(HARNESS_OAUTH_TOKEN_ENV_VAR)
@@ -70,5 +75,8 @@ def apply_harness_oauth_grant(base: Mapping[str, str]) -> dict[str, str]:
         # WARNING-level quiet test/production log threshold rather than
         # being filtered out before any processor -- including a
         # ``capture_logs()`` test -- ever sees it.
-        _log.warning("claude_child_env_harness_oauth_grant_applied")
+        global _grant_logged
+        if not _grant_logged:
+            _grant_logged = True
+            _log.warning("claude_child_env_harness_oauth_grant_applied")
     return result
