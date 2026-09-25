@@ -9,6 +9,20 @@ legitimate Phase 2 shapes already on ``develop`` (``claude_credentials.py
 run --``/``status``, the harnesses' ``docker -e CLAUDE_CODE_OAUTH_TOKEN``
 and tmux launch lines), and NO ESCAPE (unlike the git-write precedent,
 a ``# routing-allow:`` comment changes nothing here).
+
+**Environment-DUMP cases moved to ALLOWED after code review round 2**
+(nexus-wauo1.22, T2 ``nexus/rdr219-p3-code-review-round2-findings``): the
+guard no longer denies a bare ``env``/``env -0``/``set``/``printenv``
+dump, or a pipe off one, because Claude Code deletes
+``CLAUDE_CODE_OAUTH_TOKEN`` from its own environment before a Bash-tool
+child ever starts (T2 ``nexus_rdr/219-research-15``), so a dump from
+Claude's own Bash tool can never contain the protected value -- the rule
+protected nothing, cost false denials, and (per round 2's critical
+findings 1-2) could not be made complete anyway. What stays denied: an
+EXPLICIT reference to a protected variable by name (``$VAR``/``${VAR}``
+expansion, ``printenv NAME``), and a read of ANOTHER process's
+environment (``ps -E``/BSD ``e``, ``/proc/*/environ``), which really can
+carry the token.
 """
 from __future__ import annotations
 
@@ -89,18 +103,6 @@ def _reason(proc: subprocess.CompletedProcess) -> str:
 
 DENIED_SHAPES = [
     pytest.param(
-        'echo "$(env)"',
-        id="env-dump-in-command-substitution",
-    ),
-    pytest.param(
-        "x=`env`",
-        id="env-dump-in-backticks",
-    ),
-    pytest.param(
-        "env | grep -e FOO -e TOKEN",
-        id="env-grep-second-pattern-matches-protected-name",
-    ),
-    pytest.param(
         'security find-generic-password -s "Claude Code-credentials" -w',
         id="find-generic-password-interactive-login-item",
     ),
@@ -145,56 +147,16 @@ DENIED_SHAPES = [
         id="printf-braced-expansion-redirected-to-file",
     ),
     pytest.param(
-        "env",
-        id="bare-env",
-    ),
-    pytest.param(
-        "env | grep TOKEN",
-        id="bare-env-piped",
-    ),
-    pytest.param(
-        "printenv",
-        id="bare-printenv",
-    ),
-    pytest.param(
         "printenv CLAUDE_CODE_OAUTH_TOKEN",
         id="printenv-named",
-    ),
-    pytest.param(
-        "set",
-        id="bare-set",
-    ),
-    pytest.param(
-        "set | grep TOKEN",
-        id="bare-set-piped",
     ),
     pytest.param(
         "printenv CLAUDE_CODE_OAUTH_TOKEN PATH",
         id="printenv-named-among-others",
     ),
     pytest.param(
-        "env -0",
-        id="bare-env-dash-0",
-    ),
-    pytest.param(
-        "env > /tmp/leaked.txt",
-        id="bare-env-redirected-to-file",
-    ),
-    pytest.param(
-        "set > /tmp/leaked.txt",
-        id="bare-set-redirected-to-file",
-    ),
-    pytest.param(
-        "env | grep CLAUDE_CODE_OAUTH_TOKEN",
-        id="env-piped-grep-exact-name",
-    ),
-    pytest.param(
-        "env | grep OAUTH",
-        id="env-piped-grep-substring-of-protected-name",
-    ),
-    pytest.param(
-        "env | cat",
-        id="env-piped-into-unrecognized-filter",
+        "sh -c 'printenv CLAUDE_CODE_OAUTH_TOKEN'",
+        id="printenv-named-inside-sh-c-wrapper",
     ),
     pytest.param(
         """python3 -c "import os; print(os.environ['CLAUDE_CODE_OAUTH_TOKEN'])\"""",
@@ -268,6 +230,18 @@ DENIED_SHAPES = [
     pytest.param(
         "tr '\\0' '\\n' < /proc/1234/environ",
         id="tr-proc-environ-redirect",
+    ),
+    pytest.param(
+        "$(< /proc/self/environ)",
+        id="proc-environ-bash-builtin-redirect-read-no-reader-command",
+    ),
+    pytest.param(
+        "bash -c 'cat /proc/1/environ'",
+        id="proc-environ-reader-inside-bash-c-wrapper",
+    ),
+    pytest.param(
+        'eval "ps eww"',
+        id="ps-bsd-e-flag-inside-eval-wrapper",
     ),
 ]
 
@@ -440,6 +414,68 @@ ALLOWED_SHAPES = [
         id="ps-dash-p-pid-dash-o-format",
     ),
 ]
+
+# ---------------------------------------------------------------------------
+# Moved from DENIED_SHAPES after code review round 2 (nexus-wauo1.22, T2
+# nexus/rdr219-p3-code-review-round2-findings): environment-DUMP shapes
+# (bare env/env -0/set/printenv, and any pipe off one) are no longer
+# denied. Reason (T2 nexus_rdr/219-research-15): Claude Code deletes
+# CLAUDE_CODE_OAUTH_TOKEN from its own environment before a Bash-tool
+# child ever starts, so a dump from Claude's own Bash tool can never
+# contain the protected value -- the old rule protected nothing.
+# ---------------------------------------------------------------------------
+
+ALLOWED_SHAPES_FORMERLY_DENIED_ENV_DUMPS = [
+    pytest.param('echo "$(env)"', id="env-dump-in-command-substitution-now-allowed"),
+    pytest.param("x=`env`", id="env-dump-in-backticks-now-allowed"),
+    pytest.param(
+        "env | grep -e FOO -e TOKEN",
+        id="env-grep-second-pattern-matches-protected-name-now-allowed",
+    ),
+    pytest.param("env", id="bare-env-now-allowed"),
+    pytest.param("env | grep TOKEN", id="bare-env-piped-now-allowed"),
+    pytest.param("printenv", id="bare-printenv-now-allowed"),
+    pytest.param("set", id="bare-set-now-allowed"),
+    pytest.param("set | grep TOKEN", id="bare-set-piped-now-allowed"),
+    pytest.param("env -0", id="bare-env-dash-0-now-allowed"),
+    pytest.param(
+        "env > /tmp/leaked.txt", id="bare-env-redirected-to-file-now-allowed"
+    ),
+    pytest.param(
+        "set > /tmp/leaked.txt", id="bare-set-redirected-to-file-now-allowed"
+    ),
+    pytest.param(
+        "env | grep CLAUDE_CODE_OAUTH_TOKEN",
+        id="env-piped-grep-exact-name-now-allowed",
+    ),
+    pytest.param(
+        "env | grep OAUTH",
+        id="env-piped-grep-substring-of-protected-name-now-allowed",
+    ),
+    pytest.param("env | cat", id="env-piped-into-unrecognized-filter-now-allowed"),
+    # Round 2's own critical findings (1-2): these three defeated the old
+    # anchored bare-dump detector even before this removal -- proof the
+    # rule "could not be made complete regardless" (module docstring).
+    pytest.param("env 2>/dev/null", id="env-redirected-to-devnull-stderr"),
+    pytest.param("eval env", id="eval-env-not-command-position-anchored"),
+    pytest.param("{ env; }", id="env-inside-a-brace-group"),
+    # Round 2 finding 4: command-position anchoring false-positived on a
+    # backtick-quoted `env`/`set` inside single-quoted shell text where
+    # the shell never interprets the backtick -- a heredoc and a commit
+    # message are exactly this project's own routine authoring shapes.
+    pytest.param(
+        "cat > file.md <<'EOF'\n"
+        "This mentions bare `env` and `set` in prose, never executed.\n"
+        "EOF\n",
+        id="quoted-heredoc-mentioning-backtick-env-and-set",
+    ),
+    pytest.param(
+        "git commit -m 'docs: explain the bare `env`/`set` dump shape'",
+        id="commit-message-mentioning-backtick-env-and-set",
+    ),
+]
+
+ALLOWED_SHAPES = ALLOWED_SHAPES + ALLOWED_SHAPES_FORMERLY_DENIED_ENV_DUMPS
 
 
 @pytest.mark.parametrize("command", ALLOWED_SHAPES)

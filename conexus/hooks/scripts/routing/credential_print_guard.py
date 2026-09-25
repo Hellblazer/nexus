@@ -14,6 +14,28 @@ redirect on 2026-09-25 put a live token into a subagent's own transcript,
 which is exactly what a Bash-tool PreToolUse hook can see and refuse
 before it happens.
 
+**Environment-DUMP rules (bare ``env``/``env -0``/``set``/``printenv``,
+and their pipe-filter carve-outs) were REMOVED after code review round 2**
+(nexus-wauo1.22, T2 ``nexus/rdr219-p3-code-review-round2-findings``),
+on the measured fact in T2 ``nexus_rdr/219-research-15``: Claude Code
+deletes ``CLAUDE_CODE_OAUTH_TOKEN`` from its own environment before a
+Bash-tool child ever starts, and under RDR-219's amendment ("The nx-mcp
+dispatch grant") the harness's own automation-token env-var name
+(``NX_HARNESS_CLAUDE_OAUTH_TOKEN``, not ``CLAUDE_CODE_OAUTH_TOKEN``)
+reaches only an opted-in nx-mcp dispatch, never a plain Bash-tool call.
+A ``env``/``set``/``printenv`` dump from Claude's own Bash tool therefore
+CANNOT contain a protected value -- the rule protected nothing. It also
+cost real false denials (a backtick-quoted ``env`` inside a single-quoted
+heredoc, ``cat .env`` before command-position anchoring was narrowed) and
+could not be made complete regardless: ``env 2>/dev/null``, ``eval env``,
+``bash -c env``, and a brace-grouped ``{ env; }`` all defeated the
+anchored bare-dump detector (round 2's own critical findings 1-2), so the
+rule bought false confidence without buying safety. Deleted along with
+it: the command-position anchoring (``_ENV_OR_SET_INVOKE_RE``) that
+existed only to scope the bare-dump rule, and the pipe/filter logic
+(``_pipe_target_prints_value``, ``_grep_pattern_matches_protected_name``)
+that decided whether a dump's pipe target was a "safe" filter.
+
 DENY, with a message naming ``claude_credentials.py status`` and
 ``claude_credentials.py run --`` (RDR-219 Technical Design, "The plugin
 guard"):
@@ -24,40 +46,48 @@ guard"):
    ``head``, ``tail``, ``jq``, ``awk``, ``sed``, ``more``, ``od``,
    ``xxd``, ``strings``, ``base64``, or a ``python -c``/heredoc
    (``python3 - <<EOF``) open-and-print shape.
-3. Printing a protected credential environment variable
-   (:data:`CREDENTIAL_ENV_VARS`): a shell expansion of it (``echo
+3. An EXPLICIT reference to a protected credential environment variable
+   by NAME (:data:`CREDENTIAL_ENV_VARS`): a shell expansion of it (``echo
    $CLAUDE_CODE_OAUTH_TOKEN``, ``printf "%s" "$CLAUDE_CODE_OAUTH_TOKEN"``,
    redirected to a file or not -- the expansion itself is what is denied,
-   regardless of where it goes); ``printenv`` invoked bare (no names, so
-   it prints EVERY variable) or naming a protected variable explicitly
-   (``printenv PATH`` naming only an unprotected variable stays allowed);
-   or a bare ``env``/``set`` dump (``env``, ``env -0``, ``set`` invoked
-   with nothing after them, redirected to a file, or piped into anything
-   that is not a provably-safe filter -- ``grep -c``/``grep -q`` count or
-   quiet modes, ``wc``, or a ``grep`` pattern that cannot match a
-   protected name all stay allowed; a ``grep`` pattern that COULD match
-   one, or any other pipe target, is denied).
+   regardless of where it goes), or ``printenv`` naming a protected
+   variable explicitly (``printenv CLAUDE_CODE_OAUTH_TOKEN``;
+   ``printenv PATH`` naming only an unprotected variable stays allowed).
+   These cost nothing to keep and catch a future case where the variable
+   is genuinely present in the child's environment.
 4. A ``python -c``/heredoc whose code names a protected variable via
    ``os.environ[...]``, ``os.getenv(...)``, or ``environ.get(...)``.
    Running a python SCRIPT BY PATH (``python3 some/script.py ...``, no
    ``-c`` and no heredoc) is unaffected.
-5. Reading another process's environment: ``ps`` invoked with a flag that
-   prints it (macOS ``-E``; BSD-style unclustered ``e``, e.g. ``ps
-   auxeww``/``ps eww``), or a read of ``/proc/*/environ`` via a common
-   dump command (``cat``, ``strings``, ``tr``, and the rest of rule 2's
-   reader set). Plain ``ps aux``, ``ps -ef``, and ``ps -p N -o args``
-   stay allowed -- only the FIRST option token after ``ps`` is inspected,
-   matching the shapes the RDR names.
+5. Reading ANOTHER PROCESS's environment -- these are the one shape that
+   really can leak the token, since the tmux server a harness's ``run --``
+   started, or Claude's own exec-time environment, genuinely holds it:
+   ``ps`` invoked with a flag that prints it (macOS ``-E``; BSD-style
+   unclustered ``e``, e.g. ``ps auxeww``/``ps eww``); a read of
+   ``/proc/*/environ`` via a common dump command (``cat``, ``strings``,
+   ``tr``, and the rest of rule 2's reader set); or a bash builtin read of
+   ``/proc/*/environ`` via input redirection (``< /proc/1234/environ``,
+   ``$(< /proc/self/environ)``, with no reader command at all). Plain
+   ``ps aux``, ``ps -ef``, and ``ps -p N -o args`` stay allowed -- only
+   the FIRST option token after ``ps`` is inspected, matching the shapes
+   the RDR names. Every pattern in this rule matches ANYWHERE in the
+   command text, never anchored to command position, so ``eval``,
+   ``bash -c '...'``, and ``sh -c '...'`` wrappers are covered by
+   construction, not by a special case.
 
 ALLOW: ``claude_credentials.py status`` and ``claude_credentials.py run
 -- <command>`` -- these carry neither a keychain read, a
-``.credentials.json`` reference, nor an expansion/bare-dump of a
+``.credentials.json`` reference, nor an explicit-name reference to a
 protected variable, so they pass by construction, with no special-cased
 carve-out. Also allowed, by the same construction: a bare variable NAME
 with no ``$`` (``docker run -e CLAUDE_CODE_OAUTH_TOKEN`` -- docker reads
-the value from ITS OWN environment, this guard sees only the name), and
-the token-shaped grep RDR-219 itself uses to hunt leaked copies
-(``grep -rlE 'sk-ant-o(a|r)t' <dir>``).
+the value from ITS OWN environment, this guard sees only the name), the
+token-shaped grep RDR-219 itself uses to hunt leaked copies
+(``grep -rlE 'sk-ant-o(a|r)t' <dir>``), and, since the environment-dump
+rules are gone, any bare ``env``/``set``/``printenv`` invocation
+whatsoever -- ``env``, ``env 2>/dev/null``, ``eval env``, ``{ env; }``,
+and a backtick-quoted ``env``/``set`` inside a single-quoted heredoc or
+commit message all pass through untouched.
 
 NO ESCAPE (RDR-219, unlike the git-write precedent this guard's shape
 otherwise follows): this hook never calls
@@ -212,7 +242,11 @@ def _matches_credential_file_read(command: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Rule 3: printing a protected credential environment variable.
+# Rule 3: an EXPLICIT reference to a protected credential environment
+# variable by NAME. Environment-DUMP detection (bare `env`/`env -0`/
+# `set`/`printenv`, command-position anchoring, and pipe-filter
+# carve-outs) was REMOVED after code review round 2 -- see the module
+# docstring for why.
 # ---------------------------------------------------------------------------
 
 
@@ -231,14 +265,15 @@ _EXPANSION_RES: dict[str, re.Pattern[str]] = {
 }
 
 #: `printenv` has no exec-a-command form the way `env` does -- unlike
-#: `env`, ANY invocation of it only ever prints. Unlike the old
-#: unconditional match, `printenv PATH`/`printenv HOME` (an UNPROTECTED
-#: variable named explicitly) must stay allowed -- only a BARE invocation
-#: (no names -- prints every variable) or one naming a protected variable
-#: is denied. `printenv`'s own argument list ends at a pipe, `;`, `&`,
-#: `#`, or newline; whatever it is piped INTO doesn't change what
-#: `printenv` itself already wrote to that pipe, so (unlike `env`/`set`
-#: below) no downstream-filter carve-out applies here.
+#: `env`, ANY invocation of it only ever prints. Only a `printenv` naming
+#: a protected variable explicitly is denied (`printenv PATH`/`printenv
+#: HOME`, an UNPROTECTED variable named explicitly, stays allowed, and so
+#: does a BARE `printenv` with no names at all -- the dump rule that used
+#: to deny that shape is gone, see the module docstring). `printenv`'s
+#: own argument list ends at a pipe, `;`, `&`, `#`, or newline. The match
+#: is deliberately anywhere in the command text (not anchored to command
+#: position), so `sh -c 'printenv CLAUDE_CODE_OAUTH_TOKEN'` is caught the
+#: same as a bare invocation.
 _PRINTENV_INVOKE_RE = re.compile(r"\bprintenv\b(?P<tail>[^;&#\n]*)", re.MULTILINE)
 
 
@@ -247,8 +282,15 @@ def _printenv_reason(command: str) -> str | None:
     if not match:
         return None
     args_part = match.group("tail").split("|", 1)[0].strip()
+    # Strip a trailing shell-quote/paren artifact left over when this
+    # invocation sits inside `sh -c '...'`/`bash -c "..."`/`$(...)` and the
+    # regex's tail capture runs up against the wrapper's own closing
+    # delimiter (e.g. `sh -c 'printenv CLAUDE_CODE_OAUTH_TOKEN'` captures
+    # a tail ending in `TOKEN'`) -- without this the exact `var in args`
+    # check below misses a name that is genuinely present.
+    args_part = args_part.rstrip("'\")")
     if not args_part:
-        return "a bare `printenv` (prints every variable)"
+        return None
     args = args_part.split()
     for var in CREDENTIAL_ENV_VARS:
         if var in args:
@@ -256,127 +298,14 @@ def _printenv_reason(command: str) -> str | None:
     return None
 
 
-#: `env`/`set` invoked with nothing after them but a segment terminator
-#: (end of string, `;`, `&`, `#`, a newline) is the "dump everything"
-#: idiom and always denied. A real shell strips everything from `#` to
-#: end of line, so `env # comment` is exactly as bare as `env` alone.
-#: Ordinary, harmless use with real arguments (`env -i FOO=bar cmd`,
-#: `set -euo pipefail`, `set -x` -- ubiquitous at the top of nearly every
-#: harness script) must never be denied. `|` is handled separately below
-#: (a pipe target can be a provably-safe filter), unlike the old bare-tail
-#: regex that treated ANY pipe as bare.
-#: `env`/`set` must be in COMMAND position -- the start of the command, or
-#: right after `;`, `&`, `|`, `(`, a newline, `$(` or a backtick, with
-#: optional whitespace and `VAR=value` prefixes allowed -- so `cat .env`,
-#: `source .env` and `tmux set-environment` are not read as a dump, while
-#: `$(env)` and a backticked env are. The tail stops at a segment terminator,
-#: a closing `)` or a backtick, so a substitution's own close does not read
-#: as an argument.
-_ENV_OR_SET_INVOKE_RE = re.compile(
-    r"(?:^|[;&|(\n`]|\$\()\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(env|set)(?![\w.-])"
-    r"(?P<tail>[^;&#\n)`]*)",
-    re.MULTILINE,
-)
-#: A `grep`/`egrep`/`fgrep` invocation in COUNT (`-c`/`--count`) or QUIET
-#: (`-q`/`--quiet`/`--silent`) mode never prints a matched line's value,
-#: so it is safe regardless of pattern -- `env | grep -c NAME`, `env |
-#: grep -q NAME` stay allowed.
-_GREP_CMD_RE = re.compile(r"\b(?:e|f)?grep\b")
-_GREP_COUNT_OR_QUIET_RE = re.compile(
-    r"(?:^|\s)-\w*[cq]\w*\b|--count\b|--quiet\b|--silent\b"
-)
-_WC_CMD_RE = re.compile(r"\bwc\b")
-
-
-def _grep_pattern_matches_protected_name(grep_segment: str) -> str | None:
-    """Best-effort: does this `grep` invocation's PATTERN look like it
-    would match one of the protected env-var names? Returns the matched
-    var, or ``None``. Structure-agnostic like the git-write precedent:
-    takes the first non-flag token after `grep` as the pattern and checks
-    it, case-insensitively, as a substring of each protected name --
-    `env | grep OAUTH`/`env | grep TOKEN` match (both are substrings of
-    `CLAUDE_CODE_OAUTH_TOKEN`); `env | grep FOO` does not."""
-    tokens = grep_segment.split()
-    patterns: list[str] = []
-    positional_taken = False
-    i = 1
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in ("-e", "--regexp") and i + 1 < len(tokens):
-            patterns.append(tokens[i + 1])
-            i += 2
-            continue
-        if tok.startswith("--regexp="):
-            patterns.append(tok.split("=", 1)[1])
-        elif tok.startswith("-e") and len(tok) > 2:
-            patterns.append(tok[2:])
-        elif not tok.startswith("-") and not positional_taken and not patterns:
-            patterns.append(tok)
-            positional_taken = True
-        i += 1
-    for raw in patterns:
-        pattern_lower = raw.strip("'\"").lower()
-        if not pattern_lower:
-            continue
-        for var in CREDENTIAL_ENV_VARS:
-            if pattern_lower in var.lower():
-                return var
-    return None
-
-
-def _pipe_target_prints_value(segment: str) -> str | None:
-    """*segment* is the text right after a `|` following a bare
-    `env`/`set`. Returns a reason string if this pipe stage could still
-    print a protected value, or ``None`` if it is a recognized-safe
-    filter (`grep -c`/`-q`, a `grep` pattern that cannot match a
-    protected name, or `wc`). Any OTHER pipe target is denied --
-    conservative by design, since this guard cannot prove it safe."""
-    stage = segment.split("|", 1)[0]
-    if _GREP_CMD_RE.search(stage):
-        if _GREP_COUNT_OR_QUIET_RE.search(stage):
-            return None
-        matched_var = _grep_pattern_matches_protected_name(stage)
-        if matched_var:
-            return f"piped into `grep` with a pattern that could match `{matched_var}`"
-        return None
-    if _WC_CMD_RE.search(stage):
-        return None
-    return "piped into a filter that is not provably safe"
-
-
-def _env_or_set_reason(command: str) -> str | None:
-    for match in _ENV_OR_SET_INVOKE_RE.finditer(command):
-        word = match.group(1)
-        core = match.group("tail").strip()
-        if word == "env":
-            # `env -0` changes the output separator, not whether every
-            # variable is dumped -- still a bare dump when nothing else
-            # follows it.
-            core = re.sub(r"^-0\s*", "", core)
-        if not core:
-            return f"a bare `{word}` (prints every variable)"
-        if core.startswith("|"):
-            pipe_reason = _pipe_target_prints_value(core[1:])
-            if pipe_reason:
-                return f"a bare `{word}` {pipe_reason}"
-            continue
-        if core.startswith(">"):
-            return f"a bare `{word}` redirected to a file"
-        # Real arguments follow (`env -i FOO=bar cmd`, `set -euo
-        # pipefail`) -- execs a command or sets shell options, not a dump.
-    return None
-
-
 def _matches_variable_print(command: str) -> str | None:
-    """A reason string when *command* would print a protected credential
-    variable's value, or ``None``."""
+    """A reason string when *command* explicitly names a protected
+    credential variable via a shell expansion or `printenv <NAME>`, or
+    ``None``."""
     for var, pattern in _EXPANSION_RES.items():
         if pattern.search(command):
             return f"a shell expansion of `${var}`"
-    reason = _printenv_reason(command)
-    if reason:
-        return reason
-    return _env_or_set_reason(command)
+    return _printenv_reason(command)
 
 
 # ---------------------------------------------------------------------------
@@ -410,19 +339,30 @@ def _matches_python_env_print(command: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Rule 5: reading another process's environment -- `ps -E`/BSD `e`, or
-# `/proc/*/environ`.
+# Rule 5: reading another process's environment -- `ps -E`/BSD `e`, a
+# reader command on `/proc/*/environ`, or a bash builtin redirection read
+# of it. These are the one shape that can genuinely leak the token (see
+# the module docstring), and every pattern here matches ANYWHERE in the
+# command text -- never anchored to command position -- so `eval`,
+# `bash -c '...'`, and `sh -c '...'` wrappers are covered by construction.
 # ---------------------------------------------------------------------------
 
 #: Only the FIRST option-like token after `ps` is inspected -- BSD ps
 #: syntax attaches the option cluster right after `ps`, and checking
 #: every later token would false-positive on an ordinary `-o` format
-#: keyword like `etime` (which contains "e" but names no flag).
-_PS_INVOKE_RE = re.compile(r"\bps\b\s+(?P<flag>\S+)")
+#: keyword like `etime` (which contains "e" but names no flag). The
+#: token excludes a quote/backtick/closing-paren so a wrapped invocation
+#: (`eval "ps eww"`, `` `ps auxeww` ``) doesn't have the wrapper's own
+#: closing delimiter glued onto the captured flag.
+_PS_INVOKE_RE = re.compile(r"""\bps\b\s+(?P<flag>[^\s"'`)]+)""")
 _PROC_ENVIRON_RE = re.compile(r"/proc/\S*/environ\b")
 _PROC_ENVIRON_READER_RE = re.compile(
     r"\b(cat|strings|tr|xxd|od|more|less|head|tail|awk|sed)\b"
 )
+#: A bash builtin read via input redirection -- `< /proc/1234/environ`
+#: or `$(< /proc/self/environ)` -- prints the same content as any of the
+#: reader commands above but names no reader command at all.
+_PROC_ENVIRON_REDIRECT_RE = re.compile(r"<\s*/proc/\S*/environ\b")
 
 
 def _ps_flag_prints_environment(flag: str) -> bool:
@@ -438,15 +378,19 @@ def _ps_flag_prints_environment(flag: str) -> bool:
 
 def _matches_process_environment_read(command: str) -> str | None:
     """A reason string when *command* reads another process's
-    environment via `ps -E`/BSD `e`, or a read of `/proc/*/environ`, or
+    environment via `ps -E`/BSD `e`, a reader command on
+    `/proc/*/environ`, or a bash builtin redirection read of it, or
     ``None``."""
     for match in _PS_INVOKE_RE.finditer(command):
         flag = match.group("flag")
         if _ps_flag_prints_environment(flag):
             return f"`ps` with an environment-printing flag ({flag!r})"
-    if _PROC_ENVIRON_RE.search(command) and _PROC_ENVIRON_READER_RE.search(command):
+    if _PROC_ENVIRON_RE.search(command):
         reader = _PROC_ENVIRON_READER_RE.search(command)
-        return f"`{reader.group(1)}` on `/proc/*/environ`"
+        if reader:
+            return f"`{reader.group(1)}` on `/proc/*/environ`"
+        if _PROC_ENVIRON_REDIRECT_RE.search(command):
+            return "a shell redirection read of `/proc/*/environ`"
     return None
 
 
