@@ -27,9 +27,11 @@ Two kinds of check, matching the sibling P2.1a/P2.1b migrations:
 """
 from __future__ import annotations
 
+import importlib.util
 import pathlib
 import subprocess
 import sys
+import types
 
 import pytest
 
@@ -43,6 +45,20 @@ SCRIPT = (
 
 def _source() -> str:
     return SCRIPT.read_text()
+
+
+def _load_run_ladder() -> types.ModuleType:
+    """Import run_ladder.py by path -- it is a standalone script under
+    tests/cc-validation/, not part of the nexus package, so it needs
+    importlib rather than a plain `import`."""
+    spec = importlib.util.spec_from_file_location("run_ladder_under_test", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+FAKE_TOKEN = "sk-ant-oatFAKE00000000000000000000000000000000TESTONLY"  # nosec: not a real credential
 
 
 def test_script_exists() -> None:
@@ -100,25 +116,95 @@ def test_no_credentials_json_write() -> None:
     )
 
 
-def test_env_i_scrub_forwards_the_token() -> None:
-    """run_one()'s per-run `env -i` scrub (which strips everything except a
-    short allowlist before launching `claude` in tmux) must explicitly
-    carry CLAUDE_CODE_OAUTH_TOKEN through, or the scrub itself would strip
-    the very credential the harness now depends on."""
-    text = _source()
-    assert "CLAUDE_CODE_OAUTH_TOKEN" in text, (
-        "expected the ladder to reference CLAUDE_CODE_OAUTH_TOKEN somewhere "
-        "(reading it from os.environ and forwarding it through env -i)"
+def _run_one_with_fake_subprocess(monkeypatch, tmp_path: pathlib.Path):
+    """Runs run_one() for real, but with every subprocess.run() call
+    intercepted: nothing actually launches tmux or claude. Returns
+    (module, list-of-recorded-calls). Each recorded call is
+    {"cmd": [...], "kwargs": {...}} exactly as run_ladder.py invoked
+    subprocess.run, so a test can inspect every argv AND every env= it
+    ever builds -- this is the only way to prove an absence (the token
+    is nowhere) rather than merely a presence (a keyword appears in
+    source text), which is what the retired
+    test_env_i_scrub_forwards_the_token could only ever pin."""
+    mod = _load_run_ladder()
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", FAKE_TOKEN)
+    # No real wall-clock cost: the readiness loop's capture-pane fake
+    # answers "ready" on its first call, and turn_timeout=0 means the
+    # Stop-wait loop body never runs; time.sleep is stubbed out entirely
+    # so the hardcoded end-of-run sleeps (0.3s/1s/3s) cost nothing either.
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    calls: list[dict] = []
+
+    def fake_run(cmd, *a, **kw):
+        calls.append({"cmd": list(cmd), "kwargs": dict(kw)})
+        stdout = "Bypass permissions on\n" if isinstance(cmd, list) and "capture-pane" in cmd else ""
+        return types.SimpleNamespace(stdout=stdout, returncode=0, args=cmd)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(
+        out=str(tmp_path / "out"), python=sys.executable, hook_python="python3",
+        claude="fake-claude-binary-not-executed", sock="test-veh77-sock",
+        ready_regex=r"[Bb]ypass permissions on", turn_timeout=0.0, barrier=False,
     )
-    # The forwarding must land in the same env -i allowlist ("keep") that
-    # already carries PATH/HOME/etc for the tmux-launched claude process,
-    # not merely be read and discarded.
-    keep_idx = text.index("keep = {")
-    keep_block_end = text.index("\n\n", keep_idx)
-    keep_block = text[keep_idx:keep_block_end]
-    assert "CLAUDE_CODE_OAUTH_TOKEN" in keep_block, (
-        f"CLAUDE_CODE_OAUTH_TOKEN must be added to run_one()'s `keep` env-i "
-        f"allowlist, not just read elsewhere; keep block was:\n{keep_block}"
+    mod.run_one(args, "t", 0.0, "0", "bash", 0)
+    return mod, calls
+
+
+def test_token_never_appears_in_any_process_argv(monkeypatch, tmp_path: pathlib.Path) -> None:
+    """The token must never be an element of any argv run_ladder.py hands
+    to subprocess.run -- not a literal `env -i CLAUDE_CODE_OAUTH_TOKEN=...`
+    argument to a transient `env` process, and not a tmux client argv like
+    `-e CLAUDE_CODE_OAUTH_TOKEN=...`. This fails against the pre-fix
+    shape, which built `env -i {envs} {claude} ...` as ONE shell string
+    (with the token's literal value inside `envs`) and handed that whole
+    string to `tmux new-session` as an argv element -- ps-visible for the
+    life of the pane's `$SHELL -c` process."""
+    _mod, calls = _run_one_with_fake_subprocess(monkeypatch, tmp_path)
+    assert calls, "run_one() made no subprocess.run calls at all -- fixture is broken"
+    for call in calls:
+        for arg in call["cmd"]:
+            assert FAKE_TOKEN not in str(arg), (
+                f"the fake token leaked into an argv element: {arg!r} "
+                f"(full call: {call['cmd']!r})"
+            )
+
+
+def test_claude_still_receives_the_token_via_the_server_env(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """The tmux `new-session` call that actually spawns the private-socket
+    server must carry the token through subprocess's `env=` (execve, not
+    argv) -- that is the one channel that reaches the tmux SERVER's own
+    environment, which every pane (and so `claude`) inherits. Fails
+    against the pre-fix shape, which never passed `env=` to that call at
+    all (the token only ever reached `claude` by being embedded, as text,
+    in the pane's shell command)."""
+    _mod, calls = _run_one_with_fake_subprocess(monkeypatch, tmp_path)
+    new_session_calls = [c for c in calls if "new-session" in c["cmd"]]
+    assert len(new_session_calls) == 1, (
+        f"expected exactly one tmux new-session call, got {len(new_session_calls)}: "
+        f"{new_session_calls!r}"
+    )
+    env = new_session_calls[0]["kwargs"].get("env")
+    assert env is not None, (
+        "the new-session call was given no env= at all -- the server would "
+        "inherit whatever this Python process's own environment happens to "
+        "be, not the deliberately built allowlist"
+    )
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == FAKE_TOKEN, (
+        f"the new-session call's env= must carry CLAUDE_CODE_OAUTH_TOKEN "
+        f"(that's how claude, launched inside the resulting server's panes, "
+        f"gets the credential now that env -i is gone); env keys were "
+        f"{sorted(env.keys())!r}"
+    )
+    # And the pane command string itself (also an argv element of this
+    # same call) must NOT be how the token travels -- confirms (a) and (b)
+    # are the same mechanism switch, not two unrelated fixes.
+    pane_cmd = new_session_calls[0]["cmd"][-1]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in pane_cmd, (
+        f"the pane command string still names CLAUDE_CODE_OAUTH_TOKEN "
+        f"(expected the token to travel only via env=, never via the "
+        f"shell command text); pane_cmd={pane_cmd!r}"
     )
 
 

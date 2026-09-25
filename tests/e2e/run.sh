@@ -95,6 +95,16 @@ cleanup() {
     echo ""
     echo "Cleaning up tmux session..."
     _tmux kill-session -t e2e 2>/dev/null || true
+    # RDR-219 (nexus-wauo1.19): the private-socket tmux SERVER started above
+    # (via `$CRED_TOOL run -- tmux -L "$NX_TMUX_SOCKET" new-session ...`)
+    # carries CLAUDE_CODE_OAUTH_TOKEN in its own environment -- the tmux
+    # trap: a server's environment is fixed at server start, not per
+    # session. kill-session alone tears down only the pane; the server, and
+    # the token inside its environment, would otherwise linger until an
+    # unrelated reaper or reboot. Kill it too, via _tmux so this only ever
+    # targets the private socket ($NX_TMUX_SOCKET is unconditionally
+    # exported above) and never the shared default socket.
+    _tmux kill-server 2>/dev/null || true
     rm -rf "$TEST_HOME"
 }
 trap cleanup EXIT
@@ -191,7 +201,7 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "unset ANTHROPIC_API_KEY" >> "$TEST_HOME/.env.test"
 fi
 cat >> "$TEST_HOME/.env.test" << EOF
-# NX_LOCAL=1 by default so the sandbox uses ``chromadb.PersistentClient``
+# NX_LOCAL=1 by default so the sandbox uses \`\`chromadb.PersistentClient\`\`
 # + local ONNX embeddings instead of the cloud tenant configured in the
 # real .env. Otherwise an ambient CHROMA_API_KEY / CHROMA_TENANT bleeds
 # into the harness and ``nx index`` hits production. Override by

@@ -109,6 +109,27 @@ else
     pass "no plaintext ANTHROPIC_API_KEY value is written into .env.test"
 fi
 
+# 7. cleanup() tears down the private-socket tmux SERVER, not merely the
+#    session -- the server started at check 1 carries
+#    CLAUDE_CODE_OAUTH_TOKEN in its own environment (the tmux trap: env is
+#    fixed at server start), so kill-session alone leaves the token-bearing
+#    server running after the harness exits (nexus-wauo1.19). Matched
+#    inside cleanup()'s own body, routed through _tmux (private socket
+#    only, never a bare `tmux kill-server` against the shared default
+#    socket -- that's the same hazard check 2 already guards for
+#    kill-session/send-keys).
+cleanup_body="$(awk '/^cleanup\(\) \{/,/^\}/' "$TARGET")"
+if [[ -z "$cleanup_body" ]]; then
+    fail "no cleanup() function found in run.sh to check for a tmux server teardown"
+elif grep -qE '_tmux kill-server\b' <<<"$cleanup_body"; then
+    pass "cleanup() kills the private-socket tmux server (_tmux kill-server), not just the session"
+else
+    fail "cleanup() never calls '_tmux kill-server' -- the token-bearing tmux server on \$NX_TMUX_SOCKET outlives the run"
+fi
+if grep -qE '^\s*tmux kill-server\b' <<<"$cleanup_body"; then
+    fail "cleanup() issues a bare 'tmux kill-server' (bypasses the private socket) instead of '_tmux kill-server'"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

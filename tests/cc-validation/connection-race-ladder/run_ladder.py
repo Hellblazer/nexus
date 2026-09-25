@@ -38,8 +38,12 @@ Credentials (RDR-219): the ladder never handles credential material itself.
 Launch it under ``python3 tests/e2e/lib/claude_credentials.py run -- ...``
 (or ``run --remote HOST -- ...`` for qwentescence), which sets
 ``CLAUDE_CODE_OAUTH_TOKEN`` in this process's own environment before exec'ing
-it. The ladder reads that variable and forwards it, per run, through the
-scrubbed ``env -i`` environment each tmux-launched ``claude`` gets; it
+it. The ladder reads that variable and forwards it, per run, by starting a
+brand-new private-socket tmux SERVER whose environment (``env=`` on the
+Python ``subprocess`` call that spawns it, never an ``env -i`` shell scrub
+and never a tmux ``-e`` flag) carries exactly the token plus a small
+allowlist; the token never appears in any process's argv (nexus-wauo1.19 --
+see ``run_one()``'s own comment for why ``env -i`` cannot do this). It
 refuses to start at all when the variable is absent. No per-run credential
 file is ever written under ``.claude``, and no OAuth-account seed block is
 read (T2 ``nexus_rdr/219-research-14``: not needed -- a bare onboarding stub
@@ -105,9 +109,20 @@ with open(%r, "a") as f:
 '''
 
 
-def tmux(sock: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+def tmux(sock: str, *args: str, check: bool = True,
+         env: "dict[str, str] | None" = None) -> subprocess.CompletedProcess:
+    # `env=None` (the default) inherits this process's own environment,
+    # which is fine for every client command that talks to an ALREADY
+    # RUNNING server over the socket (kill-session, send-keys,
+    # capture-pane, kill-server) -- those never affect what a pane sees.
+    # `env=<dict>` is for the one call that actually SPAWNS a server (a
+    # `new-session` issued right after a `kill-server`, see run_one()):
+    # subprocess's `env=` reaches the child through execve, never through
+    # argv, so it is the one channel that can carry
+    # CLAUDE_CODE_OAUTH_TOKEN without the token ever being visible to
+    # `ps`.
     return subprocess.run(["tmux", "-L", sock, *args], capture_output=True, text=True,
-                          check=check)
+                          check=check, env=env)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -129,8 +144,9 @@ def build_home(run_dir: Path, args, server_delay: float, broken: bool,
     (home / ".claude").mkdir(parents=True)
     work.mkdir()
     # RDR-219: no credential file is ever written here. CLAUDE_CODE_OAUTH_TOKEN
-    # travels through run_one()'s env -i scrub instead (see the `keep` dict
-    # there) and a bare onboarding stub authenticates from it alone (T2
+    # travels through run_one()'s per-run tmux server environment instead
+    # (see the `keep` dict there, passed as subprocess `env=`) and a bare
+    # onboarding stub authenticates from it alone (T2
     # nexus_rdr/219-research-14).
     seed: dict = {"hasCompletedOnboarding": True, "theme": "dark",
                   "projects": {str(work): {"hasTrustDialogAccepted": True,
@@ -220,20 +236,35 @@ def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: 
     run_dir.mkdir(parents=True)
     p = build_home(run_dir, args, server_delay, kind == "broken", ss_sleep)
     sess = "veh77"
-    tmux(args.sock, "kill-session", "-t", sess, check=False)
-    # env -i: a parent Claude Code session leaks CLAUDECODE, CLAUDE_CODE_* and
-    # session markers that change the child's behaviour; start from nothing.
-    # CLAUDE_CODE_OAUTH_TOKEN is the one CLAUDE_CODE_* name let back in
-    # (RDR-219): it must survive the scrub or the launched claude has no
-    # credential at all.
+    # RDR-219 (nexus-wauo1.19): the token must never appear on any
+    # process's argv -- not as a literal `env -i CLAUDE_CODE_OAUTH_TOKEN=...`
+    # argument to a transient `env` process, and not on tmux's own client
+    # argv (a `new-session -e VAR=value` puts a literal value there too).
+    # The one channel that never touches argv is execve's own env vector,
+    # i.e. Python's subprocess `env=`. But a tmux SERVER's environment is
+    # fixed at the moment it is spawned (the RDR-219 "tmux trap" -- see
+    # tests/e2e/run.sh) and is never refreshed by a later `new-session` on
+    # an already-running server. HOME differs on every run (`p["home"]` is
+    # a fresh per-run directory), so per-run environments genuinely
+    # differ, which rules out one long-lived server for the whole plan.
+    # Chosen shape: start a brand-new PRIVATE-SOCKET server for every
+    # single run. `kill-server` first (not just `kill-session`) so the
+    # `new-session` call below is guaranteed to spawn a fresh server
+    # rather than reuse one still holding a PRIOR run's HOME/token in its
+    # environment; `new-session` then gets `env=keep`, an env dict built
+    # entirely in Python, so the token reaches the server (and every pane
+    # inside it) through execve and nowhere else. There is no `env -i`
+    # shell scrub for the claude launch at all -- nothing needs scrubbing,
+    # because the server was never given anything beyond this allowlist in
+    # the first place; a parent Claude Code session's CLAUDECODE/
+    # CLAUDE_CODE_*/session markers simply never reach `keep`.
+    tmux(args.sock, "kill-server", check=False)
     keep = {k: os.environ[k]
-            for k in ("PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG",
-                      "CLAUDE_CODE_OAUTH_TOKEN")
+            for k in ("PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG")
             if k in os.environ}
-    keep.update({"TERM": "tmux-256color", "HOME": str(p["home"]), "DISABLE_AUTOUPDATER": "1"})
-    envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in keep.items())
-    cmd = (f"env -i {envs} "
-           f"{shlex.quote(args.claude)} --debug-file {shlex.quote(str(p['debug_log']))} "
+    keep.update({"TERM": "tmux-256color", "HOME": str(p["home"]), "DISABLE_AUTOUPDATER": "1",
+                 "CLAUDE_CODE_OAUTH_TOKEN": os.environ["CLAUDE_CODE_OAUTH_TOKEN"]})
+    cmd = (f"{shlex.quote(args.claude)} --debug-file {shlex.quote(str(p['debug_log']))} "
            f"--mcp-config {shlex.quote(str(p['home'] / 'mcp.json'))} --strict-mcp-config "
            f"--dangerously-skip-permissions; sleep 600")
     rec: dict = {"label": label, "server_delay_s": server_delay, "submit": submit,
@@ -241,7 +272,7 @@ def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: 
                  "kind": kind, "rep": rep, "run_dir": str(run_dir)}
     t_launch = time.time()
     tmux(args.sock, "new-session", "-d", "-s", sess, "-x", "200", "-y", "50",
-         "-c", str(p["work"]), cmd)
+         "-c", str(p["work"]), cmd, env=keep)
     rec["t_launch"] = t_launch
     ready = re.compile(args.ready_regex)
     t_ready = None
@@ -264,6 +295,12 @@ def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: 
         (run_dir / "pane.txt").write_text(
             tmux(args.sock, "capture-pane", "-p", "-t", sess, check=False).stdout)
         tmux(args.sock, "kill-session", "-t", sess, check=False)
+        # Tear down the token-bearing server on this early-exit path too --
+        # the next run's leading `kill-server` above would eventually catch
+        # it, but a run that errors out and is also the LAST run in the
+        # plan would otherwise leave the server (and the token in its
+        # environment) running after this process exits.
+        tmux(args.sock, "kill-server", check=False)
         return rec
     if submit != "ta":
         time.sleep(int(submit) / 1000.0)
@@ -284,6 +321,11 @@ def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: 
     tmux(args.sock, "send-keys", "-t", sess, "C-c", check=False)
     time.sleep(1)
     tmux(args.sock, "kill-session", "-t", sess, check=False)
+    # Same as the early-exit path above: this run's server (token in its
+    # environment) is torn down here rather than left for the next run's
+    # leading kill-server, so a plan whose LAST run is this one still exits
+    # clean.
+    tmux(args.sock, "kill-server", check=False)
     subprocess.run(["pkill", "-f", str(run_dir)], check=False)
     rec.update(analyse(p))
     return rec
