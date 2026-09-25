@@ -1139,8 +1139,9 @@ def _record_taxonomy_tripwire(
 # recursion, the backoff schedule is short and capped, and
 # ``_TAXONOMY_ASSIGN_MAX_RETRY_SECONDS`` caps the total wall-clock time
 # spent retrying ONE top-level batch — the deadline is checked before every
-# split, so a batch still failing when the clock runs out becomes a
-# terminal loss immediately rather than splitting further. No durable
+# split AND before every sub-batch attempt, so once the clock runs out no
+# further engine call is made. The bound is the deadline plus at most one
+# in-flight call's own timeout, not the deadline alone. No durable
 # pending list here (that is P0.1 of a separate, PG-backed proposal): what
 # still fails at the floor is reported lost, exactly as it was before this
 # fix, just scoped down from the whole original batch.
@@ -1207,6 +1208,11 @@ def _assign_from_chashes_with_retry(
     sleep_fn = sleep_fn if sleep_fn is not None else time.sleep
     now_fn = now_fn if now_fn is not None else time.monotonic
     empty_result: dict[str, Any] = {"assigned": 0, "cross_assigned": 0, "unmatched_chashes": []}
+    if depth > 0 and now_fn() >= deadline:
+        # A split half scheduled before the clock ran out is not attempted
+        # after it: without this the deadline only stopped FURTHER splits,
+        # and each already-scheduled half still paid a full statement bound.
+        return empty_result, list(doc_ids), ["retry deadline exceeded before attempt"]
     try:
         result = t2_index_write(
             lambda db: db.taxonomy.assign_from_chashes(

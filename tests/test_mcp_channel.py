@@ -1954,6 +1954,24 @@ class TestStartupCatchupRead:
         assert sender.calls == []
 
     @pytest.mark.asyncio
+    async def test_a_row_stamped_far_in_the_future_gets_no_reference(self) -> None:
+        """An engine clock far ahead of this host would otherwise make every
+        old row's age negative, and so "recent", forever. The window is
+        symmetric: small skew either way still passes."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "skewed")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+        cutoff_s = waiter.wait_timeout_s + channel.DEFAULT_CATCHUP_MARGIN_S
+        fake._mutate(addr, "t1", announced_at=self._iso(cutoff_s + 30), announce_count=1)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001
+
+        assert sender.calls == []
+
+    @pytest.mark.asyncio
     async def test_a_never_announced_row_gets_no_reference(self) -> None:
         """`announced_at=None` -- a genuinely fresh row nothing has ever
         stamped -- is left for the ordinary announce-mode `tick()` to
@@ -2045,7 +2063,12 @@ class TestStartupCatchupRead:
 
         fake.rd = _raising_rd  # type: ignore[method-assign]
         sender = _FakeSender()
-        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+        # Probe injected: the default dials whatever engine this process
+        # resolves, and one below the floor would stop the waiter.
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: None,
+        )
         run_task = asyncio.create_task(waiter.run())
         try:
             await _poll_until(lambda: len(fake.wait_calls) >= 1)
@@ -2067,7 +2090,12 @@ class TestStartupCatchupRead:
         fake.seed(addr, "t1", "orphaned")
         fake._mutate(addr, "t1", announced_at=self._iso(-2.0), announce_count=1)
         sender = _FakeSender()
-        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+        # Probe injected: the default dials whatever engine this process
+        # resolves, and one below the floor would stop the waiter.
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: None,
+        )
 
         run_task = asyncio.create_task(waiter.run())
         try:

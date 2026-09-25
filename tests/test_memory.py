@@ -281,7 +281,15 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
     try:
         with (
             patch("nexus.commands.memory.t2_handle", return_value=t2),
-            patch("nexus.config.get_credential", return_value="fake-key"),
+            # Every credential but the mint pair: a "fake-key" mint_token
+            # makes the per-request data-token override (nexus-kqnlg) mint
+            # against the test engine, which 401s it.
+            patch(
+                "nexus.config.get_credential",
+                side_effect=lambda key, *a, **k: (
+                    None if key in ("mint_token", "mint_tenant") else "fake-key"
+                ),
+            ),
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", return_value=mt3),
         ):

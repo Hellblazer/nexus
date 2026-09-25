@@ -836,7 +836,9 @@ class ChannelWaiter:
                 if announced_at is None:
                     continue  # never announced, or an unparseable stamp -- "can't tell" is not "recent"
                 age_s = (now - announced_at).total_seconds()
-                if age_s <= cutoff_s:
+                # Symmetric: an engine clock far ahead of this host would
+                # otherwise make every old row's age negative, "recent" forever.
+                if abs(age_s) <= cutoff_s:
                     await self._reference_mailbox_row(subspace, row)
 
     def _call(self, fn: Callable[[Any], Any]) -> Any:

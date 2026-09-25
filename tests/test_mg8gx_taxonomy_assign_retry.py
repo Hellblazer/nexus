@@ -84,7 +84,7 @@ def test_timeout_then_halves_succeed_yields_no_lost_chunks(monkeypatch):
     doc_ids = [f"c{i}" for i in range(32)]
 
     result, lost, failures = mcp_infra._assign_from_chashes_with_retry(
-        "code__x__voyage-code-3__v1", doc_ids,
+        "code__x", doc_ids,
         deadline=1000.0, floor=16, sleep_fn=clock.sleep_fn, now_fn=clock.now_fn,
     )
 
@@ -105,7 +105,7 @@ def test_persistent_failure_recurses_to_floor_and_reports_floor_sized_losses(mon
     doc_ids = [f"c{i}" for i in range(64)]
 
     result, lost, failures = mcp_infra._assign_from_chashes_with_retry(
-        "code__x__voyage-code-3__v1", doc_ids,
+        "code__x", doc_ids,
         deadline=1000.0, floor=16, sleep_fn=clock.sleep_fn, now_fn=clock.now_fn,
     )
 
@@ -124,7 +124,7 @@ def test_4xx_is_not_retried(monkeypatch):
     doc_ids = [f"c{i}" for i in range(64)]
 
     result, lost, failures = mcp_infra._assign_from_chashes_with_retry(
-        "code__x__voyage-code-3__v1", doc_ids,
+        "code__x", doc_ids,
         deadline=1000.0, floor=16, sleep_fn=clock.sleep_fn, now_fn=clock.now_fn,
     )
 
@@ -144,7 +144,7 @@ def test_backoff_is_bounded(monkeypatch):
     doc_ids = [f"c{i}" for i in range(128)]
 
     mcp_infra._assign_from_chashes_with_retry(
-        "code__x__voyage-code-3__v1", doc_ids,
+        "code__x", doc_ids,
         deadline=1000.0, floor=16, sleep_fn=clock.sleep_fn, now_fn=clock.now_fn,
     )
 
@@ -166,7 +166,7 @@ def test_deadline_cuts_off_further_splitting(monkeypatch):
     doc_ids = [f"c{i}" for i in range(64)]
 
     result, lost, failures = mcp_infra._assign_from_chashes_with_retry(
-        "code__x__voyage-code-3__v1", doc_ids,
+        "code__x", doc_ids,
         deadline=-1.0, floor=16, sleep_fn=clock.sleep_fn, now_fn=clock.now_fn,
     )
 
@@ -175,6 +175,28 @@ def test_deadline_cuts_off_further_splitting(monkeypatch):
     assert len(calls) == 1
     assert clock.sleeps == []
     assert result == {"assigned": 0, "cross_assigned": 0, "unmatched_chashes": []}
+
+
+def test_deadline_passing_during_backoff_skips_the_scheduled_halves(monkeypatch):
+    """The split is decided before the deadline; the 1 s backoff carries the
+    clock past it. The two halves are then lost without being attempted,
+    so the deadline bounds real engine calls, not just further splits."""
+    def side_effect(_collection, _chashes, cross_collection=True):
+        raise _http_error(500)
+
+    calls = _install_t2_index_write(monkeypatch, side_effect)
+    clock = _FakeClock()
+    doc_ids = [f"c{i}" for i in range(64)]
+
+    _result, lost, failures = mcp_infra._assign_from_chashes_with_retry(
+        "code__x", doc_ids,
+        deadline=0.5, floor=16, sleep_fn=clock.sleep_fn, now_fn=clock.now_fn,
+    )
+
+    assert len(calls) == 1, "only the top-level call reaches the engine"
+    assert clock.sleeps == [1.0]
+    assert sorted(lost) == sorted(doc_ids)
+    assert failures.count("retry deadline exceeded before attempt") == 2
 
 
 def test_transport_error_is_retryable(monkeypatch):
@@ -191,7 +213,7 @@ def test_transport_error_is_retryable(monkeypatch):
     doc_ids = [f"c{i}" for i in range(32)]
 
     result, lost, failures = mcp_infra._assign_from_chashes_with_retry(
-        "code__x__voyage-code-3__v1", doc_ids,
+        "code__x", doc_ids,
         deadline=1000.0, floor=16, sleep_fn=clock.sleep_fn, now_fn=clock.now_fn,
     )
 
