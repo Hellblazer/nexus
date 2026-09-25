@@ -2317,7 +2317,7 @@ takes ~25–70 minutes against the pgvector service. Maintenance-window operatio
 
 | Flag | Description |
 |------|-------------|
-| `--to MODEL` | Target embedding model (required). CCE models like `voyage-context-3` are not supported (nexus-bw65) |
+| `--to MODEL` | Target embedding model (required): `voyage-3`, `voyage-code-3` or `voyage-context-3` (the last since nexus-tysei). In service mode it must be the model the collection name encodes |
 | `--dry-run` / `--no-dry-run` | Default `--dry-run`; pass `--no-dry-run` to actually write |
 | `--yes` | Skip the destructive-action confirmation prompt |
 

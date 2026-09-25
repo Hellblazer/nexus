@@ -1400,8 +1400,8 @@ def test_reembed_upserts_in_batches_inside_the_edge_deadline(runner, env_creds, 
     )
     assert result.exit_code == 0, result.output
     assert max(sizes) <= _REEMBED_UPSERT_BATCH
-    assert sorted(seen) == sorted(ids)
-    assert len(seen) == n
+    # In order, each exactly once: the sub-batches cover the page left to right.
+    assert seen == ids
 
 
 def test_reembed_skips_empty_documents(
