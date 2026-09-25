@@ -346,29 +346,70 @@ guard.
 
 ### Phase 0: Spike
 
-One cc-validation scenario settles A1 to A4, each with a recorded observation.
+#### Step 1: Settle A1 to A4
+
+One cc-validation scenario, run with the operator's automation token, records
+one observation per assumption: an isolated-HOME interactive tmux session (A1),
+a harness container (A2), a qwentescence WSL2 session over ssh (A3), and a
+harness run after the operator's `/logout` and `/login` (A4). It also records
+what the account settings offer for revoking one token alone.
+
+#### Step 2: Choose the path for any failed assumption
+
+A failed A1, A2 or A3 moves that launch shape to the fallback in Failure Modes
+(the automation token in a mode-0700 `mktemp` directory, trap set before the
+write). A failed A4 is recorded as a Day 2 constraint on the operator. The
+choices are written into this RDR before Phase 1 starts.
 
 ### Phase 1: The helper and the automation identity
 
-`run`, `status`, removal of `pick`'s stdout mode; tests for absent, expired and
-present tokens and for no token material on stdout.
+#### Step 1: `run` and `status`
+
+Add `run [--remote HOST] -- <command>` and `status` to the helper, with tests
+for an absent, an expired and a present token, and a test that the helper
+itself prints no token material.
+
+#### Step 2: Retire `pick`'s stdout mode
+
+Keep `pick` until the last caller migrates (Phase 2), then remove it together
+with its stdout output.
 
 ### Phase 2: Migrate the harnesses
 
-Each inventory site moves to `run --`; the snapshot, the sandbox credential and
-the plaintext API-key writes are deleted; the README recipe is rewritten. One
-commit per harness, each proved by that harness's own run.
+#### Step 1: One harness per commit
+
+Each inventory site moves to `run --` and drops its `.credentials.json` write.
+Each commit is proved by that harness's own run.
+
+#### Step 2: Delete the persistent copies
+
+Delete the snapshot path in `auth-login.sh`, the sandbox credential, and the
+plaintext API-key writes, and rewrite the README probe recipe.
 
 ### Phase 3: Guards
 
-The plugin PreToolUse guard, the widened lint and the janitor leg, each with a
-positive control that fires on a planted violation.
+#### Step 1: The plugin PreToolUse guard
+
+Add the guard as a stdlib plugin script through `nx_hook_shim.py`, declared in
+`conexus/PENDING_RELEASE.md`, with a positive control for each denied shape.
+
+#### Step 2: The widened lint and the janitor leg
+
+Widen the single-source lint to all tracked text files, and add the janitor
+leg to the release battery, each with a positive control that fires on a
+planted violation. Run the Minimum Viable Validation.
 
 ### Phase 4: Records and cleanup
 
-Correct the contradictory project memories and the stale cc-validation notes;
-delete the existing copies on this Mac and on qwentescence, by explicit path;
-redact the 2026-09-25 transcript.
+#### Step 1: Local cleanup (done 2026-09-25)
+
+The 35 credential files on this Mac were deleted and the transcript redacted on
+2026-09-25, before this RDR's implementation (T2 `nexus_rdr/219-research-2`).
+
+#### Step 2: Remote cleanup and records
+
+Delete the copies on qwentescence by explicit path, and correct the
+contradictory project memories and the stale cc-validation notes.
 
 ### Day 2 Operations
 
@@ -406,11 +447,20 @@ N/A.
 
 ### Contradiction Check
 
-To be completed at gate.
+No contradictions found between the research findings and the proposed
+solution. One tension is stated and resolved: the rule "no credential file"
+and the fallback that writes one for a launch shape where A1, A2 or A3 fails.
+The fallback applies only to a shape Phase 0 shows cannot use the environment,
+holds only the automation token (never the interactive login), and is caught by
+the janitor if left behind.
 
 ### Assumption Verification
 
-A1 to A4 are unverified until the Phase 0 spike.
+A1 to A4 and per-token revocation are unverified (T2 `nexus_rdr/219-research-4`
+and `-5`, both assumed, docs only). Phase 0 settles them before any migration,
+and Phase 0 Step 2 records the path for each one that fails. No other
+assumption carries the design: the inventory and the disk scan are recorded
+evidence (`219-research-1` and `-2`).
 
 ### Scope Verification
 
@@ -429,7 +479,10 @@ The Minimum Viable Validation is in scope and runs in Phase 3.
 
 ### Proportionality
 
-To be completed at gate.
+Right-sized for a change that touches every harness that drives a real Claude
+Code session, adds a plugin hook that every conexus user receives, and handles
+a secret. The inventory tables are kept because the migration works through
+them site by site. Nothing is designed for launch shapes not in the inventory.
 
 ## References
 
