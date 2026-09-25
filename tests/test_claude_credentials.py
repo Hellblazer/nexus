@@ -20,6 +20,8 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import time
 
@@ -498,6 +500,76 @@ def test_remote_reader_never_echoes(cc) -> None:
     assert "echo" not in reader_text
     assert "set -x" not in reader_text
     assert "printf" not in reader_text
+
+
+#: A tiny Python probe run as the "<command>" under `bash -s --`. Reads
+#: CLAUDE_CODE_OAUTH_TOKEN out of its own environment and compares it
+#: against EXPECTED_TOKEN (passed via env, never via argv or the payload,
+#: so the probe's OWN invocation carries no token-shaped string either);
+#: reads whatever is left on its own stdin, which must be empty when the
+#: reader worked correctly. Prints only two boolean lines -- never the
+#: token itself, real or fake.
+_REMOTE_PROBE_CODE = (
+    "import os, sys\n"
+    "token = os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', '')\n"
+    "expected = os.environ.get('EXPECTED_TOKEN', '')\n"
+    "remaining = sys.stdin.read()\n"
+    "print('TOKEN_MATCH=' + ('yes' if token == expected else 'no'))\n"
+    "print('STDIN_EMPTY=' + ('yes' if remaining == '' else 'no'))\n"
+)
+
+_HAS_BASH = shutil.which("bash") is not None
+
+
+def _run_remote_probe(payload: str, env_extra: dict | None = None):
+    env = dict(os.environ)
+    env["EXPECTED_TOKEN"] = _FAKE_TOKEN
+    env.update(env_extra or {})
+    return subprocess.run(
+        ["bash", "-s", "--", sys.executable, "-c", _REMOTE_PROBE_CODE],
+        input=payload, text=True, capture_output=True, env=env, timeout=10,
+    )
+
+
+@pytest.mark.skipif(not _HAS_BASH, reason="bash not on PATH")
+def test_remote_reader_real_shell_delivers_token_and_leaves_child_stdin_empty(cc) -> None:
+    """No ssh, no fake process -- a REAL `bash -s --` reads
+    `_remote_stdin_payload`'s exact bytes off its stdin and execs the
+    probe. Proves the reader mechanism itself (not just its construction)
+    with a fake token: the child sees CLAUDE_CODE_OAUTH_TOKEN equal to the
+    fake value, and the child's OWN stdin is empty (the token line never
+    reaches it) -- the "not polluted" claim in the `run` docstring, shown
+    end to end rather than merely asserted about the payload string."""
+    payload = cc._remote_stdin_payload(_FAKE_TOKEN)
+    proc = _run_remote_probe(payload)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert "TOKEN_MATCH=yes" in lines, lines
+    assert "STDIN_EMPTY=yes" in lines, lines
+    # Nothing token-shaped leaked anywhere except the deliberate boolean line.
+    assert _FAKE_TOKEN not in proc.stdout
+    assert _FAKE_TOKEN not in proc.stderr
+
+
+@pytest.mark.skipif(not _HAS_BASH, reason="bash not on PATH")
+def test_remote_reader_broken_order_never_delivers_the_token_and_leaks_it_onto_stdin(cc) -> None:
+    """Falsifier for the test above: swap the reader's own order (the
+    'export/exec' tail BEFORE the 'read' line and the token -- e.g. what a
+    scratch edit reordering `_REMOTE_READER_READ_LINE`/`_REMOTE_READER_TAIL`
+    would produce). `exec "$@"` fires immediately, before anything reads
+    the token off stdin, so the probe inherits it as unconsumed stdin
+    instead of as its environment: the token is NEVER set (TOKEN_MATCH=no)
+    and the child's stdin is NOT empty (STDIN_EMPTY=no) -- broken order
+    doesn't merely fail to help, it actively leaks the token onto the
+    child's stdin, which is exactly the failure mode the correct order
+    prevents."""
+    broken_payload = cc._REMOTE_READER_TAIL + _FAKE_TOKEN + "\n" + cc._REMOTE_READER_READ_LINE + "\n"
+    assert broken_payload != cc._remote_stdin_payload(_FAKE_TOKEN)
+    proc = _run_remote_probe(broken_payload)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert "TOKEN_MATCH=no" in lines, lines
+    assert "STDIN_EMPTY=no" in lines, lines
 
 
 def test_remote_ssh_argv_uses_default_remote_shell_excludes_token(cc, tmp_path, monkeypatch) -> None:

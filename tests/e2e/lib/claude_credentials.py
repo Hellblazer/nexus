@@ -93,7 +93,34 @@ Modes (argv[1]):
                  Phase 0 spike's own qwentescence shape
                  (T2 ``nexus_rdr/219-spike-script``) is the worked
                  example: ``--remote-shell 'wsl -d Ubuntu -u nexus --exec
-                 /bin/bash -s --'``.
+                 /bin/bash -s --'``. LIVE-VERIFIED 2026-09-25 against the
+                 real host with a fake token only
+                 (T2 ``nexus_rdr/219-review-fix-round-2``): the mechanism
+                 works end to end through the real PowerShell endpoint —
+                 but <command> ITSELF must stay free of shell
+                 metacharacters (``;``, ``[``, ``]``, embedded quotes).
+                 PowerShell re-parses the WHOLE ssh-assembled command line
+                 (--remote-shell's tokens plus <command>) as its OWN
+                 script BEFORE wsl.exe ever runs, so e.g. ``bash -c "if [
+                 -n \"$X\" ]; then ...; fi"`` breaks (PowerShell tries to
+                 execute the embedded ``;``/``[`` as its own syntax); a
+                 bare program invocation (``claude --dangerously-...``)
+                 or a reference to an ALREADY-STAGED script by its bare
+                 path both work cleanly. This is exactly why the Phase 0
+                 spike staged ``wsl-run.sh`` on disk first and invoked it
+                 by path, rather than inlining its body on the ssh
+                 command line — the STAGING is a separate, ordinary ssh
+                 call with no token involved, since <command>'s
+                 metacharacter constraint is about ssh/PowerShell command-
+                 line parsing, not about anything on stdin (the token and
+                 the reader script above are unaffected either way).
+                 Also observed: qwentescence's WSL2 ``/tmp`` did not
+                 survive a gap between staging and invoking (the idle
+                 WSL2 VM appears to reset its tmpfs on the next `wsl.exe`
+                 launch) — the spike's own choice of
+                 ``/home/nexus/rdr219-spike`` rather than ``/tmp`` avoids
+                 this; stage-then-invoke in tight succession, or use a
+                 path on the persistent root filesystem.
 
                  A bare ``docker run`` in <command> gets ``--rm`` and
                  (when nothing already names ``CLAUDE_CODE_OAUTH_TOKEN``
