@@ -10,7 +10,7 @@ import contextlib
 import os
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nexus.config import default_db_path
 from nexus.service_handles import SharedClientSlot, cached_endpoint_key
@@ -1123,6 +1123,123 @@ def _record_taxonomy_tripwire(
         )
 
 
+# nexus-mg8gx: client-side retry for a failed taxonomy-assign batch. A
+# statement/lock timeout at the engine's r0vkh 30s bound, an edge 5xx, or a
+# 499 (nginx "client closed request", seen when the upstream took too long
+# and the caller's own timeout fired first) dropped the WHOLE batch — ~270
+# chunks lost their topic assignment on one failed POST, and nothing
+# re-sent it until someone re-ran the index by hand. The assign upsert is
+# ``ON CONFLICT (tenant, doc_id, topic_id)``, so resending all or part of a
+# batch is always safe: it can only re-apply the same assignment, never
+# duplicate or corrupt one. A 4xx (validation) is never retried — resending
+# the same bad request gets the same rejection, so it fails immediately
+# exactly as before this bead.
+#
+# Bounded so one bad batch cannot stall an index run: the split floor stops
+# recursion, the backoff schedule is short and capped, and
+# ``_TAXONOMY_ASSIGN_MAX_RETRY_SECONDS`` caps the total wall-clock time
+# spent retrying ONE top-level batch — the deadline is checked before every
+# split, so a batch still failing when the clock runs out becomes a
+# terminal loss immediately rather than splitting further. No durable
+# pending list here (that is P0.1 of a separate, PG-backed proposal): what
+# still fails at the floor is reported lost, exactly as it was before this
+# fix, just scoped down from the whole original batch.
+_TAXONOMY_ASSIGN_RETRY_FLOOR = 16
+_TAXONOMY_ASSIGN_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 4.0)
+_TAXONOMY_ASSIGN_MAX_RETRY_SECONDS = 60.0
+
+
+def _is_retryable_taxonomy_assign_error(exc: Exception) -> bool:
+    """True for a transient failure worth retrying (a statement/lock
+    timeout surfacing as a client-side timeout or connection error, a
+    5xx, or a 499), false for a genuine 4xx validation error or anything
+    else unrecognized.
+
+    Deferred ``httpx`` import: this module only ever needs it for this one
+    isinstance check (see the ``TYPE_CHECKING``-only import at module top);
+    importing it eagerly here would be the only runtime use in the module.
+    """
+    import httpx  # noqa: PLC0415 — deferred; see docstring
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status >= 500 or status == 499
+    if isinstance(exc, httpx.TransportError):
+        return True
+    return isinstance(exc, (ConnectionError, TimeoutError))
+
+
+def _assign_from_chashes_with_retry(
+    collection: str,
+    doc_ids: list[str],
+    *,
+    deadline: float,
+    floor: int = _TAXONOMY_ASSIGN_RETRY_FLOOR,
+    depth: int = 0,
+    sleep_fn: Any = None,
+    now_fn: Any = None,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Attempt ``assign_from_chashes`` for *doc_ids*; on a retryable
+    failure, split the batch in half and recurse with a short backoff,
+    down to *floor*. Returns ``(merged_result, lost_doc_ids,
+    failure_messages)``:
+
+    - ``merged_result`` is a ``{"assigned", "cross_assigned",
+      "unmatched_chashes"}`` dict (the shape
+      ``HttpTaxonomyStore.assign_from_chashes`` itself returns), aggregated
+      across every sub-batch that succeeded.
+    - ``lost_doc_ids`` is empty unless a sub-batch is STILL failing once it
+      hits *floor*, the deadline, or a non-retryable error — exactly the
+      chashes that keep today's "lost their topic assignment" contract,
+      scoped down to whatever is genuinely unrecoverable rather than the
+      whole original batch.
+    - ``failure_messages`` names the exception for each terminal loss (one
+      entry per terminal sub-batch, never per doc_id).
+
+    ``sleep_fn``/``now_fn`` are injectable for tests: a fake clock and a
+    no-op sleep prove the backoff schedule and the deadline cutoff without
+    a real wall-clock wait. Left ``None`` (the production default), they
+    resolve to ``time.sleep``/``time.monotonic`` HERE, at call time, rather
+    than as bound default-argument values — a default bound at function-def
+    time would freeze the real ``time.sleep`` into ``__defaults__`` before
+    any test could monkeypatch ``nexus.mcp_infra.time.sleep``.
+    """
+    sleep_fn = sleep_fn if sleep_fn is not None else time.sleep
+    now_fn = now_fn if now_fn is not None else time.monotonic
+    empty_result: dict[str, Any] = {"assigned": 0, "cross_assigned": 0, "unmatched_chashes": []}
+    try:
+        result = t2_index_write(
+            lambda db: db.taxonomy.assign_from_chashes(
+                collection, doc_ids, cross_collection=True,
+            ),
+            op="taxonomy_assign",
+        )
+        return result, [], []
+    except Exception as exc:  # noqa: BLE001 — classified below; a terminal case is reported by the caller, never re-raised
+        retryable = _is_retryable_taxonomy_assign_error(exc)
+        can_split = len(doc_ids) > floor and now_fn() < deadline
+        if not retryable or not can_split:
+            return empty_result, list(doc_ids), [f"{type(exc).__name__}: {exc}"]
+        sleep_fn(_TAXONOMY_ASSIGN_RETRY_BACKOFF_S[min(depth, len(_TAXONOMY_ASSIGN_RETRY_BACKOFF_S) - 1)])
+        mid = len(doc_ids) // 2
+        left_result, left_lost, left_failures = _assign_from_chashes_with_retry(
+            collection, doc_ids[:mid],
+            deadline=deadline, floor=floor, depth=depth + 1, sleep_fn=sleep_fn, now_fn=now_fn,
+        )
+        right_result, right_lost, right_failures = _assign_from_chashes_with_retry(
+            collection, doc_ids[mid:],
+            deadline=deadline, floor=floor, depth=depth + 1, sleep_fn=sleep_fn, now_fn=now_fn,
+        )
+        merged = {
+            "assigned": left_result.get("assigned", 0) + right_result.get("assigned", 0),
+            "cross_assigned": left_result.get("cross_assigned", 0) + right_result.get("cross_assigned", 0),
+            "unmatched_chashes": [
+                *left_result.get("unmatched_chashes", []),
+                *right_result.get("unmatched_chashes", []),
+            ],
+        }
+        return merged, [*left_lost, *right_lost], [*left_failures, *right_failures]
+
 
 def taxonomy_assign_batch_hook(
     doc_ids: list[str],
@@ -1148,7 +1265,11 @@ def taxonomy_assign_batch_hook(
     engine reports no assignable chashes (empty ``doc_ids``). No client-side
     fallback: an engine that lacks the route fails the batch loud via the
     RDR-172 tripwire (a ``hook_failures`` row + a warning log), never a
-    silent client-side recompute.
+    silent client-side recompute. A retryable failure (a statement/lock
+    timeout, a 5xx, or a 499) is retried split in half, recursively with
+    backoff, down to a floor (nexus-mg8gx,
+    :func:`_assign_from_chashes_with_retry`) before the tripwire fires —
+    only what still fails at the floor is reported lost.
 
     Wired by :func:`nexus.hook_registry.install_default_hooks` onto every
     runtime-constructed registry.
@@ -1196,22 +1317,27 @@ def taxonomy_assign_batch_hook(
         # run-summary exit-code check uses to tell "some batches failed"
         # from "every batch failed" (total loss).
         _record_taxonomy_assign_attempt()
-        try:
-            result = t2_index_write(
-                lambda db: db.taxonomy.assign_from_chashes(
-                    collection, doc_ids, cross_collection=True,
-                ),
-                op="taxonomy_assign",
-            )
-        except Exception as exc:  # noqa: BLE001 — taxonomy service path best-effort; tripwire-recorded, returns
+        # nexus-mg8gx: a statement/lock timeout, a 5xx, or a 499 used to
+        # drop the WHOLE batch here. _assign_from_chashes_with_retry retries
+        # a retryable failure split in half, recursively, down to a floor —
+        # only what still fails at the floor (or a non-retryable 4xx) comes
+        # back as `lost`.
+        result, lost, failures = _assign_from_chashes_with_retry(
+            collection, doc_ids, deadline=time.monotonic() + _TAXONOMY_ASSIGN_MAX_RETRY_SECONDS,
+        )
+        if lost:
             _record_taxonomy_tripwire(
-                collection, doc_ids, f"service path: {type(exc).__name__}: {exc}",
+                collection, lost,
+                f"service path: {len(lost)}/{len(doc_ids)} chashes lost after "
+                f"retry/split ({len(failures)} still-failing sub-batch(es)): "
+                + "; ".join(failures),
             )
-            # nexus-7lw6a: this IS the whole-batch-loss case the bead is
-            # about (e.g. an HTTP 500 from the assign endpoint) — every
-            # doc_id in this batch lost its taxonomy assignment.
-            _record_taxonomy_assign_batch_failure(len(doc_ids))
-            return
+            # nexus-7lw6a: this IS the batch-loss case the bead is about
+            # (e.g. an HTTP 500 from the assign endpoint that retry/split
+            # never recovered) — every doc_id named in `lost` lost its
+            # taxonomy assignment. Scoped to what's actually still lost
+            # (nexus-mg8gx), not the whole original batch.
+            _record_taxonomy_assign_batch_failure(len(lost))
         unmatched = result.get("unmatched_chashes") if isinstance(result, dict) else None
         if unmatched:
             # Route contract: a chash never actually upserted into
