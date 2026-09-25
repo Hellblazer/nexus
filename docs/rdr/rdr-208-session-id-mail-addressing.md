@@ -2,7 +2,8 @@
 title: "Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time"
 id: RDR-208
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-25
 priority: medium
 author: Sam
 reviewed-by: self
@@ -418,6 +419,11 @@ mail B sent to A's old session id before the clear arrives at A's first prompt
 after it, once. When a second machine shares A's managed `service_url`, a
 session there resolves A's name and reaches it; two local-mode machines are
 out of scope.
+
+As run (nexus-galkv.19): cloud mode on real Claude Code sessions; local mode
+by the container harness `tests/e2e/rdr208-mvv/run.sh`, with stand-in claude
+processes over the real hooks, so "two real sessions" holds for cloud mode
+only. See the 2026-09-15 Revision History entry.
 
 ### Phase 1: Engine
 
