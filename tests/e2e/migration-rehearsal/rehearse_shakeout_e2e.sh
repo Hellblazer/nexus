@@ -627,6 +627,32 @@ fi
 # ── Step 7 — MCP tool surface through claude -p ─────────────────────────────
 say "Step 7 — MCP tool surface (store_put, search, query, nx_answer) via claude -p"
 
+# Pre-start the RDR-173 leased aspect-worker daemon from THIS shell, which has
+# CLAUDE_CODE_OAUTH_TOKEN (docker -e, RDR-219) -- not from nx-mcp, which never
+# gets it. nexus-wauo1.15, empirically reproduced: a `claude -p` Bash-tool
+# child reports `env | grep -c CLAUDE_CODE_OAUTH_TOKEN` == 0; an explicit
+# `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"}` block in
+# an MCP server's own .mcp.json config STILL leaves it absent in that server's
+# environment (an identical shape with an arbitrary non-credential var DOES
+# pass through) -- Claude Code deliberately strips CLAUDE_CODE_OAUTH_TOKEN from every
+# subprocess it spawns itself, Bash tool and MCP stdio server alike. This
+# leg's own assertions never check document_aspects, so without this the
+# store_put below would spawn a daemon whose nested `claude -p` silently fails
+# every extraction -- the exact silent-loss class RDR-173 exists to
+# eliminate, just never observed here. See rehearse_fullstack.sh's matching
+# comment for the full account. ensure_aspect_worker_daemon() is idempotent
+# spawn-if-absent, so this call and nx-mcp's own later one (once store_put
+# fires the enqueue hook) converge on the same daemon.
+note "pre-starting the RDR-173 leased aspect-worker daemon (inherits CLAUDE_CODE_OAUTH_TOKEN from this shell)…"
+"$NXENV_PY" -c "
+from nexus.config import nexus_config_dir
+from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon
+ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant='default')
+"
+worker_up=0
+for _ in $(seq 1 15); do pgrep -af "aspect-worker" >/dev/null 2>&1 && { worker_up=1; break; }; sleep 1; done
+if [ "$worker_up" = 1 ]; then ok "leased aspect-worker daemon pre-started"; else bad "leased aspect-worker daemon did not come up after pre-start"; fi
+
 authout="$(claude -p 'Reply with exactly the token AUTHOK and nothing else.' --dangerously-skip-permissions 2>&1)"
 if printf '%s' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"
 else bad "claude -p auth failed — cannot drive the MCP tool surface"; note "$(printf '%s' "$authout" | head -3 | tr '\n' ' ')"; say "ABORT (no claude auth)"; printf 'SHAKEOUT-E2E FAILED\n'; exit 1; fi

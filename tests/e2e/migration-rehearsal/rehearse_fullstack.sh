@@ -54,6 +54,38 @@ q() { "$PSQL" -tAqc "set nexus.tenant='default'; $1" 2>/dev/null | tr -d '[:spac
 # ── Phase F: full-stack MCP-driven enqueue + worker drain + real extraction ──
 say "Phase F — MCP-driven workload + queue enqueue + worker drain (real claude)"
 
+# 0. Pre-start the RDR-173 leased aspect-worker daemon from THIS shell, which
+# has CLAUDE_CODE_OAUTH_TOKEN (docker -e, RDR-219) — not from nx-mcp, which
+# never gets it. nexus-wauo1.15, empirically reproduced: a `claude -p` Bash-
+# tool child reports `env | grep -c CLAUDE_CODE_OAUTH_TOKEN` == 0; an explicit
+# `"env": {"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"}` block in
+# an MCP server's own .mcp.json config STILL leaves it absent in that server's
+# environment (while the identical shape with an arbitrary non-credential var
+# DOES pass through) — Claude Code deliberately strips CLAUDE_CODE_OAUTH_TOKEN from
+# every subprocess it spawns itself, Bash tool and MCP stdio server alike,
+# regardless of how the child asks for it. That silently starved the aspect-
+# worker daemon's own nested `claude -p` once this harness moved off the
+# credentials FILE (readable by any process regardless of inherited env) onto
+# the token-only mechanism — not a bug in the migration's credential plumbing,
+# a hard security boundary in Claude Code itself, so no env-based workaround
+# from these scripts can cross it.
+# ensure_aspect_worker_daemon() is itself idempotent spawn-if-absent (it
+# discovers the RDR-149 leased-tier registry; a fresh, current-version lease
+# means it returns without spawning) — this call and nx-mcp's own later call
+# (once store_put fires the enqueue hook, Phase F step 3) converge on the SAME
+# daemon. The second caller (nx-mcp) just finds it already up and skips its
+# own (env-stripped, non-functional) spawn.
+NXENV_PY="/home/nexus/nxenv/bin/python3"
+note "pre-starting the RDR-173 leased aspect-worker daemon (inherits CLAUDE_CODE_OAUTH_TOKEN from this shell)…"
+"$NXENV_PY" -c "
+from nexus.config import nexus_config_dir
+from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon
+ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant='default')
+"
+worker_up=0
+for _ in $(seq 1 15); do pgrep -af "aspect-worker" >/dev/null 2>&1 && { worker_up=1; break; }; sleep 1; done
+if [ "$worker_up" = 1 ]; then ok "leased aspect-worker daemon pre-started"; else bad "leased aspect-worker daemon did not come up after pre-start"; fi
+
 # 1. Auth smoke — proves the mounted oauth + linux claude work (biggest unknown).
 authout="$(claude -p 'Reply with exactly the token AUTHOK and nothing else.' --dangerously-skip-permissions 2>&1)"
 if printf '%s' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"

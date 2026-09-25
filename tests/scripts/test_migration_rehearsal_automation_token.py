@@ -38,6 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "tests" / "e2e" / "migration-rehearsal" / "run.sh"
 DOCKERFILE_FULLSTACK = REPO_ROOT / "tests" / "e2e" / "migration-rehearsal" / "Dockerfile.fullstack"
 REHEARSE_FULLSTACK = REPO_ROOT / "tests" / "e2e" / "migration-rehearsal" / "rehearse_fullstack.sh"
+REHEARSE_SHAKEOUT_E2E = REPO_ROOT / "tests" / "e2e" / "migration-rehearsal" / "rehearse_shakeout_e2e.sh"
 
 
 @pytest.fixture(scope="module")
@@ -53,6 +54,11 @@ def dockerfile_fullstack_text() -> str:
 @pytest.fixture(scope="module")
 def rehearse_fullstack_text() -> str:
     return REHEARSE_FULLSTACK.read_text()
+
+
+@pytest.fixture(scope="module")
+def rehearse_shakeout_e2e_text() -> str:
+    return REHEARSE_SHAKEOUT_E2E.read_text()
 
 
 #: Anchors the real launch if/elif chain (the tail of the script, right
@@ -156,6 +162,113 @@ def test_shellcheck_finds_no_new_findings_in_the_fullstack_block(script_text: st
         'CRED_TOOL=cred.py; IMAGE=img; run_env=(); FULLSTACK=1\n'
         + block
         + "\nfi\n"
+    )
+    proc = subprocess.run(
+        ["shellcheck", "-x", "-s", "bash", "-"],
+        input=probe_src,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# ===========================================================================
+# nexus-wauo1.15 follow-up: the aspect-worker daemon must be pre-started by
+# the HARNESS (bash, which has CLAUDE_CODE_OAUTH_TOKEN from docker -e), not
+# left to nx-mcp's own spawn-if-absent call -- Claude Code strips
+# CLAUDE_CODE_OAUTH_TOKEN from every subprocess it spawns itself (Bash tool
+# AND MCP stdio servers), even against an explicit named `.mcp.json` `env`
+# block (empirically reproduced with a throwaway diagnostic MCP server; see
+# T2 nexus_rdr/219-continuation-p2-1f for the full reproduction). A real
+# proof (an actual --fullstack run with document_aspects > 0) is out of
+# scope for an automated test -- see the bead's PROOF instruction.
+# ===========================================================================
+
+_MCP_WORKLOAD_MARKER = "--mcp-config"
+_PRESTART_MARKER = "ensure_aspect_worker_daemon"
+_FINDING_MARKERS = ("nexus-wauo1.15", "strips CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def _mcp_json_body(text: str) -> str:
+    start = text.index("cat > /home/nexus/mcp.json <<'MCPJSON'\n") + len(
+        "cat > /home/nexus/mcp.json <<'MCPJSON'\n"
+    )
+    end = text.index("\nMCPJSON", start)
+    return text[start:end]
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["rehearse_fullstack_text", "rehearse_shakeout_e2e_text"],
+)
+def test_worker_prestart_appears_before_the_mcp_workload_call(
+    fixture_name: str, request: pytest.FixtureRequest
+) -> None:
+    text: str = request.getfixturevalue(fixture_name)
+    prestart_idx = text.index(_PRESTART_MARKER)
+    workload_idx = text.index(_MCP_WORKLOAD_MARKER)
+    assert prestart_idx < workload_idx, (
+        f"{fixture_name}: the aspect-worker daemon pre-start "
+        f"({_PRESTART_MARKER!r} at {prestart_idx}) must appear BEFORE the "
+        f"MCP workload's claude -p call ({_MCP_WORKLOAD_MARKER!r} at "
+        f"{workload_idx}) -- otherwise nx-mcp's own store_put can race the "
+        f"harness's pre-start and spawn its own (env-stripped) daemon first."
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["rehearse_fullstack_text", "rehearse_shakeout_e2e_text"],
+)
+def test_mcp_json_carries_no_env_block(
+    fixture_name: str, request: pytest.FixtureRequest
+) -> None:
+    """A prior round of this fix tried an explicit `.mcp.json` `env` block
+    naming CLAUDE_CODE_OAUTH_TOKEN by exact key -- proven NOT to work (Claude
+    Code strips the name regardless) and reverted. This pins that reversion:
+    no `"env"` key should reappear in either mcp.json heredoc, since it would
+    misleadingly suggest the token reaches the MCP server that way."""
+    text: str = request.getfixturevalue(fixture_name)
+    body = _mcp_json_body(text)
+    assert '"env"' not in body, (
+        f"{fixture_name}: mcp.json heredoc carries an \"env\" key again -- "
+        f"this does not deliver CLAUDE_CODE_OAUTH_TOKEN (Claude Code strips "
+        f"it from spawned MCP servers regardless) and misleadingly suggests "
+        f"it does: {body!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["rehearse_fullstack_text", "rehearse_shakeout_e2e_text"],
+)
+def test_prestart_comment_names_the_empirical_finding(
+    fixture_name: str, request: pytest.FixtureRequest
+) -> None:
+    text: str = request.getfixturevalue(fixture_name)
+    for marker in _FINDING_MARKERS:
+        assert marker in text, (
+            f"{fixture_name}: expected a comment naming {marker!r} near the "
+            f"aspect-worker pre-start, documenting why it exists"
+        )
+
+
+def test_rehearse_fullstack_prestart_block_shellchecks_clean(
+    rehearse_fullstack_text: str,
+) -> None:
+    """Scoped, not whole-file -- same convention as the docker-run block
+    check above. Extracts the inserted pre-start snippet (from its own
+    comment header to the following `ok`/`bad` liveness assertion) and
+    shellchecks it in isolation."""
+    start = rehearse_fullstack_text.index("# 0. Pre-start")
+    end_marker = 'bad "leased aspect-worker daemon did not come up after pre-start"; fi'
+    end = rehearse_fullstack_text.index(end_marker) + len(end_marker)
+    block = rehearse_fullstack_text[start:end]
+    probe_src = (
+        "#!/usr/bin/env bash\nset -uo pipefail\n"
+        'ok() { :; }; bad() { :; }; note() { :; }\n'
+        + block
+        + "\n"
     )
     proc = subprocess.run(
         ["shellcheck", "-x", "-s", "bash", "-"],
