@@ -861,6 +861,10 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     # here first, the same way subspace is.
                     _check_field_size("subscriber", spec.announce.subscriber, _MAX_CLAIMANT_BYTES)
                     announce["subscriber"] = spec.announce.subscriber
+                if spec.announce.waiter is not None:
+                    # bead nexus-rxuiq: the supersession token, same ceiling.
+                    _check_field_size("waiter", spec.announce.waiter, _MAX_CLAIMANT_BYTES)
+                    announce["waiter"] = spec.announce.waiter
                 entry["announce"] = announce
             payload_specs.append(entry)
         payload: dict[str, Any] = {"subspaces": payload_specs}
@@ -873,6 +877,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 subspace=entry.get("subspace", ""),
                 tuples=[_body_to_tuple_row(t) for t in entry.get("tuples", [])],
                 subscriber=entry.get("subscriber"),
+                superseded=bool(entry.get("superseded", False)),
             )
             for entry in (r or {}).get("results", [])
         ]

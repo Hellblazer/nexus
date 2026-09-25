@@ -369,7 +369,7 @@ class TupleRepositoryTest {
     // ── mailbox address_kind gains session (RDR-208 P1.2, bead nexus-galkv.2) ──
 
     /** agent is the original v1 value (RDR-205); still accepted unchanged
-     *  now that address_kind also carries instance and session. */
+     *  now that address_kind also carries session. */
     @Test
     void out_mailboxAddressKindAgent_stillAccepted_readBack() {
         String to = "agent-kind-agent-" + UUID.randomUUID();
@@ -394,18 +394,21 @@ class TupleRepositoryTest {
         assertThat(rows.get(0).dims()).containsEntry("address_kind", "session");
     }
 
-    /** instance is retired after RDR-208 Phase 3, but stays accepted through
-     *  the migration window -- see the header comment in mailbox.yaml. */
+    /** instance is retired at RDR-208 Phase 3 (bead nexus-galkv.24): the
+     *  client release that stops sending it (R3, conexus 7.60.0) shipped
+     *  first, so this engine can now refuse it outright -- see the header
+     *  comment in mailbox.yaml. */
     @Test
-    void out_mailboxAddressKindInstance_stillAccepted_readBack() {
+    void out_mailboxAddressKindInstance_schemaViolation_noRowWritten() {
         String to = "agent-kind-instance-" + UUID.randomUUID();
-        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+        assertThatThrownBy(() -> repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
                 Map.of("from", "sender-kind-instance", "address_kind", "instance"),
-                "body", "nonce-kind-instance", null);
+                "body", "nonce-kind-instance", null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("field 'address_kind'")
+                .hasMessageContaining("not in [agent, session]");
 
-        var rows = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
-        assertThat(rows).hasSize(1);
-        assertThat(rows.get(0).dims()).containsEntry("address_kind", "instance");
+        assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
     }
 
     @Test
@@ -416,9 +419,97 @@ class TupleRepositoryTest {
                 "body", "nonce-kind-bogus", null))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("field 'address_kind'")
-                .hasMessageContaining("not in [agent, instance, session]");
+                .hasMessageContaining("not in [agent, session]");
 
         assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
+    }
+
+    /**
+     * P3 review B, critic finding (nexus-galkv.26): dropping {@code instance}
+     * from the values list only changes {@code out}'s SCHEMA VALIDATION
+     * ({@code TupleRepository#validateOutShape}, called from {@code
+     * prepareOut}, called ONLY from {@code out}). Nothing in {@code rd}/
+     * {@code rdp}/{@code in}/{@code inp}/{@code ack}/{@code subspaceStats}
+     * re-checks a row's {@code dims} against the template's current values
+     * list -- they read and mutate {@code claim_state}/{@code consumed_at}
+     * and friends, never {@code dims} shape. A row an OLDER engine already
+     * wrote with {@code address_kind=instance}, before this template change
+     * landed, must stay fully operable through the REST of its lifecycle
+     * after the change: readable, claimable, ackable, and counted in the
+     * census -- exactly like any other pre-existing row, never
+     * retroactively invalidated by a values-list edit that (by design) only
+     * gates future {@code out} calls.
+     *
+     * <p>Bypasses {@code out()}/{@code validateOutShape} entirely with a
+     * raw jOOQ insert directly into {@code nexus.tuples} -- same idiom as
+     * {@code rd_suppressedSignal_stillFindsRowViaOneSecondTimer} above --
+     * so nothing in the WRITE path gets a chance to reject the now-unlisted
+     * value either; this row's {@code address_kind=instance} dim reaches
+     * the table exactly as an old engine's {@code out} would have written
+     * it before this bead.
+     */
+    @Test
+    void legacyRow_addressKindInstance_staysReadableClaimableAckableAfterValuesListChange() throws Exception {
+        String to = "agent-legacy-instance-" + UUID.randomUUID();
+        String subspace = "mailbox/" + to;
+        byte[] id = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(("legacy-instance-" + to).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .insertInto(dev.nexus.service.jooq.nexus.Tables.TUPLES,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.SUBSPACE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.TEMPLATE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.KEYS,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.DIMS,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.BODY,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.EXPIRES_AT,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.CREATED_AT)
+                    .values(id, TENANT_A, subspace, "mailbox/<address>",
+                            org.jooq.JSONB.valueOf("{\"to\": \"" + to + "\"}"),
+                            org.jooq.JSONB.valueOf(
+                                    "{\"from\": \"sender-legacy-instance\", \"address_kind\": \"instance\"}"),
+                            "legacy row written before the values-list change",
+                            0, OffsetDateTime.now(java.time.ZoneOffset.UTC).plusHours(1),
+                            OffsetDateTime.now(java.time.ZoneOffset.UTC))
+                    .execute();
+        }
+
+        // Readable: rd and rdp both see it, dims intact including the now-unlisted value.
+        var rdRows = repo.rd(TENANT_A, subspace, Map.of("to", to), 10, null, 0L);
+        assertThat(rdRows).hasSize(1);
+        assertThat(rdRows.get(0).id()).isEqualTo(id);
+        assertThat(rdRows.get(0).dims()).containsEntry("address_kind", "instance");
+
+        var rdpRows = repo.rdp(TENANT_A, subspace, Map.of("to", to), 10, null);
+        assertThat(rdpRows).hasSize(1);
+        assertThat(rdpRows.get(0).dims()).containsEntry("address_kind", "instance");
+
+        // Counted by stats while available.
+        var beforeClaim = repo.subspaceStats(TENANT_A, subspace);
+        assertThat(beforeClaim.total()).isEqualTo(1);
+        assertThat(beforeClaim.available()).isEqualTo(1);
+
+        // Claimable.
+        var claimed = repo.inp(TENANT_A, subspace, Map.of("to", to), "claimant-legacy-instance", 60L);
+        assertThat(claimed).isPresent();
+        assertThat(claimed.get().tuple().id()).isEqualTo(id);
+        assertThat(claimed.get().tuple().dims()).containsEntry("address_kind", "instance");
+
+        var duringClaim = repo.subspaceStats(TENANT_A, subspace);
+        assertThat(duringClaim.claimed()).isEqualTo(1);
+        assertThat(duringClaim.available()).isZero();
+
+        // Ackable, and counted as consumed afterward.
+        repo.ack(TENANT_A, claimed.get().claimId(), "claimant-legacy-instance");
+
+        var afterAck = repo.subspaceStats(TENANT_A, subspace);
+        assertThat(afterAck.consumed()).isEqualTo(1);
+        assertThat(afterAck.claimed()).isZero();
+        assertThat(afterAck.available()).isZero();
     }
 
     // ── ten concurrent inp on one row ───────────────────────────────────────

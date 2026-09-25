@@ -1060,13 +1060,19 @@ public final class TupleRepository {
          * next call regardless -- there is no cursor position for it to land
          * behind.
          */
-        public record Announce(long intervalSeconds, int max, String subscriber) {
+        public record Announce(long intervalSeconds, int max, String subscriber, String waiter) {
 
             /** Back-compat constructor (every nexus-vsipz call site, every mailbox
              *  spec): {@code subscriber=null}, the row-level stamp on {@code
              *  nexus.tuples} itself. */
             public Announce(long intervalSeconds, int max) {
-                this(intervalSeconds, max, null);
+                this(intervalSeconds, max, null, null);
+            }
+
+            /** Back-compat constructor (every nexus-q82tk call site): no waiter
+             *  token, so no supersession -- today's behaviour. */
+            public Announce(long intervalSeconds, int max, String subscriber) {
+                this(intervalSeconds, max, subscriber, null);
             }
 
             /** Bounds check (review round, bead nexus-vsipz): a compact constructor
@@ -1106,6 +1112,17 @@ public final class TupleRepository {
                     }
                     checkFieldSize("subscriber", subscriber, TupleLimits.MAX_CLAIMANT_BYTES);
                 }
+                // Bead nexus-rxuiq: the waiter token orders the waits one reader
+                // issues over time, so a newer waiter supersedes an older one's
+                // still-parked wait (see TupleWaitRegistry#admitWaiter). Its shape is
+                // checked here because the ordering parses it.
+                if (waiter != null) {
+                    checkFieldSize("waiter", waiter, TupleLimits.MAX_CLAIMANT_BYTES);
+                    if (!TupleWaitRegistry.isWellFormedWaiterToken(waiter)) {
+                        throw new SchemaViolationException("waiter",
+                                "must be <decimal time_ns>-<alphanumeric id>");
+                    }
+                }
             }
 
             /** {@code true} when the stamp lives in {@code nexus.tuple_deliveries}
@@ -1122,12 +1139,27 @@ public final class TupleRepository {
      *  with nothing to report is simply absent, never present with an empty {@code
      *  tuples} list, so a client iterating results always has cursor-advancing work
      *  to do for every entry it sees. */
-    public record WaitResult(String subspace, List<TupleRow> tuples, String subscriber) {
+    public record WaitResult(String subspace, List<TupleRow> tuples, String subscriber, boolean superseded) {
 
         /** Back-compat constructor (every pre-nexus-q82tk call site): no
          *  subscriber echo. */
         public WaitResult(String subspace, List<TupleRow> tuples) {
-            this(subspace, tuples, null);
+            this(subspace, tuples, null, false);
+        }
+
+        /** Back-compat constructor (every pre-nexus-rxuiq call site): not
+         *  superseded. */
+        public WaitResult(String subspace, List<TupleRow> tuples, String subscriber) {
+            this(subspace, tuples, subscriber, false);
+        }
+
+        /** {@code superseded} (bead nexus-rxuiq): a newer waiter token now owns
+         *  this spec's {@code (subspace, subscriber)}, so this wait returned
+         *  WITHOUT querying or stamping anything -- {@code tuples} is empty, the
+         *  one exception to the "never present with an empty list" rule above.
+         *  A client seeing it should stop waiting; its successor is live. */
+        public static WaitResult supersededFor(WaitSpec spec) {
+            return new WaitResult(spec.subspace(), List.of(), spec.announce().subscriber(), true);
         }
 
         /** {@code subscriber} (bead nexus-q82tk) echoes the {@code
@@ -1201,15 +1233,24 @@ public final class TupleRepository {
             subspaces.add(spec.subspace());
         }
 
+        // Bead nexus-rxuiq: admit every waiter token BEFORE anything queries or
+        // parks. An older token is refused at once; a newer one becomes current and
+        // wakes the older wait still parked on the same (subspace, subscriber), which
+        // then returns superseded instead of stamping the next row for a reader that
+        // is gone.
+        List<WaitResult> refused = admitWaiters(tenant, specs);
+        if (!refused.isEmpty()) {
+            return refused;
+        }
         if (timeoutSeconds <= 0) {
-            return queryEachOnce(tenant, specs);
+            return queryEachOnceFenced(tenant, specs);
         }
         // Registered BEFORE the first query, so a write landing between that query and
         // the first park is not lost (RDR-205 §Technical Design "Wake", the same
         // contract rd/in already honour).
         TupleWaitRegistry.MultiWaiter waiter = waitRegistry.registerMulti(tenant, subspaces);
         try {
-            List<WaitResult> found = queryEachOnce(tenant, specs);
+            List<WaitResult> found = queryEachOnceFenced(tenant, specs);
             if (!found.isEmpty()) {
                 return found;
             }
@@ -1220,15 +1261,15 @@ public final class TupleRepository {
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
                 while (true) {
                     if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                        return queryEachOnce(tenant, specs);
+                        return queryEachOnceFenced(tenant, specs);
                     }
                     try {
                         waiter.awaitSignalOrTimer();
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        return queryEachOnce(tenant, specs);
+                        return queryEachOnceFenced(tenant, specs);
                     }
-                    List<WaitResult> again = queryEachOnce(tenant, specs);
+                    List<WaitResult> again = queryEachOnceFenced(tenant, specs);
                     if (!again.isEmpty()) {
                         return again;
                     }
@@ -1239,6 +1280,40 @@ public final class TupleRepository {
         } finally {
             waiter.release();
         }
+    }
+
+    /** Bead nexus-rxuiq: admits each spec's waiter token in the registry and
+     *  returns a superseded result for every spec whose token is older than the
+     *  current one for its {@code (subspace, subscriber)}; empty when all are
+     *  current or carry no token. */
+    private List<WaitResult> admitWaiters(String tenant, List<WaitSpec> specs) {
+        List<WaitResult> out = new ArrayList<>();
+        for (WaitSpec spec : specs) {
+            WaitSpec.Announce a = spec.announce();
+            if (a != null && a.waiter() != null
+                    && !waitRegistry.admitWaiter(tenant, spec.subspace(), a.subscriber(), a.waiter())) {
+                out.add(WaitResult.supersededFor(spec));
+            }
+        }
+        return out;
+    }
+
+    /** {@link #queryEachOnce}, unless a newer waiter has superseded any spec's
+     *  token since this wait was admitted -- then the superseded results, and no
+     *  query at all, so nothing is stamped for a waiter that has been replaced.
+     *  The check and the stamping query are not atomic: a newer waiter admitted
+     *  in between can still lose one row to this wait, a window of the query's
+     *  own duration where there used to be the whole 25 s park (bead nexus-rxuiq). */
+    private List<WaitResult> queryEachOnceFenced(String tenant, List<WaitSpec> specs) {
+        List<WaitResult> superseded = new ArrayList<>();
+        for (WaitSpec spec : specs) {
+            WaitSpec.Announce a = spec.announce();
+            if (a != null && a.waiter() != null
+                    && !waitRegistry.isCurrentWaiter(tenant, spec.subspace(), a.subscriber(), a.waiter())) {
+                superseded.add(WaitResult.supersededFor(spec));
+            }
+        }
+        return superseded.isEmpty() ? queryEachOnce(tenant, specs) : superseded;
     }
 
     /** Runs {@link #queryOnce} once per {@link WaitSpec} in {@code specs}, in list

@@ -1,13 +1,15 @@
-# RDR-205 v1 template: agent/instance/session mailbox messages.
+# RDR-205 v1 template: agent/session mailbox messages.
 #
 # The nonce in id_from is a sender-minted message id; "from" also enters
 # the id (id_dims) and so must be declared required.
 #
 # address_kind (RDR-208 Phase 1 Step 2, bead nexus-galkv.2): agent (a
-# named subagent), instance (a Claude Code instance name), or session (a
-# session-id mailbox, RDR-208's own addressing scheme). instance is
-# retired after RDR-208 Phase 3 -- kept in the values list through the
-# migration window, removed once every sender addresses by session.
+# named subagent) or session (a session-id mailbox, RDR-208's own
+# addressing scheme). instance (a Claude Code instance name) was retired
+# at RDR-208 Phase 3 (bead nexus-galkv.24): the client release that stops
+# sending it (R3, conexus 7.60.0) shipped first, and only this engine
+# release refuses it -- a value the RDR-205 Phase 6 addressing scheme
+# used before session-id addressing existed.
 name: mailbox/<address>
 
 keys:
@@ -23,7 +25,7 @@ dimensions:
     type: string
   address_kind:
     type: string
-    values: [agent, instance, session]
+    values: [agent, session]
 
 id_from: keys+nonce
 id_dims:

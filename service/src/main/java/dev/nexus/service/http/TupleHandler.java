@@ -44,11 +44,13 @@ import java.util.Optional;
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/wait            {subspaces: [{subspace, keys_pattern?, n?, since?, announce?}, ...], timeout_s?}
- *                                   announce: {interval_s, max, subscriber?} -- subscriber (bead nexus-q82tk)
+ *                                   announce: {interval_s, max, subscriber?, waiter?} -- subscriber (bead nexus-q82tk)
  *                                   keys the stamp per reader in nexus.tuple_deliveries; absent, the stamp
- *                                   is the row's own announced_at/announce_count (bead nexus-vsipz)
- *                                    -&gt; {"results": [{"subspace", "tuples": [...], "subscriber"?}, ...]}
- *                                    subscriber echoes the announce.subscriber the engine honoured (nexus-q82tk)
+ *                                   is the row's own announced_at/announce_count (bead nexus-vsipz); waiter
+ *                                   (bead nexus-rxuiq) is the reader's supersession token, newest wins
+ *                                    -&gt; {"results": [{"subspace", "tuples": [...], "subscriber"?, "superseded"?}, ...]}
+ *                                    subscriber echoes the announce.subscriber the engine honoured (nexus-q82tk);
+ *                                    superseded:true means a newer waiter owns the spec, nothing was stamped
  *                                    (RDR-211 Phase 1 Step 1, bead nexus-rplay.4 -- a multi-subspace {@code rd};
  *                                    parks with NO claimant, one global slot regardless of subspace count; a
  *                                    subspace with no match is simply absent from "results", never present
@@ -272,6 +274,10 @@ public final class TupleHandler implements HttpHandler {
             // bead nexus-q82tk: the subscriber this engine honoured for the spec,
             // additive; absent whenever the spec carried none.
             m.put("subscriber", r.subscriber());
+        }
+        if (r.superseded()) {
+            // bead nexus-rxuiq: a newer waiter owns this spec; additive, absent otherwise.
+            m.put("superseded", true);
         }
         return m;
     }
@@ -772,6 +778,15 @@ public final class TupleHandler implements HttpHandler {
             }
             subscriber = s;
         }
-        return new TupleRepository.WaitSpec.Announce(intervalS, (int) max, subscriber);
+        // waiter (bead nexus-rxuiq): optional, the reader's supersession token.
+        Object waiterRaw = m.get("waiter");
+        String waiter = null;
+        if (waiterRaw != null) {
+            if (!(waiterRaw instanceof String w)) {
+                throw new IllegalArgumentException("waiter must be a string");
+            }
+            waiter = w;
+        }
+        return new TupleRepository.WaitSpec.Announce(intervalS, (int) max, subscriber, waiter);
     }
 }

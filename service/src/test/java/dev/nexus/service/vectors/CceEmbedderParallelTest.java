@@ -85,6 +85,15 @@ class CceEmbedderParallelTest {
     private final Map<String, String> rateLimitRetryAfter = new ConcurrentHashMap<>();
 
     private final List<String> requestTexts = new CopyOnWriteArrayList<>();
+    /** nexus-u2mlh.1: inputs per request, in arrival order. */
+    private final List<Integer> requestSizes = new CopyOnWriteArrayList<>();
+    /** nexus-u2mlh.1: when > 0, a request with more inputs than this gets a 400, the
+     *  way Voyage refuses a pre-chunked request past its token cap. */
+    private final AtomicInteger maxInputsPerRequest = new AtomicInteger(0);
+    /** nexus-u2mlh.1: texts Voyage refuses with a 400 wherever they appear. */
+    private final java.util.Set<String> badRequestTexts = ConcurrentHashMap.newKeySet();
+    /** nexus-u2mlh.1: the {@code usage.total_tokens} each input is billed. */
+    private static final int TOKENS_PER_INPUT = 7;
     private final AtomicInteger inFlight = new AtomicInteger(0);
     private final AtomicInteger maxInFlight = new AtomicInteger(0);
 
@@ -95,6 +104,9 @@ class CceEmbedderParallelTest {
         rateLimitsRemaining.clear();
         rateLimitRetryAfter.clear();
         requestTexts.clear();
+        requestSizes.clear();
+        maxInputsPerRequest.set(0);
+        badRequestTexts.clear();
         inFlight.set(0);
         maxInFlight.set(0);
 
@@ -106,8 +118,12 @@ class CceEmbedderParallelTest {
         server.setExecutor(serverExecutor);
         server.createContext("/v1/contextualizedembeddings", exchange -> {
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            String text = extractText(body);
-            requestTexts.add(text);
+            List<String> texts = extractTexts(body);
+            // Scripted behaviour is keyed by text; a batch takes the first text's script,
+            // which is all the one-text-per-call tests below ever send.
+            String text = texts.get(0);
+            requestTexts.addAll(texts);
+            requestSizes.add(texts.size());
 
             int current = inFlight.incrementAndGet();
             maxInFlight.updateAndGet(prev -> Math.max(prev, current));
@@ -117,6 +133,11 @@ class CceEmbedderParallelTest {
                     Thread.sleep(delay);
                 }
 
+                int cap = maxInputsPerRequest.get();
+                if ((cap > 0 && texts.size() > cap) || texts.stream().anyMatch(badRequestTexts::contains)) {
+                    sendStatus(exchange, 400, "{\"detail\": \"too many tokens in request\"}");
+                    return;
+                }
                 AtomicInteger rl = rateLimitsRemaining.get(text);
                 if (rl != null && rl.get() > 0) {
                     rl.decrementAndGet();
@@ -133,7 +154,7 @@ class CceEmbedderParallelTest {
                     sendStatus(exchange, 500, "{\"detail\": \"upstream sad\"}");
                     return;
                 }
-                sendStatus(exchange, 200, cceResponseBody(text));
+                sendStatus(exchange, 200, cceResponseBody(texts));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } finally {
@@ -166,10 +187,17 @@ class CceEmbedderParallelTest {
      * HttpHandler} lambda, whose functional interface only permits {@link
      * java.io.IOException}.
      */
-    private static String extractText(String requestBody) {
+    private static List<String> extractTexts(String requestBody) {
         try {
             JsonNode root = MAPPER.readTree(requestBody);
-            return root.get("inputs").get(0).get(0).asText();
+            List<String> out = new java.util.ArrayList<>();
+            for (JsonNode doc : root.get("inputs")) {
+                if (doc.size() != 1) {
+                    throw new IllegalStateException("each input must be a single-chunk document: " + doc);
+                }
+                out.add(doc.get(0).asText());
+            }
+            return out;
         } catch (Exception e) {
             throw new RuntimeException("failed to parse fake CCE request body: " + requestBody, e);
         }
@@ -191,9 +219,23 @@ class CceEmbedderParallelTest {
         return Base64.getEncoder().encodeToString(buf.array());
     }
 
-    private static String cceResponseBody(String text) {
-        String b64 = encodeBase64Float32(vectorFor(text));
-        return "{\"data\": [{\"index\": 0, \"data\": [{\"index\": 0, \"embedding\": \"" + b64 + "\"}]}]}";
+    /** Documents listed in REVERSE index order, so a parser that trusts list order
+     *  instead of {@code index} misplaces every vector in a batch. */
+    private static String cceResponseBody(List<String> texts) {
+        StringBuilder sb = new StringBuilder("{\"data\": [");
+        for (int i = texts.size() - 1; i >= 0; i--) {
+            String b64 = encodeBase64Float32(vectorFor(texts.get(i)));
+            sb.append("{\"index\": ").append(i).append(", \"data\": [{\"index\": 0, \"embedding\": \"")
+              .append(b64).append("\"}]}");
+            if (i > 0) sb.append(", ");
+        }
+        sb.append("], \"usage\": {\"total_tokens\": ").append(TOKENS_PER_INPUT * texts.size()).append("}}");
+        return sb.toString();
+    }
+
+    private CceEmbedder batchedEmbedder(int parallelism, int batchChunks) {
+        return new CceEmbedder("test-key", "document", url, 5L, parallelism,
+                               Optional.empty(), new Random(), 20_000L, batchChunks);
     }
 
     private CceEmbedder embedder(int parallelism) {
@@ -273,11 +315,9 @@ class CceEmbedderParallelTest {
             for (int i = 0; i < texts.size(); i++) {
                 assertThat(result.embeddings().get(i)).isEqualTo(vectorFor(texts.get(i)));
             }
-            // Every fake response omits "usage" (0 tokens) — the sum being
-            // exactly 0 here just confirms summation ran over all 4 without
-            // throwing; the token-accumulation shape itself is exercised by
-            // the pre-existing sequential nexus-ehc4q behavior (unchanged).
-            assertThat(result.tokens()).isEqualTo(0L);
+            // nexus-u2mlh.1: the fake bills TOKENS_PER_INPUT per input, so this
+            // checks the sum across every call, not just that summation ran.
+            assertThat(result.tokens()).isEqualTo((long) TOKENS_PER_INPUT * texts.size());
         }
     }
 
@@ -764,5 +804,130 @@ class CceEmbedderParallelTest {
         try (CceEmbedder cce = embedder(2)) {
             assertThat(cce.embed(texts)).hasSize(3);
         }
+    }
+
+    // ── nexus-u2mlh.1: batched single-chunk documents (shape C) ──────────────
+
+    @Test
+    void batchedRequestsCarrySingleChunkDocumentsAndKeepInputOrder() {
+        List<String> texts = new java.util.ArrayList<>();
+        for (int i = 0; i < 30; i++) texts.add("batched-" + i);
+        // The last batch answers first; order must still follow the input.
+        latencyMs.put("batched-0", 150L);
+        CceEmbedder cce = batchedEmbedder(4, 12);
+        try {
+            EmbedResult result = cce.embedWithUsage(texts);
+            assertThat(requestSizes).containsExactlyInAnyOrder(12, 12, 6);
+            for (int i = 0; i < texts.size(); i++) {
+                assertThat(result.embeddings().get(i)).as("vector %d", i).isEqualTo(vectorFor(texts.get(i)));
+            }
+            assertThat(result.tokens()).isEqualTo((long) TOKENS_PER_INPUT * texts.size());
+        } finally {
+            cce.close();
+        }
+    }
+
+    @Test
+    void aBatchRefusedWith400IsRetriedOneTextAtATime() {
+        List<String> texts = List.of("r-0", "r-1", "r-2", "r-3", "r-4");
+        maxInputsPerRequest.set(1);
+        CceEmbedder cce = batchedEmbedder(2, 12);
+        try {
+            List<float[]> vectors = cce.embed(texts);
+            for (int i = 0; i < texts.size(); i++) {
+                assertThat(vectors.get(i)).isEqualTo(vectorFor(texts.get(i)));
+            }
+            assertThat(requestSizes).as("one refused batch, then one call per text")
+                    .containsExactly(5, 1, 1, 1, 1, 1);
+        } finally {
+            cce.close();
+        }
+    }
+
+    @Test
+    void aTextRefusedEvenAloneFailsTheWholeRequest() {
+        badRequestTexts.add("bad");
+        CceEmbedder cce = batchedEmbedder(2, 12);
+        try {
+            assertThatThrownBy(() -> cce.embed(List.of("good-0", "bad", "good-1")))
+                    .isInstanceOf(CceEmbedder.CceStatusException.class)
+                    .hasMessageContaining("HTTP 400");
+            assertThat(requestSizes).as("the batch, then texts alone until the bad one fails")
+                    .startsWith(3, 1, 1);
+        } finally {
+            cce.close();
+        }
+    }
+
+    @Test
+    void planBatchesRespectsTheCountAndTheByteBudget() {
+        CceEmbedder cce = batchedEmbedder(1, 3);
+        try {
+            // Exactly the budget: it cannot share a batch with anything.
+            String big = "x".repeat(CceEmbedder.BATCH_MAX_BYTES);
+            List<int[]> plan = cce.planBatches(List.of("a", "b", "c", "d", big, "e", "f"));
+            assertThat(plan).extracting(r -> r[0] + "-" + r[1])
+                    .containsExactly("0-3", "3-4", "4-5", "5-7");
+            String over = "y".repeat(CceEmbedder.BATCH_MAX_BYTES + 1);
+            assertThat(cce.planBatches(List.of(over))).extracting(r -> r[0] + "-" + r[1])
+                    .as("a text over the budget still goes, alone").containsExactly("0-1");
+        } finally {
+            cce.close();
+        }
+    }
+
+    @Test
+    void envIntTakesTheDefaultForBlankAndRefusesBadValues() {
+        assertThat(CceEmbedder.envInt("X", null, 12, 1, 64)).isEqualTo(12);
+        assertThat(CceEmbedder.envInt("X", "  ", 12, 1, 64)).isEqualTo(12);
+        assertThat(CceEmbedder.envInt("X", "24", 12, 1, 64)).isEqualTo(24);
+        assertThat(CceEmbedder.envInt("X", "0", 12, 1, 64)).isEqualTo(12);
+        assertThat(CceEmbedder.envInt("X", "65", 12, 1, 64)).isEqualTo(12);
+        assertThat(CceEmbedder.envInt("X", "twelve", 12, 1, 64)).isEqualTo(12);
+    }
+
+    @Test
+    void expiredDeadlineCancelsUnstartedBatches() throws Exception {
+        int parallelism = 1;
+        List<String> texts = new ArrayList<>();
+        for (int i = 0; i < 36; i++) {
+            String t = "dl-batch-" + i;
+            texts.add(t);
+        }
+        latencyMs.put("dl-batch-0", 50L);
+        try (CceEmbedder cce = batchedEmbedder(parallelism, 12)) {
+            setRequestDeadline(System.nanoTime());  // already expired at the first check
+            try {
+                assertThatThrownBy(() -> cce.embed(texts))
+                        .isInstanceOf(RequestDeadlineExceededException.class)
+                        .hasMessageContaining("0/36 chunks");
+            } finally {
+                clearRequestDeadline();
+            }
+            awaitPermitsBack(cce, parallelism);
+        }
+        assertThat(requestSizes.size()).as("at most the first batch was dispatched").isLessThanOrEqualTo(1);
+    }
+
+    @Test
+    void theFallbackStopsAtAnExpiredDeadlineInsteadOfHoldingItsPermit() throws Exception {
+        maxInputsPerRequest.set(1);  // every multi-text batch is refused
+        List<String> texts = List.of("fb-0", "fb-1", "fb-2", "fb-3");
+        try (CceEmbedder cce = batchedEmbedder(1, 12)) {
+            // Far enough out that the first check passes and the batch is sent and
+            // refused; the fallback then finds it expired between its single calls.
+            latencyMs.put("fb-0", 300L);
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(150));
+            try {
+                assertThatThrownBy(() -> cce.embed(texts))
+                        .isInstanceOf(RequestDeadlineExceededException.class)
+                        .hasMessageContaining("per-text fallback");
+            } finally {
+                clearRequestDeadline();
+            }
+            awaitPermitsBack(cce, 1);
+        }
+        assertThat(requestSizes).as("the refused batch, and no single call after the deadline")
+                .containsExactly(4);
     }
 }

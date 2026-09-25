@@ -344,6 +344,18 @@ class _FakeTupleStore:
         return results
 
 
+class _SupersedingFake(_FakeTupleStore):
+    """The engine's answer to a replaced waiter (bead nexus-rxuiq): every spec
+    comes back superseded, with no rows and nothing stamped."""
+
+    def wait(self, specs, timeout_s):
+        self.wait_calls.append((list(specs), timeout_s))
+        return [
+            WaitResult(subspace=spec.subspace, tuples=[], subscriber=spec.announce.subscriber, superseded=True)
+            for spec in specs
+        ]
+
+
 class _Db:
     def __init__(self, fake: _FakeTupleStore) -> None:
         self.tuples = fake
@@ -843,6 +855,7 @@ class TestChannelWaiterFakeStore:
         assert board_spec.since is None
         assert board_spec.announce == Announce(
             interval_s=0, max=channel.DEFAULT_BOARD_MAX_ANNOUNCES, subscriber=session_id,
+            waiter=waiter.waiter_token,
         )
         assert all("cursor" not in e for e in subs.entries())
 
@@ -1542,3 +1555,120 @@ class TestDoctorProbeNeverStartsAWaiter:
 
         with pytest.raises(AssertionError, match="reached"):
             _unguarded()
+
+
+
+# ── nexus-rxuiq: a replaced waiter's parked call must not stamp for nobody ──
+
+
+class TestWaiterSupersession:
+    @pytest.mark.asyncio
+    async def test_every_spec_carries_this_waiters_token_and_a_later_waiter_mints_a_larger_one(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        subs.subscribe(
+            "board/release-notes", templates=[],
+            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+            state_dir=None,
+        )
+        first = channel.ChannelWaiter(session_id, _fake_store_factory(_FakeTupleStore()), subs, sender=_FakeSender())
+        second = channel.ChannelWaiter(session_id, _fake_store_factory(_FakeTupleStore()), subs, sender=_FakeSender())
+        specs = first._build_specs()  # noqa: SLF001
+        assert {spec.announce.waiter for spec in specs} == {first.waiter_token}
+        assert len(specs) == 2, "the session mailbox and the board both carry it"
+
+        def order(token: str) -> tuple[int, str]:
+            time_ns, _, ident = token.partition("-")
+            return int(time_ns), ident
+
+        assert order(second.waiter_token) > order(first.waiter_token)
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_answer_stops_the_waiter_without_sending(self) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _SupersedingFake()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter.tick()
+
+        assert waiter.status()["stopped_reason"] == "superseded"
+        assert waiter._stopped is True  # noqa: SLF001
+        assert sender.calls == []
+
+
+class TestWaiterSupersessionRealEngine:
+    """The reproduction behind nexus-rxuiq, against the real engine: the first
+    waiter lives in a process that dies with its wait still parked, and a
+    second waiter for the SAME session starts inside that wait's park. Before
+    the fix, the dead process's parked call took the next row and the engine
+    stamped it announced for nobody; the live waiter never heard of it."""
+
+    _DYING_WAITER = r"""
+import asyncio, os, sys
+from nexus.mcp import channel
+from nexus.mcp.subscriptions import SubscriptionSet
+from nexus.mcp_infra import t2_ctx
+
+session_id = sys.argv[1]
+sent = []
+
+async def sender(content, meta):
+    sent.append(meta.get("tuple_id"))
+    return True
+
+async def main():
+    w = channel.ChannelWaiter(session_id, t2_ctx, SubscriptionSet(session_id=session_id), sender=sender)
+    asyncio.create_task(w.run())
+    while not sent:
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(1.0)   # the next wait is parked on the engine
+    print("SENT", sent[0], flush=True)
+    os._exit(0)                # process death: no cancel, no close
+
+asyncio.run(main())
+"""
+
+    def test_a_dead_processs_parked_wait_no_longer_takes_the_next_row(self, t2_service_env) -> None:
+        import subprocess
+        import sys
+
+        from nexus.mcp.core import tuple_out
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", self._DYING_WAITER, session_id],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        time.sleep(2.0)
+        first = tuple_out(addr, {"to": session_id}, {"from": "sender"}, "first", nonce=uuid.uuid4().hex)
+        out, _ = proc.communicate(timeout=60)
+        # Non-vacuity: the dying waiter really announced a row and re-parked,
+        # so its parked call is the orphan this test is about.
+        assert f"SENT {first}" in out, out
+
+        async def scenario() -> list[str]:
+            sender = _FakeSender()
+            waiter = channel.ChannelWaiter(session_id, t2_ctx_factory(), _subs(session_id), sender=sender)
+            task = asyncio.create_task(waiter.run())
+            await asyncio.sleep(1.0)
+            second = tuple_out(addr, {"to": session_id}, {"from": "sender"}, "second", nonce=uuid.uuid4().hex)
+            for _ in range(100):
+                if any(m.get("tuple_id") == second for _c, m in sender.calls):
+                    break
+                await asyncio.sleep(0.1)
+            await waiter.cancel()
+            return [m.get("tuple_id") for _c, m in sender.calls], second
+
+        sent, second = asyncio.run(scenario())
+        assert second in sent, (
+            "the live waiter must be told about the row written after the old process died; "
+            f"it was told about {sent}"
+        )
+
+
+def t2_ctx_factory():
+    from nexus.mcp_infra import t2_ctx
+
+    return t2_ctx

@@ -101,6 +101,7 @@ import asyncio
 import json
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -353,6 +354,25 @@ def _board_notification_content(subspace: str, tuple_id: str) -> str:
     )
 
 
+_last_waiter_token_ns = 0
+
+
+def _mint_waiter_token() -> str:
+    """``<time_ns>-<uuid4 hex>``, strictly increasing within this process
+    (bead nexus-rxuiq): the engine orders tokens by time, then by id, and a
+    same-nanosecond tie broken by a random id would let the earlier of two
+    waiters win. Across processes the wall clock orders them, which is what a
+    ``claude --resume`` into a new process needs; two processes minting in
+    the same nanosecond are ordered arbitrarily. Known limitation: if the
+    host clock STEPS backwards between an old process's mint and its
+    successor's, the successor loses and stops as ``superseded``; the drain
+    hook still delivers, and an MCP restart mints a fresh token."""
+    global _last_waiter_token_ns
+    now = max(time.time_ns(), _last_waiter_token_ns + 1)
+    _last_waiter_token_ns = now
+    return f"{now}-{uuid.uuid4().hex}"
+
+
 class ChannelWaiter:
     """One session's lifespan waiter: loops ``HttpTupleStore.wait`` over
     its :class:`~nexus.mcp.subscriptions.SubscriptionSet`, delivering
@@ -470,6 +490,13 @@ class ChannelWaiter:
         #: -- one predating THIS bead). `cancel()`'s own stop (a normal
         #: lifespan teardown) leaves this `None` -- it is not a fault.
         self._stopped_reason: str | None = None
+        #: Bead nexus-rxuiq: this waiter's supersession token, sent on every
+        #: announce spec. A later waiter for the same session mints a larger
+        #: one (see `_mint_waiter_token` for how far that holds), and the engine then refuses this one's waits, including a
+        #: call still parked after this waiter was cancelled or its process
+        #: died, instead of letting that call stamp the next row as
+        #: announced for nobody.
+        self.waiter_token = _mint_waiter_token()
         self._last_wake: datetime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
@@ -495,9 +522,10 @@ class ChannelWaiter:
         `_stop_no_wait_support`/`_stop_no_announce_support` or a real
         cancellation). `stopped_reason` (bead nexus-vsipz review round):
         `None` while alive or on an ordinary `cancel()` teardown;
-        `"no_wait_support"`, `"no_announce_support"` or
-        `"no_subscriber_support"` (bead nexus-q82tk) when one of those
-        three loud stops fired -- lets a reader (the doctor row) name WHY
+        `"no_wait_support"`, `"no_announce_support"`,
+        `"no_subscriber_support"` (bead nexus-q82tk) or `"superseded"`
+        (bead nexus-rxuiq, a newer waiter for this session took over) when
+        one of those loud stops fired -- lets a reader (the doctor row) name WHY
         the waiter is not alive instead of only THAT it is not.
         `last_wake`: ISO-8601 timestamp of the last
         completed `wait()` round-trip, or `None` before the first one.
@@ -623,6 +651,9 @@ class ChannelWaiter:
                 self._stop_no_wait_support()
                 return
             raise  # any other status is a transient fault: `run()` logs, backs off and ticks again
+        if any(result.superseded for result in results):
+            self._stop_superseded()
+            return
         if self._engine_ignores_announce(results):
             self._stop_no_announce_support()
             return
@@ -683,6 +714,16 @@ class ChannelWaiter:
                 return True
         return False
 
+    def _stop_superseded(self) -> None:
+        """Bead nexus-rxuiq: the engine answered that a newer waiter owns this
+        session's subscriptions. In practice this waiter's task was already
+        cancelled and nobody reads this; if two live waiters ever did share a
+        session, the older one stops here rather than contending, and the
+        drain hook stays the floor for it."""
+        self._stopped = True
+        self._stopped_reason = "superseded"
+        _log.warning("channel_waiter_superseded", session_id=self.session_id)
+
     def _stop_no_subscriber_support(self) -> None:
         self._stopped = True
         self._stopped_reason = "no_subscriber_support"
@@ -707,13 +748,16 @@ class ChannelWaiter:
                     subspace=subspace,
                     announce=Announce(
                         interval_s=int(self.reannounce_interval_s), max=DEFAULT_BOARD_MAX_ANNOUNCES,
-                        subscriber=self.session_id,
+                        subscriber=self.session_id, waiter=self.waiter_token,
                     ),
                 ))
             else:
                 specs.append(WaitSpec(
                     subspace=subspace, n=1,
-                    announce=Announce(interval_s=int(self.reannounce_interval_s), max=self.max_announces),
+                    announce=Announce(
+                        interval_s=int(self.reannounce_interval_s), max=self.max_announces,
+                        waiter=self.waiter_token,
+                    ),
                 ))
         return specs
 

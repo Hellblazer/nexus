@@ -387,9 +387,14 @@ def normalize_latex_spacing(s: str) -> str:
 
     s = re.sub(r"\\text\{[^}]*\}", _save_text, s)
 
-    # Rule 3: collapse all whitespace in the formula string.
-    # Safe because this function is only called on formula content, not prose.
+    # Rule 3: collapse all whitespace in the formula string, except the one
+    # space that terminates a control word before a letter (nexus-pwlqq):
+    # TeX reads ``\alpha A`` as two tokens and ``\alphaA`` as one undefined
+    # macro. A control symbol such as ``\\`` has no letters, so it never
+    # matches. Safe because this function is only called on formula content.
+    s = re.sub(r"(\\[A-Za-z]+)\s+(?=[A-Za-z])", "\\1\x01", s)
     s = re.sub(r"\s+", "", s)
+    s = s.replace("\x01", " ")
 
     # Restore \text{...} groups with their original internal spacing.
     for i, t in enumerate(_placeholders):

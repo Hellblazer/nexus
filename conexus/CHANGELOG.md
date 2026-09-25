@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.61.0] - 2026-09-24
+
+Plugin version aligned with conexus 7.61.0. The plugin-side changes go live as
+`source.ref` advances to `v7.61.0`.
+
+- The `mailbox` skill's low-level cross-session request/ack pattern uses
+  `address_kind: session`; engine-service-v0.1.131 refuses `instance`
+  (RDR-208 Phase 3, nexus-galkv.24).
+
 ## [7.60.0] - 2026-09-24
 
 Plugin version aligned with conexus 7.60.0. The plugin-side changes go live as

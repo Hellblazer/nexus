@@ -41,7 +41,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.60.0)
+## Awaiting the next release or plugin cut (pinned: v7.61.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
