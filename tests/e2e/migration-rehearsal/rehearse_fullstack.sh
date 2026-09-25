@@ -2,11 +2,12 @@
 # Full-stack isolated shakeout — runs INSIDE the container.
 #
 # Real topology: PG16+pgvector + native nexus-service (T2+T3) + nx-mcp (hooks +
-# aspect worker) + linux `claude` CLI (mounted oauth). Drives the surfaces
-# THROUGH the nexus MCP via `claude -p` so the post-store hooks ENQUEUE aspects
-# and the MCP worker DRAINS them with REAL extraction — what the bare-CLI box
-# could not do. Auth: ~/.claude/.credentials.json mounted read-only (real billed
-# calls). NOT DinD: PG provisioned in-box by `nx init --service`.
+# aspect worker) + linux `claude` CLI (RDR-219 automation token via
+# CLAUDE_CODE_OAUTH_TOKEN in the environment). Drives the surfaces THROUGH the
+# nexus MCP via `claude -p` so the post-store hooks ENQUEUE aspects and the MCP
+# worker DRAINS them with REAL extraction — what the bare-CLI box could not do.
+# Auth: the harness's own automation token, never the operator's interactive
+# login (real billed calls). NOT DinD: PG provisioned in-box by `nx init --service`.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 FAILS=0

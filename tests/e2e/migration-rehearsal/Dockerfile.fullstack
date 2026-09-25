@@ -9,9 +9,11 @@
 # worker DRAINS them with REAL extraction — the path the bare-CLI box could not
 # exercise (no MCP, no claude).
 #
-# Auth: the host's ~/.claude/.credentials.json (oauth) is mounted read-only at
-# run time (run.sh --fullstack); real, billed claude calls. Data/PG stay
-# container-isolated. NOT DinD: PG is provisioned in-box by `nx init --service`.
+# Auth (RDR-219): the harness's own automation token (never the operator's
+# interactive login) reaches the container at run time as CLAUDE_CODE_OAUTH_TOKEN
+# in the environment (run.sh --fullstack, via claude_credentials.py run --);
+# real, billed claude calls. Data/PG stay container-isolated. NOT DinD: PG is
+# provisioned in-box by `nx init --service`.
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
