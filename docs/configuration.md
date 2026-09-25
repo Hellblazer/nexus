@@ -159,7 +159,7 @@ aspects:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `docs_collections` | `[]` | Glob patterns naming the `docs__` collections to extract. A matching collection's prose files (`.md`, `.markdown`, `.txt`, `.rst`) get `general-prose-v1` (summary, key decisions, entities, open questions); its other files are skipped. Also accepts a comma-separated string, so `nx config set aspects.docs_collections "docs__1-29__*,docs__1-41__*"` works. Documents already indexed are not queued retroactively: run `nx enrich aspects <collection>` after opting in. |
+| `docs_collections` | `[]` | Glob patterns naming the `docs__` collections to extract. A matching collection's prose files (`.md`, `.markdown`, `.mdx`, `.rst`, `.adoc`, `.asciidoc`, `.org`, `.txt`) get `general-prose-v1` (summary, key decisions, entities, open questions); its other files (fixtures, word lists, graphs) are skipped. Also accepts a comma-separated string, so `nx config set aspects.docs_collections "docs__1-29__*,docs__1-41__*"` works. Documents already indexed are not queued retroactively: run `nx enrich aspects <collection>` after opting in. Opting a collection back OUT stops new extraction but does not delete aspect rows already written; `nx enrich delete <collection> <source_path>` removes one row, and there is no bulk form yet (nexus-kk4ut follow-up). The setting is per machine (this config file), while aspect rows are shared by the tenant, so opt in on every machine that indexes the collection. |
 
 ## Daemon environment variables
 

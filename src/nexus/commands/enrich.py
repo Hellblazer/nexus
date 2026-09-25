@@ -1343,7 +1343,7 @@ def _select_entries(
         entries = [e for e in entries if extraction_applies_to_source(collection, e.file_path or "")]
         click.echo(
             f"Skipping {len(non_prose)} non-prose document(s) in {collection} "
-            f"(only .md, .markdown, .txt and .rst files are extracted in docs__)."
+            f"(only prose files such as .md, .rst, .adoc and .txt are extracted in docs__)."
         )
     # nexus-3ygp3: zero catalog rows is a refusal, never "No documents to
     # process" at exit 0 (a bare name select_config prefix-matched but the

@@ -1775,49 +1775,64 @@ class TestDocsOptIn:
         from nexus.aspect_extractor import select_config
 
         self._config(monkeypatch, [])
-        assert select_config("docs__1-29__voyage-context-3__v1") is None
+        assert select_config("docs__1-29") is None
 
     def test_a_matching_glob_routes_to_general_prose(self, monkeypatch) -> None:
         from nexus.aspect_extractor import eligible_extractor_names, select_config
 
-        self._config(monkeypatch, ["docs__1-29__*"])
-        config = select_config("docs__1-29__voyage-context-3__v1")
+        self._config(monkeypatch, ["docs__1-29*"])
+        config = select_config("docs__1-29")
         assert config is not None and config.extractor_name == "general-prose-v1"
-        assert eligible_extractor_names("docs__1-29__voyage-context-3__v1") == ["general-prose-v1"]
-        assert select_config("docs__1-41__voyage-context-3__v1") is None
+        assert eligible_extractor_names("docs__1-29") == ["general-prose-v1"]
+        assert select_config("docs__1-41") is None
 
     def test_a_comma_separated_string_is_accepted(self, monkeypatch) -> None:
         from nexus.aspect_extractor import select_config
 
-        self._config(monkeypatch, "docs__a__*, docs__b__*")
-        assert select_config("docs__b__voyage-context-3__v1") is not None
-        assert select_config("docs__c__voyage-context-3__v1") is None
+        self._config(monkeypatch, "docs__a*, docs__b*")
+        assert select_config("docs__b") is not None
+        assert select_config("docs__c") is None
 
     def test_the_opt_in_never_widens_other_prefixes(self, monkeypatch) -> None:
         from nexus.aspect_extractor import select_config
 
         self._config(monkeypatch, ["*"])
-        assert select_config("code__nexus__voyage-code-3__v1") is None
+        assert select_config("code__nexus") is None
         # knowledge__ keeps its own base config; the docs opt-in never applies.
         assert select_config("knowledge__delos").extractor_name == "scholarly-paper-v1"
 
     @pytest.mark.parametrize(
         ("source_path", "expected"),
         [("docs/guide.md", True), ("README.MARKDOWN", True), ("notes.txt", True), ("api.rst", True),
+         ("page.mdx", True), ("manual.adoc", True), ("plan.org", True),
          ("words.dict", False), ("fixtures/rows.jsonl", False), ("graph.dot", False)],
     )
     def test_only_prose_files_qualify_inside_docs(self, source_path, expected) -> None:
         from nexus.aspect_extractor import extraction_applies_to_source
 
-        assert extraction_applies_to_source("docs__x__voyage-context-3__v1", source_path) is expected
+        assert extraction_applies_to_source("docs__x", source_path) is expected
         # Outside docs__, the file type never gates extraction.
         assert extraction_applies_to_source("knowledge__x", source_path) is True
 
     def test_the_enqueue_hook_skips_a_non_prose_file_in_an_opted_in_collection(self, monkeypatch) -> None:
         import nexus.aspect_worker as aw
 
-        self._config(monkeypatch, ["docs__x__*"])
+        self._config(monkeypatch, ["docs__x*"])
         seen: list[str] = []
         monkeypatch.setattr(aw, "_canonicalize_source_path", lambda c, p: seen.append(p) or p)
-        aw.aspect_extraction_enqueue_hook("fixtures/rows.jsonl", "docs__x__voyage-context-3__v1", "")
+        aw.aspect_extraction_enqueue_hook("fixtures/rows.jsonl", "docs__x", "")
         assert seen == [], "a .jsonl file in an opted-in docs__ collection must not reach enqueue"
+
+
+def test_an_unreadable_config_means_not_opted_in_and_never_raises(monkeypatch) -> None:
+    """nexus-kk4ut code review: select_config runs on the aspect worker's
+    batch path outside any row handler, so a malformed config.yml must not
+    raise out of the docs__ opt-in lookup and kill the worker thread."""
+    from nexus.aspect_extractor import select_config
+
+    def _broken(*_a, **_k):
+        raise ValueError("config.yml: mapping values are not allowed here")
+
+    monkeypatch.setattr("nexus.config.load_config", _broken)
+    assert select_config("docs__anything") is None
+    assert select_config("knowledge__delos").extractor_name == "scholarly-paper-v1"

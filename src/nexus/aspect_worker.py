@@ -1585,7 +1585,9 @@ def aspect_extraction_enqueue_hook(
     if select_config(collection) is None:
         return  # No extractor for this collection — nothing to enqueue.
     if not extraction_applies_to_source(collection, source_path):
-        return  # nexus-kk4ut: an opted-in docs__ collection's non-prose file.
+        # nexus-kk4ut: an opted-in docs__ collection's non-prose file.
+        _log.debug("aspect_enqueue_skipped_non_prose", collection=collection, source_path=source_path)
+        return
     # RDR-145 Gap-2: canonicalize a file-backed source_path against the
     # catalog before persisting the queue row (forward-only; never guesses).
     source_path = _canonicalize_source_path(collection, source_path)

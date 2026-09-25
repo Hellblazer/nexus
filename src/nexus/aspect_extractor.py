@@ -755,15 +755,29 @@ def _truncate(text: str, cap: int) -> str:
 #: config.yml names the collection (glob patterns, a YAML list or a comma-
 #: separated string, the ``taxonomy.local_exclude_collections`` shape).
 _DOCS_PREFIX: str = "docs__"
-#: The files in an opted-in docs__ collection that are prose worth a call;
-#: ``nx index repo`` also sweeps dictionaries, fixtures and graphs into it.
-_DOCS_PROSE_SUFFIXES: tuple[str, ...] = (".md", ".markdown", ".txt", ".rst")
+#: The files in an opted-in docs__ collection that are prose worth a call.
+#: Not ``classifier.classify_file``: every file in a docs__ collection is
+#: already PROSE by that classifier, whose unknown-extension fall-through is
+#: exactly how .jsonl fixtures, .dict word lists and .dot graphs land there
+#: (measured 2026-09-25). This is the narrower "prose a reader wrote" set.
+_DOCS_PROSE_SUFFIXES: tuple[str, ...] = (
+    ".md", ".markdown", ".mdx", ".rst", ".adoc", ".asciidoc", ".org", ".txt",
+)
 
 
 def _docs_opt_in_patterns() -> list[str]:
+    """The configured opt-in patterns, or ``[]`` when the config cannot be
+    read. Never raises: ``select_config`` runs on the aspect worker's batch
+    path outside any row-level handler, and a malformed config.yml must not
+    kill the worker thread (and with it knowledge__/rdr__ extraction) over a
+    docs__ lookup. Failing closed means "not opted in"."""
     from nexus.config import load_config  # noqa: PLC0415 — deferred: config import is heavier than this module's callers need at load
 
-    raw = (load_config().get("aspects") or {}).get("docs_collections") or []
+    try:
+        raw = (load_config().get("aspects") or {}).get("docs_collections") or []
+    except Exception as exc:  # noqa: BLE001 — any config failure means "not opted in", never a crash on the worker path
+        _log.warning("aspects_docs_opt_in_unreadable", error=f"{type(exc).__name__}: {exc}")
+        return []
     if isinstance(raw, str):
         raw = [p.strip() for p in raw.split(",")]
     return [str(p) for p in raw if str(p).strip()]
