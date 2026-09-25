@@ -12,7 +12,8 @@
 # Step 6 (/branch) follows the plugin under test: one whose SessionStart
 # matcher names `fork` must hand the MCP server off to the fork; one without
 # it must reproduce the pre-fix behaviour. Ends "RDR-208 LOCAL-MODE MVV
-# PASSED" or FAILED; exits 2 (UNVERIFIED) with no usable oauth credential.
+# PASSED" or FAILED; exits non-zero (naming `claude setup-token` on stderr)
+# with no usable automation token, or 2 with no docker binary.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
@@ -27,26 +28,20 @@ while [ $# -gt 0 ]; do
 done
 command -v docker > /dev/null || { echo "docker is required" >&2; exit 2; }
 
-# The sessions are real: a usable oauth credential, picked by CONTENT from the
-# keychain (never a bare keychain lookup; tests/e2e/lib/claude_credentials.py),
-# with the on-disk file as the fallback only when it passes the same check.
-# Without one this run is UNVERIFIED (exit 2), never a skip-pass.
-FRESHCREDS="$(python3 "$CRED_TOOL" pick 2>/dev/null || true)"
-if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ] \
-   && python3 "$CRED_TOOL" check "$HOME/.claude/.credentials.json" > /dev/null 2>&1; then
-    echo "(keychain miss: falling back to ~/.claude/.credentials.json, may be stale)" >&2
-    FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
-fi
-if [ -z "$FRESHCREDS" ]; then
-    echo "RDR-208 LOCAL-MODE MVV UNVERIFIED: no usable Claude oauth credential (run tests/e2e/auth-login.sh)" >&2
-    exit 2
-fi
+# RDR-219 (harness credentials never leave the keychain): the container gets
+# CLAUDE_CODE_OAUTH_TOKEN as an environment variable, never a mounted
+# .credentials.json file (T2 nexus_rdr/219-research-10, launch shape A2 --
+# no credential mount). The sessions are real: tests/e2e/lib/claude_credentials.py's
+# `run` mode reads the harness's own automation identity from the keychain
+# (never the operator's interactive login) and execs `docker run` with the
+# token in ITS OWN environment; `docker run -e
+# CLAUDE_CODE_OAUTH_TOKEN` (no `=value`) below then copies it into the
+# container's environment from there. Without a usable token this exits
+# non-zero naming `claude setup-token`, and the container is never built or
+# started.
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/rdr208-mvv.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
-umask 077
-printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"
-umask 022
 cp "$HERE/Dockerfile" "$HERE/mvv_in_container.sh" "$HERE/send.py" "$HERE/assistant_said.py" "$HERE/turn_end.py" "$HERE/channel_wakes.py" "$STAGE/"
 mkdir -p "$STAGE/wheel" "$STAGE/plugin/.claude-plugin" "$STAGE/plugin/hooks/scripts"
 if [ -n "$PUBLISHED" ]; then
@@ -158,20 +153,17 @@ rm -rf "$STAGE/conexus"
 if grep -qE '\bfork\b' <<<"$MATCHER"; then EXPECT=1; else EXPECT=0; fi
 printf '{"skipDangerousModePermissionPrompt": true}\n' > "$STAGE/settings.json"
 # ~/.claude.json pre-seed: onboarding done, the work dir trusted (never the
-# poll-and-press-Enter path), the oauthAccount block when the login snapshot
-# carries one. Mounted read-only; the container copies it into place.
-python3 - "$STAGE/claude.json" "$ROOT/tests/e2e/.claude-auth/claude.json" <<'PY'
+# poll-and-press-Enter path). No oauthAccount block: T2 nexus_rdr/219-
+# research-14 verified authentication needs only CLAUDE_CODE_OAUTH_TOKEN in
+# the environment in this launch shape (A2), among others. Mounted
+# read-only; the container copies it into place.
+python3 - "$STAGE/claude.json" <<'PY'
 import json, pathlib, sys
-out, snap = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-data = {}
-if snap.is_file():
-    try:
-        data = json.loads(snap.read_text() or "{}")
-    except ValueError:
-        data = {}
-data = {k: v for k, v in data.items() if k in ("oauthAccount",)}
-data["hasCompletedOnboarding"] = True
-data["projects"] = {"/home/nexus/work": {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}}
+out = pathlib.Path(sys.argv[1])
+data = {
+    "hasCompletedOnboarding": True,
+    "projects": {"/home/nexus/work": {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}},
+}
 out.write_text(json.dumps(data, indent=2))
 PY
 
@@ -189,10 +181,10 @@ set +e
 # nexus.install_pings. `-e` is the only channel into the container —
 # exporting the opt-out here would not reach it, because docker run does
 # not inherit the host environment.
-docker run --rm -v "$ART:/home/nexus/artifacts" -e MVV_ARTIFACTS=/home/nexus/artifacts \
+python3 "$CRED_TOOL" run -- docker run --rm -v "$ART:/home/nexus/artifacts" -e MVV_ARTIFACTS=/home/nexus/artifacts \
     -e NX_NO_TELEMETRY=1 \
-    -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
     -v "$STAGE/claude.json":/home/nexus/seed/claude.json:ro \
+    -e CLAUDE_CODE_OAUTH_TOKEN \
     -e EXPECT_BRANCH_FIX="$EXPECT" -e MVV_LABEL="$LABEL" "$IMAGE" 2>&1 | tee "$LOG"
 set -e
 echo "log: $LOG"

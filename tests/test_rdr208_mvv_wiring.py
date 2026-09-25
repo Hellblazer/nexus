@@ -83,12 +83,17 @@ def test_the_image_installs_claude_and_tmux() -> None:
     assert "cp /bin/bash /home/nexus/bin/claude" not in text, "the bash-as-claude stand-in is back"
 
 
-def test_run_sh_takes_the_credential_from_the_shared_picker() -> None:
+def test_run_sh_launches_the_container_through_the_shared_credential_tool() -> None:
+    """RDR-219 P2.1d (nexus-wauo1.13): the container is launched under
+    `claude_credentials.py run --`, never a picked-and-mounted credential
+    file. See tests/test_rdr208_mvv_credential_migration.py for the full
+    structural coverage of this migration."""
     run_sh = (_DIR / "run.sh").read_text(encoding="utf-8")
     assert "tests/e2e/lib/claude_credentials.py" in run_sh
-    assert '"$CRED_TOOL" pick' in run_sh
+    assert '"$CRED_TOOL" run --' in run_sh
+    assert '"$CRED_TOOL" pick' not in run_sh
     assert "find-generic-password" not in run_sh
-    assert "UNVERIFIED" in run_sh and "exit 2" in run_sh
+    assert ".claude-credentials.json" not in run_sh
 
 
 def test_the_sessions_are_launched_with_the_channel_and_the_staged_plugin() -> None:
