@@ -110,6 +110,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
+from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 
 if TYPE_CHECKING:
@@ -145,6 +146,15 @@ DEFAULT_BOARD_MAX_ANNOUNCES = 1
 #: "engine without wait" (a transient HTTP or store error) before the next
 #: tick. The loop never dies on one bad round-trip.
 DEFAULT_TICK_ERROR_BACKOFF_S: float = 5.0
+#: Bead nexus-ymfak (nexus-rxuiq residual): the startup catch-up read's
+#: recency window is `wait_timeout_s + this margin`, seconds -- wide
+#: enough to cover a row an orphaned predecessor waiter's still-parked
+#: `wait()` stamped in the gap between that predecessor's process dying
+#: and this waiter's construction (bounded by `wait_timeout_s`, the
+#: longest that parked call can still be live), plus slack for the
+#: catch-up read's own round trip.
+DEFAULT_CATCHUP_MARGIN_S: float = 5.0
+
 #: Belt-and-braces floor: a minimum real-clock gap `run()` enforces
 #: between the START of one tick and the START of the next, whenever a
 #: tick returns faster than this. Genuinely defensive, not the fix, for
@@ -352,6 +362,22 @@ def _board_notification_content(subspace: str, tuple_id: str) -> str:
         f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read it with "
         "tuple_rd on that subspace. Posts are never claimed."
     )
+
+
+def _parse_announced_at(value: str | None) -> datetime | None:
+    """``TupleRow.announced_at`` as the wire actually sends it -- an
+    ISO-8601 timestamp string, or ``None`` for a row nothing has ever
+    announced. Returns ``None`` on a missing or unparseable value (never
+    raises): the catch-up read this backs (:meth:`ChannelWaiter.
+    _catchup_mailbox_rows`) treats "can't tell" exactly like "not
+    recent" -- skip the row, let the ordinary announce-mode `tick()` loop
+    find it on its own schedule instead."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 _last_waiter_token_ns = 0
@@ -648,12 +674,21 @@ class ChannelWaiter:
         identity instead -- so a below-floor engine never gets to report
         "alive" even while its mailbox stays empty (measured: 16+ minutes
         against engine-service-v0.1.127 with nothing sent, T2
-        `nexus_rdr/6konb15-mvv-2026-09-25`)."""
+        `nexus_rdr/6konb15-mvv-2026-09-25`).
+
+        Bead nexus-ymfak (nexus-rxuiq residual): also before the first
+        tick, `_catchup_mailbox_rows` -- see its own docstring for what
+        gap it closes. Skipped when `_check_engine_floor_at_start` has
+        already stopped this waiter (a confirmed below-floor engine):
+        there is nothing to catch up against a substrate this waiter has
+        already refused to trust."""
         self._loop = asyncio.get_running_loop()
         self._alive = True
         self._publish_status()
         try:
             await self._check_engine_floor_at_start()
+            if not self._stopped:
+                await self._catchup_mailbox_rows()
             while not self._stopped:
                 tick_started = time.monotonic()
                 try:
@@ -729,6 +764,80 @@ class ChannelWaiter:
             self._stop_no_announce_support()
         elif version < CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION:
             self._stop_no_subscriber_support()
+
+    async def _catchup_mailbox_rows(self) -> None:
+        """Bead nexus-ymfak (nexus-rxuiq residual, DECISION: Sam
+        2026-09-24): closes the gap the waiter-token fence (`Announce
+        .waiter`, `_mint_waiter_token`) does not -- a row that arrives
+        and gets announce-stamped by an ORPHANED predecessor waiter's
+        still-parked `wait()` AFTER that predecessor's process has died
+        but BEFORE this (successor) waiter's own first `tick()` ever
+        calls `wait()` itself. The fence stops a superseded waiter's
+        parked call from stamping a FUTURE row once the successor has
+        admitted its own token; it does nothing for a row the orphan's
+        call already claimed and stamped in the seconds before the
+        successor existed at all, since there is no successor wait for
+        the engine to prefer yet. That window is bounded by
+        `wait_timeout_s` -- the longest a park predating this waiter's
+        construction can still be live -- which is exactly what a
+        `claude --resume` costs today: up to `wait_timeout_s` seconds of
+        silence for a row the dead process's own parked call took and
+        will never tell anyone about.
+
+        One plain, non-blocking `rd` (never `wait` -- this is a read, not
+        a park) per subscribed MAILBOX subspace, for rows `announced_at`
+        within the last `wait_timeout_s + DEFAULT_CATCHUP_MARGIN_S`
+        seconds: `rd` never stamps `announced_at`/`announce_count` (only
+        an announce-mode `wait` does), so this cannot itself create a
+        second orphan-shaped stamp. Every unclaimed, recently-stamped row
+        found gets a reference through the SAME path a real tick's find
+        would (`_reference_mailbox_row`) -- crediting `_announced_total`
+        only on the row's own first send, recording `_last_seen`, no
+        different from the tick that would eventually have rediscovered
+        it on its own schedule. Boards are never touched (RDR-213 bead
+        nexus-q82tk): a board's stamp is per `(subspace, subscriber)`,
+        keyed on THIS session's id rather than a waiter token, so an
+        orphan and its successor for the SAME session read the identical
+        per-subscriber budget -- there is no orphan gap for a board post
+        to fall into in the first place.
+
+        A row the orphan ALREADY referenced before dying gets a harmless
+        DUPLICATE reference here: this method has no way to know whether
+        a notification already went out for it, and the notification
+        text itself already covers a stale or already-claimed row (the
+        model's `tuple_in` on it either claims cleanly or comes back
+        empty, and either outcome is already explained). Cheaper to
+        accept an occasional duplicate than to add state whose only job
+        would be suppressing it.
+
+        Failure-isolated per subspace: an `rd` failure (a transient HTTP
+        or store error) is logged and this method moves on to the next
+        mailbox, never raising past `run()`'s start -- exactly the same
+        posture `tick()`'s own per-round-trip failures take, just before
+        there is a loop to back off inside yet."""
+        cutoff_s = self.wait_timeout_s + DEFAULT_CATCHUP_MARGIN_S
+        now = datetime.now(UTC)
+        for entry in self.subs.entries():
+            subspace = entry["subspace"]
+            if not subspace.startswith("mailbox/"):
+                continue
+            try:
+                rows = await asyncio.to_thread(self._call, lambda t, sp=subspace: t.rd(sp, n=MAX_QUERY_RESULTS))
+            except Exception as exc:  # noqa: BLE001 — failure-isolated: one bad mailbox must never block the others or the first tick
+                _log.warning(
+                    "channel_waiter_catchup_rd_failed",
+                    session_id=self.session_id, subspace=subspace, error=repr(exc),
+                )
+                continue
+            for row in rows:
+                if row.claim_state is not None:
+                    continue  # already claimed (or dead) -- not this method's job to re-surface it
+                announced_at = _parse_announced_at(row.announced_at)
+                if announced_at is None:
+                    continue  # never announced, or an unparseable stamp -- "can't tell" is not "recent"
+                age_s = (now - announced_at).total_seconds()
+                if age_s <= cutoff_s:
+                    await self._reference_mailbox_row(subspace, row)
 
     def _call(self, fn: Callable[[Any], Any]) -> Any:
         """Run *fn* against a freshly opened tuples store, closing it
