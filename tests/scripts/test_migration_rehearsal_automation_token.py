@@ -188,6 +188,23 @@ _MCP_WORKLOAD_MARKER = "--mcp-config"
 _PRESTART_MARKER = "ensure_aspect_worker_daemon"
 _FINDING_MARKERS = ("nexus-wauo1.15", "strips CLAUDE_CODE_OAUTH_TOKEN")
 
+#: A live invocation looks like `pgrep -af "aspect-worker"` or
+#: `pgrep -af "aspect-worker" ...` on its own line, not inside a `#` comment
+#: explaining why pgrep was dropped (this image has no procps -- nexus-5qefg
+#: posture -- so pgrep is never on PATH there at all; a pgrep-based liveness
+#: check gave no signal in either direction, on every run, hard-fail or note
+#: alike). Comment-exclusion convention matches the rest of this file/repo
+#: (see test_claude_credentials_single_source_lint.py's identical technique).
+_LIVE_PGREP_CALL_RE = re.compile(r'^\s*pgrep\b', re.MULTILINE)
+
+
+def _live_pgrep_calls(text: str) -> list[str]:
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if _LIVE_PGREP_CALL_RE.match(line) and not line.lstrip().startswith("#")
+    ]
+
 
 def _mcp_json_body(text: str) -> str:
     start = text.index("cat > /home/nexus/mcp.json <<'MCPJSON'\n") + len(
@@ -253,6 +270,42 @@ def test_prestart_comment_names_the_empirical_finding(
         )
 
 
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["rehearse_fullstack_text", "rehearse_shakeout_e2e_text"],
+)
+def test_no_live_pgrep_liveness_check_remains(
+    fixture_name: str, request: pytest.FixtureRequest
+) -> None:
+    """nexus-wauo1.15 round 3: a `pgrep`-based liveness check gives no
+    signal at all in this image (no procps -- nexus-5qefg posture -- so
+    `pgrep` is never on PATH there), whether it hard-fails or merely notes.
+    Confirmed, not just suspected: every proof run's RF-4 check printed "no
+    live aspect-worker process found" regardless of whether extraction
+    actually succeeded. Both the pre-start and (fullstack only) RF-4
+    checks were replaced with a real signal (registry.discover); this pins
+    that no live `pgrep` call crept back in. Comment mentions of `pgrep`
+    explaining the history are fine; only a live call is flagged."""
+    text: str = request.getfixturevalue(fixture_name)
+    hits = _live_pgrep_calls(text)
+    assert not hits, f"{fixture_name}: live pgrep call(s) found: {hits}"
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["rehearse_fullstack_text", "rehearse_shakeout_e2e_text"],
+)
+def test_worker_liveness_uses_the_registry_lease(
+    fixture_name: str, request: pytest.FixtureRequest
+) -> None:
+    """The replacement signal must be the SAME RDR-149 leased-tier registry
+    `ensure_aspect_worker_daemon()` itself consults (`ServiceRegistry` +
+    `registry.discover(...)`), not a re-invented ad hoc check."""
+    text: str = request.getfixturevalue(fixture_name)
+    assert "ServiceRegistry" in text
+    assert "registry.discover(" in text
+
+
 def test_rehearse_fullstack_prestart_block_shellchecks_clean(
     rehearse_fullstack_text: str,
 ) -> None:
@@ -261,12 +314,12 @@ def test_rehearse_fullstack_prestart_block_shellchecks_clean(
     comment header to the following `ok`/`bad` liveness assertion) and
     shellchecks it in isolation."""
     start = rehearse_fullstack_text.index("# 0. Pre-start")
-    end_marker = "the real proof)\"; fi"
+    end_marker = 'registry lease not found after pre-start"; fi'
     end = rehearse_fullstack_text.index(end_marker) + len(end_marker)
     block = rehearse_fullstack_text[start:end]
     probe_src = (
         "#!/usr/bin/env bash\nset -uo pipefail\n"
-        'ok() { :; }; bad() { :; }; note() { :; }\n'
+        'ok() { :; }; bad() { :; }; note() { :; }; NXENV_PY=python3\n'
         + block
         + "\n"
     )

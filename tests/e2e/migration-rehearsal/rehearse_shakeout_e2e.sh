@@ -93,11 +93,15 @@ NXENV_PY="/home/nexus/nxenv/bin/python3"
 MARK="skoe2e$$"
 
 # ── /proc-only process introspection (nexus-5qefg posture: this image does
-#    NOT apt-get install procps, so `ps`/`pgrep` are NOT assumed present —
-#    rehearse_fullstack.sh's own `pgrep -af aspect-worker` liveness check is
-#    UNVERIFIED against that assumption, a possible pre-existing vacuity in
-#    that journey, out of scope here but worth a T2 note). /proc is always
-#    present on a real Linux kernel regardless of installed userspace tools.
+#    NOT apt-get install procps, so `ps`/`pgrep` are NOT assumed present).
+#    /proc is always present on a real Linux kernel regardless of installed
+#    userspace tools. nexus-wauo1.15 (round 3) confirmed the flagged
+#    vacuity was real: rehearse_fullstack.sh's (and this file's own) former
+#    `pgrep -af aspect-worker` aspect-worker liveness checks gave no signal
+#    in either direction, in every run, because `pgrep` is not on PATH at
+#    all here -- both were replaced with a `registry.discover(tenant)` check
+#    against the same RDR-149 leased-tier registry the daemon itself
+#    publishes to and `ensure_aspect_worker_daemon()` itself reads.
 _service_pids() {
   local p comm
   for p in /proc/[0-9]*; do
@@ -643,15 +647,29 @@ say "Step 7 — MCP tool surface (store_put, search, query, nx_answer) via claud
 # comment for the full account. ensure_aspect_worker_daemon() is idempotent
 # spawn-if-absent, so this call and nx-mcp's own later one (once store_put
 # fires the enqueue hook) converge on the same daemon.
+# nexus-wauo1.15 (round 3): liveness is checked via the SAME RDR-149 registry
+# lease ensure_aspect_worker_daemon() itself consults (registry.discover),
+# never `pgrep` -- this image has no procps (nexus-5qefg posture, flagged
+# above in this file's own `_service_pids()` comment), so `pgrep`/`ps` are
+# not on PATH at all; confirmed, not just suspected.
 note "pre-starting the RDR-173 leased aspect-worker daemon (inherits CLAUDE_CODE_OAUTH_TOKEN from this shell)…"
-"$NXENV_PY" -c "
+worker_status="$("$NXENV_PY" -c "
+import time
 from nexus.config import nexus_config_dir
-from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon
-ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant='default')
-"
-worker_up=0
-for _ in $(seq 1 15); do pgrep -af "aspect-worker" >/dev/null 2>&1 && { worker_up=1; break; }; sleep 1; done
-if [ "$worker_up" = 1 ]; then ok "leased aspect-worker daemon pre-started"; else note "leased aspect-worker daemon not visible to pgrep yet (RF-4 below shows this is unreliable in-container; the later document_aspects assertion is the real proof)"; fi
+from nexus.daemon.aspect_worker_daemon import TIER, ensure_aspect_worker_daemon
+from nexus.daemon.service_registry import ServiceRegistry, ttl_for_tier
+config_dir = nexus_config_dir()
+ensure_aspect_worker_daemon(config_dir=config_dir, tenant='default')
+registry = ServiceRegistry(dir=config_dir, tier=TIER, ttl=ttl_for_tier(TIER))
+for _ in range(15):
+    if registry.discover('default') is not None:
+        print('LIVE')
+        break
+    time.sleep(1)
+else:
+    print('ABSENT')
+")"
+if [ "$worker_status" = "LIVE" ]; then ok "leased aspect-worker daemon pre-started (registry lease confirmed live)"; else bad "leased aspect-worker daemon registry lease not found after pre-start"; fi
 
 authout="$(claude -p 'Reply with exactly the token AUTHOK and nothing else.' --dangerously-skip-permissions 2>&1)"
 if printf '%s' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"

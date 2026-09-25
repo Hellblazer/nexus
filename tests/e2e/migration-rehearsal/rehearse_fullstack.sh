@@ -75,16 +75,37 @@ say "Phase F — MCP-driven workload + queue enqueue + worker drain (real claude
 # (once store_put fires the enqueue hook, Phase F step 3) converge on the SAME
 # daemon. The second caller (nx-mcp) just finds it already up and skips its
 # own (env-stripped, non-functional) spawn.
+# nexus-wauo1.15 (round 3): liveness is checked via the SAME RDR-149 registry
+# lease ensure_aspect_worker_daemon() itself consults (registry.discover),
+# never `pgrep` -- this image does not apt-get install procps (nexus-5qefg
+# posture), so `pgrep`/`ps` are not on PATH at all and a pgrep-based check
+# gives no signal whether it hard-fails or merely notes, which is why the RF-4
+# post-teardown check below has printed "no live aspect-worker process found"
+# on EVERY run, success or failure alike, since it was written (already
+# flagged as a likely vacuity in this file's own `_service_pids()` comment
+# above -- confirmed, not just suspected). A registry lease is a REAL signal:
+# it is exactly what a live, current-version daemon publishes and exactly
+# what nx-mcp's own later ensure_aspect_worker_daemon() call reads to decide
+# whether to spawn at all.
 NXENV_PY="/home/nexus/nxenv/bin/python3"
 note "pre-starting the RDR-173 leased aspect-worker daemon (inherits CLAUDE_CODE_OAUTH_TOKEN from this shell)…"
-"$NXENV_PY" -c "
+worker_status="$("$NXENV_PY" -c "
+import time
 from nexus.config import nexus_config_dir
-from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon
-ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant='default')
-"
-worker_up=0
-for _ in $(seq 1 15); do pgrep -af "aspect-worker" >/dev/null 2>&1 && { worker_up=1; break; }; sleep 1; done
-if [ "$worker_up" = 1 ]; then ok "leased aspect-worker daemon pre-started"; else note "leased aspect-worker daemon not visible to pgrep yet (RF-4 below shows this is unreliable in-container; the later document_aspects assertion is the real proof)"; fi
+from nexus.daemon.aspect_worker_daemon import TIER, ensure_aspect_worker_daemon
+from nexus.daemon.service_registry import ServiceRegistry, ttl_for_tier
+config_dir = nexus_config_dir()
+ensure_aspect_worker_daemon(config_dir=config_dir, tenant='default')
+registry = ServiceRegistry(dir=config_dir, tier=TIER, ttl=ttl_for_tier(TIER))
+for _ in range(15):
+    if registry.discover('default') is not None:
+        print('LIVE')
+        break
+    time.sleep(1)
+else:
+    print('ABSENT')
+")"
+if [ "$worker_status" = "LIVE" ]; then ok "leased aspect-worker daemon pre-started (registry lease confirmed live)"; else bad "leased aspect-worker daemon registry lease not found after pre-start"; fi
 
 # 1. Auth smoke — proves the mounted oauth + linux claude work (biggest unknown).
 authout="$(claude -p 'Reply with exactly the token AUTHOK and nothing else.' --dangerously-skip-permissions 2>&1)"
@@ -159,11 +180,21 @@ printf '%s' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "nx_answer (MCP)
 # spawned / crashed" (real bug) from "daemon draining, needs more time".
 LOGS_DIR="$HOME/.config/nexus/logs"
 note "leased-daemon liveness after nx-mcp teardown (RF-4 check):"
-if pgrep -af "aspect-worker" >/dev/null 2>&1; then
-  pgrep -af "aspect-worker" | sed 's/^/       proc: /'
+# nexus-wauo1.15 (round 3): registry.discover, not pgrep -- this image has no
+# procps (nexus-5qefg posture), so pgrep gave no signal here either, in any
+# run, success or failure alike. See the pre-start comment above for the full
+# account.
+rf4_status="$("$NXENV_PY" -c "
+from nexus.config import nexus_config_dir
+from nexus.daemon.aspect_worker_daemon import TIER
+from nexus.daemon.service_registry import ServiceRegistry, ttl_for_tier
+registry = ServiceRegistry(dir=nexus_config_dir(), tier=TIER, ttl=ttl_for_tier(TIER))
+print('LIVE' if registry.discover('default') is not None else 'ABSENT')
+")"
+if [ "$rf4_status" = "LIVE" ]; then
   ok "leased aspect-worker daemon SURVIVED nx-mcp teardown (RF-4: extraction host is process-independent)"
 else
-  note "no live aspect-worker process found post-teardown"
+  note "leased aspect-worker daemon registry lease not live post-teardown"
 fi
 for lg in aspect_worker_daemon.crash.log aspect_worker_daemon.log; do
   if [ -s "$LOGS_DIR/$lg" ]; then note "tail $lg:"; tail -25 "$LOGS_DIR/$lg" | sed 's/^/       /'; fi
