@@ -237,9 +237,13 @@ Three rules:
 claude_credentials.py run [--remote HOST] -- <command> [args...]
     Reads the automation token from the keychain item, exits non-zero naming the
     remedy if it is absent or expired, and execs <command> with
-    CLAUDE_CODE_OAUTH_TOKEN set in its environment. Prints nothing else.
+    CLAUDE_CODE_OAUTH_TOKEN set in its environment. Prints nothing else,
+    except one stderr line when ANTHROPIC_API_KEY is set, since that key
+    outranks the token and the child bills it.
     With --remote, runs <command> over ssh with the token in the remote
     command's environment, sent on the ssh channel's stdin, never on argv.
+    The API-key check then runs on the remote host, inside the helper's own
+    reader, because ssh does not forward the local environment.
 claude_credentials.py status
     Reports whether the automation token is present and its age. Prints no
     token material.
@@ -270,10 +274,13 @@ Transport rules the Phase 0 spike established (T2 `nexus_rdr/219-spike-script`):
   WSL2 VM on qwentescence was observed to clear between launches (T2
   `nexus_rdr/219-review-fix-round-2`).
 - Staging is a separate, token-free ssh call made before `run --remote`, and a
-  multi-file harness is staged whole as a tar stream, whose remote command has no
-  metacharacters:
+  multi-file harness is staged whole as a tar stream. Create the target first,
+  because `tar -x -C` does not:
+  `ssh <host> wsl -d Ubuntu -u nexus --exec mkdir -p <persistent-dir>`, then
   `tar -C <parent> -cf - <dir> | ssh <host> wsl -d Ubuntu -u nexus --exec tar -xf - -C <persistent-dir>`.
-  The `run --remote` command then names the staged copy by bare path.
+  The `|` is the local shell's pipe. PowerShell re-parses only the tokens after
+  `ssh <host>`, and those carry no metacharacters. The `run --remote` command
+  then names the staged copy by bare path.
 - A launched session's trust and bypass-permissions dialogs default to exit, so
   a harness pre-seeds them or selects the proceed option.
 
