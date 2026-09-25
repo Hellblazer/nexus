@@ -47,14 +47,18 @@
     topic_id LIMIT 1` over nexus.taxonomy_centroids, keyed off the same
     idx_taxonomy_centroids_embedding_<dim> HNSW index the own-collection
     ANN path (vectors-013's taxonomy_ann_query_<dim>) already binds to.
-    hnsw.iterative_scan='strict_order' and hnsw.ef_search=400 are set as
-    FUNCTION-LEVEL SET clauses (CREATE FUNCTION ... SET name = value), not
-    body statements — these functions are LANGUAGE plpgsql, which Postgres
-    never inlines regardless of a SET clause (unlike vectors-013's LANGUAGE
-    sql taxonomy_ann_query_<dim>, which the SET clause WOULD have
-    de-inlined), so no inlining is lost by adding them here. Postgres scopes
-    a function-level SET to the duration of the call and restores the prior
-    value on exit automatically.
+    hnsw.iterative_scan='strict_order' and hnsw.ef_search=400 are set in
+    the cross branch's body with set_config(..., is_local => true), NOT as
+    function-level SET clauses. The first version used SET clauses and failed
+    the candidate-migration leg (2026-09-25): CREATE FUNCTION ... SET hnsw.*
+    raises "permission denied to set parameter" for a non-superuser migration
+    role whenever pgvector's shared library is not yet loaded in the
+    migrating session, since hnsw.* is then an unknown placeholder that only
+    a superuser may attach to a function. The engine suite migrates as
+    superuser and never saw it; every production boot is non-superuser.
+    set_config is permitted to any role, and pgvector reads both settings at
+    scan time, after the call. is_local scopes them to the transaction, which
+    TaxonomyRepository runs for the cross pass alone.
 
     Every other semantic byte matches hygiene-003's forward body: the
     not-registered RAISE EXCEPTION guard runs BEFORE the rewritten RETURN
@@ -96,7 +100,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="taxonomy-018-1" author="nexus-f3yxx">
-        <comment>nexus.assign_from_chashes_384: cross_collection branch rewritten as a per-chunk LATERAL nearest-centroid over the HNSW index (idx_taxonomy_centroids_embedding_384), hnsw.iterative_scan=strict_order + hnsw.ef_search=400 function-level SET. Own branch unchanged.</comment>
+        <comment>nexus.assign_from_chashes_384: cross_collection branch rewritten as a per-chunk LATERAL nearest-centroid over the HNSW index (idx_taxonomy_centroids_embedding_384), hnsw.iterative_scan=strict_order + hnsw.ef_search=400 set transaction-local in the cross branch. Own branch unchanged.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
     p_collection       text,
@@ -109,8 +113,6 @@ CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET hnsw.iterative_scan = 'strict_order'
-SET hnsw.ef_search = 400
 AS $fn$
 #variable_conflict use_column
 BEGIN
@@ -134,6 +136,18 @@ BEGIN
                 p_collection, current_setting('nexus.tenant', true)
                 USING ERRCODE = 'foreign_key_violation';
         END IF;
+
+        -- nexus-f3yxx: the LATERAL's recall settings, transaction-local.
+        -- NOT a function-level SET clause: CREATE FUNCTION ... SET hnsw.*
+        -- fails with 'permission denied to set parameter' for a
+        -- non-superuser migration role when pgvector's library is not yet
+        -- loaded in that session (hnsw.* is then an unknown placeholder),
+        -- which is every production boot (candidate-migration leg,
+        -- 2026-09-25). set_config is allowed to any role. is_local=true
+        -- scopes it to this transaction, which since the rework is the
+        -- cross pass alone.
+        PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+        PERFORM set_config('hnsw.ef_search', '400', true);
 
         RETURN QUERY
         WITH batch AS (
@@ -312,8 +326,6 @@ CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET hnsw.iterative_scan = 'strict_order'
-SET hnsw.ef_search = 400
 AS $fn$
 #variable_conflict use_column
 BEGIN
@@ -328,6 +340,18 @@ BEGIN
                 p_collection, current_setting('nexus.tenant', true)
                 USING ERRCODE = 'foreign_key_violation';
         END IF;
+
+        -- nexus-f3yxx: the LATERAL's recall settings, transaction-local.
+        -- NOT a function-level SET clause: CREATE FUNCTION ... SET hnsw.*
+        -- fails with 'permission denied to set parameter' for a
+        -- non-superuser migration role when pgvector's library is not yet
+        -- loaded in that session (hnsw.* is then an unknown placeholder),
+        -- which is every production boot (candidate-migration leg,
+        -- 2026-09-25). set_config is allowed to any role. is_local=true
+        -- scopes it to this transaction, which since the rework is the
+        -- cross pass alone.
+        PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+        PERFORM set_config('hnsw.ef_search', '400', true);
 
         RETURN QUERY
         WITH batch AS (
@@ -506,8 +530,6 @@ CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET hnsw.iterative_scan = 'strict_order'
-SET hnsw.ef_search = 400
 AS $fn$
 #variable_conflict use_column
 BEGIN
@@ -522,6 +544,18 @@ BEGIN
                 p_collection, current_setting('nexus.tenant', true)
                 USING ERRCODE = 'foreign_key_violation';
         END IF;
+
+        -- nexus-f3yxx: the LATERAL's recall settings, transaction-local.
+        -- NOT a function-level SET clause: CREATE FUNCTION ... SET hnsw.*
+        -- fails with 'permission denied to set parameter' for a
+        -- non-superuser migration role when pgvector's library is not yet
+        -- loaded in that session (hnsw.* is then an unknown placeholder),
+        -- which is every production boot (candidate-migration leg,
+        -- 2026-09-25). set_config is allowed to any role. is_local=true
+        -- scopes it to this transaction, which since the rework is the
+        -- cross pass alone.
+        PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+        PERFORM set_config('hnsw.ef_search', '400', true);
 
         RETURN QUERY
         WITH batch AS (

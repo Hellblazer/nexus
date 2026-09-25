@@ -60,12 +60,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       out of band; this test measures it every run, on a smaller fixture,
  *       through the real function.</li>
  *   <li>{@link #assignFromChashesFunctions_carryTheLoadBearingHnswSettings}: a
- *       MUTATION guard — reads {@code pg_proc.proconfig} directly and asserts
- *       each {@code assign_from_chashes_<dim>} function actually carries
+ *       MUTATION guard — reads {@code pg_proc} directly and asserts each
+ *       {@code assign_from_chashes_<dim>} body sets
  *       {@code hnsw.iterative_scan=strict_order} and {@code hnsw.ef_search=400}
- *       as function-level SET clauses. A future edit that silently drops
- *       either clause (the exact regression class that would reopen the
- *       no-row hazard) fails HERE, not by a recall test going subtly flaky.</li>
+ *       with {@code set_config}, and that {@code proconfig} carries NO
+ *       {@code hnsw.*} SET clause. Dropping either setting reopens the no-row
+ *       hazard; moving them back into SET clauses breaks every non-superuser
+ *       migration (permission denied to set parameter, found by the
+ *       candidate-migration leg 2026-09-25). Both fail HERE.</li>
  *   <li>{@link #withoutTheSets_theSameLateralShapeMissesRowsOnTheDenseSource}:
  *       a NEGATIVE CONTROL — the identical LATERAL shape, run directly (not
  *       through the function) at {@code ef_search=40} with NO
@@ -419,8 +421,8 @@ class TaxonomyAssignCrossLateralHnswTest {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // (2) Mutation guard: the function-level SET clauses are actually present
-    // in the deployed function, not just in the changelog source text.
+    // (2) Mutation guard: the deployed function sets both recall settings in
+    // its body, and carries no hnsw.* function-level SET clause.
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
@@ -429,22 +431,29 @@ class TaxonomyAssignCrossLateralHnswTest {
             su.setAutoCommit(true);
             for (int dim : new int[] {384, 768, 1024}) {
                 String[] proconfig;
+                String prosrc;
                 try (PreparedStatement ps = su.prepareStatement(
-                        "SELECT proconfig FROM pg_catalog.pg_proc"
+                        "SELECT proconfig, prosrc FROM pg_catalog.pg_proc"
                         + " WHERE proname = ? AND pronamespace = 'nexus'::regnamespace")) {
                     ps.setString(1, "assign_from_chashes_" + dim);
                     try (var rs = ps.executeQuery()) {
                         assertThat(rs.next()).as("assign_from_chashes_" + dim + " must exist").isTrue();
                         java.sql.Array arr = rs.getArray(1);
-                        assertThat(arr).as("proconfig must be non-NULL for assign_from_chashes_" + dim).isNotNull();
-                        proconfig = (String[]) arr.getArray();
+                        proconfig = arr == null ? new String[0] : (String[]) arr.getArray();
+                        prosrc = rs.getString(2);
                     }
                 }
                 assertThat(proconfig)
-                    .as("assign_from_chashes_" + dim + "'s function-level SET clauses"
-                        + " (pg_proc.proconfig) -- a mutation that drops either of these"
-                        + " reopens the no-row hazard silently. Actual: %s", (Object) proconfig)
-                    .contains("hnsw.iterative_scan=strict_order", "hnsw.ef_search=400");
+                    .as("assign_from_chashes_" + dim + " must carry NO hnsw.* function-level"
+                        + " SET clause: CREATE FUNCTION ... SET hnsw.* is refused for a"
+                        + " non-superuser migration role while pgvector is not loaded in"
+                        + " the session. Actual: %s", (Object) proconfig)
+                    .noneMatch(c -> c.startsWith("hnsw."));
+                assertThat(prosrc)
+                    .as("assign_from_chashes_" + dim + "'s body must set both recall settings;"
+                        + " dropping either reopens the no-row hazard silently")
+                    .contains("set_config('hnsw.iterative_scan', 'strict_order', true)")
+                    .contains("set_config('hnsw.ef_search', '400', true)");
             }
         }
     }

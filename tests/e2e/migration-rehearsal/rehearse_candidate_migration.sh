@@ -190,7 +190,7 @@ for attempt in 1 2; do
     init_ok=1; break
   fi
   note "attempt $attempt failed; supervisor log tail:"
-  for f in "$HOME/.config/nexus/logs/storage_service.log" "$HOME/.config/nexus/logs/service_supervisor.log"; do
+  for f in "$HOME/.config/nexus/logs/storage_service.log" "$HOME/.config/nexus/logs/service_supervisor.log" "$HOME/.config/nexus/logs/storage_service_native.log" "$HOME/.config/nexus/logs/storage_service_jar.log"; do
     [ -f "$f" ] && tail -20 "$f" | sed 's/^/       | /'
   done
   sleep 5
@@ -812,7 +812,7 @@ START_OUT="$(nx daemon service start 2>&1 < /dev/null)"
 printf '%s\n' "$START_OUT" | sed 's/^/       /'
 if _wait_healthy 60; then ok "candidate healthy (Liquibase pass over populated data completed)"; else
   nx daemon service status 2>&1 | sed 's/^/       /' || true
-  for f in "$HOME/.config/nexus/logs/storage_service.log" "$HOME/.config/nexus/logs/service_supervisor.log"; do
+  for f in "$HOME/.config/nexus/logs/storage_service.log" "$HOME/.config/nexus/logs/service_supervisor.log" "$HOME/.config/nexus/logs/storage_service_native.log" "$HOME/.config/nexus/logs/storage_service_jar.log"; do
     [ -f "$f" ] && { note "---- $(basename "$f") (last 40 lines) ----"; tail -40 "$f" | sed 's/^/       /'; }
   done
   bad "candidate did not reach healthy over the populated store"; say "ABORT"; exit 1
