@@ -1078,10 +1078,19 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 11),
+        // nexus-f3yxx: seedFixtures' raw chunk/centroid INSERTs (2), plan-shape's
+        // raw hnsw-off session-var SETs for the second role bootstrap (2), the
+        // recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
+        // and role-bootstrap statements (5) -- same idiom as
+        // TaxonomyCentroidAnnPlanShapeTest's own REALCALL-role bootstrap.
+        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 9),
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 2),
         Map.entry("dev/nexus/service/TaxonomyRepositoryTest.java", 6),
+        // nexus-iygza: seedChunk/seedCentroid/the direct cross-assignment INSERT --
+        // same raw-JDBC-fixture idiom as TaxonomyAssignFromChashesRepositoryTest.
+        Map.entry("dev/nexus/service/TaxonomyUnassignedChashesRepositoryTest.java", 5),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 1),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 2),
@@ -1468,7 +1477,13 @@ class RawSqlGateTest {
     // counts-unavailable test the round-2 review found missing) reuses the
     // shared fixture and its own REVOKE is typed jOOQ, so
     // SchemaMigratorIntegrationTest.java's own count above stays 55.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 930;
+    // nexus-f3yxx/nexus-iygza: 930 -> 944 (+14: TaxonomyAssignCrossLateralHnswTest.java
+    // new at 9, TaxonomyUnassignedChashesRepositoryTest.java new at 5 -- both new test
+    // files, same raw-JDBC PreparedStatement/role-bootstrap fixture idiom
+    // TaxonomyAssignFromChashesRepositoryTest.java and TaxonomyCentroidAnnPlanShapeTest.java
+    // already carry entries for, no jOOQ codegen for a raw `<=>`/hnsw-GUC-off
+    // session-variable SET).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 944;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

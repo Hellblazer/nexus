@@ -945,7 +945,13 @@ public final class TaxonomyRepository {
         // exists to call at all.
         int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         return tenantScope.withTenant(tenant, ctx -> {
-            org.jooq.Table<?> fn = switch (dim) {
+            // Deliberately NOT named `fn` (HnswServingGucParityTest's anchor for a
+            // vector-RANKED fetch, same escape the GC/quarantine call sites already
+            // use per that test's own docstring): this is a plain bounded equality
+            // + antijoin scan, no vector distance operator anywhere, so it carries
+            // none of the HNSW generic-plan-flip / ef_search / iterative_scan
+            // hazards those GUCs exist for.
+            org.jooq.Table<?> unassignedFn = switch (dim) {
                 case 384  -> TAXONOMY_UNASSIGNED_CHASHES_384.call(collection, limit);
                 case 768  -> TAXONOMY_UNASSIGNED_CHASHES_768.call(collection, limit);
                 case 1024 -> TAXONOMY_UNASSIGNED_CHASHES_1024.call(collection, limit);
@@ -955,7 +961,7 @@ public final class TaxonomyRepository {
             // even when the underlying chunk scan matched nothing) — see the
             // function's own SQL for why a bare empty result set here would be
             // ambiguous between "no centroids yet" and "fully assigned".
-            var rec = ctx.selectFrom(fn).fetchOne();
+            var rec = ctx.selectFrom(unassignedFn).fetchOne();
             boolean hasTaxonomy = rec != null
                 && Boolean.TRUE.equals(rec.get("has_taxonomy", Boolean.class));
             String[] chashArr = rec == null ? null : rec.get("chashes", String[].class);
