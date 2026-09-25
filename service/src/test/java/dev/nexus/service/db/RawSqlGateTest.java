@@ -1088,9 +1088,13 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 2),
         Map.entry("dev/nexus/service/TaxonomyRepositoryTest.java", 6),
-        // nexus-iygza: seedChunk/seedCentroid/the direct cross-assignment INSERT --
-        // same raw-JDBC-fixture idiom as TaxonomyAssignFromChashesRepositoryTest.
-        Map.entry("dev/nexus/service/TaxonomyUnassignedChashesRepositoryTest.java", 5),
+        // nexus-iygza rework round: manifest-exclusion + keyset-cursor + scale-test
+        // coverage added several more raw-JDBC fixture/probe sites -- seedChunk's
+        // manifest INSERT, seedChunkNoManifest, the scale test's 4 bulk generate_series
+        // INSERTs (chunks, catalog_documents, catalog_document_chunks,
+        // topic_assignments) -- same raw-JDBC-fixture idiom as
+        // TaxonomyAssignFromChashesRepositoryTest; 5 -> 10.
+        Map.entry("dev/nexus/service/TaxonomyUnassignedChashesRepositoryTest.java", 10),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 1),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 2),
@@ -1133,6 +1137,12 @@ class RawSqlGateTest {
         // generated jOOQ DSL only. No entry: actual count is 0.
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 7),
+        // nexus-f3yxx rework round: topicsLockHeldByAnotherBackend's raw pg_locks
+        // probe -- pg_locks.relation = 'X'::regclass and pg_backend_pid() are
+        // assembled SQL expressions with no typed jOOQ DSL form, so this is plain
+        // JDBC (RawSqlGateTest's OWN noRawSqlDslTemplatesInMainOrTestSources check
+        // is what ruled out a DSL.condition(String) form for exactly this query).
+        Map.entry("dev/nexus/service/db/TaxonomyAssignSeparateTransactionsTest.java", 1),
         Map.entry("dev/nexus/service/http/AspectHandlerEnqueueErrorTest.java", 1),
         Map.entry("dev/nexus/service/http/CatalogHandlerManifestFkTest.java", 1),
         Map.entry("dev/nexus/service/http/IndexRunFenceTest.java", 12),
@@ -1483,7 +1493,11 @@ class RawSqlGateTest {
     // TaxonomyAssignFromChashesRepositoryTest.java and TaxonomyCentroidAnnPlanShapeTest.java
     // already carry entries for, no jOOQ codegen for a raw `<=>`/hnsw-GUC-off
     // session-variable SET).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 944;
+    // nexus-f3yxx/nexus-iygza rework round: 944 -> 950 (+6: TaxonomyUnassignedChashes-
+    // RepositoryTest.java 5 -> 10 (+5, manifest-exclusion + keyset-cursor + scale-test
+    // fixtures/probes) and TaxonomyAssignSeparateTransactionsTest.java new at 1 (the
+    // pg_locks lock-hold proof's raw JDBC probe, same idiom).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 950;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

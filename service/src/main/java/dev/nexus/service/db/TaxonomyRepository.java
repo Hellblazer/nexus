@@ -811,6 +811,33 @@ public final class TaxonomyRepository {
         }
     }
 
+    /**
+     * TEST SEAM (nexus-f3yxx rework round, structural lock-hold fix): invoked
+     * INSIDE the own pass's transaction, immediately after its assignment is
+     * persisted but before that transaction commits. Production callers never
+     * set this (default no-op) — paired with {@link #betweenOwnAndCrossPassHookForTests}
+     * so a same-package test can query {@code pg_locks} from a SECOND
+     * connection at two deterministic points (lock held here, released there)
+     * with no timing race and no real concurrent caller needed.
+     */
+    volatile Runnable duringOwnPassHookForTests = () -> { };
+
+    /**
+     * TEST SEAM (nexus-f3yxx rework round, structural lock-hold fix): invoked
+     * right after the own pass's transaction has COMMITTED and before the
+     * cross pass's transaction begins. Production callers never set this
+     * (default no-op) — it exists so a same-package test can query
+     * {@code pg_locks} from a SECOND connection at exactly this point and
+     * prove the own pass's {@code topics} row lock is already released,
+     * deterministically, with no timing race and no real concurrent caller
+     * needed.
+     */
+    volatile Runnable betweenOwnAndCrossPassHookForTests = () -> { };
+
+    /** Own pass's persisted count plus the existence-probe's unmatched list —
+     *  both computed inside the SAME (own-pass) transaction. */
+    private record OwnPassOutcome(int assigned, List<String> unmatched) { }
+
     private Map<String, Object> assignFromChashesRetryingDeadlocks(
             String tenant, String collection, List<String> chashes, String[] chashArr,
             int dim, boolean crossCollection) {
@@ -832,50 +859,90 @@ public final class TaxonomyRepository {
         // ON CONFLICT DO NOTHING and the deadlock loser's whole transaction is rolled
         // back by Postgres before this retry re-runs, so a retry can never double-assign
         // or double-count.
-        return DeadlockRetry.run("taxonomy.assignFromChashes", () -> tenantScope.withTenant(tenant, ctx -> {
-            // nexus-r0vkh: bound this transaction's run time AND its lock wait
-            // (SET LOCAL, so it dies with the transaction). 2026-09-16 09:05Z:
-            // one of these calls ran 782s on engine-service-v0.1.123 with eight
-            // identical calls queued on its transactionid (the recount trigger's
-            // and the FK's row locks on nexus.topics), nine of the pool's ten
-            // connections gone, every PG route on the box timing out for 11
-            // minutes. A bounded call fails with 57014/55P03; the client records
-            // the batch on its tripwire and the index write itself, already
-            // committed before this hook fired, is untouched. A lock timeout is
-            // NOT a DeadlockRetry trigger; the single bounded retry lives in
-            // assignFromChashes above, outside this belt.
-            PgSession.setTaxonomyAssignBounds(ctx);
-            // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
-            // hex text, so the existence probe goes through ChashHex.hex(...) — the
-            // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
-            // uniformly (same idiom PgVectorRepository uses for catalog_document_chunks).
-            // RDR-191 (nexus-o8dil.48): the three per-dim existence probes
-            // collapsed onto the unified nexus.chunks. (tenant RLS, collection,
-            // chash) identifies the row regardless of dim, so no embedding-column
-            // predicate is needed for THIS probe; dim stays load-bearing for the
-            // per-dim assign_from_chashes_<dim>() calls below, whose own switch
-            // keeps the unsupported-dim fail-loud arm.
-            List<String> found = ctx.select(ChashHex.hex(CHUNKS.CHASH)).from(CHUNKS)
-                    .where(CHUNKS.COLLECTION.eq(collection)
-                        .and(ChashHex.hex(CHUNKS.CHASH).in(chashArr)))
-                    .fetch(ChashHex.hex(CHUNKS.CHASH));
-            java.util.Set<String> foundSet = new java.util.HashSet<>(found);
-            List<String> unmatched = chashes.stream()
-                .filter(c -> !foundSet.contains(c))
-                .distinct()
-                .toList();
+        //
+        // STRUCTURAL LOCK-HOLD FIX (nexus-f3yxx rework round, code-review-expert +
+        // substantive-critic, both Significant): taxonomy-018's LATERAL/HNSW rewrite
+        // shrank the own-pass doc_count trigger's FOR NO KEY UPDATE lock-hold window
+        // on the collection's topics by ~40x (the cross join no longer runs INSIDE
+        // that lock's scope) but did not eliminate the coupling — own and cross used
+        // to share ONE transaction, so a future slow own pass (larger batch, cold
+        // cache, contention) would reproduce the SAME lock-hold-amplification class
+        // this bead exists to close, independent of how fast the cross join is. The
+        // own pass and the cross pass now run in SEPARATE transactions: the own
+        // pass's persisted rows (and its topics row lock) commit and release BEFORE
+        // the cross pass's transaction ever opens, structurally, not statistically.
+        // Both persists are idempotent (own: ON CONFLICT DO NOTHING; cross:
+        // ON CONFLICT DO UPDATE with GREATEST-wins similarity), so a cross-pass
+        // failure AFTER the own pass has already committed is always safe to retry
+        // from scratch — the caller's own nexus-r0vkh lock-timeout retry (or a fresh
+        // client call) simply re-runs BOTH passes; the own pass's second run finds
+        // its own already-committed rows and does nothing, at the cost of
+        // recomputing (never re-persisting) the same nearest centroid.
+        OwnPassOutcome own = DeadlockRetry.run("taxonomy.assignFromChashes.own",
+            () -> tenantScope.withTenant(tenant, ctx -> {
+                // nexus-r0vkh: bound this transaction's run time AND its lock wait
+                // (SET LOCAL, so it dies with the transaction). 2026-09-16 09:05Z:
+                // one of these calls ran 782s on engine-service-v0.1.123 with eight
+                // identical calls queued on its transactionid (the recount trigger's
+                // and the FK's row locks on nexus.topics), nine of the pool's ten
+                // connections gone, every PG route on the box timing out for 11
+                // minutes. A bounded call fails with 57014/55P03; the client records
+                // the batch on its tripwire and the index write itself, already
+                // committed before this hook fired, is untouched. A lock timeout is
+                // NOT a DeadlockRetry trigger; the single bounded retry lives in
+                // assignFromChashes above, outside this belt.
+                PgSession.setTaxonomyAssignBounds(ctx);
+                // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
+                // hex text, so the existence probe goes through ChashHex.hex(...) — the
+                // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
+                // uniformly (same idiom PgVectorRepository uses for catalog_document_chunks).
+                // RDR-191 (nexus-o8dil.48): the three per-dim existence probes
+                // collapsed onto the unified nexus.chunks. (tenant RLS, collection,
+                // chash) identifies the row regardless of dim, so no embedding-column
+                // predicate is needed for THIS probe; dim stays load-bearing for the
+                // per-dim assign_from_chashes_<dim>() calls below, whose own switch
+                // keeps the unsupported-dim fail-loud arm. Runs in the OWN pass's
+                // transaction (not a third, separate one) — a probe read carries no
+                // lock-hold risk of its own, and keeping it here means "found"/
+                // "unmatched" are computed against the exact same snapshot the own
+                // pass's assignment itself sees.
+                List<String> found = ctx.select(ChashHex.hex(CHUNKS.CHASH)).from(CHUNKS)
+                        .where(CHUNKS.COLLECTION.eq(collection)
+                            .and(ChashHex.hex(CHUNKS.CHASH).in(chashArr)))
+                        .fetch(ChashHex.hex(CHUNKS.CHASH));
+                java.util.Set<String> foundSet = new java.util.HashSet<>(found);
+                List<String> unmatched = chashes.stream()
+                    .filter(c -> !foundSet.contains(c))
+                    .distinct()
+                    .toList();
 
-            int assigned = assignFromChashesOnePass(ctx, dim, collection, chashArr, false).size();
-            int crossAssigned = crossCollection
-                ? assignFromChashesOnePass(ctx, dim, collection, chashArr, true).size()
-                : 0;
+                int assigned = assignFromChashesOnePass(ctx, dim, collection, chashArr, false).size();
+                // Still INSIDE this transaction — the own pass's persisted row(s)
+                // and the doc_count trigger's topics lock are both live here.
+                duringOwnPassHookForTests.run();
+                return new OwnPassOutcome(assigned, unmatched);
+            }));
 
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("assigned", assigned);
-            out.put("cross_assigned", crossAssigned);
-            out.put("unmatched_chashes", unmatched);
-            return out;
-        }));
+        // The own pass's transaction has now COMMITTED (tenantScope.withTenant
+        // returns only after commit) — its topics row lock is released. The test
+        // seam fires exactly here, between the two transactions.
+        betweenOwnAndCrossPassHookForTests.run();
+
+        int crossAssigned = 0;
+        if (crossCollection) {
+            crossAssigned = DeadlockRetry.run("taxonomy.assignFromChashes.cross",
+                () -> tenantScope.withTenant(tenant, ctx -> {
+                    // Same bound discipline as the own pass, in its OWN transaction.
+                    PgSession.setTaxonomyAssignBounds(ctx);
+                    return assignFromChashesOnePass(ctx, dim, collection, chashArr, true).size();
+                }));
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("assigned", own.assigned());
+        out.put("cross_assigned", crossAssigned);
+        out.put("unmatched_chashes", own.unmatched());
+        return out;
     }
 
     /**
@@ -926,16 +993,36 @@ public final class TaxonomyRepository {
      * own-collection one is still reported here — the two passes are
      * independent, and this route closes gaps in the own pass specifically.
      *
-     * @return {@code {chashes: List<String>, has_taxonomy: boolean}} —
-     *         {@code has_taxonomy=false} means {@code collection} has no
-     *         centroids at its own dim yet, and {@code chashes} is always empty
-     *         in that case; {@code has_taxonomy=true} with an empty
+     * <p>Excludes MANIFEST-LESS chunks (rework round, code-review-expert's
+     * and substantive-critic's Significant finding): a chash with no live
+     * catalog manifest reference (RDR-192's still-open "manifest-less !=
+     * live" population) is never reported, regardless of assignment state —
+     * see taxonomy-019-unassigned-chashes.xml's own header for the full
+     * rationale and why this is NOT yet the eventual RDR-192 liveness
+     * definition.
+     *
+     * <p>KEYSET CURSOR (rework round, code-review-expert's Significant
+     * finding: the prior one-shot contract gave a caller no way to tell
+     * "genuinely converging" apart from "one row stuck forever"): {@code
+     * after}, when non-null, must be a chash this method itself previously
+     * returned as {@code next_after} — the next call resumes strictly AFTER
+     * it. {@code next_after} in the response is non-null only when this
+     * call's page came back FULL ({@code chashes.size() == limit}); a drain
+     * loop calls repeatedly with the previous {@code next_after} until it
+     * comes back {@code null}, at which point every qualifying chash in
+     * scope has been seen.
+     *
+     * @return {@code {chashes: List<String>, has_taxonomy: boolean,
+     *         next_after: String}} — {@code has_taxonomy=false} means
+     *         {@code collection} has no centroids at its own dim yet, and
+     *         {@code chashes}/{@code next_after} are always empty/null in
+     *         that case; {@code has_taxonomy=true} with an empty
      *         {@code chashes} means every chunk in scope already carries its
      *         own-collection assignment.
      * @throws IllegalArgumentException if {@code limit} is not in
      *         {@code [1, MAX_UNASSIGNED_CHASHES]}
      */
-    public Map<String, Object> unassignedChashes(String tenant, String collection, int limit) {
+    public Map<String, Object> unassignedChashes(String tenant, String collection, int limit, String after) {
         if (limit < 1 || limit > MAX_UNASSIGNED_CHASHES) {
             throw new IllegalArgumentException(
                 "limit must be in [1, " + MAX_UNASSIGNED_CHASHES + "]");
@@ -945,6 +1032,11 @@ public final class TaxonomyRepository {
         // exists to call at all.
         int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-iygza rework round: bound this read the same way
+            // assignFromChashes bounds its own transaction (PgSession's
+            // general statement/lock timeout helper, reused as-is — no new
+            // engine-side SQL needed for this half).
+            PgSession.setTaxonomyAssignBounds(ctx);
             // Deliberately NOT named `fn` (HnswServingGucParityTest's anchor for a
             // vector-RANKED fetch, same escape the GC/quarantine call sites already
             // use per that test's own docstring): this is a plain bounded equality
@@ -952,9 +1044,9 @@ public final class TaxonomyRepository {
             // none of the HNSW generic-plan-flip / ef_search / iterative_scan
             // hazards those GUCs exist for.
             org.jooq.Table<?> unassignedFn = switch (dim) {
-                case 384  -> TAXONOMY_UNASSIGNED_CHASHES_384.call(collection, limit);
-                case 768  -> TAXONOMY_UNASSIGNED_CHASHES_768.call(collection, limit);
-                case 1024 -> TAXONOMY_UNASSIGNED_CHASHES_1024.call(collection, limit);
+                case 384  -> TAXONOMY_UNASSIGNED_CHASHES_384.call(collection, limit, after);
+                case 768  -> TAXONOMY_UNASSIGNED_CHASHES_768.call(collection, limit, after);
+                case 1024 -> TAXONOMY_UNASSIGNED_CHASHES_1024.call(collection, limit, after);
                 default   -> throw new IllegalArgumentException("unsupported dim " + dim);
             };
             // Exactly one row always (the function aggregates to a single row,
@@ -965,9 +1057,11 @@ public final class TaxonomyRepository {
             boolean hasTaxonomy = rec != null
                 && Boolean.TRUE.equals(rec.get("has_taxonomy", Boolean.class));
             String[] chashArr = rec == null ? null : rec.get("chashes", String[].class);
+            String nextAfter = rec == null ? null : rec.get("next_after", String.class);
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("chashes", chashArr == null ? List.<String>of() : List.of(chashArr));
             out.put("has_taxonomy", hasTaxonomy);
+            out.put("next_after", nextAfter);
             return out;
         });
     }

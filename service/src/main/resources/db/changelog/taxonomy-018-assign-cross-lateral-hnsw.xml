@@ -56,16 +56,24 @@
     a function-level SET to the duration of the call and restores the prior
     value on exit automatically.
 
-    Every other semantic byte is IDENTICAL to hygiene-003's forward body:
-    the not-registered RAISE EXCEPTION guard (unchanged, still runs before
-    the rewritten RETURN QUERY), the `persisted` CTE (GREATEST-wins upsert,
-    'projection' assigned_by, source_collection = p_collection, ON CONFLICT
-    DO UPDATE), OPERATOR(nexus.<=>) qualification (this function post-dates
-    search-path-002-qualify-vector-operator-functions.xml, so the operator
-    must stay schema-qualified — vectors-013's own bare `<=>` predates that
-    changeset and is not a counterexample), SECURITY INVOKER, and
-    #variable_conflict use_column. The OWN branch (cross_collection = false)
-    is untouched, byte-for-byte the hygiene-003 body.
+    Every other semantic byte matches hygiene-003's forward body: the
+    not-registered RAISE EXCEPTION guard runs BEFORE the rewritten RETURN
+    QUERY exactly as before (unchanged in behavior and in position), the
+    `persisted` CTE (GREATEST-wins upsert, 'projection' assigned_by,
+    source_collection = p_collection, ON CONFLICT DO UPDATE), OPERATOR
+    (nexus.<=>) qualification (this function post-dates search-path-002-
+    qualify-vector-operator-functions.xml, so the operator must stay
+    schema-qualified — vectors-013's own bare `<=>` predates that changeset
+    and is not a counterexample), SECURITY INVOKER, and #variable_conflict
+    use_column. ONE cosmetic exception, NOT byte-identical (code-review-
+    expert review round, correctly-motivated but worth naming rather than
+    folding into "unchanged"): the guard's own SQL comment says "if the
+    batch below finds rows at all" here, where hygiene-003 said "if the
+    SELECT below finds rows at all" — the single word changed to correctly
+    describe the data source the guard now sits above (a `batch` CTE, not
+    a bare SELECT), a pure prose accuracy fix with zero behavioral effect.
+    The OWN branch (cross_collection = false) IS untouched, byte-for-byte
+    the hygiene-003 body.
 
     ONE tie-break divergence, deliberate: the exact join's DISTINCT ON tie-
     break was `distance ASC, ct.collection ASC, ct.topic_id ASC`; the LATERAL

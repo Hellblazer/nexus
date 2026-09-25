@@ -577,22 +577,28 @@ public final class TaxonomyHandler implements HttpHandler {
      * remaining half after nexus-mg8gx).
      *
      * <p>Body {@code {"collection": str, "limit"?: int (default/max
-     * MAX_UNASSIGNED_CHASHES)}}. Names chunks in {@code collection} with a
-     * non-null embedding at the collection's registered dim that carry NO
+     * MAX_UNASSIGNED_CHASHES), "after"?: str (hex chash, exclusive keyset
+     * cursor, omit/null to start from the beginning)}}. Names chunks in
+     * {@code collection} with a non-null embedding at the collection's
+     * registered dim, a live catalog manifest reference, that carry NO
      * own-collection {@code topic_assignments} row, so a caller can drain the
      * gap in bounded batches — see {@link TaxonomyRepository#unassignedChashes}
      * for the full state-derivation contract this replaces a client-recorded
      * pending list with. Response 200
-     * {@code {"chashes": [...], "has_taxonomy": bool}} — {@code has_taxonomy}
-     * is {@code false} only when {@code collection} has no centroids at its
-     * own dim yet, in which case {@code chashes} is always empty.
+     * {@code {"chashes": [...], "has_taxonomy": bool, "next_after": str|null}}
+     * — {@code has_taxonomy} is {@code false} only when {@code collection}
+     * has no centroids at its own dim yet, in which case {@code chashes} is
+     * always empty and {@code next_after} always null. A drain loop passes
+     * the previous response's {@code next_after} back as {@code after} until
+     * it comes back null.
      */
     private void handleUnassignedChashes(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String collection = requireString(body, "collection");
         int limit = optIntDefault(body, "limit", TaxonomyRepository.MAX_UNASSIGNED_CHASHES);
-        Map<String, Object> result = repo.unassignedChashes(tenant, collection, limit);
+        String after = optStringOrNull(body, "after");
+        Map<String, Object> result = repo.unassignedChashes(tenant, collection, limit, after);
         HttpUtil.send(ex, 200, json(result));
     }
 

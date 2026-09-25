@@ -220,7 +220,7 @@ class TaxonomyAssignBoundsIntegrationTest {
     }
 
     @Test
-    void assignFromChashesSetsTheBoundsExactlyOnceInsideItsTransaction() throws Exception {
+    void everyTaxonomyAssignBoundsCallSiteIsTheFirstStatementInItsOwnTransaction() throws Exception {
         Path src = Path.of("src", "main", "java", "dev", "nexus", "service", "db", "TaxonomyRepository.java");
         List<String> lines = Files.readAllLines(src);
         // A LIVE statement, not the text inside a comment (the first cut of
@@ -231,27 +231,47 @@ class TaxonomyAssignBoundsIntegrationTest {
                 sites.add(i);
             }
         }
-        assertThat(sites).as("exactly one live call site").hasSize(1);
-        int method = indexOfLine(lines, "public Map<String, Object> assignFromChashes(");
-        int withTenant = indexOfLineAfter(lines, method, "tenantScope.withTenant(tenant, ctx -> {");
-        int firstStatement = indexOfLineAfter(lines, withTenant, "ctx.select(");
-        assertThat(sites.get(0))
-            .as("inside assignFromChashes's withTenant block, before its first statement")
-            .isGreaterThan(withTenant)
-            .isLessThan(firstStatement);
+        // nexus-f3yxx rework round (structural lock-hold fix): the own pass and
+        // the cross pass now run in SEPARATE transactions, each bounding itself;
+        // unassignedChashes reuses the same helper for its own (read-only)
+        // transaction. Three legitimate sites, not the pre-rework one.
+        assertThat(sites)
+            .as("three live call sites: assignFromChashes's own pass, its cross"
+                + " pass, and unassignedChashes -- each transaction bounds itself")
+            .hasSize(3);
+        for (int site : sites) {
+            int open = lastIndexOfLineBefore(lines, site, "tenantScope.withTenant(tenant, ctx -> {");
+            int firstCode = firstNonCommentCodeLineAfter(lines, open);
+            assertThat(firstCode)
+                .as("line %d: PgSession.setTaxonomyAssignBounds must be the FIRST code"
+                    + " statement inside its own enclosing withTenant block (opened at"
+                    + " line %d) -- no query may run before the transaction is bounded",
+                    site + 1, open + 1)
+                .isEqualTo(site);
+        }
     }
 
-    private static int indexOfLine(List<String> lines, String needle) {
-        return indexOfLineAfter(lines, -1, needle);
-    }
-
-    private static int indexOfLineAfter(List<String> lines, int after, String needle) {
-        for (int i = after + 1; i < lines.size(); i++) {
+    private static int lastIndexOfLineBefore(List<String> lines, int before, String needle) {
+        for (int i = before - 1; i >= 0; i--) {
             if (lines.get(i).contains(needle)) {
                 return i;
             }
         }
-        throw new AssertionError("no line containing " + needle + " after line " + after);
+        throw new AssertionError("no line containing " + needle + " before line " + before);
+    }
+
+    /** The first non-blank, non-comment line after {@code after} -- the actual
+     *  first CODE statement inside a block, skipping {@code //}/{@code /* }/{@code *}
+     *  lines a raw "next line" check would trip on. */
+    private static int firstNonCommentCodeLineAfter(List<String> lines, int after) {
+        for (int i = after + 1; i < lines.size(); i++) {
+            String s = lines.get(i).strip();
+            if (s.isEmpty() || s.startsWith("//") || s.startsWith("/*") || s.startsWith("*")) {
+                continue;
+            }
+            return i;
+        }
+        throw new AssertionError("no code line found after line " + after);
     }
 
     // ── helpers (mirroring TaxonomyAssignFromChashesRepositoryTest) ─────────
