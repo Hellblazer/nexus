@@ -582,8 +582,9 @@ With the automation token in its own keychain item and no
 `Claude Code-credentials` read anywhere: the cc-validation runner, an
 rdr208-mvv container run and one interactive tmux session each authenticate
 through `run --`; after each, the janitor finds zero credential files under
-the known roots on this Mac, and on qwentescence an ssh `find` over the
-remote home and temporary directories finds none after the remote run; and an
+the known roots on this Mac, and on qwentescence an ssh `find`, scoped to the
+remote run's own output and stage folders and /tmp and /var/tmp to depth 4
+(never a whole home or disk), finds none after the remote run; and an
 agent session's attempt to run `security
 find-generic-password -s "Claude Code-credentials" -w` is denied by the plugin
 guard. With the dispatch grant (amendment): the three Phase 3b proofs pass
