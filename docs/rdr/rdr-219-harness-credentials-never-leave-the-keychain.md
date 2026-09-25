@@ -437,6 +437,14 @@ grep over the whole of `$TMPDIR` or a scratchpad did not finish in minutes:
 the temp volume has about 79,000 top-level entries, and one scratchpad held
 65 GB (T2 `nexus_rdr/219-continuation-p3-2b`). A token pasted into a file of
 another name elsewhere in those roots is therefore not caught.
+It also fails on leftover processes (Sam, 2026-09-25, after five harness tmux
+servers were found holding the token for about seven hours, T2
+`nexus_rdr/219-leftover-tmux-servers-2026-09-25`): a process of the current
+user whose environment names `CLAUDE_CODE_OAUTH_TOKEN` or
+`NX_HARNESS_CLAUDE_OAUTH_TOKEN` (macOS `ps -E`, Linux `/proc/<pid>/environ`),
+and a live tmux server on a harness socket name, each older than two hours
+so a harness running at the same time is not flagged. It reports the pid,
+age and command name, never a value or the command line.
 
 ### Existing Infrastructure Audit
 
@@ -811,3 +819,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Amendment round 2 (critique: not-justified, 1 Critical): the grant is limited to harnesses that use `--strict-mcp-config`; plugin-loaded harnesses need a hook-resolution proof first (nexus-wauo1.37). The janitor's filename-versus-content scope is stated as built, and the accidental-versus-deliberate limitation is added to the Contradiction Check.
 - 2026-09-25: Amendment round 3 (critique: partial, 1 Significant): the guard's design section lists the ps and /proc environment shapes and the narrowed variable-print rule; the Risks entry states them as specified, not shipped.
 - 2026-09-25: The print guard stops denying whole-environment dumps: Claude deletes the token from its own environment, so a dump from its Bash tool cannot contain it; the guard keeps keychain reads, credential-file reads, references to a protected name, and other processes' environments (Phase 3 code review round 2, nexus-wauo1.26).
+- 2026-09-25: The janitor also fails on leftover processes holding a token variable and on leftover harness tmux servers (Sam's decision, after five were found).
