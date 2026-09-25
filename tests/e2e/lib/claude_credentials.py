@@ -19,8 +19,8 @@ Claude Code showed "Not logged in", while ``claude -p`` failed with "OAuth
 session expired and could not be refreshed".
 
 ``tests/cc-validation/runner.sh``'s ``_cred_tool`` (nexus-qs1g6, 2026-08-28;
-see ``tests/cc-validation/README.md`` § "Auth" /
-"More than one keychain item carries the service name") already solved
+see ``tests/cc-validation/README.md`` § "Auth" / "History: the operator's
+interactive login used to leak in") already solved
 this by choosing the credential by CONTENT rather than trusting the first
 match: enumerate every account under the service (attribute-only
 ``security dump-keychain``, no secret read, no unlock prompt), fetch each
