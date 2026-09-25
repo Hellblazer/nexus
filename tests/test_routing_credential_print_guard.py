@@ -103,6 +103,14 @@ def _reason(proc: subprocess.CompletedProcess) -> str:
 
 DENIED_SHAPES = [
     pytest.param(
+        'python3 -c "import os; print(os.environ[\\"CLAUDE_CODE_OAUTH_TOKEN\\"])"',
+        id="python-environ-escaped-double-quotes",
+    ),
+    pytest.param(
+        'python3 -c "import os; print(os.getenv(\\"CLAUDE_CODE_OAUTH_TOKEN\\"))"',
+        id="python-getenv-escaped-double-quotes",
+    ),
+    pytest.param(
         'security find-generic-password -s "Claude Code-credentials" -w',
         id="find-generic-password-interactive-login-item",
     ),
