@@ -33,6 +33,23 @@ it without any change to the actual name-draw rate.
    happens to enumerate first, observed both runs to be the stale
    pre-resume name.
 
+A THIRD round (same date, coordinator review of the first two): the same
+ambiguity infects `armed_name_known`'s "did A2 arm at all" verification,
+and the FIRST fix for it (an EXCLUDE parameter that falls back to the
+UNQUALIFIED check on ambiguity) put the vacuous-pass gap right back --
+that unqualified fallback always finds A's stale entry, so a resumed
+session whose arm genuinely never happened would still report success,
+exactly the case the fix was meant to catch. The corrected fallback reads
+LEASE evidence instead of guessing: `directory/<name>` rows carry
+per-entry `created_at` (`src/nexus/commands/tuple_cmd.py`), and a
+genuinely NEW arm always writes a NEW row with a fresh nonce
+(`src/nexus/mcp/subscriptions.py`'s `_directory_heartbeat`: a fresh nonce
+on first send, the SAME nonce -- extending the SAME row -- on every 60s
+renewal after that). A BEFORE/AFTER snapshot of the excluded name's own
+`created_at` values, taken around the arm attempt, proves whether
+anything was actually written: if not, `arm()` now reports a real
+FAILURE rather than a silent pass.
+
 These are executable, BEHAVIORAL tests, not this file's usual grep-based
 structural style, because both functions are pure enough to extract and
 exercise directly: `redraw_until_distinct` only touches its caller-named
@@ -125,9 +142,9 @@ nx() {
         printf '%s\n' '[{"subspace":"directory/work-79"}__EXTRA_SUBSPACE__]'
     elif [ "$1" = tuple ] && [ "$2" = directory ]; then
         if [ "$3" = work-79 ] || { [ -n "${SECOND_NAME:-}" ] && [ "$3" = "$SECOND_NAME" ]; }; then
-            printf '%s\n' '{"holders":["SID1"]}'
+            printf '%s\n' '{"holders":["SID1"],"entries":[{"session_id":"SID1","created_at":"2026-09-25T10:00:00.000000Z"}]}'
         else
-            printf '%s\n' '{"holders":[]}'
+            printf '%s\n' '{"holders":[],"entries":[]}'
         fi
     fi
 }
@@ -266,6 +283,7 @@ def test_arm_reports_the_genuinely_new_name_when_one_exists() -> None:
     fn = (
         _extract_function(mvv, "discover_name")
         + _extract_function(mvv, "armed_name_known")
+        + _extract_function(mvv, "_own_directory_created_ats")
         + _extract_function(mvv, "arm")
     )
     script = (
@@ -283,25 +301,87 @@ def test_arm_reports_the_genuinely_new_name_when_one_exists() -> None:
     assert out.get("NAME") == "work-2a", proc.stdout
 
 
-def test_arm_treats_a_same_name_recollision_as_success_not_a_failure() -> None:
-    """Only the excluded (pre-resume) name exists -- an irreducible
-    ambiguity (see the in-code comment: a resubscribe to an already-held
-    name leaves no distinct trace). arm() must NOT report this as a
-    failure -- that would newly introduce a false FAIL on a benign ~1/256
-    same-name re-collision, exactly the kind of mis-measurement this
-    whole fix removes elsewhere. It falls back to the unqualified check,
-    finds the excluded name itself, and succeeds."""
+# The lease-evidence fallback (coordinator's second round, 2026-09-25): a
+# naive fallback to the UNQUALIFIED check ("does ANY entry exist for this
+# session id") puts the vacuous-pass gap right back -- A's stale entry
+# always satisfies it, whether or not A2 ever armed anything. The fix
+# reads LEASE evidence instead: directory/<name> entries carry per-row
+# `created_at` (src/nexus/commands/tuple_cmd.py), and a genuinely NEW arm
+# (a different process, its own fresh in-process lease state) always
+# writes a NEW row with a fresh nonce (src/nexus/mcp/subscriptions.py),
+# so a BEFORE/AFTER snapshot of created_at values under the excluded name
+# reveals whether THIS arm attempt wrote anything, without guessing.
+# `_own_directory_created_ats`'s own `nx` calls for directory/work-79 are
+# counted here (via DIR_CALLS_FILE) so the stub can return the "before"
+# shape on the first call and, when SIMULATE_NEW_ROW=1, an ADDITIONAL row
+# from the second call onward -- simulating a real lease write that
+# happened between arm()'s "before" snapshot and its "after" one.
+_LEASE_EVIDENCE_STUB = r"""
+set -uo pipefail
+declare -A SID_OF=([A2]="SID1") NAME_OF=()
+prompt() { return 0; }
+wait_for() { shift; "$@"; }
+tok() { printf 'TOK'; }
+DIR_CALLS_FILE="$(mktemp)"
+echo 0 > "$DIR_CALLS_FILE"
+nx() {
+    if [ "$1" = tuple ] && [ "$2" = list ]; then
+        printf '%s\n' '[{"subspace":"directory/work-79"}]'
+    elif [ "$1" = tuple ] && [ "$2" = directory ] && [ "$3" = work-79 ]; then
+        local n; n="$(cat "$DIR_CALLS_FILE")"; n=$((n + 1)); echo "$n" > "$DIR_CALLS_FILE"
+        if [ "$n" -ge 2 ] && [ "${SIMULATE_NEW_ROW:-0}" = 1 ]; then
+            printf '%s\n' '{"holders":["SID1"],"entries":[{"session_id":"SID1","created_at":"2026-09-25T10:00:00.000000Z"},{"session_id":"SID1","created_at":"2026-09-25T10:05:00.000000Z"}]}'
+        else
+            printf '%s\n' '{"holders":["SID1"],"entries":[{"session_id":"SID1","created_at":"2026-09-25T10:00:00.000000Z"}]}'
+        fi
+    else
+        printf '%s\n' '{"holders":[],"entries":[]}'
+    fi
+}
+jq() { command jq "$@"; }
+"""
+
+
+def test_arm_fails_when_no_new_lease_write_since_the_arm_began() -> None:
+    """The coordinator's exact scenario: A2's arm never genuinely happens
+    (prompt() is stubbed as a no-op -- nothing calls tuple_subscribe), and
+    A's stale entry is the only thing present, unchanged throughout. RED
+    against the FIRST round's fallback (`if ! armed_name_known "$1"; then
+    ...; fi` -- an UNQUALIFIED check, which finds the stale entry and
+    reports success): GREEN only once the fallback requires lease
+    evidence of an actual write during this arm attempt, which does not
+    exist here."""
     mvv = _MVV_SH.read_text(encoding="utf-8")
     fn = (
         _extract_function(mvv, "discover_name")
         + _extract_function(mvv, "armed_name_known")
+        + _extract_function(mvv, "_own_directory_created_ats")
+        + _extract_function(mvv, "arm")
+    )
+    script = fn + _LEASE_EVIDENCE_STUB + "\narm A2 work-79\n"
+    proc = _run_bash(script)
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+
+
+def test_arm_treats_a_new_lease_write_under_the_excluded_name_as_success() -> None:
+    """The genuine same-name re-collision, now backed by real evidence
+    instead of guessed: a SECOND row appears under directory/work-79 for
+    this session id, with a created_at after the arm began -- proof that
+    THIS attempt's tuple_subscribe call actually landed, even though
+    Claude happened to re-pick the identical name. arm() must treat this
+    as success, not a failure -- redraw_until_distinct's own comparison
+    against $exclude handles it like any other collision from there."""
+    mvv = _MVV_SH.read_text(encoding="utf-8")
+    fn = (
+        _extract_function(mvv, "discover_name")
+        + _extract_function(mvv, "armed_name_known")
+        + _extract_function(mvv, "_own_directory_created_ats")
         + _extract_function(mvv, "arm")
     )
     script = (
         fn
-        + _ARM_STUB
-        + _STALE_ENTRY_STUB.replace("__EXTRA_SUBSPACE__", "")
-        + '\narm A2 work-79\n'
+        + _LEASE_EVIDENCE_STUB
+        + 'SIMULATE_NEW_ROW=1 arm A2 work-79\n'
         + 'rc=$?\n'
         + 'printf \'RC=%s\\nNAME=%s\\n\' "$rc" "${NAME_OF[A2]:-}"\n'
     )
@@ -322,6 +402,7 @@ def test_arm_reports_a_real_failure_when_nothing_exists_at_all() -> None:
     fn = (
         _extract_function(mvv, "discover_name")
         + _extract_function(mvv, "armed_name_known")
+        + _extract_function(mvv, "_own_directory_created_ats")
         + _extract_function(mvv, "arm")
     )
     stub = _STALE_ENTRY_STUB.replace("__EXTRA_SUBSPACE__", "").replace(

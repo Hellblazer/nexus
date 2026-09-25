@@ -377,6 +377,26 @@ discover_name() {  # NAME [EXCLUDE] -> the instance name this session actually a
     return 1
 }
 armed_name_known() { [ -n "$(discover_name "$1" "${2:-}")" ]; }
+_own_directory_created_ats() {  # NAME SID -> this SID's own row created_at values under directory/NAME
+    # `nx tuple directory NAME --json`'s `entries` array carries one row
+    # per LIVE tuple (session_id, created_at, expires_at) --
+    # src/nexus/commands/tuple_cmd.py's own docstring: "several live rows
+    # of the SAME session -- a re-armed watcher's new nonce beside its old
+    # row -- are one holder, not a conflict". A session's directory lease
+    # (src/nexus/mcp/subscriptions.py: DIRECTORY_TTL_S=300,
+    # DIRECTORY_HEARTBEAT_S=60) is armed with a FRESH nonce on its first
+    # send and the SAME nonce on every 60s renewal after that, so a LIVE
+    # holder's row is updated in place -- but a genuinely NEW arm (a
+    # different process, its own fresh in-process lease state) always
+    # mints a brand-new nonce on ITS first send, writing a NEW physical
+    # row alongside any existing one for the same (name, session_id).
+    # That is the observable signal this function exists to read: a
+    # BEFORE/AFTER snapshot of created_at values reveals whether anything
+    # NEW was written, resolving the exclude/collision ambiguity in arm()
+    # below without guessing (nexus-wauo1.13 coordinator finding,
+    # 2026-09-25).
+    nx tuple directory "$1" --json 2>/dev/null | jq -r --arg s "$2" '.entries[] | select(.session_id == $s) | .created_at'
+}
 arm() {  # NAME [EXCLUDE]: the session subscribes ITS OWN instance name.
     # EXCLUDE (optional, nexus-wauo1.13 coordinator finding, 2026-09-25): a
     # directory name known to be a STALE, still-live entry for this session
@@ -389,29 +409,30 @@ arm() {  # NAME [EXCLUDE]: the session subscribes ITS OWN instance name.
     # nothing, exactly as reported. The default (empty) leaves every OTHER
     # caller (A, B, C, and A2's own re-arm after /clear at step 4, a
     # DIFFERENT session id with no stale entry to exclude) unchanged.
-    local t exclude="${2:-}"; t="$(tok DONE-ARM)"
+    local t exclude="${2:-}" before_created=""; t="$(tok DONE-ARM)"
+    [ -n "$exclude" ] && before_created="$(_own_directory_created_ats "$exclude" "${SID_OF[$1]}" | sort)"
     prompt "$1" "Call ListAgents to read this session's own instance name, then call the nexus MCP tool tuple_subscribe with subspace \"mailbox/<that exact name>\" -- this arms your own name in the session directory, which is what that tool accepts. Then reply with exactly $t and nothing else." "$t" || return 1
     if [ -n "$exclude" ] && ! wait_for 30 armed_name_known "$1" "$exclude"; then
         # Nothing OTHER than $exclude showed up within 30s. That is either
         # a genuine arm failure, or a genuine SAME-NAME re-collision
-        # (Claude re-assigned the identical pre-resume name) -- the two
-        # cannot be told apart from directory state alone, since a
-        # resubscribe to an already-held name leaves no distinct trace
-        # here (the same irreducible ambiguity discover_name's own EXCLUDE
-        # comment names). Fall back to the UNQUALIFIED check: if even that
-        # finds nothing (implausible, since $exclude's own entry should
-        # still be live, but checked rather than assumed), it is a real
-        # failure. If it succeeds, treat this as a benign collision, not a
-        # failure -- redraw_until_distinct's own comparison against
-        # $exclude will correctly redraw for it, same as any other
-        # collision.
-        if ! armed_name_known "$1"; then
-            echo "  no directory entry for ${SID_OF[$1]} after the arm"
-            return 1
+        # (Claude re-assigned the identical pre-resume name) -- do NOT
+        # guess: a silent PASS here is the exact vacuous-pass bug this
+        # fix exists to close, and a naive fallback to the unqualified
+        # check (which always finds $exclude's own still-live entry) puts
+        # it right back. Ask the lease evidence instead: did THIS session
+        # write a NEW directory/$exclude row (a fresh nonce, per
+        # _own_directory_created_ats's comment) since before this arm
+        # attempt began?
+        local after_created new_created
+        after_created="$(_own_directory_created_ats "$exclude" "${SID_OF[$1]}" | sort)"
+        new_created="$(comm -13 <(printf '%s\n' "$before_created") <(printf '%s\n' "$after_created"))"
+        if [ -n "$new_created" ]; then
+            echo "  session $1 re-armed a name matching the excluded $exclude (a new lease row since the arm began -- a same-name collision, not an arm failure)"
+            NAME_OF[$1]="$exclude"
+            return 0
         fi
-        echo "  session $1 re-armed a name matching the excluded $exclude (a same-name collision, not an arm failure)"
-        NAME_OF[$1]="$exclude"
-        return 0
+        echo "  no directory entry for ${SID_OF[$1]} after the arm (excluding $exclude finds nothing new, and $exclude's own row shows no lease write since the arm began -- a real failure, not a benign collision)"
+        return 1
     fi
     if [ -z "$exclude" ]; then
         wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
