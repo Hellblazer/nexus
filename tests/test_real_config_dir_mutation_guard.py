@@ -146,6 +146,8 @@ class TestAllowlist:
             "logs/mcp.log",
             "current_session",
             "t1_session_lease.",
+            "context/",
+            "mineru.pid",
         }
         assert expected.issubset(set(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES))
 
@@ -171,6 +173,59 @@ class TestAllowlist:
         assert _is_allowlisted_config_dir_path("current_session") is True
         assert _is_allowlisted_config_dir_path("logs/mcp.log") is True
         assert _is_allowlisted_config_dir_path("logs/mcp.log.1") is True
+
+    def test_context_l1_cache_dir_is_allowlisted(self) -> None:
+        """nexus-pfuns follow-up (2026-09-25): ``context/<repo>-<hash>.txt``
+        is the RDR-072 per-repo Knowledge Map cache
+        (``nexus.context.generate_context_l1`` /
+        ``CONTEXT_L1_DIR = _ctx_nexus_config_dir() / "context"``), written by
+        any live ``nx index repo`` background dispatch (the post-commit
+        hook's ``--on-locked=skip`` run -- the same mechanism already
+        covered by ``logs/index-`` and ``locks/`` above; this is a THIRD
+        artifact of that one mechanism), by ``nx taxonomy`` rebuilds, and by
+        ``nx context refresh``, all run by a live Claude Code session on
+        this box independent of pytest. MEASURED 2026-09-25: a full
+        ``pytest -n auto`` run (0 failures) exited 1 over exactly
+        ``MODIFIED context/tmp-d0f036b9.txt``, coinciding with a real
+        session's SessionStart hook picking up a freshly regenerated
+        Knowledge Map built from the live cloud store -- no test in this
+        repo produces that content (every direct ``generate_context_l1``/
+        ``refresh_context_l1`` call in tests/test_context.py passes an
+        explicit ``output_path=tmp_path/...``, bypassing this directory
+        entirely, and every ``nx`` subprocess invocation in
+        tests/test_mineru_cmd.py-adjacent suites and elsewhere isolates
+        ``NEXUS_CONFIG_DIR`` -- see ``_isolate_config_dir``). The writer
+        itself (``nexus.context._ctx_nexus_config_dir``) honours
+        ``NEXUS_CONFIG_DIR`` too, so a test that bypasses isolation would
+        still have to reach the real path through the same escape class
+        the guard's own docstring already anticipates.
+        """
+        assert _is_allowlisted_config_dir_path("context/tmp-d0f036b9.txt") is True
+        assert _is_allowlisted_config_dir_path("context/nexus-571b8edd.txt") is True
+        # legacy global fallback file (CONTEXT_L1_PATH) is NOT under this
+        # prefix and stays reported -- narrower than a blanket "context*"
+        # match would be.
+        assert _is_allowlisted_config_dir_path("context_l1.txt") is False
+
+    def test_mineru_pid_is_allowlisted(self) -> None:
+        """``mineru.pid`` (``nexus._mineru_pid._pid_file_path``) is the live
+        MinerU server's own PID/port/started_at registration file,
+        rewritten whenever the server (re)starts -- including a restart
+        triggered by an operator's ``nx`` reinstall on this box, independent
+        of any test. Same class as the already-allowlisted
+        ``aspect_worker_addr.`` (a live daemon's own state file): every
+        test that touches this path isolates ``NEXUS_CONFIG_DIR`` first
+        (tests/test_mineru_cmd.py, tests/test_mineru_config_drift.py,
+        tests/test_mineru_spawn_logging.py, tests/daemon/
+        test_mineru_lifecycle.py -- all `monkeypatch.setenv`, no delenv),
+        and the writer itself resolves through `nexus_config_dir()`, so it
+        honours the same override. MEASURED 2026-09-25: the same day's
+        earlier run tripped on `mineru.pid` alongside `last_seen_version`
+        during a peer's operator-driven `nx` reinstall.
+        """
+        assert _is_allowlisted_config_dir_path("mineru.pid") is True
+        # nested is still reported -- only the config-dir-root file is ambient.
+        assert _is_allowlisted_config_dir_path("sub/mineru.pid") is False
 
     def test_service_registry_election_flocks_are_allowlisted(self) -> None:
         """ServiceRegistry per-scope election flocks churn independently of

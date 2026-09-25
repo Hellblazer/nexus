@@ -1065,6 +1065,42 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # or resolve the config dir through the autouse `_isolate_config_dir`
     # tmp path, so they never write the real directory.
     "tuple-watch/",
+    # RDR-072 per-repo Knowledge Map cache (`nexus.context.generate_context_l1`;
+    # `CONTEXT_L1_DIR = _ctx_nexus_config_dir() / "context"`,
+    # `<repo>-<hash>.txt` per repo). A THIRD artifact of the SAME
+    # post-commit-hook `nx index repo --on-locked=skip` background
+    # dispatch already covered by `logs/index-` and `locks/` above
+    # (src/nexus/commands/index.py:2253-2254 calls `generate_context_l1`
+    # when a repo_path is supplied), plus `nx taxonomy` rebuilds
+    # (commands/taxonomy_cmd.py:795-796) and `nx context refresh`
+    # (commands/context_cmd.py) run by any live Claude Code session on
+    # this box, independent of pytest. MEASURED 2026-09-25: a full
+    # `pytest -n auto` run (0 test failures) exited 1 over exactly
+    # `MODIFIED context/tmp-d0f036b9.txt`, coinciding with a real session's
+    # SessionStart hook (src/nexus/hooks/session_context.py) picking up a
+    # freshly regenerated Knowledge Map built from the live cloud store --
+    # no test produces that content. The writer honours `NEXUS_CONFIG_DIR`
+    # (`_ctx_nexus_config_dir()`), and every direct
+    # `generate_context_l1`/`refresh_context_l1` call in
+    # tests/test_context.py passes an explicit `output_path=tmp_path/...`,
+    # bypassing this directory entirely -- confirmed no test reaches the
+    # real path through this writer.
+    "context/",
+    # Live MinerU server's own PID/port/started_at registration file
+    # (`nexus._mineru_pid._pid_file_path` -> `nexus_config_dir() /
+    # "mineru.pid"`), rewritten whenever the server (re)starts --
+    # including a restart triggered by an operator's `nx` reinstall on
+    # this box (`config.py`'s `_restart_mineru_server`), independent of
+    # any test. Same class as the already-allowlisted
+    # `aspect_worker_addr.`: a live daemon's own state file. MEASURED
+    # 2026-09-25: tripped alongside `last_seen_version` during a peer's
+    # operator-driven `nx` reinstall mid-run. Every test that touches this
+    # path (tests/test_mineru_cmd.py, tests/test_mineru_config_drift.py,
+    # tests/test_mineru_spawn_logging.py,
+    # tests/daemon/test_mineru_lifecycle.py) isolates `NEXUS_CONFIG_DIR`
+    # via `monkeypatch.setenv` first -- none `delenv`s it -- so the writer
+    # never reaches the real path from a test.
+    "mineru.pid",
 )
 
 
