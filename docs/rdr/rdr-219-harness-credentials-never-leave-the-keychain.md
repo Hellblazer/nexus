@@ -223,7 +223,10 @@ Three rules:
    a file, so there is nothing to leave behind and nothing to print. (The
    caller is the local code that invokes the helper; on `--remote`, the
    helper's own remote side reads the token from stdin into the environment it
-   then execs.)
+   then execs.) One exception, added by amendment on 2026-09-25
+   (nexus-wauo1.35): a harness that exercises nx-mcp's own LLM dispatch may
+   also grant the token to that dispatch under a harness-only name; see "The
+   nx-mcp dispatch grant" below. It is still environment only.
 3. **Guards, not discipline.** A plugin PreToolUse hook denies commands that
    would print a keychain credential. A lint forbids credential files and
    keychain reads anywhere outside the helper, markdown included. A janitor
@@ -283,17 +286,57 @@ Transport rules the Phase 0 spike established (T2 `nexus_rdr/219-spike-script`):
   then names the staged copy by bare path.
 - A launched session's trust and bypass-permissions dialogs default to exit, so
   a harness pre-seeds them or selects the proceed option.
-- Claude Code strips `CLAUDE_CODE_OAUTH_TOKEN` from every process it starts:
-  Bash-tool commands and MCP servers alike, even when an MCP server's `env`
-  block names the variable (an ordinary variable passes through the same
-  block). `claude_credentials.py run -- claude -p 'run: env | grep -c
-  CLAUDE_CODE_OAUTH_TOKEN' --allowedTools Bash` prints 0 (T2
-  `nexus_rdr/219-research-15`). So a `claude -p` descended from another
-  Claude process cannot authenticate on the token. A harness starts any such
-  process from its own shell instead: migration-rehearsal starts the RDR-173
-  aspect worker before its Claude workload, and nx-mcp then reuses that
-  worker's lease rather than spawning its own. Forwarding the token under
-  another variable name is not a remedy, because it defeats the boundary.
+- Claude Code deletes `CLAUDE_CODE_OAUTH_TOKEN` from its own environment
+  after reading it, so no process it starts inherits it: Bash-tool commands
+  and MCP servers alike. An MCP server's `env` block cannot restore it either,
+  because `${CLAUDE_CODE_OAUTH_TOKEN}` there expands to an empty string.
+  Other names pass normally, including ones containing TOKEN, OAUTH, KEY or
+  SECRET (T2 `nexus_rdr/219-research-15`, corrected by the spike in T3
+  `analysis-deep-rdr219-harness-credential-passthrough-2026-09-25`).
+  `claude_credentials.py run -- claude -p 'run: env | grep -c
+  CLAUDE_CODE_OAUTH_TOKEN' --allowedTools Bash` prints 0. So a `claude -p`
+  descended from another Claude process has no token unless it is granted
+  one. A harness that can start such a process from its own shell does so:
+  migration-rehearsal starts the RDR-173 aspect worker before its Claude
+  workload, and nx-mcp then reuses that worker's lease rather than spawning
+  its own.
+
+**The nx-mcp dispatch grant (amendment, 2026-09-25, nexus-wauo1.35).** nx-mcp
+is always Claude's child, and it starts `claude -p` for the operator tools,
+nx_answer's inline planner and plan runner, nx_tidy, nx_enrich_beads,
+nx_plan_audit and aspect extraction. A harness cannot start those from its own
+shell. So a harness that exercises them opts in with `claude_credentials.py
+run --grant-mcp-dispatch -- <command>`. That puts the same token in the child's
+environment twice: as `CLAUDE_CODE_OAUTH_TOKEN`, which Claude reads and
+deletes, and as `NX_HARNESS_CLAUDE_OAUTH_TOKEN`, which Claude leaves in place
+and its children inherit. nx-mcp never reads the harness name itself. The two
+places that start `claude` in `src/nexus` build the child's environment
+through one helper, which sets `CLAUDE_CODE_OAUTH_TOKEN` from
+`NX_HARNESS_CLAUDE_OAUTH_TOKEN` only when the former is absent, and only in
+that child's environment. The two places are `operators/dispatch.py`'s
+`_build_dispatch_env`, used by every MCP tool above and the plan runner, and
+`aspect_extractor.py`'s `_run_claude_isolated`, which passes `env=`
+explicitly. The helper never changes `os.environ`, so git, nested MCP servers
+and other children of nx-mcp do not receive the token under its protected
+name. It keeps the harness name in the child, so a tool-granting dispatch
+whose nested nx-mcp dispatches again still works.
+The spike proved the chain end to end: the harness variable reached a stdio
+MCP server, whose nested `claude -p`, with the token mapped in and an empty
+config directory, replied; the same call without the token failed "Not
+logged in".
+Cost, accepted: in an opted-in harness session, Claude's Bash-tool commands
+can read `NX_HARNESS_CLAUDE_OAUTH_TOKEN`, which Claude's own deletion would
+otherwise have prevented. The exposure is bounded:
+- It is the revocable automation token, never the operator's login.
+- It is opt-in per harness launch.
+- It is environment only, never a file or argv.
+- It is covered by the same guards: the print guard, lint and janitor treat
+  `NX_HARNESS_CLAUDE_OAUTH_TOKEN` exactly as they treat `CLAUDE_CODE_OAUTH_TOKEN`.
+Production is unaffected: nothing sets the harness name, and the helper then
+changes nothing.
+Rejected alternatives: a credential file or a literal token in an `.mcp.json`
+env block (a file, against rule 2); and a dispatch daemon started from the
+harness shell (a product change of this size made only for harnesses).
 
 **Migration of the 26 sites.** Each site from the inventory moves to `run --`
 and drops its `.credentials.json` write. The persistent snapshot and
@@ -406,6 +449,13 @@ not documented, and it does not apply in bare mode.
 - **Risk**: the token expires after a year and harnesses fail.
   **Mitigation**: `status` reports the age; the doctor or battery warns at 30
   days to expiry.
+- **Risk**: in a harness that opts in with `--grant-mcp-dispatch`, a model's
+  Bash-tool command prints `NX_HARNESS_CLAUDE_OAUTH_TOKEN` into pane scrollback,
+  a log or an artifact (amendment, nexus-wauo1.35).
+  **Mitigation**: the opt-in is per launch and only for harnesses that exercise
+  nx-mcp's LLM dispatch; the print guard denies printing the harness name as it
+  does the token's own name; the janitor scans harness logs and artifacts for
+  token-shaped content; and it is the revocable automation token.
 
 ### Failure Modes
 
@@ -417,12 +467,14 @@ not documented, and it does not apply in bare mode.
   catches a leftover.
 - Guard false positive on a legitimate command: the message names `status`
   and the helper.
-- A harness exercises an LLM subprocess that nx-mcp dispatches (nx_answer's
-  inline planner, the operator tools, nx_tidy): that subprocess has no
-  credential, because nx-mcp is Claude's child and the token does not reach
-  it. Production is unaffected, since a user's nested `claude -p` reads the
-  user's own login. Whether harnesses accept this gap or the RDR allows a
-  narrowly scoped mechanism is open (nexus-wauo1.35).
+- A harness exercises an LLM subprocess that nx-mcp dispatches without
+  opting in with `--grant-mcp-dispatch`: that subprocess has no credential
+  and fails "Not logged in", loudly. The remedy is the opt-in (see "The nx-mcp
+  dispatch grant").
+- The harness variable is set in a production environment: the dispatch
+  helper would use it. The single-source lint forbids the name outside the
+  helper, the dispatch helper and harness launch sites, and the janitor treats
+  it as credential-shaped.
 
 ## Implementation Plan
 
@@ -501,6 +553,25 @@ the PreToolUse Bash matcher in `conexus/hooks/hooks.json` and listed in
 Widen the single-source lint to all tracked text files, and add the janitor
 leg to the release battery, each with a positive control that fires on a
 planted violation. Run the Minimum Viable Validation.
+
+### Phase 3b: The nx-mcp dispatch grant (amendment, nexus-wauo1.35)
+
+#### Step 1: The dispatch helper
+
+Add the one helper that maps `NX_HARNESS_CLAUDE_OAUTH_TOKEN` to
+`CLAUDE_CODE_OAUTH_TOKEN` in a child's environment only, and call it from
+`_build_dispatch_env` and `_run_claude_isolated`, which starts passing `env=`.
+Tests pin that production (no harness name) is unchanged, that the mapping
+never touches `os.environ`, and that an existing `CLAUDE_CODE_OAUTH_TOKEN`
+wins.
+
+#### Step 2: The opt-in and its proof
+
+Add `run --grant-mcp-dispatch` to the helper. Add the harness name to the
+guard's, lint's and janitor's credential-name constants. Prove it with one
+harness run that calls an operator tool through nx-mcp, with
+ANTHROPIC_API_KEY absent: migration-rehearsal `--fullstack` adds an
+`operator_summarize` call to its workload and asserts a real reply.
 
 ### Phase 4: Records and cleanup
 
@@ -617,3 +688,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Phase 0 critique fixes (nexus-wauo1.4): accepted A3/A4 wording restored with disclosed tested shapes (A4 partly verified), negative control and wider disk check re-run and cited, gate section pointed at the Phase 0 outcome, self-install cost and Day 2 revocation added.
 - 2026-09-25: Phase 1 review fixes reflected in Technical Design: the helper reads the token on the remote side, PowerShell re-parses the remote command so it must be a bare staged script path, remote scripts are staged on persistent storage.
 - 2026-09-25: Phase 2 finding: Claude Code strips the token from its children; harnesses start nested `claude -p` processes from their own shell; nx-mcp's LLM dispatch under the token is open as nexus-wauo1.35.
+- 2026-09-25: Amendment (nexus-wauo1.35, Sam: "amend"): harnesses may grant the automation token to nx-mcp's LLM dispatch under NX_HARNESS_CLAUDE_OAUTH_TOKEN via `run --grant-mcp-dispatch`, mapped in one helper in src/nexus; the Claude Code finding corrected (it deletes the token from its own environment, it does not filter names); Phase 3b added.
