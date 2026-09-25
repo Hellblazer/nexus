@@ -829,3 +829,63 @@ def test_main_passes_when_process_and_tmux_scans_find_nothing(tmp_path, cj, monk
     out = capsys.readouterr().out
     assert rc == 0
     assert "CREDENTIAL JANITOR PASSED" in out
+
+
+# ---------------------------------------------------------------------------
+# Code review of e108e0384 (nexus-wauo1.24): gaps a mutant passed through.
+# ---------------------------------------------------------------------------
+
+
+def test_process_scan_ignores_a_variable_whose_name_ends_with_a_protected_name(cj):
+    """`FOO_CLAUDE_CODE_OAUTH_TOKEN=` is not the protected variable; a naive
+    substring match would flag it."""
+    fake_output = "12345 03:00:00 python3 /usr/bin/python3 FOO_CLAUDE_CODE_OAUTH_TOKEN=$x\n"
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="darwin",
+        ps_runner=lambda: fake_output, comm_runner=lambda pid: "python3",
+    )
+    assert findings == []
+
+
+def test_process_scan_flags_a_protected_name_at_the_start_of_the_text(cj):
+    fake_output = "12345 03:00:00 python3 CLAUDE_CODE_OAUTH_TOKEN=$x /usr/bin/python3\n"
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="darwin",
+        ps_runner=lambda: fake_output, comm_runner=lambda pid: "python3",
+    )
+    assert [f.pid for f in findings] == [12345]
+
+
+@pytest.mark.parametrize("etime, seconds", [
+    ("05:09", 309), ("01:02:03", 3723), ("2-01:02:03", 176523), ("10-00:00:01", 864001),
+])
+def test_parse_etime_accepts_every_ps_shape(cj, etime, seconds):
+    assert cj._parse_etime(etime) == seconds
+
+
+def test_process_scan_reports_a_comm_with_spaces_whole(cj):
+    """A name like `Google Chrome Helper` splits on whitespace; the reported
+    name comes from a per-pid lookup, not the split token."""
+    fake_output = "12345 03:00:00 Google Chrome Helper --type=x NX_HARNESS_CLAUDE_OAUTH_TOKEN=$x\n"
+    findings = cj.scan_processes(
+        min_age_seconds=3600, exclude_pids=set(), platform_name="darwin",
+        ps_runner=lambda: fake_output, comm_runner=lambda pid: "Google Chrome Helper",
+    )
+    assert [f.comm for f in findings] == ["Google Chrome Helper"]
+
+
+def test_tmux_roots_that_resolve_to_one_directory_report_each_server_once(tmp_path, cj):
+    """On macOS /tmp is a symlink to /private/tmp, so the two default roots
+    are one directory; a live server must be reported once, not twice."""
+    real = tmp_path / "private-tmp" / "tmux-501"
+    real.mkdir(parents=True)
+    link = tmp_path / "tmp-link"
+    link.symlink_to(tmp_path / "private-tmp")
+    sock = real / "nexus-e2e-4242"
+    sock.write_bytes(b"")
+    old_time = time.time() - 3 * 3600
+    os.utime(sock, (old_time, old_time))
+    findings = cj.discover_tmux_sockets(
+        roots=[real, link / "tmux-501"], min_age_seconds=7200, tmux_runner=lambda name: True,
+    )
+    assert [f.socket_name for f in findings] == ["nexus-e2e-4242"]

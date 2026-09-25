@@ -411,10 +411,19 @@ def _run_ps_macos() -> str:
     return proc.stdout
 
 
+def _lookup_comm_macos(pid: int) -> str:
+    """The whole process name for one pid. `comm` in the bulk listing is
+    whitespace-split, which truncates a name such as `Google Chrome
+    Helper`; a per-pid `ps -o comm=` prints the name alone on its line."""
+    proc = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
 def _scan_processes_macos(
-    *, min_age_seconds: int, exclude_pids: "set[int]", ps_runner=None,
+    *, min_age_seconds: int, exclude_pids: "set[int]", ps_runner=None, comm_runner=None,
 ) -> "list[ProcessFinding]":
     runner = ps_runner or _run_ps_macos
+    lookup = comm_runner or (_lookup_comm_macos if ps_runner is None else None)
     output = runner()
     findings: list[ProcessFinding] = []
     for line in output.splitlines():
@@ -444,6 +453,8 @@ def _scan_processes_macos(
             continue
         if age < min_age_seconds:
             continue
+        if lookup is not None:
+            comm = lookup(pid) or comm
         findings.append(ProcessFinding(pid=pid, etime=etime_str, comm=comm))
     return findings
 
@@ -519,6 +530,7 @@ def scan_processes(
     exclude_pids: "set[int]",
     platform_name: "str | None" = None,
     ps_runner=None,
+    comm_runner=None,
     proc_root: "pathlib.Path | None" = None,
     clk_tck: "int | None" = None,
 ) -> "list[ProcessFinding]":
@@ -532,6 +544,7 @@ def scan_processes(
     if plat == "darwin":
         return _scan_processes_macos(
             min_age_seconds=min_age_seconds, exclude_pids=exclude_pids, ps_runner=ps_runner,
+            comm_runner=comm_runner,
         )
     root = proc_root if proc_root is not None else pathlib.Path("/proc")
     return _scan_processes_linux(
@@ -566,9 +579,16 @@ def discover_tmux_sockets(
     runner = tmux_runner or _run_tmux_ls
     now = time.time()
     findings: list[TmuxFinding] = []
+    seen_roots: set[pathlib.Path] = set()
     for root in roots:
         if not root.is_dir():
             continue
+        # macOS /tmp is a symlink to /private/tmp, so the two default roots
+        # are one directory; scan each real directory once.
+        resolved = root.resolve()
+        if resolved in seen_roots:
+            continue
+        seen_roots.add(resolved)
         for entry in sorted(root.iterdir()):
             if entry.is_dir():
                 continue
