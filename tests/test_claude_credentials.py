@@ -295,35 +295,44 @@ def test_run_prints_nothing_of_its_own_on_the_success_path(cc, tmp_path, monkeyp
     assert _FAKE_TOKEN not in captured.err
 
 
-def test_run_unsets_anthropic_api_key_by_default(cc, tmp_path, monkeypatch) -> None:
+def test_run_warns_once_when_anthropic_api_key_is_present(cc, tmp_path, monkeypatch, capsys) -> None:
+    """RDR-219 fix round: ANTHROPIC_API_KEY is NOT stripped (harnesses
+    that need it pass it through) -- `run` warns exactly once instead,
+    since Claude Code's documented auth precedence ranks the key above
+    CLAUDE_CODE_OAUTH_TOKEN and a leftover key would silently move the
+    child onto API billing."""
     _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-not-a-real-key")
-    spy = _ExecSpy(rc=0)
-    monkeypatch.setattr(cc, "_exec", spy)
-    cc._cmd_run(["mycommand"])
-    _argv, env = spy.calls[0]
-    assert "ANTHROPIC_API_KEY" not in env
-
-
-def test_run_keeps_anthropic_api_key_when_explicitly_allowed(cc, tmp_path, monkeypatch) -> None:
-    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-not-a-real-key")
-    monkeypatch.setenv(cc.KEEP_ANTHROPIC_API_KEY_ENV, "1")
     spy = _ExecSpy(rc=0)
     monkeypatch.setattr(cc, "_exec", spy)
     cc._cmd_run(["mycommand"])
     _argv, env = spy.calls[0]
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-api03-not-a-real-key"
+    err_lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+    matching = [line for line in err_lines if "ANTHROPIC_API_KEY" in line]
+    assert len(matching) == 1, err_lines
+    assert "bills" in matching[0]
 
 
-def test_run_forces_docker_rm_when_wrapping_a_bare_docker_run(cc, tmp_path, monkeypatch) -> None:
+def test_run_does_not_warn_when_anthropic_api_key_is_absent(cc, tmp_path, monkeypatch, capsys) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(cc, "_exec", _ExecSpy(rc=0))
+    cc._cmd_run(["mycommand"])
+    assert "ANTHROPIC_API_KEY" not in capsys.readouterr().err
+
+
+def test_run_forces_docker_rm_and_env_flag_when_wrapping_a_bare_docker_run(cc, tmp_path, monkeypatch) -> None:
     _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
     spy = _ExecSpy(rc=0)
     monkeypatch.setattr(cc, "_exec", spy)
-    cc._cmd_run(["docker", "run", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "myimage"])
+    cc._cmd_run(["docker", "run", "myimage"])
     argv, _env = spy.calls[0]
     assert "--rm" in argv
     assert argv.index("--rm") > argv.index("run")
+    assert "-e" in argv
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in argv
+    assert argv[argv.index("-e") + 1] == "CLAUDE_CODE_OAUTH_TOKEN"
 
 
 def test_run_does_not_duplicate_an_already_present_docker_rm(cc, tmp_path, monkeypatch) -> None:
@@ -333,6 +342,17 @@ def test_run_does_not_duplicate_an_already_present_docker_rm(cc, tmp_path, monke
     cc._cmd_run(["docker", "run", "--rm", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "myimage"])
     argv, _env = spy.calls[0]
     assert argv.count("--rm") == 1
+    assert argv.count("CLAUDE_CODE_OAUTH_TOKEN") == 1
+
+
+def test_run_does_not_duplicate_an_already_present_docker_env_flag(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["docker", "run", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "myimage"])
+    argv, _env = spy.calls[0]
+    assert argv.count("CLAUDE_CODE_OAUTH_TOKEN") == 1
+    assert argv.count("--rm") == 1  # still added, since it was absent
 
 
 def test_run_leaves_a_non_docker_command_untouched(cc, tmp_path, monkeypatch) -> None:
@@ -345,6 +365,57 @@ def test_run_leaves_a_non_docker_command_untouched(cc, tmp_path, monkeypatch) ->
     assert argv == ["claude", "--dangerously-skip-permissions"]
 
 
+def test_run_leaves_a_docker_run_nested_in_a_shell_string_untouched(cc, tmp_path, monkeypatch) -> None:
+    """A docker invocation hidden inside a shell string is invisible to
+    `_ensure_docker_flags` by construction -- command[0] is `bash`, not
+    `docker` -- and the docstring says so; this pins that it stays that
+    way rather than silently starting to rewrite shell text."""
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    original = ["bash", "-c", "docker run --rm myimage"]
+    cc._cmd_run(list(original))
+    argv, _env = spy.calls[0]
+    assert argv == original
+
+
+def test_run_unparseable_cdat_is_non_zero_and_never_execs(cc, tmp_path, monkeypatch, capsys) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat="not-a-valid-cdat")
+    spy = _ExecSpy()
+    monkeypatch.setattr(cc, "_exec", spy)
+    rc = cc._cmd_run(["true"])
+    assert rc != 0
+    assert spy.calls == []
+    err = capsys.readouterr().err
+    assert "unparseable" in err.lower()
+    assert _FAKE_TOKEN not in err
+
+
+def test_run_missing_security_binary_reports_a_clean_error(cc, tmp_path, monkeypatch, capsys) -> None:
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    spy = _ExecSpy()
+    monkeypatch.setattr(cc, "_exec", spy)
+    rc = cc._cmd_run(["true"])
+    assert rc != 0
+    assert spy.calls == []
+    err = capsys.readouterr().err
+    assert "security" in err.lower()
+    assert "not found" in err.lower()
+
+
+def test_status_missing_security_binary_reports_a_clean_error(cc, tmp_path, monkeypatch, capsys) -> None:
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    rc = cc._cmd_status()
+    assert rc != 0
+    out = capsys.readouterr().out
+    assert "security" in out.lower()
+    assert "not found" in out.lower()
+
+
 def test_status_absent(cc, tmp_path, monkeypatch, capsys) -> None:
     _install_fake_security(monkeypatch, tmp_path, mode="absent")
     rc = cc._cmd_status()
@@ -353,6 +424,14 @@ def test_status_absent(cc, tmp_path, monkeypatch, capsys) -> None:
     assert "claude setup-token" in captured.out or "claude setup-token" in captured.err
     assert _FAKE_TOKEN not in captured.out
     assert _FAKE_TOKEN not in captured.err
+
+
+def test_status_unparseable_cdat_exits_3(cc, tmp_path, monkeypatch, capsys) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat="not-a-valid-cdat")
+    rc = cc._cmd_status()
+    assert rc == 3
+    out = capsys.readouterr().out
+    assert _FAKE_TOKEN not in out
 
 
 def test_status_present_and_not_expiring_soon(cc, tmp_path, monkeypatch, capsys) -> None:
@@ -398,7 +477,30 @@ def test_status_reports_expired_as_exit_2(cc, tmp_path, monkeypatch, capsys) -> 
     assert _FAKE_TOKEN not in out
 
 
-def test_remote_ssh_argv_excludes_token_stdin_carries_it(cc, tmp_path, monkeypatch) -> None:
+# ---------------------------------------------------------------------------
+# --remote: RDR-219 fix round -- the HELPER's own remote side reads the
+# token (Approach rule 2, as written), never a caller-supplied reader.
+# ---------------------------------------------------------------------------
+
+
+def test_remote_stdin_payload_token_appears_once_right_after_the_read_line(cc) -> None:
+    payload = cc._remote_stdin_payload(_FAKE_TOKEN)
+    lines = payload.splitlines()
+    assert lines[0] == cc._REMOTE_READER_READ_LINE
+    assert lines[1] == _FAKE_TOKEN
+    assert "export CLAUDE_CODE_OAUTH_TOKEN" in payload
+    assert 'exec "$@"' in payload
+    assert payload.count(_FAKE_TOKEN) == 1
+
+
+def test_remote_reader_never_echoes(cc) -> None:
+    reader_text = cc._REMOTE_READER_READ_LINE + "\n" + cc._REMOTE_READER_TAIL
+    assert "echo" not in reader_text
+    assert "set -x" not in reader_text
+    assert "printf" not in reader_text
+
+
+def test_remote_ssh_argv_uses_default_remote_shell_excludes_token(cc, tmp_path, monkeypatch) -> None:
     argv_file = tmp_path / "ssh_argv.json"
     stdin_file = tmp_path / "ssh_stdin.txt"
     bin_dir = _write_fake_bin(tmp_path, "ssh", _FAKE_SSH)
@@ -410,34 +512,73 @@ def test_remote_ssh_argv_excludes_token_stdin_carries_it(cc, tmp_path, monkeypat
 
     assert rc == 0
     argv = json.loads(argv_file.read_text())
-    assert argv == ["fake-host.example", "echo", "hello"]
+    assert argv == ["fake-host.example", "bash", "-s", "--", "echo", "hello"]
     assert _FAKE_TOKEN not in argv
-    assert _FAKE_TOKEN in stdin_file.read_text()
+    for token in argv:
+        assert "read" not in token and "export" not in token  # no reader body on argv
+    stdin_content = stdin_file.read_text()
+    assert stdin_content == cc._remote_stdin_payload(_FAKE_TOKEN)
+    assert stdin_content.count(_FAKE_TOKEN) == 1
 
 
-def test_run_dash_dash_remote_routes_through_run_remote(cc, tmp_path, monkeypatch) -> None:
+def test_remote_ssh_argv_honours_a_custom_remote_shell(cc, tmp_path, monkeypatch) -> None:
+    """The qwentescence shape from the Phase 0 spike (T2
+    nexus_rdr/219-spike-script), expressed as a --remote-shell entry."""
+    argv_file = tmp_path / "ssh_argv.json"
+    stdin_file = tmp_path / "ssh_stdin.txt"
+    bin_dir = _write_fake_bin(tmp_path, "ssh", _FAKE_SSH)
+    _prepend_path(monkeypatch, bin_dir)
+    monkeypatch.setenv("FAKE_SSH_ARGV_FILE", str(argv_file))
+    monkeypatch.setenv("FAKE_SSH_STDIN_FILE", str(stdin_file))
+
+    rc = cc._run_remote(
+        "qwentescence",
+        ["claude", "--dangerously-skip-permissions"],
+        _FAKE_TOKEN,
+        remote_shell="wsl -d Ubuntu -u nexus --exec /bin/bash -s --",
+    )
+
+    assert rc == 0
+    argv = json.loads(argv_file.read_text())
+    assert argv == [
+        "qwentescence", "wsl", "-d", "Ubuntu", "-u", "nexus", "--exec",
+        "/bin/bash", "-s", "--", "claude", "--dangerously-skip-permissions",
+    ]
+    assert _FAKE_TOKEN not in argv
+
+
+def test_run_dash_dash_remote_routes_through_run_remote_with_remote_shell(cc, tmp_path, monkeypatch) -> None:
     _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
     calls = []
 
-    def fake_run_remote(host, command, token):
-        calls.append((host, list(command), token))
+    def fake_run_remote(host, command, token, remote_shell=None):
+        calls.append((host, list(command), token, remote_shell))
         return 0
 
     monkeypatch.setattr(cc, "_run_remote", fake_run_remote)
     monkeypatch.setattr(cc, "_exec", _ExecSpy())
-    rc = cc._cmd_run(["echo", "hi"], remote="fake-host.example")
+    rc = cc._cmd_run(["echo", "hi"], remote="fake-host.example", remote_shell="sh -s --")
     assert rc == 0
-    assert calls == [("fake-host.example", ["echo", "hi"], _FAKE_TOKEN)]
+    assert calls == [("fake-host.example", ["echo", "hi"], _FAKE_TOKEN, "sh -s --")]
 
 
 def test_parse_run_args_local() -> None:
     cc = _load_module()
-    assert cc._parse_run_args(["--", "cmd", "arg"]) == (None, ["cmd", "arg"])
+    assert cc._parse_run_args(["--", "cmd", "arg"]) == (None, None, ["cmd", "arg"])
 
 
 def test_parse_run_args_remote() -> None:
     cc = _load_module()
-    assert cc._parse_run_args(["--remote", "host1", "--", "cmd", "arg"]) == ("host1", ["cmd", "arg"])
+    assert cc._parse_run_args(["--remote", "host1", "--", "cmd", "arg"]) == (
+        "host1", None, ["cmd", "arg"],
+    )
+
+
+def test_parse_run_args_remote_with_remote_shell() -> None:
+    cc = _load_module()
+    assert cc._parse_run_args(
+        ["--remote", "host1", "--remote-shell", "sh -s --", "--", "cmd", "arg"]
+    ) == ("host1", "sh -s --", ["cmd", "arg"])
 
 
 def test_parse_run_args_rejects_missing_separator() -> None:
@@ -455,12 +596,25 @@ def test_parse_run_args_rejects_remote_without_host() -> None:
     assert cc._parse_run_args(["--remote"]) is None
 
 
+def test_parse_run_args_rejects_remote_shell_without_value() -> None:
+    cc = _load_module()
+    assert cc._parse_run_args(["--remote", "h", "--remote-shell"]) is None
+
+
 def test_main_dispatches_run(cc, monkeypatch) -> None:
     calls = []
-    monkeypatch.setattr(cc, "_cmd_run", lambda command, remote=None: calls.append((command, remote)) or 5)
-    rc = cc.main(["claude_credentials.py", "run", "--remote", "h", "--", "cmd", "a"])
+    monkeypatch.setattr(
+        cc, "_cmd_run",
+        lambda command, remote=None, remote_shell=None: calls.append(
+            (command, remote, remote_shell)
+        ) or 5,
+    )
+    rc = cc.main([
+        "claude_credentials.py", "run", "--remote", "h", "--remote-shell", "sh -s --",
+        "--", "cmd", "a",
+    ])
     assert rc == 5
-    assert calls == [(["cmd", "a"], "h")]
+    assert calls == [(["cmd", "a"], "h", "sh -s --")]
 
 
 def test_main_dispatches_status(cc, monkeypatch) -> None:
