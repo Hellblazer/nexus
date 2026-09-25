@@ -148,6 +148,19 @@ taxonomy:
 | `local_exclude_collections` | `["code__*"]` | Glob patterns for collections to skip in local mode. Cloud mode (Voyage embeddings) ignores this — set to `[]` to enable all collections locally. |
 | `collection_prefixes` | `["docs", "code", "knowledge", "rdr"]` | Prefix whitelist for `nx taxonomy validate-refs`. Extend this when your project adds a new user-facing collection prefix (e.g. `"custom"`). Internal-prefix collections (`taxonomy__*`, `plans__*`) are implementation-fixed and intentionally excluded. |
 
+## Aspects
+
+Which `docs__` collections get aspect extraction (nexus-kk4ut). `knowledge__` and `rdr__` collections are always extracted; `docs__` collections are extracted only when named here, because every document costs an LLM call each time it changes.
+
+```yaml
+aspects:
+  docs_collections: ["docs__1-29__*"]    # glob patterns; default [] (none)
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `docs_collections` | `[]` | Glob patterns naming the `docs__` collections to extract. A matching collection's prose files (`.md`, `.markdown`, `.txt`, `.rst`) get `general-prose-v1` (summary, key decisions, entities, open questions); its other files are skipped. Also accepts a comma-separated string, so `nx config set aspects.docs_collections "docs__1-29__*,docs__1-41__*"` works. Documents already indexed are not queued retroactively: run `nx enrich aspects <collection>` after opting in. |
+
 ## Daemon environment variables
 
 T2 and T3 both route through the single native `nexus-service` (`nx daemon service`, RDR-152/RDR-155), discovered via `~/.config/nexus/storage_service_addr.<uid>` and overridden with `NX_SERVICE_URL` (see [Managed-Cloud Credentials](#managed-cloud-credentials)). This unified the earlier RDR-120 (conexus 4.34.0) split, where the CLI and MCP server routed T2 through a separate T2 daemon publishing `~/.config/nexus/t2_addr.<uid>`; that daemon and discovery file are retired (RDR-158 — see the `NX_T2_ADDR`/`NX_T2_SOCK` note below). Clients honour these env-var overrides:

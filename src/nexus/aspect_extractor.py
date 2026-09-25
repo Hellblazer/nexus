@@ -368,8 +368,10 @@ _REGISTRY: dict[str, ExtractorConfig] = {
     # forced. Paper-shaped content in a repo should be ingested via
     # `nx index pdf --collection knowledge__<repo>-papers` (the
     # convention nexus-olg5 established for the ART corpus split).
-    # If a dedicated doc-summary extractor with the right schema
-    # ever lands, register it here.
+    # A collection opts in one at a time instead (nexus-kk4ut, Sam
+    # 2026-09-25, option A2): see docs_collection_opted_in below. Only its
+    # prose files are enqueued (extraction_applies_to_source), which keeps
+    # the .dict/.jsonl/.dot sweep this comment describes out of the LLM.
     # rdr__* — pure-Python extractor (RDR-089 Phase F). RDRs carry
     # YAML frontmatter + labelled markdown sections; a deterministic
     # parser is more reliable and zero-cost compared to forcing the
@@ -747,6 +749,48 @@ def _truncate(text: str, cap: int) -> str:
     return text[:cap].rstrip() + "..."
 
 
+#: nexus-kk4ut: docs__ aspect extraction is opt-in per collection (Sam
+#: 2026-09-25, option A2). Every docs__ document costs an LLM call on each
+#: change, so nothing is extracted until ``aspects.docs_collections`` in
+#: config.yml names the collection (glob patterns, a YAML list or a comma-
+#: separated string, the ``taxonomy.local_exclude_collections`` shape).
+_DOCS_PREFIX: str = "docs__"
+#: The files in an opted-in docs__ collection that are prose worth a call;
+#: ``nx index repo`` also sweeps dictionaries, fixtures and graphs into it.
+_DOCS_PROSE_SUFFIXES: tuple[str, ...] = (".md", ".markdown", ".txt", ".rst")
+
+
+def _docs_opt_in_patterns() -> list[str]:
+    from nexus.config import load_config  # noqa: PLC0415 — deferred: config import is heavier than this module's callers need at load
+
+    raw = (load_config().get("aspects") or {}).get("docs_collections") or []
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.split(",")]
+    return [str(p) for p in raw if str(p).strip()]
+
+
+def docs_collection_opted_in(collection: str) -> bool:
+    """True when ``collection`` is a docs__ collection that
+    ``aspects.docs_collections`` opts in to aspect extraction (nexus-kk4ut)."""
+    if not collection.startswith(_DOCS_PREFIX):
+        return False
+    import fnmatch  # noqa: PLC0415 — stdlib, only needed on this branch
+
+    return any(fnmatch.fnmatchcase(collection, p) for p in _docs_opt_in_patterns())
+
+
+def extraction_applies_to_source(collection: str, source_path: str) -> bool:
+    """Whether a document from ``source_path`` should be enqueued for
+    ``collection``'s extractor. The prose-file rule applies only to a docs__
+    collection that gets its extractor through the opt-in (nexus-kk4ut);
+    anything the registry itself covers is unaffected."""
+    if not collection.startswith(_DOCS_PREFIX):
+        return True
+    if any(collection.startswith(prefix) for prefix in _REGISTRY):
+        return True
+    return source_path.lower().endswith(_DOCS_PROSE_SUFFIXES)
+
+
 def select_config(collection: str) -> ExtractorConfig | None:
     """Return the registered BASE ``ExtractorConfig`` whose prefix matches
     ``collection``, or ``None`` if no prefix matches.
@@ -766,12 +810,18 @@ def select_config(collection: str) -> ExtractorConfig | None:
       frontmatter parser, RDR-089 Phase F; zero API cost). Not
       shape-routed: every ``rdr__*`` row carries this one extractor_name.
 
-    Other prefixes (``docs__``, ``code__``, bare ``knowledge``
-    without the double-underscore separator, etc.) return ``None``.
+    ``docs__*`` → ``general-prose-v1`` ONLY when the collection is opted in
+    through ``aspects.docs_collections`` (nexus-kk4ut, option A2); every
+    other docs__ collection returns ``None``, as before.
+
+    Other prefixes (``code__``, bare ``knowledge`` without the
+    double-underscore separator, etc.) return ``None``.
     """
     for prefix, config in _REGISTRY.items():
         if collection.startswith(prefix):
             return config
+    if docs_collection_opted_in(collection):
+        return _GENERAL_PROSE_CONFIG
     return None
 
 

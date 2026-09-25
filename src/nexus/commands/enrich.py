@@ -1195,7 +1195,8 @@ def enrich_aspects(
         click.echo(
             f"No extractor config registered for collection "
             f"'{collection}'. Supported prefixes: knowledge__*, "
-            f"rdr__*. Aborting."
+            f"rdr__*, and docs__* collections opted in through "
+            f"aspects.docs_collections. Aborting."
         )
         # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` reaches
         # here because select_config already rejected it as unsupported --
@@ -1205,10 +1206,12 @@ def enrich_aspects(
         # Candidate-string derivation for the hint.
         if split_candidate_collection_name(collection)[0] == "docs":
             click.echo(
-                "Note: docs__* collections are not paper-shaped (nexus-z70w "
-                "reverted the #377 routing). Index academic PDFs into "
+                "Note: docs__* collections are extracted only when opted in "
+                "(nexus-kk4ut): nx config set aspects.docs_collections "
+                f"'{collection}' (glob patterns allowed). Their prose files "
+                "then get general-prose-v1. Academic PDFs belong in "
                 "knowledge__<name> via 'nx index pdf --collection "
-                "knowledge__<name>' for aspect extraction."
+                "knowledge__<name>'."
             )
         return
 
@@ -1330,6 +1333,18 @@ def _select_entries(
         click.echo("Catalog is empty — index or store documents first (nx index repo / nx store put).")
         return None
     entries = cat.list_by_collection(collection)
+    # nexus-kk4ut: an opted-in docs__ collection extracts only its prose
+    # files, the same rule the enqueue paths apply.
+    from nexus.aspect_extractor import extraction_applies_to_source  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    raw_empty = not entries  # before the prose filter: "no rows" means the catalog has none
+    non_prose = [e for e in entries if not extraction_applies_to_source(collection, e.file_path or "")]
+    if non_prose:
+        entries = [e for e in entries if extraction_applies_to_source(collection, e.file_path or "")]
+        click.echo(
+            f"Skipping {len(non_prose)} non-prose document(s) in {collection} "
+            f"(only .md, .markdown, .txt and .rst files are extracted in docs__)."
+        )
     # nexus-3ygp3: zero catalog rows is a refusal, never "No documents to
     # process" at exit 0 (a bare name select_config prefix-matched but the
     # catalog does not know read as a completed, zero-cost extraction).
@@ -1338,7 +1353,6 @@ def _select_entries(
     # them, as the --missing audit does; --all takes no such read and
     # refuses without the count.
     orphan_rows: int | None = None
-    raw_empty = not entries
 
     if re_extract or not extract_all:
         # ONE T2 open serves both filters. nexus-ym9ey originally added a
@@ -1384,7 +1398,7 @@ def _select_entries(
                         )
                     }
         orphan_rows = len(existing_paths)
-        if not entries:
+        if raw_empty:
             raise click.ClickException(unknown_collection_message(collection, orphan_rows=orphan_rows, row_label="aspect row"))
 
         if re_extract:

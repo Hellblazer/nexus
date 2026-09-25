@@ -5605,7 +5605,7 @@ def _run_index(
             # uniform across the whole upload batch, so the extractor-config
             # gate (aspect_extraction_enqueue_hook's own early-return) can be
             # checked ONCE here instead of once per file.
-            from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
+            from nexus.aspect_extractor import extraction_applies_to_source, select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
             if select_config(collection) is None:
                 return  # No extractor for this collection — nothing to enqueue.
             from nexus.aspect_worker import _canonicalize_source_path  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
@@ -5613,6 +5613,8 @@ def _run_index(
             for _path, _c in _file_contexts:
                 if not isinstance(_c, dict):
                     continue
+                if not extraction_applies_to_source(collection, str(_path)):
+                    continue  # nexus-kk4ut: a docs__ collection's non-prose file
                 rows.append({
                     "collection": collection,
                     # content="" (CLI ingest scope, matches the per-file

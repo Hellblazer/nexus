@@ -1581,9 +1581,11 @@ def aspect_extraction_enqueue_hook(
         carries the empty string; worker falls back to
         ``Path(source_path).read_text()``.
     """
-    from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
+    from nexus.aspect_extractor import extraction_applies_to_source, select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
     if select_config(collection) is None:
         return  # No extractor for this collection — nothing to enqueue.
+    if not extraction_applies_to_source(collection, source_path):
+        return  # nexus-kk4ut: an opted-in docs__ collection's non-prose file.
     # RDR-145 Gap-2: canonicalize a file-backed source_path against the
     # catalog before persisting the queue row (forward-only; never guesses).
     source_path = _canonicalize_source_path(collection, source_path)

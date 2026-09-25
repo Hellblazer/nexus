@@ -186,18 +186,17 @@ class TestRouting:
         assert "No extractor config" in result.output
         assert "knowledge__" in result.output
 
-    def test_unsupported_docs_collection_names_the_z70w_note(self, env) -> None:
-        """nexus-ft04v.23: ``collection.startswith("docs__")`` funnelled to
-        ``collection_content_type(collection) == "docs"`` -- the extra
-        docs__-specific note (nexus-z70w) must still fire for a docs__
-        collection, and only for one (code__nexus above gets the generic
-        message with no z70w note)."""
+    def test_unsupported_docs_collection_names_the_opt_in(self, env) -> None:
+        """nexus-ft04v.23 kept a docs__-specific note on this refusal; since
+        nexus-kk4ut it names the opt-in instead of the old z70w explanation,
+        and still fires only for a docs__ collection (code__nexus above gets
+        the generic message)."""
         runner = CliRunner()
         result = runner.invoke(enrich, ["aspects", "docs__manual"])
         assert result.exit_code == 0
         assert "No extractor config" in result.output
-        assert "nexus-z70w" in result.output
-        assert "not paper-shaped" in result.output
+        assert "aspects.docs_collections" in result.output
+        assert "docs__manual" in result.output
 
 
 # ── --dry-run ───────────────────────────────────────────────────────────────
@@ -1663,3 +1662,54 @@ class TestCliBatchAttribution:
         from nexus.db.t2 import T2Database
         with T2Database(db_path) as db:
             assert db.document_aspects.list_by_collection("rdr__nexus-foo") == []
+
+
+class TestDocsOptInEnrich:
+    """nexus-kk4ut: ``nx enrich aspects`` on an opted-in docs__ collection
+    extracts its prose files only, and a collection whose files are all
+    non-prose is skipped with a message, never refused as empty."""
+
+    @staticmethod
+    def _opt_in(monkeypatch, pattern: str) -> None:
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda *a, **k: {"aspects": {"docs_collections": [pattern]}},
+        )
+
+    def _register(self, cat, files: list[str]) -> None:
+        owner = cat.register_owner("optrepo", "repo", repo_hash="feed1234", repo_root="/Users/test/optrepo")
+        for f in files:
+            cat.register(owner=owner, title=f, content_type="prose",
+                         physical_collection="docs__optrepo-feed1234", file_path=f)
+
+    def test_only_prose_files_are_dispatched(self, env, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus.aspect_readers import ReadOk
+
+        _, _, cat = env
+        self._opt_in(monkeypatch, "docs__optrepo-*")
+        self._register(cat, ["docs/guide.md", "data/rows.jsonl", "notes.txt"])
+        seen: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            seen.append(uri)
+            return ReadOk(text="content", metadata={})
+
+        class _FakeT3:
+            pass
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.aspect_readers.read_source", fake_read)
+
+        result = CliRunner().invoke(enrich, ["aspects", "docs__optrepo-feed1234", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Skipping 1 non-prose document(s)" in result.output
+        assert not any("rows.jsonl" in u for u in seen), seen
+
+    def test_a_collection_of_only_non_prose_files_is_not_refused_as_empty(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _, cat = env
+        self._opt_in(monkeypatch, "docs__optrepo-*")
+        self._register(cat, ["data/rows.jsonl", "graph.dot"])
+        result = CliRunner().invoke(enrich, ["aspects", "docs__optrepo-feed1234", "--dry-run"])
+        assert "Skipping 2 non-prose document(s)" in result.output
+        assert "No catalog rows" not in result.output

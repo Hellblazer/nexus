@@ -1754,3 +1754,70 @@ class TestGap3KnowledgeNoteRouting:
         assert rec.experimental_datasets == []
         assert rec.experimental_baselines == []
         assert rec.experimental_results in ("", None)
+
+
+# ── nexus-kk4ut: docs__ aspect extraction is opt-in per collection ─────────
+
+
+class TestDocsOptIn:
+    """Sam 2026-09-25, option A2: a docs__ collection gets general-prose-v1
+    only when ``aspects.docs_collections`` names it; only its prose files
+    are enqueued."""
+
+    @staticmethod
+    def _config(monkeypatch, value) -> None:
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda *a, **k: {"aspects": {"docs_collections": value}},
+        )
+
+    def test_default_config_opts_nothing_in(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._config(monkeypatch, [])
+        assert select_config("docs__1-29__voyage-context-3__v1") is None
+
+    def test_a_matching_glob_routes_to_general_prose(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import eligible_extractor_names, select_config
+
+        self._config(monkeypatch, ["docs__1-29__*"])
+        config = select_config("docs__1-29__voyage-context-3__v1")
+        assert config is not None and config.extractor_name == "general-prose-v1"
+        assert eligible_extractor_names("docs__1-29__voyage-context-3__v1") == ["general-prose-v1"]
+        assert select_config("docs__1-41__voyage-context-3__v1") is None
+
+    def test_a_comma_separated_string_is_accepted(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._config(monkeypatch, "docs__a__*, docs__b__*")
+        assert select_config("docs__b__voyage-context-3__v1") is not None
+        assert select_config("docs__c__voyage-context-3__v1") is None
+
+    def test_the_opt_in_never_widens_other_prefixes(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._config(monkeypatch, ["*"])
+        assert select_config("code__nexus__voyage-code-3__v1") is None
+        # knowledge__ keeps its own base config; the docs opt-in never applies.
+        assert select_config("knowledge__delos").extractor_name == "scholarly-paper-v1"
+
+    @pytest.mark.parametrize(
+        ("source_path", "expected"),
+        [("docs/guide.md", True), ("README.MARKDOWN", True), ("notes.txt", True), ("api.rst", True),
+         ("words.dict", False), ("fixtures/rows.jsonl", False), ("graph.dot", False)],
+    )
+    def test_only_prose_files_qualify_inside_docs(self, source_path, expected) -> None:
+        from nexus.aspect_extractor import extraction_applies_to_source
+
+        assert extraction_applies_to_source("docs__x__voyage-context-3__v1", source_path) is expected
+        # Outside docs__, the file type never gates extraction.
+        assert extraction_applies_to_source("knowledge__x", source_path) is True
+
+    def test_the_enqueue_hook_skips_a_non_prose_file_in_an_opted_in_collection(self, monkeypatch) -> None:
+        import nexus.aspect_worker as aw
+
+        self._config(monkeypatch, ["docs__x__*"])
+        seen: list[str] = []
+        monkeypatch.setattr(aw, "_canonicalize_source_path", lambda c, p: seen.append(p) or p)
+        aw.aspect_extraction_enqueue_hook("fixtures/rows.jsonl", "docs__x__voyage-context-3__v1", "")
+        assert seen == [], "a .jsonl file in an opted-in docs__ collection must not reach enqueue"
