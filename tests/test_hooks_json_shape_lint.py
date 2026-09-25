@@ -22,14 +22,24 @@ set and `test_the_permitted_commands_are_not_rejected_as_substrings` is
 the fixture that fails if anyone rewrites it as `in`.
 
 WHY THE conexus python3 ALLOWLIST IS BY NAME. Bead .21 left five handlers
-plugin-resident under a bare `python3`, and this lint allows exactly those
-five. nexus-t9klx ported all five to `nx-hook` verbs, but 7.58.0 keeps
-hooks.json on the scripts: an older `nx-hook` exits 2 on a verb it does not
-know, so a plugin that updated before its CLI would block every prompt and
-every Bash call. Four of the five move to their verbs once a CLI that knows
-them is the norm; the lockstep never does, because it is the hook that
-repairs that skew (tests/hooks/test_lockstep_survives_cli_skew.py). A sixth
-script appearing is drift the lint refuses until someone argues for it.
+plugin-resident under a bare `python3`; this lint originally allowed
+exactly those five. nexus-t9klx ported all five to `nx-hook` verbs, but
+7.58.0 keeps hooks.json on the scripts: an older `nx-hook` exits 2 on a
+verb it does not know, so a plugin that updated before its CLI would
+block every prompt and every Bash call. Four of the five move to their
+verbs once a CLI that knows them is the norm; the lockstep never does,
+because it is the hook that repairs that skew
+(tests/hooks/test_lockstep_survives_cli_skew.py).
+
+RDR-219 (nexus-wauo1.22) adds a SIXTH, `credential_print_guard`, and it
+is not a temporary skew accommodation the way the other four are — it
+stays plugin-resident by design, never ported. The Technical Design says
+so explicitly: a self-contained stdlib script with no `nexus` import
+"depends on no CLI verb, so an older installed CLI cannot change its
+behaviour," which is exactly the guarantee a credential-printing guard
+needs — nothing about the box's installed generation should ever be able
+to widen what it denies. A seventh script appearing is drift the lint
+refuses until someone argues for it.
 
 sn left `python3` for the same reason (nexus-j4iy0) by a different route. It
 ships no Python package, so it has no console script to ride; it runs its
@@ -67,7 +77,11 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: `mailbox-drain`. 27 -> 25 for 7.58.0: both veh77 entries are held back
 #: with the rest of the new verbs (plugin-ahead skew; see the docstring).
 #: 25 -> 27 for 7.59.0: both veh77 entries return through the nx-hook shim.
-EXPECTED_CONEXUS_ENTRIES = 27
+#: 27 -> 28 at nexus-wauo1.22 (RDR-219): a sixth PreToolUse:Bash
+#: plugin-resident script, `credential_print_guard`, alongside
+#: `subagent_git_write_requires_orchestrator` and
+#: `phase_review_close_requires_gate`.
+EXPECTED_CONEXUS_ENTRIES = 28
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -82,8 +96,10 @@ CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "python3"})
 #: tests/test_hooks_json_verb_release_floor.py decides which entries must use it.
 NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
 
-#: The five handlers bead .21 resolved as plugin-resident. See the docstring
-#: for why 7.58.0 still wires them.
+#: The five handlers bead .21 resolved as plugin-resident, plus the sixth
+#: RDR-219 adds deliberately (nexus-wauo1.22) -- see the docstring for why
+#: 7.58.0 still wires the first five, and why the sixth is not a skew
+#: accommodation at all.
 PLUGIN_RESIDENT_SCRIPTS = frozenset(
     {
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py",
@@ -91,6 +107,7 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/phase_review_close_requires_gate.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py",
     }
 )
 

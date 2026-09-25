@@ -149,14 +149,6 @@ class TestTheTwoSurfacesAgree:
     @staticmethod
     def _call_site_flags() -> dict[str, bool]:
         flags: dict[str, bool] = {}
-        # The plugin-directory scan that used to run here is GONE, not
-        # merely empty (nexus-t9klx). Both guards and the library are in
-        # the wheel and `routing/` holds no Python at all, so a glob over
-        # it could only ever contribute nothing — and a scan that cannot
-        # match reads exactly like one that found everything in order.
-        # `test_every_call_site_is_in_the_registry`'s non-empty assert is
-        # what keeps the remaining scan honest.
-        #
         # Ported guards: keyed on the module's OWN RULE_NAME rather than its
         # filename, because the verb name, the module name and the rule name
         # deliberately differ — the port carried RULE_NAME unchanged so old
@@ -169,6 +161,28 @@ class TestTheTwoSurfacesAgree:
             name = re.search(r'^RULE_NAME\s*=\s*"([^"]+)"', body, re.MULTILINE)
             if name:
                 flags[name.group(1)] = m.group(1) == "True"
+        # nexus-wauo1.22 (RDR-219 plan-audit residual 2): "`routing/` holds
+        # no Python at all" was already stale when this comment was
+        # written — `subagent_git_write_requires_orchestrator.py` and
+        # `phase_review_close_requires_gate.py` stayed plugin-resident
+        # through nexus-t9klx's port (7.58.0 kept hooks.json on the
+        # scripts, not the verbs; see test_hooks_json_shape_lint.py's
+        # docstring), and RDR-219 deliberately adds a THIRD plugin-
+        # resident guard that is never ported at all. Scanning only
+        # WHEEL_HOOKS silently reported those rules as having no call
+        # site — the same "registry names a rule the scan can't see"
+        # failure test_every_registry_rule_has_a_call_site exists to
+        # catch, one level up. `_lib.run_hook(` (with the `_lib.` prefix,
+        # so `_lib.py`'s own `def run_hook(` never self-matches) is these
+        # scripts' real call-site shape, not `run_hook_result(`.
+        for module in sorted(ROUTING.glob("*.py")):
+            body = module.read_text()
+            m = re.search(r"_lib\.run_hook\((?:[^)]|\n)*?fail_closed=(True|False)", body)
+            if not m:
+                continue
+            name = re.search(r'^RULE_NAME\s*=\s*"([^"]+)"', body, re.MULTILINE)
+            if name:
+                flags.setdefault(name.group(1), m.group(1) == "True")
         return flags
 
     def test_every_registry_rule_has_a_call_site(self):

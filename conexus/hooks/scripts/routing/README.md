@@ -39,17 +39,20 @@ Expectations is an **aggregate across all installed plugins**, not a
 per-plugin count -- Claude Code merges hook registrations and fires
 them sequentially. Current count (the review-coverage push gate,
 `git_add_all_redirects_to_explicit_paths`, was deleted 2026-08-22 —
-Sam's decision, see the file's former git history):
+Sam's decision, see the file's former git history; RDR-219
+(nexus-wauo1.22) added `credential_print_guard`, taking nx's own
+PreToolUse:Bash count to the cap):
 
 | Plugin | Routing rules | Other PreToolUse:Bash | Subtotal |
 |--------|----|----|----|
-| nx | 1 (`phase_review_close`) | 1 (`pre_close_verification_hook.sh`) | 2 |
-| sn | 1 (`grep_for_symbols`) | 0 | 1 |
-| **Aggregate** | | | **3** |
+| nx | 3 (`phase_review_close`, `subagent_git_write`, `credential_print_guard`) | 1 (`pre_close_verification_hook.sh`) | 4 |
+| sn | 0 | 0 | 0 |
+| **Aggregate** | | | **4** |
 
-Adding a fifth routing rule in any plugin requires either consolidation
-or a budget revision in a successor RDR. The
-`tests/test_routing_registry_aggregate_cap.py` CI lint enforces this.
+The aggregate is now AT the cap. Adding a fifth routing rule in any
+plugin requires either consolidation or a budget revision in a
+successor RDR. The `tests/test_routing_registry_aggregate_cap.py` CI
+lint enforces this.
 
 ## Contract
 

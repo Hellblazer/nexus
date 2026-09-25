@@ -45,6 +45,21 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/routing/credential_print_guard.py` — new
+  PreToolUse:Bash guard (RDR-219 Gap 2, nexus-wauo1.22): denies a keychain
+  read naming `Claude Code-credentials`/`nexus-automation-oauth-token`, a
+  `.credentials.json` read, or printing `CLAUDE_CODE_OAUTH_TOKEN`. NO
+  escape token. Stdlib-only, no `nexus` import, never ported.
+- `conexus/hooks/hooks.json` — registers the guard above under the
+  PreToolUse:Bash matcher (nexus-wauo1.22), same shape as
+  `subagent_git_write_requires_orchestrator.py`.
+- `conexus/hooks/scripts/routing/registry.yaml` — documents the guard's
+  `credential_print_guard` rule entry (nexus-wauo1.22), `fail_closed:
+  false` (the marker-scoped split lives inside the hook itself).
+- `conexus/hooks/scripts/routing/README.md` — updated cumulative-cap
+  accounting table for the new rule (nexus-wauo1.22): nx's own
+  PreToolUse:Bash count reaches the RDR-121 cap of 4.
+
 ## Deferred to the next client release
 
 _Empty. The four RDR-215 straddling beads deferred here by nexus-2x3qy
