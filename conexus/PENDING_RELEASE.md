@@ -52,7 +52,18 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   escape token. Stdlib-only, no `nexus` import, never ported.
 - `conexus/hooks/hooks.json` — registers the guard above under the
   PreToolUse:Bash matcher (nexus-wauo1.22), same shape as
-  `subagent_git_write_requires_orchestrator.py`.
+  `subagent_git_write_requires_orchestrator.py`. **RECORDED RESIDUAL
+  (bead nexus-wauo1.22):** this adds a sixth bare `python3` hooks.json
+  entry, the same interpreter-discovery shape RDR-215 and nexus-t9klx set
+  out to eliminate so a native Windows client becomes viable (stock
+  Windows has no `python3` on PATH). `8664d8ec8` restored the
+  plugin-script entries for CLI-skew reasons, which is the precedent this
+  guard follows; it is not yet ported to an `nx-hook` verb. **The guard
+  does not run on native Windows** until that port lands — a Windows
+  Bash call reaches no credential-print check from this guard, RDR-219
+  Gap 2's only mitigation on that platform being the underlying fact that
+  `CLAUDE_CODE_OAUTH_TOKEN` is deleted from Claude Code's own environment
+  before a Bash-tool child ever starts.
 - `conexus/hooks/scripts/routing/registry.yaml` — documents the guard's
   `credential_print_guard` rule entry (nexus-wauo1.22), `fail_closed:
   false` (the marker-scoped split lives inside the hook itself).

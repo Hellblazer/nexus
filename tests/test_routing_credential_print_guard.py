@@ -156,6 +156,107 @@ DENIED_SHAPES = [
         "set | grep TOKEN",
         id="bare-set-piped",
     ),
+    pytest.param(
+        "printenv CLAUDE_CODE_OAUTH_TOKEN PATH",
+        id="printenv-named-among-others",
+    ),
+    pytest.param(
+        "env -0",
+        id="bare-env-dash-0",
+    ),
+    pytest.param(
+        "env > /tmp/leaked.txt",
+        id="bare-env-redirected-to-file",
+    ),
+    pytest.param(
+        "set > /tmp/leaked.txt",
+        id="bare-set-redirected-to-file",
+    ),
+    pytest.param(
+        "env | grep CLAUDE_CODE_OAUTH_TOKEN",
+        id="env-piped-grep-exact-name",
+    ),
+    pytest.param(
+        "env | grep OAUTH",
+        id="env-piped-grep-substring-of-protected-name",
+    ),
+    pytest.param(
+        "env | cat",
+        id="env-piped-into-unrecognized-filter",
+    ),
+    pytest.param(
+        """python3 -c "import os; print(os.environ['CLAUDE_CODE_OAUTH_TOKEN'])\"""",
+        id="python-dash-c-os-environ-bracket",
+    ),
+    pytest.param(
+        """python3 -c "import os; print(os.getenv('CLAUDE_CODE_OAUTH_TOKEN'))\"""",
+        id="python-dash-c-os-getenv",
+    ),
+    pytest.param(
+        "python3 - <<'EOF'\n"
+        "import os\n"
+        "print(os.environ['CLAUDE_CODE_OAUTH_TOKEN'])\n"
+        "EOF\n",
+        id="python-heredoc-os-environ",
+    ),
+    pytest.param(
+        "python3 - <<'EOF'\n"
+        "print(open('.credentials.json').read())\n"
+        "EOF\n",
+        id="python-heredoc-credentials-json-open",
+    ),
+    pytest.param(
+        "awk '{print}' .credentials.json",
+        id="awk-credentials-json",
+    ),
+    pytest.param(
+        "sed -n '1p' .credentials.json",
+        id="sed-credentials-json",
+    ),
+    pytest.param(
+        "more .credentials.json",
+        id="more-credentials-json",
+    ),
+    pytest.param(
+        "od -c .credentials.json",
+        id="od-credentials-json",
+    ),
+    pytest.param(
+        "xxd .credentials.json",
+        id="xxd-credentials-json",
+    ),
+    pytest.param(
+        "strings .credentials.json",
+        id="strings-credentials-json",
+    ),
+    pytest.param(
+        "base64 .credentials.json",
+        id="base64-credentials-json",
+    ),
+    pytest.param(
+        "ps -E",
+        id="ps-dash-capital-e-macos",
+    ),
+    pytest.param(
+        "ps auxeww",
+        id="ps-auxeww-bsd-e-flag",
+    ),
+    pytest.param(
+        "ps eww",
+        id="ps-eww-bsd-e-flag",
+    ),
+    pytest.param(
+        "cat /proc/1234/environ",
+        id="cat-proc-environ",
+    ),
+    pytest.param(
+        "strings /proc/$$/environ",
+        id="strings-proc-environ",
+    ),
+    pytest.param(
+        "tr '\\0' '\\n' < /proc/1234/environ",
+        id="tr-proc-environ-redirect",
+    ),
 ]
 
 
@@ -176,6 +277,36 @@ def test_denied_shape_names_the_helper_in_the_reason(command: str) -> None:
     reason = _reason(_run(command))
     assert "claude_credentials.py status" in reason
     assert "claude_credentials.py run --" in reason
+
+
+# ---------------------------------------------------------------------------
+# Diagnosability: the new python (rule 3/4) and process-environment (rule
+# 5) heuristics are the most likely to false-positive, so their reasons
+# must name what actually matched, not just a generic label.
+# ---------------------------------------------------------------------------
+
+
+def test_python_env_print_reason_names_the_variable() -> None:
+    reason = _reason(_run(
+        """python3 -c "import os; print(os.environ['CLAUDE_CODE_OAUTH_TOKEN'])\""""
+    ))
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in reason
+
+
+def test_process_environment_reason_names_the_matched_flag() -> None:
+    reason = _reason(_run("ps -E"))
+    assert "-E" in reason
+
+
+def test_process_environment_reason_names_the_bsd_flag_shape() -> None:
+    reason = _reason(_run("ps auxeww"))
+    assert "auxeww" in reason
+
+
+def test_process_environment_reason_names_the_reader_for_proc_environ() -> None:
+    reason = _reason(_run("cat /proc/1234/environ"))
+    assert "cat" in reason
+    assert "/proc/*/environ" in reason
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +378,50 @@ ALLOWED_SHAPES = [
     pytest.param(
         "env -i CLAUDE_CODE_OAUTH_TOKEN=x claude --dangerously-skip-permissions",
         id="env-with-args-execs-a-command-not-a-bare-dump",
+    ),
+    pytest.param(
+        "printenv PATH",
+        id="printenv-unprotected-name-path",
+    ),
+    pytest.param(
+        "printenv HOME",
+        id="printenv-unprotected-name-home",
+    ),
+    pytest.param(
+        "env | grep -c NAME",
+        id="env-piped-grep-count-mode",
+    ),
+    pytest.param(
+        "env | grep -q NAME",
+        id="env-piped-grep-quiet-mode",
+    ),
+    pytest.param(
+        "env | grep MYVAR",
+        id="env-piped-grep-pattern-not-matching-protected-name",
+    ),
+    pytest.param(
+        "env | wc -l",
+        id="env-piped-wc",
+    ),
+    pytest.param(
+        "set -x",
+        id="set-with-dash-x-ubiquitous-script-preamble",
+    ),
+    pytest.param(
+        'python3 tests/e2e/lib/claude_credentials.py run -- echo "hi"',
+        id="python-script-by-path-not-dash-c-not-heredoc",
+    ),
+    pytest.param(
+        "ps aux",
+        id="ps-aux-no-environment-flag",
+    ),
+    pytest.param(
+        "ps -ef",
+        id="ps-dash-ef-no-environment-flag",
+    ),
+    pytest.param(
+        "ps -p 123 -o args",
+        id="ps-dash-p-pid-dash-o-format",
     ),
 ]
 

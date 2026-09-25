@@ -21,14 +21,33 @@ guard"):
 1. ``security find-generic-password`` or ``security dump-keychain -d``
    naming either credential item (:data:`CREDENTIAL_KEYCHAIN_ITEMS`).
 2. Reading a ``.credentials.json`` file to output: ``cat``, ``less``,
-   ``head``, ``tail``, ``jq``, or a ``python -c`` open-and-print shape.
+   ``head``, ``tail``, ``jq``, ``awk``, ``sed``, ``more``, ``od``,
+   ``xxd``, ``strings``, ``base64``, or a ``python -c``/heredoc
+   (``python3 - <<EOF``) open-and-print shape.
 3. Printing a protected credential environment variable
    (:data:`CREDENTIAL_ENV_VARS`): a shell expansion of it (``echo
    $CLAUDE_CODE_OAUTH_TOKEN``, ``printf "%s" "$CLAUDE_CODE_OAUTH_TOKEN"``,
    redirected to a file or not -- the expansion itself is what is denied,
-   regardless of where it goes), or a bare dump command that would print
-   EVERY variable including it (``env``, ``printenv``, ``set`` invoked
-   with nothing after them, or piped onward).
+   regardless of where it goes); ``printenv`` invoked bare (no names, so
+   it prints EVERY variable) or naming a protected variable explicitly
+   (``printenv PATH`` naming only an unprotected variable stays allowed);
+   or a bare ``env``/``set`` dump (``env``, ``env -0``, ``set`` invoked
+   with nothing after them, redirected to a file, or piped into anything
+   that is not a provably-safe filter -- ``grep -c``/``grep -q`` count or
+   quiet modes, ``wc``, or a ``grep`` pattern that cannot match a
+   protected name all stay allowed; a ``grep`` pattern that COULD match
+   one, or any other pipe target, is denied).
+4. A ``python -c``/heredoc whose code names a protected variable via
+   ``os.environ[...]``, ``os.getenv(...)``, or ``environ.get(...)``.
+   Running a python SCRIPT BY PATH (``python3 some/script.py ...``, no
+   ``-c`` and no heredoc) is unaffected.
+5. Reading another process's environment: ``ps`` invoked with a flag that
+   prints it (macOS ``-E``; BSD-style unclustered ``e``, e.g. ``ps
+   auxeww``/``ps eww``), or a read of ``/proc/*/environ`` via a common
+   dump command (``cat``, ``strings``, ``tr``, and the rest of rule 2's
+   reader set). Plain ``ps aux``, ``ps -ef``, and ``ps -p N -o args``
+   stay allowed -- only the FIRST option token after ``ps`` is inspected,
+   matching the shapes the RDR names.
 
 ALLOW: ``claude_credentials.py status`` and ``claude_credentials.py run
 -- <command>`` -- these carry neither a keychain read, a
@@ -160,8 +179,16 @@ def _matches_keychain_read(command: str) -> str | None:
 # Rule 2: reading a `.credentials.json` file to output.
 # ---------------------------------------------------------------------------
 
-_FILE_READ_CMD_RE = re.compile(r"\b(cat|less|head|tail|jq)\b")
+_FILE_READ_CMD_RE = re.compile(
+    r"\b(cat|less|head|tail|jq|awk|sed|more|od|xxd|strings|base64)\b"
+)
 _PYTHON_DASH_C_RE = re.compile(r"\bpython3?\b[^\n]*\s-c\b")
+#: ``python3 - <<EOF`` / ``python3 - <<'EOF'`` / ``python3 - <<-EOF`` --
+#: any heredoc fed to a python invocation. Requires only "python3?" and a
+#: "<<" on the SAME physical line (the command's first line); the heredoc
+#: BODY that follows on subsequent lines is still part of the full,
+#: multi-line ``command`` string these checks scan, never line-by-line.
+_PYTHON_HEREDOC_RE = re.compile(r"\bpython3?\b[^\n]*<<-?\s*['\"]?\w+")
 
 
 def _matches_credential_file_read(command: str) -> str | None:
@@ -179,6 +206,8 @@ def _matches_credential_file_read(command: str) -> str | None:
         return f"`{read_match.group(1)}` on a `{CREDENTIAL_FILE_NAME}` file"
     if _PYTHON_DASH_C_RE.search(command):
         return f"a `python -c` open-and-print of a `{CREDENTIAL_FILE_NAME}` file"
+    if _PYTHON_HEREDOC_RE.search(command):
+        return f"a python heredoc open-and-print of a `{CREDENTIAL_FILE_NAME}` file"
     return None
 
 
@@ -201,25 +230,118 @@ _EXPANSION_RES: dict[str, re.Pattern[str]] = {
     var: _expansion_re(var) for var in CREDENTIAL_ENV_VARS
 }
 
-#: A command word invoked BARE -- nothing after it but whitespace then
-#: end-of-segment (end of string, `;`, `&`, `|`, a newline, or a `#`
-#: shell comment -- a real shell strips everything from `#` to the end
-#: of the line, so `env # comment` is exactly as bare as `env` alone;
-#: measured, not assumed: the NO-ESCAPE test that appends
-#: `# routing-allow: ...` to every denied shape caught this once with
-#: `#` left out of the terminator class). This is what distinguishes the
-#: "dump everything" idiom (`env`, `set` with no arguments) from the
-#: ordinary, harmless use of the same word with arguments (`env -i
-#: FOO=bar cmd`, `set -euo pipefail` -- ubiquitous at the top of nearly
-#: every harness script and must never be denied).
-_BARE_TAIL = r"(?=\s*(?:$|[;&|#\n]))"
-_ENV_BARE_RE = re.compile(r"\benv\b" + _BARE_TAIL, re.MULTILINE)
-_SET_BARE_RE = re.compile(r"\bset\b" + _BARE_TAIL, re.MULTILINE)
 #: `printenv` has no exec-a-command form the way `env` does -- unlike
-#: `env`, ANY invocation of it only ever prints (either everything, bare,
-#: or one named variable's value), so it is denied unconditionally
-#: whenever the word appears, with no bare-tail qualifier.
-_PRINTENV_RE = re.compile(r"\bprintenv\b")
+#: `env`, ANY invocation of it only ever prints. Unlike the old
+#: unconditional match, `printenv PATH`/`printenv HOME` (an UNPROTECTED
+#: variable named explicitly) must stay allowed -- only a BARE invocation
+#: (no names -- prints every variable) or one naming a protected variable
+#: is denied. `printenv`'s own argument list ends at a pipe, `;`, `&`,
+#: `#`, or newline; whatever it is piped INTO doesn't change what
+#: `printenv` itself already wrote to that pipe, so (unlike `env`/`set`
+#: below) no downstream-filter carve-out applies here.
+_PRINTENV_INVOKE_RE = re.compile(r"\bprintenv\b(?P<tail>[^;&#\n]*)", re.MULTILINE)
+
+
+def _printenv_reason(command: str) -> str | None:
+    match = _PRINTENV_INVOKE_RE.search(command)
+    if not match:
+        return None
+    args_part = match.group("tail").split("|", 1)[0].strip()
+    if not args_part:
+        return "a bare `printenv` (prints every variable)"
+    args = args_part.split()
+    for var in CREDENTIAL_ENV_VARS:
+        if var in args:
+            return f"`printenv {var}`"
+    return None
+
+
+#: `env`/`set` invoked with nothing after them but a segment terminator
+#: (end of string, `;`, `&`, `#`, a newline) is the "dump everything"
+#: idiom and always denied. A real shell strips everything from `#` to
+#: end of line, so `env # comment` is exactly as bare as `env` alone.
+#: Ordinary, harmless use with real arguments (`env -i FOO=bar cmd`,
+#: `set -euo pipefail`, `set -x` -- ubiquitous at the top of nearly every
+#: harness script) must never be denied. `|` is handled separately below
+#: (a pipe target can be a provably-safe filter), unlike the old bare-tail
+#: regex that treated ANY pipe as bare.
+_ENV_OR_SET_INVOKE_RE = re.compile(r"\b(env|set)\b(?P<tail>[^;&#\n]*)", re.MULTILINE)
+#: A `grep`/`egrep`/`fgrep` invocation in COUNT (`-c`/`--count`) or QUIET
+#: (`-q`/`--quiet`/`--silent`) mode never prints a matched line's value,
+#: so it is safe regardless of pattern -- `env | grep -c NAME`, `env |
+#: grep -q NAME` stay allowed.
+_GREP_CMD_RE = re.compile(r"\b(?:e|f)?grep\b")
+_GREP_COUNT_OR_QUIET_RE = re.compile(
+    r"(?:^|\s)-\w*[cq]\w*\b|--count\b|--quiet\b|--silent\b"
+)
+_WC_CMD_RE = re.compile(r"\bwc\b")
+
+
+def _grep_pattern_matches_protected_name(grep_segment: str) -> str | None:
+    """Best-effort: does this `grep` invocation's PATTERN look like it
+    would match one of the protected env-var names? Returns the matched
+    var, or ``None``. Structure-agnostic like the git-write precedent:
+    takes the first non-flag token after `grep` as the pattern and checks
+    it, case-insensitively, as a substring of each protected name --
+    `env | grep OAUTH`/`env | grep TOKEN` match (both are substrings of
+    `CLAUDE_CODE_OAUTH_TOKEN`); `env | grep FOO` does not."""
+    tokens = grep_segment.split()
+    pattern = None
+    for tok in tokens[1:]:
+        if tok.startswith("-"):
+            continue
+        pattern = tok.strip("'\"")
+        break
+    if not pattern:
+        return None
+    pattern_lower = pattern.lower()
+    for var in CREDENTIAL_ENV_VARS:
+        if pattern_lower in var.lower():
+            return var
+    return None
+
+
+def _pipe_target_prints_value(segment: str) -> str | None:
+    """*segment* is the text right after a `|` following a bare
+    `env`/`set`. Returns a reason string if this pipe stage could still
+    print a protected value, or ``None`` if it is a recognized-safe
+    filter (`grep -c`/`-q`, a `grep` pattern that cannot match a
+    protected name, or `wc`). Any OTHER pipe target is denied --
+    conservative by design, since this guard cannot prove it safe."""
+    stage = segment.split("|", 1)[0]
+    if _GREP_CMD_RE.search(stage):
+        if _GREP_COUNT_OR_QUIET_RE.search(stage):
+            return None
+        matched_var = _grep_pattern_matches_protected_name(stage)
+        if matched_var:
+            return f"piped into `grep` with a pattern that could match `{matched_var}`"
+        return None
+    if _WC_CMD_RE.search(stage):
+        return None
+    return "piped into a filter that is not provably safe"
+
+
+def _env_or_set_reason(command: str) -> str | None:
+    for match in _ENV_OR_SET_INVOKE_RE.finditer(command):
+        word = match.group(1)
+        core = match.group("tail").strip()
+        if word == "env":
+            # `env -0` changes the output separator, not whether every
+            # variable is dumped -- still a bare dump when nothing else
+            # follows it.
+            core = re.sub(r"^-0\s*", "", core)
+        if not core:
+            return f"a bare `{word}` (prints every variable)"
+        if core.startswith("|"):
+            pipe_reason = _pipe_target_prints_value(core[1:])
+            if pipe_reason:
+                return f"a bare `{word}` {pipe_reason}"
+            continue
+        if core.startswith(">"):
+            return f"a bare `{word}` redirected to a file"
+        # Real arguments follow (`env -i FOO=bar cmd`, `set -euo
+        # pipefail`) -- execs a command or sets shell options, not a dump.
+    return None
 
 
 def _matches_variable_print(command: str) -> str | None:
@@ -228,12 +350,80 @@ def _matches_variable_print(command: str) -> str | None:
     for var, pattern in _EXPANSION_RES.items():
         if pattern.search(command):
             return f"a shell expansion of `${var}`"
-    if _PRINTENV_RE.search(command):
-        return "`printenv`"
-    if _ENV_BARE_RE.search(command):
-        return "a bare `env`"
-    if _SET_BARE_RE.search(command):
-        return "a bare `set`"
+    reason = _printenv_reason(command)
+    if reason:
+        return reason
+    return _env_or_set_reason(command)
+
+
+# ---------------------------------------------------------------------------
+# Rule 4: a `python -c`/heredoc that names a protected variable via
+# os.environ/os.getenv/environ.get.
+# ---------------------------------------------------------------------------
+
+_PYTHON_ENV_ACCESS_RES: dict[str, re.Pattern[str]] = {
+    var: re.compile(
+        r"\b(?:os\.)?(?:environ\s*\[\s*|environ\.get\(\s*|getenv\(\s*)"
+        r"""(['"])""" + re.escape(var)
+    )
+    for var in CREDENTIAL_ENV_VARS
+}
+
+
+def _matches_python_env_print(command: str) -> str | None:
+    """A reason string when *command* is a `python -c`/heredoc invocation
+    whose code names a protected variable via `os.environ`/`os.getenv`/
+    `environ.get`, or ``None``. Running a python SCRIPT BY PATH (no `-c`,
+    no heredoc -- `python3 tests/e2e/lib/claude_credentials.py run --
+    ...`) is unaffected: neither detector this rule reuses (`-c`/heredoc)
+    matches that shape."""
+    invoked = _PYTHON_DASH_C_RE.search(command) or _PYTHON_HEREDOC_RE.search(command)
+    if not invoked:
+        return None
+    for var, pattern in _PYTHON_ENV_ACCESS_RES.items():
+        if pattern.search(command):
+            return f"a `python -c`/heredoc reading `{var}` via os.environ/os.getenv"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Rule 5: reading another process's environment -- `ps -E`/BSD `e`, or
+# `/proc/*/environ`.
+# ---------------------------------------------------------------------------
+
+#: Only the FIRST option-like token after `ps` is inspected -- BSD ps
+#: syntax attaches the option cluster right after `ps`, and checking
+#: every later token would false-positive on an ordinary `-o` format
+#: keyword like `etime` (which contains "e" but names no flag).
+_PS_INVOKE_RE = re.compile(r"\bps\b\s+(?P<flag>\S+)")
+_PROC_ENVIRON_RE = re.compile(r"/proc/\S*/environ\b")
+_PROC_ENVIRON_READER_RE = re.compile(
+    r"\b(cat|strings|tr|xxd|od|more|less|head|tail|awk|sed)\b"
+)
+
+
+def _ps_flag_prints_environment(flag: str) -> bool:
+    """macOS `-E` (case-sensitive -- `-e` alone is a different, harmless
+    flag) or a BSD-style unclustered lowercase `e` (`aux`, `auxww` stay
+    allowed; `auxeww`, `eww` are denied)."""
+    if flag.startswith("-"):
+        return "E" in flag[1:]
+    if re.fullmatch(r"[a-z]+", flag):
+        return "e" in flag
+    return False
+
+
+def _matches_process_environment_read(command: str) -> str | None:
+    """A reason string when *command* reads another process's
+    environment via `ps -E`/BSD `e`, or a read of `/proc/*/environ`, or
+    ``None``."""
+    for match in _PS_INVOKE_RE.finditer(command):
+        flag = match.group("flag")
+        if _ps_flag_prints_environment(flag):
+            return f"`ps` with an environment-printing flag ({flag!r})"
+    if _PROC_ENVIRON_RE.search(command) and _PROC_ENVIRON_READER_RE.search(command):
+        reader = _PROC_ENVIRON_READER_RE.search(command)
+        return f"`{reader.group(1)}` on `/proc/*/environ`"
     return None
 
 
@@ -243,6 +433,8 @@ def _matched_reason(command: str) -> str | None:
         _matches_keychain_read(command)
         or _matches_credential_file_read(command)
         or _matches_variable_print(command)
+        or _matches_python_env_print(command)
+        or _matches_process_environment_read(command)
     )
 
 

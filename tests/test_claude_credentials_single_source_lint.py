@@ -77,6 +77,28 @@ forbidden shapes and so cannot be whole-file exempted the way the shared
 tool is. Adding that name's allowed sites is a one-line, reviewed change to
 this one dict; no other part of this lint changes.
 
+KNOWN LIMIT (line-based, not data-flow). Every detector above operates
+ONE LINE at a time (``_violations``'s ``for line in text.splitlines()``
+loop) and looks for the write verb and the credential-shaped name/path
+literal TOGETHER on that same line. It does not track a path held in a
+variable and interpolated elsewhere, e.g.::
+
+    p = ".credentials.json"
+    open(p, "w").write(payload)
+
+Neither line carries both the write call and the literal path, so this
+shape is NOT flagged (nexus-wauo1.26 code review finding 5, confirmed via
+a direct ``_violations()`` call returning empty hits). Accepted, not
+fixed here: a full data-flow analysis -- tracking a string literal
+through an arbitrary variable before it reaches a write call -- is out of
+proportion to what a cheap, line-based lint can do, and RDR-219's
+defense-in-depth does not rest on this one layer alone. The credential
+janitor (``tests/test_credential_janitor.py``, wired into the release
+battery per nexus-wauo1.24) finds the RESULTING ``.credentials.json``
+file on disk by walking the filesystem for its FILENAME, regardless of
+how the write that created it reached that name -- so an indirected write
+this lint misses is still caught the moment it actually lands a file.
+
 THE EXEMPTION LIST (closed; see ``_EXEMPT_PATHS``/``_EXEMPT_PREFIXES``, and
 ``test_exempt_list_is_exactly_this`` which pins it): this lint's own file
 (its docstring and kill-control fixtures plant the forbidden shapes on
