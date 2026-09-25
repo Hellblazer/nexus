@@ -34,9 +34,16 @@ ahead 300 ms after launch, before the box exists. ``kind`` is ``bash`` (one
 Bash call then stop), ``long`` (four Bash calls over ~12 s), ``agent`` (one foreground subagent dispatch) or
 ``broken`` (the server exits before serving: the negative control).
 
-Credentials: ``--cred-cmd`` is run before EVERY run and must print the OAuth
-credential JSON (tokens live 25-60 min); ``--cred-file`` copies a file.
-``--oauth-seed`` names a ``.claude.json`` whose ``oauthAccount`` is copied.
+Credentials (RDR-219): the ladder never handles credential material itself.
+Launch it under ``python3 tests/e2e/lib/claude_credentials.py run -- ...``
+(or ``run --remote HOST -- ...`` for qwentescence), which sets
+``CLAUDE_CODE_OAUTH_TOKEN`` in this process's own environment before exec'ing
+it. The ladder reads that variable and forwards it, per run, through the
+scrubbed ``env -i`` environment each tmux-launched ``claude`` gets; it
+refuses to start at all when the variable is absent. No per-run credential
+file is ever written under ``.claude``, and no OAuth-account seed block is
+read (T2 ``nexus_rdr/219-research-14``: not needed -- a bare onboarding stub
+authenticates from the token alone on every launch shape tested).
 
 Output: ``<out>/results.jsonl`` (one record per run) and ``<out>/summary.txt``.
 
@@ -121,23 +128,13 @@ def build_home(run_dir: Path, args, server_delay: float, broken: bool,
     work = home / "work"
     (home / ".claude").mkdir(parents=True)
     work.mkdir()
-    cred = home / ".claude" / ".credentials.json"
-    if args.cred_cmd:
-        blob = subprocess.run(args.cred_cmd, shell=True, capture_output=True, text=True,
-                              check=True).stdout
-    else:
-        blob = Path(args.cred_file).read_text()
-    json.loads(blob)
-    cred.write_text(blob)
-    cred.chmod(0o600)
-
+    # RDR-219: no credential file is ever written here. CLAUDE_CODE_OAUTH_TOKEN
+    # travels through run_one()'s env -i scrub instead (see the `keep` dict
+    # there) and a bare onboarding stub authenticates from it alone (T2
+    # nexus_rdr/219-research-14).
     seed: dict = {"hasCompletedOnboarding": True, "theme": "dark",
                   "projects": {str(work): {"hasTrustDialogAccepted": True,
                                            "hasCompletedProjectOnboarding": True}}}
-    if args.oauth_seed and Path(args.oauth_seed).exists():
-        acct = json.loads(Path(args.oauth_seed).read_text()).get("oauthAccount")
-        if acct:
-            seed["oauthAccount"] = acct
     (home / ".claude.json").write_text(json.dumps(seed))
 
     twin_log = run_dir / "twin.jsonl"
@@ -226,7 +223,12 @@ def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: 
     tmux(args.sock, "kill-session", "-t", sess, check=False)
     # env -i: a parent Claude Code session leaks CLAUDECODE, CLAUDE_CODE_* and
     # session markers that change the child's behaviour; start from nothing.
-    keep = {k: os.environ[k] for k in ("PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG")
+    # CLAUDE_CODE_OAUTH_TOKEN is the one CLAUDE_CODE_* name let back in
+    # (RDR-219): it must survive the scrub or the launched claude has no
+    # credential at all.
+    keep = {k: os.environ[k]
+            for k in ("PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG",
+                      "CLAUDE_CODE_OAUTH_TOKEN")
             if k in os.environ}
     keep.update({"TERM": "tmux-256color", "HOME": str(p["home"]), "DISABLE_AUTOUPDATER": "1"})
     envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in keep.items())
@@ -387,9 +389,6 @@ def main() -> int:
     ap.add_argument("--python", required=True, help="interpreter with mcp<2 for the probe")
     ap.add_argument("--hook-python", default="python3")
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
-    ap.add_argument("--cred-cmd")
-    ap.add_argument("--cred-file")
-    ap.add_argument("--oauth-seed")
     ap.add_argument("--sock", default="veh77-ladder")
     ap.add_argument("--plan")
     ap.add_argument("--ready-regex", default=r"bypass permissions on")
@@ -401,11 +400,15 @@ def main() -> int:
     ap.add_argument("--reanalyse", action="store_true",
                     help="recompute every record in <out>/results.jsonl from its run dir")
     args = ap.parse_args()
-    if not (args.cred_cmd or args.cred_file):
-        ap.error("one of --cred-cmd / --cred-file is required")
+    if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        ap.error(
+            "CLAUDE_CODE_OAUTH_TOKEN is not set (RDR-219) -- launch the ladder under "
+            "`python3 tests/e2e/lib/claude_credentials.py run -- ...` (or "
+            "`run --remote HOST -- ...`), never with a credential file or command"
+        )
     # Claude runs with cwd inside each run's HOME, so every path it is handed
     # must be absolute.
-    for name in ("out", "cred_file", "oauth_seed", "plan"):
+    for name in ("out", "plan"):
         if getattr(args, name):
             setattr(args, name, str(Path(getattr(args, name)).resolve()))
     if "/" in args.python:
@@ -424,6 +427,13 @@ def main() -> int:
         (Path(args.out) / "summary.txt").write_text(summary + "\n")
         _out(summary)
         return 0
+    # Plan-audit round-1 residual (bead notes): a server left running on
+    # this socket from an earlier invocation carries THAT invocation's own
+    # environment, token included or not, regardless of what THIS process's
+    # os.environ holds. Reset it before the first run so every session this
+    # invocation starts is born from a fresh server, using the `keep`
+    # environment run_one() builds per launch.
+    tmux(args.sock, "kill-server", check=False)
     plan_text = Path(args.plan or DEFAULT_PLAN).read_text()
     Path(args.out).mkdir(parents=True, exist_ok=True)
     results = Path(args.out) / "results.jsonl"
