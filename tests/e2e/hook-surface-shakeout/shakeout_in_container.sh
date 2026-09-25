@@ -40,12 +40,20 @@ T() { tmux -L "$SOCK" "$@"; }
 pane() { T capture-pane -p -t "$1" 2>/dev/null; }
 wait_for() { local d=$(( $(now) + $1 )); shift; while [ "$(now)" -lt "$d" ]; do "$@" && return 0; sleep 1; done; return 1; }
 
-# --- credentials: mounted read-only by run.sh, never derived here ----------
+# --- credentials (RDR-219): the automation token arrives as an inherited
+# environment variable, set by `run.sh`'s `claude_credentials.py run --
+# docker run -e CLAUDE_CODE_OAUTH_TOKEN ...`, on THIS process (the
+# container's own entrypoint) -- never a mounted file, never derived here.
+# Checked for presence only, never its value (the token rule): a tmux
+# session takes its environment from the tmux SERVER, not from the command
+# that asks for the session, so this check runs before the "launch" section
+# below creates that server with `T kill-server`/`T new-session` -- its
+# first use of this socket, so it is what seeds the server's environment.
 say "auth"
-mkdir -p "$HOME_DIR/.claude"
-umask 077
-cp /creds/.credentials.json "$HOME_DIR/.claude/.credentials.json"
-umask 022
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    echo "CLAUDE_CODE_OAUTH_TOKEN did not reach the container's environment"
+    exit 1
+fi
 python3 - <<'PY'
 import json, pathlib
 p = pathlib.Path("/home/nexus/.claude.json")
