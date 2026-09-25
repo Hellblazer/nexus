@@ -188,10 +188,13 @@ alternatives to a copied login.
   further. Day 2 Operations carries the remedy if a later `/logout` does break
   it.
 
-Phase 0 outcome (2026-09-25): all four pass, so no launch shape uses the file
-fallback in Failure Modes. Claude Code wrote the environment token to no file in
-any run, so rule 2 holds (T2 `nexus_rdr/219-research-13`). The first runs
-searched only the isolated `HOME`; a rerun of A1 also searched `/private/tmp`,
+Phase 0 outcome (2026-09-25): A1 to A3 pass and A4 passes in the tested shape
+(partly verified, above), so no launch shape uses the file fallback in Failure
+Modes. Claude Code wrote the environment token to no file in
+any run, so rule 2 holds (T2 `nexus_rdr/219-research-13`). A2, A3 and A4 were
+checked in the isolated `HOME` only (A2's container is removed with the run;
+A4 is the same host and shape as A1); the first A1 runs also searched only the
+`HOME`; a rerun of A1 also searched `/private/tmp`,
 the operator's per-user temp directory under `/private/var/folders` and
 `/private/var/tmp`, before and after the run, and the only new match was the
 Claude Code binary itself, byte-identical to the installed one. The `oauthAccount`
@@ -389,8 +392,8 @@ not documented, and it does not apply in bare mode.
 
 ### Prerequisites
 
-- [ ] Critical Assumptions A1 to A4 settled by the Phase 0 spike.
-- [ ] The operator has run `claude setup-token` and stored the token in the
+- [x] Critical Assumptions A1 to A4 settled by the Phase 0 spike (A4 partly verified, accepted by the operator).
+- [x] The operator has run `claude setup-token` and stored the token in the
   keychain item `nexus-automation-oauth-token`.
 
 ### Minimum Viable Validation
