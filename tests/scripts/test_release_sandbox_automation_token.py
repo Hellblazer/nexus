@@ -102,6 +102,33 @@ def test_tmux_mode_uses_a_private_socket_not_the_default_server(script_text: str
     )
 
 
+def test_cred_tool_run_restores_the_real_home_for_the_keychain_lookup(
+    script_text: str,
+) -> None:
+    """`$SANDBOX/activate` (sourced earlier in the script) swaps this
+    script's own $HOME to $SANDBOX for install isolation -- but `security
+    find-generic-password` (inside _cred_tool) resolves the login
+    keychain off $HOME too, so with $HOME still pointed at the sandbox
+    dir the automation token reads as absent even though it exists
+    (reproduced empirically: `status` exits 0 against the real $HOME and
+    exits 1, "absent", with $HOME redirected to an unrelated directory).
+    The `_cred_tool run --` invocation that starts the private tmux
+    server must restore the real $HOME (captured by `activate` as
+    $SANDBOX_ORIG_HOME) for just that one call."""
+    block = _tmux_block(script_text)
+    run_lines = [
+        ln for ln in block.splitlines()
+        if re.search(r"\b(_cred_tool|claude_credentials\.py)\s+run\b", ln)
+    ]
+    assert run_lines, "no `_cred_tool run --` invocation found in the tmux) block"
+    assert any(
+        re.search(r'HOME="\$SANDBOX_ORIG_HOME"', ln) for ln in run_lines
+    ), (
+        f"`_cred_tool run --` line(s) do not restore $SANDBOX_ORIG_HOME before "
+        f"the keychain lookup: {run_lines}"
+    )
+
+
 def test_cred_tool_wrapper_is_defined(script_text: str) -> None:
     assert re.search(r"_cred_tool\(\)\s*\{", script_text), (
         "no `_cred_tool()` wrapper defined -- expected a thin wrapper around "

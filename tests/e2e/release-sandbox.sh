@@ -1640,7 +1640,19 @@ case "$MODE" in
         # harness's single fail-loud credential gate — `set -euo pipefail`
         # stops the script here if the token is absent or expired, before
         # tmux does anything.
-        _cred_tool run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 220 -y 50 \
+        #
+        # HOME="$SANDBOX_ORIG_HOME" here only: `$SANDBOX/activate` (sourced
+        # above, step 1) already swapped this SCRIPT's own $HOME to
+        # $SANDBOX for install/isolation, but `security find-generic-
+        # password` (inside _cred_tool) resolves the login keychain off
+        # $HOME too — with $HOME pointed at the sandbox dir it can never
+        # see the real keychain, so the token would read as absent even
+        # though it exists. Restoring the real $HOME (captured by
+        # `activate` as $SANDBOX_ORIG_HOME) for just this one invocation
+        # fixes the keychain lookup without touching the pane's own
+        # isolation: the pane command below still sets HOME='$SANDBOX'
+        # explicitly, so nx/claude inside it stay fenced to the sandbox.
+        HOME="$SANDBOX_ORIG_HOME" _cred_tool run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 220 -y 50 \
             "env HOME='$SANDBOX' PATH='$SANDBOX/.local/bin:$PATH' bash -i"
         sleep 1
         _tmux send-keys -t "$TMUX_SESSION" "claude" Enter
