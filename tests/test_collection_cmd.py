@@ -1324,15 +1324,47 @@ def test_reembed_no_dry_run_writes_via_server(
     assert call["embeddings"] is None
 
 
-def test_reembed_rejects_cce_model(runner, env_creds, cloud_mode) -> None:
-    """nexus-bw65: voyage-context-3 (CCE) is not supported; click.Choice
-    rejects at parse time."""
-    result = _invoke(
-        runner, MagicMock(spec=HttpVectorClient),
-        ["re-embed", "knowledge__any", "--to", "voyage-context-3"],
+def test_reembed_cce_collection_recomputes_server_side(runner, env_creds, cloud_mode) -> None:
+    """nexus-tysei: voyage-context-3 re-embeds in place. It was refused
+    (nexus-bw65) while the client embedded a document's chunks together;
+    since the engine embeds each chunk on its own, an in-place re-embed is
+    the repair for stored vectors that no longer match their text. Same
+    contract as the other models: stored text and ids, force_re_embed, no
+    client-computed vectors."""
+    import uuid
+
+    coll_name = f"knowledge__rem{uuid.uuid4().hex[:10]}__voyage-context-3__v1"
+    client = make_vector_test_client()
+    col = client.get_or_create_collection(coll_name)
+    col.add(
+        ids=["k1", "k2"], documents=["page one text", "page two text"],
+        metadatas=[
+            {"content_hash": "h1", "embedding_model": "voyage-context-3"},
+            {"content_hash": "h2", "embedding_model": "voyage-context-3"},
+        ],
     )
-    assert result.exit_code != 0
-    assert "voyage-context-3" in result.output or "Invalid value" in result.output
+    fake_db = MagicMock(spec=HttpVectorClient)
+    fake_db.get_collection.side_effect = client.get_collection
+    upsert_calls: list[dict] = []
+
+    def _capture_upsert(collection, ids, documents, metadatas=None, *,
+                        force_re_embed=None, embeddings=None, skip_existing=None):
+        upsert_calls.append({"ids": ids, "documents": documents,
+                             "force_re_embed": force_re_embed, "embeddings": embeddings})
+
+    fake_db.upsert_chunks.side_effect = _capture_upsert
+
+    result = _invoke(
+        runner, fake_db,
+        ["re-embed", coll_name, "--to", "voyage-context-3", "--no-dry-run", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "re-embedded 2" in result.output
+    assert len(upsert_calls) == 1
+    assert upsert_calls[0]["ids"] == ["k1", "k2"]
+    assert upsert_calls[0]["documents"] == ["page one text", "page two text"]
+    assert upsert_calls[0]["force_re_embed"] is True
+    assert upsert_calls[0]["embeddings"] is None
 
 
 def test_reembed_skips_empty_documents(

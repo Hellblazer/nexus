@@ -1331,7 +1331,7 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
 
 
-_REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3")
+_REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3", "voyage-context-3")
 
 
 def _reembed_collection(
@@ -1348,9 +1348,14 @@ def _reembed_collection(
     Preserves chunk id, document text, and metadata. Only the embedding
     vector changes. Returns ``(processed, skipped)``.
 
-    nexus-bw65: in-place re-embed for non-CCE Voyage models. CCE
-    (``voyage-context-3``) requires sliding-window context across chunks
-    and is intentionally out of scope; the CLI rejects it up front.
+    nexus-bw65: in-place re-embed for Voyage models. CCE
+    (``voyage-context-3``) was refused here while the CLIENT embedded,
+    because the client path sent a document's chunks together for context.
+    Since nexus-sghyo the engine embeds server-side, and ``CceEmbedder``
+    sends every chunk as its own single-chunk document (nexus-u2mlh.1), so
+    a server-side re-embed of stored text is exactly the vector a fresh
+    index would write. That is what repairs chunks whose stored vector was
+    computed with document context by the retired client path (nexus-tysei).
 
     nexus-sghyo (Hal determination 2026-07-28): the client no longer
     embeds via Voyage. Every write below routes through
@@ -1465,8 +1470,8 @@ def _reembed_collection(
 @click.option(
     "--to", "target_model", required=True,
     type=click.Choice(_REEMBED_SUPPORTED_MODELS),
-    help="Target embedding model (CCE models like voyage-context-3 are "
-         "intentionally not supported — see nexus-bw65).",
+    help="Target embedding model; in service mode it must be the model the "
+         "collection name encodes.",
 )
 @click.option("--dry-run/--no-dry-run", default=True,
               help="Default dry-run. Pass --no-dry-run to actually write.")
@@ -1486,10 +1491,12 @@ def reembed_cmd(
     collections prefer ``nx collection reindex`` so the indexer
     re-derives chunk boundaries with the new chunker contract.
 
+    Also the repair for stored vectors that no longer match their text:
+    re-embedding in place with the collection's own model recomputes every
+    vector server-side (nexus-tysei: voyage-context-3 chunks the retired
+    client path embedded with document context).
+
     Limitations:
-      - Only non-CCE Voyage models are supported. Contextualized
-        Chunk Embeddings (voyage-context-3) require sliding-window
-        context across chunks and need a different pipeline.
       - The collection's name often encodes the embedding model
         (RDR-103 / nexus-1-1__voyage-code-3__v1). This command does
         NOT rename the collection; run ``nx collection rename`` if
