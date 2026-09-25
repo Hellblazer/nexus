@@ -83,10 +83,10 @@ THE EXEMPTION LIST (closed; see ``_EXEMPT_PATHS``/``_EXEMPT_PREFIXES``, and
 purpose — DATA, not live code), ``CHANGELOG.md`` (its RDR-219 entry names
 the forbidden command it replaced), and ``docs/rdr/**`` (the RDR itself
 quotes the forbidden ``security find-generic-password`` command in its own
-Minimum Viable Validation). The P3.1 plugin guard script (nexus-wauo1.22)
-and its test file join this set the moment they land, by the identical
-reasoning as this lint's own self-exemption — nothing currently matches
-those paths because P3.1 has not shipped yet.
+Minimum Viable Validation), and the P3.1 guard's test file
+(nexus-wauo1.22), whose positive controls quote every command the guard
+denies, as data. The guard script itself needs no exemption: it matches
+those shapes with patterns, never with a literal forbidden command line.
 """
 from __future__ import annotations
 
@@ -117,6 +117,7 @@ def _rel(path: pathlib.Path) -> str:
 _EXEMPT_PATHS: frozenset[str] = frozenset({
     _rel(_SELF),
     "CHANGELOG.md",
+    "tests/test_routing_credential_print_guard.py",
 })
 
 #: Repo-relative path PREFIXES exempt from every check in this lint.
@@ -309,6 +310,7 @@ def test_exempt_list_is_exactly_this() -> None:
     assert _EXEMPT_PATHS == frozenset({
         "tests/test_claude_credentials_single_source_lint.py",
         "CHANGELOG.md",
+        "tests/test_routing_credential_print_guard.py",
     })
     assert _EXEMPT_PREFIXES == ("docs/rdr/",)
 
