@@ -217,7 +217,16 @@ class TestTheTwoSurfacesAgree:
         assert self._call_site_flags()["phase_review_close_requires_gate"] is True
 
     @pytest.mark.parametrize(
-        "rule", ["subagent_git_write_requires_orchestrator"]
+        "rule",
+        [
+            "subagent_git_write_requires_orchestrator",
+            # nexus-wauo1.22 (RDR-219): the SAME shape -- a crash in the
+            # matching logic must not brick every agent's Bash, and the
+            # real deny/allow split for a raised exception lives INSIDE
+            # the hook (its own "FAILURE BEHAVIOUR" plain-substring
+            # fallback), not at this wrapper.
+            "credential_print_guard",
+        ],
     )
     def test_the_deliberately_fail_open_rules_stay_fail_open(self, rule):
         """registry.yaml carries Hal's 2026-07-25 reasoning for this one: a
