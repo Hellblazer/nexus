@@ -174,16 +174,20 @@ cat > "$TEST_HOME/.env.test" << EOF
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 export HOME="$TEST_HOME"
 export PATH="$TEST_HOME/.local/bin:\$PATH"
-# ANTHROPIC_API_KEY: pass through when set so CI callers can provide one
-# explicitly; otherwise explicitly unset so Claude Code falls through to
-# the automation token (CLAUDE_CODE_OAUTH_TOKEN) already in the tmux
-# server's own environment (RDR-219 — see the NX_TMUX_SOCKET / \`run --\`
-# setup above). Exporting a placeholder here would make Claude prefer the
-# bogus key over the token and reject every request with "Invalid API key."
+# ANTHROPIC_API_KEY (RDR-219 Phase 2 Step 2, mechanism 9): never written to
+# this file. When a CI caller sets it, it is already in run.sh's own
+# process environment and so already reaches the tmux SERVER's environment
+# (and every pane) through the \`\$CRED_TOOL run -- tmux ... new-session\`
+# call above — \`run\` execs with a copy of the caller's own os.environ plus
+# the automation token, so the pane already has the key before .env.test is
+# sourced. Writing the value here too would put a plaintext credential on
+# disk for no operational reason. When it's NOT set, explicitly unset it so
+# Claude Code falls through to the automation token (CLAUDE_CODE_OAUTH_TOKEN)
+# already in the tmux server's own environment — a stray export here would
+# make Claude prefer a bogus/inherited key over the token and reject every
+# request with "Invalid API key."
 EOF
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    echo "export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\"" >> "$TEST_HOME/.env.test"
-else
+if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "unset ANTHROPIC_API_KEY" >> "$TEST_HOME/.env.test"
 fi
 cat >> "$TEST_HOME/.env.test" << EOF

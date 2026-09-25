@@ -56,11 +56,6 @@ fi
 # Load API keys
 [[ -f "$REPO_ROOT/.env" ]] && set -a && source "$REPO_ROOT/.env" && set +a
 
-# ANTHROPIC_API_KEY is optional: needed only when the sandbox will spawn Claude
-# Code (interactive / tmux modes). Pure CLI smoke (release-sandbox.sh smoke) and
-# the `shell` mode that just exercises `nx` do not need it.
-: "${ANTHROPIC_API_KEY:=}"
-
 # Bare Claude home
 rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX/.claude/plugins"
@@ -75,7 +70,15 @@ echo '{"hasCompletedOnboarding":true}' > "$SANDBOX/.claude.json"
     printf '%s\n' 'export SANDBOX_ORIG_HOME="$HOME"'
     printf 'export HOME="%s"\n' "$SANDBOX"
     printf 'export PATH="%s/.local/bin:$PATH"\n' "$SANDBOX"
-    printf 'export ANTHROPIC_API_KEY="%s"\n' "${ANTHROPIC_API_KEY:-}"
+    # ANTHROPIC_API_KEY (RDR-219 Phase 2 Step 2, mechanism 2): never written
+    # here. It is needed only when the sandbox will spawn Claude Code
+    # (interactive / tmux modes) -- pure CLI smoke (release-sandbox.sh smoke)
+    # and the `shell` mode that just exercises `nx` do not need it at all.
+    # When it IS needed, the operator's own shell (the one that sources this
+    # activate file) already carries it if they exported it before running
+    # sandbox.sh or ./tests/e2e/lib/claude_credentials.py `run --` wraps the
+    # actual `claude` invocation the same way the other harnesses do -- the
+    # key stays in the launching process's environment, never on disk.
     printf 'export VOYAGE_API_KEY="%s"\n' "${VOYAGE_API_KEY:-}"
     printf 'export CHROMA_API_KEY="%s"\n' "${CHROMA_API_KEY:-}"
     printf 'export CHROMA_TENANT="%s"\n' "${CHROMA_TENANT:-}"

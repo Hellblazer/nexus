@@ -94,6 +94,21 @@ else
     pass "no AUTH_DIR/claude.json seed copy remains in run.sh"
 fi
 
+# 6. RDR-219 Phase 2 Step 2 (bead item 2, mechanism 9): the caller's own
+#    ANTHROPIC_API_KEY value must never be written into $TEST_HOME/.env.test
+#    -- it already reaches the tmux SERVER's environment (and so every pane)
+#    through the `$CRED_TOOL run -- tmux ... new-session` call at check 1,
+#    which execs with a copy of the caller's own os.environ. Writing the
+#    literal value into .env.test as well would put a plaintext credential
+#    on disk for no operational reason. A defensive `unset ANTHROPIC_API_KEY`
+#    line (written when the caller's env does NOT carry a key, so a stale
+#    export from an earlier .env.test can't linger) is fine and expected.
+if grep -qE 'export ANTHROPIC_API_KEY=\\?"\$ANTHROPIC_API_KEY\\?"' "$TARGET"; then
+    fail "run.sh still writes the ANTHROPIC_API_KEY value into .env.test"
+else
+    pass "no plaintext ANTHROPIC_API_KEY value is written into .env.test"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
