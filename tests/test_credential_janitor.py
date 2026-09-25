@@ -356,7 +356,8 @@ def test_main_exits_nonzero_and_prints_failed_verdict_on_a_finding(tmp_path, cj,
     repo = tmp_path / "repo"
     repo.mkdir()
     _git_init(repo)
-    (repo / ".credentials.json").write_text('{"accessToken": "x"}')
+    planted = repo / ".credentials.json"
+    planted.write_text('{"accessToken": "x"}')  # a planted fixture, not a credential
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
     fake_cred_tool = tmp_path / "fake_claude_credentials.py"
