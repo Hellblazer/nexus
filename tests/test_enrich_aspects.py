@@ -60,11 +60,11 @@ def _shared_doc_id() -> str:
 #   unsatisfiable assertion. "Catalog not initialized" is a LOCAL-only state;
 #   in service mode make_catalog_reader always returns a handle.
 #
-#   _needs_diagnosis_nexus_t0nrd — five tests around the extraction loop's
-#   routed-write seam and the re-extract outdated filter. NOT retired, NOT
-#   understood: tracked in nexus-t0nrd with what has already been ruled out
-#   (the aspect store round-trips identically on both substrates, so the
-#   divergence is in the CLI verb, not document_aspects).
+#   _needs_diagnosis_nexus_t0nrd — RETIRED 2026-09-25 (nexus-3foc9 work
+#   found it stale): its three surviving tests (persist routes through
+#   t2_index_write, the re-extract outdated filter, single-row delete) pass
+#   on the engine substrate, 3 of 3 runs, so the skip was hiding working
+#   behaviour. nexus-t0nrd itself was closed as a duplicate of nexus-02avu.
 #
 # nexus-i711w Stage 1b (2026-07-28): the SQLite substrate is gone, so what
 # remains is the t0nrd marker, now UNCONDITIONAL — a skipif whose predicate
@@ -75,10 +75,6 @@ def _shared_doc_id() -> str:
 # two markers went with their tests: the local-only "Catalog not initialized"
 # assertion is unsatisfiable on the only remaining substrate, and
 # _rich_catalog_dies_at_flip had already been emptied by the aqbrk correction.
-_needs_diagnosis_nexus_t0nrd = pytest.mark.skip(
-    reason="nexus-t0nrd: engine-substrate behaviour of the enrich write path "
-    "not yet diagnosed — tracked, not retired",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -728,7 +724,6 @@ class TestDefaultExtraction:
         assert "2 extracted" in result.output
         assert "by_extractor" not in result.output
 
-    @_needs_diagnosis_nexus_t0nrd
     def test_aspect_persist_routes_through_t2_index_write(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -817,7 +812,6 @@ class TestDefaultExtraction:
 
 
 class TestReExtract:
-    @_needs_diagnosis_nexus_t0nrd
     def test_re_extract_filters_to_outdated_rows(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1534,7 +1528,6 @@ class TestDay2Ops:
         assert result.exit_code == 0
         assert "No aspect row" in result.output
 
-    @_needs_diagnosis_nexus_t0nrd
     def test_delete_removes_row(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
