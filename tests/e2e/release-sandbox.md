@@ -105,15 +105,16 @@ When to use this vs `smoke`:
 
 Reinstall + isolated `$HOME` + launch Claude Code in a tmux pane against the sandbox. Use for end-to-end exercises against the real MCP / plugin / hooks surface.
 
-Prerequisites: `tests/e2e/.claude-auth/.credentials.json` must exist. Run `tests/e2e/auth-login.sh` once to cache OAuth from the macOS Keychain.
+Prerequisites (RDR-219): the harness's own automation token must be present in the keychain — check with `python3 tests/e2e/lib/claude_credentials.py status`, and mint one with `claude setup-token` if it's absent or expired. No credential file is cached to disk; the private tmux server this mode starts is launched under `claude_credentials.py run --`, so it never reads the operator's own interactive login.
 
 ```bash
-./tests/e2e/auth-login.sh         # one-time cache
 ./tests/e2e/release-sandbox.sh tmux
 # tmux attaches automatically; Ctrl-b d to detach
 ```
 
 Inside tmux, you have a real Claude Code session running against the wheel-installed `nx`, isolated from your live config.
+
+To launch `claude` by hand against a persistent sandbox (e.g. from `shell` mode, or a manual tmux pane outside this harness), use the same helper directly rather than any cached credential file: `python3 tests/e2e/lib/claude_credentials.py run -- claude`.
 
 ### `reset`
 

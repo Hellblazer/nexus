@@ -41,6 +41,15 @@ export NX_NO_TELEMETRY=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# RDR-219 P2.1c: thin wrapper around the shared automation-token picker
+# (tests/e2e/lib/claude_credentials.py). `tmux` mode's private tmux server
+# is launched under `_cred_tool run --` so CLAUDE_CODE_OAUTH_TOKEN reaches
+# it — the harness's own automation identity, never the operator's
+# interactive login.
+_cred_tool() {
+    python3 "$REPO_ROOT/tests/e2e/lib/claude_credentials.py" "$@"
+}
 # nexus-mfage fix B item 3: NEXUS_SANDBOX_HOME overrides the fixed
 # $HOME/nexus-sandbox so two sandbox gates (smoke and shakedown in one
 # battery) run side by side, each in its own HOME. The lock follows the
@@ -586,8 +595,8 @@ _print_help() {
         "             tear down." \
         "  tmux       Reinstall + activate + launch Claude Code interactively in tmux." \
         "             Useful for end-to-end exercises against MCP / plugin / hooks." \
-        "             Requires tests/e2e/.claude-auth/.credentials.json (run" \
-        "             tests/e2e/auth-login.sh first)." \
+        "             Requires the harness's own automation token in the keychain" \
+        "             (run: python3 tests/e2e/lib/claude_credentials.py status)." \
         "  service    RDR-157 P4.2 fresh-machine LOCAL-mode E2E: position the service" \
         "             artifact (native binary via NEXUS_SERVICE_BIN, else the repo JAR)," \
         "             then prove ONE command (nx init --service) goes fresh-install ->" \
@@ -1609,29 +1618,33 @@ case "$MODE" in
         if ! command -v tmux >/dev/null 2>&1; then
             _die "tmux not installed (brew install tmux)"
         fi
-        AUTH_DIR="$REPO_ROOT/tests/e2e/.claude-auth"
-        if [[ ! -f "$AUTH_DIR/.credentials.json" ]]; then
-            _die "missing $AUTH_DIR/.credentials.json — run tests/e2e/auth-login.sh first"
-        fi
         # Reuse cc-validation lib for tmux primitives + claude_start.
         export TEST_HOME="$SANDBOX"
         export TMUX_SESSION
+        # RDR-219 tmux transport rule: a tmux session takes its environment
+        # from the SERVER, not from the command that asks for the session —
+        # so this harness runs its own private server (never the user's
+        # default one) and starts it under `_cred_tool run --` below.
+        NX_TMUX_SOCKET="release-sandbox-sock"
+        export NX_TMUX_SOCKET
         echo "[3/3] Launching Claude Code in tmux session '$TMUX_SESSION' ..."
-        echo "      Detach: Ctrl-b d   |   Kill: tmux kill-session -t $TMUX_SESSION"
+        echo "      Detach: Ctrl-b d   |   Kill: tmux -L $NX_TMUX_SOCKET kill-session -t $TMUX_SESSION"
         echo
         # shellcheck source=/dev/null
         . "$REPO_ROOT/tests/e2e/lib.sh"
-        # Ensure auth credentials are reachable inside the sandbox HOME.
-        mkdir -p "$SANDBOX/.claude"
-        cp "$AUTH_DIR/.credentials.json" "$SANDBOX/.claude/.credentials.json"
-        if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-            tmux kill-session -t "$TMUX_SESSION"
-        fi
-        tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 \
+        # Never reuse a stale private server from a killed prior run.
+        _tmux kill-server 2>/dev/null || true
+        # RDR-219: the harness's own automation token
+        # (nexus-automation-oauth-token), never the operator's interactive
+        # login or a cached credential snapshot file. This is also the
+        # harness's single fail-loud credential gate — `set -euo pipefail`
+        # stops the script here if the token is absent or expired, before
+        # tmux does anything.
+        _cred_tool run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 220 -y 50 \
             "env HOME='$SANDBOX' PATH='$SANDBOX/.local/bin:$PATH' bash -i"
         sleep 1
-        tmux send-keys -t "$TMUX_SESSION" "claude" Enter
+        _tmux send-keys -t "$TMUX_SESSION" "claude" Enter
         echo "Attaching ... (Ctrl-b d to detach without killing)"
-        tmux attach -t "$TMUX_SESSION"
+        _tmux attach -t "$TMUX_SESSION"
         ;;
 esac
