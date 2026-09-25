@@ -2,12 +2,12 @@
 title: "Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment"
 id: RDR-219
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-09-25
-accepted_date:
+accepted_date: 2026-09-25
 related_issues: [nexus-6konb.15]
 related_rdrs: [RDR-215, RDR-079]
 ---
@@ -510,3 +510,5 @@ fix the practice that makes copies before cleaning up the copies. Sam chose an
 RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Gate round 1 — BLOCKED (1 Critical, 2 Significant, 1 ship-blocker(s)); commit `36217ae7f`; critique `nexus_rdr/219-gate-critique-2026-09-25-r1`.
 - 2026-09-25: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `a50c35f27`; critique `nexus_rdr/219-gate-critique-2026-09-25-r2`.
+- 2026-09-25: Gate round 2 Significants fixed before accept in `e833d41a4` (fix check `nexus_rdr/219-fix-check-e833d41a4`, PASS).
+- 2026-09-25: Accepted by Sam.
