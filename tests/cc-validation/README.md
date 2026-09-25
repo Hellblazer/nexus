@@ -81,10 +81,10 @@ RDR-219 closed the class rather than the symptom: the harness uses its own
 automation token instead of the operator's login, and never writes a
 credential to disk at all, so there is no snapshot left to overwrite and no
 husk to choose between. The shared helper this section used to describe,
-`tests/e2e/lib/claude_credentials.py` (nexus-galkv.19), now carries `run`/
-`status` for the automation token alongside its original husk-avoiding
-`Claude Code-credentials` picker, still used by the few call sites RDR-219
-has not yet migrated.
+`tests/e2e/lib/claude_credentials.py` (nexus-galkv.19), now carries only
+`run` and `status` for the automation token; its husk-avoiding picker over
+the operator's login was removed once the last harness migrated
+(nexus-wauo1.18).
 
 **Lesson (same class as the 2026-05-31 trio below): a successful FETCH is not
 a valid CREDENTIAL.** An `[auth] ...` line on stderr is provenance, not
