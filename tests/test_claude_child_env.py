@@ -9,6 +9,9 @@ from __future__ import annotations
 import os
 
 import pytest
+from structlog.testing import capture_logs
+
+import nexus.claude_child_env as claude_child_env
 
 from nexus.claude_child_env import (
     CLAUDE_OAUTH_TOKEN_ENV_VAR,
@@ -98,8 +101,6 @@ def test_never_logs_either_value() -> None:
     """The helper's own log line (when it fires) must never contain either
     the harness value or the granted token value -- only the fact that a
     grant was applied, at most once."""
-    from structlog.testing import capture_logs
-
     base = {HARNESS_OAUTH_TOKEN_ENV_VAR: "super-secret-fake-value-zzz"}
     with capture_logs() as logs:
         apply_harness_oauth_grant(base)
@@ -112,8 +113,6 @@ def test_never_logs_either_value() -> None:
 
 def test_no_grant_logs_nothing() -> None:
     """No harness name -> no log call at all (not just no value logged)."""
-    from structlog.testing import capture_logs
-
     with capture_logs() as logs:
         apply_harness_oauth_grant({"PATH": "/usr/bin"})
 
@@ -123,9 +122,7 @@ def test_no_grant_logs_nothing() -> None:
 @pytest.fixture(autouse=True)
 def _fresh_grant_log_flag(monkeypatch) -> None:
     """The grant logs once per process; reset that state per test."""
-    import nexus.claude_child_env as mod
-
-    monkeypatch.setattr(mod, "_grant_logged", False)
+    monkeypatch.setattr(claude_child_env, "_grant_logged", False)
 
 
 def test_grant_logs_once_per_process_not_per_dispatch() -> None:
@@ -133,8 +130,6 @@ def test_grant_logs_once_per_process_not_per_dispatch() -> None:
     extraction retry applies the grant, so a per-call warning floods a
     harness run's log. One line per process is enough; nx-mcp's startup
     warning already names the grant."""
-    from structlog.testing import capture_logs
-
     base = {HARNESS_OAUTH_TOKEN_ENV_VAR: "fake-value"}
     with capture_logs() as logs:
         for _ in range(5):
@@ -143,8 +138,6 @@ def test_grant_logs_once_per_process_not_per_dispatch() -> None:
 
 
 def test_existing_token_wins_and_logs_nothing() -> None:
-    from structlog.testing import capture_logs
-
     base = {HARNESS_OAUTH_TOKEN_ENV_VAR: "fake-h", CLAUDE_OAUTH_TOKEN_ENV_VAR: "fake-c"}
     with capture_logs() as logs:
         apply_harness_oauth_grant(base)
