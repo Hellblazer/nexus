@@ -248,7 +248,7 @@ def _record_taxonomy_assign_batch_failure(chunk_count: int) -> None:
 
 
 def taxonomy_assign_run_stats() -> dict[str, int]:
-    """Snapshot of ``{attempted, failed_batches, failed_chunks}`` for the
+    """Snapshot of ``{attempted, failed_batches, failed_chunks, deferred_chunks}`` for the
     current run. Mirrors ``service_t2_op_stats()``'s snapshot contract."""
     with _taxonomy_assign_stats_lock:
         return dict(_taxonomy_assign_run_stats)
@@ -282,9 +282,64 @@ def reset_taxonomy_assign_run_stats() -> None:
 TAXONOMY_DEFER_UPTIME_S = 600
 #: How long after a recorded assign failure later runs defer.
 TAXONOMY_FAILURE_BACKOFF_S = 900
-#: File under the nexus config dir holding the wall-clock time of the last
-#: run that lost an assignment (seconds since the epoch).
+#: Prefix of the file under the nexus config dir holding the wall-clock
+#: time of the last run that lost an assignment (seconds since the epoch).
+#: One file per (engine endpoint, tenant): see
+#: :func:`taxonomy_failure_marker_path`.
 TAXONOMY_FAILURE_MARKER = "taxonomy_assign_failed_at"
+
+
+def _env_seconds(name: str, default: int) -> int:
+    """A non-negative integer from env *name*, or *default*.
+
+    Both thresholds are proxies (conexus measured cache recovery as
+    work-driven, not time-driven), so they can be retuned without a
+    release. An unparsable or negative value is logged and ignored.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if value < 0:
+            raise ValueError("negative")
+    except ValueError:
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning("taxonomy_deferral_env_ignored", var=name, value=raw, default=default)
+        return default
+    return value
+
+
+def taxonomy_defer_uptime_s() -> int:
+    """:data:`TAXONOMY_DEFER_UPTIME_S`, or ``NX_TAXONOMY_DEFER_UPTIME_S``."""
+    return _env_seconds("NX_TAXONOMY_DEFER_UPTIME_S", TAXONOMY_DEFER_UPTIME_S)
+
+
+def taxonomy_failure_backoff_s() -> int:
+    """:data:`TAXONOMY_FAILURE_BACKOFF_S`, or ``NX_TAXONOMY_FAILURE_BACKOFF_S``."""
+    return _env_seconds("NX_TAXONOMY_FAILURE_BACKOFF_S", TAXONOMY_FAILURE_BACKOFF_S)
+
+
+def taxonomy_failure_marker_path(config_dir: Any) -> Any:
+    """The failure marker for the engine and tenant this process talks to.
+
+    Keyed on a digest of the resolved service URL and token (the token is
+    tenant-bound, and only its digest is written), the way the data-token
+    lease files are keyed, so a loss against one engine never defers
+    indexing against another on the same box. An endpoint that cannot be
+    resolved gets its own ``unresolved`` file.
+    """
+    import hashlib  # noqa: PLC0415 — stdlib, only this helper needs it
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    try:
+        from nexus.db.http_vector_client import _resolve_endpoint  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
+
+        url, token = _resolve_endpoint()
+        key = hashlib.sha256(f"{url}\x00{token}".encode()).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 — an unresolvable endpoint fails the index run elsewhere; here it only picks a file name
+        key = "unresolved"
+    return Path(config_dir) / f"{TAXONOMY_FAILURE_MARKER}.{key}"
 
 _taxonomy_deferral = ""
 _taxonomy_breaker_armed = False
@@ -333,9 +388,9 @@ def engine_process_uptime_seconds() -> int | None:
     must treat ``None`` as "no evidence of a restart", never as "warm".
     """
     try:
-        from nexus.db.http_vector_client import _get  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
+        from nexus.db.http_vector_client import _get, _process_default_tenant  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
 
-        info = _get("/version")
+        info = _get("/version", tenant=_process_default_tenant())
     except Exception as exc:  # noqa: BLE001 — advisory probe; absence defers nothing
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
         structlog.get_logger().debug("engine_uptime_probe_failed", error=str(exc))
@@ -352,28 +407,38 @@ def record_taxonomy_failure(marker: Any, *, now: float) -> None:
 
     path = Path(marker)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{now:.0f}\n")
+    # Temp file then rename: two runs recording at once never leave a torn
+    # value (a torn one would read as "no backoff", which is safe but wrong).
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(f"{now:.0f}\n")
+    os.replace(tmp, path)
 
 
 def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str:
     """Why this run should defer taxonomy assignment, or ``""``.
 
     Two exclusions, checked in order: the engine restarted less than
-    :data:`TAXONOMY_DEFER_UPTIME_S` ago; or a run lost an assignment less
-    than :data:`TAXONOMY_FAILURE_BACKOFF_S` ago (the *marker* file). Unknown
+    :func:`taxonomy_defer_uptime_s` ago; or a run lost an assignment less
+    than :func:`taxonomy_failure_backoff_s` ago (the *marker* file). Unknown
     uptime and an unreadable marker both defer nothing.
+
+    Known limits, accepted: "under load" is caught only after a batch has
+    failed (the client has no engine load signal); a deploy that does not
+    restart the engine is not seen; and the MCP ``store_put`` path is never
+    deferred, by design, so a long-lived server cannot lose its assigns to
+    one stuck flag.
     """
     from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
 
     uptime = uptime_fn()
-    if uptime is not None and uptime < TAXONOMY_DEFER_UPTIME_S:
+    if uptime is not None and uptime < taxonomy_defer_uptime_s():
         return f"engine restarted {uptime} s ago"
     try:
         failed_at = float(Path(marker).read_text().strip())
     except (OSError, ValueError):
         return ""
     age = now_fn() - failed_at
-    if 0 <= age < TAXONOMY_FAILURE_BACKOFF_S:
+    if 0 <= age < taxonomy_failure_backoff_s():
         return f"taxonomy assign failed {age:.0f} s ago"
     return ""
 
@@ -1391,8 +1456,8 @@ class DrainResult:
     ``found`` counts chashes the engine listed, ``assigned`` those whose
     assign call succeeded, ``lost`` those that still failed after the retry.
     ``truncated`` means the budget or deadline stopped the drain with pages
-    left. ``skipped_reason`` is non-empty when nothing could be asked at all
-    (an engine without the route).
+    left. ``skipped_reason`` is non-empty when nothing was asked: an engine
+    without the route, or taxonomy deferred for this run (nexus-tawfg).
     """
 
     collection: str

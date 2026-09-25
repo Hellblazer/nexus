@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+import nexus.db.http_vector_client as hvc
 import nexus.mcp_infra as mcp_infra
 from nexus.cli import main
 from nexus.config import nexus_config_dir
@@ -196,4 +197,117 @@ def test_index_repo_records_a_loss_for_the_next_run(tmp_path, monkeypatch, t2_se
     out = _index_repo(tmp_path, monkeypatch, uptime=None)
 
     assert out.exit_code != 0, out.output
-    assert (nexus_config_dir() / "taxonomy_assign_failed_at").exists()
+    assert mcp_infra.taxonomy_failure_marker_path(nexus_config_dir()).exists()
+
+
+def test_the_marker_is_per_engine_and_tenant(tmp_path, monkeypatch) -> None:
+    """A loss against one engine must not defer indexing against another
+    engine on the same box (critic, round 1)."""
+    monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://engine-a:1", "tok-a"))
+    a = mcp_infra.taxonomy_failure_marker_path(tmp_path)
+    monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://engine-b:1", "tok-a"))
+    b = mcp_infra.taxonomy_failure_marker_path(tmp_path)
+    monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://engine-a:1", "tok-b"))
+    c = mcp_infra.taxonomy_failure_marker_path(tmp_path)
+
+    assert len({a, b, c}) == 3
+    assert "tok-a" not in a.name and "engine-a" not in a.name, "no raw endpoint or token on disk"
+
+    record_taxonomy_failure(a, now=_NOW)
+    assert "failed" in decide_taxonomy_deferral(uptime_fn=lambda: None, marker=a, now_fn=lambda: _NOW)
+    assert decide_taxonomy_deferral(uptime_fn=lambda: None, marker=b, now_fn=lambda: _NOW) == ""
+
+
+def test_thresholds_are_env_tunable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("NX_TAXONOMY_DEFER_UPTIME_S", "60")
+    assert _decide(tmp_path, 61) == ""
+    assert "restarted" in _decide(tmp_path, 59)
+    monkeypatch.setenv("NX_TAXONOMY_DEFER_UPTIME_S", "garbage")
+    assert "restarted" in _decide(tmp_path, TAXONOMY_DEFER_UPTIME_S - 1), "bad value keeps the default"
+
+    marker = tmp_path / "m"
+    record_taxonomy_failure(marker, now=_NOW - 100)
+    monkeypatch.setenv("NX_TAXONOMY_FAILURE_BACKOFF_S", "50")
+    assert decide_taxonomy_deferral(uptime_fn=lambda: None, marker=marker, now_fn=lambda: _NOW) == ""
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"process_uptime_seconds": 30}, 30),
+    ({"process_uptime_seconds": 0}, 0),
+    ({"process_uptime_seconds": True}, None),
+    ({"process_uptime_seconds": "30"}, None),
+    ({"process_uptime_seconds": 30.5}, None),
+    ({}, None),
+    (["not", "a", "dict"], None),
+])
+def test_uptime_probe_accepts_only_an_integer(monkeypatch, payload, expected) -> None:
+    seen: dict = {}
+
+    def _get(path, tenant=None):
+        seen["path"], seen["tenant"] = path, tenant
+        return payload
+
+    monkeypatch.setattr(hvc, "_get", _get)
+    assert mcp_infra.engine_process_uptime_seconds() == expected
+    assert seen == {"path": "/version", "tenant": hvc._process_default_tenant()}
+
+
+def test_uptime_probe_failure_is_no_evidence(monkeypatch) -> None:
+    def _boom(path, tenant=None):
+        raise ConnectionError("engine down")
+
+    monkeypatch.setattr(hvc, "_get", _boom)
+    assert mcp_infra.engine_process_uptime_seconds() is None
+
+
+def test_a_future_dated_marker_defers_nothing(tmp_path) -> None:
+    """Clock skew or a corrupted marker must not defer indefinitely."""
+    record_taxonomy_failure(tmp_path / "m", now=_NOW + 3600)
+    assert decide_taxonomy_deferral(
+        uptime_fn=lambda: None, marker=tmp_path / "m", now_fn=lambda: _NOW,
+    ) == ""
+
+
+def test_no_taxonomy_still_defers_and_records(tmp_path, monkeypatch, t2_service_env) -> None:
+    """--no-taxonomy skips discovery only; the per-flush assign still runs,
+    so the deferral and the backoff marker apply to it (code review round 1)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    reg = MagicMock()
+    reg.get.return_value = {"collection": "code__myrepo", "docs_collection": "docs__myrepo"}
+    monkeypatch.setattr(mcp_infra, "engine_process_uptime_seconds", lambda: 30)
+
+    def _lossy_index(*a, **kw):
+        return {"files_changed": 1, "taxonomy_assign_batches_attempted": 1,
+                "taxonomy_assign_batches_failed": 1, "taxonomy_assign_chunks_failed": 4}
+
+    with patch("nexus.commands.index._registry", return_value=reg), \
+            patch("nexus.indexer.index_repository", side_effect=_lossy_index):
+        out = CliRunner().invoke(main, ["index", "repo", str(repo), "--no-taxonomy"])
+
+    assert "Taxonomy deferred: engine restarted 30 s ago" in out.output, out.output
+    assert out.exit_code != 0, out.output
+    assert mcp_infra.taxonomy_failure_marker_path(nexus_config_dir()).exists()
+
+
+def test_the_run_reports_how_many_chunks_it_deferred(tmp_path, monkeypatch, t2_service_env) -> None:
+    def _index_with_deferral(*a, **kw):
+        mcp_infra._record_taxonomy_deferred(7)
+        return {"files_changed": 1}
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    reg = MagicMock()
+    reg.get.return_value = {"collection": "code__myrepo", "docs_collection": "docs__myrepo"}
+    monkeypatch.setattr(mcp_infra, "engine_process_uptime_seconds", lambda: 30)
+    mcp_infra.reset_taxonomy_assign_run_stats()
+    with patch("nexus.commands.index._registry", return_value=reg), \
+            patch("nexus.indexer.index_repository", side_effect=_index_with_deferral):
+        out = CliRunner().invoke(main, ["index", "repo", str(repo)])
+
+    assert out.exit_code == 0, out.output
+    assert "Taxonomy: 7 chunk(s) deferred" in out.output, out.output

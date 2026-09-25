@@ -1493,14 +1493,16 @@ def index_repo_cmd(
         # command ends so nothing else in the process inherits it.
         import nexus.config as _nx_config  # noqa: PLC0415 — circular-dep avoidance; module attribute so a patched nexus_config_dir is seen (nexus-78blw)
         from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
-            TAXONOMY_FAILURE_MARKER,
             decide_taxonomy_deferral,
             engine_process_uptime_seconds,
             set_taxonomy_deferral,
+            taxonomy_failure_marker_path,
         )
-        _failure_marker = _nx_config.nexus_config_dir() / TAXONOMY_FAILURE_MARKER
+        _failure_marker = taxonomy_failure_marker_path(_nx_config.nexus_config_dir())
         _deferred_at_start = ""
-        if not frecency_only and not no_taxonomy:
+        # Not gated on --no-taxonomy: that flag skips discovery only, and the
+        # per-flush assign (the path that lost chunks in mg8gx) still runs.
+        if not frecency_only:
             _deferred_at_start = decide_taxonomy_deferral(
                 uptime_fn=engine_process_uptime_seconds, marker=_failure_marker,
                 now_fn=time.time,
@@ -1648,13 +1650,22 @@ def index_repo_cmd(
                 ("taxonomy_assign_chunks_failed", "failed_chunks"),
             ):
                 stats[_key] = stats.get(_key, 0) + _after[_counter] - _before[_counter]
-            if stats.get("taxonomy_assign_batches_failed"):
-                # nexus-tawfg: later runs back off for a while.
-                from nexus.mcp_infra import record_taxonomy_failure  # noqa: PLC0415 — deferred to avoid circular import
-                try:
-                    record_taxonomy_failure(_failure_marker, now=time.time())
-                except OSError as exc:
-                    _log.warning("taxonomy_failure_marker_write_failed", error=str(exc))
+
+        # nexus-tawfg: a run that lost assignments makes later runs against
+        # this engine back off. Outside the taxonomy block above: the
+        # per-flush assign runs under --no-taxonomy too.
+        if stats.get("taxonomy_assign_batches_failed"):
+            from nexus.mcp_infra import record_taxonomy_failure  # noqa: PLC0415 — deferred to avoid circular import
+            try:
+                record_taxonomy_failure(_failure_marker, now=time.time())
+            except OSError as exc:
+                _log.warning("taxonomy_failure_marker_write_failed", error=str(exc))
+        from nexus.mcp_infra import taxonomy_assign_run_stats as _tars  # noqa: PLC0415 — deferred to avoid circular import
+        _deferred_chunks = _tars().get("deferred_chunks", 0)
+        if _deferred_chunks:
+            click.echo(
+                f"  Taxonomy: {_deferred_chunks} chunk(s) deferred; a later run's drain assigns them"
+            )
 
         if not frecency_only:
             try:
