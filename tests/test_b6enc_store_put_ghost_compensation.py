@@ -1512,6 +1512,56 @@ class TestWbfpw28WriteExceptionArbitration:
             "ManifestMissingChunkError"
         )
 
+    def test_write_exception_then_verify_exhausted_keeps_the_write_error(
+        self, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round-3 code review: when the write call raises AND every
+        arbitration verify read also fails, the outcome is uncertain (no
+        rollback), but the write's own error must still reach the raised
+        message. Without it the operator sees only the verify failure and
+        nothing about why the write raised."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.catalog.store_hook import (
+            ManifestVerifyUncertainError, store_put_manifest_direct,
+        )
+
+        chash = "e" * 64
+        collection = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        t = cat.register(
+            owner, "write-exc-verify-exhausted-target", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+        )
+
+        monkeypatch.setattr(
+            HttpCatalogClient, "atomic_manifest_replace",
+            lambda self, d, c, *, collection: (_ for _ in ()).throw(
+                RuntimeError("write raised: gateway reset")
+            ),
+        )
+
+        def _reader_down():
+            raise RuntimeError("catalog read path down")
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", _reader_down,
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook._manifest_verify_retry_sleep",
+            lambda _s: None,
+        )
+        with pytest.raises(ManifestVerifyUncertainError) as exc_info:
+            store_put_manifest_direct(str(t), [{
+                "chunk_text_hash": chash, "chunk_start_char": 0, "chunk_end_char": 10,
+            }], collection=collection)
+        message = str(exc_info.value)
+        assert "catalog read path down" in message
+        assert "write raised: gateway reset" in message, (
+            "the write call's own error must survive into the uncertain "
+            "outcome's message"
+        )
+
 
 # ── RDR-192 Step 3a fix-round 2, critic (a) / Decision 2: bounded ───────────
 # ── verify-read retry ────────────────────────────────────────────────────────
@@ -1835,3 +1885,36 @@ class TestWbfpw28MissingChunkFkClassifier:
             "constraint": "fk_catalog_chunks_doc",
         })
         assert not _is_missing_chunk_fk_violation(exc)
+
+
+class TestWbfpw28PartialRepieceMessage:
+    def test_partial_repiece_failure_names_the_already_reput_chunks(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round-3 critique Minor 2: when repiece succeeds for one missing
+        chash and fails for the next, the error names the failure and says
+        the chunk already re-put is left unreferenced for the rollback."""
+        import nexus.catalog.store_hook as sh
+
+        a, b = "a" * 64, "b" * 64
+
+        def _raise_missing(doc_id, metadatas, *, collection):
+            raise sh.ManifestMissingChunkError(
+                "race", missing_chashes=frozenset({a, b}),
+            )
+
+        monkeypatch.setattr(sh, "store_put_manifest_direct", _raise_missing)
+
+        def _repiece(chash: str) -> None:
+            if chash == b:
+                raise RuntimeError("t3 put refused")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            sh.store_put_manifest_direct_with_recovery(
+                "1.1.1", [{"chunk_text_hash": a}, {"chunk_text_hash": b}],
+                collection="knowledge__x__bge-base-en-v15-768__v1",
+                repiece=_repiece,
+            )
+        message = str(exc_info.value)
+        assert "t3 put refused" in message
+        assert "1 other chunk(s) were re-put" in message

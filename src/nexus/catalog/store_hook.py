@@ -91,8 +91,6 @@ def _is_missing_chunk_fk_violation(exc: BaseException) -> bool:
     ``HTTPStatusError`` is still classified; a message substring match is
     kept as a fallback for a non-HTTP path that does name the constraint.
     """
-    import httpx  # noqa: PLC0415 — deferred; keeps module import light
-
     seen: set[int] = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
@@ -1258,18 +1256,23 @@ def store_put_manifest_direct(
     # same call. Best-effort — a read failure here means the reap below
     # simply has nothing to compare against (empty `before`), never that
     # the manifest write itself is blocked; no sweep beats a wrong sweep.
-    before_reader = make_catalog_reader()
+    # Constructing the reader is inside the try too: a reader that cannot
+    # be built is the same "nothing to compare against" as one whose read
+    # raises, and must not abort the write.
+    before_reader = None
     before: set[str] = set()
-    if before_reader is not None:
-        try:
+    try:
+        before_reader = make_catalog_reader()
+        if before_reader is not None:
             before = {row.chash for row in before_reader.get_manifest(catalog_doc_id) if row.chash}
-        except Exception:  # noqa: BLE001 — no sweep beats a wrong sweep
-            _log.warning(
-                "store_put_supersede_before_read_failed",
-                doc_id=catalog_doc_id, collection=collection, exc_info=True,
-            )
-            before = set()
-        finally:
+    except Exception:  # noqa: BLE001 — no sweep beats a wrong sweep
+        _log.warning(
+            "store_put_supersede_before_read_failed",
+            doc_id=catalog_doc_id, collection=collection, exc_info=True,
+        )
+        before = set()
+    finally:
+        if before_reader is not None:
             try:
                 before_reader._db.close()
             except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
@@ -1314,10 +1317,25 @@ def store_put_manifest_direct(
     # unknown" branch of the four-way split above; nothing further to do
     # here but let it propagate.
     expected = {c["chash"] for c in chunks}
-    landed = _read_manifest_chashes_with_retry(
-        catalog_doc_id,
-        context="post-write verify" if write_exc is None else "write-exception arbitration",
-    )
+    try:
+        landed = _read_manifest_chashes_with_retry(
+            catalog_doc_id,
+            context="post-write verify" if write_exc is None else "write-exception arbitration",
+        )
+    except ManifestVerifyUncertainError as verify_exc:
+        if write_exc is None:
+            raise
+        # Both the write and every arbitration read failed. The outcome is
+        # still unknown (no rollback), but the write's own error is the
+        # first thing an operator needs, so it rides the raised message.
+        _log.warning(
+            "store_put_manifest_write_exception_unarbitrated",
+            doc_id=catalog_doc_id, collection=collection,
+            error=str(write_exc)[:300],
+        )
+        raise ManifestVerifyUncertainError(
+            f"{verify_exc}; the manifest write call itself had raised: {write_exc}"
+        ) from verify_exc
     missing = expected - landed
 
     if write_exc is not None:
@@ -1438,16 +1456,24 @@ def store_put_manifest_direct_with_recovery(
             # acting on a different call's content; not this function's
             # bug to paper over.
             raise
+        repieced: list[str] = []
         for chash in sorted(exc.missing_chashes):
             try:
                 repiece(chash)
             except Exception as repiece_exc:
+                already = (
+                    f" {len(repieced)} other chunk(s) were re-put before this "
+                    f"failure and are left unreferenced, so the caller's "
+                    f"rollback removes them too."
+                    if repieced else ""
+                )
                 raise RuntimeError(
                     f"manifest write for {catalog_doc_id}: a concurrent "
                     f"rollback deleted chash {chash[:16]}… before this "
                     f"call's own manifest write landed, and re-putting it "
-                    f"to recover also failed: {repiece_exc}"
+                    f"to recover also failed: {repiece_exc}.{already}"
                 ) from repiece_exc
+            repieced.append(chash)
         try:
             store_put_manifest_direct(catalog_doc_id, metadatas, collection=collection)
         except ManifestVerifyUncertainError:

@@ -349,7 +349,7 @@ def put_cmd(
     # nexus-cotmr F2 (mirrors MCP core.py::store_put verbatim):
     # manifest_complete rides this existing call through
     # manifest_write_batch_hook's write_manifest_many completion stamp
-    # (the SAME manifest rows _store_put_manifest_direct above already
+    # (the SAME manifest rows _store_put_manifest_direct_with_recovery above already
     # wrote — an idempotent re-UPSERT), no extra round trip. Passed
     # unconditionally, same as the MCP path: if the direct write above
     # already failed, this ride is the hook's own (idempotent) retry —
