@@ -998,7 +998,7 @@ class TestManifestNeverOutrunsConfirmedChunks:
                 # Stale-positive probe: reports EVERY id present.
                 return list(ids)
 
-            def update_chunks(self, collection, ids, metadatas):
+            def update_chunks(self, collection, ids, metadatas, **_kw):
                 # "Cannot tell" — the exact D1 trigger.
                 return None
 

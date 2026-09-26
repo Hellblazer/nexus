@@ -1311,14 +1311,25 @@ def _upsert_skip_reembed(
     ``force``-alone behaviour. Forwarded verbatim as
     ``upsert_chunks_with_embeddings(..., force_re_embed=force_re_embed)``.
 
+    ``metadatas`` is the COMPLETE intended state of each row (every caller is a
+    batch indexer). The engine merges chunk metadata rather than replacing it
+    (nexus-w94eo), so every write below carries ``delete_keys`` naming the
+    writer-owned keys this batch dropped as empty (nexus-y8xjh,
+    :func:`nexus.metadata_schema.rewrite_delete_keys`); without it a clean
+    re-index could not clear a stale ``quality_gate_overridden`` or
+    ``extraction_source``. Passed only when non-empty.
+
     Returns the number of chunks actually sent down the embed path.
     """
     from nexus.db import http_vector_client as _hvc  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     if not ids:
         return 0
+    _dk_list = rewrite_delete_keys(metadatas)
+    _dk: dict[str, Any] = {"delete_keys": _dk_list} if _dk_list else {}
     if not _hvc.is_vector_service_mode():
-        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas, **_dk)
         return len(ids)
     if not _hvc.is_service_backed(db):
         # nexus-5lygi: NX_STORAGE_BACKEND_VECTORS says service mode (the
@@ -1352,7 +1363,7 @@ def _upsert_skip_reembed(
         )
         db.upsert_chunks_with_embeddings(
             collection_name, ids, documents, embeddings, metadatas,
-            force_re_embed=force_re_embed,
+            force_re_embed=force_re_embed, **_dk,
         )
         return len(ids)
     present: set[str] = set()
@@ -1385,7 +1396,7 @@ def _upsert_skip_reembed(
             branch="full_upsert_no_existing",
             count=len(ids),
         )
-        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas, **_dk)
         # nexus-gtl01 (upsert-chunks ACK coverage): tie the outcome to the
         # branch event above via collection + count. This is the branch the
         # captured 2026-08-08 recurrence took (probe present=0, branch=
@@ -1445,6 +1456,7 @@ def _upsert_skip_reembed(
             [documents[i] for i in new_idx],
             [embeddings[i] for i in new_idx],
             [metadatas[i] for i in new_idx],
+            **_dk,
         )
     if old_idx:
         # Metadata-only refresh — no embedding cost, preserves the
@@ -1453,6 +1465,7 @@ def _upsert_skip_reembed(
             collection_name,
             [ids[i] for i in old_idx],
             [metadatas[i] for i in old_idx],
+            **_dk,
         )
         # nexus-gtl01: the update_chunks "missing"-list disposition, logged
         # at the decision point regardless of which of the three branches
@@ -1552,6 +1565,7 @@ def _upsert_skip_reembed(
                     [documents[i] for i in reroute_idx],
                     [embeddings[i] for i in reroute_idx],
                     [metadatas[i] for i in reroute_idx],
+                    **_dk,
                 )
     _log.debug(
         "upsert_skip_reembed",

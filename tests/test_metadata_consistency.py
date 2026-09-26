@@ -226,7 +226,16 @@ def test_pdf_indexer_emits_full_keyset(tmp_repo: Path) -> None:
 
 
 def test_pipeline_pdf_emits_full_keyset() -> None:
-    """``pipeline_stages._build_chunk_metadata`` routes through the factory."""
+    """``pipeline_stages._build_chunk_metadata`` routes through the factory.
+
+    nexus-w94eo: ``title``/``source_author`` are the two exceptions to the
+    "full keyset" contract here (unlike ``_pdf_chunks``'s batch path, which
+    still emits them). They are ALWAYS unknown at streaming chunk-time — the
+    post-pass (``_enrich_metadata_from_extraction``) is the only place either
+    is ever resolved — so this function omits them rather than stamping an
+    empty-string placeholder a late-committing duplicate write could
+    otherwise merge back on top of the post-pass's real values.
+    """
     from nexus.pdf_chunker import TextChunk
     from nexus.pipeline_stages import _build_chunk_metadata
     chunk = TextChunk(
@@ -246,10 +255,18 @@ def test_pipeline_pdf_emits_full_keyset() -> None:
         embedding_model="voyage-context-3",
         now_iso="2026-04-26T00:00:00+00:00",
     )
-    expected = _full_keyset_minus_optional()
+    expected = _full_keyset_minus_optional() - {"title", "source_author"}
     missing = expected - set(meta.keys())
     assert not missing, (
         f"streaming pipeline dropped: {missing}; got keys {sorted(meta.keys())}"
+    )
+    assert "title" not in meta, (
+        "nexus-w94eo: title is unknown at streaming chunk-time and must be "
+        "omitted, not stamped as an empty-string placeholder"
+    )
+    assert "source_author" not in meta, (
+        "nexus-w94eo: source_author is unknown at streaming chunk-time and "
+        "must be omitted, not stamped as an empty-string placeholder"
     )
 
 

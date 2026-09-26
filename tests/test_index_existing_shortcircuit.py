@@ -27,12 +27,16 @@ import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.doc_indexer import _upsert_skip_reembed
+from nexus.metadata_schema import rewrite_delete_keys
 
 _COLL = "code__nexus-1-1__voyage-code-3__v1"
 _IDS = ["aa" * 16, "bb" * 16, "cc" * 16]
 _DOCS = ["doc-a", "doc-b", "doc-c"]
 _EMB = [[], [], []]
 _METAS = [{"source_path": "a.py"}, {"source_path": "b.py"}, {"source_path": "c.py"}]
+# nexus-y8xjh: every write carries the writer-owned keys the batch dropped.
+# These toy dicts carry none of them, so every owned key is named.
+_DK = rewrite_delete_keys(_METAS)
 
 
 def _service_db(monkeypatch, existing: set[str]) -> MagicMock:
@@ -57,6 +61,7 @@ def test_mixed_existing_and_new_splits_the_batch(monkeypatch):
     db.update_chunks.assert_called_once_with(
         _COLL, [_IDS[0], _IDS[2]],
         [{"source_path": "a.py"}, {"source_path": "c.py"}],
+        delete_keys=_DK,
     )
 
 
@@ -65,7 +70,7 @@ def test_all_existing_skips_upsert_entirely(monkeypatch):
     sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
     assert sent == 0
     db.upsert_chunks_with_embeddings.assert_not_called()
-    db.update_chunks.assert_called_once_with(_COLL, _IDS, _METAS)
+    db.update_chunks.assert_called_once_with(_COLL, _IDS, _METAS, delete_keys=_DK)
 
 
 def test_none_existing_full_upsert_no_update(monkeypatch):
@@ -73,7 +78,7 @@ def test_none_existing_full_upsert_no_update(monkeypatch):
     sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
     assert sent == 3
     db.upsert_chunks_with_embeddings.assert_called_once_with(
-        _COLL, _IDS, _DOCS, _EMB, _METAS,
+        _COLL, _IDS, _DOCS, _EMB, _METAS, delete_keys=_DK,
     )
     db.update_chunks.assert_not_called()
 
@@ -99,7 +104,7 @@ def test_non_service_mode_is_untouched(monkeypatch):
     assert sent == 3
     db.existing_ids.assert_not_called()
     db.upsert_chunks_with_embeddings.assert_called_once_with(
-        _COLL, _IDS, _DOCS, _EMB, _METAS,
+        _COLL, _IDS, _DOCS, _EMB, _METAS, delete_keys=_DK,
     )
 
 
@@ -112,7 +117,7 @@ def test_db_without_existing_ids_shape_falls_back(monkeypatch):
     class Bare:
         def __init__(self):
             self.upserts = []
-        def upsert_chunks_with_embeddings(self, *a):
+        def upsert_chunks_with_embeddings(self, *a, **_kw):
             self.upserts.append(a)
     db = Bare()
     sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
@@ -148,7 +153,7 @@ def test_force_true_without_re_embed_bypasses_probe_and_sets_force_re_embed_fals
     assert sent == 3  # every chunk goes down the embed path, not just the new one
     db.existing_ids.assert_not_called()  # the client-side probe is skipped entirely
     db.upsert_chunks_with_embeddings.assert_called_once_with(
-        _COLL, _IDS, _DOCS, _EMB, _METAS, force_re_embed=False,
+        _COLL, _IDS, _DOCS, _EMB, _METAS, force_re_embed=False, delete_keys=_DK,
     )
     db.update_chunks.assert_not_called()  # no metadata-only branch under force
 
@@ -163,7 +168,7 @@ def test_force_true_and_force_re_embed_true_sets_force_re_embed(monkeypatch):
     assert sent == 3  # every chunk goes down the embed path, not just the new one
     db.existing_ids.assert_not_called()  # the client-side probe is skipped entirely
     db.upsert_chunks_with_embeddings.assert_called_once_with(
-        _COLL, _IDS, _DOCS, _EMB, _METAS, force_re_embed=True,
+        _COLL, _IDS, _DOCS, _EMB, _METAS, force_re_embed=True, delete_keys=_DK,
     )
     db.update_chunks.assert_not_called()  # no metadata-only branch under force
 
@@ -176,7 +181,7 @@ def test_force_false_default_no_force_re_embed_kwarg(monkeypatch):
     sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
     assert sent == 3
     db.upsert_chunks_with_embeddings.assert_called_once_with(
-        _COLL, _IDS, _DOCS, _EMB, _METAS,
+        _COLL, _IDS, _DOCS, _EMB, _METAS, delete_keys=_DK,
     )
 
 
@@ -193,5 +198,5 @@ def test_force_true_non_service_mode_untouched(monkeypatch):
     assert sent == 3
     db.existing_ids.assert_not_called()
     db.upsert_chunks_with_embeddings.assert_called_once_with(
-        _COLL, _IDS, _DOCS, _EMB, _METAS,
+        _COLL, _IDS, _DOCS, _EMB, _METAS, delete_keys=_DK,
     )

@@ -1338,11 +1338,12 @@ def test_update_chunks_calls_col_update_without_documents(mock_db, monkeypatch):
     # is schema-stable and round-trips through the canonical pass.
     metas = [{"frecency_score": 0.9}] * 2
     db.update_chunks(collection="code__myrepo", ids=["id-1", "id-2"], metadatas=metas)
-    # update_chunks funnels through canonical metadata (nexus-40t),
-    # injecting ``content_type`` for every record.
-    normalised = [
-        {"frecency_score": 0.9, "content_type": "code"}
-    ] * 2
+    # update_chunks funnels through canonical metadata (nexus-40t) but writes
+    # only the keys the caller sent: an update is partial and the store
+    # merges it, so an injected content_type (inferred from the collection
+    # name) would overwrite the stored one. nexus-w94eo: a docs__ collection
+    # infers "prose" and overwrote a PDF chunk's "pdf".
+    normalised = [{"frecency_score": 0.9}] * 2
     mock_col.update.assert_called_once_with(
         ids=["id-1", "id-2"], metadatas=normalised,
     )

@@ -40,8 +40,10 @@ __all__ = [
     "CONTENT_TYPES",
     "MAX_SAFE_TOP_LEVEL_KEYS",
     "MetadataSchemaError",
+    "REWRITE_OWNED_KEYS",
     "make_chunk_metadata",
     "normalize",
+    "rewrite_delete_keys",
     "validate",
 ]
 
@@ -189,6 +191,35 @@ _BIB_FIELDS: tuple[str, ...] = (
     "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
     "bib_semantic_scholar_id",
 )
+
+#: Keys a FULL-REWRITE writer owns (nexus-y8xjh): every schema key except the
+#: ``bib_*`` set, which ``nx enrich bib`` writes after indexing and a re-index
+#: cannot recompute, and ``content_type``, which every write stamps. The engine
+#: merges chunk metadata instead of replacing it (nexus-w94eo), so a key a
+#: rewrite drops as empty (normalize's Steps 2c-2e, or the ``nx index repo`` PDF
+#: path's own empty-value filter) would otherwise keep its stale stored value.
+REWRITE_OWNED_KEYS: frozenset[str] = ALLOWED_TOP_LEVEL - frozenset(_BIB_FIELDS) - {"content_type"}
+
+
+def rewrite_delete_keys(metadatas: list[dict[str, Any]]) -> list[str]:
+    """Return the ``delete_keys`` a full-rewrite writer sends with *metadatas*.
+
+    A key in :data:`REWRITE_OWNED_KEYS` that is absent from ANY row of the batch
+    is named. The engine strips named keys from each row's STORED metadata before
+    merging the incoming row on top, so a row that does carry the key still
+    writes it; only the rows that dropped it lose the stale value. This restores
+    the pre-nexus-w94eo replace semantics for the keys the writer owns, without
+    touching enrichment keys another writer set.
+
+    Only for writers whose dict is the complete intended state of the row (the
+    batch indexers). The streaming PDF stub is NOT one: its dict is deliberately
+    partial and the post-pass fills the rest, so it must never send these.
+    """
+    absent: set[str] = set()
+    for m in metadatas:
+        absent |= REWRITE_OWNED_KEYS - m.keys()
+    return sorted(absent)
+
 
 #: Primitive value types accepted by ChromaDB metadata.
 _PRIMITIVE_TYPES: tuple[type, ...] = (str, int, float, bool, type(None))

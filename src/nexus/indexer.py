@@ -3046,6 +3046,13 @@ def _index_pdf_file(
         _fence_begin(catalog_doc_id, content_hash_hex, collection_name)
 
     with _stage("upload"):
+        # nexus-y8xjh: the engine merges chunk metadata (nexus-w94eo), and both
+        # normalize() and the _EMPTY_VALUES filter above drop falsy keys, so a
+        # clean --force re-index would otherwise leave a stale
+        # quality_gate_overridden=True (and any other key this rewrite dropped
+        # as empty) on the stored row. Name them so the engine strips them.
+        from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+        _pdf_delete_keys = rewrite_delete_keys(metadatas)
         try:
             db.upsert_chunks_with_embeddings(
                 collection_name=collection_name,
@@ -3056,6 +3063,7 @@ def _index_pdf_file(
                 # nexus-4jj40: --force alone re-sends without re-embedding;
                 # only the explicit --re-embed opt-in forces a re-embed.
                 force_re_embed=force_re_embed,
+                **({"delete_keys": _pdf_delete_keys} if _pdf_delete_keys else {}),
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
@@ -5326,6 +5334,11 @@ def _run_index(
                     collection=collection,
                     count=len(orphan_ids),
                 )
+                # nexus-y8xjh: batch-indexer rows are complete dicts, so name
+                # the writer-owned keys they dropped as empty (see
+                # _index_pdf_file's upload for why).
+                from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+                _orphan_delete_keys = rewrite_delete_keys(orphan_metas)
                 db.upsert_chunks_with_embeddings(
                     collection_name=collection,
                     ids=orphan_ids,
@@ -5333,6 +5346,7 @@ def _run_index(
                     embeddings=[[] for _ in orphan_ids],  # Seam B: server embeds
                     metadatas=orphan_metas,
                     force_re_embed=force_re_embed,
+                    **({"delete_keys": _orphan_delete_keys} if _orphan_delete_keys else {}),
                 )
 
             if not full_docs:
