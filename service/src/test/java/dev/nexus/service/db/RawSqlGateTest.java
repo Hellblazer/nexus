@@ -1087,7 +1087,12 @@ class RawSqlGateTest {
         // EXPLAIN-the-exact-statement-text raw ctx.resultQuery(...).fetch()
         // call, replacing the prior proxy-function ctx.explain(...) call
         // (which was typed jOOQ, not raw SQL, and so carried no entry here).
-        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 10),
+        // nexus-swam7 review round: +2 (12) -- the negative-control test's own
+        // ctx.resultQuery(...).fetch() (EXPLAIN without the access-path pins)
+        // and the prosrc drift check's raw su.prepareStatement(...) fetching
+        // pg_proc.prosrc (no jOOQ codegen for pg_catalog reads, same idiom
+        // TaxonomyCentroidAnnPlanShapeTest's own REALCALL bootstrap uses).
+        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 12),
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 2),
@@ -1504,7 +1509,10 @@ class RawSqlGateTest {
     // nexus-swam7: 950 -> 951 (+1: TaxonomyAssignCrossLateralHnswTest.java 9 -> 10,
     // the realistic-scale plan-shape test's raw EXPLAIN-the-exact-statement-text
     // resultQuery call, see that entry's own comment above).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 951;
+    // nexus-swam7 review round: 951 -> 953 (+2: TaxonomyAssignCrossLateralHnswTest.java
+    // 10 -> 12, the negative-control EXPLAIN and the prosrc drift check's
+    // prepareStatement, see that entry's own comment above).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 953;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -84,23 +84,50 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       against the CLASS's shared, now production-shaped fixture (43
  *       collections, largest 67, ~1,000-2,000 centroids/dim — see
  *       {@link #FILLER_COLLECTION_COUNT}'s javadoc), asserting the HNSW index
- *       binds and no Seq Scan appears.</li>
+ *       binds, no Seq Scan appears, and no plain (non-incremental) Sort node
+ *       is used either. Also asserts — review round, code-review-expert's
+ *       finding that nothing tied the hand-copied statement text to the real
+ *       function body — that this statement text is a normalized-whitespace
+ *       SUBSTRING of {@code assign_from_chashes_1024}'s real {@code prosrc}
+ *       (parameter names restored in place of this fixture's literals),
+ *       so the two cannot silently drift apart. IMPORTANT: this test proves
+ *       the four settings' EFFECT on the plan at this fixture's scale — it
+ *       does NOT prove the real function actually sets them; that is
+ *       {@link #assignFromChashesFunctions_carryTheLoadBearingHnswSettings}'s
+ *       job alone (see its own bullet above). The two together, not either
+ *       one, are what back the "production's cross-collection assignment
+ *       uses the reviewed HNSW path" claim below.</li>
+ *   <li>{@link #crossLateral_planShape_withoutTheAccessPathPins_choosesSeqScan}:
+ *       a SECOND negative control (review round, substantive-critic's
+ *       finding) — the SAME statement text, SAME fixture, with ONLY
+ *       taxonomy-018's two {@code hnsw.*} pins applied and taxonomy-020's two
+ *       {@code enable_seqscan}/{@code enable_sort} pins withheld. Asserts a
+ *       Seq Scan on taxonomy_centroids IS chosen. Proves this fixture
+ *       genuinely sits BELOW pgvector's natural HNSW/Seq-Scan crossover, so
+ *       item 4 above passes because of taxonomy-020's pin and not because
+ *       raw cardinality already favored the index (the failure mode the
+ *       PRIOR round's ~9,045-centroid fixture had, silently).</li>
  * </ol>
  *
- * <p><strong>nexus-swam7 rework (taxonomy-020, 2026-09-25).</strong> At
- * ef_search=400 the planner's own cost model prefers a per-chunk Seq Scan +
- * top-N Sort over taxonomy_centroids until roughly 8,000 centroids/dim (T2
+ * <p><strong>Stated plainly: what this bead changes in production.</strong>
+ * At ef_search=400 the planner's own cost model prefers a per-chunk Seq Scan
+ * + top-N Sort over taxonomy_centroids until roughly 8,000 centroids/dim (T2
  * nexus/p02-hnsw-incremental-recall-2026-09-25) — well above both production's
  * real count (799, 43 collections, largest 67) and, as it turned out, above
  * the PRIOR round's own ~9,045-centroid fixture, which sat safely on the
  * far side of that crossover and so proved nothing about whether a pin was
- * needed at production's actual scale. taxonomy-020 adds a transaction-local
- * {@code enable_seqscan}/{@code enable_sort} pin inside the cross branch,
- * alongside the existing hnsw.* pins; this round shrinks the SHARED fixture
- * to land INSIDE the bead's 1,000-2,000-centroid target band (below the
- * crossover) so every test in this class -- recall, the mutation guard, the
- * negative control, and the plan-shape assertion -- now exercises the SAME
- * fixture shape that actually forces the choice this bead's pin makes.
+ * needed at production's actual scale. Concretely: production's
+ * cross-collection assignment TODAY runs the EXACT nested-loop join —
+ * correct, but accidentally so (nobody pinned the plan; the planner just
+ * happens to cost it cheaper than HNSW at this scale). taxonomy-020 moves it
+ * onto the REVIEWED, approximate HNSW path deliberately, by adding a
+ * transaction-local {@code enable_seqscan}/{@code enable_sort} pin inside the
+ * cross branch, alongside the existing hnsw.* pins; this round shrinks the
+ * SHARED fixture to land INSIDE the bead's 1,000-2,000-centroid target band
+ * (below the crossover) so every test in this class -- recall, the mutation
+ * guard, both negative controls, and the plan-shape assertion -- now
+ * exercises the SAME fixture shape that actually forces the choice this
+ * bead's pin makes.
  *
  * <p><strong>What changed from the previous round, and why.</strong> The
  * prior version of {@link #crossLateral_realHnsw_matchesExactNearest_underIncrementalInsertion}
@@ -589,37 +616,15 @@ class TaxonomyAssignCrossLateralHnswTest {
     // ════════════════════════════════════════════════════════════════════════
 
     /**
-     * Bead nexus-swam7: the PRIOR round of this test (see the class javadoc's
-     * "What changed" section and {@link #FILLER_COLLECTION_COUNT}'s own
-     * javadoc) ran a proxy SQL function ({@code taxonomy_ann_query_1024}) at a
-     * fixture cardinality (~9,045 centroids/dim) already ABOVE pgvector's
-     * natural ~8,000-centroid HNSW/Seq-Scan crossover -- so it passed on raw
-     * cardinality alone and would have passed identically whether or not
-     * taxonomy-018 (or this bead's taxonomy-020 follow-up) existed at all.
-     * Production carries only 799 centroids/dim (43 collections, largest 67;
-     * bd comment, conexus-b3, 2026-09-25), nowhere near either fixture's
-     * scale.
-     *
-     * <p>This version instead EXPLAINs the EXACT statement text embedded in
-     * {@code assign_from_chashes_1024}'s cross branch (taxonomy-020-3,
-     * verbatim minus the plpgsql parameter names, which become SQL literals),
-     * NOT a proxy function -- {@code assign_from_chashes_1024} is
-     * {@code LANGUAGE plpgsql} and opaque to a direct {@code EXPLAIN} of a
-     * call to it, and the only faithful way to see the REAL statement's plan
-     * is to run that statement's own text with the SAME four
-     * {@code set_config} calls applied in the SAME session (this bead's own
-     * verification method, documented in taxonomy-020's changelog header: a
-     * scratch pgvector/pg17 harness plus this exact class, both showing the
-     * plan flips to the HNSW index once the pins are applied). This runs
-     * against the class's SHARED fixture ({@link #startAll}), sized (see
-     * {@link #FILLER_COLLECTION_COUNT}'s javadoc) to land in nexus-swam7's own
-     * 1,000-2,000-centroids-per-dim target band across 43 total collections,
-     * largest 67 -- production-shaped, and below the crossover, so a Seq Scan
-     * here would be the taxonomy-018-without-taxonomy-020 regression
-     * reappearing, not a fixture artifact.
+     * The EXACT cross-branch statement text embedded in
+     * {@code assign_from_chashes_1024}'s cross branch (taxonomy-020-3),
+     * parameters substituted for this fixture's literals -- built ONCE so
+     * the plan-shape test, its prosrc drift check, and the negative control
+     * below all run against the IDENTICAL text; they can only ever diverge
+     * from the real function body (which the drift check catches), never
+     * from each other.
      */
-    @Test
-    void crossLateral_planShape_bindsHnswIndex_notSeqScan_atRealisticScale() {
+    private String crossBranchStatementText() {
         String chashArrayLiteral = chunkChashes.stream()
             .map(h -> "'" + h + "'")
             .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
@@ -629,14 +634,14 @@ class TaxonomyAssignCrossLateralHnswTest {
         // this is the FULL statement, not a read-only excerpt of it -- a bare
         // EXPLAIN (no ANALYZE) never executes the query, so the INSERT never
         // runs and the fixture is never mutated.
-        String sql =
+        return
             "WITH batch AS ("
             + "    SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb"
             + "      FROM nexus.chunks c"
             + "     WHERE c.collection = '" + COL_DENSE + "'"
             + "       AND c.embedding_1024 IS NOT NULL"
             + "       AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(" + chashArrayLiteral + ") x))"
-            + "), nearest AS ("
+            + " ), nearest AS ("
             + "    SELECT encode(b.b_chash, 'hex') AS m_chash, b.b_chash AS m_chash_bytes,"
             + "           n.n_topic_id AS m_topic_id, (1 - n.n_dist)::double precision AS m_sim"
             + "      FROM batch b"
@@ -649,7 +654,7 @@ class TaxonomyAssignCrossLateralHnswTest {
             + "           ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
             + "           LIMIT 1"
             + "      ) n"
-            + "), persisted AS ("
+            + " ), persisted AS ("
             + "    INSERT INTO nexus.topic_assignments AS ta"
             + "        (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
             + "    SELECT '" + TENANT + "', n.m_chash_bytes, n.m_topic_id,"
@@ -663,7 +668,94 @@ class TaxonomyAssignCrossLateralHnswTest {
             + "                            THEN EXCLUDED.source_collection ELSE ta.source_collection END,"
             + "        assigned_by = 'projection'"
             + "    RETURNING 1"
-            + ") SELECT m_chash, m_topic_id, m_sim FROM nearest";
+            + " ) SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n";
+    }
+
+    /**
+     * {@link #crossBranchStatementText()} with {@code p_collection}/
+     * {@code p_chashes}/the tenant GUC read MECHANICALLY restored in place of
+     * this fixture's literals -- the form comparable, after whitespace
+     * normalization, against {@code assign_from_chashes_1024}'s real
+     * {@code prosrc} (review round, code-review-expert's finding: nothing
+     * previously tied the hand-copied statement to the real function body,
+     * so a future edit to one could silently stop matching the other while
+     * this test kept passing against its own stale copy).
+     */
+    private String crossBranchStatementTextParametrized() {
+        String chashArrayLiteral = chunkChashes.stream()
+            .map(h -> "'" + h + "'")
+            .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
+        return crossBranchStatementText()
+            .replace("'" + COL_DENSE + "'", "p_collection")
+            .replace(chashArrayLiteral, "p_chashes")
+            .replace("'" + TENANT + "'", "current_setting('nexus.tenant', true)");
+    }
+
+    /** Collapse all whitespace runs to a single space and trim, so two SQL
+     *  texts formatted differently (line breaks, indentation) compare equal
+     *  on their TOKEN sequence alone. */
+    private static String normalizeWhitespace(String s) {
+        return s.replaceAll("\\s+", " ").trim();
+    }
+
+    /** Matches a plain (non-incremental) EXPLAIN "Sort" node -- ANCHORED so it
+     *  does NOT match "Incremental Sort" (a single space separates
+     *  "Incremental" and "Sort" there, never two consecutive spaces before
+     *  "Sort" itself; EXPLAIN's own formatting always puts exactly two spaces
+     *  between a node's name and its "(cost=..." clause). Used to catch a
+     *  FUTURE planner change that would make the pinned plan need an
+     *  explicit full sort again -- see {@link
+     *  #crossLateral_planShape_bindsHnswIndex_notSeqScan_atRealisticScale}. */
+    private static final java.util.regex.Pattern PLAIN_SORT_NODE =
+        java.util.regex.Pattern.compile("(?m)^\\s*(->\\s+)?Sort\\s+\\(cost=");
+
+    /**
+     * Bead nexus-swam7: the PRIOR round of this test (see the class javadoc's
+     * "What changed" section and {@link #FILLER_COLLECTION_COUNT}'s own
+     * javadoc) ran a proxy SQL function ({@code taxonomy_ann_query_1024}) at a
+     * fixture cardinality (~9,045 centroids/dim) already ABOVE pgvector's
+     * natural ~8,000-centroid HNSW/Seq-Scan crossover -- so it passed on raw
+     * cardinality alone and would have passed identically whether or not
+     * taxonomy-018 (or this bead's taxonomy-020 follow-up) existed at all.
+     * Production carries only 799 centroids/dim (43 collections, largest 67;
+     * bd comment, conexus-b3, 2026-09-25), nowhere near either fixture's
+     * scale.
+     *
+     * <p>This version instead EXPLAINs {@link #crossBranchStatementText()},
+     * NOT a proxy function -- {@code assign_from_chashes_1024} is
+     * {@code LANGUAGE plpgsql} and opaque to a direct {@code EXPLAIN} of a
+     * call to it, and the only faithful way to see the REAL statement's plan
+     * is to run that statement's own text with the SAME four
+     * {@code set_config} calls applied in the SAME session. This runs
+     * against the class's SHARED fixture ({@link #startAll}), sized (see
+     * {@link #FILLER_COLLECTION_COUNT}'s javadoc) to land in nexus-swam7's own
+     * 1,000-2,000-centroids-per-dim target band across 43 total collections,
+     * largest 67 -- production-shaped, and below the crossover, so a Seq Scan
+     * here would be the taxonomy-018-without-taxonomy-020 regression
+     * reappearing, not a fixture artifact.
+     *
+     * <p><strong>What this test does NOT prove</strong> (review round,
+     * code-review-expert's finding, corrected here): that
+     * {@code assign_from_chashes_1024}'s DEPLOYED body actually carries the
+     * four {@code set_config} calls this test applies by hand via {@link
+     * PgSession#setLocal} -- it proves only that IF those four settings are
+     * live, the plan at THIS fixture's scale uses the HNSW index. The
+     * DEPLOYED-body claim is {@link
+     * #assignFromChashesFunctions_carryTheLoadBearingHnswSettings}'s job
+     * alone (its {@code prosrc} mutation guard), and this test additionally
+     * asserts its own hand-copied statement text is a normalized-whitespace
+     * substring of that SAME {@code prosrc} (see {@link
+     * #crossBranchStatementTextParametrized()}), closing the remaining gap:
+     * that the text this test EXPLAINs is the text the function actually
+     * runs. Together -- never either alone -- these two tests are what back
+     * this bead's claim that production's cross-collection assignment now
+     * takes the reviewed HNSW path instead of the exact fallback it took
+     * before taxonomy-020 (see the class javadoc's "Stated plainly" section
+     * and taxonomy-020's own changelog header).
+     */
+    @Test
+    void crossLateral_planShape_bindsHnswIndex_notSeqScan_atRealisticScale() throws Exception {
+        String sql = crossBranchStatementText();
 
         String plan = tenantScope.withTenant(TENANT, ctx -> {
             // Mirrors EXACTLY the FOUR transaction-local set_config calls
@@ -699,6 +791,81 @@ class TaxonomyAssignCrossLateralHnswTest {
             .as("must not use ANY sequential scan (chunks included) once the pin is"
                 + " applied. Plan was:%n%s", plan)
             .doesNotContain("Seq Scan");
+        assertThat(PLAIN_SORT_NODE.matcher(plan).find())
+            .as("must not fall back to a plain (non-incremental) Sort node either --"
+                + " a future planner/cost-model change that stopped treating the HNSW"
+                + " index's output as presorted would still show HNSW bound above, but"
+                + " would need a full Sort to satisfy the ORDER BY, silently reopening"
+                + " a slower plan than measured. Plan was:%n%s", plan)
+            .isFalse();
+
+        // Review round, code-review-expert's finding: nothing above ties `sql`
+        // to the REAL function body -- assert it explicitly. Fetch
+        // assign_from_chashes_1024's prosrc and check that this test's
+        // statement text (parameters restored) is a normalized-whitespace
+        // substring of it.
+        String prosrc;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (PreparedStatement ps = su.prepareStatement(
+                    "SELECT prosrc FROM pg_catalog.pg_proc"
+                    + " WHERE proname = 'assign_from_chashes_1024' AND pronamespace = 'nexus'::regnamespace")) {
+                try (var rs = ps.executeQuery()) {
+                    assertThat(rs.next()).as("assign_from_chashes_1024 must exist").isTrue();
+                    prosrc = rs.getString(1);
+                }
+            }
+        }
+        assertThat(normalizeWhitespace(prosrc))
+            .as("this test's hand-copied cross-branch statement text (parameters"
+                + " restored) must be a substring of the REAL assign_from_chashes_1024"
+                + " prosrc -- if this ever fails, the two have drifted apart and the"
+                + " plan-shape assertions above no longer say anything about what"
+                + " production actually runs. Parametrized test text was:%n%s",
+                normalizeWhitespace(crossBranchStatementTextParametrized()))
+            .contains(normalizeWhitespace(crossBranchStatementTextParametrized()));
+    }
+
+    /**
+     * Negative control (review round, substantive-critic's finding): the
+     * IDENTICAL statement text and fixture as {@link
+     * #crossLateral_planShape_bindsHnswIndex_notSeqScan_atRealisticScale},
+     * but with ONLY taxonomy-018's two {@code hnsw.*} pins applied --
+     * taxonomy-020's two {@code enable_seqscan}/{@code enable_sort} pins are
+     * deliberately withheld. Must choose a Seq Scan on taxonomy_centroids;
+     * if it does not, this fixture has drifted to sit AT OR ABOVE pgvector's
+     * natural HNSW/Seq-Scan crossover and the test above would pass on raw
+     * cardinality alone, exactly the failure mode the PRIOR round's
+     * ~9,045-centroid fixture had (see the class javadoc). If this ever
+     * fails, enlarge {@link #FILLER_COLLECTION_COUNT} (or its per-collection
+     * size) until it fails here again, rather than trusting the test above
+     * in isolation.
+     */
+    @Test
+    void crossLateral_planShape_withoutTheAccessPathPins_choosesSeqScan() {
+        String sql = crossBranchStatementText();
+
+        String plan = tenantScope.withTenant(TENANT, ctx -> {
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "strict_order");
+            PgSession.setLocal(ctx, "hnsw.ef_search", "400");
+            StringBuilder sb = new StringBuilder();
+            for (var r : ctx.resultQuery("EXPLAIN " + sql).fetch()) {
+                sb.append(r.get(0, String.class)).append('\n');
+            }
+            return sb.toString();
+        });
+
+        assertThat(plan)
+            .as("WITHOUT the enable_seqscan/enable_sort pin, this fixture's %d"
+                + " centroids/dim across %d collections (largest %d) must still cost"
+                + " a Seq Scan on taxonomy_centroids cheaper than the HNSW index at"
+                + " ef_search=400 -- proving the fixture genuinely sits BELOW"
+                + " pgvector's natural crossover, so the pinned test's HNSW result is"
+                + " because of the pin and not incidental cardinality. If this ever"
+                + " fails, the fixture has drifted ABOVE the crossover; enlarge it"
+                + " until it fails here again. Plan was:%n%s",
+                totalCentroidsSeeded(), totalCollectionsSeeded(), NAMED_COLLECTION_SIZES[0], plan)
+            .contains("Seq Scan on taxonomy_centroids");
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────

@@ -96,6 +96,39 @@
     placed after taxonomy-019-unassigned-chashes.xml (current tail) and
     before the grants-nexus-svc.xml runAlways block, matching every other
     late-append include's own comment.
+
+    STATED PLAINLY (review round, nexus-swam7): this changeset moves
+    production's cross-collection assignment from TODAY's behavior — an
+    EXACT per-chunk Seq Scan, chosen accidentally, because production's 799
+    centroids/dim sit below pgvector's natural HNSW/Seq-Scan crossover
+    (~8,000 centroids/dim at ef_search=400) and nobody had pinned the plan
+    either way — to a REVIEWED, deliberate approximate-nearest-neighbor path
+    via the HNSW index, forced by the two PERFORM set_config calls this
+    changeset adds. The recall properties of that HNSW path were already
+    reviewed and shipped in taxonomy-018 (measured equal to exact at
+    ef_search=400 with strict_order); this changeset is what makes the
+    engine actually TAKE that path at production's current scale, instead
+    of silently falling through to the (correct, but never load-bearing
+    until now) exact fallback.
+
+    This paragraph, and this whole top-of-file comment, sit OUTSIDE every
+    changeSet element below — editing them carries NO Liquibase checksum
+    risk on any deployment that has already run these changesets.
+    Liquibase's ChangeSet.generateCheckSum() computes its MD5 from the
+    changeSet's own contained Change/Precondition/Rollback objects (for a
+    &lt;sql&gt; change, that object's SQL text), built by walking the
+    changeSet element's own XML subtree — a comment living before
+    databaseChangeLog opens, or between changeSet elements, is never part
+    of any changeSet's subtree at all, and Liquibase's XML parser has
+    already discarded it before that object model exists. It cannot reach
+    any changeset's checksum input under any version of Liquibase's
+    algorithm, not merely under this project's current reading of it —
+    contrast the checksum-safety reasoning cited elsewhere in this
+    changelog tree (grants-nexus-svc.xml, catalog-020-index-run-fence.xml)
+    for edits INSIDE a changeSet (its rollback block, or a comment sibling
+    of its &lt;sql&gt; element), which rely on the narrower claim that
+    Liquibase hashes the change body only, not the surrounding comment or
+    &lt;comment&gt; element within that same changeSet.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
