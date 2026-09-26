@@ -1575,3 +1575,18 @@ def test_existing_ids_pagination_respects_300_cap(local_t3: T3Database):
     found = local_t3.existing_ids(col, seeded + ["nonexistent11111"])
     assert found == set(seeded)
     assert "nonexistent11111" not in found
+
+
+def test_partial_update_keeps_a_key_sent_at_its_empty_default() -> None:
+    """nexus-w94eo: normalize() drops extraction_method="" and
+    quality_gate_overridden=False, but a caller sending them on a partial
+    update means to overwrite the stored value, and the engine stores them
+    as sent. The test facade must too."""
+    from nexus.db.t3 import _normalize_partial
+
+    got = _normalize_partial(
+        {"extraction_method": "", "quality_gate_overridden": False},
+        "docs__foo",
+    )
+    assert got == {"extraction_method": "", "quality_gate_overridden": False}
+    assert "content_type" not in got

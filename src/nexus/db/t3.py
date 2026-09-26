@@ -38,7 +38,7 @@ from nexus.corpus import (
     index_model_for_collection,
 )
 from nexus.db.limits import QUOTAS
-from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
+from nexus.metadata_schema import ALLOWED_TOP_LEVEL, CONTENT_TYPES, normalize, validate
 
 _log = structlog.get_logger(__name__)
 
@@ -105,13 +105,22 @@ def _normalize_partial(metadata: dict, collection_name: str) -> dict:
     which a merging store would otherwise write over the stored values.
     A legacy ``store_type`` sent alone resolves to a ``content_type`` equal to
     that default and is therefore dropped; no live writer sends it
-    (RDR-101 Phase 5c retired the key).
+    (RDR-101 Phase 5c retired the key). A schema key the caller sent at its
+    empty default is kept, as the engine keeps it.
     """
     content_type = _infer_content_type(metadata, collection_name)
     out = normalize(metadata, content_type=content_type)
     defaults = normalize({}, content_type=content_type)
-    return {k: v for k, v in out.items()
+    kept = {k: v for k, v in out.items()
             if k in metadata or k not in defaults or defaults[k] != v}
+    # normalize() drops a sparse key sent at its empty default
+    # (extraction_method="", quality_gate_overridden=False). A caller that
+    # sends one on a partial update means to overwrite the stored value, and
+    # the engine stores it as sent, so keep it here too.
+    for k, v in metadata.items():
+        if k not in kept and k in ALLOWED_TOP_LEVEL:
+            kept[k] = v
+    return kept
 
 # nexus-o6aa.9.16: collection prefixes whose writes bypass the canonical
 # chunk schema. These are programmatically-populated collections that
