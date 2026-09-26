@@ -572,9 +572,10 @@ class TestFormulaPreservationOnRealPdf:
     _EXPECTED_QUICK_SCREEN = 11             # _has_formulas_quick() return
     _EXPECTED_META_FORMULA_COUNT = 22       # MinerU's structured count (44 -> 22, nexus-v4xg7)
     _EXPECTED_REGEX_MARKERS = 8             # (16 -> 8, nexus-v4xg7) _count_formula_markers — sum
-                                            # of 4 $$..$$ blocks (counted as
-                                            # blocks) + 12 \frac\b commands
-                                            # (counted independently). Prior
+                                            # of 2 $$..$$ blocks (counted as
+                                            # blocks) + 6 \frac\b commands
+                                            # (counted independently; 4 + 12
+                                            # before nexus-v4xg7). Prior
                                             # value 4 reflected the
                                             # alternation-undercount bug
                                             # (code-review C1) where each
