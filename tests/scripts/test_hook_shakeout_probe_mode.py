@@ -46,7 +46,7 @@ def _guard() -> str:
     line = next(l for l in SCRIPT.read_text().splitlines() if l.strip().startswith('TOKEN_GUARD="[['))
     out = subprocess.run(["bash", "-c", line.strip() + '\nprintf %s "$TOKEN_GUARD"'],
                          capture_output=True, text=True, check=True).stdout
-    assert "$CLAUDE_CODE_OAUTH_TOKEN" in out, "the guard must reference the variable, never a value"
+    assert "${CLAUDE_CODE_OAUTH_TOKEN}" in out, "the guard must reference the variable, never a value"
     return out
 
 
