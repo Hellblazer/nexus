@@ -570,8 +570,8 @@ class TestFormulaPreservationOnRealPdf:
     # number drifts, the test fails and a human reviews the diff — that's the
     # correct fail-loud contract for fixture-based regression guards.
     _EXPECTED_QUICK_SCREEN = 11             # _has_formulas_quick() return
-    _EXPECTED_META_FORMULA_COUNT = 44       # MinerU's structured count
-    _EXPECTED_REGEX_MARKERS = 16            # _count_formula_markers — sum
+    _EXPECTED_META_FORMULA_COUNT = 22       # MinerU's structured count (44 -> 22, nexus-v4xg7)
+    _EXPECTED_REGEX_MARKERS = 8             # (16 -> 8, nexus-v4xg7) _count_formula_markers — sum
                                             # of 4 $$..$$ blocks (counted as
                                             # blocks) + 12 \frac\b commands
                                             # (counted independently). Prior
@@ -581,8 +581,8 @@ class TestFormulaPreservationOnRealPdf:
                                             # $$..$$ consumed whole and
                                             # \frac instances inside were
                                             # never separately counted.
-    _EXPECTED_DOLLAR_DOLLAR_COUNT = 8       # 8 $$ markers = 4 paired blocks
-    _EXPECTED_FRAC_COUNT = 12               # \frac{...} occurrences
+    _EXPECTED_DOLLAR_DOLLAR_COUNT = 4       # 4 $$ markers = 2 paired blocks (8 -> 4, nexus-v4xg7)
+    _EXPECTED_FRAC_COUNT = 6                # \frac{...} occurrences (12 -> 6, nexus-v4xg7)
     # 60135 -> 59573 (nexus-gtltb). 60135 was the RAW pre-normalizer length:
     # the desync meant prose was being stripped and formulas were not, and the
     # two happened to cancel. Now 562 chars are removed, all from formula spans
@@ -596,9 +596,24 @@ class TestFormulaPreservationOnRealPdf:
     # 59557 and the marked text to 58827, a 730-char difference that matches
     # this drift exactly. page_count 33, formula_count 44, $$ 8 and \frac 12
     # all held, which identifies it as the marker pass, not extraction.
-    _EXPECTED_TEXT_LENGTH = 58843           # full extracted text
-    _EXPECTED_EFFICIENT_COUNT = 27          # "efficient" occurrences; 0 under MinerU 3.4.5
-    _EXPECTED_PAGE_COUNT = 33               # PyMuPDF page count
+    # nexus-v4xg7, 2026-09-26: EVERY MinerU-derived value above and below was
+    # locked (de5fa4292) while the subprocess path passed a half-open batch end
+    # straight to MinerU's inclusive end_page_id, so each 1-page batch [i, i+1)
+    # also extracted page i+1. This fixture has 17 pages (PyMuPDF and PDFium
+    # agree, file unchanged since it was added); 16 doubled batches + 1 is the
+    # 33 that page_count reported, and the text, formula and marker counts
+    # carried the same duplication. _mineru_end_page_id (43d187cd5) fixed the
+    # extraction; this slow, deselected test was never rerun, so it failed on
+    # the correct 17. Re-measured on MinerU 3.1.11: page_count 33 -> 17,
+    # formula_count 44 -> 22, text 58843 -> 30198, $$ 8 -> 4, \frac 12 -> 6,
+    # markers 16 -> 8, "efficient" 27 -> 16 (not an exact half: a duplicated
+    # page is its successor's text, not a copy of itself). The pinned
+    # snippet is still present. _EXPECTED_QUICK_SCREEN is PyMuPDF-only and
+    # did not move. The history comments above describe deltas measured on
+    # the doubled text and are kept as the record of those changes.
+    _EXPECTED_TEXT_LENGTH = 30198           # full extracted text
+    _EXPECTED_EFFICIENT_COUNT = 16          # "efficient" occurrences; 0 under MinerU 3.4.5
+    _EXPECTED_PAGE_COUNT = 17               # PyMuPDF page count
 
     # The canonical false-positive-rate formula from the paper, in the exact
     # form MinerU emits. Pinned verbatim so any change to formula rendering
