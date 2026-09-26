@@ -230,3 +230,49 @@ def test_stop_with_undrained_rows_signals(tmp_path, monkeypatch) -> None:
     assert level == "warning"
     assert fields["count"] == 2
     assert fields["tenant"] == "tenant-Z"
+
+
+def test_started_log_carries_a_phase_timing_breakdown(tmp_path: Path, monkeypatch) -> None:
+    """nexus-1m9sb: a fullstack-container run measured ~3 minutes between the
+    daemon's pid being assigned and 'aspect_worker_daemon.started' logging,
+    with no signal in between naming which phase of start() was slow. No
+    code-level cause was found there (six isolated / CPU-saturated /
+    concurrent-container reproductions against the exact same image all
+    completed in ~1s), so the actionable fix is observability: 'started' now
+    carries a per-phase millisecond breakdown (lease publish, worker
+    construction, worker thread start, reclaim-queue construction, and the
+    total) so a recurrence is diagnosable from the log alone."""
+    cap = _CapturingLog()
+    monkeypatch.setattr(awd, "_log", cap)
+
+    class _NoopQueue:
+        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+            return 0
+
+        def close(self) -> None: ...
+
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="tenant-timing",
+        worker_factory=_FakeWorker, queue_factory=_NoopQueue,
+    )
+    d.start()
+    try:
+        started = cap.of("aspect_worker_daemon.started")
+        assert started, f"no started event; got {[e[1] for e in cap.events]}"
+        _level, _event, fields = started[0]
+        for field in (
+            "lease_publish_ms", "worker_build_ms", "worker_start_ms",
+            "queue_build_ms", "total_startup_ms",
+        ):
+            assert field in fields, f"{field!r} missing from started event: {fields}"
+            assert isinstance(fields[field], float)
+            assert fields[field] >= 0.0
+        # The total spans every phase, so it is at least as large as any one
+        # of them (loose sanity — not an exact sum, since thread-start and
+        # log-formatting overhead between phases is real but untimed).
+        assert fields["total_startup_ms"] >= fields["lease_publish_ms"]
+        assert fields["total_startup_ms"] >= fields["worker_build_ms"]
+        assert fields["total_startup_ms"] >= fields["worker_start_ms"]
+        assert fields["total_startup_ms"] >= fields["queue_build_ms"]
+    finally:
+        d.stop()
