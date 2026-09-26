@@ -20,6 +20,7 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.errors import CombinedWriteEmbedTimeoutError
 from nexus.mcp_infra import (
     _manifest_write_loop,
+    get_manifest_write_failure_chashes,
     get_manifest_write_failures,
     reset_manifest_write_failures,
 )
@@ -810,6 +811,28 @@ class _AlwaysDownManyCat:
         pass
 
 
+class _PartialFailManyCat:
+    """write_manifest_many succeeds for the POST overall but reports one
+    doc's write as a partial failure (the ``failed_doc_ids`` shape) --
+    proves ``_manifest_write_loop``'s write_many-partial branch records
+    the failed doc's OWN chashes (nexus-wbfpw.29 round 6
+    ``_failed_chashes``), not another doc's from the same batch."""
+
+    def __init__(self, failed_doc_ids: list[str]) -> None:
+        self._failed_doc_ids = list(failed_doc_ids)
+        self.replace_calls: list[str] = []
+
+    def write_manifest_many(self, docs, complete=None, *, collection):
+        assert collection, "write_manifest_many called with a blank collection"
+        return {"failed_doc_ids": list(self._failed_doc_ids)}
+
+    def atomic_manifest_replace(self, doc_id, chunks, *, collection, **kw):
+        self.replace_calls.append(doc_id)
+
+    def resync_chunk_count_cache(self, doc_id):
+        pass
+
+
 class TestManifestWriteFailureSurfacing:
     """GH #1371: retry transient connection errors; surface persistent
     failures via the module-level collector instead of only a log line."""
@@ -849,6 +872,91 @@ class TestManifestWriteFailureSurfacing:
         assert get_manifest_write_failures() == ["1.9.0"]
         reset_manifest_write_failures()
         assert get_manifest_write_failures() == []
+
+    # ── T2 critique-wbfpw29-r5 Significant: chash attribution, not just
+    # doc_id. Every test above only asserts get_manifest_write_failures()
+    # (the doc_id list) -- a mis-keyed grouping in any of these three
+    # branches (write_many-partial's `_failed_chashes`, the write_many
+    # exception handler, and the per-doc loop's own except) would pass
+    # every test above unnoticed. These drive the same REAL branches with
+    # two docs carrying distinct, known chashes and assert each doc keeps
+    # its OWN set -- never the sibling's -- plus the UNKNOWN (None) case
+    # for a row with no chash.
+
+    def test_write_many_partial_failure_records_only_the_failed_docs_own_chashes(self) -> None:
+        cat = _PartialFailManyCat(failed_doc_ids=["1.9.1"])
+        by_doc = _by_doc(2)
+        _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
+
+        assert get_manifest_write_failures() == ["1.9.1"]
+        expected = get_manifest_write_failure_chashes()
+        own_chashes = {m["chunk_text_hash"] for _, m in by_doc["1.9.1"]}
+        assert expected["1.9.1"] == frozenset(own_chashes)
+        # the doc write_manifest_many did NOT report failed must never
+        # appear in the failure collector at all.
+        assert "1.9.0" not in expected
+
+    def test_write_many_partial_failure_with_blank_chash_marks_unknown(self) -> None:
+        cat = _PartialFailManyCat(failed_doc_ids=["1.9.0"])
+        by_doc = {
+            "1.9.0": [
+                (0, {"chunk_text_hash": "a" * 64, "chunk_index": 0}),
+                (1, {"chunk_text_hash": "", "chunk_index": 1}),
+            ],
+        }
+        _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
+        assert get_manifest_write_failures() == ["1.9.0"]
+        assert get_manifest_write_failure_chashes()["1.9.0"] is None
+
+    def test_write_many_exception_records_each_docs_own_chashes(self) -> None:
+        cat = _AlwaysDownManyCat()
+        by_doc = _by_doc(2)
+        with patch("nexus.retry.time.sleep"):
+            _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
+        assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
+        expected = get_manifest_write_failure_chashes()
+        for doc_id in ("1.9.0", "1.9.1"):
+            own_chashes = {m["chunk_text_hash"] for _, m in by_doc[doc_id]}
+            assert expected[doc_id] == frozenset(own_chashes)
+        # cross-check: the two docs' recorded sets must not be swapped.
+        assert expected["1.9.0"] != expected["1.9.1"]
+
+    def test_write_many_exception_with_blank_chash_marks_unknown(self) -> None:
+        cat = _AlwaysDownManyCat()
+        by_doc = {
+            "1.9.0": [
+                (0, {"chunk_text_hash": "a" * 64, "chunk_index": 0}),
+                (1, {"chunk_text_hash": "", "chunk_index": 1}),
+            ],
+        }
+        with patch("nexus.retry.time.sleep"):
+            _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
+        assert get_manifest_write_failures() == ["1.9.0"]
+        assert get_manifest_write_failure_chashes()["1.9.0"] is None
+
+    def test_persistent_per_doc_failure_records_each_docs_own_chashes(self) -> None:
+        cat = _AlwaysDownCat()
+        by_doc = _by_doc(2)
+        with patch("nexus.retry.time.sleep"):
+            _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
+        expected = get_manifest_write_failure_chashes()
+        for doc_id in ("1.9.0", "1.9.1"):
+            own_chashes = {m["chunk_text_hash"] for _, m in by_doc[doc_id]}
+            assert expected[doc_id] == frozenset(own_chashes)
+        assert expected["1.9.0"] != expected["1.9.1"]
+
+    def test_persistent_per_doc_failure_with_blank_chash_marks_unknown(self) -> None:
+        cat = _AlwaysDownCat()
+        by_doc = {
+            "1.9.0": [
+                (0, {"chunk_text_hash": "a" * 64, "chunk_index": 0}),
+                (1, {"chunk_text_hash": "", "chunk_index": 1}),
+            ],
+        }
+        with patch("nexus.retry.time.sleep"):
+            _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
+        assert get_manifest_write_failures() == ["1.9.0"]
+        assert get_manifest_write_failure_chashes()["1.9.0"] is None
 
 
 class TestManifestNeverOutrunsConfirmedChunks:

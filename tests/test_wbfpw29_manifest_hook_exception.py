@@ -355,3 +355,150 @@ def test_manifest_write_batch_hook_declares_flush_grain():
     channel-3 test -- and fault only its internal dependencies, never
     replace the function object itself."""
     assert mcp_infra.manifest_write_batch_hook.batch_grain == "flush"
+
+
+# ── Round 8 (T2 critique-wbfpw29-r5 Significant): chash attribution ──────────
+#
+# Every test above only ever asserts the failed doc_id LIST
+# (get_manifest_write_failures()). None of them assert
+# get_manifest_write_failure_chashes() -- the per-doc EXPECTED chash set
+# commands/_helpers.py's resolve_confirmed_write_failure_doc_ids reads to
+# decide whether a same-run self-heal actually closed the gap. A mis-keyed
+# grouping (doc A's chash recorded under doc B) would pass every test above
+# unnoticed. These drive the REAL producers with two docs carrying distinct,
+# known chashes and assert each doc keeps its OWN set -- never the
+# sibling's -- plus the UNKNOWN (None) case for a row with no chash.
+
+
+def test_real_manifest_hook_get_catalog_raises_chash_attribution_two_docs(monkeypatch):
+    """manifest_write_batch_hook's get_catalog()-raises branch
+    (mcp_infra.py ~2270): two docs in one failing batch must each keep
+    their OWN chash, never the sibling's."""
+    def raising_get_catalog():
+        raise RuntimeError("catalog unreachable")
+
+    monkeypatch.setattr(mcp_infra, "get_catalog", raising_get_catalog)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    chash_a, chash_b = "a" * 64, "b" * 64
+    reg.fire_batch(
+        [chash_a, chash_b], "code__x", ["content-a", "content-b"],
+        metadatas=[
+            {"doc_id": "1.2.3", "chunk_text_hash": chash_a},
+            {"doc_id": "1.9.9", "chunk_text_hash": chash_b},
+        ],
+    )
+
+    assert sorted(mcp_infra.get_manifest_write_failures()) == ["1.2.3", "1.9.9"]
+    expected = mcp_infra.get_manifest_write_failure_chashes()
+    assert expected["1.2.3"] == frozenset({chash_a})
+    assert expected["1.9.9"] == frozenset({chash_b})
+
+
+def test_real_manifest_hook_get_catalog_raises_blank_chash_marks_unknown(monkeypatch):
+    """A row with no chunk_text_hash means this write's expectation is
+    only partly known -- the doc must be recorded UNKNOWN (None), never a
+    partial/empty confirmed set."""
+    def raising_get_catalog():
+        raise RuntimeError("catalog unreachable")
+
+    monkeypatch.setattr(mcp_infra, "get_catalog", raising_get_catalog)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    reg.fire_batch(
+        ["chash-1"], "code__x", ["content"],
+        metadatas=[{"doc_id": "1.2.3"}],  # no chunk_text_hash key
+    )
+
+    assert mcp_infra.get_manifest_write_failures() == ["1.2.3"]
+    assert mcp_infra.get_manifest_write_failure_chashes()["1.2.3"] is None
+
+
+def test_real_manifest_hook_get_catalog_none_chash_attribution_two_docs(monkeypatch):
+    """manifest_write_batch_hook's `_gate is None` branch (mcp_infra.py
+    ~2285): same cross-doc attribution proof as the raises branch above --
+    this branch had ZERO chash coverage before this round."""
+    monkeypatch.setattr(mcp_infra, "get_catalog", lambda: None)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    chash_a, chash_b = "c" * 64, "d" * 64
+    reg.fire_batch(
+        [chash_a, chash_b], "code__x", ["content-a", "content-b"],
+        metadatas=[
+            {"doc_id": "2.1", "chunk_text_hash": chash_a},
+            {"doc_id": "2.2", "chunk_text_hash": chash_b},
+        ],
+    )
+
+    assert sorted(mcp_infra.get_manifest_write_failures()) == ["2.1", "2.2"]
+    expected = mcp_infra.get_manifest_write_failure_chashes()
+    assert expected["2.1"] == frozenset({chash_a})
+    assert expected["2.2"] == frozenset({chash_b})
+
+
+def test_real_manifest_hook_get_catalog_none_blank_chash_marks_unknown(monkeypatch):
+    """The `_gate is None` branch's UNKNOWN case."""
+    monkeypatch.setattr(mcp_infra, "get_catalog", lambda: None)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    reg.fire_batch(
+        ["chash-1"], "code__x", ["content"],
+        metadatas=[{"doc_id": "2.1"}],
+    )
+
+    assert mcp_infra.get_manifest_write_failures() == ["2.1"]
+    assert mcp_infra.get_manifest_write_failure_chashes()["2.1"] is None
+
+
+def test_manifest_hook_exception_chash_attribution_two_docs_via_hook_registry(monkeypatch):
+    """hook_registry._record_manifest_hook_batch_exception builds its OWN
+    chash_by_doc independently of mcp_infra's -- same cross-doc proof,
+    driven through fire_batch's except-block routing rather than the
+    hook's own body."""
+    def faulty(*args, **kwargs):
+        raise RuntimeError("nexus-wbfpw.29 fault injection")
+
+    monkeypatch.setattr(mcp_infra, "manifest_write_batch_hook", faulty)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    chash_a, chash_b = "e" * 64, "f" * 64
+    reg.fire_batch(
+        [chash_a, chash_b], "code__x", ["c1", "c2"],
+        metadatas=[
+            {"doc_id": "1.9.0", "chunk_text_hash": chash_a},
+            {"doc_id": "1.9.1", "chunk_text_hash": chash_b},
+        ],
+    )
+
+    assert sorted(mcp_infra.get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
+    expected = mcp_infra.get_manifest_write_failure_chashes()
+    assert expected["1.9.0"] == frozenset({chash_a})
+    assert expected["1.9.1"] == frozenset({chash_b})
+
+
+def test_manifest_hook_exception_legacy_meta_doc_id_blank_chash_marks_unknown(monkeypatch):
+    """hook_registry's routing on the exact input
+    test_manifest_hook_exception_records_write_failure_by_legacy_meta_doc_id
+    already drives (no chunk_text_hash on either row) must record BOTH
+    docs UNKNOWN, not an empty-but-known confirmed set."""
+    def faulty(*args, **kwargs):
+        raise RuntimeError("nexus-wbfpw.29 fault injection")
+
+    monkeypatch.setattr(mcp_infra, "manifest_write_batch_hook", faulty)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    reg.fire_batch(
+        ["chash-1", "chash-2"], "code__x", ["c1", "c2"],
+        metadatas=[{"doc_id": "1.9.0"}, {"doc_id": "1.9.1"}],
+    )
+
+    assert sorted(mcp_infra.get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
+    expected = mcp_infra.get_manifest_write_failure_chashes()
+    assert expected["1.9.0"] is None
+    assert expected["1.9.1"] is None
