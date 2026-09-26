@@ -138,3 +138,75 @@ def test_verdict_job_waits_on_every_job_a_develop_push_runs() -> None:
     for name in ("board-pending", "board-verdict"):
         assert "refs/heads/develop" in jobs[name]["if"]
         assert "NX_BOARD_TOKEN" in str(jobs[name]["steps"])
+
+
+# ── review round (substantive-critic) ────────────────────────────────────────
+
+
+def test_an_unknown_job_result_is_a_failure_not_a_success() -> None:
+    assert cbp.verdict_from_results({"a": "success", "b": "weird"}) == ("failure", ["b"])
+
+
+def test_a_refusal_body_that_contains_the_token_is_redacted(monkeypatch, capsys) -> None:
+    """The real engine never echoes the bearer, so prove the redaction on a
+    body that does, placed so a truncate-then-redact order would leak a
+    prefix."""
+    import io
+    import urllib.error
+
+    token = "T" * 64
+    body = ("x" * 180 + token).encode()
+
+    def refuse(*_a, **_kw):
+        raise urllib.error.HTTPError("u", 403, "Forbidden", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(cbp, "post", refuse)
+    monkeypatch.setenv("NX_SERVICE_URL", "https://engine.invalid")
+    monkeypatch.setenv("NX_BOARD_TOKEN", token)
+    assert cbp.main(["--kind", "ci-pending", "--sha", _SHA, "--run", "9"]) == 0
+    out = capsys.readouterr().out
+    assert "TTTT" not in out and "HTTP 403" in out
+
+
+def test_a_transient_failure_is_retried(monkeypatch, capsys) -> None:
+    import urllib.error
+
+    calls = []
+
+    def flaky(*_a, **_kw):
+        calls.append(1)
+        if len(calls) < 2:
+            raise urllib.error.URLError("connection reset")
+        return "abc"
+
+    monkeypatch.setattr(cbp, "post", flaky)
+    monkeypatch.setattr(cbp.time, "sleep", lambda _s: None)
+    monkeypatch.setenv("NX_SERVICE_URL", "https://engine.invalid")
+    monkeypatch.setenv("NX_BOARD_TOKEN", "t")
+    assert cbp.main(["--kind", "ci-pending", "--sha", _SHA, "--run", "9"]) == 0
+    assert len(calls) == 2
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_a_lower_engine_cap_still_lands_a_minimal_verdict(monkeypatch, capsys) -> None:
+    """code-review-expert: the 1024-byte cap is engine config. A 413 must
+    degrade the post, not drop it."""
+    import io
+    import urllib.error
+
+    sent = []
+
+    def capped(_url, _tok, payload, **_kw):
+        sent.append(json.loads(payload["body"]))
+        if len(sent) == 1:
+            raise urllib.error.HTTPError("u", 413, "TooLarge", {}, io.BytesIO(b"{}"))
+        return "id"
+
+    monkeypatch.setattr(cbp, "post", capped)
+    monkeypatch.setenv("NX_SERVICE_URL", "https://engine.invalid")
+    monkeypatch.setenv("NX_BOARD_TOKEN", "t")
+    assert cbp.main(["--kind", "ci-verdict", "--sha", _SHA, "--run", "9",
+                     "--results", json.dumps({"a": "failure"})]) == 0
+    assert "::warning" not in capsys.readouterr().out
+    assert sent[1] == {"sha": _SHA, "run": "9", "attempt": "1",
+                       "conclusion": "failure", "truncated": True}

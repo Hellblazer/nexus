@@ -26,7 +26,8 @@ The tuple, per the ``board/<topic>`` template:
 Environment: ``NX_SERVICE_URL`` (the engine) and ``NX_BOARD_TOKEN`` (the
 bearer). Stdlib only, so the runner needs no ``uv sync``.
 
-Advisory, not a gate: a refused or failed post prints a GitHub ``::warning::``
+Advisory, not a gate: a transport error or 5xx is retried (``POST_ATTEMPTS``),
+and a refused or finally failed post prints a GitHub ``::warning::``
 annotation and exits 0, because a red board job on a green run would read as
 a CI failure. A missing endpoint or token is also a warning; the board is
 simply not written. Exit 2 is reserved for bad arguments.
@@ -37,14 +38,17 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
 TOPIC: str = "ci-develop"
 SUBSPACE: str = f"board/{TOPIC}"
-#: The board template's max_body_bytes (tuple_registry, board/<topic>).
+#: The board template's max_body_bytes (tuple_registry, board/<topic>) when
+#: this was written. It is engine-side configuration, so the script does not
+#: rely on it alone: a 413 from the engine (a lower cap) is answered by one
+#: retry with a minimal body, so the verdict still lands.
 MAX_BODY_BYTES: int = 1024
-CONCLUSIONS: frozenset[str] = frozenset({"pending", "success", "failure", "cancelled"})
 
 
 def verdict_from_results(results: dict[str, str]) -> tuple[str, list[str]]:
@@ -52,9 +56,12 @@ def verdict_from_results(results: dict[str, str]) -> tuple[str, list[str]]:
 
     ``failure`` wins over ``cancelled``, which wins over success; ``skipped``
     counts as success, as it does for branch protection (the doc-only fast
-    lane skips jobs on purpose). Returns ``(conclusion, failed_job_names)``.
+    lane skips jobs on purpose). A result outside GitHub's closed set
+    (success, failure, cancelled, skipped) counts as a failure, never as a
+    silent success. Returns ``(conclusion, failed_job_names)``.
     """
-    failed = sorted(j for j, r in results.items() if r == "failure")
+    known = {"success", "skipped", "cancelled"}
+    failed = sorted(j for j, r in results.items() if r not in known)
     cancelled = sorted(j for j, r in results.items() if r == "cancelled")
     if failed:
         return "failure", failed + cancelled
@@ -78,6 +85,12 @@ def build_body(*, sha: str, run: str, attempt: str, workflow: str,
         names = names[:-1]
 
 
+#: Attempts for one post. A refused write (4xx) is not retried; a transport
+#: error or a 5xx is, because a lost verdict leaves a stale ci-pending that
+#: readers would take for a live run.
+POST_ATTEMPTS: int = 3
+
+
 def post(base_url: str, token: str, payload: dict, timeout: float = 20.0) -> str:
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/v1/tuples/out",
@@ -87,6 +100,10 @@ def post(base_url: str, token: str, payload: dict, timeout: float = 20.0) -> str
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed https endpoint from config
         return str(json.loads(resp.read().decode()).get("id", ""))
+
+
+def _redact(text: str, token: str) -> str:
+    return text.replace(token, "<redacted>") if token else text
 
 
 def _warn(msg: str) -> int:
@@ -139,13 +156,29 @@ def main(argv: list[str] | None = None) -> int:
         "nonce": f"{args.sha}:{args.run}:{args.attempt}:{args.kind}",
         "body": body,
     }
-    try:
-        tuple_id = post(base_url, token, payload)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:200].replace(token, "<redacted>")
-        return _warn(f"POST /v1/tuples/out refused: HTTP {exc.code} {detail}")
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return _warn(f"POST /v1/tuples/out failed: {type(exc).__name__}: {exc}")
+    tuple_id = ""
+    for attempt in range(1, POST_ATTEMPTS + 1):
+        try:
+            tuple_id = post(base_url, token, payload)
+            break
+        except urllib.error.HTTPError as exc:
+            # Redact BEFORE truncating, so a cut inside the token cannot
+            # leave a prefix of it behind.
+            detail = _redact(exc.read().decode(errors="replace"), token)[:200]
+            if exc.code == 413 and "truncated" not in payload["body"]:
+                payload["body"] = json.dumps(
+                    {"sha": args.sha, "run": args.run, "attempt": args.attempt,
+                     "conclusion": conclusion, "truncated": True},
+                    separators=(",", ":"))
+                continue
+            if exc.code < 500 or attempt == POST_ATTEMPTS:
+                return _warn(f"POST /v1/tuples/out refused: HTTP {exc.code} {detail}")
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if attempt == POST_ATTEMPTS:
+                return _warn("POST /v1/tuples/out failed after "
+                             f"{POST_ATTEMPTS} attempts: {type(exc).__name__}: "
+                             f"{_redact(str(exc), token)[:200]}")
+        time.sleep(2 * attempt)
     print(f"{SUBSPACE} {args.kind} {conclusion} sha={args.sha} tuple={tuple_id}")
     return 0
 
