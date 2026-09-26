@@ -752,7 +752,7 @@ public final class CceEmbedder implements Embedder {
                 "embed admission refused: " + myBatches + " batches behind " + queued + " queued and "
                         + held + " running need about " + predicted / 1_000_000L + "ms, "
                         + remaining / 1_000_000L + "ms left before the deadline",
-                retryAfterS);
+                retryAfterS, RequestDeadlineExceededException.Outcome.REFUSED);
     }
 
     /** Hands back {@code count} batch reservations taken by {@link #admit}. Package-private

@@ -96,6 +96,10 @@ public final class VectorHandler implements HttpHandler {
 
     private static final Logger log = LoggerFactory.getLogger(VectorHandler.class);
 
+    /** Response header on a deadline 503: {@code refused} or {@code aborted} (nexus-qajw7).
+     *  Additive: a client that does not read it keeps its previous retry behaviour. */
+    public static final String DEADLINE_OUTCOME_HEADER = "X-Nexus-Deadline-Outcome";
+
     static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
@@ -268,9 +272,13 @@ public final class VectorHandler implements HttpHandler {
             log.warn("event=vector_request_deadline_exceeded op={} retry_after_s={} error={}",
                      op, e.retryAfterSeconds(), e.getMessage());
             exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
+            // nexus-qajw7: refused (nothing embedded) or aborted (embedded work
+            // discarded). The client widens its retry budget only for a refusal.
+            exchange.getResponseHeaders().set(DEADLINE_OUTCOME_HEADER, e.outcome().wire());
             HttpUtil.send(exchange, 503, json(Map.of(
                     "error", e.getMessage(),
-                    "retry_after_seconds", e.retryAfterSeconds())));
+                    "retry_after_seconds", e.retryAfterSeconds(),
+                    "deadline_outcome", e.outcome().wire())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));

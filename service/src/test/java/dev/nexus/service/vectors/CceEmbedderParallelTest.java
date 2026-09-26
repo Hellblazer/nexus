@@ -791,7 +791,10 @@ class CceEmbedderParallelTest {
             setRequestDeadline(start + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(200));
             try {
                 assertThatThrownBy(() -> cce.embed(List.of(t)))
-                        .isInstanceOf(RequestDeadlineExceededException.class);
+                        .isInstanceOfSatisfying(RequestDeadlineExceededException.class, e ->
+                                assertThat(e.outcome())
+                                        .as("nexus-qajw7: an abort discards work; the client must not widen")
+                                        .isEqualTo(RequestDeadlineExceededException.Outcome.ABORTED));
             } finally {
                 clearRequestDeadline();
             }
@@ -1028,6 +1031,9 @@ class CceEmbedderParallelTest {
                         .isInstanceOfSatisfying(RequestDeadlineExceededException.class, e -> {
                             assertThat(e.getMessage()).contains("admission refused");
                             assertThat(e.retryAfterSeconds()).isBetween(1L, CceEmbedder.MAX_ADMISSION_RETRY_AFTER_S);
+                            assertThat(e.outcome())
+                                    .as("nexus-qajw7: nothing was embedded, so the client may widen its retries")
+                                    .isEqualTo(RequestDeadlineExceededException.Outcome.REFUSED);
                         });
             } finally {
                 clearRequestDeadline();
