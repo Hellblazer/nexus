@@ -55,3 +55,20 @@ def test_rewrite_metadata_strips_a_legacy_key_and_converges(t2_service_env) -> N
 
     # Converged: a second run finds nothing to change.
     assert _rewrite_collection_metadata(t3, _COLLECTION) == (0, 1, 1)
+
+
+def test_rewrite_metadata_never_deletes_bib_fields(t2_service_env) -> None:
+    """nx enrich bib owns bib_* and writes them after indexing; a rewrite that
+    deleted them could erase a concurrent enrichment. A placeholder bib key
+    that normalize() drops is left alone, and the row still converges."""
+    t3 = make_t3()
+    chash = _seed(t3)
+    t3.update_chunks(_COLLECTION, [chash], [{"bib_year": 0}])
+    assert _stored(t3, chash).get("bib_year") == 0  # non-vacuity
+
+    assert _rewrite_collection_metadata(t3, _COLLECTION)[0] == 1
+    meta = _stored(t3, chash)
+    assert _LEGACY not in meta, meta
+    assert meta.get("bib_year") == 0, meta
+
+    assert _rewrite_collection_metadata(t3, _COLLECTION) == (0, 1, 1)

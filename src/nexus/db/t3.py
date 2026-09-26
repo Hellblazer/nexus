@@ -38,7 +38,13 @@ from nexus.corpus import (
     index_model_for_collection,
 )
 from nexus.db.limits import QUOTAS
-from nexus.metadata_schema import ALLOWED_TOP_LEVEL, CONTENT_TYPES, normalize, validate
+from nexus.metadata_schema import (
+    ALLOWED_TOP_LEVEL,
+    CONTENT_TYPES,
+    REWRITE_OWNED_KEYS,
+    normalize,
+    validate,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -208,11 +214,19 @@ def _rewrite_collection_metadata(
             total += 1
             current = dict(meta or {})
             canonical = _normalize_for_write(current, collection_name)
-            if canonical == current:
+            # Keys the rewrite may remove: ones it owns, and cargo outside the
+            # schema. Never bib_* (nx enrich bib writes them after indexing,
+            # and a concurrent enrichment would be erased) or content_type.
+            gone = current.keys() - canonical.keys()
+            drop = tuple(sorted(
+                k for k in gone
+                if k in REWRITE_OWNED_KEYS or k not in ALLOWED_TOP_LEVEL
+            ))
+            kept_foreign = gone - set(drop)
+            if canonical == {k: v for k, v in current.items() if k not in kept_foreign}:
                 skipped += 1
                 continue
             updated += 1
-            drop = tuple(sorted(current.keys() - canonical.keys()))
             group_ids, group_metas = groups.setdefault(drop, ([], []))
             group_ids.append(chunk_id)
             group_metas.append(canonical)
