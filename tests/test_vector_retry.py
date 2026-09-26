@@ -505,6 +505,35 @@ def test_503_without_retry_after_now_trips_brake_with_escalating_default(
     mock_sleep.assert_called_once_with(2.0)  # max(local jittered 2.0, brake 2.0)
 
 
+def test_admission_refusal_503_retry_after_floors_the_shared_brake(monkeypatch) -> None:
+    """nexus-u2mlh.2: the engine's CCE admission refusal is a 503 on
+    upsert-chunks carrying ``Retry-After`` (the waiting batches' estimated
+    drain time, 1-30 s). The client needs no code for it, but that claim
+    rests on this path: the server's value reaches the process-wide brake,
+    which paces every other indexer worker too, and floors this caller's
+    own pause above its local backoff."""
+    test_brake = MagicMock()
+    test_brake.wait.return_value = 0.0
+    test_brake.trip.return_value = 7.0
+    monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
+
+    call_count = 0
+
+    def refused_once() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise _make_vector_service_error(503, retry_after="7")
+        return "ok"
+
+    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
+        "nexus.retry.random.random", return_value=0.5,
+    ):
+        assert _vector_with_retry(refused_once) == "ok"
+    test_brake.trip.assert_called_once_with(7.0, source="vector")
+    mock_sleep.assert_called_once_with(7.0)  # server's 7 s beats the local 2 s
+
+
 def test_502_no_retry_after_trips_brake_and_is_retried(monkeypatch) -> None:
     """A 502 with no Retry-After is the LITERAL 2026-08-15 incident shape
     (engine retrying Voyage internally; the edge's own timeout surfaces to
