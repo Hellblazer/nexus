@@ -416,7 +416,7 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         put_note_pieces,
         raise_if_oversized,
         rollback_uncataloged_chunk_write,
-        store_put_manifest_direct,
+        store_put_manifest_direct_with_recovery,
     )
     from nexus.doc_indexer import _fence_begin, _fence_fail  # noqa: PLC0415 — deferred; test patch target
 
@@ -470,9 +470,29 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
             f"could not catalog {rec.get('title', '')!r} in {col_name}: "
             f"catalog registration failed. {describe_rollback_outcome(outcome)}"
         )
+    # RDR-192 Step 3a fix-round 2, Decision (b): the chunk(s) this call
+    # just wrote can be deleted out from under it by a CONCURRENT
+    # rollback before this manifest write's own INSERT lands (the
+    # opposite-ordering race from fix-round 1's Significant 3) —
+    # store_put_manifest_direct_with_recovery re-puts exactly the
+    # affected piece(s) and retries once; every other outcome reaches
+    # this try/except unchanged.
+    _chash_to_piece = {
+        m.get("chunk_text_hash", ""): pieces[i]
+        for i, m in enumerate(manifest_metadatas)
+    }
+
+    def _repiece_import(chash: str) -> None:
+        put_note_pieces(
+            t3, col_name, [_chash_to_piece[chash]],
+            title=rec["title"], tags=rec.get("tags", ""),
+            category=rec.get("category", ""), catalog_doc_id=catalog_doc_id,
+        )
+
     try:
-        store_put_manifest_direct(
+        store_put_manifest_direct_with_recovery(
             catalog_doc_id, manifest_metadatas, collection=col_name,
+            repiece=_repiece_import,
         )
     except ManifestVerifyUncertainError as manifest_exc:
         # RDR-192 Step 3a fix-round 1 (critic Critical 1): verify infra

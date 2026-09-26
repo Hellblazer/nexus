@@ -499,7 +499,7 @@ class TestCliStorePut:
             _ef_override=DefaultEmbeddingFunction(),
         )
         monkeypatch.setattr(
-            store_mod, "_store_put_manifest_direct",
+            store_mod, "_store_put_manifest_direct_with_recovery",
             lambda *a, **k: (_ for _ in ()).throw(
                 RuntimeError("manifest write refused")
             ),
@@ -1106,6 +1106,7 @@ class TestWbfpw28ManifestVerifyUncertain:
         the state a caller must not treat as safe to delete."""
         from nexus.catalog.factory import make_catalog_reader as real_make_reader
         from nexus.catalog.store_hook import (
+            _MANIFEST_VERIFY_RETRY_ATTEMPTS,
             ManifestVerifyUncertainError,
             store_put_manifest_direct,
         )
@@ -1128,19 +1129,34 @@ class TestWbfpw28ManifestVerifyUncertain:
             def get_manifest(self, doc_id):
                 raise RuntimeError("verify read boom")
 
+        # Call 1 is store_put_manifest_direct's own nexus-bb6n2 "before"
+        # read (best-effort, real reader is fine); the next
+        # _MANIFEST_VERIFY_RETRY_ATTEMPTS calls are the bounded-retry
+        # verify reads (fix-round 2, Decision 2) -- ALL of them must fail
+        # to genuinely exhaust the retry budget and raise
+        # ManifestVerifyUncertainError; a single-failure reader would
+        # recover on the next attempt and the write would be (correctly)
+        # reported as landed, never raising at all. Bounded rather than
+        # permanent: this test's own post-assertion re-resolves a reader
+        # afterward (via active_reader(), which shares this same patched
+        # factory function) to empirically confirm the write landed, and
+        # that read must succeed for real.
+        _last_boom_call = 1 + _MANIFEST_VERIFY_RETRY_ATTEMPTS
+
         def _flaky_make_reader():
             calls["n"] += 1
-            # Call 1 is store_put_manifest_direct's own nexus-bb6n2
-            # "before" read (best-effort, real reader is fine); call 2 is
-            # the VERIFY read this test targets.
-            if calls["n"] == 2:
+            if 2 <= calls["n"] <= _last_boom_call:
                 return _VerifyReadBoom()
             return real_make_reader()
 
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_reader", _flaky_make_reader,
         )
-        with pytest.raises(ManifestVerifyUncertainError, match="verify read failed"):
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook._manifest_verify_retry_sleep",
+            lambda seconds: None,
+        )
+        with pytest.raises(ManifestVerifyUncertainError, match="verify failed"):
             store_put_manifest_direct(str(t), [{
                 "chunk_text_hash": chash,
                 "chunk_start_char": 0,
@@ -1249,18 +1265,21 @@ class TestWbfpw28GenuineInterleavedRace:
         FROM THIS SPECIFIC INTERLEAVING — no recovery-retry logic is
         needed for it.
 
-        SCOPE, not proven here: the mirror-image ordering (B's delete
+        NOT covered by this test: the mirror-image ordering (B's delete
         completing BEFORE A's manifest write attempts to reference the
         chash — possible in true concurrent multi-process execution,
         where A's own manifest-write HTTP round trip could be the slower
-        leg) is a DIFFERENT interleaving this test does not exercise. In
-        that ordering A's ``atomic_manifest_replace`` would be racing a
-        chash that genuinely no longer exists, which — per this same
-        file's ``store_put_manifest_direct`` docstring — is exactly the
-        shape that raises (confirmed-not-landed), not a scenario this
-        test's "no recovery needed" conclusion covers. That ordering was
-        not named in the coordinator's fix-round request and is not
-        addressed by this bead."""
+        leg). In that ordering A's ``atomic_manifest_replace`` races a
+        chash that genuinely no longer exists at INSERT time, which is a
+        real ``fk_catalog_chunks_chunk`` foreign-key violation, not a
+        silent no-op — a different interleaving with a different
+        mechanism than this test's engine-anti-join case. That ordering
+        IS addressed by this bead (fix-round 2, Decision (b)): see
+        ``TestWbfpw28OppositeOrderingRecovery`` below, which drives it
+        deterministically against the same ``orphaned_chashes`` seam in
+        the opposite order and asserts
+        :func:`store_put_manifest_direct_with_recovery`'s bounded
+        re-put-and-retry recovers A's write."""
         import nexus.db.http_vector_client as hvc
         from nexus.catalog.store_hook import (
             catalog_store_hook_tracked,
@@ -1395,3 +1414,424 @@ class TestWbfpw28DescribeRollbackOutcome:
         msg = describe_rollback_outcome(outcome)
         assert "1 of 2" in msg
         assert "retry is safe" not in msg
+
+
+# ── RDR-192 Step 3a fix-round 2 (nexus-wbfpw.28): a write-call exception ────
+# ── is arbitrated via verify-read, never assumed confirmed-failed ───────────
+#
+# critic Critical / ship-blocker: atomic_manifest_replace raising does not
+# by itself mean the write failed -- the POST may have committed
+# server-side with only the acknowledgment lost. Every write-call
+# exception must be arbitrated by a (retried) verify read before any
+# confirmed-failure conclusion is drawn.
+
+
+class TestWbfpw28WriteExceptionArbitration:
+    def test_write_exception_but_landed_is_treated_as_success(
+        self, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lets the REAL atomic_manifest_replace land, then raises anyway
+        (the exact ack-lost shape) -- store_put_manifest_direct must
+        return normally (no exception raised at all), and the catalog
+        row + manifest must survive untouched. Mirrors fix-round 1's
+        TestWbfpw28ManifestVerifyUncertain technique (let the write
+        commit for real, then break the NEXT step), applied here to the
+        write call itself rather than the verify step."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.catalog.store_hook import store_put_manifest_direct
+        from tests._catalog_fixture_ops import active_reader, seed_manifest_chunks
+
+        chash = "c" * 64
+        collection = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        t = cat.register(
+            owner, "write-exc-landed-target", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+        )
+        seed_manifest_chunks(collection, [chash])
+
+        real_replace = HttpCatalogClient.atomic_manifest_replace
+
+        def _replace_then_raise_ack_lost(self, doc_id, chunks, *, collection):
+            real_replace(self, doc_id, chunks, collection=collection)
+            raise RuntimeError("simulated ack-lost network failure")
+
+        monkeypatch.setattr(
+            HttpCatalogClient, "atomic_manifest_replace", _replace_then_raise_ack_lost,
+        )
+        # No exception at all -- this IS the success path.
+        store_put_manifest_direct(str(t), [{
+            "chunk_text_hash": chash, "chunk_start_char": 0, "chunk_end_char": 10,
+        }], collection=collection)
+
+        assert chash in active_reader().get_chunk_chashes(str(t)), (
+            "the write actually landed despite the raised exception -- "
+            "must not have been rolled back"
+        )
+        assert len(_catalog_rows(catalog_env, "write-exc-landed-target")) == 1, (
+            "the catalog row must survive: this was a success, not a "
+            "confirmed failure"
+        )
+
+    def test_write_exception_and_confirmed_missing_raises_plain_error(
+        self, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The write call raises AND no write ever actually happened
+        (verify confirms missing) -- CONFIRMED failure. A plain
+        RuntimeError, NOT ManifestMissingChunkError, since this is a
+        generic failure, not the fk_catalog_chunks_chunk shape fix-round
+        2 Decision (b) recovers from."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.catalog.store_hook import (
+            ManifestMissingChunkError, store_put_manifest_direct,
+        )
+
+        chash = "d" * 64
+        collection = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        t = cat.register(
+            owner, "write-exc-missing-target", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+        )
+
+        monkeypatch.setattr(
+            HttpCatalogClient, "atomic_manifest_replace",
+            lambda self, d, c, *, collection: (_ for _ in ()).throw(
+                RuntimeError("network down before commit")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="network down before commit") as exc_info:
+            store_put_manifest_direct(str(t), [{
+                "chunk_text_hash": chash, "chunk_start_char": 0, "chunk_end_char": 10,
+            }], collection=collection)
+        assert not isinstance(exc_info.value, ManifestMissingChunkError), (
+            "a generic write failure (not an fk_catalog_chunks_chunk "
+            "violation) must raise a plain RuntimeError, not "
+            "ManifestMissingChunkError"
+        )
+
+
+# ── RDR-192 Step 3a fix-round 2, critic (a) / Decision 2: bounded ───────────
+# ── verify-read retry ────────────────────────────────────────────────────────
+
+
+class TestWbfpw28BoundedVerifyRetry:
+    def test_recovers_on_retry(
+        self, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.catalog.factory import make_catalog_reader as real_make_reader
+        from nexus.catalog.store_hook import (
+            _MANIFEST_VERIFY_RETRY_ATTEMPTS,
+            _read_manifest_chashes_with_retry,
+        )
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        assert _MANIFEST_VERIFY_RETRY_ATTEMPTS >= 2, (
+            "test assumes at least 2 configured attempts"
+        )
+        chash = "b" * 64
+        collection = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        t = cat.register(
+            owner, "verify-retry-target", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+        )
+        seed_manifest_chunks(collection, [chash])
+        cat.append_manifest_chunks(str(t), [{"chash": chash, "position": 0}], collection=collection)
+
+        calls = {"n": 0}
+        sleep_calls: list[float] = []
+
+        class _FlakyOnceReader:
+            def get_manifest(self, doc_id):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("transient blip")
+                return real_make_reader().get_manifest(doc_id)
+
+            @property
+            def _db(self):
+                raise RuntimeError("no direct db handle in service mode")
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", lambda: _FlakyOnceReader(),
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook._manifest_verify_retry_sleep",
+            lambda seconds: sleep_calls.append(seconds),
+        )
+        landed = _read_manifest_chashes_with_retry(str(t), context="test")
+        assert chash in landed
+        assert calls["n"] == 2, "must succeed on the second attempt, not loop further"
+        assert len(sleep_calls) == 1, (
+            "exactly one backoff between the failed 1st and successful "
+            "2nd attempt — no real sleep, since the patched function "
+            "recorded the call instead of sleeping"
+        )
+
+    def test_exhausts_to_uncertain(
+        self, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.catalog.store_hook import (
+            _MANIFEST_VERIFY_RETRY_ATTEMPTS,
+            ManifestVerifyUncertainError,
+            _read_manifest_chashes_with_retry,
+        )
+
+        sleep_calls: list[float] = []
+
+        class _AlwaysFailsReader:
+            def get_manifest(self, doc_id):
+                raise RuntimeError("permanently down")
+
+            @property
+            def _db(self):
+                raise RuntimeError("no direct db handle in service mode")
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", lambda: _AlwaysFailsReader(),
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook._manifest_verify_retry_sleep",
+            lambda seconds: sleep_calls.append(seconds),
+        )
+        with pytest.raises(
+            ManifestVerifyUncertainError,
+            match=f"after {_MANIFEST_VERIFY_RETRY_ATTEMPTS} attempts",
+        ):
+            _read_manifest_chashes_with_retry("1.2.3", context="test")
+        assert len(sleep_calls) == _MANIFEST_VERIFY_RETRY_ATTEMPTS - 1, (
+            "no sleep before the FIRST attempt — only between attempts"
+        )
+
+
+# ── RDR-192 Step 3a fix-round 2, Decision (b): the opposite-ordering race ───
+# ── — B's delete lands BEFORE A's manifest write, A recovers ────────────────
+
+
+class TestWbfpw28OppositeOrderingRecovery:
+    def test_a_recovers_via_repiece_and_retry_after_bs_delete_lands_first(
+        self, catalog_env: Path, t2_service_env: str,
+    ) -> None:
+        """The mirror-image ordering of fix-round 1's Significant 3 race
+        (there: B's delete landed AFTER A's manifest write; here: B's
+        delete lands BEFORE A's manifest write even starts). Real
+        HttpVectorClient against the engine substrate (the in-memory
+        fake has no catalog awareness and cannot exhibit the REAL
+        fk_catalog_chunks_chunk violation this test needs — see
+        fix-round 1's TestWbfpw28GenuineInterleavedRace docstring for
+        why the fake can't stand in for the server side here either).
+
+        Deterministic by CONSTRUCTION, not a timing race: A's own chunk
+        write and catalog registration happen for real FIRST (mirroring
+        put_note_pieces's own ordering — t3.put always precedes the
+        manifest write), then B's FULL rollback (the same
+        rollback_uncataloged_chunk_write callers use, orphaned_chashes
+        union guard included) runs to completion against the SAME
+        chash, deleting it for real since nothing has manifested it
+        yet. Only THEN does A's manifest write run — genuinely racing a
+        chunk that is by now gone, the exact fk_catalog_chunks_chunk
+        violation Decision (b) exists to recover from."""
+        import nexus.db.http_vector_client as hvc
+        from nexus.catalog.store_hook import (
+            catalog_store_hook_tracked,
+            rollback_uncataloged_chunk_write,
+            store_put_manifest_direct_with_recovery,
+        )
+        from tests._catalog_fixture_ops import active_reader
+
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        collection = "knowledge__wbfpw28-opposite__bge-base-en-v15-768__v1"
+        content = "wbfpw28 opposite ordering race content"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        manifest_metadatas = [{
+            "chunk_text_hash": chash, "chunk_start_char": 0,
+            "chunk_end_char": len(content),
+        }]
+
+        # A's own chunk write + registration happen for real first —
+        # exactly put_note_pieces's ordering (t3.put before the manifest
+        # write).
+        client.upsert_chunks_with_embeddings(
+            collection, ids=[chash], documents=[content], embeddings=[],
+            metadatas=[{"title": "wbfpw28-opposite-a", "chunk_text_hash": chash}],
+        )
+        tumbler_a, _created = catalog_store_hook_tracked(
+            title="wbfpw28-opposite-a", doc_id=chash, collection_name=collection,
+        )
+
+        # B: registration forced to fail (simulated by calling the
+        # rollback directly with a blank catalog_doc_id, exactly what
+        # every producer does on a registration failure); its FULL
+        # rollback — union-guard check AND delete — completes entirely
+        # BEFORE A's manifest write is ever attempted.
+        outcome_b = rollback_uncataloged_chunk_write(
+            client, [chash], collection=collection, catalog_doc_id="",
+        )
+        assert outcome_b.deleted_count == 1, (
+            "precondition: B's delete actually removed the shared chunk "
+            "— nothing yet references it, since A has registered but "
+            "has not written a manifest"
+        )
+        from nexus.errors import CollectionNotFoundError  # noqa: PLC0415 — test-local, only needed for this precondition check
+        try:
+            still_present = client.get_collection(collection).get(ids=[chash], include=[]).get("ids") or []
+        except CollectionNotFoundError:
+            # The collection held exactly one chunk; deleting it can
+            # leave the collection itself unlisted — equally proof the
+            # chash is gone.
+            still_present = []
+        assert not still_present, (
+            "precondition: the chunk is genuinely gone before A's "
+            "manifest write is attempted"
+        )
+
+        repieced: list[str] = []
+
+        def _repiece(missing_chash: str) -> None:
+            repieced.append(missing_chash)
+            client.upsert_chunks_with_embeddings(
+                collection, ids=[missing_chash], documents=[content], embeddings=[],
+                metadatas=[{"title": "wbfpw28-opposite-a", "chunk_text_hash": missing_chash}],
+            )
+
+        # A's manifest write now genuinely races the just-deleted chunk
+        # — a REAL fk_catalog_chunks_chunk violation, not simulated.
+        store_put_manifest_direct_with_recovery(
+            tumbler_a, manifest_metadatas, collection=collection, repiece=_repiece,
+        )
+
+        assert repieced == [chash], (
+            "A must recover by re-putting exactly the chash a "
+            "concurrent rollback deleted"
+        )
+        assert chash in active_reader().get_chunk_chashes(tumbler_a), (
+            "A's manifest must reference the chash after recovery"
+        )
+        present = client.get_collection(collection).get(ids=[chash], include=[])
+        assert chash in (present.get("ids") or []), (
+            "the re-put chunk must be physically present after recovery"
+        )
+
+
+class TestWbfpw28RecoveryWordingTruthful:
+    """Decision (b)'s closing requirement: 'make the already-deleted-by-a-
+    concurrent-rollback case word itself truthfully if it still reaches
+    the error path' — pure unit coverage, no substrate needed."""
+
+    def test_repiece_failure_names_the_concurrent_rollback(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.catalog.store_hook import (
+            ManifestMissingChunkError, store_put_manifest_direct_with_recovery,
+        )
+
+        def _fails_with_missing_chunk(*a, **k):
+            raise ManifestMissingChunkError(
+                "manifest write for 1.2.3: a concurrent rollback deleted "
+                "1 of 1 chunk(s)…",
+                missing_chashes=frozenset({"e" * 64}),
+            )
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            _fails_with_missing_chunk,
+        )
+
+        def _repiece_fails(chash: str) -> None:
+            raise RuntimeError("t3.put failed: engine down")
+
+        # Matches text only the recovery path writes; the mocked
+        # ManifestMissingChunkError's own message already says "a concurrent
+        # rollback deleted", so matching that alone passes with recovery off.
+        with pytest.raises(
+            RuntimeError,
+            match="a concurrent rollback deleted chash e{16}.* re-putting it "
+                  "to recover also failed: t3.put failed: engine down",
+        ):
+            store_put_manifest_direct_with_recovery(
+                "1.2.3", [{"chunk_text_hash": "e" * 64}],
+                collection="knowledge__x", repiece=_repiece_fails,
+            )
+
+    def test_retry_failure_names_the_concurrent_rollback(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.catalog.store_hook import (
+            ManifestMissingChunkError, store_put_manifest_direct_with_recovery,
+        )
+
+        calls = {"n": 0}
+
+        def _first_missing_then_fails(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ManifestMissingChunkError(
+                    "manifest write for 1.2.3: a concurrent rollback "
+                    "deleted 1 of 1 chunk(s)…",
+                    missing_chashes=frozenset({"f" * 64}),
+                )
+            raise RuntimeError("still broken after retry")
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            _first_missing_then_fails,
+        )
+        with pytest.raises(RuntimeError, match="recovered from a concurrent rollback"):
+            store_put_manifest_direct_with_recovery(
+                "1.2.3", [{"chunk_text_hash": "f" * 64}],
+                collection="knowledge__x", repiece=lambda chash: None,
+            )
+
+
+class TestWbfpw28MissingChunkFkClassifier:
+    """The engine's class-23 409 body names the constraint in a JSON
+    field; the client's raise-for-status keeps only ``error`` in the
+    message. Measured against the real engine by
+    TestWbfpw28OppositeOrderingRecovery: the message is
+    ``HTTP 409: integrity constraint violation``, no constraint name."""
+
+    @staticmethod
+    def _status_error(body: dict) -> Exception:
+        import httpx
+
+        req = httpx.Request("POST", "http://engine/v1/catalog/manifest/write")
+        resp = httpx.Response(409, json=body, request=req)
+        return httpx.HTTPStatusError(
+            "HttpCatalogClient./v1/catalog/manifest/write failed: HTTP 409: "
+            "integrity constraint violation",
+            request=req, response=resp,
+        )
+
+    def test_constraint_named_only_in_the_response_body_is_classified(self) -> None:
+        from nexus.catalog.store_hook import _is_missing_chunk_fk_violation
+
+        exc = self._status_error({
+            "error": "integrity constraint violation", "sqlstate": "23503",
+            "constraint": "fk_catalog_chunks_chunk",
+        })
+        assert "fk_catalog_chunks_chunk" not in str(exc)
+        assert _is_missing_chunk_fk_violation(exc)
+
+    def test_wrapped_status_error_is_classified(self) -> None:
+        from nexus.catalog.store_hook import _is_missing_chunk_fk_violation
+
+        inner = self._status_error({
+            "error": "integrity constraint violation",
+            "constraint": "fk_catalog_chunks_chunk",
+        })
+        outer = RuntimeError("wrapped")
+        outer.__cause__ = inner
+        assert _is_missing_chunk_fk_violation(outer)
+
+    def test_other_constraint_is_not_classified(self) -> None:
+        from nexus.catalog.store_hook import _is_missing_chunk_fk_violation
+
+        exc = self._status_error({
+            "error": "integrity constraint violation", "sqlstate": "23503",
+            "constraint": "fk_catalog_chunks_doc",
+        })
+        assert not _is_missing_chunk_fk_violation(exc)

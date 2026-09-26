@@ -112,7 +112,7 @@ class TestVictimScenarioEndToEnd:
                    return_value=("9.9.9", True)), \
              patch("nexus.commands.store._single_chunk_manifest_metadata",
                    return_value=("cid", [{}])), \
-             patch("nexus.commands.store._store_put_manifest_direct",
+             patch("nexus.commands.store._store_put_manifest_direct_with_recovery",
                    return_value=None), \
              patch("nexus.hook_registry.HookRegistry"), \
              patch("nexus.hook_registry.install_default_hooks"):

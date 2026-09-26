@@ -230,9 +230,32 @@ def put_cmd(
     manifest_error = ""
     manifest_uncertain = ""
     if catalog_doc_id:
+        # RDR-192 Step 3a fix-round 2, Decision (b): a chunk this call
+        # just wrote can be deleted out from under it by a CONCURRENT
+        # rollback before this manifest write's own INSERT lands (the
+        # opposite-ordering race from fix-round 1's Significant 3) —
+        # _store_put_manifest_direct_with_recovery re-puts exactly the
+        # affected piece(s) and retries once; every other outcome
+        # (success, uncertain, an ordinary confirmed failure, or a
+        # second miss on the retry) reaches this try/except unchanged.
+        _chash_to_piece = {
+            m.get("chunk_text_hash", ""): pieces[i]
+            for i, m in enumerate(manifest_metadatas)
+        }
+
+        def _repiece_store_put(chash: str) -> None:
+            _put_note_pieces(
+                db, col_name, [_chash_to_piece[chash]],
+                title=title, tags=tags, category=category,
+                session_id=session_id, source_agent=agent,
+                ttl_days=ttl_days, catalog_doc_id=catalog_doc_id,
+            )
+
         try:
-            _store_put_manifest_direct(
-                catalog_doc_id, manifest_metadatas, collection=col_name)
+            _store_put_manifest_direct_with_recovery(
+                catalog_doc_id, manifest_metadatas, collection=col_name,
+                repiece=_repiece_store_put,
+            )
         except _ManifestVerifyUncertainError as manifest_exc:
             manifest_uncertain = str(manifest_exc)
             from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
@@ -372,7 +395,7 @@ from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook  
 # direct fail-loud manifest write for the store_put path.
 from nexus.catalog.store_hook import catalog_store_hook_tracked as _catalog_store_hook_tracked  # noqa: E402
 from nexus.catalog.store_hook import rollback_minted_catalog_entry as _rollback_minted_catalog_entry  # noqa: E402
-from nexus.catalog.store_hook import store_put_manifest_direct as _store_put_manifest_direct  # noqa: E402
+from nexus.catalog.store_hook import store_put_manifest_direct_with_recovery as _store_put_manifest_direct_with_recovery  # noqa: E402
 # RDR-192 Step 3a (nexus-wbfpw.28): shared rollback for a chunk that
 # gained no catalog manifest owner in this call.
 from nexus.catalog.store_hook import rollback_uncataloged_chunk_write as _rollback_uncataloged_chunk_write  # noqa: E402

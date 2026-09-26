@@ -4882,7 +4882,7 @@ def store_put(
             raise_if_oversized,
             rollback_minted_catalog_entry,
             rollback_uncataloged_chunk_write,
-            store_put_manifest_direct,
+            store_put_manifest_direct_with_recovery,
         )
         # nexus-spujb: a note longer than the collection model's token
         # window is written as several chunks under one catalog document;
@@ -4972,9 +4972,32 @@ def store_put(
         manifest_error = ""
         manifest_uncertain = ""
         if catalog_doc_id:
+            # RDR-192 Step 3a fix-round 2, Decision (b): a chunk this call
+            # just wrote can be deleted out from under it by a CONCURRENT
+            # rollback before this manifest write's own INSERT lands (the
+            # opposite-ordering race from fix-round 1's Significant 3) —
+            # store_put_manifest_direct_with_recovery re-puts exactly the
+            # affected piece(s) and retries once; every other outcome
+            # (success, uncertain, an ordinary confirmed failure, or a
+            # second miss on the retry) reaches this try/except unchanged.
+            _chash_to_piece = {
+                m.get("chunk_text_hash", ""): pieces[i]
+                for i, m in enumerate(manifest_metadatas)
+            }
+
+            def _repiece_store_put(chash: str) -> None:
+                put_note_pieces(
+                    t3, col_name, [_chash_to_piece[chash]],
+                    title=title, tags=tags, category=category,
+                    session_id=session_arg, source_agent=agent_arg,
+                    ttl_days=ttl_days, catalog_doc_id=catalog_doc_id,
+                )
+
             try:
-                store_put_manifest_direct(
-                    catalog_doc_id, manifest_metadatas, collection=col_name)
+                store_put_manifest_direct_with_recovery(
+                    catalog_doc_id, manifest_metadatas, collection=col_name,
+                    repiece=_repiece_store_put,
+                )
             except ManifestVerifyUncertainError as manifest_exc:
                 manifest_uncertain = str(manifest_exc)
                 from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target

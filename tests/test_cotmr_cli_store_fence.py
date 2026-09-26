@@ -131,7 +131,7 @@ class TestCliStorePutFence:
 
         title = "cotmr-cli-put-failed"
         monkeypatch.setattr(
-            store_mod, "_store_put_manifest_direct",
+            store_mod, "_store_put_manifest_direct_with_recovery",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("manifest write refused")),
         )
         result = _invoke_store_put(tmp_path, _local_t3(), title, "cli fence failure body")

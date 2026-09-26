@@ -577,10 +577,11 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             ManifestVerifyUncertainError,
             catalog_store_hook_tracked,
             describe_rollback_outcome,
+            put_note_pieces,
             rollback_minted_catalog_entry,
             rollback_uncataloged_chunk_write,
             single_chunk_manifest_metadata,
-            store_put_manifest_direct,
+            store_put_manifest_direct_with_recovery,
         )
         # single_chunk_manifest_metadata mirrors T3Database.put's natural-id
         # derivation (full sha256 hex per RDR-180) AND yields the manifest
@@ -642,9 +643,30 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         manifest_error = ""
         manifest_uncertain = ""
         if catalog_doc_id:
+            # RDR-192 Step 3a fix-round 2, Decision (b): the chunk this
+            # call just wrote can be deleted out from under it by a
+            # CONCURRENT rollback before this manifest write's own INSERT
+            # lands (the opposite-ordering race from fix-round 1's
+            # Significant 3) — store_put_manifest_direct_with_recovery
+            # re-puts it (single-chunk producer, so there is exactly one
+            # possible missing chash) and retries once; every other
+            # outcome reaches this try/except unchanged.
+            # put_note_pieces with one piece is exactly the t3.put above;
+            # the post-store chains fire once, below, after the manifest
+            # write (recovered or not) — same as the other three producers'
+            # repiece callbacks.
+            def _repiece_promote(chash: str) -> None:
+                put_note_pieces(
+                    t3, collection, [entry["content"]],
+                    title=entry["title"], tags=merged_tags,
+                    ttl_days=ttl_days, catalog_doc_id=catalog_doc_id,
+                )
+
             try:
-                store_put_manifest_direct(
-                    catalog_doc_id, manifest_metadatas, collection=collection)
+                store_put_manifest_direct_with_recovery(
+                    catalog_doc_id, manifest_metadatas, collection=collection,
+                    repiece=_repiece_promote,
+                )
             except ManifestVerifyUncertainError as manifest_exc:
                 manifest_uncertain = str(manifest_exc)
                 from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
