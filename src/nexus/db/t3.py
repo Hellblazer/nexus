@@ -95,6 +95,21 @@ def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
     return normalize(metadata, content_type=content_type)
 
 
+
+def _normalize_partial(metadata: dict, collection_name: str) -> dict:
+    """Normalise a PARTIAL update without injecting defaults (nexus-w94eo).
+
+    Keeps a normalised key when the caller sent it, or when ``normalize``
+    produced it with a value other than its default (a legacy-key rename).
+    Drops the defaults ``normalize`` fills in for keys the caller left out,
+    which a merging store would otherwise write over the stored values.
+    """
+    content_type = _infer_content_type(metadata, collection_name)
+    out = normalize(metadata, content_type=content_type)
+    defaults = normalize({}, content_type=content_type)
+    return {k: v for k, v in out.items()
+            if k in metadata or k not in defaults or defaults[k] != v}
+
 # nexus-o6aa.9.16: collection prefixes whose writes bypass the canonical
 # chunk schema. These are programmatically-populated collections that
 # carry their own metadata vocabulary — applying the canonical
@@ -999,9 +1014,17 @@ class T3Database:
         :func:`_bypass_canonical_schema`.
 
         ``delete_keys``: accepted but not honored, see :meth:`upsert_chunks`.
+
+        nexus-w94eo: an update is PARTIAL. The engine merges it into the
+        stored row, and so does the in-process store, so only the keys the
+        caller sent may reach it. ``normalize`` fills every missing key with
+        its default (``content_type`` becomes ``prose``), and writing those
+        defaults overwrote stored values the caller never touched, as the
+        PDF post-pass's enrichment-only write showed. A key ``normalize``
+        produced with a non-default value (a rename) is kept.
         """
         if not _bypass_canonical_schema(collection):
-            metadatas = [_normalize_for_write(m, collection) for m in metadatas]
+            metadatas = [_normalize_partial(m, collection) for m in metadatas]
             for m in metadatas:
                 validate(m)
         # See ``upsert_chunks`` for why ``strict=False`` here. Update
