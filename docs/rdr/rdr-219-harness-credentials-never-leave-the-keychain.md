@@ -373,14 +373,17 @@ started with the variable set (Claude removes it only from its own
 
 Host-side harness launches narrow the Claude part (nexus-wauo1.36): the tmux
 pane launches (`tests/e2e/lib.sh` `claude_start`, cc-validation scenarios 16
-and 28) and `claude_mcp_grant.sh` start Claude through
-`tests/e2e/lib/claude_fd_exec.sh`, which pipes the token into fd 3, unsets the
-variable and sets `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3`. Measured
-2026-09-26 on Claude Code 2.1.283: an interactive tmux session and `-p` both
-authenticate this way, Claude's exec environment then holds no token, and
-Claude removes the fd variable from its children too. With the variable set
-and the fd closed, Claude still uses `CLAUDE_CODE_OAUTH_TOKEN`, so a nested
-dispatch under the grant is unaffected. Container harnesses keep `docker run
+and 28) start Claude through `tests/e2e/lib/claude_fd_exec.sh`, which pipes
+the token into fd 3, unsets the variable and sets
+`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3`. `claude_mcp_grant.sh` does the
+same three steps inline, because its exec also carries the piped
+`--mcp-config`; `tests/test_claude_fd_exec.py` pins both. Measured 2026-09-26
+on Claude Code 2.1.283 (T2 `nexus_rdr/219-fd-route-measurements`): an
+interactive tmux session and `-p` both authenticate this way, and in the
+interactive session Claude's exec environment held no token. In `-p` only, a
+Bash-tool child saw neither the token nor the fd variable, and with the fd
+variable set and the fd closed Claude still used `CLAUDE_CODE_OAUTH_TOKEN`, so
+a nested dispatch under the grant is unaffected. Container harnesses keep `docker run
 -e`: the container's init process holds the token either way, so moving the
 Claude launch inside it would not narrow anything.
 
@@ -419,7 +422,8 @@ naming the helper:
   the amendment `NX_HARNESS_CLAUDE_OAUTH_TOKEN`): `$NAME` or `${NAME}`,
   `printenv NAME`, and python code reading it;
 - printing other processes' environments, which do hold the token (the tmux
-  server `run --` started, Claude's exec-time environment): `ps` with `-E` or
+  server `run --` started, and Claude's exec-time environment for a Claude not
+  started on the fd route; see the threat-model paragraph): `ps` with `-E` or
   BSD `e`, and reads of `/proc/<pid>/environ` (including bash's `$(< file)`),
   matched anywhere in the command, so `eval` and `bash -c` wrappers are
   covered.
