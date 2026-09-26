@@ -1005,6 +1005,18 @@ class _FakeManyReaderWriter:
         pass
 
 
+def _file_atomic_write_loop(cat, by_doc, collection, *, reader):
+    """nexus-4pj54: every batch in ``TestFastBranchSweep`` is a whole,
+    file-atomic write of each document, so it carries the producer's
+    completeness claim. Without it the dropped chashes are held for a
+    completion stamp instead of swept, and every delete assertion below
+    would see no delete at all (the ``assert_not_called`` ones vacuously)."""
+    _manifest_write_loop(
+        cat, by_doc, collection, reader=reader,
+        manifest_complete={d: "a" * 64 for d in by_doc},
+    )
+
+
 class TestFastBranchSweep:
     def test_jk88j_tripwire_fast_branch_sweeps_when_write_many_is_reachable(self) -> None:
         """THE tripwire. A doc whose batch drops a chash referenced by
@@ -1016,7 +1028,7 @@ class TestFastBranchSweep:
         col = MagicMock()
         with patch("nexus.db.make_t3", return_value=MagicMock(
                 get_collection=MagicMock(return_value=col))):
-            _manifest_write_loop(fake, _metas_by_doc({"doc-A": ["keep"]}), "coll", reader=fake)
+            _file_atomic_write_loop(fake, _metas_by_doc({"doc-A": ["keep"]}), "coll", reader=fake)
 
         assert fake.replaced_many, "the batch write must still happen"
         col.delete.assert_called_once()
@@ -1035,7 +1047,7 @@ class TestFastBranchSweep:
         col = MagicMock()
         with patch("nexus.db.make_t3", return_value=MagicMock(
                 get_collection=MagicMock(return_value=col))):
-            _manifest_write_loop(
+            _file_atomic_write_loop(
                 fake,
                 _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["X", "keep-b"]}),
                 "coll", reader=fake,
@@ -1054,7 +1066,7 @@ class TestFastBranchSweep:
         col = MagicMock()
         with patch("nexus.db.make_t3", return_value=MagicMock(
                 get_collection=MagicMock(return_value=col))):
-            _manifest_write_loop(
+            _file_atomic_write_loop(
                 fake,
                 _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["keep-b"]}),
                 "coll", reader=fake,
@@ -1076,7 +1088,7 @@ class TestFastBranchSweep:
         col = MagicMock()
         with patch("nexus.db.make_t3", return_value=MagicMock(
                 get_collection=MagicMock(return_value=col))):
-            _manifest_write_loop(
+            _file_atomic_write_loop(
                 fake,
                 _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["keep-b"]}),
                 "coll", reader=fake,
@@ -1098,7 +1110,7 @@ class TestFastBranchSweep:
         col = MagicMock()
         with patch("nexus.db.make_t3", return_value=MagicMock(
                 get_collection=MagicMock(return_value=col))):
-            _manifest_write_loop(fake, _metas_by_doc({"doc-A": ["keep"]}), "coll", reader=fake)
+            _file_atomic_write_loop(fake, _metas_by_doc({"doc-A": ["keep"]}), "coll", reader=fake)
 
         col.delete.assert_not_called()
 
@@ -1111,7 +1123,7 @@ class TestFastBranchSweep:
         col = MagicMock()
         with patch("nexus.db.make_t3", return_value=MagicMock(
                 get_collection=MagicMock(return_value=col))):
-            _manifest_write_loop(
+            _file_atomic_write_loop(
                 fake,
                 _metas_by_doc({"doc-A": ["a"], "doc-B": ["b"], "doc-C": ["c"]}),
                 "coll", reader=fake,
@@ -1131,7 +1143,7 @@ class TestFastBranchSweep:
         col = MagicMock()
         with patch("nexus.db.make_t3", return_value=MagicMock(
                 get_collection=MagicMock(return_value=col))):
-            _manifest_write_loop(
+            _file_atomic_write_loop(
                 fake,
                 _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["keep-b"]}),
                 "coll", reader=fake,
