@@ -19,15 +19,18 @@ import java.util.regex.Pattern;
  * SQL comment (never actually executed) would all still pass a substring
  * check unchanged.
  *
- * <p>This extractor strips SQL comments first ({@code --} to end of line,
- * plus slash-star/star-slash block comments), then regex-matches every
- * {@code set_config('<name>', '<value>', true)} call IN SOURCE ORDER, and reduces
- * them to the LAST-OCCURRENCE-WINS map Postgres itself would apply at
- * runtime (a later {@code set_config} call for the same name overrides an
- * earlier one within the same transaction), plus the total call COUNT. A
- * caller can therefore assert both "this is the value that actually takes
- * effect" (exclusivity + precedence) and "no stray extra or missing call
- * site" (reachability), none of which a substring check can distinguish.
+ * <p>This extractor strips SQL comments first (a QUOTE-AWARE scan --
+ * {@link #stripComments} -- so a {@code --} or block-comment starter
+ * sitting inside a single-quoted string literal is never mistaken for a
+ * real comment; round-4 review, critic Significant), then regex-matches
+ * every {@code set_config('<name>', '<value>', true)} call IN SOURCE
+ * ORDER, and reduces them to the LAST-OCCURRENCE-WINS map Postgres itself
+ * would apply at runtime (a later {@code set_config} call for the same
+ * name overrides an earlier one within the same transaction), plus the
+ * total call COUNT. A caller can therefore assert both "this is the value
+ * that actually takes effect" (exclusivity + precedence) and "no stray
+ * extra or missing call site" (reachability), none of which a substring
+ * check can distinguish.
  */
 public final class HnswSettingsExtractor {
 
@@ -62,14 +65,6 @@ public final class HnswSettingsExtractor {
         "enable_seqscan", "off",
         "enable_sort", "off");
 
-    // DOTALL so a block comment spanning multiple lines is stripped whole;
-    // reluctant (.*?) so two SEPARATE block comments in one body don't
-    // collapse into one match spanning the real code between them.
-    private static final Pattern BLOCK_COMMENT = Pattern.compile("/\\*.*?\\*/", Pattern.DOTALL);
-    // A line comment runs from `--` to the next newline (or end of
-    // string); matched AFTER block-comment stripping so a `--` sitting
-    // inside a block comment is not double-processed.
-    private static final Pattern LINE_COMMENT = Pattern.compile("--[^\\n]*");
     private static final Pattern SET_CONFIG = Pattern.compile(
         "set_config\\(\\s*'([^']+)'\\s*,\\s*'([^']*)'\\s*,\\s*true\\s*\\)");
 
@@ -81,8 +76,7 @@ public final class HnswSettingsExtractor {
      * which would then swallow everything after it, including real code.
      */
     public static Extraction extract(String rawProsrc) {
-        String stripped = BLOCK_COMMENT.matcher(rawProsrc).replaceAll(" ");
-        stripped = LINE_COMMENT.matcher(stripped).replaceAll(" ");
+        String stripped = stripComments(rawProsrc);
 
         List<Call> calls = new ArrayList<>();
         Map<String, String> effective = new LinkedHashMap<>();
@@ -94,5 +88,94 @@ public final class HnswSettingsExtractor {
             effective.put(name, value); // last-occurrence-wins: a later put() overwrites
         }
         return new Extraction(effective, calls);
+    }
+
+    /**
+     * Round-4 review (critic, Significant): a plain regex strip of a line
+     * comment or a block comment is NOT quote-aware, so it also strips the
+     * {@code --} inside every plain single-quoted string literal that
+     * happens to contain one -- {@code assign_from_chashes}'s own {@code
+     * RAISE EXCEPTION} message ({@code '... %% -- register it first via
+     * ...'}, 12 occurrences across taxonomy-018/020) is exactly such a
+     * literal. Harmless only by the accident that no real {@code
+     * set_config} pin shares that literal's line; a future body that DID
+     * would silently lose the pin to a corrupted comment strip.
+     *
+     * <p>This is a small single-pass scanner instead: it tracks whether
+     * the cursor is INSIDE a single-quoted string (handling Postgres's
+     * {@code ''} doubled-quote escape, so a {@code '} inside a literal
+     * does not end the string early) and treats a comment starter as a
+     * comment ONLY when outside a string. A quote character found while
+     * scanning a comment is NOT special -- a comment runs to end-of-line
+     * or its closer regardless of what it contains, exactly like
+     * Postgres's own lexer.
+     *
+     * <p>DOLLAR-QUOTING (Postgres's {@code $$...$$} / {@code $tag$...$tag$}
+     * string form) is deliberately NOT handled: it is not needed for these
+     * bodies. {@code cross_preview_<dim>} and {@code assign_from_chashes_
+     * <dim>} use ordinary single-quoted literals throughout (visible in
+     * their own changelog SQL); dollar-quoting in Postgres is used to
+     * nest a string containing unescaped single quotes, or to write a
+     * function body without doubling every quote in it, neither of which
+     * applies to a `pg_proc.prosrc` value being scanned FROM THE OUTSIDE
+     * (prosrc is already the un-dollar-quoted body text; a NESTED
+     * dollar-quoted string inside a plpgsql body, e.g. for a dynamic
+     * {@code EXECUTE}, would need this handled -- it would misparse quote
+     * state from that point on -- but neither function does that).
+     */
+    private static String stripComments(String src) {
+        StringBuilder out = new StringBuilder(src.length());
+        int n = src.length();
+        int i = 0;
+        boolean inString = false;
+        while (i < n) {
+            char c = src.charAt(i);
+            if (inString) {
+                if (c == '\'') {
+                    if (i + 1 < n && src.charAt(i + 1) == '\'') {
+                        out.append("''"); // escaped quote: stays inside the string
+                        i += 2;
+                    } else {
+                        out.append(c); // closing quote
+                        inString = false;
+                        i++;
+                    }
+                } else {
+                    out.append(c);
+                    i++;
+                }
+                continue;
+            }
+            // Outside a string: a comment starter takes priority over
+            // entering a new string, since neither comment form can
+            // itself open one.
+            if (c == '-' && i + 1 < n && src.charAt(i + 1) == '-') {
+                int j = i + 2;
+                while (j < n && src.charAt(j) != '\n') {
+                    j++;
+                }
+                out.append(' ');
+                i = j; // leaves the newline itself (if any) for the next iteration
+                continue;
+            }
+            if (c == '/' && i + 1 < n && src.charAt(i + 1) == '*') {
+                int j = i + 2;
+                while (j + 1 < n && !(src.charAt(j) == '*' && src.charAt(j + 1) == '/')) {
+                    j++;
+                }
+                i = (j + 1 < n) ? j + 2 : n; // unterminated: consume to end
+                out.append(' ');
+                continue;
+            }
+            if (c == '\'') {
+                inString = true;
+                out.append(c);
+                i++;
+                continue;
+            }
+            out.append(c);
+            i++;
+        }
+        return out.toString();
     }
 }

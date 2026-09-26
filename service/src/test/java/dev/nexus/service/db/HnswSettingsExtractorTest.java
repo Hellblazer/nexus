@@ -111,4 +111,82 @@ class HnswSettingsExtractorTest {
         assertThat(x.effective()).isEmpty();
         assertThat(x.calls()).isEmpty();
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Round-4 review (critic, Significant): the comment stripper must be
+    // QUOTE-AWARE. A plain regex strip of `--`/block comments also strips
+    // a `--` or `/*` sitting inside an ordinary single-quoted string
+    // literal -- assign_from_chashes' own RAISE EXCEPTION message
+    // ('... %% -- register it first via ...', 12 occurrences across
+    // taxonomy-018/020) is exactly such a literal, harmless today only
+    // because no real set_config pin shares that literal's line.
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void quoteAware_aDashDashInsideAStringLiteralDoesNotSwallowTheRestOfTheLine() {
+        // The naive (pre-round-4) regex strip would see the `--` inside
+        // the quoted message and treat EVERYTHING from there to end of
+        // line as a comment -- including the real set_config call that
+        // follows it on the SAME line.
+        String sameLine =
+            "RAISE EXCEPTION 'collection %% is not registered -- register it first';\n"
+            + "PERFORM set_config('hnsw.ef_search', '400', true);\n";
+        HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(sameLine);
+        assertThat(x.effective())
+            .as("the set_config call after the quoted '--' must still be found -- a"
+                + " quote-UNAWARE stripper would have swallowed it as part of a fake"
+                + " comment starting inside the string literal")
+            .containsEntry("hnsw.ef_search", "400")
+            .hasSize(1);
+    }
+
+    @Test
+    void quoteAware_aSlashStarInsideAStringLiteralDoesNotSwallowTheRestOfTheLine() {
+        String sameLine =
+            "RAISE EXCEPTION 'malformed /* input */ detected here';\n"
+            + "PERFORM set_config('enable_sort', 'off', true);\n";
+        HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(sameLine);
+        assertThat(x.effective())
+            .as("a `/*` inside a string literal must not be treated as a block-comment"
+                + " opener -- the real set_config call after the string must still be found")
+            .containsEntry("enable_sort", "off")
+            .hasSize(1);
+    }
+
+    @Test
+    void quoteAware_aDoubledQuoteEscapeInsideAStringDoesNotEndTheStringEarly() {
+        // Postgres's '' doubled-quote escape represents a literal ' inside
+        // a string. A scanner that ends the string at the FIRST quote
+        // would then misparse everything after it, including a `--` that
+        // is actually still inside the (longer) real string.
+        String withEscapedQuote =
+            "RAISE EXCEPTION 'it''s not registered -- register it first';\n"
+            + "PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);\n";
+        HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(withEscapedQuote);
+        assertThat(x.effective())
+            .containsEntry("hnsw.iterative_scan", "strict_order")
+            .hasSize(1);
+    }
+
+    @Test
+    void quoteAware_theRealAssignFromChashesRaiseMessageDoesNotCorruptExtraction() {
+        // The EXACT shape of assign_from_chashes' own message (taxonomy-018's
+        // header names it explicitly), verbatim, immediately followed by
+        // the real settings block -- reproduces the round-4 finding
+        // directly against production's own literal text.
+        String realShape =
+            "IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections) THEN\n"
+            + "    RAISE EXCEPTION 'assign_from_chashes_1024: collection %% is not"
+            + " registered for tenant %% -- register it first via POST"
+            + " /v1/catalog/collections/upsert', p_collection, current_setting('nexus.tenant', true)"
+            + " USING ERRCODE = 'foreign_key_violation';\n"
+            + "END IF;\n"
+            + "PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);\n"
+            + "PERFORM set_config('hnsw.ef_search', '400', true);\n"
+            + "PERFORM set_config('enable_seqscan', 'off', true);\n"
+            + "PERFORM set_config('enable_sort', 'off', true);\n";
+        HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(realShape);
+        assertThat(x.effective()).isEqualTo(HnswSettingsExtractor.EXPECTED_HNSW_SETTINGS);
+        assertThat(x.calls()).hasSize(4);
+    }
 }

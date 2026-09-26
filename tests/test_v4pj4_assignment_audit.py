@@ -452,14 +452,21 @@ def test_probe_collection_recovers_on_retry_after_a_first_attempt_mismatch(monke
 
 
 def test_a_centroid_change_in_an_unrelated_dim_does_not_flag_this_collection() -> None:
-    """Round-3 review (Minor): ``get_foreign`` returns every OTHER
-    collection's centroids across every embedding dim a tenant's
-    collections use, not just the sampled source collection's own dim
-    (here, dim 2 -- the fixture's chunk vector is ``[1.0, 0.0]``). A
-    3-dim centroid appearing between this probe's before and after reads
-    is a change in a dim this probe never reads at all, and must not flag
-    ``changed_during_probe`` for a collection nothing actually raced
-    against.
+    """Round-3 review (Minor), tightened by round-4 review (Minor: the
+    first version was vacuous -- its one-step unrelated-dim change
+    stabilized by the retry EVEN WITHOUT dim scoping, so it passed for the
+    wrong reason). ``get_foreign`` returns every OTHER collection's
+    centroids across every embedding dim a tenant's collections use, not
+    just the sampled source collection's own dim (here, dim 2 -- the
+    fixture's chunk vector is ``[1.0, 0.0]``).
+
+    This fixture's dim-2 topic (10) is CONSTANT across every call, so the
+    DIM-SCOPED comparison matches on the very first attempt (no retry
+    needed) -- but its dim-3 topic gets a NEW id on every single call, so
+    an UNSCOPED comparison would never stabilize across ANY two calls,
+    including the retry's, and would report ``changed_during_probe=True``.
+    The two predictions genuinely diverge on this fixture, so it actually
+    exercises the scoping rather than merely being consistent with it.
     """
 
     class _Col:
@@ -474,21 +481,20 @@ def test_a_centroid_change_in_an_unrelated_dim_does_not_flag_this_collection() -
             return {"a" * 64: [1.0, 0.0]}  # dim 2
 
     class _Centroid:
-        """dim-2 topic 10 is STABLE across every call; a dim-3 topic (99)
-        appears only from the second call onward -- an unrelated-dim
-        change that must be invisible to the dim-scoped comparison."""
+        """dim-2 topic 10 is STABLE across every call. dim-3 gets a BRAND
+        NEW topic id on every single call (900 + call number) -- so an
+        unscoped comparison never sees the same dim-3 snapshot twice, on
+        the first attempt OR the retry, and would never stabilize."""
 
         def __init__(self):
             self.calls = 0
 
         def get_foreign(self, name):
             self.calls += 1
-            embeddings = [[1.0, 0.0]]
-            metadatas = [{"topic_id": 10}]
-            if self.calls > 1:
-                embeddings.append([0.0, 0.0, 1.0])
-                metadatas.append({"topic_id": 99})
-            return {"embeddings": embeddings, "metadatas": metadatas}
+            return {
+                "embeddings": [[1.0, 0.0], [0.0, 0.0, 1.0]],
+                "metadatas": [{"topic_id": 10}, {"topic_id": 900 + self.calls}],
+            }
 
     class _Taxo:
         _centroid = _Centroid()
