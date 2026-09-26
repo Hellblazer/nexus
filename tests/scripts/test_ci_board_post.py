@@ -237,5 +237,9 @@ def test_run_cancelled_flag_reaches_the_verdict(monkeypatch) -> None:
 def test_verdict_job_passes_the_runs_cancelled_state() -> None:
     wf = (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml").read_text()
     job = wf[wf.index("  board-verdict:"):]
-    assert "RUN_CANCELLED: ${{ cancelled() }}" in job
+    # cancelled() is legal only in an if: (actionlint; run 36269529170 failed
+    # as a workflow file error when it sat in a step env).
+    assert "RUN_CANCELLED: ${{ cancelled() }}" not in job
+    assert "if: cancelled()" in job
+    assert "RUN_CANCELLED: ${{ steps.run-state.outputs.cancelled || 'false' }}" in job
     assert '--run-cancelled "$RUN_CANCELLED"' in job
