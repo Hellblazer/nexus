@@ -2011,24 +2011,32 @@ def get_superseded_sweep_stats() -> dict:
 
     ``{"swept": int, "skipped": [{"doc_id": str, "collection": str,
     "reason": str}, ...], "deferred_discarded": int,
-    "deferred_pending": int}``. ``swept`` is the total count of T3 rows
-    actually deleted; ``skipped`` names every run where the sweep could
-    not complete (and therefore may have left superseded rows searchable)
-    — never silent. ``deferred_discarded`` counts documents whose deferred
-    sweep (nexus-4pj54) was dropped because their run failed or was
-    fenced; ``deferred_pending`` is the number of documents still holding
-    deferred candidates right now (a run in flight, or one that died
-    without reaching either fence call). Both name documents whose
+    "deferred_pending": int, "deferred_pending_doc_ids": [str, ...]}``.
+    ``swept`` is the total count of T3 rows actually deleted; ``skipped``
+    names every run where the sweep could not complete (and therefore may
+    have left superseded rows searchable) — never silent.
+    ``deferred_discarded`` counts documents whose deferred sweep
+    (nexus-4pj54) was dropped because their run failed or was fenced;
+    ``deferred_pending`` counts documents stashed since the last reset
+    that still hold deferred candidates (a run in flight, one that died
+    without reaching either fence call, or one whose completion-stamp
+    write failed in transport), and ``deferred_pending_doc_ids`` names
+    them. An entry held from before the last reset is not counted: it
+    belongs to an earlier run or file. Both name documents whose
     superseded rows may remain in T3. Snapshot copy.
     """
     with _pending_sweep_lock:
-        pending = len(_PENDING_SWEEP_CANDIDATES)
+        pending_ids = sorted(
+            d for d in _PENDING_SWEEP_CANDIDATES
+            if d in _PENDING_SWEEP_STASHED_SINCE_RESET
+        )
     with _superseded_sweep_stats_lock:
         return {
             "swept": _SUPERSEDED_SWEEP_SWEPT_TOTAL,
             "skipped": [dict(d) for d in _SUPERSEDED_SWEEP_SKIPS],
             "deferred_discarded": _SUPERSEDED_SWEEP_DEFERRED_DISCARDED,
-            "deferred_pending": pending,
+            "deferred_pending": len(pending_ids),
+            "deferred_pending_doc_ids": pending_ids,
         }
 
 
@@ -2036,8 +2044,11 @@ def reset_superseded_sweep_stats() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
     run, mirroring ``reset_manifest_write_failures``). Does not touch the
     pending deferred-sweep entries themselves: those are live state, not
-    counters."""
+    counters. It only forgets which of them this run stashed, so the next
+    run's pending stat does not inherit them."""
     global _SUPERSEDED_SWEEP_SWEPT_TOTAL, _SUPERSEDED_SWEEP_DEFERRED_DISCARDED
+    with _pending_sweep_lock:
+        _PENDING_SWEEP_STASHED_SINCE_RESET.clear()
     with _superseded_sweep_stats_lock:
         _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
         _SUPERSEDED_SWEEP_SKIPS.clear()
@@ -2334,11 +2345,21 @@ def _apply_combined_write_response(
 # today); the automatic reaper is planned in RDR-192 Phase 3 (nexus-2x9xa,
 # OPEN) and is not built.
 #
-# Concurrent runs on one doc_id share this entry (keyed on doc_id alone):
-# the same cross-fire shape as nexus-11gh6 / nexus-wxjr6, covered by
-# index-run epoch fencing rather than by anything here.
+# Concurrent runs on one doc_id in one process share this entry (keyed on
+# doc_id alone, no run epoch). Epoch fencing does NOT cover it: the fence
+# guards pipeline-row writes, and the uploader stashes (via fire_batch)
+# BEFORE its epoch-fenced mark_uploaded, so a superseded run can stash one
+# more batch and then, on discovering the fence, discard the MERGED entry,
+# the newer owner's candidates included. The newer owner's completion then
+# finds nothing to sweep. Accepted residual, safe direction only: rows are
+# left for ``nx t3 gc``, never wrongly deleted.
 _pending_sweep_lock = threading.Lock()
 _PENDING_SWEEP_CANDIDATES: dict[str, tuple[str, set[str]]] = {}
+# doc_ids stashed since the last ``reset_superseded_sweep_stats``. The
+# pending stat reports only these, so an entry a much earlier file left held
+# (a transport failure on its completion stamp) is not re-reported against
+# every later file of a ``--dir`` batch. Guarded by ``_pending_sweep_lock``.
+_PENDING_SWEEP_STASHED_SINCE_RESET: set[str] = set()
 
 
 def _stash_pending_sweep(doc_id: str, collection: str, dropped: set[str]) -> None:
@@ -2351,6 +2372,7 @@ def _stash_pending_sweep(doc_id: str, collection: str, dropped: set[str]) -> Non
     with _pending_sweep_lock:
         _, prev = _PENDING_SWEEP_CANDIDATES.get(doc_id, (collection, set()))
         _PENDING_SWEEP_CANDIDATES[doc_id] = (collection, prev | dropped)
+        _PENDING_SWEEP_STASHED_SINCE_RESET.add(doc_id)
 
 
 def sweep_deferred_superseded_vectors(doc_id: str) -> None:

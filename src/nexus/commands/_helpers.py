@@ -427,6 +427,9 @@ def _emit_superseded_swept_info() -> bool:
             f"and {pending} unfinished document(s); old T3 rows may remain "
             f"until 'nx t3 gc -c COLLECTION' (nexus-4pj54)"
         )
+        pending_ids = stats.get("deferred_pending_doc_ids", [])
+        if pending_ids:
+            click.echo(f"    unfinished: {', '.join(pending_ids)}")
     return False
 
 

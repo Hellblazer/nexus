@@ -608,3 +608,46 @@ def test_run_summary_names_discarded_and_pending_sweeps(capsys) -> None:
     assert "not run for 1 failed/fenced and 1 unfinished document(s)" in out
     assert "t3 gc -c COLLECTION" in out
     reset_superseded_sweep_stats()
+
+
+# ── Pending attribution is per run/file (review round 2) ─────────────────────
+
+
+def test_pending_held_from_before_a_reset_is_not_reported_against_the_next_file(capsys) -> None:
+    """``reset_identity_drop_collectors`` resets once PER FILE in a --dir
+    batch. An entry an earlier file left held (its completion stamp failed
+    in transport) must not show up as "unfinished" in every later file's
+    summary; a document the current file stashed and left held must, by
+    name."""
+    from nexus.commands._helpers import _emit_superseded_swept_info
+
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep("doc-file-3", "coll", {"old0"})
+    assert get_superseded_sweep_stats()["deferred_pending_doc_ids"] == ["doc-file-3"]
+
+    reset_superseded_sweep_stats()  # the per-file reset before file 4
+    stats = get_superseded_sweep_stats()
+    assert stats["deferred_pending"] == 0
+    assert stats["deferred_pending_doc_ids"] == []
+    assert "doc-file-3" in _PENDING_SWEEP_CANDIDATES, "reset must not drop live state"
+    _emit_superseded_swept_info()
+    assert "unfinished" not in capsys.readouterr().out
+
+    _stash_pending_sweep("doc-file-4", "coll", {"old1"})
+    _emit_superseded_swept_info()
+    out = capsys.readouterr().out
+    assert "0 failed/fenced and 1 unfinished document(s)" in out
+    assert "unfinished: doc-file-4" in out
+    assert "doc-file-3" not in out
+    reset_superseded_sweep_stats()
+
+
+def test_restashing_an_earlier_files_held_doc_reports_it_again() -> None:
+    """Re-indexing the stuck document in a later file makes it this file's
+    work again: it counts if it is still held at that file's end."""
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep("doc-A", "coll", {"old0"})
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep("doc-A", "coll", {"old1"})
+    assert get_superseded_sweep_stats()["deferred_pending_doc_ids"] == ["doc-A"]
+    reset_superseded_sweep_stats()
