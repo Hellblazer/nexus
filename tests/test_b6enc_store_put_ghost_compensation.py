@@ -2214,6 +2214,43 @@ class TestK54nkRollbackLiveNoteGuard:
         assert after[0].chunk_count == 0
         assert _manifest_rows(catalog_env, tumbler) == []
 
+    def test_stamp_restore_declines_when_a_concurrent_reput_restamped(
+        self, catalog_env: Path,
+    ) -> None:
+        """Round-3 critique: the compare-then-write restore must decline
+        when the document's current stamp is no longer the one this call
+        wrote (a concurrent re-put landed a newer identity), and must
+        restore when it still is. Both branches, same fixture shape."""
+        from nexus.catalog.store_hook import _restore_pre_call_stamp
+
+        collection = self._COLLECTION
+        old_chash = "a1" * 32
+        ours_chash = "b2" * 32
+        newer_chash = "c3" * 32
+
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        raced = str(cat.register(
+            owner, "k54nk-cas-declines", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": newer_chash},
+        ))
+        still_ours = str(cat.register(
+            owner, "k54nk-cas-restores", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": ours_chash},
+        ))
+
+        _restore_pre_call_stamp(raced, old_chash, ours_chash)
+        _restore_pre_call_stamp(still_ours, old_chash, ours_chash)
+
+        assert (documents_by_title("k54nk-cas-declines")[0].meta or {}).get(
+            "doc_id") == newer_chash, (
+            "a concurrent re-put's newer stamp must never be overwritten"
+        )
+        assert (documents_by_title("k54nk-cas-restores")[0].meta or {}).get(
+            "doc_id") == old_chash, (
+            "a stamp still equal to this call's own must be restored"
+        )
+
     def test_repeated_identical_failure_restores_pre_call_stamp(
         self, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
