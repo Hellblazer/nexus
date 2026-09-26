@@ -576,6 +576,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
             catalog_store_hook_tracked,
             rollback_minted_catalog_entry,
+            rollback_uncataloged_chunk_write,
             single_chunk_manifest_metadata,
             store_put_manifest_direct,
         )
@@ -660,6 +661,26 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                     exc_info=True,
                 )
 
+        # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26:
+        # rollback, not a marker column): a blank catalog_doc_id
+        # (registration failed above) or a manifest write that raised
+        # each leave the chunk t3.put just wrote with no manifest owner
+        # — the census's no-owner / legacy-unmanifested shape. Delete it
+        # (only if no other live document's manifest references it) and
+        # fail loud, deliberately BEFORE the --remove branch and before
+        # any post-store hook chain ever sees this chunk — never delete
+        # the T2 source of a promotion whose catalog leg failed.
+        if not catalog_doc_id or manifest_error:
+            reason = manifest_error or "catalog registration failed"
+            rollback_uncataloged_chunk_write(
+                t3, [doc_id], collection=collection, catalog_doc_id=catalog_doc_id,
+            )
+            raise click.ClickException(
+                f"could not catalog promoted entry in {collection}: "
+                f"{reason}. The chunk was rolled back — nothing was "
+                f"stored; retry is safe."
+            )
+
         # nexus-9099: fire post-store chains so the promoted T3 row
         # reaches chash_index / taxonomy / aspect queue. RDR-095
         # symmetric-fire; this path was missed by the original commit.
@@ -682,15 +703,9 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
 
-        if manifest_error:
-            # Deliberately BEFORE the --remove branch: never delete the
-            # T2 source of a promotion whose catalog leg failed.
-            raise click.ClickException(
-                f"promoted to T3 ({doc_id} in {collection}) but NOT "
-                f"cataloged: {manifest_error}. Catalog row {catalog_doc_id} "
-                f"may show chunk_count=0; retry the promote with the same "
-                f"entry (idempotent dedup makes retry safe)."
-            )
+        # RDR-192 Step 3a: a manifest failure already raised above (with
+        # the chunk rolled back) before any of this post-store work ran
+        # — manifest_error is always empty here.
 
         if remove:
             _delete_with_taxonomy_cascade(

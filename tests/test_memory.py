@@ -292,6 +292,23 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
             ),
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", return_value=mt3),
+            # RDR-192 Step 3a (nexus-wbfpw.28): a blank/failed catalog
+            # registration is now a fail-loud rollback, not a tolerated
+            # degraded success — this helper's "fake-key" creds make a
+            # REAL registration attempt 400/401 against the test engine,
+            # which used to be silently swallowed. These tests are about
+            # promote's T3-put/remove/TTL behavior, not catalog wiring
+            # (that contract is pinned in test_b6enc_store_put_ghost_
+            # compensation.py's TestPromote* classes), so give it a
+            # working stand-in instead of a real registration attempt.
+            patch(
+                "nexus.catalog.store_hook.catalog_store_hook_tracked",
+                return_value=("9.9.9", True),
+            ),
+            patch(
+                "nexus.catalog.store_hook.store_put_manifest_direct",
+                return_value=None,
+            ),
         ):
             result = runner.invoke(main, args)
     finally:

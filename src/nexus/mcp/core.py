@@ -4808,8 +4808,8 @@ def store_put(
 
     Returns "Stored: <id> -> <collection>" (for a split note, the first
     chunk's id, plus "(N chunks, split to the embedding model's token
-    window)"), or an explicit error naming what did not land (e.g. content
-    stored but not cataloged).
+    window)"), or an explicit error — a failed catalog/manifest write
+    rolls the chunk back, never a partial "Stored:".
 
     Constraints:
     - `content` is capped at 16,384 UTF-8 bytes (~3,000-4,000 words).
@@ -4879,6 +4879,7 @@ def store_put(
             put_note_pieces,
             raise_if_oversized,
             rollback_minted_catalog_entry,
+            rollback_uncataloged_chunk_write,
             store_put_manifest_direct,
         )
         # nexus-spujb: a note longer than the collection model's token
@@ -4960,9 +4961,8 @@ def store_put(
         # nexus-b6enc C3 / F2: the manifest leg must not ride the
         # swallowing fire_batch chain for this producer — write it
         # directly and verify it landed. Failure is captured (not
-        # raised) so the remaining post-store consumers still fire; the
-        # final result then reports "stored but NOT cataloged" instead
-        # of a bare "Stored:".
+        # raised) so the RDR-192 Step 3a rollback below runs before the
+        # result is returned.
         manifest_error = ""
         if catalog_doc_id:
             try:
@@ -4990,6 +4990,29 @@ def store_put(
                     error=manifest_error[:300],
                     exc_info=True,
                 )
+
+        # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26:
+        # rollback, not a marker column): a blank catalog_doc_id (the
+        # registration attempt above failed) or a manifest write that
+        # raised each leave the chunk put_note_pieces just wrote with no
+        # manifest owner — the census's no-owner / legacy-unmanifested
+        # shape. Delete it (only if no other live document's manifest
+        # references it — see the helper's own race-guard docstring) and
+        # return an explicit error before any post-store consumer
+        # (cache invalidation, auto-link, the hook chains) ever sees this
+        # chunk. Never a bare "Stored:", never "stored but NOT cataloged"
+        # with the chunk left behind.
+        if not catalog_doc_id or manifest_error:
+            reason = manifest_error or "catalog registration failed"
+            rollback_uncataloged_chunk_write(
+                t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+            )
+            return (
+                f"Error: store_put could not catalog content in {col_name}: "
+                f"{reason}. The chunk was rolled back — nothing was "
+                f"stored; retry is safe."
+            )
+
         # A committed write makes any cached page burst stale — drop it so a
         # same-identity search re-fetches (batch-f1655f55 critique).
         _page_cache_invalidate()
@@ -5111,21 +5134,9 @@ def store_put(
             tool="store_put", tier="T3",
             target_title=title or doc_id,
         )
-        if manifest_error:
-            # nexus-b6enc C3: never a bare "Stored:" when the catalog
-            # manifest did not land — the content IS in T3 (recoverable
-            # by doc_id) but catalog-aware consumers will not see it.
-            # CRE Imp 3: do NOT suggest 'nx catalog reconcile' here —
-            # heal_manifest_gaps' candidate filter (chunk_count>0 OR
-            # meta.content_hash) excludes exactly these rows, making it
-            # a verified no-op for this failure mode. Retry IS effective
-            # (by_doc_id dedup + idempotent t3.put).
-            return (
-                f"Error: stored to T3 ({doc_id} in {col_name}) but NOT "
-                f"cataloged: {manifest_error}. Catalog row {catalog_doc_id} "
-                f"may show chunk_count=0; retry store_put with the same "
-                f"content (idempotent dedup makes retry safe)."
-            )
+        # RDR-192 Step 3a: a manifest failure already returned above
+        # (with the chunk rolled back) before any of this post-store
+        # work ran — manifest_error is always empty here.
         split_note = (
             f" ({len(pieces)} chunks, split to the embedding model's token window)"
             if len(pieces) > 1 else ""

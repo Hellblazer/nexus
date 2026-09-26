@@ -413,6 +413,7 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         note_pieces,
         put_note_pieces,
         raise_if_oversized,
+        rollback_uncataloged_chunk_write,
         store_put_manifest_direct,
     )
     from nexus.doc_indexer import _fence_begin, _fence_fail  # noqa: PLC0415 — deferred; test patch target
@@ -453,14 +454,34 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
             from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — deferred, sibling module
             rollback_minted_catalog_entry(catalog_doc_id, original_error=str(put_exc))
         raise
-    if catalog_doc_id:
-        try:
-            store_put_manifest_direct(
-                catalog_doc_id, manifest_metadatas, collection=col_name,
-            )
-        except Exception as manifest_exc:
-            _fence_fail(catalog_doc_id, str(manifest_exc))
-            raise
+    # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26: rollback,
+    # not a marker column): a blank catalog_doc_id (registration failed
+    # above) leaves the chunk put_note_pieces just wrote with no catalog
+    # owner at all — the census's no-owner shape. Roll it back and fail
+    # this record loud (import_bundle's per-record catch already
+    # attributes the failure without aborting the rest of the import).
+    if not catalog_doc_id:
+        rollback_uncataloged_chunk_write(
+            t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+        )
+        raise RuntimeError(
+            f"could not catalog {rec.get('title', '')!r} in {col_name}: "
+            f"catalog registration failed. The chunk was rolled back — "
+            f"nothing was stored."
+        )
+    try:
+        store_put_manifest_direct(
+            catalog_doc_id, manifest_metadatas, collection=col_name,
+        )
+    except Exception as manifest_exc:
+        _fence_fail(catalog_doc_id, str(manifest_exc))
+        # RDR-192 Step 3a: the manifest write failed after the chunk was
+        # already written — same no-manifest-owner shape as the blank-
+        # catalog_doc_id branch above, just discovered one step later.
+        rollback_uncataloged_chunk_write(
+            t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+        )
+        raise
     # Post-store hook chains (review-fold blocker): chash index, taxonomy,
     # aspect-queue enqueue — the same unconditional ride put_cmd/MCP
     # store_put fire; per-hook failures are isolated by fire_batch.

@@ -169,6 +169,65 @@ def t3():
     ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
+
+    # RDR-192 Step 3a (nexus-wbfpw.28): a real store_put/promote manifest
+    # write now rolls back the whole call when it can't find the chash's
+    # matching REAL nexus.chunks row, instead of degrading silently. This
+    # fixture's T3 is a purely in-memory fake, so every real .put() here
+    # needs the same FK-satisfying seed the suite's many hand-written
+    # _seed_for_store_put helpers provide, done once here rather than at
+    # each of this file's ~dozen store_put call sites.
+    #
+    # Registers the collection directly with the box's real (bge) model
+    # first, exactly like tests/test_store_cmd.py's ``_seed_for_store_put``
+    # (see that helper's docstring): this test's collections auto-promote
+    # to a voyage-context-3-named 4-segment form, but the engine's
+    # "knowledge" content_type embedding_profile was already locked to
+    # bge by an earlier collection's first touch (one profile per
+    # content_type, tenant-wide) — a plain ``upsert_chunks`` call would
+    # try to register the voyage name for real and 422/EmbeddingProfile-
+    # MismatchError against that lock. Caching the name in
+    # ``_REGISTERED_COLLECTIONS`` stops this bead's own registration-retry
+    # wiring from re-attempting that conflicting voyage registration
+    # underneath the chunk write.
+    import hashlib as _hashlib
+
+    from nexus.corpus import _REGISTERED_COLLECTIONS, collection_registration_kwargs
+    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
+    from tests._catalog_fixture_ops import seed_manifest_chunks as _seed_manifest_chunks
+
+    _real_put = db.put
+    _seeded_collections: set[str] = set()
+
+    def _put_and_seed_manifest_chunk(*args: object, **kwargs: object) -> str:
+        content = kwargs.get("content", args[0] if args else "")
+        collection = kwargs.get("collection", args[1] if len(args) > 1 else "")
+        if content and collection:
+            col_name = str(collection)
+            if col_name not in _seeded_collections:
+                try:
+                    from nexus.catalog.factory import make_catalog_writer
+
+                    reg_kwargs = collection_registration_kwargs(col_name)
+                    reg_kwargs["embedding_model"] = _MODEL_TOKENS[_TIER1_MODEL]
+                    writer = make_catalog_writer()
+                    try:
+                        writer.register_collection(col_name, **reg_kwargs)
+                    finally:
+                        writer.close()
+                    _REGISTERED_COLLECTIONS.add(col_name)
+                except Exception:  # noqa: BLE001 — best-effort seed; a real failure surfaces from the actual manifest write below, unmasked
+                    pass
+                _seeded_collections.add(col_name)
+            chash = _hashlib.sha256(str(content).encode()).hexdigest()
+            try:
+                _seed_manifest_chunks(col_name, [chash])
+            except Exception:  # noqa: BLE001 — best-effort seed; a real failure surfaces from the actual manifest write below, unmasked
+                pass
+        return _real_put(*args, **kwargs)
+
+    db.put = _put_and_seed_manifest_chunk
+
     yield db
     _clear_ephemeral_collections(client)
 
@@ -365,7 +424,7 @@ class TestNexusHmxiRoundTripGrandfathering:
 
         fake_writer = MagicMock()
         monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_writer", lambda: fake_writer,
+            "nexus.catalog.factory.make_catalog_writer", lambda **kw: fake_writer,
         )
         monkeypatch.setattr(
             "nexus.db.http_vector_client._post",
@@ -374,6 +433,18 @@ class TestNexusHmxiRoundTripGrandfathering:
         monkeypatch.setattr(
             "nexus.catalog.store_hook.store_put_manifest_direct",
             lambda *a, **kw: None,
+        )
+        # RDR-192 Step 3a (nexus-wbfpw.28): this test is about client-side
+        # collection-NAME promotion (register_collection, asserted below),
+        # not document registration — ``fake_writer.register(...)``'s
+        # MagicMock return can't unpack into catalog_store_hook_tracked's
+        # ``(tumbler, created)``, which a blank catalog_doc_id now turns
+        # into a fail-loud rollback rather than the old degraded success.
+        # Give document registration a working stand-in so the collection-
+        # promotion assertions below are reached.
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.catalog_store_hook_tracked",
+            lambda *a, **kw: ("9.9.9", True),
         )
 
         _seed_for_store_put("Greenfield content", "knowledge__greenfield")

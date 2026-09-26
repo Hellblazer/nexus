@@ -100,16 +100,25 @@ class TestVictimScenarioEndToEnd:
         src = tmp_path / "f.txt"
         src.write_text("content")
         db = _fake_t3()
+        # RDR-192 Step 3a (nexus-wbfpw.28): a blank catalog_doc_id is now a
+        # fail-loud rollback, not a tolerated degraded success — this test
+        # is about the no-creds environment never leaking a credential
+        # pre-flight message, not about catalog wiring, so give the
+        # registration/manifest legs a working stand-in instead of forcing
+        # the old "no catalog" shortcut.
         with patch("nexus.commands.store.make_t3", return_value=db), \
              patch("nexus.corpus.t3_collection_name", return_value="knowledge__t__x__v1"), \
              patch("nexus.commands.store._catalog_store_hook_tracked",
-                   return_value=("", False)), \
+                   return_value=("9.9.9", True)), \
              patch("nexus.commands.store._single_chunk_manifest_metadata",
                    return_value=("cid", [{}])), \
+             patch("nexus.commands.store._store_put_manifest_direct",
+                   return_value=None), \
              patch("nexus.hook_registry.HookRegistry"), \
              patch("nexus.hook_registry.install_default_hooks"):
             result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "t"])
         assert result.exit_code == 0, result.output
+        assert "chroma_api_key" not in result.output.lower()
 
     def test_store_list_works(self, runner, no_cred_env):
         db = _fake_t3()

@@ -306,13 +306,18 @@ def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_p
             super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
 
     monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
-    # No catalog_doc_id -> the manifest-write path (which needs a live engine,
-    # unavailable in this unit-test environment) is skipped entirely; the
-    # heartbeat wraps db.put() regardless of whether catalog registration ran.
-    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+    # RDR-192 Step 3a (nexus-wbfpw.28): a blank catalog_doc_id is now a
+    # fail-loud rollback, not a degraded-but-successful put — so this test
+    # can no longer skip the manifest-write path by forcing registration
+    # to return ("", False). Let real registration run against the engine
+    # substrate instead, pre-seeding the T3 chunk row its manifest write's
+    # FK needs (mock_store never writes a real one) via _seed_for_store_put,
+    # the same pattern the other real-registration tests in this file use.
+    content = "a large document"
+    _seed_for_store_put(content)
 
     src = tmp_path / "big.md"
-    src.write_text("a large document")
+    src.write_text(content)
 
     def _slow_put(**kwargs):
         time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
@@ -328,10 +333,13 @@ def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_p
 
 
 def test_store_put_heartbeat_silent_on_a_fast_put(runner, mock_store, tmp_path, monkeypatch):
-    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+    # RDR-192 Step 3a: see the sibling test above for why real registration
+    # + a manifest FK seed replaces the old blank-catalog_doc_id shortcut.
+    content = "small content"
+    _seed_for_store_put(content)
 
     src = tmp_path / "small.md"
-    src.write_text("small content")
+    src.write_text(content)
 
     mock_store.put.return_value = "doc-id-fast"
     result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])

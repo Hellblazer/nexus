@@ -335,9 +335,17 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
                 title="hook-fail-doc",
             )
 
-        # store_put still reports success (non-fatal policy).
-        assert "Stored:" in result
-        # Failure is now observable.
+        # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26):
+        # superseded the "non-fatal policy" this test used to pin — a
+        # catalog hook failure is exactly the inverse-of-#244 orphan shape
+        # named in this test's own docstring, so store_put now rolls back
+        # the chunk it just wrote and reports an explicit error instead of
+        # a bare "Stored:".
+        assert result.startswith("Error"), result
+        assert "catalog registration failed" in result
+        # The warning-level observability this test exists for is
+        # unchanged — still logged from store_put's own boundary catch
+        # around the (here, mocked-to-raise) registration call.
         assert any(
             e["event"] == "catalog_store_hook_failed" and e["log_level"] == "warning"
             for e in cap
