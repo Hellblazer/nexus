@@ -1622,6 +1622,7 @@ def test_rebuild_cli_is_discover_force_alias() -> None:
     mock_fn.assert_called_once()
     _, kwargs = mock_fn.call_args
     assert kwargs.get("force") is True
+    assert "nx taxonomy project --backfill --persist" in result.output
 
 
 # ── MiniLM topic quality validation (RDR-070, nexus-7m8) ─────────────────────
