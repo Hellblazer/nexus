@@ -2584,9 +2584,12 @@ def _run_supplementary_checks() -> None:
          "disagrees beyond a float-noise tolerance, any collection could "
          "not be probed, or nothing was compared. A collection with no "
          "live foreign centroid to project onto is not applicable; a "
-         "sample that turned up no comparable chunk is INCONCLUSIVE; an "
+         "sample that turned up no comparable chunk is INCONCLUSIVE; a "
+         "live foreign-centroid snapshot that changed between this "
+         "check's own before/after reads, even after one retry, is "
+         "CHANGED DURING PROBE (not compared, not a disagreement); an "
          "engine older than this route is not applicable (exit 0) -- none "
-         "of the three counts as a failure alone.",
+         "of the four counts as a failure alone.",
 )
 @click.option(
     "--assignments-sample",

@@ -319,6 +319,80 @@ def test_probe_collection_reports_a_raced_foreign_centroid_without_erroring() ->
     assert r.disagreements == []
 
 
+def test_probe_collection_reports_changed_during_probe_not_a_disagreement() -> None:
+    """Round-2 review (critic, Significant + code-review Minor): a foreign
+    centroid appearing (or otherwise changing) between this probe's own
+    before/after ``get_foreign`` reads must not read as a disagreement --
+    the snapshot never stabilizes across the first attempt or its one
+    retry, so the collection is reported CHANGED DURING PROBE instead of
+    being compared against a snapshot the engine's own answer may never
+    have seen.
+    """
+
+    class _Col:
+        def get(self, **kw):
+            return {"ids": ["a" * 64]}
+
+    class _T3:
+        def get_or_create_collection(self, name):
+            return _Col()
+
+        def get_embeddings_by_id(self, name, ids):
+            return {"a" * 64: [1.0, 0.0]}
+
+    class _Centroid:
+        """Every ``get_foreign`` call returns a snapshot ONE topic LARGER
+        than the last -- a new, closer centroid keeps appearing -- so no
+        two consecutive before/after reads (this attempt's pair, or the
+        retry's) ever match, exhausting the one retry."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def get_foreign(self, name):
+            self.calls += 1
+            return {
+                "embeddings": [[1.0, 0.0]] * self.calls,
+                "metadatas": [{"topic_id": 10 + i} for i in range(self.calls)],
+            }
+
+    class _Taxo:
+        _centroid = _Centroid()
+
+        def cross_preview(self, name, ids):
+            return {"a" * 64: (10, 1.0)}
+
+        def get_assignment_details(self, ids):
+            return []
+
+    r = probe_collection(_Taxo(), _T3(), "c", size=1, sample=20, rng=random.Random(1))
+
+    assert r.error is None
+    assert r.compared == 0
+    assert r.disagreements == []
+    assert r.changed_during_probe is True
+    assert r.inconclusive is False, "changed_during_probe and inconclusive are mutually exclusive"
+
+
+def test_report_names_changed_during_probe_collections_and_is_not_a_clean_pass() -> None:
+    changed = CollectionAssignmentDrift(collection="racy", size=2, changed_during_probe=True)
+    clean = CollectionAssignmentDrift(collection="busy", size=2, compared=2)
+    lines, ok = format_report([changed, clean], sample=20, seed=1)
+    assert ok  # `busy` alone already makes this run clean; `racy` is not a failure
+    assert any("CHANGED DURING PROBE" in line and "racy" in line for line in lines)
+
+
+def test_a_changed_during_probe_only_run_is_not_a_clean_result() -> None:
+    """Mirrors the existing all-inconclusive case: a run where the ONLY
+    thing that happened is a snapshot race is not a clean pass either --
+    nothing was actually compared."""
+    changed = CollectionAssignmentDrift(collection="racy", size=2, changed_during_probe=True)
+    lines, ok = format_report([changed], sample=20, seed=1)
+    assert not ok
+    assert any("CHANGED DURING PROBE" in line and "racy" in line for line in lines)
+    assert any("nothing was compared" in line for line in lines)
+
+
 def test_probe_collection_no_candidate_answered_is_not_applicable() -> None:
     """The engine's cross-preview returns nothing at all for every sampled
     candidate (no live chunk vector at this dim, or no foreign centroid to
@@ -332,7 +406,13 @@ def test_probe_collection_no_candidate_answered_is_not_applicable() -> None:
         def get_or_create_collection(self, name):
             return _Col()
 
+    class _Centroid:
+        def get_foreign(self, name):
+            return {"embeddings": [], "metadatas": []}
+
     class _Taxo:
+        _centroid = _Centroid()
+
         def cross_preview(self, name, ids):
             return {}
 

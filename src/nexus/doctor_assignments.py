@@ -62,6 +62,29 @@ pass or fail, and the round-1 eligibility-cutoff timestamp filter this
 module used to carry is GONE: it existed solely to compensate for reading
 a possibly-stale stored row, which never happens in this design.
 
+RACE NOTE (round-2 review, critic Significant + code-review Minor): "the
+same run" above is a client-side illusion unless it is enforced. A single
+``get_foreign`` fetch taken AFTER the ``cross_preview`` call could observe
+a foreign-centroid set that changed WHILE the engine's own LATERAL was
+running -- in EITHER direction: a topic added or a centroid revised in
+place after the engine computed its answer but before this probe reads
+(the engine's answer would then be compared against a snapshot it never
+saw, reading as a false disagreement), or, symmetrically, a topic removed
+or revised in that same window (this probe's exact recompute would then
+run over centroids the engine's answer legitimately never had a chance to
+see either). Both directions are closed the same way: :func:`probe_collection`
+fetches the foreign-centroid snapshot TWICE per attempt, immediately
+before and immediately after the ``cross_preview`` call, bypassing
+:class:`~nexus.db.t2.http_centroid_store.HttpCentroidStore`'s per-instance
+cache for both reads (that cache is invalidated only by a mutation THIS
+instance issues -- a different process's write is otherwise invisible to
+it by documented design, which would make a naive before/after comparison
+trivially always agree with itself). If the two snapshots differ, this
+collection's batch is not compared this run; the whole before/call/after
+sequence is retried ONCE; if it still differs, the collection is reported
+CHANGED DURING PROBE -- reported, not a failure, and never folded into a
+disagreement or an INCONCLUSIVE result.
+
 Exit 0 when every sampled chunk's exact recompute agrees with the
 engine's live ANN pick (within :data:`SIMILARITY_TIE_TOLERANCE`), 1 when
 any disagrees, any collection could not be probed, or nothing was
@@ -71,7 +94,10 @@ single-collection tenant, or one restricted via
 applicable", never a failure by itself. A collection this run's sample
 failed to produce any comparable chunk for (a real chance event, not a
 population question any more -- see the paragraph above) is reported
-INCONCLUSIVE, likewise never a failure alone. An engine older than the
+INCONCLUSIVE, likewise never a failure alone. A collection whose live
+foreign-centroid snapshot would not stabilize across the before/after
+reads, even after one retry, is reported CHANGED DURING PROBE (see the
+RACE NOTE above), also never a failure alone. An engine older than the
 one that shipped ``cross-preview`` 404s on the very first call; that is
 reported as a single "not applicable: engine below ..." line, exit 0 --
 an old engine is not a defect this check can observe anything about.
@@ -140,6 +166,48 @@ _MAX_NAMED = 5
 #: an unrelated error message is vanishingly unlikely in this call's own
 #: failure surface (connection/timeout/HTTP-status text).
 _ENGINE_404_MARKER = "404"
+#: Before/after foreign-centroid snapshot attempts per collection (round-2
+#: review, critic Significant): the first attempt plus ONE retry, per the
+#: module docstring's RACE NOTE. Not a tunable -- a coordinator decision,
+#: not a population/detection-power knob like `DEFAULT_SAMPLE`.
+_MAX_SNAPSHOT_ATTEMPTS = 2
+
+
+def _live_foreign(taxo: Any, name: str) -> dict[str, list[Any]]:
+    """A GENUINELY live ``get_foreign`` read, bypassing
+    :class:`~nexus.db.t2.http_centroid_store.HttpCentroidStore`'s
+    per-instance ``get_foreign``/``get_by_collection`` cache -- that cache
+    is invalidated only by a mutation THIS SAME instance issues
+    (``upsert``/``delete_ids``/``purge``); a different process's write
+    between two calls on this instance is invisible to it by documented
+    design. The before/after comparison in :func:`probe_collection` exists
+    specifically to detect a cross-process change DURING the probe
+    window, so both reads must bypass the cache -- otherwise the "after"
+    read would just return the "before" read's cached value and the
+    comparison would trivially always agree with itself, closing nothing.
+
+    Fake ``_centroid`` test doubles (this module's own pure-part tests)
+    carry no such cache and therefore no invalidation method at all --
+    skipped via ``getattr`` rather than required, so those fakes need no
+    changes to keep working.
+    """
+    invalidate = getattr(taxo._centroid, "_invalidate_centroid_cache", None)
+    if invalidate is not None:
+        invalidate()
+    return taxo._centroid.get_foreign(name)
+
+
+def _foreign_snapshot_map(foreign: dict[str, list[Any]]) -> dict[int, list[float]]:
+    """Collapse a ``get_foreign()`` envelope into ``{topic_id: embedding}``,
+    order-independent, so two snapshots can be compared for equality
+    regardless of what order the engine happened to return rows in. Catches
+    an added, removed, OR revised-in-place centroid alike -- any of the
+    three changes this dict's equality with an earlier snapshot.
+    """
+    return {
+        int(meta["topic_id"]): list(emb)
+        for emb, meta in zip(foreign.get("embeddings", []), foreign.get("metadatas", []))
+    }
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -206,6 +274,19 @@ class CollectionAssignmentDrift:
     #: see the module docstring) -- distinct from both a clean pass and a
     #: failure.
     inconclusive: bool = False
+    #: True when the live foreign-centroid snapshot this probe fetched
+    #: immediately BEFORE and immediately AFTER its ``cross_preview`` call
+    #: differed -- on both this attempt and its one retry (round-2 review,
+    #: critic Significant + code-review Minor; see the module docstring's
+    #: RACE NOTE). A centroid added, removed, or revised in place during
+    #: that window makes it impossible to know which snapshot the engine's
+    #: own answer actually saw, so this collection's batch is not compared
+    #: this run rather than risk a false disagreement OR a false pass
+    #: against the wrong snapshot. Distinct from both a clean pass and a
+    #: failure, like `inconclusive` -- and mutually exclusive with it,
+    #: since a collection that hits this never reaches the point where
+    #: `inconclusive` would otherwise apply.
+    changed_during_probe: bool = False
     error: str | None = None
 
 
@@ -223,12 +304,20 @@ def probe_collection(
     handled by the caller across every collection at once -- see the
     module docstring). A collection with no live foreign centroid at this
     dim sets ``not_applicable=True``. A sample that turns up candidates
-    but nothing comparable sets ``inconclusive=True`` with no error.
+    but nothing comparable sets ``inconclusive=True`` with no error. A
+    live foreign-centroid snapshot that will not stabilize across a
+    before/after read, even after one retry, sets
+    ``changed_during_probe=True`` (see the module docstring's RACE NOTE).
     """
     result = CollectionAssignmentDrift(collection=name, size=size)
 
     def _finish() -> CollectionAssignmentDrift:
-        if result.error is None and not result.not_applicable and result.compared == 0:
+        if (
+            result.error is None
+            and not result.not_applicable
+            and not result.changed_during_probe
+            and result.compared == 0
+        ):
             result.inconclusive = True
         return result
 
@@ -246,10 +335,27 @@ def probe_collection(
         # dim, or `name` has no foreign centroid at all for THAT id's dim
         # (both benign; see the "no similarity threshold" module note for
         # why an absence is never a below-floor signal).
-        ann = taxo.cross_preview(name, candidate_ids)
-        if not ann:
-            result.not_applicable = True
-            return result
+        #
+        # Bracketed by a before/after live foreign-centroid snapshot (round-2
+        # review, critic Significant + code-review Minor; module docstring's
+        # RACE NOTE): if the snapshot changed WHILE cross_preview ran, this
+        # probe cannot know which snapshot the engine's own answer actually
+        # saw, so the whole sequence is retried once before giving up.
+        ann: dict[str, tuple[int, float]] = {}
+        foreign: dict[str, list[Any]] = {}
+        for _attempt in range(_MAX_SNAPSHOT_ATTEMPTS):
+            foreign_before = _live_foreign(taxo, name)
+            ann = taxo.cross_preview(name, candidate_ids)
+            if not ann:
+                result.not_applicable = True
+                return result
+            foreign_after = _live_foreign(taxo, name)
+            if _foreign_snapshot_map(foreign_before) == _foreign_snapshot_map(foreign_after):
+                foreign = foreign_after
+                break
+        else:
+            result.changed_during_probe = True
+            return _finish()
 
         matched = sorted(ann)[:sample]
         vecs = t3.get_embeddings_by_id(name, matched)
@@ -259,7 +365,6 @@ def probe_collection(
             return _finish()
 
         dim = len(vecs[found[0]])
-        foreign = taxo._centroid.get_foreign(name)
         centroids: dict[int, list[float]] = {}
         for emb, meta in zip(foreign.get("embeddings", []), foreign.get("metadatas", [])):
             if len(emb) == dim:
@@ -337,6 +442,7 @@ def format_report(
     probed = [r for r in results if r.error is None and r.compared > 0]
     not_applicable = [r for r in results if r.error is None and r.not_applicable]
     inconclusive = [r for r in results if r.error is None and r.inconclusive]
+    changed = [r for r in results if r.error is None and r.changed_during_probe]
     total = sum(r.compared for r in probed)
     # A run that compared nothing has not shown anything is healthy --
     # UNLESS every result is genuinely not_applicable (a single-collection
@@ -376,6 +482,15 @@ def format_report(
             "or a live foreign-centroid race) -- not a failure, not a clean pass: "
             + ", ".join(r.collection for r in inconclusive[:5])
             + (f" (+{len(inconclusive) - 5} more)" if len(inconclusive) > 5 else "")
+        )
+    if changed:
+        lines.append(
+            f"      CHANGED DURING PROBE: {len(changed)} collection(s) had their live "
+            "foreign-centroid snapshot change between this probe's own before/after "
+            "reads, even after one retry (a topic added, removed, or revised in place "
+            "mid-probe) -- not compared this run, not a failure: "
+            + ", ".join(r.collection for r in changed[:5])
+            + (f" (+{len(changed) - 5} more)" if len(changed) > 5 else "")
         )
     no_vector = [r for r in results if r.error is None and r.no_vector]
     if no_vector:
