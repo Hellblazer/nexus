@@ -50,6 +50,7 @@ import java.util.Map;
  *   GET  /v1/vectors/count           count chunks in a collection
  *   GET  /v1/vectors/stats           per-collection live stats (count/dim/last_write) — RDR-156 P3
  *   POST /v1/vectors/embed           embed-only (parity gate); 503 without a router
+ *   POST /v1/vectors/manifest-less-census  read-only manifest-less classification — RDR-192 S2
  * </pre>
  *
  * <p><strong>Fused rerank stage (RDR-188, bead nexus-9o6y2.2).</strong> The five
@@ -199,6 +200,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/gc/quarantine-orphans"  -> handleGcQuarantineOrphans(exchange, method);   // RDR-191 P1
                 case "/gc/restore-rereferenced" -> handleGcRestoreRereferenced(exchange, method); // RDR-191 P1
                 case "/gc/expire-quarantine"   -> handleGcExpireQuarantine(exchange, method);     // RDR-191 P1
+                case "/manifest-less-census"   -> handleManifestLessCensus(exchange, method);     // RDR-192 S2
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (SkipHandlerException e) {
@@ -1162,6 +1164,77 @@ public final class VectorHandler implements HttpHandler {
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);
         HttpUtil.send(ex, 200, json(Map.of("expired", outcome.expired(), "refused", outcome.refused())));
+    }
+
+    /**
+     * Upper bound on the {@code limit} field accepted by {@code
+     * /v1/vectors/manifest-less-census} (RDR-192 S2, bead nexus-wbfpw.4) — the
+     * AGENTS.md paging convention (N &lt;= 300). Clamped, never rejected with a
+     * 400, mirroring {@code TelemetryHandler.MAX_QUERY_RUNS_LIMIT}'s precedent.
+     */
+    static final int MAX_CENSUS_LIMIT = 300;
+
+    /**
+     * POST /v1/vectors/manifest-less-census (RDR-192 Step 2, bead nexus-wbfpw.4)
+     *
+     * <p>Read-only: classifies every chunk in {@code collection} carrying no
+     * OWN-COLLECTION manifest row into exactly one of five buckets (superseded,
+     * legacy-unmanifested, dead-owner, no-owner, unclassified) — see {@link
+     * PgVectorRepository#MANIFEST_LESS_CENSUS_SQL}'s header comment for the full
+     * bucket definitions. Sam's ruling 2026-09-26: no engine tag carries this
+     * route until the rest of RDR-192 ships; the production census runs the
+     * identical text ({@code scripts/sql/manifest_less_census.sql}) directly
+     * until then.
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection": "knowledge__owner__voyage-context-3__v1",
+     *   "limit":      100,     // optional, default 100, clamped to 300
+     *   "offset":     0        // optional, default 0
+     * }
+     * </pre>
+     * <p>A {@code collection} starting {@code quarantine-} is refused with 400 —
+     * quarantine rows are out of the census by construction (RDR-192 MVV (a)).
+     * <p>Response 200: {@code {"collection": "...", "returned": N, "counts":
+     * {bucket: count, ...}, "chashes": {bucket: [chash, ...], ...}}} — {@code
+     * counts}/{@code chashes} always carry all five bucket keys. Paged by chash
+     * ascending; loop while {@code returned == limit} (offset += limit), exactly
+     * like {@code /v1/vectors/store-list}.
+     */
+    private void handleManifestLessCensus(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        requireNotQuarantineCollection(collection);
+        int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_CENSUS_LIMIT));
+        int offset = Math.max(0, optInt(body, "offset", 0));
+
+        var result = repo.manifestLessCensus(tenant, collection, limit, offset);
+        HttpUtil.send(ex, 200, json(Map.of(
+            "collection", collection,
+            "returned", result.returned(),
+            "counts", result.counts(),
+            "chashes", result.chashes())));
+    }
+
+    /**
+     * {@code /v1/vectors/manifest-less-census}'s quarantine refusal (RDR-192 S2):
+     * a {@code quarantine-*} collection is out of the census by construction, so
+     * the route 400s rather than silently classifying quarantine rows. Extracted
+     * to a package-private static method so it is directly unit-testable without
+     * an HTTP round trip or a database — same precedent as {@link
+     * #resolveRowLimit}/{@link #clampSampleLimit}, see {@code
+     * VectorHandlerManifestLessCensusRoutingTest}.
+     */
+    static void requireNotQuarantineCollection(String collection) {
+        if (collection != null && collection.startsWith("quarantine-")) {
+            throw new IllegalArgumentException(
+                "collection " + collection + " is a quarantine collection; quarantine rows "
+                + "are out of the manifest-less census by construction (RDR-192 MVV (a))");
+        }
     }
 
     /**

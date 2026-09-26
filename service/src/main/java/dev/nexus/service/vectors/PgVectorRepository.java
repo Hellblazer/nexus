@@ -2566,6 +2566,149 @@ public final class PgVectorRepository {
     }
 
     /**
+     * RDR-192 Step 2 (bead nexus-wbfpw.4): the ONE SQL statement classifying every
+     * chunk in a collection carrying no OWN-COLLECTION manifest row into exactly
+     * one of five buckets. See {@code scripts/sql/manifest_less_census.sql}'s own
+     * header comment (the SAME text, byte-for-byte, pinned by {@code
+     * ManifestLessCensusSqlIdentityTest}) for the full bucket definitions and the
+     * bind-parameter order. Positional binds, in order: tenant_id, collection,
+     * limit, offset.
+     *
+     * <p>SOLE COPY (Sam's ruling 2026-09-26): the standalone script is a
+     * byte-identical courtesy copy for a hand-run in psql, never a second
+     * hand-maintained rendering of the same classification — no engine tag
+     * carries {@code POST /v1/vectors/manifest-less-census} until the rest of
+     * RDR-192 ships, so until then the production census runs this exact text
+     * directly against the database, not through the route.
+     *
+     * <p>Flush-left on purpose: a Java text block strips only the whitespace
+     * common to every content line and the closing delimiter, so keeping both
+     * at column 0 here means this constant's value is exactly the standalone
+     * file's bytes, with no incidental indentation to keep in sync by hand.
+     */
+    public static final String MANIFEST_LESS_CENSUS_SQL = """
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+-- manifest_less_census.sql (RDR-192 Step 2, bead nexus-wbfpw.4)
+--
+-- Classifies every chunk in one collection that carries NO own-collection
+-- catalog_document_chunks manifest row into exactly one bucket, by
+-- resolving its owning document from the chunk's own metadata field
+-- catalog_doc_id (falling back to doc_id when catalog_doc_id is absent
+-- or empty) and treating that value as a catalog_documents.tumbler.
+--
+-- SOLE COPY of this statement (Sam's ruling 2026-09-26, nexus-wbfpw.4):
+-- the engine route (POST /v1/vectors/manifest-less-census,
+-- PgVectorRepository.MANIFEST_LESS_CENSUS_SQL) and this file execute the
+-- IDENTICAL text -- ManifestLessCensusSqlIdentityTest pins them equal, so
+-- there is no second copy that can drift. No engine tag carries the route
+-- until the rest of RDR-192 ships (Sam, 2026-09-26); until then, run this
+-- file directly against production (psql), substituting each positional
+-- placeholder below with its literal value in this exact order:
+--   1. tenant_id   (text)
+--   2. collection  (text)
+--   3. limit       (integer, <= 300)
+--   4. offset      (integer, >= 0)
+--
+-- Buckets:
+--   superseded            owning document is live, has manifest rows in
+--                         THIS collection, none naming this chash (a
+--                         lost reap).
+--   legacy-unmanifested   owning document is live, has NO manifest row
+--                         in any collection (a note stored before
+--                         nexus-b6enc).
+--   dead-owner            owning document is tombstoned, OR live but
+--                         every manifest row it has is in another
+--                         collection (the rename-COPY leftover,
+--                         CatalogRepository.java ~8101-8125).
+--   no-owner              catalog_doc_id/doc_id is empty, or names no
+--                         catalog document (a .nxexp import).
+--   unclassified          anything else -- reported, never dropped.
+--
+-- Quarantine collections are refused by the caller before this text ever
+-- runs (they are out of the census by construction); this statement does
+-- not itself check the collection name.
+SELECT encode(c.chash, 'hex') AS chash,
+       CASE
+           WHEN owner.tumbler IS NULL THEN 'no-owner'
+           WHEN owner.deleted_at IS NOT NULL THEN 'dead-owner'
+           WHEN manifest_counts.total_count = 0 THEN 'legacy-unmanifested'
+           WHEN manifest_counts.own_count = 0 THEN 'dead-owner'
+           WHEN manifest_counts.own_count > 0 THEN 'superseded'
+           ELSE 'unclassified'
+       END AS bucket
+FROM nexus.chunks c
+LEFT JOIN nexus.catalog_document_chunks own_manifest
+       ON own_manifest.tenant_id = c.tenant_id
+      AND own_manifest.collection = c.collection
+      AND own_manifest.chash = c.chash
+LEFT JOIN nexus.catalog_documents owner
+       ON owner.tenant_id = c.tenant_id
+      AND owner.tumbler = COALESCE(
+              NULLIF(c.metadata ->> 'catalog_doc_id', ''),
+              NULLIF(c.metadata ->> 'doc_id', ''))
+LEFT JOIN LATERAL (
+       SELECT count(*) AS total_count,
+              count(*) FILTER (WHERE m.collection = c.collection) AS own_count
+       FROM nexus.catalog_document_chunks m
+       WHERE m.tenant_id = owner.tenant_id
+         AND m.doc_id = owner.tumbler
+) manifest_counts ON owner.tumbler IS NOT NULL
+WHERE c.tenant_id = ?
+  AND c.collection = ?
+  AND own_manifest.chash IS NULL
+ORDER BY c.chash
+LIMIT ? OFFSET ?
+""";
+
+    /** The five census buckets, in a stable order — every response carries all five keys. */
+    private static final List<String> MANIFEST_LESS_CENSUS_BUCKETS = List.of(
+        "superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified");
+
+    /**
+     * One page of {@link #MANIFEST_LESS_CENSUS_SQL}'s classification: {@code
+     * returned} is the row count THIS page (loop while it equals the requested
+     * {@code limit}); {@code counts}/{@code chashes} always carry all five bucket
+     * keys, zero/empty when a bucket had no rows on this page.
+     */
+    public record ManifestLessCensusResult(
+        int returned,
+        Map<String, Long> counts,
+        Map<String, List<String>> chashes) {}
+
+    /**
+     * Runs {@link #MANIFEST_LESS_CENSUS_SQL} for one page of {@code collection}'s
+     * manifest-less chunks, ordered by chash ascending. {@code limit}/{@code
+     * offset} behave like {@link #list}. Callers refuse a {@code quarantine-*}
+     * collection before reaching here — see {@code
+     * VectorHandler#requireNotQuarantineCollection} — this method does not itself
+     * check the collection name.
+     */
+    // SANCTIONED RAW (nexus-wbfpw.4, same precedent as ChashRepository#lookup):
+    // MANIFEST_LESS_CENSUS_SQL is the PUBLISHED, byte-identical-to-
+    // scripts/sql/manifest_less_census.sql statement (ManifestLessCensusSqlIdentityTest
+    // pins the two texts equal) — a jOOQ DSL rendering would decouple the executed
+    // query from the hand-runnable psql copy Sam's ruling requires.
+    public ManifestLessCensusResult manifestLessCensus(
+            String tenant, String collection, int limit, int offset) {
+        Result<Record> rows = tenantScope.withTenant(tenant, ctx ->
+            ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, tenant, collection, limit, offset).fetch());
+
+        Map<String, Long> counts = new LinkedHashMap<>();
+        Map<String, List<String>> chashes = new LinkedHashMap<>();
+        for (String bucket : MANIFEST_LESS_CENSUS_BUCKETS) {
+            counts.put(bucket, 0L);
+            chashes.put(bucket, new ArrayList<>());
+        }
+        for (var rec : rows) {
+            String chash = rec.get("chash", String.class);
+            String bucket = rec.get("bucket", String.class);
+            chashes.computeIfAbsent(bucket, b -> new ArrayList<>()).add(chash);
+            counts.merge(bucket, 1L, Long::sum);
+        }
+        return new ManifestLessCensusResult(rows.size(), counts, chashes);
+    }
+
+    /**
      * Delete chunks by ID, ANTI-JOIN SCOPED against the catalog manifest
      * (RDR-191 F10c fix, bead nexus-o8dil.5).
      *
