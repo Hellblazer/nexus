@@ -2,7 +2,8 @@
 title: "Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment"
 id: RDR-219
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-26
 priority: high
 author: Sam
 reviewed-by: self
@@ -896,4 +897,5 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Phase 3 critique round 2: the janitor text states the tmux name list is a second signal behind the process check; the MVV guard criterion states what the run observed.
 - 2026-09-26: Phase 3b review round: "The nx-mcp dispatch grant" states the no-shell invariant the kept harness name depends on, pinned by a test; the aspect extractor's `claude -p` passes `--tools ""`; the MVV counts four Phase 3b proofs.
 - 2026-09-26: Host-side harness Claude launches take the token on fd 3 (`claude_fd_exec.sh`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`), so it is no longer in Claude's exec environment there; container harnesses unchanged, since their init process holds it (nexus-wauo1.36).
-- 2026-09-26: nexus-wauo1.37 measured the plugin-loaded case: in hook-surface-shakeout's container, an `--mcp-config` entry named exactly `plugin:conexus:nexus` (not the earlier, broken plain `nexus`) leaves every `mcp_tool` hook firing identically with and without the override, proved by two container runs against the same image and read with `hook_census.py` itself (T2 `nexus_rdr/219-plugin-override-proof`). "The nx-mcp dispatch grant" is updated from "unmeasured" to the proof, and `claude_mcp_grant.sh` now allows `--plugin-dir` when `CLAUDE_MCP_GRANT_SERVER_NAME=plugin:conexus:nexus`, refusing it under any other name. Scope stated afterwards (critique): six of the nine `mcp_tool` hooks measured, the other three inferred; Claude Code 2.1.277.
+- 2026-09-26: nexus-wauo1.37 measured the plugin-loaded case: in hook-surface-shakeout's container, an `--mcp-config` entry named exactly `plugin:conexus:nexus` (not the earlier, broken plain `nexus`) leaves the six measured `mcp_tool` hooks firing identically with and without the override, proved by two container runs against the same image and read with `hook_census.py` itself (T2 `nexus_rdr/219-plugin-override-proof`). "The nx-mcp dispatch grant" is updated from "unmeasured" to the proof, and `claude_mcp_grant.sh` now allows `--plugin-dir` when `CLAUDE_MCP_GRANT_SERVER_NAME=plugin:conexus:nexus`, refusing it under any other name. Scope stated afterwards (critique): six of the nine `mcp_tool` hooks measured, the other three inferred; Claude Code 2.1.277.
+- 2026-09-26: Closed, implemented. Close-time critique: justified, 0 Critical, 0 Significant (T2 `nexus_rdr/219-critique-scope-audit-2026-09-26`). Post-mortem: `post-mortem/219-harness-credentials-never-leave-the-keychain.md`. The .37 entry above now says "the six measured hooks" where it said "every".
