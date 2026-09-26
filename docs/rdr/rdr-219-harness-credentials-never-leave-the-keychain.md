@@ -317,19 +317,43 @@ shell, so a harness that exercises them grants the token to nx-mcp alone:
   pipe once and keeps the parsed config: a `/mcp` reconnect restarts the
   server with the value still present (T3
   `analysis-deep-rdr219-devfd-mcp-config-2026-09-25`).
-- **Harnesses that load the conexus plugin are not supported by the grant
-  yet.** The grant is for harnesses that run Claude with
+- **Harnesses that load the conexus plugin: supported ONLY under the entry
+  name `plugin:conexus:nexus` (nexus-wauo1.37, proved 2026-09-26).** The
+  grant is otherwise for harnesses that run Claude with
   `--strict-mcp-config` and their own nexus server entry, as
-  migration-rehearsal `--fullstack` does. Replacing the plugin's server
-  instead, with an entry named `plugin:conexus:nexus`, resolves the model's
-  tool calls (spike, T3 `analysis-deep-rdr219-devfd-mcp-config-2026-09-25`
-  Q5), but whether the plugin's `mcp_tool` hooks resolve to that entry is
-  unmeasured. An earlier override in hook-surface-shakeout, named `nexus`,
-  broke the tool-tier hooks without stopping the session
-  (`tests/e2e/hook-surface-shakeout/shakeout_in_container.sh`). No harness
-  that loads the plugin needs the grant today. One that does needs a proof
-  first that a `mcp_tool` hook still fires with the override in place
-  (nexus-wauo1.37).
+  migration-rehearsal `--fullstack` does. An earlier override in
+  hook-surface-shakeout, named plain `nexus`, broke the tool-tier hooks
+  without stopping the session
+  (`tests/e2e/hook-surface-shakeout/shakeout_in_container.sh`): every
+  `mcp_tool` hook entry in `hooks.json` carries `"server":
+  "plugin:conexus:nexus"` literally, so a manually configured server under
+  any OTHER name leaves them addressing a server that does not exist. That
+  earlier failure was the entry's NAME, not the override itself: naming
+  the entry `plugin:conexus:nexus` -- the same name Claude Code gives the
+  plugin's own `.mcp.json` key `nexus` -- resolves the model's tool calls
+  (spike, T3 `analysis-deep-rdr219-devfd-mcp-config-2026-09-25` Q5, the
+  plugin's own copy suppressed as a duplicate), and was UNMEASURED for the
+  `mcp_tool` hooks until nexus-wauo1.37 measured it directly: in
+  `tests/e2e/hook-surface-shakeout`'s container, on real Claude Code
+  2.1.277, two runs against the identical image (one with `--plugin-dir`
+  alone, one adding `--strict-mcp-config --mcp-config <(...)` naming the
+  override entry `plugin:conexus:nexus`, both driving the same single
+  subagent-dispatch turn) produced IDENTICAL results: every one of the six
+  `mcp_tool` hooks that turn provokes (`hook_agent_dispatch_expect`,
+  `hook_subagent_start`, `hook_subagent_start_stamp`,
+  `hook_subagent_start_tuple`, `hook_subagent_stop_tuple`,
+  `hook_stop_verification`) fired in both runs, per `hook_census.py`
+  itself reading the tee'd JSON-RPC stream into nx-mcp -- the hook's own
+  effect, not the absence of a "not connected" error; `debug.log` in
+  both runs showed the server connecting under the name
+  `plugin:conexus:nexus` with no `CONNECT_TIMEOUT`, `not connected`,
+  `Suppressing plugin MCP server`, or `mcp_tool hook skipped` line. T2
+  `nexus_rdr/219-plugin-override-proof` carries the artifact paths and raw
+  counts. `tests/e2e/lib/claude_mcp_grant.sh` now allows `--plugin-dir`
+  when `CLAUDE_MCP_GRANT_SERVER_NAME=plugin:conexus:nexus` is set before
+  the call, and refuses it (as before) for the default name `nexus` or any
+  other value, with unit tests against a fake `claude`
+  (`tests/test_claude_mcp_grant_launcher.py`).
 - **The mapping.** nx-mcp never reads the harness name itself. The two places
   in `src/nexus` that start `claude` build the child's environment through one
   helper. It sets `CLAUDE_CODE_OAUTH_TOKEN` from
@@ -855,3 +879,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: Phase 3 critique round 2: the janitor text states the tmux name list is a second signal behind the process check; the MVV guard criterion states what the run observed.
 - 2026-09-26: Phase 3b review round: "The nx-mcp dispatch grant" states the no-shell invariant the kept harness name depends on, pinned by a test; the aspect extractor's `claude -p` passes `--tools ""`; the MVV counts four Phase 3b proofs.
 - 2026-09-26: Host-side harness Claude launches take the token on fd 3 (`claude_fd_exec.sh`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`), so it is no longer in Claude's exec environment there; container harnesses unchanged, since their init process holds it (nexus-wauo1.36).
+- 2026-09-26: nexus-wauo1.37 measured the plugin-loaded case: in hook-surface-shakeout's container, an `--mcp-config` entry named exactly `plugin:conexus:nexus` (not the earlier, broken plain `nexus`) leaves every `mcp_tool` hook firing identically with and without the override, proved by two container runs against the same image and read with `hook_census.py` itself (T2 `nexus_rdr/219-plugin-override-proof`). "The nx-mcp dispatch grant" is updated from "unmeasured" to the proof, and `claude_mcp_grant.sh` now allows `--plugin-dir` when `CLAUDE_MCP_GRANT_SERVER_NAME=plugin:conexus:nexus`, refusing it under any other name.

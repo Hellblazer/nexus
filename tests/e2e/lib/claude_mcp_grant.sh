@@ -34,32 +34,52 @@
 # reconnect restarts the server with the value still present -- T3
 # analysis-deep-rdr219-devfd-mcp-config-2026-09-25).
 #
-# NOT SUPPORTED YET: a harness that loads the conexus PLUGIN (rather than
-# supplying its own "nexus" MCP server entry through this function) cannot
-# use this grant. Overriding the plugin's own "nexus" server entry
-# resolves the model's tool calls, but whether the plugin's `mcp_tool`
-# hooks still resolve to that override is UNMEASURED (RDR-219 Technical
-# Design, "Harnesses that load the conexus plugin are not supported by
-# the grant yet" -- nexus-wauo1.37 is the tracking bead for that proof).
-# Do not call this function from a harness that runs `claude` WITH the
-# conexus plugin loaded.
+# A HARNESS THAT LOADS THE CONEXUS PLUGIN (--plugin-dir) is refused UNLESS
+# the server entry is named EXACTLY `plugin:conexus:nexus`, set via
+# `CLAUDE_MCP_GRANT_SERVER_NAME` before calling. That is the one proven
+# shape (nexus-wauo1.37): the default entry name, plain "nexus", is still
+# refused together with --plugin-dir, because that combination is the one
+# hook-surface-shakeout measured as BROKEN -- a manually configured server
+# named "nexus" leaves every `mcp_tool` hook (which all address
+# `plugin:conexus:nexus` literally) pointed at a name that does not exist
+# ("Stop hook error: MCP server 'plugin:conexus:nexus' not connected", the
+# session continuing anyway). Naming the override entry
+# `plugin:conexus:nexus` instead -- the same name Claude Code gives the
+# plugin's OWN `.mcp.json` key `nexus` -- was measured two ways to work:
+# the model's tool calls route to the override (T3
+# analysis-deep-rdr219-devfd-mcp-config-2026-09-25 Q5: the plugin's own
+# copy is suppressed as a duplicate), and separately (nexus-wauo1.37,
+# tests/e2e/hook-surface-shakeout, real Claude Code 2.1.277, one subagent-
+# dispatch turn in each of two container runs against the identical image)
+# every one of the six `mcp_tool` hooks that turn provokes --
+# hook_agent_dispatch_expect, hook_subagent_start, hook_subagent_start_
+# stamp, hook_subagent_start_tuple, hook_subagent_stop_tuple, hook_stop_
+# verification -- fired identically with and without the override, per
+# `hook_census.py` itself reading the tee'd JSON-RPC stream into nx-mcp
+# (the hook's own effect, not the absence of a "not connected" error).
+# T2 `nexus_rdr/219-plugin-override-proof` carries the artifact paths.
 #
 # USAGE (source this file, then call the function):
 #
 #   source tests/e2e/lib/claude_mcp_grant.sh
 #   claude_mcp_grant nx-mcp -- -p "prompt" --allowedTools mcp__nexus__search
 #
+#   # a harness that ALSO loads the conexus plugin (--plugin-dir):
+#   CLAUDE_MCP_GRANT_SERVER_NAME=plugin:conexus:nexus \
+#       claude_mcp_grant nx-mcp -- -p "prompt" --plugin-dir /path/to/conexus
+#
 # `claude_mcp_grant NEXUS_CMD [NEXUS_ARG...] [-- CLAUDE_ARG...]` execs
 # `claude --strict-mcp-config --mcp-config <(...) CLAUDE_ARG...`, where the
-# piped config declares exactly one MCP server, "nexus", running
+# piped config declares exactly one MCP server, named by
+# `CLAUDE_MCP_GRANT_SERVER_NAME` (default "nexus"), running
 # `NEXUS_CMD [NEXUS_ARG...]` with `NX_HARNESS_CLAUDE_OAUTH_TOKEN` set to
 # THIS SHELL's own `CLAUDE_CODE_OAUTH_TOKEN` -- set ahead of this call by
 # `claude_credentials.py run -- ...` (this function reads that variable;
 # it never fetches a token itself). A caller that needs additional MCP
-# servers besides "nexus" sets `CLAUDE_MCP_GRANT_EXTRA_SERVERS_JSON` to a
-# raw JSON fragment of additional `"name": {...}` entries (no leading or
-# trailing comma) before calling; it is spliced into `mcpServers`
-# verbatim, alongside "nexus".
+# servers besides the named one sets `CLAUDE_MCP_GRANT_EXTRA_SERVERS_JSON`
+# to a raw JSON fragment of additional `"name": {...}` entries (no leading
+# or trailing comma) before calling; it is spliced into `mcpServers`
+# verbatim, alongside the named entry.
 #
 # FAILS LOUDLY, before ever invoking `claude`, when `CLAUDE_CODE_OAUTH_TOKEN`
 # is unset or empty in the calling shell -- this function never fetches a
@@ -83,6 +103,14 @@
 # sourced standalone by bash harnesses with no nexus import), not
 # re-derived from the Python module.
 _CLAUDE_MCP_GRANT_ENV_VAR="NX_HARNESS_CLAUDE_OAUTH_TOKEN"
+
+# The ONE server name --plugin-dir is allowed alongside (nexus-wauo1.37):
+# the plugin's own namespaced name for its ".mcp.json" key "nexus", proven
+# by a real container run to keep every `mcp_tool` hook (all of which
+# address this literal string) resolving correctly when this function's
+# own entry replaces the plugin's. Any other name paired with --plugin-dir
+# stays refused -- see the refusal message below for why.
+_CLAUDE_MCP_GRANT_PLUGIN_SERVER_NAME="plugin:conexus:nexus"
 
 # JSON-escapes a command name or CLI argument: backslash first, then
 # double-quote, newline, carriage return and tab. Any other control
@@ -139,12 +167,19 @@ claude_mcp_grant() {
         echo "claude_mcp_grant: usage: claude_mcp_grant NEXUS_CMD [NEXUS_ARG...] [-- CLAUDE_ARG...]" >&2
         return 2
     fi
+    local server_name="${CLAUDE_MCP_GRANT_SERVER_NAME:-nexus}"
     for a in "${claude_args[@]+"${claude_args[@]}"}"; do
         case $a in
             --plugin-dir|--plugin-dir=*)
-                echo "claude_mcp_grant: refusing --plugin-dir: harnesses that load the conexus" \
-                     "plugin are not supported by the grant yet (RDR-219, nexus-wauo1.37)" >&2
-                return 2
+                if [ "$server_name" != "$_CLAUDE_MCP_GRANT_PLUGIN_SERVER_NAME" ]; then
+                    echo "claude_mcp_grant: refusing --plugin-dir with server name" \
+                         "'$server_name': only CLAUDE_MCP_GRANT_SERVER_NAME=" \
+                         "$_CLAUDE_MCP_GRANT_PLUGIN_SERVER_NAME is proven safe" \
+                         "alongside --plugin-dir (RDR-219, nexus-wauo1.37) -- the" \
+                         "default name 'nexus' left every mcp_tool hook pointed at" \
+                         "a server that did not exist" >&2
+                    return 2
+                fi
                 ;;
         esac
     done
@@ -185,6 +220,12 @@ claude_mcp_grant() {
     token=${token//\\/\\\\}
     token=${token//\"/\\\"}
 
+    local server_name_json
+    if ! server_name_json="$(_claude_mcp_grant_json_escape "$server_name")"; then
+        echo "claude_mcp_grant: CLAUDE_MCP_GRANT_SERVER_NAME contains a control character" >&2
+        return 2
+    fi
+
     # `builtin printf` (never a bare `printf`, in case something upstream
     # shadowed the name with a function) writes the config; the pipe is a
     # process substitution, never a file. Nothing here ever writes the
@@ -196,7 +237,8 @@ claude_mcp_grant() {
     unset CLAUDE_CODE_OAUTH_TOKEN
     export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3
     exec claude --strict-mcp-config --mcp-config <(builtin printf \
-        '{"mcpServers":{"nexus":{"command":%s,"args":%s,"env":{"%s":"%s"}}%s}}' \
-        "$nexus_cmd_json" "$nexus_args_json" "$_CLAUDE_MCP_GRANT_ENV_VAR" "$token" "$extra_suffix") \
+        '{"mcpServers":{"%s":{"command":%s,"args":%s,"env":{"%s":"%s"}}%s}}' \
+        "$server_name_json" "$nexus_cmd_json" "$nexus_args_json" \
+        "$_CLAUDE_MCP_GRANT_ENV_VAR" "$token" "$extra_suffix") \
         "${claude_args[@]+"${claude_args[@]}"}" 3< <(builtin printf '%s' "$raw_token")
 }

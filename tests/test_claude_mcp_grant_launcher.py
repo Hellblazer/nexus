@@ -106,6 +106,7 @@ def _write_driver(
     nexus_argv: "list[str]",
     claude_args: "list[str]",
     extra_servers_json: "str | None" = None,
+    server_name: "str | None" = None,
 ) -> pathlib.Path:
     """A standalone driver script: sets/unsets `CLAUDE_CODE_OAUTH_TOKEN`,
     sources the real launcher, and calls `claude_mcp_grant`. Never `bash -c
@@ -121,6 +122,8 @@ def _write_driver(
         lines.append(
             f"export CLAUDE_MCP_GRANT_EXTRA_SERVERS_JSON={_bash_single_quote(extra_servers_json)}"
         )
+    if server_name is not None:
+        lines.append(f"export CLAUDE_MCP_GRANT_SERVER_NAME={_bash_single_quote(server_name)}")
     lines.append(f"source {_bash_single_quote(str(LAUNCHER))}")
     args = " ".join(_bash_single_quote(a) for a in nexus_argv)
     if claude_args:
@@ -331,9 +334,14 @@ def test_launcher_escapes_newline_and_tab_in_nexus_args(tmp_path) -> None:
     assert json.loads(config_file.read_text())["mcpServers"]["nexus"]["args"] == ["a\nb", "c\td"]
 
 
-def test_launcher_refuses_to_run_with_the_conexus_plugin_loaded(tmp_path) -> None:
-    """RDR-219: plugin-loaded harnesses are not supported by the grant yet
-    (nexus-wauo1.37), so the launcher enforces it rather than documenting it."""
+def test_launcher_refuses_to_run_with_the_conexus_plugin_loaded_under_the_default_name(
+    tmp_path,
+) -> None:
+    """RDR-219 (nexus-wauo1.37): --plugin-dir is refused under the DEFAULT
+    server name ("nexus") -- that combination is the one hook-surface-
+    shakeout measured as broken (every mcp_tool hook addresses
+    "plugin:conexus:nexus" literally, so a manually configured server
+    named plain "nexus" leaves them pointed at nothing)."""
     for i, flag in enumerate((["--plugin-dir", "/x/conexus"], ["--plugin-dir=/x/conexus"])):
         case = tmp_path / f"case{i}"
         case.mkdir()
@@ -342,6 +350,55 @@ def test_launcher_refuses_to_run_with_the_conexus_plugin_loaded(tmp_path) -> Non
         assert proc.returncode != 0, flag
         assert not argv_file.exists(), flag
         assert "plugin" in proc.stderr, flag
+
+
+def test_launcher_refuses_to_run_with_the_plugin_loaded_under_any_other_server_name(
+    tmp_path,
+) -> None:
+    """A caller that sets CLAUDE_MCP_GRANT_SERVER_NAME to something OTHER
+    than the one proven name still gets refused alongside --plugin-dir --
+    the allowance is for that exact string, not for "any name the caller
+    chose"."""
+    driver = _write_driver(
+        tmp_path,
+        token=FAKE_TOKEN,
+        nexus_argv=["nx-mcp"],
+        claude_args=["--plugin-dir", "/x/conexus"],
+        server_name="plugin:conexus:nexus-catalog",
+    )
+    proc, argv_file, _ = _run_driver(tmp_path, driver)
+    assert proc.returncode != 0
+    assert not argv_file.exists()
+    assert "plugin" in proc.stderr
+
+
+def test_launcher_allows_plugin_dir_with_the_one_proven_server_name(tmp_path) -> None:
+    """RDR-219 nexus-wauo1.37: a real container proof (hook-surface-
+    shakeout, two runs against the identical image, one subagent-dispatch
+    turn each) showed every mcp_tool hook firing identically with and
+    without a --strict-mcp-config --mcp-config override named exactly
+    "plugin:conexus:nexus" -- the plugin's own namespaced name for its
+    ".mcp.json" key "nexus". CLAUDE_MCP_GRANT_SERVER_NAME set to that exact
+    string is the one case --plugin-dir is allowed, and the piped config's
+    key must be that name, not the default "nexus"."""
+    driver = _write_driver(
+        tmp_path,
+        token=FAKE_TOKEN,
+        nexus_argv=["nx-mcp"],
+        claude_args=["-p", "hello", "--plugin-dir", "/x/conexus"],
+        server_name="plugin:conexus:nexus",
+    )
+    proc, argv_file, config_file = _run_driver(tmp_path, driver)
+    assert proc.returncode == 0, proc.stderr
+    assert argv_file.is_file()
+    argv = argv_file.read_text().splitlines()
+    assert "--plugin-dir" in argv
+    config = json.loads(config_file.read_text())
+    assert "plugin:conexus:nexus" in config["mcpServers"]
+    assert "nexus" not in config["mcpServers"]
+    entry = config["mcpServers"]["plugin:conexus:nexus"]
+    assert entry["command"] == "nx-mcp"
+    assert entry["env"]["NX_HARNESS_CLAUDE_OAUTH_TOKEN"] == FAKE_TOKEN
 
 
 def test_sourcing_the_launcher_does_not_turn_on_nounset_in_the_caller(tmp_path) -> None:

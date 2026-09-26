@@ -299,6 +299,12 @@ DOCKER_ARGS=(
     -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}"
     -e SHAKEOUT_RACE_DELAY="${SHAKEOUT_RACE_DELAY:-}"
     -e SHAKEOUT_CLI_VERSION="$CLI_VERSION"
+    # nexus-wauo1.37: SHAKEOUT_HOOK_PROBE runs the single cheap subagent-
+    # dispatch turn instead of the full eight-turn sequence; SHAKEOUT_MCP_
+    # OVERRIDE additionally launches with --strict-mcp-config --mcp-config
+    # naming the entry `plugin:conexus:nexus` (see shakeout_in_container.sh).
+    -e SHAKEOUT_HOOK_PROBE="${SHAKEOUT_HOOK_PROBE:-}"
+    -e SHAKEOUT_MCP_OVERRIDE="${SHAKEOUT_MCP_OVERRIDE:-}"
 )
 if [ -n "$KEEP" ]; then
     # --keep (header comment above: "leave the container up"): a bare

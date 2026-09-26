@@ -105,7 +105,8 @@ prompt() {  # TEXT LABEL: paste, Enter, wait for the Stop-hook turn sentinel
 }
 
 say "launch: real Claude Code, plugin from ${SHAKEOUT_SHA:-?}, ALL hooks live"
-# NO --mcp-config, and that is the point. The twelve tool-tier hooks address
+# NO --mcp-config, and that is the point -- UNLESS SHAKEOUT_MCP_OVERRIDE is
+# set (nexus-wauo1.37). The twelve tool-tier hooks address
 # `plugin:conexus:nexus`, which is how Claude Code namespaces the PLUGIN's own
 # .mcp.json key `nexus`. Passing our own --mcp-config (with
 # --strict-mcp-config, which suppresses every other source) registered a
@@ -113,13 +114,34 @@ say "launch: real Claude Code, plugin from ${SHAKEOUT_SHA:-?}, ALL hooks live"
 # did not exist -- measured as "Stop hook error: MCP server
 # 'plugin:conexus:nexus' not connected", with the session continuing anyway.
 # rdr208-mvv can use --mcp-config because the two hooks it tests are
-# command-tier and never name a server. This one cannot.
+# command-tier and never name a server. This one cannot -- UNLESS the
+# override names the entry EXACTLY `plugin:conexus:nexus` (not `nexus`),
+# which is the shape RDR-219's "nx-mcp dispatch grant" needs for a
+# plugin-loaded harness (T3 analysis-deep-rdr219-devfd-mcp-config-2026-09-25
+# Q5: the plugin's own copy is suppressed as a duplicate, and the model's
+# tool calls route to the override). Whether the mcp_tool HOOKS also route
+# there is what nexus-wauo1.37 measures.
 # --debug-file, not bare --debug: bead .6 measured that --debug alone puts
 # nothing on stderr and the hook outcome lines -- "Successfully connected",
 # "[engine] turn 1 start", "CONNECT_TIMEOUT", "mcp_tool hook skipped" --
 # exist only in that file. Four runs of this harness scraped the pane
 # instead, which is why the first census could see nothing.
-CMD="export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --debug-file $RUN/debug.log --dangerously-skip-permissions --plugin-dir $PLUGIN"
+EXTRA_CLAUDE_FLAGS=""
+if [ -n "${SHAKEOUT_MCP_OVERRIDE:-}" ]; then
+    # The token itself is NEVER pre-expanded here: `\$CLAUDE_CODE_OAUTH_TOKEN`
+    # stays literal text in CMD (same escaping style as `\$PATH` above) so it
+    # is typed into the tmux pane as a bare variable reference and expanded
+    # only when the PANE's own bash evaluates the exec line, from the pane
+    # shell's own environment (inherited from the tmux SERVER, which was
+    # seeded with CLAUDE_CODE_OAUTH_TOKEN by the "auth" section above, before
+    # `T new-session` ever ran). The literal token value therefore never
+    # appears in this script's own variables, in `$RUN/pane.log`, or in any
+    # argv a `ps` snapshot could see -- same delivery contract as
+    # tests/e2e/lib/claude_mcp_grant.sh, just typed through a pane instead of
+    # exec'd directly, because this harness drives an interactive session.
+    EXTRA_CLAUDE_FLAGS="--strict-mcp-config --mcp-config <(builtin printf '{\"mcpServers\":{\"plugin:conexus:nexus\":{\"command\":\"/home/nexus/mcp_tee.sh\",\"args\":[],\"env\":{\"NX_HARNESS_CLAUDE_OAUTH_TOKEN\":\"%s\"}}}}' \"\$CLAUDE_CODE_OAUTH_TOKEN\")"
+fi
+CMD="export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --debug-file $RUN/debug.log --dangerously-skip-permissions --plugin-dir $PLUGIN $EXTRA_CLAUDE_FLAGS"
 T kill-server 2>/dev/null
 T new-session -d -s S -x 240 -y 50 || { echo "tmux failed"; exit 1; }
 T pipe-pane -t S -o "cat >> $RUN/pane.log"
@@ -185,6 +207,28 @@ if [ -n "${SHAKEOUT_RACE_DELAY:-}" ]; then
         || echo "    (no markers found in debug.log)"
     collect
     echo "RACE PROBE COMPLETE (delay=${SHAKEOUT_RACE_DELAY}s)"
+    exit 0
+fi
+
+# HOOK PROBE MODE (nexus-wauo1.37): one turn, chosen because it is the
+# cheapest single turn that provokes the largest slice of the mcp_tool
+# roster -- dispatching a subagent fires PreToolUse's hook_agent_dispatch_
+# expect, all three SubagentStart entries (hook_subagent_start,
+# hook_subagent_start_stamp, hook_subagent_start_tuple), SubagentStop's
+# hook_subagent_stop_tuple, and the turn's own Stop fires hook_stop_
+# verification -- six of the nine mcp_tool handlers in one billed turn.
+# No warmup turn: the Agent tool is a Claude Code built-in, not a deferred
+# MCP tool, so nothing here needs ToolSearch discovery first. Evidence is
+# read from $RUN/mcp-stdin.jsonl (the tee'd JSON-RPC stream into nx-mcp,
+# whichever server name it actually reached) via hook_census.py's
+# tool_roster(), never from the absence of a "not connected" error.
+if [ -n "${SHAKEOUT_HOOK_PROBE:-}" ]; then
+    say "hook probe: one subagent-dispatch turn (mcp_tool hook proof, override=${SHAKEOUT_MCP_OVERRIDE:-0})"
+    prompt "Use the Agent tool to dispatch one general-purpose subagent whose entire task is to reply with the word PONG. Then tell me what it said." "subagent turn"
+    T send-keys -t S "/exit" Enter
+    sleep 15
+    collect
+    echo "HOOK PROBE COMPLETE (override=${SHAKEOUT_MCP_OVERRIDE:-0})"
     exit 0
 fi
 
