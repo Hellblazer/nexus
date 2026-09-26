@@ -100,9 +100,12 @@ def _normalize_partial(metadata: dict, collection_name: str) -> dict:
     """Normalise a PARTIAL update without injecting defaults (nexus-w94eo).
 
     Keeps a normalised key when the caller sent it, or when ``normalize``
-    produced it with a value other than its default (a legacy-key rename).
+    produced it with a value other than its default for this content type.
     Drops the defaults ``normalize`` fills in for keys the caller left out,
     which a merging store would otherwise write over the stored values.
+    A legacy ``store_type`` sent alone resolves to a ``content_type`` equal to
+    that default and is therefore dropped; no live writer sends it
+    (RDR-101 Phase 5c retired the key).
     """
     content_type = _infer_content_type(metadata, collection_name)
     out = normalize(metadata, content_type=content_type)
@@ -187,8 +190,11 @@ def _rewrite_collection_metadata(
         if not ids:
             break
 
-        rewrite_ids: list[str] = []
-        rewrite_metas: list[dict] = []
+        # nexus-w94eo: the engine MERGES an update into the stored row, so a
+        # key the canonical form drops survives unless it is named in
+        # delete_keys. delete_keys applies to a whole request, so rows are
+        # grouped by the exact set of keys each one must lose.
+        groups: dict[tuple[str, ...], tuple[list[str], list[dict]]] = {}
         for chunk_id, meta in zip(ids, metas):
             total += 1
             current = dict(meta or {})
@@ -197,11 +203,17 @@ def _rewrite_collection_metadata(
                 skipped += 1
                 continue
             updated += 1
-            rewrite_ids.append(chunk_id)
-            rewrite_metas.append(canonical)
+            drop = tuple(sorted(current.keys() - canonical.keys()))
+            group_ids, group_metas = groups.setdefault(drop, ([], []))
+            group_ids.append(chunk_id)
+            group_metas.append(canonical)
 
-        if rewrite_ids and not dry_run:
-            t3_db.update_chunks(collection_name, rewrite_ids, rewrite_metas)
+        if not dry_run:
+            for drop, (group_ids, group_metas) in groups.items():
+                t3_db.update_chunks(
+                    collection_name, group_ids, group_metas,
+                    delete_keys=list(drop) or None,
+                )
 
         if len(ids) < page:
             break
@@ -1020,8 +1032,8 @@ class T3Database:
         caller sent may reach it. ``normalize`` fills every missing key with
         its default (``content_type`` becomes ``prose``), and writing those
         defaults overwrote stored values the caller never touched, as the
-        PDF post-pass's enrichment-only write showed. A key ``normalize``
-        produced with a non-default value (a rename) is kept.
+        PDF post-pass's enrichment-only write showed. See
+        :func:`_normalize_partial` for exactly which keys are kept.
         """
         if not _bypass_canonical_schema(collection):
             metadatas = [_normalize_partial(m, collection) for m in metadatas]
