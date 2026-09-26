@@ -1310,6 +1310,31 @@ class CatalogManifestSweepRepositoryTest {
         }
     }
 
+    /**
+     * Same attach/detach pattern as {@link #captureTimingLogLines}, filtered
+     * to {@code event=write_manifest_many_swept} lines instead (nexus-wbfpw.13:
+     * that event used to fire only when {@code swept > 0}; this helper is how
+     * both the swept=0 and swept>0 tests below observe it).
+     */
+    private List<String> captureSweptLogLines(Runnable body) {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=write_manifest_many_swept "))
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
     /** Extracts {@code key=<value>}'s value (up to the next whitespace, or end
      *  of line) from a structured-logging line; fails loud if {@code key}
      *  never appears — a missing field is a defect in the event, not an
@@ -1421,5 +1446,80 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(fieldValue(line, "swept")).isEqualTo("0");
         assertThat(fieldLong(line, "sweep_ms")).as("no sweep DELETE ever ran").isEqualTo(0L);
         assertThat(fieldValue(line, "sweep_reasons")).isEmpty();
+    }
+
+    // ── nexus-wbfpw.13 (RDR-192 S6): event=write_manifest_many_swept fires on
+    //    EVERY sweep run, not only when swept > 0 ──────────────────────────
+
+    @Test @Order(50)
+    void writeManifestMany_sweptEvent_allCandidatesKept_stillLogsWithKeptEqualsDropped() throws Exception {
+        // Same shape as Order(34): a tombstoned referrer's manifest row still
+        // protects the shared chash, so every dropped candidate is kept
+        // (swept = 0). Before nexus-wbfpw.13 the event never fired here.
+        String col = "code__swp50__minilm-l6-v2-384__v1";
+        String shared = ch("swp50-shared");
+        seedChunk384(TENANT_A, col, shared);
+        registerDoc(TENANT_A, "swp.50a", col);
+        registerDoc(TENANT_A, "swp.50b", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.50a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "swp.50b", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))), col);
+
+        assertThat(repo.deleteDocument(TENANT_A, "swp.50b")).isEqualTo(1);
+
+        var lines = captureSweptLogLines(() ->
+            writeManifestManySeeded(TENANT_A, List.of(
+                Map.<String, Object>of("doc_id", "swp.50a", "rows", List.<Map<String, Object>>of(
+                    Map.<String, Object>of("position", 0, "chash", ch("swp50-new"), "chunk_index", 0)))), col,
+                null, true));
+
+        assertThat(lines)
+            .as("a sweep run where every candidate is kept (swept=0) must still emit "
+                + "the event — this is the exact case the old swept>0 guard suppressed")
+            .hasSize(1);
+        String line = lines.getFirst();
+        assertThat(fieldValue(line, "tenant")).isEqualTo(TENANT_A);
+        assertThat(fieldValue(line, "doc_id")).isEqualTo("swp.50a");
+        assertThat(fieldValue(line, "collection")).isEqualTo(col);
+        assertThat(fieldValue(line, "dropped")).isEqualTo("1");
+        assertThat(fieldValue(line, "swept")).isEqualTo("0");
+        assertThat(fieldValue(line, "kept")).as("kept must equal dropped when nothing was swept").isEqualTo("1");
+        assertThat(chunk384Exists(TENANT_A, col, shared))
+            .as("the chunk must survive — the tombstoned referrer still protects it")
+            .isTrue();
+    }
+
+    @Test @Order(51)
+    void writeManifestMany_sweptEvent_someCandidatesSwept_logsExactlyOnceWithCorrectCounts() throws Exception {
+        // Same shape as Order(40): an uncontended sweep that actually removes
+        // the dropped chunk. Guards against a fix that duplicates the line
+        // (one from an unconditional log call plus one still gated on
+        // swept > 0) rather than making the single existing line unconditional.
+        String col = "code__swp51__minilm-l6-v2-384__v1";
+        String x = ch("swp51-x");
+        seedChunk384(TENANT_A, col, x);
+        registerDoc(TENANT_A, "swp.51", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.51", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
+
+        var lines = captureSweptLogLines(() ->
+            writeManifestManySeeded(TENANT_A, List.of(
+                Map.<String, Object>of("doc_id", "swp.51", "rows", List.<Map<String, Object>>of())), col,
+                null, true));
+
+        assertThat(lines)
+            .as("exactly one event=write_manifest_many_swept line per sweep run — never two")
+            .hasSize(1);
+        String line = lines.getFirst();
+        assertThat(fieldValue(line, "tenant")).isEqualTo(TENANT_A);
+        assertThat(fieldValue(line, "doc_id")).isEqualTo("swp.51");
+        assertThat(fieldValue(line, "collection")).isEqualTo(col);
+        assertThat(fieldValue(line, "dropped")).isEqualTo("1");
+        assertThat(fieldValue(line, "swept")).isEqualTo("1");
+        assertThat(fieldValue(line, "kept")).isEqualTo("0");
+        assertThat(chunk384Exists(TENANT_A, col, x)).as("the sweep this event reports actually ran").isFalse();
     }
 }

@@ -5737,9 +5737,14 @@ public final class CatalogRepository {
                 boolean stagingActive = stagingHasRowsForTenant(ctx, tenant);
                 List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped, stagingActive);
                 int swept = sweptChashes.size();
+                int kept = dropped.size() - swept;
+                // nexus-wbfpw.13: unconditional — a run that keeps every
+                // candidate (swept=0) used to log nothing at all, even though
+                // the response map below always carries `kept`. One line per
+                // sweep run, every run.
+                log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={} kept={}",
+                          tenant, docId, collection, dropped.size(), swept, kept);
                 if (swept > 0) {
-                    log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={}",
-                              tenant, docId, collection, dropped.size(), swept);
                     // nexus-sybbh: audit the reap IN THE SAME TRANSACTION as the sweep
                     // DELETE above (same ctx, not yet committed) — this is the exact
                     // codepath the 233 lost store_put chunks (nexus-3n7pr) went through
@@ -5753,7 +5758,7 @@ public final class CatalogRepository {
                 out.put("doc_id", docId);
                 out.put("dropped", dropped.size());
                 out.put("swept", swept);
-                out.put("kept", dropped.size() - swept);
+                out.put("kept", kept);
                 out.put("errored", false);
                 return out;
             });
