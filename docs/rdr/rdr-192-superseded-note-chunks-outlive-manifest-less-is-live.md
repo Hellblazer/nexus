@@ -924,9 +924,9 @@ To be completed at gate (Layer 3 AI critique).
   Proposed Solution rewritten around engine-side `live(c)`/`reapable(c)` and
   a state-derived reaper (`nexus-2x9xa`).
 - 2026-09-26: Gate round 1 — PASSED (0 Critical, 6 Significant, 0
-  ship-blocker(s)); commit `1aff90d0c`; critique
+  ship-blocker(s)); commit `141684599`; critique
   `nexus_rdr/192-gate-critique-2026-09-26-r1`.
-- 2026-09-26: All six gate-round-1 findings fixed in `503fabbb1`. CA3
+- 2026-09-26: All six gate-round-1 findings fixed in `13bcd8e5e`. CA3
   acknowledged by Sam (T2 `nexus_rdr/192-research-7`); it stays a Phase 2
   prerequisite. Accepted by Sam.
 - 2026-09-26: Amended after planning (epic `nexus-wbfpw`, plan audit READY
