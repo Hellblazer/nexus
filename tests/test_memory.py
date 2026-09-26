@@ -309,6 +309,16 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
                 "nexus.catalog.store_hook.store_put_manifest_direct",
                 return_value=None,
             ),
+            # The stand-in id above is not a real catalog document, and
+            # these fake credentials point at no reachable catalog, so the
+            # real manifest hook in the post-store chains would retry an
+            # unreachable write (180s per call once the rate-limit brake
+            # escalates). Its contract is pinned elsewhere; here it is a
+            # no-op, installed where install_default_hooks imports it.
+            patch(
+                "nexus.mcp_infra.manifest_write_batch_hook",
+                lambda *a, **k: None,
+            ),
         ):
             result = runner.invoke(main, args)
     finally:
