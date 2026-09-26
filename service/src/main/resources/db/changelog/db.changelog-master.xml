@@ -80,6 +80,8 @@
     <include file="db/changelog/service-tokens-004-mint-locked-scope.xml"/>
     <!-- nexus-lgiqw: partial expiry index for the scope=data reaper. -->
     <include file="db/changelog/service-tokens-005-data-expiry-index.xml"/>
+    <!-- nexus-r3ur5: board-ci writer scope (CI board-post-only credential). -->
+    <include file="db/changelog/service-tokens-006-board-ci-scope.xml"/>
 
     <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
     <include file="db/changelog/vectors-001-baseline.xml"/>

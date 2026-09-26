@@ -82,6 +82,15 @@ def test_issue_passes_mint_locked_scope_flag() -> None:
     assert _FakeStore.calls == [("issue_token", ("conexus-edge-locked", None, None, "mint-locked"))]
 
 
+def test_issue_passes_board_ci_scope_flag() -> None:
+    # nexus-r3ur5: board-ci writer credential — the CLI just forwards the string
+    # verbatim; server-side (AuthFilter/TupleHandler/TokenAdminHandler) is the
+    # security boundary that confines it to POST /v1/tuples/out on board/ci/<topic>.
+    result = _run(["token", "issue", "--tenant", "ci-board-writer", "--scope", "board-ci"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("issue_token", ("ci-board-writer", None, None, "board-ci"))]
+
+
 def test_issue_omits_scope_by_default() -> None:
     result = _run(["token", "issue", "--tenant", "t-a"])
     assert result.exit_code == 0, result.output

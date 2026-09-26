@@ -23,6 +23,7 @@ import java.sql.Connection;
 
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-152 bead nexus-gmiaf.32.3 — token lifecycle admin endpoints, end-to-end through the
@@ -460,6 +461,107 @@ class TokenAdminHandlerTest {
         assertThat(resp.statusCode())
             .as("non-operator mint-locked-scope issuance must be 403: %s", resp.body())
             .isEqualTo(403);
+    }
+
+    // ── nexus-r3ur5: board-ci writer credential ─────────────────────────────
+
+    @Test
+    void issueScope_boardCi_operatorMayIssueForAnyTenant() throws Exception {
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"ci-board-writer\",\"label\":\"ci-board\",\"scope\":\"board-ci\"}");
+        assertThat(scopeOf(r.get("token_hash").asText())).isEqualTo("board-ci");
+    }
+
+    @Test
+    void issueScope_boardCi_tenantMayIssueForItsOwnTenant() throws Exception {
+        // Unlike mint/mint-locked, board-ci carries no privilege escalation, so it
+        // follows the plain 'tenant' authorization model: a non-operator may issue
+        // it for its OWN tenant (authorizedForTenant, not requireOperator).
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"board-ci-self-a\"}")
+            .get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-self-a\",\"scope\":\"board-ci\"}");
+        assertThat(resp.statusCode()).as("self-tenant board-ci issuance: %s", resp.body())
+            .isEqualTo(200);
+        JsonNode r = MAPPER.readTree(resp.body());
+        assertThat(scopeOf(r.get("token_hash").asText())).isEqualTo("board-ci");
+    }
+
+    @Test
+    void issueScope_boardCi_crossTenantIsRefused() throws Exception {
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"board-ci-cross-a\"}")
+            .get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-cross-b\",\"scope\":\"board-ci\"}");
+        assertThat(resp.statusCode())
+            .as("cross-tenant board-ci issuance must be 403: %s", resp.body())
+            .isEqualTo(403);
+    }
+
+    @Test
+    void boardCiScopedBearer_rejectedOnEveryAdminRoute() throws Exception {
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-lockout\",\"scope\":\"board-ci\"}");
+        String boardCiRaw = r.get("token").asText();
+        // A board-ci token must not issue anything, including another board-ci
+        // token — rejected on every admin route, same shape as mint/mint-locked/data.
+        for (String route : new String[] {"/v1/tenants/create", "/v1/service-tokens/issue",
+                                          "/v1/service-tokens/rotate", "/v1/service-tokens/revoke",
+                                          "/v1/service-tokens/list"}) {
+            var resp = sendAs(boardCiRaw, route, "{}");
+            assertThat(resp.statusCode())
+                .as("board-ci-scoped bearer on %s must be 403: %s", route, resp.body())
+                .isEqualTo(403);
+        }
+    }
+
+    @Test
+    void dataTokenMint_byBoardCiBearer_is403() throws Exception {
+        // DataTokenHandler already requires mint/mint-locked scope, and the
+        // AuthFilter board-ci choke point refuses everything but
+        // POST /v1/tuples/out anyway — either layer alone would 403 this.
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-no-mint\",\"scope\":\"board-ci\"}");
+        String boardCiRaw = r.get("token").asText();
+        var resp = sendAs(boardCiRaw, "/v1/data-tokens/mint", "{\"tenant\":\"board-ci-no-mint\"}");
+        assertThat(resp.statusCode())
+            .as("board-ci bearer must not mint data tokens: %s", resp.body())
+            .isEqualTo(403);
+    }
+
+    @Test
+    void chkServiceTokensScope_acceptsBoardCi_stillRejectsUnknown() throws Exception {
+        // Bypasses the application-layer scope validation entirely (a raw insert
+        // via seedServiceToken, the same helper the other tests in this suite use
+        // to seed rows) — this proves the DB CHECK constraint itself (service-
+        // tokens-006), not the handler's own guard tested elsewhere in this class.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES),
+                "raw-chk-board-ci-accept", "chk-board-ci-tenant", "chk-probe", "board-ci", null, null);
+        }
+        assertThat(scopeOfRawToken("raw-chk-board-ci-accept")).isEqualTo("board-ci");
+
+        assertThatThrownBy(() -> {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES),
+                    "raw-chk-unknown-scope", "chk-unknown-tenant", "chk-probe",
+                    "not-a-real-scope", null, null);
+            }
+        }).as("an unrecognized scope must still violate chk_service_tokens_scope")
+            .isInstanceOf(org.jooq.exception.DataAccessException.class);
+    }
+
+    private String scopeOfRawToken(String raw) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.SCOPE).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(TokenHashing.sha256Hex(raw)))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(rows).hasSize(1);
+            return rows.get(0);
+        }
     }
 
     @Test

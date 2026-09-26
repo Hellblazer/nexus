@@ -98,10 +98,13 @@ public final class TokenAdminHandler implements HttpHandler {
         // first; this handler-level guard is defense-in-depth layer 2 AND the
         // primary enforcement for data tokens (which legitimately pass the filter
         // for data routes but must never administer credentials — a leaked data
-        // token stays "one tenant's data, one TTL window").
+        // token stays "one tenant's data, one TTL window"). nexus-r3ur5 extends
+        // this to board-ci: a board-ci token must not ISSUE anything, including
+        // another board-ci token — its AuthFilter choke point already fires first
+        // here too, same defense-in-depth shape as mint.
         String callerScope = RequestContext.scope();
         if (TokenStore.SCOPE_MINT.equals(callerScope) || TokenStore.SCOPE_MINT_LOCKED.equals(callerScope)
-                || TokenStore.SCOPE_DATA.equals(callerScope)) {
+                || TokenStore.SCOPE_DATA.equals(callerScope) || TokenStore.SCOPE_BOARD_CI.equals(callerScope)) {
             log.debug("event=token_admin_denied reason=scope_forbidden_on_admin_surface scope={}",
                       callerScope);
             HttpUtil.send(exchange, 403, json(Map.of(
@@ -153,20 +156,24 @@ public final class TokenAdminHandler implements HttpHandler {
         }
         String label = optString(body, "label");
         Long ttl = optLong(body, "ttl_seconds");
-        // nexus-868dq: optional scope. Only 'tenant' (the default) and 'mint' are
-        // issuable here — 'data' tokens are minted exclusively by
-        // /v1/data-tokens/mint and 'root' is never issuable. Mint issuance is
-        // privilege escalation (the credential can mint data tokens for ANY
-        // tenant), so it is OPERATOR-ONLY even for the caller's own tenant.
+        // nexus-868dq: optional scope. 'tenant' (the default), 'mint', 'mint-locked'
+        // and 'board-ci' (nexus-r3ur5) are issuable here — 'data' tokens are minted
+        // exclusively by /v1/data-tokens/mint and 'root' is never issuable. Mint
+        // issuance is privilege escalation (the credential can mint data tokens for
+        // ANY tenant), so it is OPERATOR-ONLY even for the caller's own tenant.
+        // board-ci carries NO such escalation — it is confined to writing one
+        // template — so it follows the plain 'tenant' authorization model instead:
+        // the authorizedForTenant() check above already narrows a non-operator to
+        // issuing for its OWN tenant, same as issuing an ordinary tenant token.
         String scope = optString(body, "scope");
         if (scope == null || scope.isBlank()) {
             scope = TokenStore.SCOPE_TENANT;
         }
         if (!TokenStore.SCOPE_TENANT.equals(scope) && !TokenStore.SCOPE_MINT.equals(scope)
-                && !TokenStore.SCOPE_MINT_LOCKED.equals(scope)) {
+                && !TokenStore.SCOPE_MINT_LOCKED.equals(scope) && !TokenStore.SCOPE_BOARD_CI.equals(scope)) {
             throw new IllegalArgumentException(
                 "invalid scope for issue: '" + scope
-                    + "' (only 'tenant', 'mint', and 'mint-locked' are issuable)");
+                    + "' (only 'tenant', 'mint', 'mint-locked', and 'board-ci' are issuable)");
         }
         if ((TokenStore.SCOPE_MINT.equals(scope) || TokenStore.SCOPE_MINT_LOCKED.equals(scope))
                 && !requireOperator(ex)) {

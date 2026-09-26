@@ -51,7 +51,8 @@ public final class TokenStore {
     // Server-assigned; NEVER derived from the client-supplied label (a label-
     // derived privilege would let any /v1/service-tokens/issue caller
     // self-escalate by crafting a label). The DB CHECK constraint mirrors this
-    // set (service-tokens-003, extended by service-tokens-004 for mint-locked).
+    // set (service-tokens-003, extended by service-tokens-004 for mint-locked
+    // and service-tokens-006 for board-ci).
 
     /** The single operator credential (bootstrap). Cross-tenant admin. */
     public static final String SCOPE_ROOT = "root";
@@ -64,9 +65,16 @@ public final class TokenStore {
     public static final String SCOPE_MINT_LOCKED = "mint-locked";
     /** Short-TTL per-tenant data token minted by a mint credential. */
     public static final String SCOPE_DATA = "data";
+    /** Board-ci writer credential (nexus-r3ur5): replaces a tenant-scope token in a
+     *  public repo's CI and a public Lambda with one that may ONLY call
+     *  {@code POST /v1/tuples/out}, and only to write the {@code board/ci/<topic>}
+     *  template — the security-critical narrowing "post a CI verdict" needs, versus
+     *  the full corpus read/write/delete a tenant token carries. */
+    public static final String SCOPE_BOARD_CI = "board-ci";
 
     private static final java.util.Set<String> VALID_SCOPES =
-        java.util.Set.of(SCOPE_ROOT, SCOPE_TENANT, SCOPE_MINT, SCOPE_MINT_LOCKED, SCOPE_DATA);
+        java.util.Set.of(SCOPE_ROOT, SCOPE_TENANT, SCOPE_MINT, SCOPE_MINT_LOCKED, SCOPE_DATA,
+                          SCOPE_BOARD_CI);
 
     /**
      * A live (non-revoked) service token: its tenant, optional expiry instant, and

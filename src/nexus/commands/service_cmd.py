@@ -212,11 +212,15 @@ def _print_issued(result: dict[str, object]) -> None:
 @click.option("--label", default=None, help="Optional human-readable label.")
 @click.option("--ttl", "ttl_seconds", type=int, default=None,
               help="Optional lifetime in seconds (default: no expiry).")
-@click.option("--scope", type=click.Choice(["tenant", "mint", "mint-locked"]), default=None,
+@click.option("--scope", type=click.Choice(["tenant", "mint", "mint-locked", "board-ci"]), default=None,
               help="Token scope (nexus-868dq): default 'tenant'; 'mint' issues the "
                    "cross-tenant data-token mint credential (operator/root bearer required); "
                    "'mint-locked' issues a tenant-bound mint credential that may only mint "
                    "data tokens for the tenant it is bound to (RDR-005 2a, nexus-xidcq). "
+                   "'board-ci' (nexus-r3ur5) issues a credential that may ONLY call "
+                   "POST /v1/tuples/out to write the board/ci/<topic> template — the "
+                   "narrow scope CI board-status posting needs instead of a full "
+                   "tenant token; issuable by the operator or by a tenant for itself. "
                    "'data' tokens are minted only by POST /v1/data-tokens/mint, never issued here.")
 def issue(tenant: str, label: str | None, ttl_seconds: int | None, scope: str | None) -> None:
     """Issue a new bound token for TENANT. Printed once; only the hash is stored."""

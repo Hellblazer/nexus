@@ -231,6 +231,27 @@ public final class AuthFilter extends Filter {
             }
         }
 
+        // nexus-r3ur5 (choke point, mirrors the nexus-868dq mint pattern): a
+        // board-ci credential exists to write CI board posts via
+        // POST /v1/tuples/out and NOTHING else — exact path AND method, not a
+        // prefix (a GET on /v1/tuples/out, or any other tuples op such as
+        // /v1/tuples/rd, carries no meaning for this scope and is refused
+        // here so every route behind this filter is covered without
+        // per-handler opt-in; TupleHandler's own scope guard is defense in
+        // depth layer 2, same shape as the mint-surface check above).
+        if (dev.nexus.service.db.TokenStore.SCOPE_BOARD_CI.equals(scope)) {
+            String path = exchange.getRequestURI().getPath();
+            boolean boardCiSurface = "POST".equalsIgnoreCase(exchange.getRequestMethod())
+                && path.equals("/v1/tuples/out");
+            if (!boardCiSurface) {
+                log.debug("event=auth_rejected path={} method={} "
+                        + "reason=board_ci_scope_surface_forbidden",
+                        path, exchange.getRequestMethod());
+                sendError(exchange, 403, "forbidden");
+                return;
+            }
+        }
+
         // nexus-45ykb (defense in depth): deny any token that resolves to the wildcard
         // sentinel tenant. '*' is a reserved name that token minting, `nx tenant create`,
         // and catalog owner-registration all refuse, so it can NEVER be a registered
