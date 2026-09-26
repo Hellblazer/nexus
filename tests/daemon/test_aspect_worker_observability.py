@@ -276,3 +276,35 @@ def test_started_log_carries_a_phase_timing_breakdown(tmp_path: Path, monkeypatc
         assert fields["total_startup_ms"] >= fields["queue_build_ms"]
     finally:
         d.stop()
+
+
+def test_process_age_is_parsed_from_proc_stat() -> None:
+    """nexus-1m9sb review: the ~3 minutes could sit BEFORE start() (CLI
+    startup), which the per-phase breakdown cannot see, so 'started' also
+    carries the process's age. Field 22 of /proc/<pid>/stat is the start time
+    in clock ticks since boot; the comm field may contain spaces and ')'."""
+    stat = "4242 (nx daemon) x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 500 20"
+    # starttime=500 ticks at 100 Hz = 5.0 s after boot; uptime 65.25 s -> 60.25 s old.
+    assert awd._process_age_ms_from(stat, "65.25 1.0", 100) == 60250.0
+    assert awd._process_age_ms_from("garbage", "65.25 1.0", 100) is None
+
+
+def test_started_log_carries_process_age(tmp_path: Path, monkeypatch) -> None:
+    cap = _CapturingLog()
+    monkeypatch.setattr(awd, "_log", cap)
+    monkeypatch.setattr(awd, "_process_age_ms", lambda: 1234.5)
+
+    class _NoopQueue:
+        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+            return 0
+
+        def close(self) -> None: ...
+
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-age",
+                           worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+    d.start()
+    try:
+        _level, _event, fields = cap.of("aspect_worker_daemon.started")[0]
+        assert fields["process_age_ms"] == 1234.5
+    finally:
+        d.stop()

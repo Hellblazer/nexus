@@ -137,6 +137,30 @@ def _default_aspect_queue(tenant: str) -> Any:
     return HttpAspectQueue(tenant=tenant)
 
 
+def _process_age_ms_from(stat: str, uptime: str, clk_tck: int) -> float | None:
+    """Age of the process in ms from ``/proc/<pid>/stat`` and ``/proc/uptime``
+    text. Field 22 of stat is the start time in clock ticks since boot; the
+    fields are counted after the last ``)`` because comm may hold spaces."""
+    try:
+        fields = stat[stat.rindex(")") + 2:].split()
+        start_ticks = int(fields[19])
+        return round((float(uptime.split()[0]) - start_ticks / clk_tck) * 1000, 1)
+    except (ValueError, IndexError):
+        return None
+
+
+def _process_age_ms() -> float | None:
+    """This process's age in ms on Linux, None where /proc is absent (nexus-1m9sb:
+    the slow boot was in a Linux container, and the time before start() -- CLI
+    startup -- is invisible to start()'s own phase timings)."""
+    try:
+        stat = Path("/proc/self/stat").read_text()
+        uptime = Path("/proc/uptime").read_text()
+        return _process_age_ms_from(stat, uptime, os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError):
+        return None
+
+
 class AspectWorkerDaemon:
     """A per-tenant leased host for the aspect-extraction worker loop.
 
@@ -282,6 +306,7 @@ class AspectWorkerDaemon:
             worker_start_ms=round((t_worker_started - t_worker_built) * 1000, 1),
             queue_build_ms=round((t_queue_built - t_worker_started) * 1000, 1),
             total_startup_ms=round((t_done - t_start) * 1000, 1),
+            process_age_ms=_process_age_ms(),
         )
 
     def _on_worker_self_fault(self, reason: str) -> None:
