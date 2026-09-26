@@ -188,6 +188,23 @@ class VectorHandlerUpstreamRateLimitedTest {
         assertThat(genericIdx).isGreaterThan(armIdx);
     }
 
+    @Test
+    void stagingHandlerMapsBothEmbedFailuresThroughTheirShapes() throws Exception {
+        // nexus-qajw7 fix round: embed_fill calls the embedder directly, so both
+        // typed embed exceptions must be caught ahead of the generic 500 arm.
+        String src = Files.readString(Path.of(
+            "src", "main", "java", "dev", "nexus", "service", "http", "StagingHandler.java"));
+        int deadlineIdx = src.indexOf("catch (dev.nexus.service.vectors.RequestDeadlineExceededException");
+        int rateIdx = src.indexOf("catch (dev.nexus.service.vectors.UpstreamRateLimitedException");
+        assertThat(deadlineIdx).isPositive();
+        assertThat(rateIdx).isPositive();
+        assertThat(src.substring(deadlineIdx, deadlineIdx + 800))
+            .contains("HttpUtil.sendRequestDeadlineExceeded(exchange, e)");
+        assertThat(src.substring(rateIdx, rateIdx + 900)).contains("Retry-After").contains("429");
+        int genericIdx = src.indexOf("catch (Exception e)", Math.max(deadlineIdx, rateIdx));
+        assertThat(genericIdx).isGreaterThan(Math.max(deadlineIdx, rateIdx));
+    }
+
     /** Always throws the typed exception, simulating a budget-exhausted sustained 429. */
     private static final class RateLimitedEmbedder implements Embedder {
         @Override

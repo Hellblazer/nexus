@@ -227,6 +227,21 @@ public final class StagingHandler implements HttpHandler {
             }
         } catch (StagingPromoteOps.PromotePreconditionException | IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (dev.nexus.service.vectors.RequestDeadlineExceededException e) {
+            // nexus-qajw7: embed_fill embeds through the same embedders as
+            // /v1/vectors; its deadline refusal or abort takes the shared 503
+            // shape instead of the generic arm's opaque 500.
+            log.warn("event=staging_request_deadline_exceeded op={} tenant={} outcome={} error={}",
+                     op, tenant, e.outcome().wire(), e.getMessage());
+            HttpUtil.sendRequestDeadlineExceeded(exchange, e);
+        } catch (dev.nexus.service.vectors.UpstreamRateLimitedException e) {
+            // Same class of gap for Voyage's sustained 429: mirror the vector and
+            // catalog handlers' honest 429 + Retry-After.
+            log.warn("event=staging_upstream_rate_limited op={} tenant={} retry_after_s={} error={}",
+                     op, tenant, e.retryAfterSeconds(), e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
+            HttpUtil.send(exchange, 429, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage())
+                + ",\"retry_after_seconds\":" + e.retryAfterSeconds() + "}");
         } catch (Exception e) {
             if (!HttpUtil.sendTypedDbError(exchange, e, log, "staging_handler",
                     "op=" + op + " tenant=" + tenant)) {
