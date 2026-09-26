@@ -296,8 +296,8 @@ Then end with the literal token LEAKCHECKDONE. Never print the command's own env
 
   note "leak-check tail: $(printf '%s' "$leakout" | tail -3 | tr '\n' ' ' | redact | cut -c1-200)"
   if [[ "$leakout" == *LEAKCHECKDONE* ]] \
-     && [[ "$leakout" =~ (^|[^0-9A-Za-z_])HARNESS_COUNT=0([^0-9]|$) ]] \
-     && [[ "$leakout" =~ (^|[^0-9A-Za-z_])TOKEN_COUNT=0([^0-9]|$) ]]; then
+     && [[ "$leakout" =~ (^|[^0-9A-Za-z_])HARNESS_COUNT=0([^0-9A-Za-z_]|$) ]] \
+     && [[ "$leakout" =~ (^|[^0-9A-Za-z_])TOKEN_COUNT=0([^0-9A-Za-z_]|$) ]]; then
     ok "no leak: a real Bash-tool child's environment names neither token (HARNESS_COUNT=0, TOKEN_COUNT=0)"
   else
     bad "no-leak diagnostic did not confirm both counts are 0 (leak, or the diagnostic itself failed)"

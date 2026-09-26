@@ -37,6 +37,16 @@ def test_subprocess_tool_grant_has_no_shell_tool() -> None:
     assert not offending, f"_subprocess_tool_grant grants a shell tool: {offending}"
 
 
+# References to claude_dispatch that hand it on under another local name, each
+# with the name its callers use. The scan audits every call of that name in the
+# same file: none may pass allowed_tools or mcp_servers.
+INDIRECT_DISPATCH: dict[str, str] = {
+    # _resolve_repeat_dispatch is the injectable seam for `nx rdr repeat`,
+    # which calls the result as `dispatch(...)`, tool-free.
+    "commands/rdr.py": "dispatch",
+}
+
+
 def _call_name(node: ast.Call) -> str | None:
     fn = node.func
     if isinstance(fn, ast.Name):
@@ -69,6 +79,7 @@ def test_every_dispatch_allowed_tools_comes_from_the_audited_grant() -> None:
     has to be reviewed against the shell-tool invariant before it lands."""
     dispatch_calls = 0
     granted_calls = 0
+    indirect_calls = 0
     violations: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -88,10 +99,38 @@ def test_every_dispatch_allowed_tools_comes_from_the_audited_grant() -> None:
                             violations.append(
                                 f"{path.relative_to(SRC)}:{node.lineno} allowed_tools not from _subprocess_tool_grant()"
                             )
+        # A call the scan cannot see is an unreviewed call: claude_dispatch
+        # imported under another name, or referenced other than as the
+        # callee of a direct call (functools.partial, a stored alias).
+        direct_callees = {
+            id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "claude_dispatch" and alias.asname not in (None, "claude_dispatch"):
+                        violations.append(f"{path.relative_to(SRC)}:{node.lineno} claude_dispatch imported as {alias.asname}")
+            ref = (isinstance(node, ast.Name) and node.id == "claude_dispatch") or (
+                isinstance(node, ast.Attribute) and node.attr == "claude_dispatch"
+            )
+            if ref and id(node) not in direct_callees and isinstance(getattr(node, "ctx", None), ast.Load):
+                rel = str(path.relative_to(SRC))
+                if rel not in INDIRECT_DISPATCH:
+                    violations.append(f"{rel}:{node.lineno} claude_dispatch referenced but not called directly")
+        alias_name = INDIRECT_DISPATCH.get(str(path.relative_to(SRC)))
+        if alias_name:
+            alias_calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and _call_name(n) == alias_name]
+            if not alias_calls:
+                violations.append(f"{path.relative_to(SRC)}: no {alias_name}(...) call left; drop the INDIRECT_DISPATCH entry")
+            for call in alias_calls:
+                indirect_calls += 1
+                if any(kw.arg in (None, "allowed_tools", "mcp_servers") for kw in call.keywords):
+                    violations.append(f"{path.relative_to(SRC)}:{call.lineno} {alias_name}(...) grants tools or unpacks kwargs")
     # Non-vacuity: the scan must see the real call sites, including the two
     # tool-granting ones (nx_enrich_beads, nx_plan_audit).
     assert dispatch_calls >= 15, f"scan found only {dispatch_calls} claude_dispatch calls"
     assert granted_calls >= 2, f"scan found only {granted_calls} tool-granting dispatches"
+    assert indirect_calls >= 1, "the INDIRECT_DISPATCH audit examined no call"
     assert not violations, "\n".join(violations)
 
 

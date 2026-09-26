@@ -18,7 +18,7 @@ import json
 import re
 import sys
 
-AUTH_FAILURE = re.compile(r"not logged in|invalid api key|authentication_error|oauth token", re.I)
+AUTH_FAILURE = re.compile(r"not logged in|invalid api key|authentication_error", re.I)
 
 
 def _text(content: object) -> str:
