@@ -124,31 +124,43 @@ class HnswSettingsExtractorTest {
 
     @Test
     void quoteAware_aDashDashInsideAStringLiteralDoesNotSwallowTheRestOfTheLine() {
-        // The naive (pre-round-4) regex strip would see the `--` inside
-        // the quoted message and treat EVERYTHING from there to end of
-        // line as a comment -- including the real set_config call that
-        // follows it on the SAME line.
+        // Round-5 review (code review, Significant): a NEWLINE between the
+        // confounding literal and the real call would make this pass under
+        // the OLD line-bounded regex too (`--[^\n]*` already stops at that
+        // newline on its own), proving nothing about quote-awareness. Both
+        // must sit on the SAME LINE so the OLD regex's `--` match, which
+        // starts INSIDE the string, actually reaches -- and swallows -- the
+        // real call before hitting a newline.
         String sameLine =
-            "RAISE EXCEPTION 'collection %% is not registered -- register it first';\n"
-            + "PERFORM set_config('hnsw.ef_search', '400', true);\n";
+            "RAISE EXCEPTION 'not registered -- see docs'; PERFORM set_config('hnsw.ef_search', '400', true);\n";
         HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(sameLine);
         assertThat(x.effective())
-            .as("the set_config call after the quoted '--' must still be found -- a"
-                + " quote-UNAWARE stripper would have swallowed it as part of a fake"
-                + " comment starting inside the string literal")
+            .as("the set_config call after the quoted '--', on the SAME line, must still be"
+                + " found -- a quote-UNAWARE stripper's `--[^\\n]*` would start matching"
+                + " INSIDE the string literal and swallow everything to end of line,"
+                + " including this real call")
             .containsEntry("hnsw.ef_search", "400")
             .hasSize(1);
     }
 
     @Test
     void quoteAware_aSlashStarInsideAStringLiteralDoesNotSwallowTheRestOfTheLine() {
+        // Round-5 review (code review, Significant): the string's `/*` must
+        // have NO closing `*/` before the real call, so the OLD DOTALL
+        // block-comment regex's reluctant match -- which starts at THIS
+        // `/*` -- is forced to keep scanning past the string, past the real
+        // call, to the FIRST `*/` it finds anywhere, which is the stray one
+        // placed deliberately AFTER the call. A `/* ... */` fully closed
+        // inside the string (the round-4 version) lets the old regex's
+        // match end there too, proving nothing.
         String sameLine =
-            "RAISE EXCEPTION 'malformed /* input */ detected here';\n"
-            + "PERFORM set_config('enable_sort', 'off', true);\n";
+            "RAISE EXCEPTION 'malformed /* input'; PERFORM set_config('enable_sort', 'off', true); */\n";
         HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(sameLine);
         assertThat(x.effective())
-            .as("a `/*` inside a string literal must not be treated as a block-comment"
-                + " opener -- the real set_config call after the string must still be found")
+            .as("a `/*` inside a string literal, with no closing `*/` until AFTER the real"
+                + " call, must not be treated as a block-comment opener -- a quote-UNAWARE"
+                + " DOTALL regex would match from this `/*` all the way to the stray `*/`"
+                + " after the call, swallowing the entire real call in between")
             .containsEntry("enable_sort", "off")
             .hasSize(1);
     }
@@ -156,12 +168,13 @@ class HnswSettingsExtractorTest {
     @Test
     void quoteAware_aDoubledQuoteEscapeInsideAStringDoesNotEndTheStringEarly() {
         // Postgres's '' doubled-quote escape represents a literal ' inside
-        // a string. A scanner that ends the string at the FIRST quote
-        // would then misparse everything after it, including a `--` that
-        // is actually still inside the (longer) real string.
+        // a string. Same-line, same reasoning as the `--` test above: this
+        // exercises escape-awareness AND the OLD-regex discrimination
+        // together, since the `--` after the escaped quote is still inside
+        // the (longer) real string and must not be treated as a comment
+        // opener, on either scanner.
         String withEscapedQuote =
-            "RAISE EXCEPTION 'it''s not registered -- register it first';\n"
-            + "PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);\n";
+            "RAISE EXCEPTION 'it''s not registered -- see docs'; PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);\n";
         HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(withEscapedQuote);
         assertThat(x.effective())
             .containsEntry("hnsw.iterative_scan", "strict_order")
@@ -172,8 +185,13 @@ class HnswSettingsExtractorTest {
     void quoteAware_theRealAssignFromChashesRaiseMessageDoesNotCorruptExtraction() {
         // The EXACT shape of assign_from_chashes' own message (taxonomy-018's
         // header names it explicitly), verbatim, immediately followed by
-        // the real settings block -- reproduces the round-4 finding
-        // directly against production's own literal text.
+        // the real settings block. NOT the discriminating test (round-5
+        // review, code review, Significant): production's own message ends
+        // its own line before the settings block starts on later lines, so
+        // even the OLD line-bounded regex extracts this correctly too --
+        // the two same-line tests above are what actually distinguish this
+        // scanner from a plain regex strip. This one stays as a REGRESSION
+        // PIN against production's real literal text specifically.
         String realShape =
             "IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections) THEN\n"
             + "    RAISE EXCEPTION 'assign_from_chashes_1024: collection %% is not"
