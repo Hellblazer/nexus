@@ -328,7 +328,7 @@ class TestMineruRunViaServer:
         extractor._mineru_run_total_pages = total
         with (
             patch("nexus.pdf_extractor.subprocess.Popen") as mock_popen,
-            pytest.raises(ValueError, match="MinerU page range|past the last page"),
+            pytest.raises(ValueError, match="MinerU page range|past the last page|zero-page"),
         ):
             extractor._mineru_run_subprocess(dummy_pdf, start, end)
         mock_popen.assert_not_called()
@@ -620,6 +620,24 @@ class TestAdaptivePageRanges:
             extractor._extract_with_mineru(dummy_pdf)
         assert mock_iso.call_count == expected_calls
         assert [c.args[1:] for c in mock_iso.call_args_list] == expected_ranges
+
+    def test_a_batch_that_comes_back_as_the_whole_document_is_refused(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """MinerU's convert_pdf_bytes_to_bytes falls back to the ORIGINAL bytes
+        when its pdfium page rewrite throws, so a valid one-page batch can come
+        back as every page. Appended, that duplicates the document (the
+        nexus-v4xg7 corruption); it must fail instead, and as a ValueError so
+        the bisect ladder does not retry it."""
+        whole_doc = ("all pages", [], [{"page_idx": i} for i in range(5)])
+        with (
+            _mock_pymupdf(5), _mock_do_parse(),
+            patch("nexus.config.get_mineru_page_batch", return_value=1),
+            patch.object(extractor, "_mineru_run_isolated", return_value=whole_doc) as mock_iso,
+            pytest.raises(ValueError, match="returned 5 pages for pages 1-1"),
+        ):
+            extractor._extract_with_mineru(dummy_pdf)
+        assert mock_iso.call_count == 1, "refused on the first batch, not retried"
 
     def test_oom_retry_bisects_to_single_pages(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
         # RDR-148 Gap 6 batch//2 ladder: any multi-page range OOMs; only single

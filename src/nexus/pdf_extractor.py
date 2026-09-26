@@ -281,6 +281,8 @@ def _mineru_check_range(start: int, end: int | None, total_pages: int | None) ->
             f"empty MinerU page range [{start}, {end}); MinerU would extract "
             f"the whole document for it"
         )
+    if total_pages == 0:
+        raise ValueError("zero-page document; there is nothing for MinerU to extract")
     if total_pages is not None and start >= total_pages:
         raise ValueError(
             f"MinerU start page {start} is past the last page of a "
@@ -1910,6 +1912,22 @@ class PDFExtractor:
                 _extract_range(s, mid)
                 _extract_range(mid, rng_end)
                 return
+            # MinerU returns one pdf_info entry per page it parsed. MORE entries
+            # than pages asked for means it parsed something else: when its
+            # pdfium page rewrite throws, convert_pdf_bytes_to_bytes
+            # falls back to the ORIGINAL bytes and parses the whole document
+            # for this one batch (MinerU 3.1.11, mineru/cli/common.py). Appending
+            # that duplicates every page, the same corruption nexus-v4xg7 found
+            # from an off-by-one, and chash dedup hides it in storage. ValueError,
+            # not RuntimeError, so the bisect ladder above does not retry it.
+            # Only an excess is checked: whether MinerU emits an entry for a
+            # blank page is not established, and a shortfall is not this leak.
+            if len(pdf_info) > span:
+                raise ValueError(
+                    f"MinerU returned {len(pdf_info)} pages for pages "
+                    f"{s + 1}-{rng_end} ({span} requested) of {fname}; its page "
+                    f"rewrite most likely failed and it parsed the whole document"
+                )
             # Success. Normalize before measuring length so per_page_lengths is
             # consistent with the stored normalized text.
             md = _unwrap_mineru_font_tags(_normalize_mineru_latex(md))
