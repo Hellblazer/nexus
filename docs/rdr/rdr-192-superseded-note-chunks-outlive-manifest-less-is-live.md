@@ -29,15 +29,24 @@ was originally filed for. Re-verified against develop `135bb38a4` / engine
 What survives is bigger than the note-only case the title still names. The
 underlying question — *is this T3 chunk visible to any search, delete, or
 sweep path* — is answered **nine different ways** across the client and the
-engine, and those nine answers reduce to only **three** distinct positions.
+engine. Eight of those nine collapse to three distinct positions on "is this
+chunk current" (enumerated in Gap 1 below); the ninth — delete-time
+protection — answers a different question entirely and is treated
+separately throughout this RDR (see Gap 1's own accounting and Trade-offs).
 Every path that computes an answer fails open, and at least one of them
 throws away its own result on failure instead of retrying or recording it.
 The `manifest-less-is-live` contract this RDR originally targeted for notes
 was written to protect one specific overload (a note, by design, has no
-manifest row); it now silently protects every other manifest-less chunk in
-the store too — rename leftovers, quarantine rows, partial documents from an
-interrupted indexing run, `.nxexp` imports, and, still, superseded content
-whenever a sweep fails partway through.
+manifest row — no `catalog_document_chunks` row joining it to a document);
+it now silently protects every other manifest-less chunk in the store too —
+rename leftovers, quarantine rows (chunks copied into a separate
+`quarantine-*` physical collection by a garbage-collection sweep, pending
+review or deletion), partial documents from an interrupted indexing run,
+`.nxexp` imports (`nx store export`'s portable snapshot format for a
+collection, re-imported elsewhere), and, still, superseded content whenever
+a sweep fails partway through. Implementation Plan Phase 1 maps each of
+these five producer classes to a concrete detection bucket before any
+destructive change ships.
 
 Raw vector search (`nx search`, `search()`) is where this becomes a
 correctness bug rather than a disk-space one: catalog-aware paths (`query()`,
@@ -62,9 +71,11 @@ of "is this chunk current," and they disagree:
 1. **Search/get visibility** — `PgVectorRepository.liveChunksCondition`
    (`PgVectorRepository.java:3624`) and the `vectors-017-1` /
    `vectors-017-2` dead-set logic: a chunk is hidden only if it has an
-   own-collection manifest row AND every owner referenced by that row is
-   tombstoned. A manifest-less chunk is vacuously visible.
-2. **`nexus.live_chunks` view** (`vectors-005-repoint-functions-views.xml:228-252`):
+   own-collection manifest row (a `catalog_document_chunks` row in the SAME
+   collection as the chunk, joining it to a document) AND every owner
+   referenced by that row is tombstoned. A manifest-less chunk is
+   vacuously visible.
+2. **`nexus.live_chunks` view** (`vectors-005-repoint-functions-views.xml:228-257`):
    visible if it has NO manifest row at all (tenant-wide, any collection) OR
    at least one live-doc manifest row (also tenant-wide). Not
    collection-scoped, unlike every other predicate here — see Gap 5.
@@ -74,10 +85,11 @@ of "is this chunk current," and they disagree:
    AND none of that row's owners are live or recently tombstoned.
    Manifest-less chunks are never candidates.
 4. **Engine superseded sweep**, `sweepChunksQuery`
-   (`CatalogRepository.java:5904-5949`): deletes a dropped chash only if it
-   has NO manifest row at all (tenant-wide, any collection, tombstones
-   included) AND no live note-shaped document in the same physical
-   collection claims it via `meta.doc_id`.
+   (`CatalogRepository.java:5904-5949`): deletes a dropped chash (the
+   chunk's content hash, `sha256(chunk_text)`, which doubles as its T3 row
+   id) only if it has NO manifest row at all (tenant-wide, any collection,
+   tombstones included) AND no live note-shaped document in the same
+   physical collection claims it via `meta.doc_id`.
 5. **Client guards**, `indexer_utils.orphaned_chashes` (113-228,
    collection-scoped, fail-open) and `live_note_chashes` (317): feed
    `mcp_infra._sweep_superseded_vectors` (2204), `_sweep_superseded_vectors_many`
@@ -128,10 +140,14 @@ sweep) and `:2437-2438` (batch sweep) still filter and return with no log
 line on empty. `store_hook.py:1172-1173` (the `bb6n2` reap's own note-guard
 filter) and `:1159-1160` (its all-shared-chash early return) do the same.
 Both reproduce the shape of `nexus-kgos1`: *"It had never deleted a row. The
-silence is what hid it."* The engine's own sweep does not have this defect —
-`CatalogRepository.java:5756` logs `kept` counts on every run — which means
-the client had a correct model sitting beside the code it was editing and
-did not follow it.
+silence is what hid it."* The engine's own sweep has the identical gap, not
+a correct model the client failed to follow: `runSweepTransaction`'s
+response map always carries a `kept` count
+(`CatalogRepository.java:5756`, `out.put("kept", dropped.size() - swept)`),
+but its only `log.info` call (`:5740-5742`, `event=write_manifest_many_swept`)
+fires only when `swept > 0`. A run where the note guard keeps every
+candidate (`swept == 0`) logs nothing at all — the same silent shape this
+Gap describes in the client, sitting inside the code that inspired the fix.
 
 #### Gap 4: The engine sweep loses its own drop set on failure
 
@@ -140,13 +156,17 @@ the before-set inside the manifest-write transaction, commits, then runs
 `runSweepTransaction` (5725-5773) in a **separate** transaction: a 2000 ms
 lock timeout, a 5000 ms statement timeout, and an advisory exclusive lock
 (`pg_advisory_xact_lock(hashtext('sweepgate:'||tenant||'/'||collection))`)
-guard a `DELETE ... RETURNING` plus a `gc_audit` row. On `55P03`, `57014`, or
-any other failure it logs `write_manifest_many_sweep_gate_failed` and returns
+guard a `DELETE ... RETURNING` plus a `gc_audit` row (the engine's
+persistent audit-trail table for garbage-collection actions — every reap,
+quarantine move, or purge writes one row here, naming the actor and the
+chashes touched). On `55P03`, `57014`, or any other failure it logs
+`write_manifest_many_sweep_gate_failed` and returns
 `{dropped, swept, errored, reason}` — **without the chash list**. The client's
 `_apply_combined_write_response` (`mcp_infra.py` ~2194-2200) records only
 `doc_id` + `reason` via `_record_superseded_sweep_skip`: no retry, no chash,
-no way to try again. Only the `ChunkBatcher` flush path calls
-`sweep=true` at all (`indexer.py:5378-5386`); every other write path —
+no way to try again. Only the `ChunkBatcher` flush path — the client's
+batched-write buffer for the indexer's combined chunk-plus-manifest requests
+— calls `sweep=true` at all (`indexer.py:5378-5386`); every other write path —
 `store_put`'s own reap, the non-combined indexer paths — runs the
 client-side fail-open sweep instead, with the identical loss shape. Measured
 2026-09-24: a sweep-gate failure left 7 superseded chunks searchable in
@@ -158,7 +178,7 @@ explicitly pending this RDR.
 
 #### Gap 5: `nexus.live_chunks` is tenant-wide, not collection-scoped
 
-`vectors-005-repoint-functions-views.xml:228-252` defines `live_chunks` over
+`vectors-005-repoint-functions-views.xml:228-257` defines `live_chunks` over
 the whole tenant, with no collection filter — the one predicate in the
 nine-site survey that isn't scoped to the chunk's own collection.
 `vectors-017` collection-scoped the equivalent defect in predicates 1 and 3
@@ -219,7 +239,9 @@ run can each produce the same searchable ghost.
 - `catalog-003-soft-delete.xml` — `nexus.live_chunks` view, `purge_trash`
   step 1.
 - `vectors-005-repoint-functions-views.xml`, `vectors-009` (why `live_chunks`
-  cannot become a view join without breaking HNSW binds), `vectors-017-1/-2/-3`
+  cannot become a view join without breaking HNSW binds — the planner's
+  ability to push a vector-distance `ORDER BY` into pgvector's HNSW index
+  rather than falling back to a sequential scan), `vectors-017-1/-2/-3`
   (collection-scoping of predicates 1, 3, and `strandedChunkCount` — but not
   of `live_chunks` itself), `hygiene-005-1` / `catalog-037-1`
   (`gc_quarantine_orphans`), `taxonomy-019` (`taxonomy_unassigned_chashes`).
@@ -252,7 +274,7 @@ develop `135bb38a4` / engine `v0.1.132`, 2026-09-26.
 | Liveness/orphan status is computed at nine independent sites with three distinct answers | Enumerated in Gap 1 above, one file:line citation per site | Verified |
 | Two of those nine sites are collection-scoped inconsistently with the rest | `nexus.live_chunks` (tenant-wide) vs. predicates 1, 3, and `strandedChunkCount` (collection-scoped, fixed by `vectors-017`) | Verified |
 | The silent note-guard skip from `nexus-kgos1` was reproduced in the new reap path | `mcp_infra.py:2287-2288`, `:2437-2438`; `store_hook.py:1159-1160`, `:1172-1173` — all silent on empty/all-filtered | Verified |
-| The engine's own sweep does not have this defect | `CatalogRepository.java:5756` logs `kept` on every run | Verified |
+| The engine's own sweep has the identical logging gap | Response always carries `kept` (`CatalogRepository.java:5756`); its only `log.info` (`:5740-5742`) fires only when `swept > 0`, so a keep-everything run logs nothing | Verified |
 | The post-commit sweep loses its drop set on any gate failure | `CatalogRepository.java:5725-5773` returns `{dropped, swept, errored, reason}` with no chash list; client records only `doc_id` + `reason` (`mcp_infra.py` ~2194-2200), no retry | Verified |
 | A sweep-gate failure produced 7 searchable superseded chunks in production | Measured 2026-09-24, T2 `nexus/indexing-brittleness-proposal-2026-09-25` | Verified (field measurement) |
 | The historical 55k-row manifest-less population no longer exists | `gc_quarantine_orphans` moved 41,545 (`code__1-1`) + 5,831 (`knowledge__1-1`) + 5,681 (`docs__1-1`) rows on 2026-09-16; live population 2026-09-24 is 147 tenant-wide, all `knowledge__*` | Verified |
@@ -274,12 +296,14 @@ develop `135bb38a4` / engine `v0.1.132`, 2026-09-26.
   independently maintained predicates that happen to agree most of the
   time. Fixing "the" predicate requires naming and replacing all nine, not
   patching the one raw search reads.
-- **Verified** — The engine already contains a correct pattern
-  (`sweepChunksQuery`'s reporting, `strandedChunkCount`'s collection
-  scoping) sitting next to the client code that reproduces the defects
-  those patterns already solved. The asymmetry argues for moving the
-  authoritative predicate into the engine, once, rather than patching each
-  client call site to match engine behavior it can drift from again.
+- **Verified** — The engine already contains one correct pattern worth
+  moving to
+  (`strandedChunkCount`'s collection scoping) sitting next to client code
+  that reproduces the defect it already solved. `sweepChunksQuery`'s own
+  reporting is not a second example — it has the identical silent-on-empty
+  gap as the client (Gap 3). The argument for moving the authoritative
+  predicate into the engine, once, still holds; the engine's sweep-reporting
+  code needs the same fix as the client, not a template to copy from.
 - **Verified** — `nexus-iygza` (the sibling half of the same P0.1 proposal
   item) already answered "persist a drop set or recompute from state" for
   taxonomy assignment: Sam's ruling was recompute from state, not a durable
@@ -355,9 +379,11 @@ lands last, behind a completed backfill:
    the audit-trail gap the client-side reap left open.
 4. **Close the silent skip** (Gap 3): log the kept/filtered count at every
    site that currently returns silently — `mcp_infra.py:2287-2288`,
-   `:2437-2438`, `store_hook.py:1159-1160`, `:1172-1173` — matching the
-   report line the engine's own sweep already emits
-   (`CatalogRepository.java:5756`).
+   `:2437-2438`, `store_hook.py:1159-1160`, `:1172-1173`, **and** the
+   engine's own `runSweepTransaction` (`CatalogRepository.java:5740-5742`),
+   whose `log.info` fires only when `swept > 0` today even though its
+   response map has always carried the `kept` count (`:5756`). The engine
+   is not a model to match here; it has the identical gap.
 5. **Fix the stale documentation** (Gap 6) and **add `superseded: [...]`
    to the `store_put` result** (Gap 7, cheapest, non-blocking).
 
@@ -413,6 +439,26 @@ removed entirely once the legacy-note backfill (Phase 1) reaches zero,
 because after backfill every current note has a manifest row and
 `reapable(c)` already excludes anything with one.
 
+**Basis change: `indexed_at` to `created_at`.** `nx t3 gc` ages its
+candidates on the metadata field `indexed_at` today and skips any chunk
+that lacks one (`commands/t3.py:502`, `:524-531`, `:547-549`);
+`nexus.chunks.created_at` is a `NOT NULL DEFAULT now()` engine column every
+chunk has (`vectors-004-unify-chunks.xml:272`). Moving predicate 8 to
+`reapable(c)` therefore closes that skip gap, but it also changes the clock:
+every chunk `nx t3 gc` ages on `indexed_at` today ages on `created_at`
+after the migration. This is safe only if `created_at` is write-once per
+row, which is confirmed by source reading: `PgVectorRepository`'s two
+`ON CONFLICT ... DO UPDATE` blocks for chunk upserts — the ordinary content
+path (~787-800) and the reference-only path (~838-847) — never list
+`created_at` in their `.set(...)` clause, so a conflicting write to an
+existing `(tenant, collection, chash)` row leaves `created_at` untouched on
+every upsert path this survey found. (The one reset bug on record touching
+this column, `catalog-037-1`'s bounded quarantine move, was a different
+mechanism — an INSERT of a NEW row into the quarantine collection that
+originally omitted `created_at` and was fixed to carry it through — not a
+rewrite of an existing row's `created_at`, and is not evidence against the
+write-once claim above.)
+
 **State-derived reaper, not a persisted drop set.** The engine's post-commit
 sweep transaction (`runSweepTransaction`, `CatalogRepository.java:5725-5773`)
 keeps its 2 s lock / 5 s statement bound and its advisory lock — those are
@@ -462,7 +508,7 @@ its own phase below rather than folding into Phase 2.
 | `reapable(c)` predicate | `indexer_utils.orphaned_chashes`, `gc_quarantine_orphans`, `nx t3 gc`'s candidate logic | Consolidate into one engine-side predicate; client tools call it rather than re-deriving it |
 | State-derived reaper | `CatalogRepository.sweepChunksQuery` / `runSweepTransaction` | Extend with a periodic `knowledge__*` pass driven by `reapable(c)` against current state, not the write transaction's drop set (`nexus-2x9xa`) |
 | Legacy-note backfill | `manifest_backfill` (client repair script) | Reuse; add a completion census gate before Phase 4 |
-| Silent-skip fix | `mcp_infra._sweep_superseded_vectors[_many]`, `store_hook._reap_superseded_note_chunks` | Add the `kept`/`kept_notes` log line the engine sweep already has |
+| Silent-skip fix | `mcp_infra._sweep_superseded_vectors[_many]`, `store_hook._reap_superseded_note_chunks`, `CatalogRepository.runSweepTransaction` | Add an unconditional `kept`/`kept_notes` log line to all four sites — the engine sweep has the same gap, not a model to copy from |
 | Stale docs | `catalog-003-soft-delete.xml` comment, `mcp/core.py:4742-4747` | Rewrite to describe post-`b6enc`/`bb6n2` behavior |
 | Operator cleanup | `nx t3 gc` | Point its candidate logic at `reapable(c)` once shipped |
 | Currency signal (obsolete) | `superseded_at` column / `supersedes` catalog link | **Drop both candidates** — the manifest row itself is the positive signal; no new column or link type is needed |
@@ -574,6 +620,12 @@ grown.
   it is the same rule doing the same job everywhere — but it means the
   blast radius of Phase 2 onward is not scoped to notes the way the
   original filing assumed.
+- Predicate 8's clock changes from the metadata field `indexed_at` (which
+  `nx t3 gc` skips a chunk for lacking) to the engine column `created_at`
+  (which every chunk has and which is confirmed write-once — see Technical
+  Design). This widens candidacy rather than narrowing it: a chunk `nx t3 gc`
+  silently skips today for having no `indexed_at` becomes a `reapable(c)`
+  candidate the moment it passes the grace window.
 - `nexus.live_chunks` becoming collection-scoped changes `collection_vector_stats`'s
   output for any tenant with a chash shared across collections; this should
   be called out to anyone consuming that stat.
@@ -597,11 +649,12 @@ grown.
   case surfaces, since today's window is at least no wider than it was
   before `nexus-bb6n2`.
 - **Risk**: The 147-row `knowledge__*` manifest-less population is not yet
-  decomposed, so Phase 2's destructive migration could delete a legacy
-  current note before backfill completes. **Mitigation**: Phase 1's census
-  is a hard prerequisite gate, not advisory — Phase 2 does not start until
-  the census classifies every row and the legacy class reads zero after
-  backfill.
+  decomposed, so Phase 2's visibility change could hide a legacy current
+  note from search before backfill completes — Phase 2 changes what
+  `live(c)` returns; it deletes nothing (see Migration order above).
+  **Mitigation**: Phase 1's census is a hard prerequisite gate, not
+  advisory — Phase 2 does not start until the census classifies every row
+  and the legacy class reads zero after backfill.
 - **Risk**: A new engine reaper duplicates work the client-side reap
   already does, doubling load. **Mitigation**: the reaper only needs to run
   where the client-side reap can fail (`knowledge__*`, where
@@ -621,7 +674,7 @@ grown.
 - **Diagnosis**: `nx catalog show` reports a clean manifest while raw search
   returns two versions of one title — same signature as the original
   filing. A `catalog doctor` check for "title with more than one live
-  chunk" remains in scope and is not yet built (Day 2 Operations, below).
+  chunk" is Phase 4 Step 14, below.
 - **Recovery**: over-retention is recoverable by a later reaper pass;
   over-deletion of a note is not recoverable at all. This asymmetry still
   sets every default here, unchanged from the original filing.
@@ -643,9 +696,32 @@ grown.
 
 (a) **Read-only decomposition**, per `knowledge__*` collection: classify
 every manifest-less chunk, by following its metadata `catalog_doc_id`, into
-superseded / legacy-unmanifested / dead-owner / no-owner. Run
-`manifest_backfill` against the legacy class until a follow-up census reads
-zero, before Phase 2 ships anything destructive.
+four buckets — superseded / legacy-unmanifested / dead-owner / no-owner —
+mapped from the five producer classes named in the Problem Statement as
+follows. A lost reap (superseded content) lands in **superseded**: its
+`catalog_doc_id` resolves to a live document whose current manifest names a
+different chash. A legacy-current note lands in **legacy-unmanifested**: its
+`catalog_doc_id`/`doc_id` resolves to a live document with no manifest row
+at all. A rename-COPY leftover (`CatalogRepository.java:8101-8125`, where a
+rename onto a live target repoints the manifest and the `collection` column
+without moving the physical chunk rows) lands in **dead-owner**: its owning
+document is live but its manifest now points at a different collection
+name, so the bucket's definition is broadened to cover a repointed owner as
+well as a tombstoned one. A `.nxexp` import lands in **no-owner**: its
+manifest hook short-circuited on an empty `doc_id` at import time
+(`exporter.py:201-215`), so no catalog document was ever registered to own
+it. Quarantine rows are **out of scope for this census entirely** — they
+live in their own `quarantine-*` physical collection, a deliberate sweep
+destination, never folded into a `knowledge__*` collection's own count.
+Run `manifest_backfill` against the legacy-unmanifested class until a
+follow-up census reads zero, before Phase 2 ships anything destructive.
+`manifest_backfill` (`backfill_manifest_for_collection`,
+`manifest_backfill.py:182`) operates on one named collection at a time and
+is document-driven — it iterates a collection's catalog documents, not an
+orphan scan of T3 — so an operator backfilling `knowledge__*` never targets
+`quarantine-*` and touches no quarantine row, and it has nothing to iterate
+for a `.nxexp` import's chunks either, since no catalog document was ever
+registered to own them, for the identical reason.
 
 (b) **Forced-failure reap**: re-put a titled note with the change, then
 force the reap to fail (simulate the sweep-gate contention). Assert that raw
@@ -668,8 +744,11 @@ All four in scope; none deferred.
 
 #### Step 2: Read-only decomposition of the 147 `knowledge__*` manifest-less rows
 
-Classify each by `catalog_doc_id` lineage: superseded, legacy-unmanifested,
-dead owner, no owner.
+Classify each by `catalog_doc_id` lineage into superseded, legacy-unmanifested,
+dead-owner, or no-owner, per the producer-to-bucket mapping in the MVV above.
+Quarantine rows are out of scope by construction (a separate physical
+collection); `.nxexp` imports and rename-COPY leftovers are not overlooked
+by this census — they are the no-owner and dead-owner buckets respectively.
 
 #### Step 3: Run `manifest_backfill` against the legacy-unmanifested class
 
@@ -681,7 +760,7 @@ Gate: a follow-up census of the same class reads zero before Phase 2 begins.
 
 #### Step 5: Migrate predicates 1 and 2 (search/get, `nexus.live_chunks`) to `live(c)`, collection-scoping `live_chunks` in the same change
 
-#### Step 6: Close the silent skip (Gap 3) — log `kept`/`kept_notes` at every site named above
+#### Step 6: Close the silent skip (Gap 3) — log `kept`/`kept_notes` at every client site named above, **and** add an unconditional log line to the engine's `runSweepTransaction` (`CatalogRepository.java:5740-5742`), which has the same gate-on-`swept>0` gap
 
 ### Phase 3: `reapable(c)` and the state-derived reaper (destructive; gated on Phase 1)
 
@@ -691,23 +770,23 @@ Gate: a follow-up census of the same class reads zero before Phase 2 begins.
 
 #### Step 9: Ship the periodic `knowledge__*` engine reaper driven by `reapable(c)` against current state, writing `gc_audit` rows (`nexus-2x9xa`)
 
+#### Step 10: Ship `nx store list --reapable`, a read-only list of the chunks `reapable(c)` currently selects for a collection, so an operator can inspect what the reaper is about to remove before it runs
+
 ### Phase 4: Cleanup (gated on Phase 1's backfill census reading zero)
 
-#### Step 10: Remove the notes-guard arms from predicate 4's union guard and from predicate 5 (`live_note_chashes`)
+#### Step 11: Remove the notes-guard arms from predicate 4's union guard and from predicate 5 (`live_note_chashes`)
 
-#### Step 11: Rewrite the stale documentation (Gap 6) — `catalog-003-soft-delete.xml`'s comment and `mcp/core.py:4742-4747`
+#### Step 12: Rewrite the stale documentation (Gap 6) — `catalog-003-soft-delete.xml`'s comment and `mcp/core.py:4742-4747`
 
-#### Step 12: Add `superseded: [...]` to the `store_put` result (Gap 7)
+#### Step 13: Add `superseded: [...]` to the `store_put` result (Gap 7)
+
+#### Step 14: Ship a `catalog doctor` check for "title with more than one live chunk" — the divergence signature named under Failure Modes, and the one thing that currently detects nothing
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded/reapable chunks | In scope (`nx store list --reapable`) | In scope | In scope (engine reaper; `nx t3 gc` for the client-driven path) | In scope (`catalog doctor` check, below) | N/A — content lives in the current chunk |
-
-A `catalog doctor` check for "title with more than one live chunk" is still
-in scope — it is the divergence signature named under Failure Modes, and
-nothing currently detects it.
+| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope (engine reaper; `nx t3 gc` for the client-driven path) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk |
 
 ### New Dependencies
 
@@ -801,3 +880,17 @@ with a concrete, gated decomposition requirement.
 ### Scope Verification
 
 To be completed at gate (Layer 3 AI critique).
+
+## Revision History
+
+- 2026-09-26: Re-verified against develop `135bb38a4` / engine `v0.1.132`.
+  The original Gap 1 (store_put manifest replace had no paired sweep) closed
+  by `nexus-bb6n2` (7.58.0); gaps renumbered and re-evidenced; Gaps 3-6 added
+  (silent skip reproduced in the reap path, engine sweep loses its drop set,
+  `live_chunks`'s tenant-wide scope, stale contract documentation); Critical
+  Assumptions restated (CA1/CA2 verified, CA3 unverified, CA4 obsolete);
+  Proposed Solution rewritten around engine-side `live(c)`/`reapable(c)` and
+  a state-derived reaper (`nexus-2x9xa`).
+- 2026-09-26: Gate round 1 — PASSED (0 Critical, 6 Significant, 0
+  ship-blocker(s)); commit `1aff90d0c`; critique
+  `nexus_rdr/192-gate-critique-2026-09-26-r1`.
