@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -240,13 +242,17 @@ class GcQuarantineOrphansBoundedTest {
         // misregistered stayed wrong forever. The fixed body re-files it.
         var p = seed("refile", 2);
         registerOriginAs(p.src(), "a6mon-refile-owner", "v3", 384);
+        String originModel = (String) collectionRow(p.src()).get("embedding_model");
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().executeUpdate(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, "
-                    + "embedding_model, model_version, dimension, lifecycle_state) "
-                    + "SELECT tenant_id, '" + p.dst() + "', 'quarantine-knowledge', 'a6mon-refile', "
-                    + "embedding_model, 'v1', NULL, 'quarantine' FROM nexus.catalog_collections "
-                    + "WHERE tenant_id = '" + TENANT + "' AND name = '" + p.src() + "'");
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_COLLECTIONS,
+                    CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                    CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                    CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+               .values(TENANT, p.dst(), "quarantine-knowledge", "a6mon-refile",
+                    originModel, "v1", null, "quarantine")
+               .execute();
         }
         assertThat(collectionRow(p.dst()).get("content_type"))
             .as("guard: the sibling starts in the defect's shape").isEqualTo("quarantine-knowledge");
@@ -274,18 +280,18 @@ class GcQuarantineOrphansBoundedTest {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
-            ctx.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, metadata) "
-                + "VALUES (?, ?, sha256('a6mon unreg'::bytea), 'a6mon unreg', "
-                + "('[1' || repeat(',0', 383) || ']')::nexus.vector, '{}'::jsonb)", TENANT, src);
+            float[] unit = new float[384];
+            unit[0] = 1f;
+            PgContainerHelper.insertChunk384(ctx, TENANT, src, Chash.ofText("a6mon unreg").toBytes(),
+                Vector.of(unit));
             PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
                 CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
             assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(src))))
                 .as("precondition: the origin has a chunk but no catalog row").isFalse();
 
-            assertThatThrownBy(() -> ctx.fetch(
-                    "SELECT * FROM nexus.gc_quarantine_orphans_bounded(384, ?, ?, ?, '2026-09-26T00:00:00Z', 20, 10)",
-                    TENANT, src, dst))
+            assertThatThrownBy(() -> Routines.gcQuarantineOrphansBounded(
+                    ctx.configuration(), 384, TENANT, src, dst, "2026-09-26T00:00:00Z", 20, 10))
                 .as("attributes come from the origin row, so an unregistered origin fails loud")
                 .hasMessageContaining("is not registered")
                 .hasMessageContaining(src);

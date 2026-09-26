@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -73,11 +75,12 @@ class Hygiene008GcBoundedRegistrationDataCorrectionTest {
                     // (owner, model_version), so the correction must copy them.
                     insertRow(ctx, ORIGIN, "knowledge", "h008-origin-owner", "bge-base-en-v15-768", "v4", 768,
                         "live");
-                    ctx.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, metadata) "
-                        + "VALUES (?, ?, sha256('h008 orphan'::bytea), 'h008 orphan', ('[1' || repeat(',0', 767) || ']')::nexus.vector, '{}'::jsonb)",
-                        TENANT, ORIGIN);
-                    ctx.fetch("SELECT * FROM nexus.gc_quarantine_orphans_bounded(768, ?, ?, ?, "
-                        + "'2026-09-26T00:00:00Z', 20, 10)", TENANT, ORIGIN, QUAR_FROM_FUNCTION);
+                    float[] unit = new float[768];
+                    unit[0] = 1f;
+                    PgContainerHelper.insertChunk768(ctx, TENANT, ORIGIN,
+                        dev.nexus.service.db.Chash.ofText("h008 orphan").toBytes(), Vector.of(unit));
+                    Routines.gcQuarantineOrphansBounded(ctx.configuration(), 768, TENANT, ORIGIN,
+                        QUAR_FROM_FUNCTION, "2026-09-26T00:00:00Z", 20, 10);
 
                     insertRow(ctx, QUAR_NO_ORIGIN, "quarantine-docs", "h008-b", "bge-base-en-v15-768", "v1", null,
                         "disputed");
