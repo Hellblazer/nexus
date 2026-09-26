@@ -1606,6 +1606,94 @@ def describe_rollback_outcome(outcome: ChunkRollbackOutcome) -> str:
     return "Nothing needed to be rolled back."
 
 
+def _restore_pre_call_stamp(
+    catalog_doc_id: str, pre_call_doc_id: str, stamped_doc_id: str,
+) -> None:
+    """Undo :func:`catalog_store_hook_tracked`'s own pre-manifest-write
+    stamp on a confirmed-failed call (nexus-k54nk fix-round 2, T2
+    ``nexus/review-k54nk-code-r2`` Significant 1 / ``nexus/critique-k54nk-r2``
+    Significant 1, both ship-blocker-adjacent).
+
+    Every RECONCILE branch in :func:`catalog_store_hook_tracked` (chash-
+    dedup, ``by_source_uri``, ghost-by-title) stamps *catalog_doc_id*'s
+    document's ``meta.doc_id`` to *stamped_doc_id`` (``doc_ids[0]`` — the
+    not-yet-manifested chash the call is about to try) BEFORE the manifest
+    write is even attempted. Left in place after a confirmed failure, that
+    stamp names a chash this same rollback call has just deleted (or
+    protected — either way, no longer a live identity for this document):
+    the manifest-blind :func:`nexus.indexer_utils.live_note_chashes`
+    predicate then treats the document as permanently note-shaped for a
+    chash that no longer exists anywhere, and a LATER write that happens
+    to collide with it is wrongly protected — concretely, an identical-
+    content RETRY of a confirmed-failed call captures the dangling value
+    as ITS OWN ``pre_call_doc_id`` and re-protects the very chunk it is
+    trying to delete, reopening nexus-wbfpw.28 on a two-consecutive-
+    identical-failures sequence.
+
+    Restores *catalog_doc_id*'s ``meta.doc_id`` to *pre_call_doc_id* — the
+    same document's identity as it stood before this call touched it — or
+    ``""`` (an unstamped document's own shape, per every reconcile
+    branch's own ``.get("doc_id", "")`` default) when this call minted a
+    brand-new row with no prior identity to protect (e.g. Case E: a
+    minted row whose own delete then failed).
+
+    COMPARE-AND-SET, not a blind write: only when the document's CURRENT
+    ``meta.doc_id`` still equals *stamped_doc_id* (this call's own,
+    about-to-be-stale value) is it restored. A concurrent re-put that has
+    already re-stamped the SAME document (its own
+    ``catalog_store_hook_tracked`` ran again before this rollback got
+    here) has moved ``meta.doc_id`` on to ITS OWN new value —
+    unconditionally overwriting that with this call's now-stale
+    *pre_call_doc_id* would silently undo a newer, possibly-still-landing
+    call's own stamp. Not a true compare-and-swap (no such primitive on
+    the wire — a race between this read and the write below remains);
+    this narrows the window, it does not close it.
+
+    Best-effort like every other step in
+    :func:`rollback_uncataloged_chunk_write`: a lookup or write failure
+    here is logged and never raises — the caller's own store_put error is
+    what must surface, never masked by this cleanup step.
+    """
+    if not catalog_doc_id or not stamped_doc_id:
+        return
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    reader = make_catalog_reader()
+    try:
+        current = reader.resolve(catalog_doc_id)
+    except Exception:  # noqa: BLE001 — best-effort: cannot prove the stamp is stale, leave it
+        _log.warning(
+            "store_put_rollback_stamp_restore_lookup_failed",
+            catalog_doc_id=catalog_doc_id, exc_info=True,
+        )
+        current = None
+    finally:
+        try:
+            reader._db.close()
+        except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
+            pass
+    if current is None:
+        return
+    if (current.meta or {}).get("doc_id", "") != stamped_doc_id:
+        # A newer stamp landed since this call's own write (a concurrent
+        # re-put reconciled onto the same document) — never clobber it.
+        return
+    try:
+        writer = make_catalog_writer(priority="interactive")
+        writer.update(catalog_doc_id, meta={"doc_id": pre_call_doc_id})
+    except Exception:  # noqa: BLE001 — best-effort restore; the caller's own store_put error must still surface
+        _log.warning(
+            "store_put_rollback_stamp_restore_failed",
+            catalog_doc_id=catalog_doc_id, exc_info=True,
+        )
+        return
+    _log.info(
+        "store_put_rollback_stamp_restored",
+        catalog_doc_id=catalog_doc_id,
+        restored_to=pre_call_doc_id or "(cleared)",
+    )
+
+
 def rollback_uncataloged_chunk_write(
     t3: Any, doc_ids: list[str], *, collection: str, catalog_doc_id: str = "",
     pre_call_doc_id: str = "",
@@ -1706,6 +1794,15 @@ def rollback_uncataloged_chunk_write(
     were wrong — see :class:`ChunkRollbackOutcome`'s ``deleted_count``
     field.
 
+    STAMP RESTORE (nexus-k54nk fix-round 2, T2 ``nexus/review-k54nk-
+    code-r2`` Significant 1): after deciding what to do about the T3
+    chunk(s) (deleted, protected, or the delete itself failed), this
+    function also calls :func:`_restore_pre_call_stamp` to undo
+    :func:`catalog_store_hook_tracked`'s own pre-manifest-write stamp on
+    *catalog_doc_id*'s document — see that function's docstring for the
+    dangling-reference hazard it closes and its compare-and-set contract.
+    Best-effort, same fail-open direction as everything else here.
+
     Fail-open and best-effort throughout, same direction as every other
     T3-deleting sweep in this module: a lookup or delete failure is
     logged and returned on the outcome, never raised — the caller's own
@@ -1743,6 +1840,13 @@ def rollback_uncataloged_chunk_write(
     ids = tuple(sorted({d for d in doc_ids if d}))
     if not ids or not collection:
         return ChunkRollbackOutcome(requested=ids)
+    # nexus-k54nk fix-round 2: the FIRST piece's chash is the exact value
+    # catalog_store_hook_tracked stamped onto catalog_doc_id's meta.doc_id
+    # (note_manifest_metadata/single_chunk_manifest_metadata's return, and
+    # every producer's doc_ids[0] — see _restore_pre_call_stamp's own
+    # docstring). From the ORIGINAL *doc_ids* order, not the deduped/
+    # sorted `ids` above — sorting can reorder a multi-piece note's chunks.
+    stamped_doc_id = next((d for d in doc_ids if d), "")
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
     from nexus.indexer_utils import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
         catalog_documents_for_collection,
@@ -1787,6 +1891,7 @@ def rollback_uncataloged_chunk_write(
     protected = tuple(sorted(set(ids) - set(orphaned)))
     attempted = tuple(sorted(orphaned))
     if not attempted:
+        _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
         return ChunkRollbackOutcome(requested=ids, protected=protected)
     try:
         result = t3.get_collection(collection).delete(ids=list(attempted))
@@ -1795,6 +1900,7 @@ def rollback_uncataloged_chunk_write(
             "store_put_rollback_chunk_delete_failed",
             collection=collection, chashes=len(attempted), exc_info=True,
         )
+        _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
         return ChunkRollbackOutcome(
             requested=ids, protected=protected, attempted=attempted,
             delete_error=str(exc),
@@ -1805,6 +1911,7 @@ def rollback_uncataloged_chunk_write(
         collection=collection, catalog_doc_id=catalog_doc_id,
         deleted=deleted_count, requested=len(attempted),
     )
+    _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
     return ChunkRollbackOutcome(
         requested=ids, protected=protected, attempted=attempted,
         deleted_count=deleted_count,

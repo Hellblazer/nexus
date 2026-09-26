@@ -2119,6 +2119,15 @@ class TestK54nkRollbackLiveNoteGuard:
             "OLD must be completely untouched"
         )
         assert _manifest_rows(catalog_env, str(tumbler)) == [(old_chash,)]
+        # fix-round 2 (T2 nexus/review-k54nk-code-r2 Significant 1): the
+        # confirmed-failure rollback must also restore D's meta.doc_id to
+        # its pre-call identity -- left dangling at NEW (round 1's own
+        # gap), a later identical-content retry would capture NEW as ITS
+        # pre_call_doc_id and wrongly re-protect it (nexus-wbfpw.28).
+        assert (documents_by_title(title)[0].meta or {}).get("doc_id") == old_chash, (
+            "D's meta.doc_id must be restored to OLD, not left dangling "
+            "at the just-deleted NEW"
+        )
 
     def test_case_e_minted_row_survives_delete_but_chunk_is_still_deleted(
         self, catalog_env: Path, local_t3: T3Database,
@@ -2133,20 +2142,15 @@ class TestK54nkRollbackLiveNoteGuard:
         mint has no prior identity to protect), so the chunk is deleted
         same as if the row-delete had succeeded.
 
-        Surviving-row state after this: the catalog document lives on
-        with ``meta.doc_id`` naming a chash that no longer exists ANYWHERE
-        in T3 (no chunk, no manifest row) -- a dangling ghost stamp. This
-        is a narrowing of the PRE-EXISTING, undocumented residual the
-        reviewer named (rollback_minted_catalog_entry's delete_document
-        can itself fail) -- this fix does not create that residual, it
-        only changes its outcome: pre-fix the surviving row's own
-        note-shape protected the chunk (self-consistent ghost, chunk
-        retained); post-fix the chunk is correctly deleted (matching
-        every OTHER confirmed-failed-write outcome) and the row is left
-        with a dangling reference instead. Not tested for repair here --
-        that catalog-hygiene residual is out of this bead's scope; a
-        later re-put of the same title reconciles onto this row via
-        by_source_uri regardless of the dangling stamp."""
+        Surviving-row state after this: the catalog document lives on.
+        Fix-round 1 left ``meta.doc_id`` naming a chash that no longer
+        exists ANYWHERE in T3 (no chunk, no manifest row) -- a dangling
+        ghost stamp, explicitly out of scope at the time ("Not tested for
+        repair here"). Fix-round 2 (T2 ``nexus/review-k54nk-code-r2`` /
+        ``nexus/critique-k54nk-r2``) closes that: ``_restore_pre_call_
+        stamp`` clears the stamp back to ``pre_call_doc_id`` (empty here
+        -- a brand-new mint has no prior identity), so the surviving
+        ghost row no longer names a deleted chunk at all."""
         from nexus.catalog.store_hook import (
             catalog_store_hook_tracked,
             rollback_uncataloged_chunk_write,
@@ -2197,10 +2201,223 @@ class TestK54nkRollbackLiveNoteGuard:
         )
 
         # Surviving-row state: the row is still there (its own delete
-        # failed, out of scope here), still stamped with new_chash, which
-        # is now a dangling reference -- no chunk, no manifest row.
+        # failed, out of scope here). Fix-round 2: its dangling stamp is
+        # now restored to pre_call_doc_id ("" -- no prior identity for a
+        # brand-new mint), so it no longer names the just-deleted chunk.
         after = documents_by_title(title)
         assert len(after) == 1, after
-        assert (after[0].meta or {}).get("doc_id") == new_chash
+        assert (after[0].meta or {}).get("doc_id", "") == "", (
+            "fix-round 2: the dangling stamp must be cleared -- a "
+            "brand-new mint has no pre_call_doc_id to restore, so an "
+            "unstamped document's own shape is the correct end state"
+        )
         assert after[0].chunk_count == 0
         assert _manifest_rows(catalog_env, tumbler) == []
+
+    def test_repeated_identical_failure_restores_pre_call_stamp(
+        self, catalog_env: Path, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-k54nk fix-round 2 ship-blocker (T2
+        ``nexus/review-k54nk-code-r2`` Significant 1 / ``nexus/critique-
+        k54nk-r2`` Significant 1): fix-round 1's self-exclusion correctly
+        deletes a confirmed-failed re-put's own chash, but left the
+        document's ``meta.doc_id`` stamp DANGLING at that now-deleted
+        chash -- nothing restored it to the document's real pre-call
+        identity. A SECOND, byte-identical retry -- the exact retry
+        store_put's own error text recommends ("a retry is an idempotent
+        re-write either way") -- then captures that dangling value as ITS
+        OWN ``pre_call_doc_id`` and readmits it, wrongly re-protecting the
+        very chunk this second call is also trying to delete:
+        nexus-wbfpw.28 reopened on two consecutive identical failures.
+
+        RED at ab2265b95: the second call's NEW chunk survived deletion
+        (wrongly readmitted via the first call's dangling stamp) and D's
+        meta.doc_id was left at NEW instead of restored to OLD after
+        either failure."""
+        from nexus.aspect_readers import uri_for
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        collection = self._COLLECTION
+        title = "k54nk-repeated-identical-failure"
+        old_content = "k54nk repeated failure -- original content"
+        new_content = "k54nk repeated failure -- replacement content"
+        old_chash = hashlib.sha256(old_content.encode()).hexdigest()
+        new_chash = hashlib.sha256(new_content.encode()).hexdigest()
+        source_uri = uri_for(collection, title)
+
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        tumbler = cat.register(
+            owner, title, content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": old_chash},
+            source_uri=source_uri or "",
+        )
+        # A genuinely MANIFESTED note: real T3 chunk + real manifest row.
+        local_t3.put(collection=collection, content=old_content, title=title)
+        seed_manifest_chunks(collection, [old_chash])
+        cat.append_manifest_chunks(
+            str(tumbler), [{"chash": old_chash, "position": 0}],
+            collection=collection,
+        )
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("manifest write refused")
+            ),
+        )
+
+        # First failed re-put: stamps NEW, then must roll it back.
+        result1 = _mcp_store_put_with(local_t3, new_content, title)
+        assert result1.startswith("Error"), result1
+        assert local_t3.get_by_id(collection, new_chash) is None, (
+            "the first failed re-put's own chunk must be deleted"
+        )
+        assert (documents_by_title(title)[0].meta or {}).get("doc_id") == old_chash, (
+            "fix-round 2: the confirmed-failure rollback must restore "
+            "D's meta.doc_id to its pre-call identity, not leave it "
+            "dangling at the just-deleted NEW"
+        )
+
+        # SECOND, byte-identical retry -- the system's own recommended
+        # recovery action -- also confirmed-fails.
+        result2 = _mcp_store_put_with(local_t3, new_content, title)
+        assert result2.startswith("Error"), result2
+
+        assert local_t3.get_by_id(collection, new_chash) is None, (
+            "the second failed retry's own chunk must ALSO be deleted -- "
+            "a dangling stamp from the first failure must never readmit "
+            "and protect it (nexus-wbfpw.28)"
+        )
+        assert local_t3.get_by_id(collection, old_chash) is not None, (
+            "OLD must remain completely untouched throughout"
+        )
+        assert (documents_by_title(title)[0].meta or {}).get("doc_id") == old_chash, (
+            "D's meta.doc_id must be restored to OLD again after the "
+            "second failure too"
+        )
+        assert _manifest_rows(catalog_env, str(tumbler)) == [(old_chash,)], (
+            "D's original manifest must be completely untouched"
+        )
+
+    def test_identical_content_repute_of_manifested_note_survives_failure(
+        self, catalog_env: Path, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T2 ``nexus/critique-k54nk-r2`` Significant 2: a re-put of
+        BYTE-IDENTICAL content onto an already-manifested note is safe
+        today, but not because of anything nexus-k54nk's fix added -- it
+        is safe because ``rollback_uncataloged_chunk_write``'s union
+        guard passes ``doc_id=""`` to ``orphaned_chashes`` (store_hook.py
+        ``orphaned = orphaned_chashes(reader, "", list(ids), ...)``), so
+        D's OWN still-intact manifest reference to its unchanged chash
+        counts as a live reference by "another" party and the candidate
+        is never even orphaned, regardless of the notes guard or the
+        self-exclusion this bead added. Pinned explicitly here so a
+        future refactor that made the two ``orphaned_chashes`` call
+        sites' ``doc_id`` argument consistent (mirroring
+        ``_reap_superseded_note_chunks``'s own ``catalog_doc_id``-scoped
+        call) would fail this test instead of silently reopening a
+        self-collision variant for the identical-content-re-put case."""
+        from nexus.aspect_readers import uri_for
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        collection = self._COLLECTION
+        title = "k54nk-identical-repute-manifested"
+        content = "k54nk identical repute of a manifested note"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        source_uri = uri_for(collection, title)
+
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        tumbler = cat.register(
+            owner, title, content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+            source_uri=source_uri or "",
+        )
+        local_t3.put(collection=collection, content=content, title=title)
+        seed_manifest_chunks(collection, [chash])
+        cat.append_manifest_chunks(
+            str(tumbler), [{"chash": chash, "position": 0}],
+            collection=collection,
+        )
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("manifest write refused")
+            ),
+        )
+
+        result = _mcp_store_put_with(local_t3, content, title)
+        assert result.startswith("Error"), result
+
+        assert local_t3.get_by_id(collection, chash) is not None, (
+            "the chunk is still referenced by D's own manifest -- "
+            "orphaned_chashes' doc_id=\"\" self-reference must protect "
+            "it, independent of the notes guard"
+        )
+        assert (documents_by_title(title)[0].meta or {}).get("doc_id") == chash, (
+            "the stamp is unchanged -- pre_call_doc_id equals the "
+            "re-stamped value for byte-identical content, so the "
+            "fix-round 2 restore is a no-op here"
+        )
+        assert _manifest_rows(catalog_env, str(tumbler)) == [(chash,)]
+
+    def test_legacy_note_reput_of_own_unchanged_content_survives_via_readmission(
+        self, catalog_env: Path, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T2 ``nexus/critique-k54nk-r2``: the scenario ``pre_call_doc_id``
+        readmission exists to protect -- a genuinely manifest-less LEGACY
+        note (pre-nexus-b6enc shape: ``meta.doc_id`` only, no manifest row
+        anywhere) re-putting its OWN unchanged content under the SAME
+        title, reconciling onto ITSELF via ``by_source_uri`` -- had no
+        positive test before this. Self-exclusion (fix-round 1) removes
+        this document from the notes guard's general set; without
+        ``pre_call_doc_id``'s single-chash readmission, its own chash
+        would be wrongly deleted (nothing else protects a manifest-less
+        note's only chunk -- ``docs_for_chashes`` cannot see it and it is
+        the only document naming it). Manifest write confirmed-fails; the
+        chunk must survive and the stamp must be unchanged."""
+        from nexus.aspect_readers import uri_for
+
+        collection = self._COLLECTION
+        title = "k54nk-legacy-self-readmission"
+        content = "k54nk legacy note reconciling onto its own unchanged content"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        source_uri = uri_for(collection, title)
+
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        cat.register(
+            owner, title, content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+            source_uri=source_uri or "",
+        )
+        # A genuinely manifest-less legacy row: the chunk exists in T3
+        # (mirrors what a real client wrote long ago), but no manifest
+        # row anywhere -- docs_for_chashes cannot see it; only
+        # meta.doc_id names it.
+        local_t3.put(collection=collection, content=content, title=title)
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("manifest write refused")
+            ),
+        )
+
+        result = _mcp_store_put_with(local_t3, content, title)
+        assert result.startswith("Error"), result
+
+        assert local_t3.get_by_id(collection, chash) is not None, (
+            "pre_call_doc_id readmission must protect this document's "
+            "own unchanged chash -- self-exclusion alone would remove "
+            "it from the notes guard's general set and nothing else "
+            "protects a manifest-less note's only chunk"
+        )
+        assert (documents_by_title(title)[0].meta or {}).get("doc_id") == chash, (
+            "the stamp is unchanged"
+        )
