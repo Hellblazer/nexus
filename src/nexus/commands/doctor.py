@@ -2134,15 +2134,37 @@ def _run_check_mineru() -> None:
 #                                          | (nexus-f9duo).
 #   --check-assignments           | NO        | no billed calls (reads a
 #                                          | stored vector + live foreign
-#                                          | centroids, never re-embeds),
-#                                          | but still opt-in for the same
-#                                          | reason as --check-collection-
-#                                          | shape: a NEW audit surface a
-#                                          | substantive-critic recommended
-#                                          | as a guard against ANN/exact
-#                                          | drift (nexus-v4pj4), not a gate
-#                                          | on the engine-service-v0.1.132
-#                                          | LATERAL/HNSW rewrite it audits.
+#                                          | centroids, never re-embeds), but
+#                                          | still opt-in: a full run fetches
+#                                          | EVERY foreign centroid tenant-
+#                                          | wide per collection audited
+#                                          | (get_foreign) plus the FULL topic
+#                                          | table once (for the eligibility-
+#                                          | cutoff timestamps) -- real work
+#                                          | at ~800-centroid scale, not the
+#                                          | O(1) round trip the promoted
+#                                          | checks above are. Also a NEW
+#                                          | audit surface (nexus-v4pj4,
+#                                          | substantive-critic follow-on to
+#                                          | nexus-f3yxx) whose false-positive
+#                                          | behavior against a real corpus
+#                                          | is not yet observed; promoting it
+#                                          | before that is a separate,
+#                                          | reviewed decision, not a side
+#                                          | effect of adding the check. Not a
+#                                          | gate on the engine-service-
+#                                          | v0.1.132 LATERAL/HNSW rewrite it
+#                                          | audits — see doctor_assignments.py's
+#                                          | module docstring for the round-1
+#                                          | review finding (a stored pick
+#                                          | compared against TODAY's live
+#                                          | centroids false-alarms on healthy
+#                                          | taxonomy growth) and the read-only
+#                                          | eligibility-cutoff mitigation this
+#                                          | check applies instead of a full
+#                                          | same-moment engine recompute
+#                                          | (which needs engine work this
+#                                          | client-only bead could not add).
 #   --check-wal-retention         | NO        | explicitly "Always exit 0:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
@@ -2547,13 +2569,22 @@ def _run_supplementary_checks() -> None:
     default=False,
     help="Sample chunks per collection that carry a cross-collection "
          "('projection') topic assignment, recompute the exact nearest "
-         "foreign centroid, and compare with the stored pick (nexus-v4pj4: "
-         "the engine-service-v0.1.132 LATERAL/HNSW ANN rewrite measures "
-         "equal to exact, but a future recall drift would be silent). "
-         "Exits 1 when any sampled row disagrees beyond a float-noise "
-         "tolerance, any collection could not be probed, or nothing was "
-         "compared. A collection with no cross-collection projection "
-         "population is not applicable, never a failure alone.",
+         "ELIGIBLE foreign centroid (only topics that already existed at "
+         "or before that assignment's own decision time -- a topic "
+         "discovered afterward never counts against it), and compare with "
+         "the most-recently-decided stored pick (nexus-v4pj4: the "
+         "engine-service-v0.1.132 LATERAL/HNSW ANN rewrite measures equal "
+         "to exact, but a future recall drift would be silent). At the "
+         "default sample of 20, a systemic wrong-pick rate of 10% is "
+         "caught with ~88% probability, 20% with ~99%; a rare, isolated "
+         "bad pick under 1% of a collection's population may need a "
+         "larger --assignments-sample or a different --assignments-seed "
+         "to land in any one run's sample. Exits 1 when any sampled row "
+         "disagrees beyond a float-noise tolerance, any collection could "
+         "not be probed, or nothing was compared. A collection with no "
+         "cross-collection projection population is not applicable; a "
+         "collection with a known population this sample failed to reach "
+         "is INCONCLUSIVE -- neither counts as a failure alone.",
 )
 @click.option(
     "--assignments-sample",

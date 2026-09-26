@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``nx doctor --check-assignments``: does each SAMPLED cross-collection
-("projection") topic assignment agree with an exact recompute?
+("projection") topic assignment agree with an exact recompute over the
+SAME candidate topics the engine had when it made that decision?
 
 nexus-v4pj4, a substantive-critic follow-on to nexus-f3yxx/nexus-iygza
 (T2 ``nexus/review-f3yxx-iygza-round2-substantive-critic-2026-09-25``).
@@ -17,11 +18,61 @@ decisions (2026-09-25) -- but a wrong pick from a future pgvector upgrade
 or HNSW build-parameter drift would be silent: nothing else in the audit
 surface re-derives the pick and compares it.
 
+ROUND-1 REVIEW FINDING (both reviewers, not-justified) AND THE FIX
+-------------------------------------------------------------------
+The first cut compared a STORED pick against TODAY's live foreign
+centroids, so healthy taxonomy growth (a topic discovered/rediscovered
+AFTER the stored assignment was made) read as ANN drift: the stored
+pick could not possibly have chosen a topic that did not exist yet, but
+an unrestricted "exact over everything live today" recompute would
+happily call that a disagreement.
+
+The fully correct fix compares the engine's ANN answer and the exact
+answer over the IDENTICAL live centroid snapshot at the IDENTICAL
+moment -- which needs either a read-only engine route that runs the
+cross pass's exact HNSW settings (``ef_search=400``,
+``iterative_scan=strict_order``) without persisting, or accepting a
+real (idempotent) re-write via ``assign_from_chashes`` itself. NEITHER
+exists client-side today (investigated 2026-09-26, see the module's own
+`docs/cli-reference.md` entry and the nexus-v4pj4 handoff note for the
+detail): the one read-only ANN route, ``POST /v1/taxonomy/centroids/
+query`` (``HttpCentroidStore.ann_query`` -> ``TaxonomyCentroidRepository
+.annQuery``), sets ``hnsw.iterative_scan='relaxed_order'`` and
+``hnsw.ef_search=n_results`` -- NOT the cross pass's ``strict_order``/
+``400`` -- so it tests a materially different, weaker recall
+configuration, not the one this probe exists to audit; and
+``assign_from_chashes_<dim>`` has no dry-run form, it always computes
+AND persists in the same statement. Recommendation on record for a
+follow-on: an engine-side read-only route (or a query-parameter on the
+existing one) that accepts the SAME HNSW settings the cross pass uses,
+so a client-only audit can compare same-moment ANN vs exact without a
+write. Filed as the open half of nexus-v4pj4 pending that engine work.
+
+Given that, THIS probe closes the specific, provable false-positive
+class the reviewers demonstrated (healthy taxonomy growth) with a
+read-only mitigation that needs no engine change: rather than trusting
+the stored pick's recorded SIMILARITY VALUE at all, it (1) picks the
+CANONICAL stored row per chunk by RECENCY (``assigned_at``), since the
+``topic_assignments`` conflict key is ``(tenant_id, doc_id, topic_id)``
+-- see the CONFLICT-KEY NOTE below -- so a chunk reassigned to a
+different topic can carry a STALE, higher-recorded-similarity row that
+GREATEST-wins would otherwise treat as canonical; and (2) recomputes
+the exact nearest centroid restricted to foreign topics whose
+``created_at`` is at or before that stored decision's ``assigned_at``
+-- a topic discovered or rediscovered AFTER the assignment was made is
+excluded from its candidate set, exactly mirroring what the engine's
+own LATERAL saw at decision time. This does NOT close the "an EXISTING
+topic's centroid vector was later revised (rebuild/merge, same
+topic_id)" half of the reviewers' finding -- there is no
+centroid-last-updated timestamp exposed client-side to detect that; a
+genuinely revised centroid still reads as a same-moment disagreement
+here, which is the accepted residual gap pending the engine route above.
+
 This probe samples chunks that carry a stored ``assigned_by='projection'``
 row, re-fetches their stored vector (``HttpVectorClient.
 get_embeddings_by_id``) and every live foreign centroid
 (``HttpCentroidStore.get_foreign``), and recomputes the exact nearest
-centroid with the SAME tie-break the engine's own LATERAL uses
+ELIGIBLE centroid with the SAME tie-break the engine's own LATERAL uses
 (``ORDER BY distance, topic_id`` -- ascending distance, i.e. descending
 cosine similarity, ties broken by the lower topic id). Same shape as
 ``nx doctor --check-embeddings`` (:mod:`nexus.doctor_embeddings`): opt-in
@@ -34,9 +85,11 @@ collection could not be probed, or nothing was compared. A collection
 with NO cross-collection projection population at all (a single-
 collection tenant, or a collection restricted via
 ``--assignments-collection`` that happens to carry none) is reported as
-"not applicable", never as a failure by itself -- there is nothing wrong
-to detect when there is no cross-collection assignment to have gotten
-wrong.
+"not applicable", never as a failure by itself. A collection WITH a known
+projection population that this run's sample failed to reach (a thin,
+low-density population the row-page cap could not realistically cover --
+see the density-sized pool in :func:`probe_collection`) is
+reported as INCONCLUSIVE, distinct from both a clean pass and a failure.
 
 CONFLICT-KEY NOTE (read before touching the "stored pick" logic): the
 engine's ``topic_assignments`` unique constraint is
@@ -46,9 +99,25 @@ reassigned to a DIFFERENT topic across two ``assign_from_chashes`` runs
 rather than overwriting the first; the old row is not implicitly
 retracted (see ``HttpTaxonomyStore.prune_projection_below``, the
 explicit remedy for exactly this). This probe therefore treats the
-HIGHEST-similarity 'projection' row per sampled doc_id as the "current"
-stored pick -- the same GREATEST(similarity)-wins rule the engine's own
-upsert applies on a same-topic conflict, generalised across topics.
+MOST-RECENTLY-DECIDED (max ``assigned_at``) 'projection' row per sampled
+doc_id as the "current" stored pick -- NOT the highest-similarity row
+(that was the round-1 design, and it is exactly backwards: a STALE row
+from an earlier, weaker candidate set can carry a numerically HIGHER
+recorded similarity than a later, correct reassignment onto a newly
+discovered, genuinely-closer topic; GREATEST-wins is the right rule for
+the ENGINE's own same-topic-id conflict resolution, but the wrong rule
+for THIS probe's "which historical decision is current" question).
+
+NO SIMILARITY THRESHOLD (round-1 finding (b), corrected): the cross
+branch of ``assign_from_chashes_<dim>`` has no distance/similarity floor
+at all -- every chunk gets its unconditional nearest foreign centroid
+(``LIMIT 1``, no ``WHERE`` on the distance) whenever at least one foreign
+centroid exists at this collection's dim. A sampled candidate chunk can
+still lack a 'projection' row, but only because no foreign centroid
+existed yet when it was indexed, or the cross pass was never invoked for
+it at all (a drain/backlog gap, see ``HttpTaxonomyStore.
+unassigned_chashes``/``mcp_infra.drain_unassigned_chunks``) -- never
+because its best match scored too low.
 """
 from __future__ import annotations
 
@@ -67,23 +136,41 @@ from nexus.doctor_embeddings import default_seed, window_offsets
 
 _log = structlog.get_logger(__name__)
 
-#: Similarity gap above which a disagreement is real rather than float
-#: noise between this probe's pure-Python cosine and the engine's pgvector
-#: computation of the SAME vector pair. The two independently compute the
-#: same dot products in a different summation order/precision over
-#: (already float32-precision) stored embeddings, so a genuine tie can
-#: read as a hairline difference of either sign; a real ANN/exact
-#: divergence (a different topic actually chosen) shows a gap many orders
-#: of magnitude larger than float64 roundoff on a few hundred to a
-#: thousand summed terms. Exact float ties are not disagreements.
+#: Similarity gap above which a disagreement is real rather than a near-tie.
+#: Both similarities compared here (the exact best pick and the stored
+#: pick's own recompute) are produced by THIS module's own pure-Python
+#: cosine against the SAME two live centroid embeddings -- this is never a
+#: comparison against the engine's recorded number (that value is used only
+#: to help pick the CANONICAL stored row among duplicates; see the
+#: CONFLICT-KEY NOTE). The tolerance instead separates a genuine wrong pick
+#: from two eligible centroids that are, to this vector, essentially
+#: equidistant: when the gap between "best" and "stored" is this small,
+#: which one an approximate search happens to land on is not a
+#: correctness question the ef_search=400/strict_order tuning was ever
+#: meant to resolve, and calling it a defect would flag noise, not drift.
 SIMILARITY_TIE_TOLERANCE = 1e-6
 #: Chunks sampled per collection when the caller names no size.
 DEFAULT_SAMPLE = 20
-#: Candidate chunk pool multiplier: not every sampled chunk carries a
-#: projection assignment (a below-similarity-floor chunk, or a
-#: single-collection tenant, gets none), so the candidate pool is
-#: oversampled before filtering down to `sample` actual projection rows.
-_POOL_FACTOR = 5
+#: Detection power at the default sample, assuming independent draws (the
+#: windowed sampling in :func:`nexus.doctor_embeddings.window_offsets`
+#: approximates this well enough for this purpose) and a systemic
+#: wrong-pick RATE p across the collection's projection population: the
+#: probability this run catches AT LEAST ONE wrong pick is
+#: ``1 - (1 - p) ** DEFAULT_SAMPLE``. At the default sample of 20: a 5%
+#: wrong-pick rate is caught ~64% of the time, 10% ~88%, 20% ~99%. A rare,
+#: isolated bad pick well under 1% of a collection's population is
+#: unlikely to land in any single day's sample -- rerun with a larger
+#: ``--assignments-sample`` (up to 300) or a different
+#: ``--assignments-seed`` for higher-confidence coverage of a suspected
+#: narrow defect, the same tradeoff ``--check-embeddings`` documents for
+#: its own sample.
+#: Floor on the density-sized candidate pool (see :func:`probe_collection`):
+#: never smaller than ``sample * _MIN_POOL_MULTIPLE``, even when the known
+#: projection density alone would suggest a smaller pool -- real
+#: populations cluster (a batch of chunks indexed together tends to share
+#: assignment fate), so a pool sized to the EXPECTED yield with no margin
+#: would systematically undershoot on an unlucky draw.
+_MIN_POOL_MULTIPLE = 3
 #: Collections probed at once.
 _WORKERS = 4
 #: Worst rows named per collection.
@@ -102,16 +189,23 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
 
 @dataclass
 class Disagreement:
-    """One sampled chunk whose exact-recomputed nearest foreign topic
-    differs from its stored ``assigned_by='projection'`` pick by more
-    than :data:`SIMILARITY_TIE_TOLERANCE`."""
+    """One sampled chunk whose exact-recomputed nearest ELIGIBLE foreign
+    topic (see the module docstring's eligibility-cutoff design) differs
+    from its stored, most-recently-decided 'projection' pick by more than
+    :data:`SIMILARITY_TIE_TOLERANCE`."""
 
     doc_id: str
     stored_topic_id: int
-    stored_similarity: float
+    #: This probe's OWN recompute of cosine(vector, stored topic's live
+    #: centroid) -- never the engine's recorded number; see
+    #: :data:`SIMILARITY_TIE_TOLERANCE`'s docstring.
+    stored_topic_similarity: float
     exact_topic_id: int
     exact_similarity: float
     gap: float
+    #: The stored pick's own ``assigned_at`` (context for the report: is
+    #: this a fresh decision or an old one that predates recent topics?).
+    stored_assigned_at: str
 
 
 @dataclass
@@ -124,55 +218,94 @@ class CollectionAssignmentDrift:
     #: Known population size: projection rows sourced from this collection
     #: (``HttpTaxonomyStore.get_projection_counts_by_collection``).
     projection_count: int
-    #: Sampled rows actually compared against a live foreign centroid.
+    #: Sampled rows actually compared against an eligible live foreign centroid.
     compared: int = 0
     disagreements: list[Disagreement] = field(default_factory=list)
     #: Sampled candidate ids that carried no stored vector at this
     #: collection's dim (a re-embed in progress, or deleted mid-probe).
     no_vector: int = 0
     #: Sampled projection rows whose stored topic id has no live foreign
-    #: centroid any more (a deleted or rebuilt topic) -- excluded from
-    #: `compared`, never counted as a disagreement.
+    #: centroid any more (a deleted topic) -- excluded from `compared`,
+    #: never counted as a disagreement.
     no_foreign_centroids: int = 0
+    #: True when this collection has a known projection population
+    #: (``projection_count > 0``, the only reason it was probed at all)
+    #: but this run's sample reached NONE of it -- a thin/low-density
+    #: population the row-page cap could not realistically cover, or
+    #: simple bad luck. Distinct from a clean pass AND from a failure:
+    #: reported as INCONCLUSIVE, never folded into either.
+    inconclusive: bool = False
     error: str | None = None
 
 
-def _stored_pick(rows: list[dict[str, Any]]) -> tuple[int, float]:
-    """The CANONICAL stored projection pick among *rows* for one doc_id:
-    highest similarity, ties broken by the LOWER topic id (mirrors the
-    engine's own ``ORDER BY distance, topic_id`` preference). See the
-    module docstring's CONFLICT-KEY NOTE for why more than one row can
-    exist for the same doc_id.
+def _stored_pick(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The row representing the engine's MOST RECENTLY DECIDED 'projection'
+    assignment among *rows* for one doc_id: max ``assigned_at`` (ties
+    broken by higher recorded similarity, then lower topic id, purely for
+    determinism -- true ties on ``assigned_at`` at one-second resolution
+    are possible but rare).
+
+    Deliberately NOT the highest-similarity row (see the module
+    docstring's CONFLICT-KEY NOTE for why that rule is backwards for this
+    question, even though it is the right rule for the ENGINE's own
+    same-topic-id upsert conflict).
     """
-    best = max(rows, key=lambda r: (float(r.get("similarity") or -1.0), -int(r["topic_id"])))
-    return int(best["topic_id"]), float(best.get("similarity") or -1.0)
+    def _key(r: dict[str, Any]) -> tuple[str, float, int]:
+        return (str(r.get("assigned_at") or ""), float(r.get("similarity") or -1.0), -int(r["topic_id"]))
+    return max(rows, key=_key)
 
 
 def probe_collection(
     taxo: Any, t3: Any, name: str, size: int, projection_count: int,
-    sample: int, rng: random.Random,
+    sample: int, rng: random.Random, topic_created_at: dict[int, str],
 ) -> CollectionAssignmentDrift:
     """Sample *name*'s chunk ids, filter to those carrying a stored
     ``assigned_by='projection'`` row for THIS collection, recompute the
-    exact nearest foreign centroid for each, and compare.
+    exact nearest ELIGIBLE foreign centroid for each (eligible = the
+    foreign topic already existed, per *topic_created_at*, at or before
+    the stored pick's own ``assigned_at``), and compare.
 
     Any failure is recorded in ``error``; the collection then counts as
-    not probed. A sample that turns up no projection row at all (an
-    unlucky window, or a collection whose population is thinner than the
-    sample) returns with ``compared == 0`` and no error -- reported as an
-    empty probe, not a failure, by :func:`format_report`.
+    not probed. A sample that turns up no projection row at all --
+    despite a known nonzero *projection_count* (the only reason this
+    function is ever called for *name*) -- sets ``inconclusive=True``
+    with no error: this run's sample simply did not reach the known
+    population, never a failure by itself.
+
+    *topic_created_at* maps EVERY topic id tenant-wide (not just this
+    collection's foreign set) to its ``created_at`` (UTC ISO-8601,
+    explicit seconds -- the exact string shape ``HttpTaxonomyStore.
+    get_all_topics``/``get_assignment_details`` both emit via the
+    engine's shared ``UTC_SECOND`` formatter, so a plain string compare
+    is a valid chronological compare). A topic id absent from the map
+    (should not normally happen for a live centroid) is treated as
+    ELIGIBLE by default -- the safer failure mode is to include an
+    unknown-provenance candidate rather than silently exclude it and
+    hide a real disagreement.
     """
     result = CollectionAssignmentDrift(collection=name, size=size, projection_count=projection_count)
+
+    def _finish() -> CollectionAssignmentDrift:
+        if result.error is None and result.compared == 0:
+            result.inconclusive = True
+        return result
+
     try:
         col = t3.get_or_create_collection(name)
         from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred (db.limits)
-        pool = min(size, max(sample * _POOL_FACTOR, sample), MAX_QUERY_RESULTS)
+        # Density-sized pool (round-1 finding (a)): draw enough candidate
+        # chunk ids that, at this collection's KNOWN projection density,
+        # we expect to land on `sample` actual projection rows -- not a
+        # flat oversample factor blind to how sparse the population is.
+        density = (projection_count / size) if size > 0 else 0.0
+        target_pool = math.ceil(sample / density) if density > 0 else size
+        pool = min(size, max(target_pool, sample * _MIN_POOL_MULTIPLE), MAX_QUERY_RESULTS)
         candidate_ids: list[str] = []
         for offset, limit in window_offsets(size, pool, rng):
             page = col.get(limit=limit, offset=offset)
             candidate_ids.extend(page.get("ids") or [])
         if not candidate_ids:
-            return result
+            return _finish()
 
         rows = taxo.get_assignment_details(candidate_ids)
         by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -180,15 +313,15 @@ def probe_collection(
             if r.get("assigned_by") == "projection" and r.get("source_collection") == name:
                 by_doc[r["doc_id"]].append(r)
         if not by_doc:
-            return result
-        stored: dict[str, tuple[int, float]] = {doc_id: _stored_pick(rs) for doc_id, rs in by_doc.items()}
+            return _finish()
+        stored: dict[str, dict[str, Any]] = {doc_id: _stored_pick(rs) for doc_id, rs in by_doc.items()}
 
         chosen = sorted(stored)[:sample]
         vecs = t3.get_embeddings_by_id(name, chosen)
         found = [i for i in chosen if i in vecs]
         result.no_vector = len(chosen) - len(found)
         if not found:
-            return result
+            return _finish()
 
         dim = len(vecs[found[0]])
         foreign = taxo._centroid.get_foreign(name)
@@ -198,12 +331,23 @@ def probe_collection(
                 centroids[int(meta["topic_id"])] = emb
         if not centroids:
             result.error = f"no live foreign centroid at dim {dim} for {name}"
-            return result
+            return _finish()
 
         for doc_id in found:
             vec = vecs[doc_id]
-            stored_topic_id, _stored_recorded_similarity = stored[doc_id]
-            sims = {tid: _cosine(vec, emb) for tid, emb in centroids.items()}
+            stored_row = stored[doc_id]
+            stored_topic_id = int(stored_row["topic_id"])
+            cutoff = str(stored_row.get("assigned_at") or "")
+            # Eligibility: a foreign topic discovered/rediscovered AFTER
+            # this decision was made could not have been a candidate when
+            # the engine's own LATERAL ran -- excluding it is what makes
+            # this a same-moment comparison instead of "exact today vs
+            # decided yesterday". The stored topic itself is ALWAYS
+            # eligible (it was chosen, so it existed) even if its
+            # created_at is missing from the map for some reason.
+            eligible_ids = {tid for tid in centroids if topic_created_at.get(tid, "") <= cutoff}
+            eligible_ids.add(stored_topic_id)
+            sims = {tid: _cosine(vec, centroids[tid]) for tid in eligible_ids if tid in centroids}
             best_topic_id = min(sims, key=lambda tid: (-sims[tid], tid))
             best_sim = sims[best_topic_id]
             stored_sim = sims.get(stored_topic_id)
@@ -214,18 +358,19 @@ def probe_collection(
             gap = best_sim - stored_sim
             if best_topic_id != stored_topic_id and gap > SIMILARITY_TIE_TOLERANCE:
                 result.disagreements.append(Disagreement(
-                    doc_id=doc_id, stored_topic_id=stored_topic_id, stored_similarity=stored_sim,
+                    doc_id=doc_id, stored_topic_id=stored_topic_id, stored_topic_similarity=stored_sim,
                     exact_topic_id=best_topic_id, exact_similarity=best_sim, gap=gap,
+                    stored_assigned_at=cutoff,
                 ))
     except Exception as exc:  # noqa: BLE001 — one collection's failure is reported, never hides the rest
         _log.debug("doctor_assignments_probe_failed", collection=name, error=str(exc))
         result.error = f"{type(exc).__name__}: {exc}"
-    return result
+    return _finish()
 
 
 def probe_collections(
     taxo: Any, t3: Any, sizes: dict[str, int], projection_counts: dict[str, int],
-    *, sample: int, seed: int,
+    topic_created_at: dict[int, str], *, sample: int, seed: int,
 ) -> list[CollectionAssignmentDrift]:
     """Probe every collection in *sizes*, in name order.
 
@@ -237,7 +382,7 @@ def probe_collections(
     def _one(name: str) -> CollectionAssignmentDrift:
         return probe_collection(
             taxo, t3, name, sizes[name], projection_counts.get(name, 0),
-            sample, random.Random(f"{seed}:{name}"),
+            sample, random.Random(f"{seed}:{name}"), topic_created_at,
         )
 
     with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
@@ -254,7 +399,7 @@ def format_report(
     disagreed = [r for r in results if r.error is None and r.disagreements]
     failed = [r for r in results if r.error is not None]
     probed = [r for r in results if r.error is None and r.compared > 0]
-    empty = [r for r in results if r.error is None and r.compared == 0]
+    inconclusive = [r for r in results if r.error is None and r.inconclusive]
     total = sum(r.compared for r in probed)
     # A run that compared nothing has not shown anything is healthy.
     ok = not disagreed and not failed and total > 0
@@ -277,13 +422,14 @@ def format_report(
         )
     for r in failed:
         lines.append(f"      ✗ {r.collection}: NOT PROBED ({r.error})")
-    if empty:
+    if inconclusive:
         lines.append(
-            f"      NOT CHECKED: {len(empty)} collection(s) gave no comparable projection "
-            "row in the sample (no stored vector, a deleted foreign topic, or the sampled "
-            "candidates simply carried none): "
-            + ", ".join(r.collection for r in empty[:5])
-            + (f" (+{len(empty) - 5} more)" if len(empty) > 5 else "")
+            f"      INCONCLUSIVE: {len(inconclusive)} collection(s) have a known "
+            "cross-collection projection population this sample did not reach (a thin "
+            "population past the row-page cap, or the sampled candidates simply carried "
+            "none) -- not a failure, not a clean pass: "
+            + ", ".join(f"{r.collection} ({r.projection_count} known)" for r in inconclusive[:5])
+            + (f" (+{len(inconclusive) - 5} more)" if len(inconclusive) > 5 else "")
         )
     no_vector = [r for r in results if r.error is None and r.no_vector]
     if no_vector:
@@ -298,7 +444,7 @@ def format_report(
         lines.append(
             f"      {sum(r.no_foreign_centroids for r in missing_topic)} sampled "
             "assignment(s) reference a topic with no live foreign centroid at the "
-            "sampled dim (a deleted or rebuilt topic), not compared: "
+            "sampled dim (a deleted topic), not compared: "
             + ", ".join(f"{r.collection} ({r.no_foreign_centroids})" for r in missing_topic[:5])
         )
     if not_applicable:
@@ -330,6 +476,14 @@ def run_check_assignments(*, sample: int, collections: tuple[str, ...], seed: in
     try:
         try:
             proj_counts = taxo.get_projection_counts_by_collection()
+            # Fetched ONCE, tenant-wide: the eligibility cutoff (module
+            # docstring) needs every topic's created_at, not just the
+            # collections this run happens to probe -- a foreign topic
+            # can live in ANY other collection.
+            topic_created_at = {
+                int(t["id"]): str(t.get("created_at") or "")
+                for t in taxo.get_all_topics()
+            }
         except Exception as exc:  # noqa: BLE001 — boundary: an unreadable taxonomy engine is a hard failure here
             click.echo(f"[✗] Assignment drift: taxonomy engine UNREADABLE ({type(exc).__name__}: {exc})")
             raise SystemExit(1) from exc
@@ -357,7 +511,9 @@ def run_check_assignments(*, sample: int, collections: tuple[str, ...], seed: in
             )
             return
 
-        results = probe_collections(taxo, t3, applicable, proj_counts, sample=sample, seed=run_seed)
+        results = probe_collections(
+            taxo, t3, applicable, proj_counts, topic_created_at, sample=sample, seed=run_seed,
+        )
         lines, ok = format_report(results, sample=sample, seed=run_seed, not_applicable=not_applicable)
         for line in lines:
             click.echo(line)
