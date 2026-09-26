@@ -806,6 +806,21 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         )
 
 
+def _echo_stale_projection_hint() -> None:
+    """Tell the operator other collections' projections may now be stale.
+
+    rebuild, merge and split change one collection's topics in place.
+    Other collections' cross-collection projections onto those topics are
+    not recomputed: the engine projects only chunks as they are written,
+    and nx index repo re-projects only when discovery creates topics
+    (nexus-x3gig round 3).
+    """
+    click.echo(
+        "Note: other collections' projections onto these topics are not "
+        "recomputed. Run `nx taxonomy project --backfill --persist` to refresh them."
+    )
+
+
 @taxonomy.command("rebuild")
 @click.option("--collection", "-c", default="", help="T3 collection to rebuild taxonomy for")
 @click.option("--project", "-p", default="", hidden=True, help="Deprecated: use --collection instead")
@@ -840,6 +855,8 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
             click.echo(f"Refused: {exc}", err=True)
             raise SystemExit(1) from None
     click.echo(f"Rebuilt {count} topics for collection {collection!r}.")
+    if count:
+        _echo_stale_projection_hint()
 
 
 @taxonomy.command("reset")
@@ -1357,6 +1374,7 @@ def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
         _tgt = target_id
         t2_index_write(lambda db, _s=_src, _t=_tgt: db.taxonomy.merge_topics(_s, _t))
         click.echo(f"Merged '{source_label}' into '{target_label}'.")
+        _echo_stale_projection_hint()
 
 
 @taxonomy.command("split")
@@ -1416,6 +1434,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
             redistribution = "/".join(str(c) for c in child_counts) or "0"
             note = f" ({retained} retained on parent)" if retained else ""
             click.echo(f"Redistribution: {parent_doc_count} -> {redistribution}{note}")
+            _echo_stale_projection_hint()
 
             coll_scope = collection_name or collection
             scope = f" -c {coll_scope}" if coll_scope else ""
