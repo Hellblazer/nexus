@@ -1578,17 +1578,21 @@ def _invoke_once_batch(prompt: str, *, timeout: int, model: str | None = None) -
         raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
     if result.returncode != 0:
-        stderr_lc = (result.stderr or "").lower()
-        if any(p in stderr_lc for p in _TRANSIENT_STDERR_PATTERNS):
+        # The CLI reports a rate limit or overload in the stdout envelope,
+        # not stderr, so the transient check reads both (nexus-4vsx8).
+        stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
+        seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
+        if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
             raise _TransientFailure(
-                f"transient stderr (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]}",
+                _redact_tokens(
+                    f"transient failure (rc={result.returncode}): "
+                    f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+                ),
             )
         raise _HardFailure(
             _redact_tokens(
                 f"non-zero exit (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]} | stdout: "
-                f"{_stdout_excerpt_for_hard_failure(result.stdout)}",
+                f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
             ),
         )
 
@@ -1909,17 +1913,21 @@ def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
         raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
     if result.returncode != 0:
-        stderr_lc = (result.stderr or "").lower()
-        if any(p in stderr_lc for p in _TRANSIENT_STDERR_PATTERNS):
+        # The CLI reports a rate limit or overload in the stdout envelope,
+        # not stderr, so the transient check reads both (nexus-4vsx8).
+        stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
+        seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
+        if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
             raise _TransientFailure(
-                f"transient stderr (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]}",
+                _redact_tokens(
+                    f"transient failure (rc={result.returncode}): "
+                    f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+                ),
             )
         raise _HardFailure(
             _redact_tokens(
                 f"non-zero exit (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]} | stdout: "
-                f"{_stdout_excerpt_for_hard_failure(result.stdout)}",
+                f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
             ),
         )
 

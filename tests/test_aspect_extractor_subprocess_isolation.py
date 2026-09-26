@@ -469,12 +469,39 @@ def test_hard_failure_surfaces_stdout_error_envelope_on_batch_path(monkeypatch) 
     non-zero-exit branches, not just the single-paper one."""
     cp = subprocess.CompletedProcess(
         ["claude"], 1,
-        json.dumps({"result": "rate limit exceeded, try again later"}),
+        json.dumps({"result": "Credit balance is too low"}),
         "",
     )
     monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
-    with pytest.raises(ax._HardFailure, match="rate limit exceeded"):
+    with pytest.raises(ax._HardFailure, match="Credit balance is too low"):
         ax._invoke_once_batch("some batch prompt", timeout=30)
+
+
+@pytest.mark.parametrize("path", ["single", "batch"])
+def test_rate_limit_reported_on_stdout_is_transient(monkeypatch, path: str) -> None:
+    """A rate limit or overload arrives in the stdout envelope, not stderr,
+    so the transient check reads both; before, it read stderr only and a
+    retriable failure was raised as hard (nexus-4vsx8 fix round)."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1, json.dumps({"result": "API Error: 529 overloaded_error"}), "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._TransientFailure, match="overloaded_error"):
+        if path == "single":
+            ax._invoke_once("p")
+        else:
+            ax._invoke_once_batch("p", timeout=30)
+
+
+def test_transient_failure_message_is_redacted(monkeypatch) -> None:
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1, "", "rate limit hit for sk-ant-oat01-FAKEFAKEFAKE1234567890",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._TransientFailure) as exc_info:
+        ax._invoke_once("p")
+    assert "sk-ant-" not in str(exc_info.value)
+    assert "[REDACTED]" in str(exc_info.value)
 
 
 def test_hard_failure_redacts_token_shaped_stdout(monkeypatch) -> None:
