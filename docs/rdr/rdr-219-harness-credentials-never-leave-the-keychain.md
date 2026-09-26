@@ -365,10 +365,24 @@ deliberate reader running as the same user. Any process of that user can read
 another process's environment: with `ps -E` on macOS, except for Apple
 platform binaries, and with `/proc/<pid>/environ` on Linux. So a
 deliberate reader can see the token in the tmux server started by `run --`,
-in Claude's exec-time environment (Claude removes the variable only from its
-own `process.env`), and in nx-mcp under the grant. The same is already true of
-every Phase 2 route, including `docker run -e`, where every process in the
-container can read `/proc/1/environ`.
+in nx-mcp under the grant, and in Claude's exec-time environment for a Claude
+started with the variable set (Claude removes it only from its own
+`process.env`). The same is already true of every Phase 2 route, including
+`docker run -e`, where every process in the container can read
+`/proc/1/environ`.
+
+Host-side harness launches narrow the Claude part (nexus-wauo1.36): the tmux
+pane launches (`tests/e2e/lib.sh` `claude_start`, cc-validation scenarios 16
+and 28) and `claude_mcp_grant.sh` start Claude through
+`tests/e2e/lib/claude_fd_exec.sh`, which pipes the token into fd 3, unsets the
+variable and sets `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3`. Measured
+2026-09-26 on Claude Code 2.1.283: an interactive tmux session and `-p` both
+authenticate this way, Claude's exec environment then holds no token, and
+Claude removes the fd variable from its children too. With the variable set
+and the fd closed, Claude still uses `CLAUDE_CODE_OAUTH_TOKEN`, so a nested
+dispatch under the grant is unaffected. Container harnesses keep `docker run
+-e`: the container's init process holds the token either way, so moving the
+Claude launch inside it would not narrow anything.
 
 How this squares with the rejection nexus-wauo1.35 first recorded ("a renamed
 variable forwarded past the scrub defeats the boundary"): that objection was
@@ -536,9 +550,10 @@ not documented, and it does not apply in bare mode.
   days to expiry.
 - **Risk**: a process running as the same user reads the token from another
   process's environment (`ps -E`, `/proc/<pid>/environ`). This holds for every
-  environment route: the `run --` tmux server, Claude's exec-time environment,
-  nx-mcp under the dispatch grant, and every process in a `docker run -e`
-  container.
+  environment route: the `run --` tmux server, nx-mcp under the dispatch
+  grant, and every process in a `docker run -e` container. Claude's own
+  exec-time environment no longer holds it on the host-side launches, which
+  use the fd route (nexus-wauo1.36).
   **Mitigation**: none within this RDR against a deliberate reader, since its
   threat model is accidental disclosure (see "The nx-mcp dispatch grant"). The
   accidental form, a debugging command that prints other processes'
@@ -835,3 +850,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: The janitor also fails on leftover processes holding a token variable and on leftover harness tmux servers (Sam's decision, after five were found).
 - 2026-09-25: Phase 3 critique round 2: the janitor text states the tmux name list is a second signal behind the process check; the MVV guard criterion states what the run observed.
 - 2026-09-26: Phase 3b review round: "The nx-mcp dispatch grant" states the no-shell invariant the kept harness name depends on, pinned by a test; the aspect extractor's `claude -p` passes `--tools ""`; the MVV counts four Phase 3b proofs.
+- 2026-09-26: Host-side harness Claude launches take the token on fd 3 (`claude_fd_exec.sh`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`), so it is no longer in Claude's exec environment there; container harnesses unchanged, since their init process holds it (nexus-wauo1.36).

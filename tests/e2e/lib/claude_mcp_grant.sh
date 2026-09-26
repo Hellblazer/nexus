@@ -175,7 +175,8 @@ claude_mcp_grant() {
     # The token itself is escaped with pure bash parameter substitution --
     # no subprocess, no command substitution -- so it never transits
     # anything that could show up as a separate process's argv.
-    local token="$CLAUDE_CODE_OAUTH_TOKEN"
+    local raw_token="$CLAUDE_CODE_OAUTH_TOKEN"
+    local token="$raw_token"
     if [[ $token == *[[:cntrl:]]* ]]; then
         echo "claude_mcp_grant: CLAUDE_CODE_OAUTH_TOKEN contains a control character;" \
              "refusing to build an unparseable config" >&2
@@ -188,8 +189,14 @@ claude_mcp_grant() {
     # shadowed the name with a function) writes the config; the pipe is a
     # process substitution, never a file. Nothing here ever writes the
     # token to disk or passes it as an argv element to any exec'd program.
+    #
+    # Claude's own login rides fd 3 (CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR),
+    # not its environment, so the token is not in Claude's exec-time
+    # environment either (nexus-wauo1.36; see claude_fd_exec.sh).
+    unset CLAUDE_CODE_OAUTH_TOKEN
+    export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3
     exec claude --strict-mcp-config --mcp-config <(builtin printf \
         '{"mcpServers":{"nexus":{"command":%s,"args":%s,"env":{"%s":"%s"}}%s}}' \
         "$nexus_cmd_json" "$nexus_args_json" "$_CLAUDE_MCP_GRANT_ENV_VAR" "$token" "$extra_suffix") \
-        "${claude_args[@]+"${claude_args[@]}"}"
+        "${claude_args[@]+"${claude_args[@]}"}" 3< <(builtin printf '%s' "$raw_token")
 }

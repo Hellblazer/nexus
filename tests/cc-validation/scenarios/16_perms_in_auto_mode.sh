@@ -12,7 +12,7 @@ claude_start_auto() {
     # runner.sh and in scope here.
     _preseed_trust 2>/dev/null || true
     local _extra; _extra="$(_prepare_mcp_args 2>/dev/null || true)"
-    send_keys "claude --permission-mode=auto ${_extra}" Enter
+    send_keys "bash $CLAUDE_FD_EXEC --permission-mode=auto ${_extra}" Enter
     sleep 8
     local deadline=$(( $(date +%s) + 60 ))
     local _trust_done=0
