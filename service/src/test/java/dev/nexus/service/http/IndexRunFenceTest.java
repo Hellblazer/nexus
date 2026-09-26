@@ -785,7 +785,7 @@ class IndexRunFenceTest {
         insertChunk1024(existing);
 
         var outcome = vecRepo.updateMetadataWithMissing(TENANT, COLLECTION,
-            List.of(existing, missing), List.of(Map.of("v", "1"), Map.of("v", "1")));
+            List.of(existing, missing), List.of(Map.of("v", "1"), Map.of("v", "1")), List.of());
 
         assertThat(outcome.updated()).isEqualTo(1);
         assertThat(outcome.missing()).containsExactly(missing);

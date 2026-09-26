@@ -147,7 +147,16 @@ class PgVectorRepositoryContractTest {
                 "code__getwherene__voyage-code-3__v1", "code__listpage__voyage-code-3__v1",
                 "code__listrls__voyage-code-3__v1", "code__manifest__voyage-code-3__v1",
                 "code__manifestbroken__voyage-code-3__v1", "code__manifestrls__voyage-code-3__v1",
-                "code__manifestshared__voyage-code-3__v1", "code__neverwritten__voyage-code-3__v1",
+                "code__manifestshared__voyage-code-3__v1",
+                "code__mergemeta__voyage-code-3__v1", "code__mergemeta-delkeys__voyage-code-3__v1",
+                "code__mergemeta-delkeys-noop__voyage-code-3__v1", "code__mergemeta-latecommit__voyage-code-3__v1",
+                "code__mergemeta-latecommit-explicit__voyage-code-3__v1",
+                "code__mergemeta-upsertdel-conflict__voyage-code-3__v1",
+                "code__mergemeta-upsertdel-havevec__voyage-code-3__v1",
+                "code__mergemeta-upsertdel-nodel__voyage-code-3__v1",
+                "code__mergemeta-upsertdel-incoming__voyage-code-3__v1",
+                "code__mergemeta-batchreplace__voyage-code-3__v1",
+                "code__neverwritten__voyage-code-3__v1",
                 "code__reupsert__voyage-code-3__v1", "code__searchand__voyage-code-3__v1",
                 "code__searchbadop__voyage-code-3__v1", "code__searchcap__voyage-code-3__v1",
                 "code__searchcompound__voyage-code-3__v1", "code__searcheq__voyage-code-3__v1",
@@ -1303,6 +1312,284 @@ class PgVectorRepositoryContractTest {
         assertThat(metas.get(0).get("v"))
             .as("cross-tenant updateMetadata must not modify the owning tenant's metadata")
             .isEqualTo("e9941e196dc41bcf2e7288f58b96ac6a33041c5d7b3955f3c3db25869510ddad");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Contract 7b (nexus-w94eo): every chunk-metadata write path MERGES rather
+    // than replaces — metadata = chunks.metadata || EXCLUDED.metadata (and the
+    // plain-UPDATE equivalent) — so a write carrying a SUBSET of keys can no
+    // longer erase keys an earlier write set. Diagnosis: the streaming PDF
+    // uploader writes a title-less stub first and the post-extraction post-pass
+    // fills title/extraction_method in later; a late-committing duplicate of the
+    // stub (a 504-retried upsert-chunks attempt the client had already given up
+    // on) used to be able to land AFTER the post-pass and wipe its keys back to
+    // the stub's payload.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void upsertChunks_secondWriteWithFewerKeys_preservesFirstWritesKeys() throws Exception {
+        String col = "code__mergemeta__voyage-code-3__v1";
+        String chash = "1111111111111111111111111111111111111111111111111111111111111111";
+        embedder1024.register("merge probe text", 0.6f, 0.8f);
+
+        // First write: full metadata, as a fresh insert.
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("merge probe text"),
+            List.of(Map.of("title", "T1", "extraction_method", "mineru")),
+            /* forceReEmbed */ true);
+
+        // Second write: SAME chash/text, forceReEmbed=true so it re-enters the
+        // ON CONFLICT DO UPDATE branch (not the have-vector metadata-only
+        // reroute) — a DIFFERENT, smaller metadata dict that carries neither
+        // key the first write set.
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("merge probe text"),
+            List.of(Map.of("frecency_score", "0.9")),
+            /* forceReEmbed */ true);
+
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas.get(0).get("title"))
+            .as("a later write with a SUBSET of keys must not erase an earlier write's title")
+            .isEqualTo("T1");
+        assertThat(metas.get(0).get("extraction_method"))
+            .as("a later write with a SUBSET of keys must not erase an earlier write's extraction_method")
+            .isEqualTo("mineru");
+        assertThat(metas.get(0).get("frecency_score"))
+            .as("the second write's own key must still land")
+            .isEqualTo("0.9");
+    }
+
+    @Test
+    void updateMetadataWithMissing_deleteKeys_removesKeyAfterMerge() throws Exception {
+        String col = "code__mergemeta-delkeys__voyage-code-3__v1";
+        String chash = "2222222222222222222222222222222222222222222222222222222222222222";
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("delete-keys probe text"),
+            List.of(Map.of("quality_gate_overridden", true, "title", "Degraded Doc")));
+
+        var outcome = repo1024.updateMetadataWithMissing(TENANT_A, col,
+            List.of(chash), List.of(Map.of("extraction_method", "mineru")),
+            List.of("quality_gate_overridden"));
+        assertThat(outcome.updated()).isEqualTo(1);
+
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas.get(0))
+            .as("delete_keys removes the named key even though this write merges everything else")
+            .doesNotContainKey("quality_gate_overridden");
+        assertThat(metas.get(0).get("title"))
+            .as("a key NOT named in delete_keys survives the merge untouched")
+            .isEqualTo("Degraded Doc");
+        assertThat(metas.get(0).get("extraction_method"))
+            .as("this write's own key lands normally")
+            .isEqualTo("mineru");
+    }
+
+    @Test
+    void updateMetadataWithMissing_deleteKeys_absentKeyIsANoOp() throws Exception {
+        String col = "code__mergemeta-delkeys-noop__voyage-code-3__v1";
+        String chash = "3333333333333333333333333333333333333333333333333333333333333333";
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("delete-keys noop probe text"), List.of(Map.of("title", "T")));
+
+        var outcome = repo1024.updateMetadataWithMissing(TENANT_A, col,
+            List.of(chash), List.of(Map.of("frecency_score", "0.5")),
+            List.of("quality_gate_overridden"));
+        assertThat(outcome.updated())
+            .as("deleting a key that was never present must not fail the write")
+            .isEqualTo(1);
+
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas.get(0).get("title")).isEqualTo("T");
+        assertThat(metas.get(0).get("frecency_score")).isEqualTo("0.5");
+    }
+
+    @Test
+    void upsertChunks_stubLandingAfterEnrichmentWrite_doesNotEraseEnrichment() throws Exception {
+        // The exact nexus-w94eo shape: a title-less STUB write (nexus-w94eo's OTHER
+        // half: pipeline_stages._build_chunk_metadata now OMITS title/source_author
+        // entirely rather than stamping ""), then the post-extraction enrichment
+        // write (title + extraction_method), then a LATE-ARRIVING duplicate of the
+        // ORIGINAL stub write (the abandoned half of a 504-retried upsert-chunks
+        // attempt finally committing). Before this bead the stub's wholesale-REPLACE
+        // would win, reverting the chunk back to title="". The stub dict below
+        // deliberately carries NO "title"/"source_author" key at all — merging a
+        // dict that never had the key is what the engine-side fix alone cannot do;
+        // it needs the client's own omission (see the sibling test below for what
+        // happens when a stub explicitly sends title="").
+        String col = "code__mergemeta-latecommit__voyage-code-3__v1";
+        String chash = "4444444444444444444444444444444444444444444444444444444444444444";
+        embedder1024.register("late-commit probe text", 0.8f, 0.6f);
+        Map<String, Object> stubMetadata = Map.of("content_hash", "abc123");
+
+        // 1. Stub write (streaming uploader shape, forceReEmbed to guarantee the
+        //    ON CONFLICT DO UPDATE branch on every write in this test).
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("late-commit probe text"), List.of(stubMetadata), true);
+
+        // 2. Enrichment write (the post-pass, via the HTTP update-metadata path).
+        repo1024.updateMetadataWithMissing(TENANT_A, col,
+            List.of(chash), List.of(Map.of("title", "Real Title", "extraction_method", "mineru")),
+            List.of());
+
+        // 3. The late-arriving duplicate of step 1's stub — same payload, lands
+        //    LAST.
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("late-commit probe text"), List.of(stubMetadata), true);
+
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas.get(0).get("title"))
+            .as("nexus-w94eo: a late-arriving stub duplicate must not revert the enrichment's title")
+            .isEqualTo("Real Title");
+        assertThat(metas.get(0).get("extraction_method"))
+            .as("nexus-w94eo: a late-arriving stub duplicate must not revert extraction_method")
+            .isEqualTo("mineru");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Contract 7c (nexus-y8xjh): upsert-chunks delete_keys. A full-rewrite writer
+    // whose normalize step drops quality_gate_overridden=False as empty must still be
+    // able to clear a stale True now that the write merges instead of replacing.
+    // ---------------------------------------------------------------------------
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> storedMeta(String col, String chash) {
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of(chash), 10, 0);
+        return ((List<Map<String, Object>>) got.get("metadatas")).get(0);
+    }
+
+    @Test
+    void upsertChunks_deleteKeys_onConflictBranch_clearsStaleSparseKey() {
+        String col = "code__mergemeta-upsertdel-conflict__voyage-code-3__v1";
+        String chash = "6666666666666666666666666666666666666666666666666666666666666666";
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe one"),
+            List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)), true);
+
+        // Clean --force --re-embed rewrite: normalize dropped the False value, so the
+        // dict has no key at all; the writer names it in deleteKeys instead.
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe one"),
+            List.of(Map.of("title", "Clean")), true, List.of("quality_gate_overridden"));
+
+        Map<String, Object> meta = storedMeta(col, chash);
+        assertThat(meta)
+            .as("the ON CONFLICT branch strips a delete_keys key from the stored row")
+            .doesNotContainKey("quality_gate_overridden");
+        assertThat(meta.get("title")).isEqualTo("Clean");
+    }
+
+    @Test
+    void upsertChunks_deleteKeys_haveVectorBranch_clearsStaleSparseKey() {
+        // forceReEmbed=false + identical text: the existence partition routes the row
+        // to batchUpdateMetadata (the plain --force path, no --re-embed), not the
+        // insert. This is the branch a hardcoded-null deleteKeys used to strand.
+        String col = "code__mergemeta-upsertdel-havevec__voyage-code-3__v1";
+        String chash = "7777777777777777777777777777777777777777777777777777777777777777";
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe two"),
+            List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)));
+
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe two"),
+            List.of(Map.of("title", "Clean")), false, List.of("quality_gate_overridden"));
+
+        Map<String, Object> meta = storedMeta(col, chash);
+        assertThat(meta)
+            .as("the have-vector metadata-only branch strips a delete_keys key too")
+            .doesNotContainKey("quality_gate_overridden");
+        assertThat(meta.get("title")).isEqualTo("Clean");
+    }
+
+    @Test
+    void upsertChunks_withoutDeleteKeys_staleSparseKeySurvives() {
+        // Control for the two tests above: with merge semantics and no delete_keys,
+        // the stale key is NOT cleared. If this ever went green the other way, the
+        // delete_keys tests would prove nothing.
+        String col = "code__mergemeta-upsertdel-nodel__voyage-code-3__v1";
+        String chash = "8888888888888888888888888888888888888888888888888888888888888888";
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe three"),
+            List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)));
+
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe three"),
+            List.of(Map.of("title", "Clean")));
+
+        assertThat(storedMeta(col, chash).get("quality_gate_overridden"))
+            .as("without delete_keys a merge leaves an omitted key at its stored value")
+            .isEqualTo(true);
+    }
+
+    @Test
+    void upsertChunks_deleteKeys_keyAlsoInIncomingRow_incomingValueLands() {
+        // delete_keys strips the STORED side only, so one request-level list is safe
+        // for a batch whose rows differ: a row that still carries the key writes it.
+        String col = "code__mergemeta-upsertdel-incoming__voyage-code-3__v1";
+        String chash = "9999999999999999999999999999999999999999999999999999999999999999";
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe four"),
+            List.of(Map.of("section_title", "Old Section")), true);
+
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe four"),
+            List.of(Map.of("section_title", "New Section")), true, List.of("section_title"));
+
+        assertThat(storedMeta(col, chash).get("section_title"))
+            .as("a delete_keys key the incoming row carries lands with the incoming value")
+            .isEqualTo("New Section");
+    }
+
+    @Test
+    void batchUpdateMetadata_sixArgCombinedWriteMode_stillReplaces() {
+        // CombinedWriteService's metadata-only branch keeps the pre-nexus-w94eo REPLACE
+        // (its insert branch in CatalogRepository still replaces), so a clean re-index
+        // through the combined-write endpoint clears an omitted sparse key.
+        String col = "code__mergemeta-batchreplace__voyage-code-3__v1";
+        String chash = "aaaa" + "a".repeat(60);
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("batch replace probe"),
+            List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)));
+
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(1024);
+        List<Integer> zero = tenantScope.withTenant(TENANT_A, ctx ->
+            PgVectorRepository.batchUpdateMetadata(ctx, ch, col, List.of(chash),
+                List.of(Map.of("title", "Clean")), List.of(0)));
+        assertThat(zero).isEmpty();
+
+        Map<String, Object> meta = storedMeta(col, chash);
+        assertThat(meta).doesNotContainKey("quality_gate_overridden");
+        assertThat(meta.get("title")).isEqualTo("Clean");
+    }
+
+    @Test
+    void upsertChunks_stubStillSendingExplicitEmptyTitle_stillRevertsEnrichment() throws Exception {
+        // Adversarial control for the test above: merge semantics alone do NOT
+        // protect a caller that (unlike the fixed streaming uploader) still sends
+        // an EXPLICIT title="" in its stub dict — an explicit value, even an empty
+        // one, is itself something the merge's right-hand operand can re-assert.
+        // This is exactly why the client-side omission (pipeline_stages._build_
+        // chunk_metadata) is a REQUIRED half of this fix, not optional polish.
+        String col = "code__mergemeta-latecommit-explicit__voyage-code-3__v1";
+        String chash = "5555555555555555555555555555555555555555555555555555555555555555";
+        embedder1024.register("late-commit explicit-empty probe text", 0.6f, 0.8f);
+        Map<String, Object> stubMetadataWithExplicitEmptyTitle =
+            Map.of("title", "", "content_hash", "abc123");
+
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("late-commit explicit-empty probe text"),
+            List.of(stubMetadataWithExplicitEmptyTitle), true);
+        repo1024.updateMetadataWithMissing(TENANT_A, col,
+            List.of(chash), List.of(Map.of("title", "Real Title", "extraction_method", "mineru")),
+            List.of());
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(chash), List.of("late-commit explicit-empty probe text"),
+            List.of(stubMetadataWithExplicitEmptyTitle), true);
+
+        Map<String, Object> got = repo1024.get(TENANT_A, col, List.of(chash), 10, 0);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
+        assertThat(metas.get(0).get("title"))
+            .as("an EXPLICIT stub value is not protected by merge alone — documents the residual")
+            .isEqualTo("");
     }
 
     // ---------------------------------------------------------------------------

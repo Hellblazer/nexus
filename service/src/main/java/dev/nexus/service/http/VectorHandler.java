@@ -340,7 +340,8 @@ public final class VectorHandler implements HttpHandler {
      *   "ids":        ["sha256hex...", ...],
      *   "documents":  ["chunk text", ...],
      *   "metadatas":  [{...}, ...]    // optional; length must match ids if provided
-     *   "force_re_embed": false       // optional, default false — see below
+     *   "force_re_embed": false,      // optional, default false — see below
+     *   "delete_keys": ["k", ...]     // optional (nexus-y8xjh) — see below
      * }
      * </pre>
      *
@@ -362,6 +363,17 @@ public final class VectorHandler implements HttpHandler {
      * signature parity with {@code HttpVectorClient} (callers duck-type against
      * {@code IndexContext.db} regardless of mode) but treats it as a documented
      * no-op — local mode has no server-side existence-partition to bypass.
+     *
+     * <p>{@code delete_keys} (nexus-w94eo / nexus-y8xjh, optional): top-level
+     * metadata keys stripped from each written row's STORED metadata before this
+     * request's {@code metadatas} are merged on top. Every write here merges rather
+     * than replacing, so a full-rewrite writer whose own normalize step drops a
+     * sparse key as empty (a clean re-index's {@code quality_gate_overridden=False})
+     * names the key here, or a stale value from an earlier write would outlive the
+     * rewrite. A key the incoming row also carries lands with the incoming value.
+     * Applies on every branch: the insert's {@code ON CONFLICT}, the have-vector
+     * metadata-only refresh, and the vector-passthrough branch. Absent or empty
+     * means nothing is stripped.
      *
      * <p>Response 200: {"upserted": N}
      */
@@ -386,6 +398,8 @@ public final class VectorHandler implements HttpHandler {
         List<Map<String, Object>> metadatas = optMetadataList(body, "metadatas", ids.size());
         List<float[]> embeddings = optEmbeddingsList(body, "embeddings");
         boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+        List<String> deleteKeys = optStringList(body, "delete_keys");
+        if (deleteKeys == null) deleteKeys = List.of();
 
         if (ids.size() != documents.size()) {
             throw new IllegalArgumentException(
@@ -402,14 +416,15 @@ public final class VectorHandler implements HttpHandler {
                 throw new IllegalArgumentException(
                         "embeddings length " + embeddings.size() + " != ids length " + ids.size());
             }
-            repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas);
+            repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas,
+                    deleteKeys);
             emitTokenUsage(ex, 0L);
             HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
             return;
         }
 
         var upsertResult = repo.upsertChunksWithTokens(
-                tenant, collection, ids, documents, metadatas, forceReEmbed);
+                tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys);
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
@@ -941,6 +956,16 @@ public final class VectorHandler implements HttpHandler {
      * an id here believing it already has a stored vector — when that belief is wrong the
      * client must be able to re-route the id through a full upsert instead of silently
      * losing content. Detection lives here; the client-side reroute is a separate bead.
+     *
+     * <p>{@code delete_keys} (nexus-w94eo, optional): top-level metadata keys to remove
+     * from every id in this batch, stripped from the STORED row before this request's
+     * {@code metadatas} are merged on top — this endpoint no longer REPLACES metadata
+     * wholesale ({@code PgVectorRepository.mergeMetadata}). A merge can only add or
+     * overwrite a key, never retract one by omission, so a caller that must clear a
+     * stale key (e.g. {@code quality_gate_overridden} once a document's re-index comes
+     * back clean) names it here instead of relying on leaving it out of {@code
+     * metadatas}. A named key the incoming row also carries lands with the incoming
+     * value.
      */
     private void handleUpdateMetadata(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -950,6 +975,7 @@ public final class VectorHandler implements HttpHandler {
         String collection                     = requireString(body, "collection");
         List<String> ids                      = requireStringList(body, "ids");
         List<Map<String, Object>> metadatas   = optMetadataList(body, "metadatas", ids.size());
+        List<String> deleteKeys               = optStringList(body, "delete_keys");
 
         if (metadatas.size() != ids.size()) {
             throw new IllegalArgumentException(
@@ -960,7 +986,8 @@ public final class VectorHandler implements HttpHandler {
         // affected-row count rather than void — report it verbatim instead of
         // assuming every id existed (a stale/deleted id previously reported as
         // "updated" with no row actually touched).
-        var outcome = repo.updateMetadataWithMissing(tenant, collection, ids, metadatas);
+        var outcome = repo.updateMetadataWithMissing(
+                tenant, collection, ids, metadatas, deleteKeys == null ? List.of() : deleteKeys);
         HttpUtil.send(ex, 200, json(Map.of("updated", outcome.updated(), "missing", outcome.missing())));
     }
 

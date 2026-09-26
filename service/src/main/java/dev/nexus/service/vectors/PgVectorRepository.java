@@ -478,8 +478,28 @@ public final class PgVectorRepository {
                                                     List<String> documents,
                                                     List<Map<String, Object>> metadatas,
                                                     boolean forceReEmbed) {
+        return upsertChunksWithTokens(tenant, collection, ids, documents, metadatas, forceReEmbed, List.of());
+    }
+
+    /**
+     * {@code deleteKeys}-aware sibling (nexus-w94eo / nexus-y8xjh): every row this
+     * call writes, whether through the insert's {@code ON CONFLICT DO UPDATE} or the
+     * have-vector metadata-only branch, first loses the named top-level keys from its
+     * STORED metadata, then gets this call's metadata merged on top (see {@link
+     * #mergeMetadata}). Wired from {@code VectorHandler}'s {@code delete_keys} request
+     * field. A full-rewrite writer names the keys it dropped as empty, so a stale
+     * value from an earlier write cannot outlive the rewrite now that writes merge
+     * instead of replacing.
+     */
+    public Tokened<Integer> upsertChunksWithTokens(String tenant, String collection,
+                                                    List<String> ids,
+                                                    List<String> documents,
+                                                    List<Map<String, Object>> metadatas,
+                                                    boolean forceReEmbed,
+                                                    List<String> deleteKeys) {
         long[] tokensOut = {0L};
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null, forceReEmbed);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null, forceReEmbed,
+                deleteKeys);
         return new Tokened<>(ids.size(), tokensOut[0]);
     }
 
@@ -488,7 +508,7 @@ public final class PgVectorRepository {
                              List<String> ids,
                              List<String> documents,
                              List<Map<String, Object>> metadatas) {
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false, List.of());
     }
 
     /** {@code forceReEmbed}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean)}. */
@@ -497,7 +517,19 @@ public final class PgVectorRepository {
                              List<String> documents,
                              List<Map<String, Object>> metadatas,
                              boolean forceReEmbed) {
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed,
+                List.of());
+    }
+
+    /** {@code deleteKeys}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean, List)}. */
+    public void upsertChunks(String tenant, String collection,
+                             List<String> ids,
+                             List<String> documents,
+                             List<Map<String, Object>> metadatas,
+                             boolean forceReEmbed,
+                             List<String> deleteKeys) {
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed,
+                deleteKeys);
     }
 
     /**
@@ -519,6 +551,16 @@ public final class PgVectorRepository {
                                         List<String> documents,
                                         List<float[]> embeddings,
                                         List<Map<String, Object>> metadatas) {
+        upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas, List.of());
+    }
+
+    /** {@code deleteKeys}-aware sibling of {@link #upsertChunksWithVectors} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean, List)}. */
+    public void upsertChunksWithVectors(String tenant, String collection,
+                                        List<String> ids,
+                                        List<String> documents,
+                                        List<float[]> embeddings,
+                                        List<Map<String, Object>> metadatas,
+                                        List<String> deleteKeys) {
         // nexus-e0hd2 review F2: this is the server-to-server ingest path
         // (MigrationHandler /ingest-cloud) — ids arrive from an EXTERNAL
         // source with no HTTP-boundary validation. Validate here so a
@@ -541,7 +583,8 @@ public final class PgVectorRepository {
         // gates the existence-partition check off unconditionally below, before
         // forceReEmbed is ever consulted. Pass false — never wire this true here,
         // it would be dead plumbing with no behavioral effect.
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings, false);
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings, false,
+                deleteKeys);
     }
 
     private void upsertChunksInternal(String tenant, String collection,
@@ -550,7 +593,8 @@ public final class PgVectorRepository {
                                       List<Map<String, Object>> metadatas,
                                       long[] tokensOut,
                                       List<float[]> providedEmbeddings,
-                                      boolean forceReEmbed) {
+                                      boolean forceReEmbed,
+                                      List<String> deleteKeys) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(tenant, collection);
 
@@ -643,7 +687,8 @@ public final class PgVectorRepository {
             // check entirely — the rare model-drift-within-collection recompute,
             // and the escape for the (0%-hit) first-index path so it never pays
             // for the existence SELECT with no offsetting benefit.
-            insertIdx = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas);
+            insertIdx = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas,
+                    deleteKeys);
         }
         if (insertIdx == null) {
             // Passthrough, forceReEmbed, an empty batch, or the existence-check
@@ -788,7 +833,18 @@ public final class PgVectorRepository {
                       .doUpdate()
                       .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
                       .set(ch.embedding(), DSL.excluded(ch.embedding()))
-                      .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+                      // nexus-w94eo: MERGES metadata (mergeMetadata: current || incoming)
+                      // rather than replacing it wholesale. This is the fix for the
+                      // diagnosed late-commit revert — a 504'd upsert-chunks attempt the
+                      // client had already given up on used to be able to land AFTER a
+                      // later write (e.g. the streaming post-pass's enrichment) and wipe
+                      // its keys back to this (older) attempt's payload. The request's
+                      // delete_keys (nexus-y8xjh) strips named keys from the stored row
+                      // first: a full-rewrite writer whose normalize step drops a sparse
+                      // key as empty (quality_gate_overridden=False) names it there, or a
+                      // stale True from an earlier write would outlive the rewrite.
+                      .set(ch.metadata(),  mergeMetadata(ch.metadata(), DSL.excluded(ch.metadata()),
+                              deleteKeys))
                       // RDR-169 Phase B (bead nexus-zw2em): this ordinary content path
                       // always writes real chunk_text, so any pre-existing row it
                       // conflicts on ends up with retention='full' regardless of what it
@@ -845,7 +901,11 @@ public final class PgVectorRepository {
                   .onConflict(ch.tenantId(), ch.collection(), ch.chash())
                   .doUpdate()
                   .set(ch.embedding(), DSL.excluded(ch.embedding()))
-                  .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+                  // nexus-w94eo: merge, not replace — see the sibling ON CONFLICT above
+                  // in upsertChunksInternal for the full rationale. No delete keys: the
+                  // upsert-reference-only route carries no delete_keys field, and no
+                  // client in src/nexus calls that route today.
+                  .set(ch.metadata(),  mergeMetadata(ch.metadata(), DSL.excluded(ch.metadata()), null))
                   .set(ch.retention(), DSL.excluded(ch.retention()));
     }
 
@@ -2913,13 +2973,14 @@ public final class PgVectorRepository {
      * entry point so existing callers (and their tests) are unaffected by nexus-5xn3k.2's
      * addition of the missing-ids report.
      *
-     * @param metadatas replacement metadata maps aligned with {@code ids}
+     * @param metadatas metadata maps aligned with {@code ids}, each MERGED into its
+     *                  stored row (nexus-w94eo; omitted keys are left untouched)
      * @return total rows affected across all {@code ids} (0 to {@code ids.size()})
      */
     public int updateMetadata(String tenant, String collection,
                                List<String> ids,
                                List<Map<String, Object>> metadatas) {
-        return updateMetadataWithMissing(tenant, collection, ids, metadatas).updated();
+        return updateMetadataWithMissing(tenant, collection, ids, metadatas, List.of()).updated();
     }
 
     /** {@link #updateMetadata}'s outcome, naming WHICH ids had no matching row. */
@@ -2936,13 +2997,19 @@ public final class PgVectorRepository {
      * method only makes the misses REPORTABLE via the HTTP {@code /v1/vectors/update-metadata}
      * response's {@code "missing"} field.
      *
-     * @param metadatas replacement metadata maps aligned with {@code ids}
+     * @param metadatas  metadata maps aligned with {@code ids}, each MERGED into its
+     *                   stored row (nexus-w94eo; omitted keys are left untouched)
+     * @param deleteKeys top-level metadata keys to strip from every row's STORED value
+     *                   before the merge (see {@link #mergeMetadata});
+     *                   {@code null}/empty is a no-op — the pre-nexus-w94eo behavior for
+     *                   every caller that predates the delete-keys wire field
      * @return updated count (same as {@link #updateMetadata}) plus the missing id subset,
      *         in {@code ids} order (never null; empty when every id existed)
      */
     public MetadataUpdateOutcome updateMetadataWithMissing(String tenant, String collection,
                                                             List<String> ids,
-                                                            List<Map<String, Object>> metadatas) {
+                                                            List<Map<String, Object>> metadatas,
+                                                            List<String> deleteKeys) {
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return new MetadataUpdateOutcome(0, List.of());
         if (ids.size() != metadatas.size()) {
@@ -2955,7 +3022,7 @@ public final class PgVectorRepository {
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
-                int rows = updateMetadataOneRow(ctx, ch, collection, ids.get(i), metadatas.get(i));
+                int rows = updateMetadataOneRow(ctx, ch, collection, ids.get(i), metadatas.get(i), deleteKeys);
                 affected += rows;
                 if (rows == 0) missing.add(ids.get(i));
             }
@@ -2964,24 +3031,77 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Shallow jsonb MERGE for a chunk-metadata write (nexus-w94eo): {@code current ||
+     * incoming}, so a write carrying a SUBSET of keys can no longer erase keys an
+     * earlier write set. Every chunk-metadata write path used to REPLACE {@code
+     * metadata} wholesale — {@code ON CONFLICT DO UPDATE SET metadata =
+     * excluded.metadata}, and the plain metadata-only {@code UPDATE}s below — so a
+     * late-committing retry (a 504'd {@code upsert-chunks} attempt the client had
+     * already given up on) or an interleaved read-modify-write post-pass could revert
+     * a newer write's keys back to an older, incomplete payload's. See the nexus-w94eo
+     * diagnosis (T2 {@code nexus/nexus-w94eo-diagnosis}): the streaming PDF pipeline
+     * writes a title/extraction_method-less STUB first and fills those keys in later,
+     * so it was the write path most exposed to this class of revert.
+     *
+     * <p>{@code deleteKeys}, when non-empty, removes those top-level keys from the
+     * STORED value before the merge, via chained {@code jsonb - text}: the result is
+     * {@code (current - k1 - k2 ...) || incoming}. A merge can only ADD or OVERWRITE a
+     * key, never retract one by omission, so a caller that must clear a stale key
+     * names it here. Because the removal applies to the stored side only, a key named
+     * in {@code deleteKeys} that this write ALSO carries lands with the incoming
+     * value: one request-level list is safe for a batch whose rows differ in which
+     * keys they carry (a full-rewrite writer names every key it dropped as empty on
+     * ANY row; rows that kept the key still write it). The motivating key is
+     * {@code quality_gate_overridden}: a document that failed the extraction quality
+     * gate once and is re-indexed clean under {@code --force} must be able to un-set
+     * it, and the writer's own normalize step drops the False value instead of
+     * sending it (nexus-y8xjh).
+     *
+     * @param current    the stored column reference ({@link DimTables.ChunkTable#metadata()}
+     *                   or, on the {@code ON CONFLICT} path, the target row before this
+     *                   statement)
+     * @param incoming   this write's metadata (an {@code EXCLUDED.metadata} reference on
+     *                   the {@code ON CONFLICT} path, or a bound JSONB literal on a plain
+     *                   {@code UPDATE})
+     * @param deleteKeys top-level keys to strip from the stored value before the merge;
+     *                   {@code null}/empty strips nothing
+     */
+    private static org.jooq.Field<JSONB> mergeMetadata(org.jooq.Field<JSONB> current,
+                                                        org.jooq.Field<JSONB> incoming,
+                                                        List<String> deleteKeys) {
+        org.jooq.Field<JSONB> base = current;
+        if (deleteKeys != null) {
+            for (String key : deleteKeys) {
+                base = DSL.field("({0} - CAST({1} AS text))", JSONB.class, base, DSL.val(key));
+            }
+        }
+        return DSL.field("({0} || {1})", JSONB.class, base, incoming);
+    }
+
+    /**
      * Ctx-level metadata-only UPDATE for exactly one chash — the shared SQL shape
-     * behind both {@link #updateMetadata} (its own short transaction, the HTTP
-     * frecency-reindex path) and {@link #resolveNeedEmbedIdx}'s have-vector branch
-     * (same transaction as that method's existence SELECT, RDR-181 bead nexus-f0r8p.2).
-     * Factored out so both call sites share identical sanitization + JSON shape — the
-     * metadata a have-vector UPDATE writes MUST be indistinguishable from what a fresh
-     * INSERT would have written (metadata-parity acceptance criterion).
+     * behind {@link #updateMetadata} (its own short transaction, the HTTP
+     * frecency-reindex and post-extraction-enrichment paths). {@link
+     * #resolveNeedEmbedIdx}'s have-vector branch uses the batched sibling {@link
+     * #batchUpdateMetadata} instead (nexus-6yps0), not this per-row method.
+     *
+     * <p>nexus-w94eo: MERGES {@code metadata} (see {@link #mergeMetadata}) rather than
+     * replacing it, after stripping {@code deleteKeys} from the stored value — the HTTP
+     * {@code update-metadata} endpoint's wire-level escape for a caller that must
+     * retract a key a merge would otherwise leave stuck at its last value.
      *
      * @return rows affected (0 or 1) — 0 means no row currently matches
      *         {@code (collection, chash)} under RLS
      */
     private static int updateMetadataOneRow(DSLContext ctx, DimTables.ChunkTable ch,
                                              String collection, String chash,
-                                             Map<String, Object> metadata) {
+                                             Map<String, Object> metadata,
+                                             List<String> deleteKeys) {
         // Same NUL defense as upsertChunks: jsonb rejects NUL just like text does
         // (nexus-rvfwj, dual-review M2).
+        org.jooq.Field<JSONB> incoming = DSL.val(JSONB.jsonb(toJson(sanitizeNulDeep(metadata))));
         return ctx.update(ch.table())
-                  .set(ch.metadata(), JSONB.jsonb(toJson(sanitizeNulDeep(metadata))))
+                  .set(ch.metadata(), mergeMetadata(ch.metadata(), incoming, deleteKeys))
                   .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
                   .execute();
     }
@@ -3056,6 +3176,26 @@ public final class PgVectorRepository {
                                                        String collection, List<String> ids,
                                                        List<Map<String, Object>> metadatas,
                                                        List<Integer> idxToUpdate) {
+        return batchUpdateMetadata(ctx, ch, collection, ids, metadatas, idxToUpdate, null);
+    }
+
+    /**
+     * {@link #batchUpdateMetadata(DSLContext, DimTables.ChunkTable, String, List, List, List)}
+     * with a write mode (nexus-w94eo / nexus-y8xjh). {@code deleteKeys == null} REPLACES
+     * each row's metadata wholesale, the pre-nexus-w94eo semantics: that is the
+     * combined-write caller ({@code CombinedWriteService}), whose insert branch
+     * ({@code CatalogRepository.upsertManifestChunkVectors}) also still replaces, so its
+     * metadata-only branch must too or a clean re-index could not clear a sparse key
+     * through that endpoint. A non-null list (possibly empty) MERGES via {@link
+     * #mergeMetadata}, stripping the named keys from the stored value first: that is
+     * {@link #resolveNeedEmbedIdx}'s have-vector branch of {@code upsert-chunks}, which
+     * carries the request's {@code delete_keys}.
+     */
+    public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
+                                                       String collection, List<String> ids,
+                                                       List<Map<String, Object>> metadatas,
+                                                       List<Integer> idxToUpdate,
+                                                       List<String> deleteKeys) {
         List<Integer> zeroAffected = new ArrayList<>();
         // nexus-hxrcm: one global lock order — sort the indices by the chash they
         // update (see javadoc). Copy: idxToUpdate may be an unmodifiable view.
@@ -3067,8 +3207,15 @@ public final class PgVectorRepository {
             List<org.jooq.Query> queries = new ArrayList<>(page.size());
             for (int idx : page) {
                 // Same NUL defense as updateMetadataOneRow/upsertChunks (nexus-rvfwj).
+                // Write mode per the javadoc: null deleteKeys REPLACES (combined-write),
+                // a list MERGES (upsert-chunks have-vector branch).
+                org.jooq.Field<JSONB> incoming =
+                    DSL.val(JSONB.jsonb(toJson(sanitizeNulDeep(metadatas.get(idx)))));
+                org.jooq.Field<JSONB> value = deleteKeys == null
+                    ? incoming
+                    : mergeMetadata(ch.metadata(), incoming, deleteKeys);
                 queries.add(ctx.update(ch.table())
-                               .set(ch.metadata(), JSONB.jsonb(toJson(sanitizeNulDeep(metadatas.get(idx)))))
+                               .set(ch.metadata(), value)
                                .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(idx)))));
             }
             int[] affectedCounts = ctx.batch(queries).execute();
@@ -3258,7 +3405,8 @@ public final class PgVectorRepository {
     private List<Integer> resolveNeedEmbedIdx(String tenant, String collection, int dim,
                                                List<String> dedupIds,
                                                List<String> dedupDocs,
-                                               List<Map<String, Object>> dedupMetas) {
+                                               List<Map<String, Object>> dedupMetas,
+                                               List<String> deleteKeys) {
         existenceSelectCalls.incrementAndGet();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
@@ -3320,7 +3468,8 @@ public final class PgVectorRepository {
                 // behavior-preserving; see CatalogRepository-sibling PgVectorMetadata
                 // BatchParityTest for the exact-row-state parity this must hold instead.
                 needEmbedIdx.addAll(
-                    batchUpdateMetadata(ctx, ch, collection, dedupIds, dedupMetas, unchangedIdx));
+                    batchUpdateMetadata(ctx, ch, collection, dedupIds, dedupMetas, unchangedIdx,
+                            deleteKeys == null ? List.of() : deleteKeys));
                 return needEmbedIdx;
             });
         } catch (RuntimeException e) {

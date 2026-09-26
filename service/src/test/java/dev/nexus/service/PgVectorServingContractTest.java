@@ -592,6 +592,37 @@ class PgVectorServingContractTest {
             .isEqualTo(503);
     }
 
+    @Test
+    @Order(14)
+    void upsertChunks_deleteKeysField_stripsStaleKeyOverHttp() throws Exception {
+        // nexus-y8xjh: the wire field reaches the repository. Own chash, runs after
+        // every count/stats assertion above.
+        String chash = "60" + "0".repeat(62);
+        String text = "delete keys wire probe chunk";
+        postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
+            "collection", COL, "ids", List.of(chash), "documents", List.of(text),
+            "metadatas", List.of(Map.of("lang", "java", "quality_gate_overridden", true))));
+        postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
+            "collection", COL, "ids", List.of(chash), "documents", List.of(text),
+            "metadatas", List.of(Map.of("lang", "py")),
+            "delete_keys", List.of("quality_gate_overridden")));
+
+        try (Connection su = pg.createConnection("");
+             var ps = su.prepareStatement(
+                 "SELECT jsonb_exists(metadata, 'quality_gate_overridden'), metadata->>'lang' FROM "
+                 + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
+            ps.setString(1, COL);
+            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
+            try (var rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getBoolean(1))
+                    .as("delete_keys on /upsert-chunks strips the stale key")
+                    .isFalse();
+                assertThat(rs.getString(2)).isEqualTo("py");
+            }
+        }
+    }
+
     // nexus-lgdel.l1: Order(90) (search_legacyWindowRow_servedNotRejected)
     // DELETED — its subject was enrichSearchRows' auto-converge-window
     // degrade-per-row tolerance for legacy 16-byte-key rows (nexus-p78a0),
