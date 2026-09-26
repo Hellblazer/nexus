@@ -2132,6 +2132,17 @@ def _run_check_mineru() -> None:
 #                                          | Voyage work and minutes of
 #                                          | wall time on a large tenant
 #                                          | (nexus-f9duo).
+#   --check-assignments           | NO        | no billed calls (reads a
+#                                          | stored vector + live foreign
+#                                          | centroids, never re-embeds),
+#                                          | but still opt-in for the same
+#                                          | reason as --check-collection-
+#                                          | shape: a NEW audit surface a
+#                                          | substantive-critic recommended
+#                                          | as a guard against ANN/exact
+#                                          | drift (nexus-v4pj4), not a gate
+#                                          | on the engine-service-v0.1.132
+#                                          | LATERAL/HNSW rewrite it audits.
 #   --check-wal-retention         | NO        | explicitly "Always exit 0:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
@@ -2209,7 +2220,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-mcp-logs", "--check-tier-discipline",
     "--check-storage-boundary", "--check-post-store-hooks",
     "--check-mineru", "--check-wal-retention", "--check-collection-shape",
-    "--check-embeddings",
+    "--check-embeddings", "--check-assignments",
 )
 
 
@@ -2530,6 +2541,45 @@ def _run_supplementary_checks() -> None:
          "as YYYYMMDD, printed in the result so a run can be repeated.",
 )
 @click.option(
+    "--check-assignments",
+    "check_assignments",
+    is_flag=True,
+    default=False,
+    help="Sample chunks per collection that carry a cross-collection "
+         "('projection') topic assignment, recompute the exact nearest "
+         "foreign centroid, and compare with the stored pick (nexus-v4pj4: "
+         "the engine-service-v0.1.132 LATERAL/HNSW ANN rewrite measures "
+         "equal to exact, but a future recall drift would be silent). "
+         "Exits 1 when any sampled row disagrees beyond a float-noise "
+         "tolerance, any collection could not be probed, or nothing was "
+         "compared. A collection with no cross-collection projection "
+         "population is not applicable, never a failure alone.",
+)
+@click.option(
+    "--assignments-sample",
+    "assignments_sample",
+    type=click.IntRange(min=1, max=300),
+    default=20,
+    show_default=True,
+    help="Chunks sampled per collection by --check-assignments.",
+)
+@click.option(
+    "--assignments-collection",
+    "assignments_collections",
+    multiple=True,
+    help="Restrict --check-assignments to this collection (repeatable). "
+         "Default: every collection with a cross-collection projection "
+         "assignment.",
+)
+@click.option(
+    "--assignments-seed",
+    "assignments_seed",
+    type=int,
+    default=None,
+    help="Sampling seed for --check-assignments. Default: today's UTC "
+         "date as YYYYMMDD, printed in the result so a run can be repeated.",
+)
+@click.option(
     "--check-wal-retention",
     "check_wal_retention",
     is_flag=True,
@@ -2605,6 +2655,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                embeddings_sample: int,
                embeddings_collections: tuple[str, ...],
                embeddings_seed: int | None,
+               check_assignments: bool,
+               assignments_sample: int,
+               assignments_collections: tuple[str, ...],
+               assignments_seed: int | None,
                check_wal_retention: bool,
                check_engine_activity: bool,
                check_index_failures: bool,
@@ -2633,6 +2687,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-t1": check_t1,
             "--check-collection-shape": check_collection_shape,
             "--check-embeddings": check_embeddings,
+            "--check-assignments": check_assignments,
             "--check-wal-retention": check_wal_retention,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
@@ -2717,6 +2772,15 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             sample=embeddings_sample,
             collections=embeddings_collections,
             seed=embeddings_seed,
+        )
+        return
+
+    if check_assignments:
+        from nexus.doctor_assignments import run_check_assignments  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        run_check_assignments(
+            sample=assignments_sample,
+            collections=assignments_collections,
+            seed=assignments_seed,
         )
         return
 
