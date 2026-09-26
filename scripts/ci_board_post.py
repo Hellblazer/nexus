@@ -51,7 +51,8 @@ SUBSPACE: str = f"board/{TOPIC}"
 MAX_BODY_BYTES: int = 1024
 
 
-def verdict_from_results(results: dict[str, str]) -> tuple[str, list[str]]:
+def verdict_from_results(results: dict[str, str], *,
+                         run_cancelled: bool = False) -> tuple[str, list[str]]:
     """Fold ``needs.<job>.result`` values into one conclusion.
 
     ``failure`` wins over ``cancelled``, which wins over success; ``skipped``
@@ -59,10 +60,20 @@ def verdict_from_results(results: dict[str, str]) -> tuple[str, list[str]]:
     lane skips jobs on purpose). A result outside GitHub's closed set
     (success, failure, cancelled, skipped) counts as a failure, never as a
     silent success. Returns ``(conclusion, failed_job_names)``.
+
+    *run_cancelled* is the workflow's own ``cancelled()``, and it wins over
+    the job results: when a newer push cancels a run, GitHub reports a
+    matrix job whose legs were cancelled as ``failure`` and an aggregator
+    such as ``pytest-gate`` fails on the missing shards, so the results
+    alone read as a real red (run 36267952110, 2026-09-26). The run is
+    then ``cancelled``, and ``failed`` still names every job that did not
+    end green, so nothing is hidden; the newer run carries the verdict.
     """
     known = {"success", "skipped", "cancelled"}
     failed = sorted(j for j, r in results.items() if r not in known)
     cancelled = sorted(j for j, r in results.items() if r == "cancelled")
+    if run_cancelled:
+        return "cancelled", sorted(set(failed) | set(cancelled))
     if failed:
         return "failure", failed + cancelled
     if cancelled:
@@ -121,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--url", default="")
     ap.add_argument("--results", default="{}",
                     help="JSON object of job -> result (toJSON of needs, reduced)")
+    ap.add_argument("--run-cancelled", default="false", choices=["true", "false"],
+                    help="the workflow's cancelled() at verdict time")
     args = ap.parse_args(argv)
 
     if args.kind == "ci-pending":
@@ -139,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             print("--results is empty: a verdict needs at least one job result",
                   file=sys.stderr)
             return 2
-        conclusion, failed = verdict_from_results(results)
+        conclusion, failed = verdict_from_results(
+            results, run_cancelled=args.run_cancelled == "true")
 
     base_url = os.environ.get("NX_SERVICE_URL", "").strip()
     token = os.environ.get("NX_BOARD_TOKEN", "").strip()

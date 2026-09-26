@@ -1953,8 +1953,11 @@ jobs:
           NX_SERVICE_URL: ${{ vars.NX_SERVICE_URL || 'https://api.conexus-nexus.com' }}
           NX_BOARD_TOKEN: ${{ secrets.NX_BOARD_TOKEN }}
           RESULTS: ${{ toJSON(needs) }}
+          # cancelled() is the run's own state: a run a newer push cancelled
+          # reports its cancelled matrix legs as failure in needs (nexus-dotwy).
+          RUN_CANCELLED: ${{ cancelled() }}
         run: >-
           python3 scripts/ci_board_post.py --kind ci-verdict
           --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
           --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          --results "$RESULTS"
+          --results "$RESULTS" --run-cancelled "$RUN_CANCELLED"

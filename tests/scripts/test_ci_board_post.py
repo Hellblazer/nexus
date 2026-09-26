@@ -210,3 +210,32 @@ def test_a_lower_engine_cap_still_lands_a_minimal_verdict(monkeypatch, capsys) -
     assert "::warning" not in capsys.readouterr().out
     assert sent[1] == {"sha": _SHA, "run": "9", "attempt": "1",
                        "conclusion": "failure", "truncated": True}
+
+
+def test_a_superseded_run_is_cancelled_even_when_job_results_read_failure() -> None:
+    # Run 36267952110: a newer push cancelled every pytest leg; needs reported
+    # test/test-lint as failure and pytest-gate failed on the missing shards.
+    results = {"lint": "success", "test": "failure", "test-lint": "failure",
+               "pytest-gate": "failure", "changes": "success"}
+    assert cbp.verdict_from_results(results) == (
+        "failure", ["pytest-gate", "test", "test-lint"])
+    assert cbp.verdict_from_results(results, run_cancelled=True) == (
+        "cancelled", ["pytest-gate", "test", "test-lint"])
+
+
+def test_run_cancelled_flag_reaches_the_verdict(monkeypatch) -> None:
+    seen = {}
+    monkeypatch.setattr(cbp, "verdict_from_results",
+                        lambda r, run_cancelled=False: seen.update(rc=run_cancelled) or ("cancelled", []))
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    monkeypatch.delenv("NX_BOARD_TOKEN", raising=False)
+    cbp.main(["--kind", "ci-verdict", "--sha", "a" * 40, "--run", "1",
+              "--results", '{"test": "failure"}', "--run-cancelled", "true"])
+    assert seen == {"rc": True}
+
+
+def test_verdict_job_passes_the_runs_cancelled_state() -> None:
+    wf = (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml").read_text()
+    job = wf[wf.index("  board-verdict:"):]
+    assert "RUN_CANCELLED: ${{ cancelled() }}" in job
+    assert '--run-cancelled "$RUN_CANCELLED"' in job
