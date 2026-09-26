@@ -51,8 +51,12 @@ SUBSPACE: str = f"board/{TOPIC}"
 MAX_BODY_BYTES: int = 1024
 
 
-def verdict_from_results(results: dict[str, str], *,
-                         run_cancelled: bool = False) -> tuple[str, list[str]]:
+#: Fan-in jobs that fail when a job they aggregate is missing, so a failure
+#: of theirs beside a cancelled job says nothing new.
+AGGREGATORS: frozenset[str] = frozenset({"pytest-gate"})
+
+
+def verdict_from_results(results: dict[str, str]) -> tuple[str, list[str]]:
     """Fold ``needs.<job>.result`` values into one conclusion.
 
     ``failure`` wins over ``cancelled``, which wins over success; ``skipped``
@@ -61,21 +65,20 @@ def verdict_from_results(results: dict[str, str], *,
     (success, failure, cancelled, skipped) counts as a failure, never as a
     silent success. Returns ``(conclusion, failed_job_names)``.
 
-    *run_cancelled* is the workflow's own ``cancelled()``, and it wins over
-    the job results: when a newer push cancels a run, GitHub reports a
-    matrix job whose legs were cancelled as ``failure`` and an aggregator
-    such as ``pytest-gate`` fails on the missing shards, so the results
-    alone read as a real red (run 36267952110, 2026-09-26). The run is
-    then ``cancelled``, and ``failed`` still names every job that did not
-    end green, so nothing is hidden; the newer run carries the verdict.
-    A job that hits its ``timeout-minutes`` also leaves the run cancelled,
-    with no newer run behind it: a ``cancelled`` verdict with no newer
-    ``ci-pending`` needs a rerun, not a reading as green.
+    One exception: when some job was cancelled and the only failures are
+    ``AGGREGATORS``, the run is ``cancelled``. A newer push cancels the older
+    run's jobs, and ``pytest-gate`` then fails on the shards it never got
+    (run 36271319947, 2026-09-26). The workflow's ``cancelled()`` cannot say
+    this: the verdict job starts after the cancellation under ``always()``
+    and sees ``cancelled()`` false. A job that hits its ``timeout-minutes``
+    also reads as cancelled, with no newer run behind it, so a ``cancelled``
+    verdict with no newer ``ci-pending`` needs a rerun. ``failed`` always
+    names every job that did not end green.
     """
     known = {"success", "skipped", "cancelled"}
     failed = sorted(j for j, r in results.items() if r not in known)
     cancelled = sorted(j for j, r in results.items() if r == "cancelled")
-    if run_cancelled:
+    if cancelled and set(failed) <= AGGREGATORS:
         return "cancelled", sorted(set(failed) | set(cancelled))
     if failed:
         return "failure", failed + cancelled
@@ -135,8 +138,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--url", default="")
     ap.add_argument("--results", default="{}",
                     help="JSON object of job -> result (toJSON of needs, reduced)")
-    ap.add_argument("--run-cancelled", default="false", choices=["true", "false"],
-                    help="the workflow's cancelled() at verdict time")
     args = ap.parse_args(argv)
 
     if args.kind == "ci-pending":
@@ -155,8 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             print("--results is empty: a verdict needs at least one job result",
                   file=sys.stderr)
             return 2
-        conclusion, failed = verdict_from_results(
-            results, run_cancelled=args.run_cancelled == "true")
+        conclusion, failed = verdict_from_results(results)
 
     base_url = os.environ.get("NX_SERVICE_URL", "").strip()
     token = os.environ.get("NX_BOARD_TOKEN", "").strip()

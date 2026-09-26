@@ -1948,25 +1948,14 @@ jobs:
         with:
           sparse-checkout: scripts/ci_board_post.py
           sparse-checkout-cone-mode: false
-      # cancelled() is the run's own state: a run a newer push cancelled
-      # reports its cancelled matrix legs as failure in needs (nexus-dotwy).
-      # It is legal only in an if:, so this step records it as an output.
-      - name: Record whether the run was cancelled
-        id: run-state
-        if: cancelled()
-        shell: bash
-        run: echo "cancelled=true" >> "$GITHUB_OUTPUT"
       - name: Post ci-verdict to board/ci-develop
-        # always(): the default success() skips this step in a cancelled run.
-        if: always()
         shell: bash
         env:
           NX_SERVICE_URL: ${{ vars.NX_SERVICE_URL || 'https://api.conexus-nexus.com' }}
           NX_BOARD_TOKEN: ${{ secrets.NX_BOARD_TOKEN }}
           RESULTS: ${{ toJSON(needs) }}
-          RUN_CANCELLED: ${{ steps.run-state.outputs.cancelled || 'false' }}
         run: >-
           python3 scripts/ci_board_post.py --kind ci-verdict
           --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
           --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          --results "$RESULTS" --run-cancelled "$RUN_CANCELLED"
+          --results "$RESULTS"
