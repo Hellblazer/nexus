@@ -47,6 +47,7 @@ from nexus.db.gateway_backoff import (
     is_non_idempotent_sweep_path,
 )
 from nexus.logging_setup import emit_import_time_warning
+from nexus.rate_brake import is_deadline_abort
 from nexus.redact import redact_credentials
 
 _log = structlog.get_logger(__name__)
@@ -1313,6 +1314,12 @@ def _request(
                 )
             except urllib.error.HTTPError as exc:
                 if exc.code not in _GATEWAY_RETRY_CODES or delay is None or no_auto_retry:
+                    raise
+                # nexus-qajw7: an engine deadline ABORT discarded embedded work;
+                # a resend seconds later runs the request to its deadline again.
+                # Hand it straight to the caller's retry wrapper, which paces it
+                # through the shared brake on the ordinary attempt budget.
+                if exc.code == 503 and is_deadline_abort(exc.headers):
                     raise
                 floored = exc.code == 504 and embed_write_path
                 sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay

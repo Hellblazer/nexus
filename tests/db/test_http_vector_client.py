@@ -2325,6 +2325,53 @@ class TestGatewayTransientRetry:
         else:
             assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
 
+    def test_a_deadline_abort_503_is_not_resent_by_the_gateway_loop(self, monkeypatch):
+        """nexus-qajw7: an engine 503 marked aborted discarded embedded work;
+        resending it 2/5/10 s later runs the whole request to its deadline
+        again. It goes straight to the caller's retry wrapper (ordinary budget,
+        shared brake) instead. A refused or unmarked 503 keeps the gateway
+        loop."""
+        import io
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+
+        def aborted(*a, **k):
+            calls.append(1)
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/x", code=503, msg="err",
+                hdrs={"X-Nexus-Deadline-Outcome": "aborted", "Retry-After": "5"},
+                fp=io.BytesIO(b'{"error":"deadline"}'),
+            )
+
+        monkeypatch.setattr(hv, "_request_once", aborted)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/upsert-chunks",
+                        tenant="default", timeout=600, body={})
+        assert len(calls) == 1
+
+    def test_a_refused_deadline_503_keeps_the_gateway_loop(self, monkeypatch):
+        import io
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+
+        def refused(*a, **k):
+            calls.append(1)
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/x", code=503, msg="err",
+                hdrs={"X-Nexus-Deadline-Outcome": "refused", "Retry-After": "5"},
+                fp=io.BytesIO(b'{"error":"refused"}'),
+            )
+
+        monkeypatch.setattr(hv, "_request_once", refused)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/upsert-chunks",
+                        tenant="default", timeout=600, body={})
+        assert len(calls) == 1 + len(hv._GATEWAY_RETRY_SLEEPS)
+
     def test_exhausted_retries_raise_original(self, monkeypatch):
         import urllib.error
         import nexus.db.http_vector_client as hv
