@@ -74,7 +74,10 @@ def test_reset_identity_drop_collectors_also_zeroes_the_sweep_collector():
 
     reset_identity_drop_collectors()
 
-    assert get_superseded_sweep_stats() == {"swept": 0, "skipped": []}
+    stats = get_superseded_sweep_stats()
+    assert stats["swept"] == 0
+    assert stats["skipped"] == []
+    assert stats["deferred_discarded"] == 0  # nexus-4pj54
 
 
 def test_reset_identity_drop_collectors_also_zeroes_the_partial_doc_skip_collector():

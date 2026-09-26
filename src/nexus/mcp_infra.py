@@ -2000,31 +2000,48 @@ def _record_complete_refusal(doc_id: str) -> None:
 _superseded_sweep_stats_lock = threading.Lock()
 _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
 _SUPERSEDED_SWEEP_SKIPS: list[dict] = []
+# nexus-4pj54: deferred-sweep entries a failed or fenced run threw away
+# (``discard_deferred_superseded_vectors``). Their superseded rows stay in
+# T3 until ``nx t3 gc``.
+_SUPERSEDED_SWEEP_DEFERRED_DISCARDED = 0
 
 
 def get_superseded_sweep_stats() -> dict:
     """Superseded-vector sweep outcomes this process/run.
 
     ``{"swept": int, "skipped": [{"doc_id": str, "collection": str,
-    "reason": str}, ...]}``. ``swept`` is the total count of T3 rows
+    "reason": str}, ...], "deferred_discarded": int,
+    "deferred_pending": int}``. ``swept`` is the total count of T3 rows
     actually deleted; ``skipped`` names every run where the sweep could
     not complete (and therefore may have left superseded rows searchable)
-    — never silent. Snapshot copy.
+    — never silent. ``deferred_discarded`` counts documents whose deferred
+    sweep (nexus-4pj54) was dropped because their run failed or was
+    fenced; ``deferred_pending`` is the number of documents still holding
+    deferred candidates right now (a run in flight, or one that died
+    without reaching either fence call). Both name documents whose
+    superseded rows may remain in T3. Snapshot copy.
     """
+    with _pending_sweep_lock:
+        pending = len(_PENDING_SWEEP_CANDIDATES)
     with _superseded_sweep_stats_lock:
         return {
             "swept": _SUPERSEDED_SWEEP_SWEPT_TOTAL,
             "skipped": [dict(d) for d in _SUPERSEDED_SWEEP_SKIPS],
+            "deferred_discarded": _SUPERSEDED_SWEEP_DEFERRED_DISCARDED,
+            "deferred_pending": pending,
         }
 
 
 def reset_superseded_sweep_stats() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``)."""
-    global _SUPERSEDED_SWEEP_SWEPT_TOTAL
+    run, mirroring ``reset_manifest_write_failures``). Does not touch the
+    pending deferred-sweep entries themselves: those are live state, not
+    counters."""
+    global _SUPERSEDED_SWEEP_SWEPT_TOTAL, _SUPERSEDED_SWEEP_DEFERRED_DISCARDED
     with _superseded_sweep_stats_lock:
         _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
         _SUPERSEDED_SWEEP_SKIPS.clear()
+        _SUPERSEDED_SWEEP_DEFERRED_DISCARDED = 0
 
 
 def _record_superseded_swept(count: int) -> None:
@@ -2120,6 +2137,17 @@ def manifest_write_batch_hook(
     streaming chunks fall back to local positions which are still
     monotone within a batch — Phase 4 retargeting will pass per-call
     chunk_positions explicitly.
+
+    *manifest_complete* (``{doc_id: content_hash}``) is the producer's claim
+    that this batch carries the WHOLE document for that doc_id, not a
+    prefix of it. Besides feeding the completion stamp, the claim decides
+    what happens to the T3 rows a manifest REPLACE drops (nexus-4pj54):
+    with the claim they are swept immediately; without it the sweep is
+    deferred to the document's completion fence
+    (``doc_indexer._fence_complete``) and runs against the final manifest.
+    Never set it for a partial batch, such as the first batch of a
+    streaming or incremental upload: that batch carries position 0, and the
+    claim would sweep rows a later batch in the same run re-appends.
     """
     if not metadatas:
         return
@@ -2294,11 +2322,21 @@ def _apply_combined_write_response(
 # Candidates are held here, keyed on doc_id, instead of swept on the spot;
 # ``sweep_deferred_superseded_vectors`` (called from
 # ``doc_indexer._fence_complete`` on a SUCCESSFUL completion stamp only)
-# pops the entry and sweeps it against the FINAL manifest. Process-lifetime
+# pops the entry and sweeps it against the FINAL manifest. A run that fails,
+# whose stamp is refused, or that is fenced (``doc_indexer._fence_fail``,
+# ``_fence_complete``'s IndexRunVerifyRefused branch, pipeline_stages.py's
+# PipelineRunFenced abort) DISCARDS its entry via
+# ``discard_deferred_superseded_vectors`` -- never sweeps it. Process-lifetime
 # only, by design: an interrupted run loses its pending entry rather than
-# risking deletion of a row a later batch was about to re-append -- no
-# sweep beats a wrong sweep, and RDR-192's reaper is the backstop for
-# genuinely orphaned rows left unswept this way.
+# risking deletion of a row a later batch was about to re-append -- no sweep
+# beats a wrong sweep. Superseded rows left unswept this way stay in T3
+# until an operator runs ``nx t3 gc`` (manual, the only backstop that exists
+# today); the automatic reaper is planned in RDR-192 Phase 3 (nexus-2x9xa,
+# OPEN) and is not built.
+#
+# Concurrent runs on one doc_id share this entry (keyed on doc_id alone):
+# the same cross-fire shape as nexus-11gh6 / nexus-wxjr6, covered by
+# index-run epoch fencing rather than by anything here.
 _pending_sweep_lock = threading.Lock()
 _PENDING_SWEEP_CANDIDATES: dict[str, tuple[str, set[str]]] = {}
 
@@ -2322,8 +2360,10 @@ def sweep_deferred_superseded_vectors(doc_id: str) -> None:
 
     Called from ``doc_indexer._fence_complete`` immediately after a
     SUCCESSFUL completion stamp — never on ``IndexRunVerifyRefused`` or a
-    transport failure, since the manifest is not confirmed complete there
-    and a future successful stamp will retry this. No-op when nothing is
+    transport failure, since the manifest is not confirmed complete there.
+    A refusal discards the entry (:func:`discard_deferred_superseded_vectors`);
+    a transport failure leaves it held and counted in ``deferred_pending``.
+    No-op when nothing is
     pending for *doc_id*: the common case (a file-atomic single-batch
     write) sweeps immediately in ``_manifest_write_loop`` and never
     stashes anything here, so this call costs one dict lookup.
@@ -2372,6 +2412,38 @@ def sweep_deferred_superseded_vectors(doc_id: str) -> None:
         _close = getattr(reader, "close", None)
         if callable(_close):
             _close()
+
+
+def discard_deferred_superseded_vectors(doc_id: str) -> int:
+    """Drop, never sweep, the candidates held for *doc_id* (nexus-4pj54).
+
+    Called when *doc_id*'s index run failed (``doc_indexer._fence_fail``),
+    its completion stamp was refused (``doc_indexer._fence_complete``'s
+    ``IndexRunVerifyRefused`` branch, which propagates past every
+    ``_fence_fail`` call site), or it was fenced by a newer run
+    (pipeline_stages.py's PipelineRunFenced abort, which skips
+    ``_fence_fail``). The manifest is not confirmed complete on any of these
+    paths, so a sweep could delete a row the document
+    still needs; holding the entry instead would leak it for the life of
+    the process. The superseded rows stay in T3 until ``nx t3 gc``; the
+    discard is counted in :func:`get_superseded_sweep_stats` so the run
+    summary names it. Returns the number of candidate chashes dropped
+    (0 when nothing was pending). Never raises.
+    """
+    global _SUPERSEDED_SWEEP_DEFERRED_DISCARDED
+    with _pending_sweep_lock:
+        entry = _PENDING_SWEEP_CANDIDATES.pop(doc_id, None)
+    if entry is None:
+        return 0
+    collection, candidates = entry
+    with _superseded_sweep_stats_lock:
+        _SUPERSEDED_SWEEP_DEFERRED_DISCARDED += 1
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+    structlog.get_logger().info(
+        "superseded_sweep_deferred_discarded", doc_id=doc_id,
+        collection=collection, candidates=len(candidates),
+    )
+    return len(candidates)
 
 
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],

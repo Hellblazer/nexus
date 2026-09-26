@@ -164,6 +164,27 @@ class TestSecondDocumentSharingTheBytes:
         assert engine.rows_for(_HASH) == []
 
 
+def _hold_a_deferred_sweep(doc_id: str) -> None:
+    """nexus-4pj54: seed the state an earlier batch of this run leaves when
+    its REPLACE had no completeness claim, so the fenced abort has a
+    deferred sweep to dispose of."""
+    from nexus.mcp_infra import _stash_pending_sweep, reset_superseded_sweep_stats
+
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep(doc_id, "docs__test", {"superseded-" + doc_id})
+
+
+def _assert_deferred_sweep_discarded(doc_id: str) -> None:
+    """The fenced path skips _fence_fail, so it must discard the held
+    sweep itself: dropped, counted, and never swept."""
+    from nexus.mcp_infra import _PENDING_SWEEP_CANDIDATES, get_superseded_sweep_stats
+
+    assert doc_id not in _PENDING_SWEEP_CANDIDATES, "a fenced run leaked its deferred sweep"
+    stats = get_superseded_sweep_stats()
+    assert stats["deferred_discarded"] == 1
+    assert stats["swept"] == 0, "a fenced run must never sweep"
+
+
 class TestRunEpochFence:
     """nexus-8vu8p: a run the engine fenced stops without touching the row,
     its WAL, or the catalog document, all of which belong to the new owner.
@@ -191,6 +212,7 @@ class TestRunEpochFence:
         the catalog document."""
         fence_fail = MagicMock()
         monkeypatch.setattr("nexus.doc_indexer._fence_fail", fence_fail)
+        _hold_a_deferred_sweep("1.9.8")
         stale = _client_for(engine)
         owner_box: dict = {}
 
@@ -217,6 +239,7 @@ class TestRunEpochFence:
         assert [r["page_text"] for r in owner.read_pages(_HASH)] == ["owner's page"], "the owner's WAL survives"
         fence_fail.assert_not_called()
         t3.upsert_chunks_with_embeddings.assert_not_called()
+        _assert_deferred_sweep_discarded("1.9.8")
 
     def test_fence_discovered_at_cleanup_skips_the_catalog_stamp(self, engine, monkeypatch) -> None:
         """The stale run's ORIGINAL failure is unrelated; the takeover happens
@@ -224,6 +247,7 @@ class TestRunEpochFence:
         inside mark_failed's /fail call. _fence_fail must still be skipped."""
         fence_fail = MagicMock()
         monkeypatch.setattr("nexus.doc_indexer._fence_fail", fence_fail)
+        _hold_a_deferred_sweep("1.9.9")
         stale = _client_for(engine)
         owner_box: dict = {}
 
@@ -248,6 +272,7 @@ class TestRunEpochFence:
         assert row["run_epoch"] == 1
         assert [r["page_text"] for r in owner.read_pages(_HASH)] == ["owner's page"], "the stale clear_wal was fenced"
         fence_fail.assert_not_called()
+        _assert_deferred_sweep_discarded("1.9.9")
 
     def test_completed_leftover_reset_fences_the_first_runs_delayed_write(self, engine) -> None:
         first = _client_for(engine)

@@ -1286,6 +1286,13 @@ def pipeline_index_pdf(
         if doc_id and not dry_run and not fenced:
             from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
             _fence_fail(doc_id, str(first_exc))
+        elif doc_id and fenced:
+            # nexus-4pj54: the fenced path skips _fence_fail, which is where
+            # a failed run's deferred superseded-vector sweep is discarded.
+            # Discard it here instead: this run no longer owns the manifest,
+            # so its held candidates must never be swept.
+            from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
+            discard_deferred_superseded_vectors(doc_id)
         raise first_exc
 
     # ── Post-passes (after all three stages complete) ────────────────────────

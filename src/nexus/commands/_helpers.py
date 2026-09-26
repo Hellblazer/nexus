@@ -407,11 +407,25 @@ def _emit_superseded_swept_info() -> bool:
 
     from nexus.mcp_infra import get_superseded_sweep_stats  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
 
-    swept = get_superseded_sweep_stats().get("swept", 0)
+    stats = get_superseded_sweep_stats()
+    swept = stats.get("swept", 0)
     if swept:
         click.echo(
             f"  swept {swept} superseded T3 chunk(s) left behind by a "
             f"changed re-index (nexus-39upx)"
+        )
+    # nexus-4pj54: a multi-batch document's sweep is deferred to its
+    # completion stamp. A failed or fenced run drops it (discarded); a run
+    # that never reached either fence call leaves it held (pending). Either
+    # way superseded rows may remain in T3. The run's own failure already
+    # drives the exit code, so this stays informational.
+    discarded = stats.get("deferred_discarded", 0)
+    pending = stats.get("deferred_pending", 0)
+    if discarded or pending:
+        click.echo(
+            f"  superseded-chunk sweep not run for {discarded} failed/fenced "
+            f"and {pending} unfinished document(s); old T3 rows may remain "
+            f"until 'nx t3 gc -c COLLECTION' (nexus-4pj54)"
         )
     return False
 

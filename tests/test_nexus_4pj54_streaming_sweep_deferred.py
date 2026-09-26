@@ -44,11 +44,27 @@ import pytest
 
 from nexus.errors import IndexRunVerifyRefused
 from nexus.mcp_infra import (
+    _PENDING_SWEEP_CANDIDATES,
     _manifest_write_loop,
+    _pending_sweep_lock,
+    _stash_pending_sweep,
+    discard_deferred_superseded_vectors,
     get_superseded_sweep_stats,
     reset_superseded_sweep_stats,
     sweep_deferred_superseded_vectors,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_pending_sweeps_leak_between_tests():
+    """Pending entries are process-lifetime state that
+    reset_superseded_sweep_stats deliberately leaves alone; clear them so
+    one test's held candidates never merge into the next test's doc-A."""
+    with _pending_sweep_lock:
+        _PENDING_SWEEP_CANDIDATES.clear()
+    yield
+    with _pending_sweep_lock:
+        _PENDING_SWEEP_CANDIDATES.clear()
 
 
 def _metas(*chashes: str, start: int = 0):
@@ -475,3 +491,120 @@ def test_fence_complete_sweeps_even_on_the_pre_fence_engine_none_sentinel() -> N
             patch("nexus.mcp_infra.sweep_deferred_superseded_vectors") as swept:
         _fence_complete("1.2.3", "c" * 64, 2)
     swept.assert_called_once_with("1.2.3")
+
+
+# ── Failed / fenced runs discard, never sweep (review round 1) ───────────────
+
+
+def test_discard_drops_the_held_candidates_without_sweeping_and_counts_it() -> None:
+    reset_superseded_sweep_stats()
+    fake = _StreamingFakeCatalog(initial={"doc-A": ["old0", "old1", "old2"]})
+    t3, col = _t3_spy()
+    with patch("nexus.db.make_t3", return_value=t3), \
+            patch("nexus.mcp_infra.get_catalog", return_value=fake):
+        _manifest_write_loop(
+            fake, {"doc-A": _metas("new0")}, "coll",
+            reader=fake, manifest_complete=None,
+        )
+        assert get_superseded_sweep_stats()["deferred_pending"] == 1
+
+        assert discard_deferred_superseded_vectors("doc-A") == 3
+
+        # A later completion call for the same doc finds nothing to sweep.
+        sweep_deferred_superseded_vectors("doc-A")
+    col.delete.assert_not_called()
+    stats = get_superseded_sweep_stats()
+    assert stats["deferred_discarded"] == 1
+    assert stats["deferred_pending"] == 0
+    assert stats["swept"] == 0
+    reset_superseded_sweep_stats()
+    assert get_superseded_sweep_stats()["deferred_discarded"] == 0
+
+
+def test_discard_with_nothing_pending_is_a_counted_noop() -> None:
+    reset_superseded_sweep_stats()
+    assert discard_deferred_superseded_vectors("doc-never-stashed") == 0
+    assert get_superseded_sweep_stats()["deferred_discarded"] == 0
+
+
+def test_fence_fail_discards_the_held_sweep() -> None:
+    """The real _fence_fail (only its catalog writer stubbed) must drop the
+    doc's deferred sweep: a failed run's manifest is not complete."""
+    from nexus.doc_indexer import _fence_fail
+
+    class _FailWriter:
+        def __init__(self) -> None:
+            self.failed: list[tuple[str, str]] = []
+
+        def fail_index_run(self, doc_id, error):
+            self.failed.append((doc_id, error))
+
+        def close(self):
+            pass
+
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep("1.2.3", "coll", {"old0", "old1"})
+    writer = _FailWriter()
+    with patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+            patch("nexus.db.make_t3") as make_t3:
+        _fence_fail("1.2.3", "boom")
+    assert writer.failed == [("1.2.3", "boom")]
+    assert "1.2.3" not in _PENDING_SWEEP_CANDIDATES
+    make_t3.assert_not_called()
+    assert get_superseded_sweep_stats()["deferred_discarded"] == 1
+    reset_superseded_sweep_stats()
+
+
+def test_fence_fail_still_discards_when_the_fail_write_raises() -> None:
+    from nexus.doc_indexer import _fence_fail
+
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep("1.2.3", "coll", {"old0"})
+    with patch("nexus.catalog.factory.make_catalog_writer",
+               side_effect=RuntimeError("engine down")):
+        _fence_fail("1.2.3", "boom")  # advisory: never raises
+    assert "1.2.3" not in _PENDING_SWEEP_CANDIDATES
+    assert get_superseded_sweep_stats()["deferred_discarded"] == 1
+    reset_superseded_sweep_stats()
+
+
+def test_refused_stamp_discards_the_held_sweep_and_reraises_unchanged() -> None:
+    """A refused completion stamp propagates past every _fence_fail call
+    site, so _fence_complete itself must drop the doc's deferred sweep:
+    never swept, not left pending, and the refusal re-raised as the same
+    object."""
+    from nexus.doc_indexer import _fence_complete
+
+    refusal = IndexRunVerifyRefused(
+        doc_id="1.2.3", referenced=2, present=1, missing=1, chunk_count=2,
+        server_detail="verify failed",
+    )
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep("1.2.3", "coll", {"old0", "old1"})
+    writer = _StubFenceWriter(raises=refusal)
+    with patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+            patch("nexus.db.make_t3") as make_t3, \
+            pytest.raises(IndexRunVerifyRefused) as excinfo:
+        _fence_complete("1.2.3", "c" * 64, 2)
+    assert excinfo.value is refusal, "the refusal must propagate unchanged"
+    assert "1.2.3" not in _PENDING_SWEEP_CANDIDATES, "a refused stamp leaked its deferred sweep"
+    make_t3.assert_not_called()
+    stats = get_superseded_sweep_stats()
+    assert stats["deferred_discarded"] == 1
+    assert stats["deferred_pending"] == 0
+    assert stats["swept"] == 0
+    reset_superseded_sweep_stats()
+
+
+def test_run_summary_names_discarded_and_pending_sweeps(capsys) -> None:
+    from nexus.commands._helpers import _emit_superseded_swept_info
+
+    reset_superseded_sweep_stats()
+    _stash_pending_sweep("doc-held", "coll", {"x"})
+    _stash_pending_sweep("doc-failed", "coll", {"y"})
+    discard_deferred_superseded_vectors("doc-failed")
+    assert _emit_superseded_swept_info() is False
+    out = capsys.readouterr().out
+    assert "not run for 1 failed/fenced and 1 unfinished document(s)" in out
+    assert "t3 gc -c COLLECTION" in out
+    reset_superseded_sweep_stats()

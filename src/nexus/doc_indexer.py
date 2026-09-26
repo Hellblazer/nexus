@@ -540,9 +540,15 @@ def _fence_begin_many(pairs: list[tuple[str, str]], collection: str) -> None:
 def _fence_fail(doc_id: str, error: str) -> None:
     """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
     own exception (the reason this is being called) must always propagate
-    unmasked."""
-    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    unmasked.
 
+    Also discards any superseded-vector sweep ``_manifest_write_loop``
+    deferred for *doc_id* (nexus-4pj54): a failed run's manifest is not
+    complete, so its held candidates are dropped, never swept."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+    discard_deferred_superseded_vectors(doc_id)
     w = None
     try:
         w = make_catalog_writer()
@@ -590,8 +596,15 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
         w = make_catalog_writer()
         result = w.complete_index_run(doc_id, content_hash, chunk_count)
     except IndexRunVerifyRefused:
-        from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+            _record_complete_refusal,
+            discard_deferred_superseded_vectors,
+        )
         _record_complete_refusal(doc_id)
+        # nexus-4pj54: a refused stamp means the manifest is NOT verified
+        # complete, and the refusal propagates past every _fence_fail call
+        # site, so drop this doc's deferred sweep here -- never sweep it.
+        discard_deferred_superseded_vectors(doc_id)
         raise
     except Exception:  # noqa: BLE001 — boundary catch: transport failure leaves the fence 'indexing' (over-work, never data loss); only the typed refusal propagates
         _log.warning("index_run_complete_write_failed", doc_id=doc_id)
