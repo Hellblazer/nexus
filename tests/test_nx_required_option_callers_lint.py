@@ -78,6 +78,9 @@ WHAT THIS SCANNER STILL CANNOT SEE, disclosed rather than silently mishandled:
     ``run`` and the real command consumes at most one following value token
     (``--project X``); an unusual multi-value flag shape between them could
     defeat it. No real caller in this corpus puts a flag there at all.
+  * A required option passed in Click's glued short form (``-cvalue``) is not
+    recognized as present. This fails LOUD, as a false violation, unlike the
+    gaps above; no real caller uses the glued form.
 """
 from __future__ import annotations
 
@@ -677,6 +680,40 @@ def test_uv_run_is_recognized_as_a_command_position_lead_in() -> None:
 
 
 @pytest.mark.lint
+def test_prefix_words_before_nx_keep_it_in_command_position() -> None:
+    """Substantive review (nexus-egei6): ``"${NXTOK[@]}" nx tuple ack ...``
+    (20 live sites in rehearse_candidate_migration.sh) and a bare
+    ``NAME=value nx ...`` were invisible, compliant or not. Each shape must
+    be SEEN, and a missing required flag behind it must be a violation."""
+    required = _leaf_required_options()
+    assert any("--claimant" in o.aliases for o in required["nx tuple ack"]), required.get("nx tuple ack")
+    shapes = [
+        'if OUT=$("${NXTOK[@]}" nx tuple ack CLAIM {flag}); then :; fi\n',
+        '${NXTOK[@]} nx tuple ack CLAIM {flag}\n',
+        'NX_SERVICE_TOKEN="$tok" nx tuple ack CLAIM {flag}\n',
+        'env NX_SERVICE_TOKEN=x nx tuple ack CLAIM {flag}\n',
+    ]
+    for shape in shapes:
+        ok = _shell_file_hits(shape.replace("{flag}", "--claimant me"), required, file_label="s.sh")
+        bad = _shell_file_hits(shape.replace("{flag}", ""), required, file_label="s.sh")
+        assert [h.status for h in ok if h.invocation == "nx tuple ack"] == ["ok"], (shape, ok)
+        assert [h.status for h in bad if h.invocation == "nx tuple ack"] == ["violation"], (shape, bad)
+
+    # Naming is not invoking: a prefix word only counts in command position.
+    mention = 'echo "run FOO=1 nx tuple ack by hand"\n'
+    assert not _shell_file_hits(mention, required, file_label="s.sh"), mention
+
+
+@pytest.mark.lint
+def test_the_array_prefix_call_sites_in_the_real_corpus_are_scanned() -> None:
+    """Real-corpus pin for the same finding: the NXTOK-prefixed ``nx tuple``
+    calls must reach the evaluator, not merely the synthetic shapes above."""
+    rel = "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh"
+    seen = {h.invocation for h in _all_hits() if h.file.startswith(rel)}
+    assert {"nx tuple ack", "nx tuple in"} <= seen, sorted(seen)
+
+
+@pytest.mark.lint
 def test_the_continuation_joiner_merges_a_backslash_continued_line() -> None:
     text = "nx store put ./f.md \\\n  --collection foo\n"
     joined = _join_continuations(text)
@@ -732,7 +769,20 @@ def test_discover_nx_wrapper_names_recognizes_every_real_shape() -> None:
         '}\n'
     )
     assert discover_nx_wrapper_names(chained_wrapper) == {"_nx", "_nx_poisoned"}, (
-        "data-token-cli-gate.sh shape: a wrapper calling a previously-discovered wrapper"
+        "synthetic: a wrapper calling a previously-discovered wrapper (fixed point); "
+        "the real data-token-cli-gate.sh _nx_poisoned re-implements the body instead"
+    )
+
+    keyword_form = 'function _kw_nx {\n    "$BIN_DIR/nx" "$@"\n}\n'
+    assert discover_nx_wrapper_names(keyword_form) == {"_kw_nx"}, "bash `function name {` form"
+
+    prose_path_plus_forward = (
+        '_log_and_run() {\n'
+        '    echo "binary is $DIR/nx" && "$1" "$@"\n'
+        '}\n'
+    )
+    assert discover_nx_wrapper_names(prose_path_plus_forward) == set(), (
+        "a quoted string ending in /nx is prose, not an invocation"
     )
 
     not_a_wrapper_no_forward = (

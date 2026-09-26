@@ -44,9 +44,25 @@ import shlex
 #: [value]`` pairs, e.g. ``uv run --project x nx ...``), is the fix: `uv` is
 #: the word bash actually executes, and `run`'s own argument list is where
 #: `nx` arrives, so no punctuation or keyword ever precedes it directly.
+#:
+#: After any of those, zero or more PREFIX WORDS may sit between the lead-in
+#: and `nx` without moving it out of command position: ``env``, an inline
+#: assignment (``NX_LOCAL=1``, ``TOKEN="$t"``), or an expanded shell array
+#: (``"${NXTOK[@]}"``). Substantive review (nexus-egei6) found the array form
+#: live 20 times in ``rehearse_candidate_migration.sh``
+#: (``NXTOK=(env "NX_SERVICE_TOKEN=$tok")`` then ``"${NXTOK[@]}" nx tuple
+#: ack ...``), invisible to both lints for exactly the ``--claimant`` /
+#: ``--lease-s`` commands they guard; a bare ``NAME=value nx ...`` was
+#: invisible the same way.
+_PREFIX_WORD = (
+    r"(?:env"
+    r"|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|[^\s;&|()]*)"
+    r"|\"?\$\{[A-Za-z_]\w*\[[@*]\]\}\"?)"
+)
 NX_LEAD_IN = (
     r"(?:^|[;&|(]|&&|\|\||\$\(|\b(?:if|then|else|do|sudo|exec|time)\s+"
     r"|\buv\s+run\b(?:\s+--[\w=-]+(?:\s+\S+)?)*\s+)"
+    r"(?:\s*" + _PREFIX_WORD + r"\s+)*"
 )
 
 
@@ -89,8 +105,10 @@ def join_continuations(text: str) -> list[tuple[int, str]]:
     return out
 
 
-_FUNC_ONELINE_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*\(\)\s*\{(.*)\}\s*;?\s*$")
-_FUNC_OPEN_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*\(\)\s*\{\s*$")
+# Both bash spellings: ``name() {`` and ``function name [()] {``.
+_FUNC_HEAD = r"^\s*(?:function\s+([A-Za-z_]\w*)\s*(?:\(\))?|([A-Za-z_]\w*)\s*\(\))\s*\{"
+_FUNC_ONELINE_RE = re.compile(_FUNC_HEAD + r"(.*)\}\s*;?\s*$")
+_FUNC_OPEN_RE = re.compile(_FUNC_HEAD + r"\s*$")
 _FUNC_CLOSE_RE = re.compile(r"^\s*\}\s*$")
 
 
@@ -116,12 +134,12 @@ def _function_bodies(text: str) -> dict[str, str]:
         line = strip_shell_comment(joined[i][1])
         m1 = _FUNC_ONELINE_RE.match(line)
         if m1:
-            bodies[m1.group(1)] = m1.group(2)
+            bodies[m1.group(1) or m1.group(2)] = m1.group(3)
             i += 1
             continue
         m2 = _FUNC_OPEN_RE.match(line)
         if m2:
-            name = m2.group(1)
+            name = m2.group(1) or m2.group(2)
             j = i + 1
             parts: list[str] = []
             while j < n and not _FUNC_CLOSE_RE.match(strip_shell_comment(joined[j][1])):
@@ -145,6 +163,11 @@ def _invokes_known_name(tokens: list[str], known: set[str]) -> bool:
     <name>``.
     """
     for t in tokens:
+        if any(c.isspace() for c in t):
+            # shlex keeps a whole quoted string as one token, so
+            # ``echo "binary is $DIR/nx"`` yields a token ending in ``/nx``.
+            # A command word or path has no whitespace; prose does.
+            continue
         for name in known:
             if t == name or t.endswith("/" + name):
                 return True
