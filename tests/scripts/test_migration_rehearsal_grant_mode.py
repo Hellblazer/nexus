@@ -228,7 +228,7 @@ def test_rehearse_fullstack_prestart_block_shellchecks_clean(
     # one line) is nested inside an OUTER `if [ "$GRANT_MODE" != 1 ]; then`
     # block -- the extraction needs BOTH closing `fi`s, one on the assertion
     # line and one on the line right after it, or the probe is unbalanced.
-    end_marker = 'registry lease not found after pre-start"; fi\nfi'
+    end_marker = 'extraction below is the proof)"; fi\nfi'
     end = rehearse_fullstack_text.index(end_marker) + len(end_marker)
     block = rehearse_fullstack_text[start:end]
     probe_src = (
