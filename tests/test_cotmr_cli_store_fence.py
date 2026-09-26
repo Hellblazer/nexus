@@ -116,9 +116,17 @@ class TestCliStorePutFence:
         assert result.exit_code == 0, result.output
         assert _index_state_for(title) == "complete"
 
-    def test_manifest_failure_stamps_failed(
+    def test_manifest_failure_rolls_back_the_freshly_minted_row(
         self, catalog_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """RDR-192 Step 3a fix-round 1 (nexus-wbfpw.28, Important, both
+        reviewers): superseding this test's old 'stamped failed, row
+        survives' contract. A manifest failure on a document THIS CALL
+        minted now rolls the catalog row back entirely (mirroring the
+        sibling t3.put-failure branch's rollback_minted_catalog_entry
+        exactly) rather than leaving a chunk_count=0 ghost stamped
+        'failed' — the fence stamp fires first (still exercised, just no
+        longer observable afterward since the row it was on is gone)."""
         import nexus.commands.store as store_mod
 
         title = "cotmr-cli-put-failed"
@@ -128,7 +136,11 @@ class TestCliStorePutFence:
         )
         result = _invoke_store_put(tmp_path, _local_t3(), title, "cli fence failure body")
         assert result.exit_code != 0
-        assert _index_state_for(title) == "failed"
+        assert documents_by_title(title) == [], (
+            "a manifest failure on a freshly-minted document must roll "
+            "back the catalog row, not leave a chunk_count=0 ghost "
+            "stamped 'failed'"
+        )
 
 
 # ── CLI `nx memory promote` fences ───────────────────────────────────────────
@@ -141,9 +153,13 @@ class TestMemoryPromoteFence:
         assert result.exit_code == 0, result.output
         assert _index_state_for(title) == "complete"
 
-    def test_manifest_failure_stamps_failed(
+    def test_manifest_failure_rolls_back_the_freshly_minted_row(
         self, catalog_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """RDR-192 Step 3a fix-round 1 (nexus-wbfpw.28, Important, both
+        reviewers): superseding this test's old 'stamped failed, row
+        survives' contract — see the CLI sibling test above for the
+        full rationale."""
         title = "cotmr-promote-failed"
         monkeypatch.setattr(
             "nexus.catalog.store_hook.store_put_manifest_direct",
@@ -151,7 +167,11 @@ class TestMemoryPromoteFence:
         )
         result = _invoke_promote(tmp_path, _local_t3(), title, "promote fence failure body")
         assert result.exit_code != 0
-        assert _index_state_for(title) == "failed"
+        assert documents_by_title(title) == [], (
+            "a manifest failure on a freshly-minted document must roll "
+            "back the catalog row, not leave a chunk_count=0 ghost "
+            "stamped 'failed'"
+        )
 
 
 # ── The acquire-gate journey, end to end ─────────────────────────────────────

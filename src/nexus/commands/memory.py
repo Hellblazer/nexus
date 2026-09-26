@@ -574,7 +574,9 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # Without this, the promoted entry lands in T3 with no catalog
         # identity — same regression class as nexus-zq79 / nexus-lf8f.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
+            ManifestVerifyUncertainError,
             catalog_store_hook_tracked,
+            describe_rollback_outcome,
             rollback_minted_catalog_entry,
             rollback_uncataloged_chunk_write,
             single_chunk_manifest_metadata,
@@ -638,10 +640,24 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # here) so the remaining post-store consumers still fire; the
         # command then fails loudly instead of echoing a bare "Promoted:".
         manifest_error = ""
+        manifest_uncertain = ""
         if catalog_doc_id:
             try:
                 store_put_manifest_direct(
                     catalog_doc_id, manifest_metadatas, collection=collection)
+            except ManifestVerifyUncertainError as manifest_exc:
+                manifest_uncertain = str(manifest_exc)
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, manifest_uncertain)
+                import structlog  # noqa: PLC0415 — branch-local logging
+                structlog.get_logger(__name__).warning(
+                    "store_put_manifest_verify_uncertain",
+                    doc_id=doc_id,
+                    catalog_doc_id=catalog_doc_id,
+                    collection=collection,
+                    error=manifest_uncertain[:300],
+                    exc_info=True,
+                )
             except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit ClickException below
                 manifest_error = str(manifest_exc)
                 # nexus-cotmr: the vector put already succeeded (t3.put
@@ -661,24 +677,43 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                     exc_info=True,
                 )
 
+        # RDR-192 Step 3a fix-round 1 (critic Critical 1): verify infra
+        # failed — outcome unknown, must not roll back (the write may
+        # have landed). Deliberately BEFORE the --remove branch too.
+        if manifest_uncertain:
+            raise click.ClickException(
+                f"could not confirm the catalog manifest landed for "
+                f"{doc_id} in {collection}: {manifest_uncertain}. Nothing "
+                f"was rolled back — the write may already have "
+                f"succeeded; check before retrying (a retry is an "
+                f"idempotent re-write either way)."
+            )
+
         # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26:
         # rollback, not a marker column): a blank catalog_doc_id
-        # (registration failed above) or a manifest write that raised
-        # each leave the chunk t3.put just wrote with no manifest owner
-        # — the census's no-owner / legacy-unmanifested shape. Delete it
-        # (only if no other live document's manifest references it) and
-        # fail loud, deliberately BEFORE the --remove branch and before
-        # any post-store hook chain ever sees this chunk — never delete
-        # the T2 source of a promotion whose catalog leg failed.
+        # (registration failed above) or a manifest write CONFIRMED not
+        # to have landed each leave the chunk t3.put just wrote with no
+        # manifest owner — the census's no-owner / legacy-unmanifested
+        # shape. Delete it (only if no other live document's manifest
+        # references it) and fail loud, deliberately BEFORE the --remove
+        # branch and before any post-store hook chain ever sees this
+        # chunk — never delete the T2 source of a promotion whose
+        # catalog leg failed.
         if not catalog_doc_id or manifest_error:
             reason = manifest_error or "catalog registration failed"
-            rollback_uncataloged_chunk_write(
+            # fix-round 1 Important (both reviewers): also roll back the
+            # ghost catalog row when THIS call minted it, mirroring the
+            # sibling t3.put-failure branch above exactly.
+            if catalog_doc_id and catalog_row_minted:
+                rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=reason,
+                )
+            outcome = rollback_uncataloged_chunk_write(
                 t3, [doc_id], collection=collection, catalog_doc_id=catalog_doc_id,
             )
             raise click.ClickException(
                 f"could not catalog promoted entry in {collection}: "
-                f"{reason}. The chunk was rolled back — nothing was "
-                f"stored; retry is safe."
+                f"{reason}. {describe_rollback_outcome(outcome)}"
             )
 
         # nexus-9099: fire post-store chains so the promoted T3 row

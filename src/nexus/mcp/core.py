@@ -4873,7 +4873,9 @@ def store_put(
         # unconditionally (not just on the catalog-present path) since
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            ManifestVerifyUncertainError,
             catalog_store_hook_tracked,
+            describe_rollback_outcome,
             note_manifest_metadata,
             note_pieces,
             put_note_pieces,
@@ -4962,12 +4964,30 @@ def store_put(
         # swallowing fire_batch chain for this producer — write it
         # directly and verify it landed. Failure is captured (not
         # raised) so the RDR-192 Step 3a rollback below runs before the
-        # result is returned.
+        # result is returned. RDR-192 Step 3a fix-round 1 (critic
+        # Critical 1): ManifestVerifyUncertainError is caught SEPARATELY
+        # from a plain Exception — see store_put_manifest_direct's own
+        # three-way-outcome docstring for why the two must never be
+        # handled the same way.
         manifest_error = ""
+        manifest_uncertain = ""
         if catalog_doc_id:
             try:
                 store_put_manifest_direct(
                     catalog_doc_id, manifest_metadatas, collection=col_name)
+            except ManifestVerifyUncertainError as manifest_exc:
+                manifest_uncertain = str(manifest_exc)
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, manifest_uncertain)
+                import structlog  # noqa: PLC0415 — branch-local logging
+                structlog.get_logger().warning(
+                    "store_put_manifest_verify_uncertain",
+                    doc_id=doc_id,
+                    catalog_doc_id=catalog_doc_id,
+                    collection=col_name,
+                    error=manifest_uncertain[:300],
+                    exc_info=True,
+                )
             except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit non-"Stored:" result below
                 manifest_error = str(manifest_exc)
                 # nexus-vw594 F2 fix-round IMPORTANT: the vector put
@@ -4991,26 +5011,50 @@ def store_put(
                     exc_info=True,
                 )
 
+        # RDR-192 Step 3a fix-round 1 (critic Critical 1): the verify
+        # step's OWN infrastructure failed — we do NOT know whether the
+        # manifest write landed, so we must NOT roll back (it may have
+        # succeeded) and must not claim "rolled back" either way. Report
+        # the uncertainty and stop before any post-store consumer runs;
+        # a retry is still safe (the write path is an idempotent
+        # replace), it just is not "safe because nothing happened".
+        if manifest_uncertain:
+            return (
+                f"Error: store_put could not confirm the catalog manifest "
+                f"landed for {doc_id} in {col_name}: {manifest_uncertain}. "
+                f"Nothing was rolled back — the write may already have "
+                f"succeeded; check with store_get before retrying (a "
+                f"retry is an idempotent re-write either way)."
+            )
+
         # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26:
         # rollback, not a marker column): a blank catalog_doc_id (the
-        # registration attempt above failed) or a manifest write that
-        # raised each leave the chunk put_note_pieces just wrote with no
-        # manifest owner — the census's no-owner / legacy-unmanifested
-        # shape. Delete it (only if no other live document's manifest
-        # references it — see the helper's own race-guard docstring) and
-        # return an explicit error before any post-store consumer
-        # (cache invalidation, auto-link, the hook chains) ever sees this
-        # chunk. Never a bare "Stored:", never "stored but NOT cataloged"
-        # with the chunk left behind.
+        # registration attempt above failed) or a manifest write CONFIRMED
+        # not to have landed each leave the chunk put_note_pieces just
+        # wrote with no manifest owner — the census's no-owner / legacy-
+        # unmanifested shape. Delete it (only if no other live document's
+        # manifest references it — see the helper's own race-guard
+        # docstring) and return an explicit error before any post-store
+        # consumer (cache invalidation, auto-link, the hook chains) ever
+        # sees this chunk. Never a bare "Stored:", never "stored but NOT
+        # cataloged" with the chunk left behind.
         if not catalog_doc_id or manifest_error:
             reason = manifest_error or "catalog registration failed"
-            rollback_uncataloged_chunk_write(
+            # fix-round 1 Important (both reviewers): a manifest failure
+            # on a document THIS CALL minted must also roll back the
+            # ghost catalog row, mirroring the sibling t3.put-failure
+            # branch above exactly — a registration failure never mints
+            # one, so this only fires on the manifest-failure sub-case.
+            if catalog_doc_id and catalog_row_minted:
+                rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=reason,
+                )
+            outcome = rollback_uncataloged_chunk_write(
                 t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
             )
             return (
                 f"Error: store_put could not catalog content in {col_name}: "
-                f"{reason}. The chunk was rolled back — nothing was "
-                f"stored; retry is safe."
+                f"{reason}. {describe_rollback_outcome(outcome)}"
             )
 
         # A committed write makes any cached page burst stale — drop it so a

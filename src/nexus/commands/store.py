@@ -228,10 +228,24 @@ def put_cmd(
     # direct write + verify; failure becomes an explicit non-"Stored:"
     # error after the remaining hook chains fire.
     manifest_error = ""
+    manifest_uncertain = ""
     if catalog_doc_id:
         try:
             _store_put_manifest_direct(
                 catalog_doc_id, manifest_metadatas, collection=col_name)
+        except _ManifestVerifyUncertainError as manifest_exc:
+            manifest_uncertain = str(manifest_exc)
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+            _fence_fail(catalog_doc_id, manifest_uncertain)
+            import structlog  # noqa: PLC0415 — branch-local logging
+            structlog.get_logger(__name__).warning(
+                "store_put_manifest_verify_uncertain",
+                doc_id=doc_id,
+                catalog_doc_id=catalog_doc_id,
+                collection=col_name,
+                error=manifest_uncertain[:300],
+                exc_info=True,
+            )
         except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit error below
             manifest_error = str(manifest_exc)
             # nexus-cotmr: the vector put already succeeded (db.put
@@ -257,21 +271,39 @@ def put_cmd(
                 exc_info=True,
             )
 
+    # RDR-192 Step 3a fix-round 1 (critic Critical 1): verify infra failed
+    # — outcome unknown, must not roll back (the write may have landed).
+    if manifest_uncertain:
+        raise click.ClickException(
+            f"could not confirm the catalog manifest landed for {doc_id} "
+            f"in {col_name}: {manifest_uncertain}. Nothing was rolled "
+            f"back — the write may already have succeeded; check with "
+            f"'nx store list' before retrying (a retry is an idempotent "
+            f"re-write either way)."
+        )
+
     # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26: rollback,
     # not a marker column): a blank catalog_doc_id (registration failed
-    # above) or a manifest write that raised each leave the chunk
-    # _put_note_pieces just wrote with no manifest owner — the census's
-    # no-owner / legacy-unmanifested shape. Delete it (only if no other
-    # live document's manifest references it) and fail loud before any
-    # post-store hook chain ever sees this chunk.
+    # above) or a manifest write CONFIRMED not to have landed each leave
+    # the chunk _put_note_pieces just wrote with no manifest owner — the
+    # census's no-owner / legacy-unmanifested shape. Delete it (only if
+    # no other live document's manifest references it) and fail loud
+    # before any post-store hook chain ever sees this chunk.
     if not catalog_doc_id or manifest_error:
         reason = manifest_error or "catalog registration failed"
-        _rollback_uncataloged_chunk_write(
+        # fix-round 1 Important (both reviewers): also roll back the
+        # ghost catalog row when THIS call minted it, mirroring the
+        # sibling t3.put-failure branch above exactly.
+        if catalog_doc_id and catalog_row_minted:
+            _rollback_minted_catalog_entry(
+                catalog_doc_id, original_error=reason,
+            )
+        outcome = _rollback_uncataloged_chunk_write(
             db, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
         )
         raise click.ClickException(
-            f"could not catalog {source} in {col_name}: {reason}. The "
-            f"chunk was rolled back — nothing was stored; retry is safe."
+            f"could not catalog {source} in {col_name}: {reason}. "
+            f"{_describe_rollback_outcome(outcome)}"
         )
     # nexus-9099: fire the three post-store hook chains so the chash
     # index, taxonomy assignment, and aspect-extraction queue see CLI
@@ -344,6 +376,8 @@ from nexus.catalog.store_hook import store_put_manifest_direct as _store_put_man
 # RDR-192 Step 3a (nexus-wbfpw.28): shared rollback for a chunk that
 # gained no catalog manifest owner in this call.
 from nexus.catalog.store_hook import rollback_uncataloged_chunk_write as _rollback_uncataloged_chunk_write  # noqa: E402
+from nexus.catalog.store_hook import describe_rollback_outcome as _describe_rollback_outcome  # noqa: E402
+from nexus.catalog.store_hook import ManifestVerifyUncertainError as _ManifestVerifyUncertainError  # noqa: E402
 # nexus-spujb: split a note to the collection model's token window.
 from nexus.catalog.store_hook import note_content_hash as _note_content_hash  # noqa: E402
 from nexus.catalog.store_hook import note_manifest_metadata as _note_manifest_metadata  # noqa: E402

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -25,6 +26,23 @@ from nexus.aspect_readers import uri_for
 from nexus.embed_window import window_for_model
 
 _log = structlog.get_logger(__name__)
+
+
+class ManifestVerifyUncertainError(RuntimeError):
+    """:func:`store_put_manifest_direct`'s verify step could not confirm
+    whether the manifest write landed (RDR-192 Step 3a fix-round 1,
+    nexus-wbfpw.28, critic Critical 1) — the catalog reader used to verify
+    was unavailable, or the verify READ ITSELF raised. This is distinct
+    from ``RuntimeError`` (the plain exception this module raises when the
+    write itself failed or verify SUCCEEDED and proved the chashes
+    missing): both of those mean the write is CONFIRMED not to have
+    landed, safe to roll back. This one means the outcome is UNKNOWN — the
+    write may have landed and simply couldn't be observed. Callers must
+    NOT roll back the chunk on this exception; they must report the
+    uncertainty instead. See ``store_put_manifest_direct``'s own docstring
+    for the three-way outcome split this class exists to make callers
+    handle correctly.
+    """
 
 
 def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
@@ -998,11 +1016,33 @@ def store_put_manifest_direct(
     DIRECTLY via the whitelisted write ops (``atomic_manifest_replace``
     + ``resync_chunk_count_cache`` — both implemented on the local
     Catalog and the service ``HttpCatalogClient``) and then VERIFIES the
-    rows landed via a fresh reader. Any failure RAISES so the caller can
-    roll back the chunk it just wrote (:func:`rollback_uncataloged_chunk_write`,
-    RDR-192 Step 3a) and return an explicit error instead of a bare
-    success or a "stored but NOT cataloged" result with an orphan left
-    behind.
+    rows landed via a fresh reader.
+
+    THREE-WAY OUTCOME (RDR-192 Step 3a fix-round 1, nexus-wbfpw.28, critic
+    Critical 1) — callers must tell these apart, not treat every raise the
+    same:
+
+    1. **Confirmed not landed.** The write call itself
+       (``atomic_manifest_replace``/``resync_chunk_count_cache``) raised —
+       nothing committed — or the verify READ SUCCEEDED and proved the
+       expected chashes missing. Both raise a plain ``RuntimeError``. Safe
+       to roll back the chunk (:func:`rollback_uncataloged_chunk_write`).
+    2. **Outcome unknown.** The verify step's OWN infrastructure failed —
+       no catalog reader available, or the verify read itself raised —
+       so we cannot tell whether the write landed. Raises
+       :class:`ManifestVerifyUncertainError`. The write may well have
+       landed; a caller that rolls back here can delete a chunk a live
+       manifest row already references (the engine's own anti-join in
+       ``PgVectorRepository.delete`` — RDR-191 F10c — silently no-ops that
+       specific delete rather than losing data, but the caller's own
+       error text must not claim "rolled back" when it didn't happen).
+       Callers must report the uncertainty and skip rollback entirely.
+    3. **Success.** Returns normally.
+
+    Never a bare success or a "stored but NOT cataloged" result with an
+    orphan left behind for case 1 or 2 — see each of the four callers'
+    own three-way branch (``ManifestVerifyUncertainError`` first, plain
+    ``Exception`` second).
 
     Does not replace the fire_batch manifest hook for other producers;
     the store_put re-write it implies is an idempotent replace.
@@ -1068,7 +1108,21 @@ def store_put_manifest_direct(
     writer = make_catalog_writer(priority="interactive")
     try:
         writer.atomic_manifest_replace(catalog_doc_id, chunks, collection=collection)
-        writer.resync_chunk_count_cache(catalog_doc_id)
+        # RDR-192 Step 3a fix-round 1 (critic Critical 1, same defect
+        # class swept here too): the replace above already committed —
+        # a resync failure is NOT evidence the manifest write failed to
+        # land, only that documents.chunk_count is stale (recoverable via
+        # `nx catalog reconcile`). Letting it propagate as an
+        # indistinguishable-from-write-failure exception would make the
+        # verify step below moot and trigger a rollback of a chunk that
+        # DID land. Log and continue; the verify step is the real arbiter.
+        try:
+            writer.resync_chunk_count_cache(catalog_doc_id)
+        except Exception:  # noqa: BLE001 — see comment above: not evidence of a failed write
+            _log.warning(
+                "store_put_manifest_resync_chunk_count_failed",
+                doc_id=catalog_doc_id, collection=collection, exc_info=True,
+            )
     finally:
         try:
             writer.close()
@@ -1076,14 +1130,32 @@ def store_put_manifest_direct(
             pass
 
     # VERIFY the rows landed (nexus-b6enc F2: never trust a silent path).
-    reader = make_catalog_reader()
-    if reader is None:
-        raise RuntimeError(
+    # RDR-192 Step 3a fix-round 1 (critic Critical 1): a failure HERE means
+    # we do not know whether the write landed, which is a DIFFERENT
+    # outcome from "verify succeeded and proved it didn't" below —
+    # ManifestVerifyUncertainError, not RuntimeError, so callers cannot
+    # accidentally roll back a chunk whose manifest write may have
+    # actually succeeded.
+    try:
+        reader = make_catalog_reader()
+    except Exception as exc:  # noqa: BLE001 — outcome-unknown boundary, converted below
+        raise ManifestVerifyUncertainError(
             f"manifest write for {catalog_doc_id}: catalog reader "
-            "unavailable — cannot verify the manifest landed"
+            f"construction failed while verifying — write outcome unknown: {exc}"
+        ) from exc
+    if reader is None:
+        raise ManifestVerifyUncertainError(
+            f"manifest write for {catalog_doc_id}: catalog reader "
+            "unavailable — cannot verify the manifest landed; write outcome unknown"
         )
     try:
-        landed = {row.chash for row in reader.get_manifest(catalog_doc_id)}
+        try:
+            landed = {row.chash for row in reader.get_manifest(catalog_doc_id)}
+        except Exception as exc:  # noqa: BLE001 — outcome-unknown boundary, converted below
+            raise ManifestVerifyUncertainError(
+                f"manifest write for {catalog_doc_id}: verify read failed — "
+                f"write outcome unknown: {exc}"
+            ) from exc
     finally:
         try:
             reader._db.close()
@@ -1092,6 +1164,9 @@ def store_put_manifest_direct(
     expected = {c["chash"] for c in chunks}
     missing = expected - landed
     if missing:
+        # CONFIRMED not landed: the verify read itself succeeded and
+        # proved these chashes are absent from the manifest — safe for a
+        # caller to roll back.
         raise RuntimeError(
             f"manifest write for {catalog_doc_id} did not land: "
             f"{len(missing)} of {len(expected)} chunk hashes missing "
@@ -1118,13 +1193,84 @@ def store_put_manifest_direct(
                     pass
 
 
+@dataclass(frozen=True)
+class ChunkRollbackOutcome:
+    """What :func:`rollback_uncataloged_chunk_write` actually did (RDR-192
+    Step 3a fix-round 1, nexus-wbfpw.28, critic/reviewer Significant 4) —
+    a caller words its error message from THIS, never from what it hoped
+    happened. ``requested`` is every chash the caller asked to roll back;
+    the other three fields partition (not always exhaustively — see
+    ``deleted_count`` below) what became of them.
+
+    Attributes:
+        requested: every chash the caller's put wrote this call.
+        protected: the subset :func:`nexus.indexer_utils.orphaned_chashes`
+            found still referenced by a live document's manifest (this
+            call's own included — see that function's caller-side note)
+            — never attempted for delete.
+        attempted: ``requested`` minus ``protected`` — the chashes this
+            call actually asked the engine to delete.
+        deleted_count: rows the engine reports it removed. May be LESS
+            than ``len(attempted)`` even on a clean call: the engine's own
+            anti-join (``PgVectorRepository.delete``, RDR-191 F10c) is the
+            final authority and can silently keep a chash this function's
+            own (necessarily point-in-time) check missed a fresh
+            reference for — which specific chash(es) is not reported back
+            by a batch delete, only the count.
+        delete_error: non-empty when the delete call itself raised —
+            ``deleted_count`` is then always 0, and the true state of
+            ``attempted`` is unknown (the call may have partially applied
+            server-side before raising).
+    """
+
+    requested: tuple[str, ...]
+    protected: tuple[str, ...] = ()
+    attempted: tuple[str, ...] = ()
+    deleted_count: int = 0
+    delete_error: str = ""
+
+
+def describe_rollback_outcome(outcome: ChunkRollbackOutcome) -> str:
+    """The honest sentence a caller appends to its failure message after
+    naming *reason* (RDR-192 Step 3a fix-round 1, Significant 4) — never
+    "rolled back" or "retry is safe" when the outcome says otherwise.
+    """
+    if not outcome.requested:
+        return "No new chunk was written for this call; there is nothing to roll back."
+    if outcome.delete_error:
+        return (
+            f"The rollback delete itself failed ({outcome.delete_error}) — "
+            f"the chunk may still be present in T3; check via store_get "
+            f"before retrying."
+        )
+    if outcome.protected and not outcome.attempted:
+        return (
+            "The chunk is still referenced by a live document's manifest "
+            "(this call's own, or another one's), so it was correctly "
+            "left in place rather than risk deleting content that's "
+            "actually live — nothing was deleted."
+        )
+    if outcome.attempted and outcome.deleted_count < len(outcome.attempted):
+        return (
+            f"{outcome.deleted_count} of {len(outcome.attempted)} chunk(s) "
+            f"were confirmed removed; the rest may still be referenced by "
+            f"another document and were left in place — check via "
+            f"store_get before assuming a clean retry."
+        )
+    if outcome.attempted:
+        return "The chunk was rolled back — nothing new was stored; retry is safe."
+    return "Nothing needed to be rolled back."
+
+
 def rollback_uncataloged_chunk_write(
     t3: Any, doc_ids: list[str], *, collection: str, catalog_doc_id: str = "",
-) -> None:
+) -> ChunkRollbackOutcome:
     """Delete the T3 chunk rows a store_put-shaped write just wrote, when
-    catalog registration failed or the direct manifest write raised
-    (RDR-192 Step 3a / nexus-wbfpw.28; Sam's ruling 2026-09-26: rollback,
-    not a marker column).
+    catalog registration failed or the direct manifest write is CONFIRMED
+    not to have landed (RDR-192 Step 3a / nexus-wbfpw.28; Sam's ruling
+    2026-09-26: rollback, not a marker column). Never call this for a
+    :class:`ManifestVerifyUncertainError` — see
+    :func:`store_put_manifest_direct`'s three-way-outcome docstring.
 
     Shared by every store_put-shaped producer — MCP ``store_put``, CLI
     ``nx store put``, ``nx memory promote``, and the recovery-bundle
@@ -1134,30 +1280,37 @@ def rollback_uncataloged_chunk_write(
     chash(es) of the piece(s) just stored), once the caller has decided
     the put failed: either :func:`catalog_store_hook_tracked` returned no
     tumbler (*catalog_doc_id* blank) or :func:`store_put_manifest_direct`
-    raised for the tumbler it did mint. Left uncorrected, the chunk is a
-    live, manifest-less T3 row — exactly the no-owner / legacy-
-    unmanifested shape RDR-192's census classifies, and that a future
-    reaper (Phase 3) would remove anyway, only later and silently.
+    raised a plain ``RuntimeError`` (confirmed not landed) for the
+    tumbler it did mint. Left uncorrected, the chunk is a live,
+    manifest-less T3 row — exactly the no-owner / legacy-unmanifested
+    shape RDR-192's census classifies, and that a future reaper (Phase 3)
+    would remove anyway, only later and silently.
 
-    RACE GUARD (plan-audit round 2 residual): identical chunk TEXT
-    collapses to ONE T3 row (CLAUDE.md § catalog/T3 split), so a chash
-    this call just wrote can be the SAME physical row a concurrent,
-    already-succeeded store of identical content depends on. This reuses
-    :func:`nexus.indexer_utils.orphaned_chashes` — the identical union
-    guard :func:`_reap_superseded_note_chunks` above uses for the
-    supersede-reap path — so a chash any OTHER live document's manifest
-    already references is left alone; only a chash nothing references is
-    deleted. *catalog_doc_id* (possibly ``""``) is passed through as the
-    "owning document" the guard excludes from that check — a no-op when
-    blank, since a blank id never appears in a real reverse-lookup
-    result.
+    RACE GUARD (plan-audit round 2 residual, fix-round 1 critic Critical
+    1): identical chunk TEXT collapses to ONE T3 row (CLAUDE.md § catalog/
+    T3 split), so a chash this call just wrote can be the SAME physical
+    row a concurrent, already-succeeded store of identical content
+    depends on. This reuses :func:`nexus.indexer_utils.orphaned_chashes`
+    — the identical union guard :func:`_reap_superseded_note_chunks`
+    above uses for the supersede-reap path — so a chash any OTHER live
+    document's manifest already references is left alone. UNLIKE that
+    supersede-reap caller, this one passes ``""`` for the "owning
+    document" the guard excludes, not *catalog_doc_id*: a rollback's own
+    document may ALREADY reference the chash (the manifest write it is
+    rolling back landed for real despite whatever made the caller think
+    it failed), and that reference must protect the chunk exactly like
+    any other document's would, not be excluded from the check. The
+    engine's own anti-join (``PgVectorRepository.delete``, RDR-191 F10c)
+    is a second, independent backstop against ever losing a still-
+    referenced chunk even if this Python-side check were wrong — see
+    :class:`ChunkRollbackOutcome`'s ``deleted_count`` field.
 
     Fail-open and best-effort throughout, same direction as every other
     T3-deleting sweep in this module: a lookup or delete failure is
-    logged and swallowed, never raised — the caller's own store_put
-    error is what must surface, and this compensation must never mask
-    it. Over-retention is recoverable (``nx t3 gc``, or the RDR-192
-    reaper once shipped, catches it later); over-deletion is not.
+    logged and returned on the outcome, never raised — the caller's own
+    store_put error is what must surface, and this compensation must
+    never mask it. Over-retention is recoverable (``nx t3 gc``, or the
+    RDR-192 reaper once shipped, catches it later); over-deletion is not.
 
     Args:
         t3: the SAME T3 handle the caller just wrote *doc_ids* through
@@ -1170,38 +1323,53 @@ def rollback_uncataloged_chunk_write(
         collection: the T3 collection *doc_ids* were written into.
         catalog_doc_id: the tumbler :func:`catalog_store_hook_tracked`
             returned for this call, or ``""`` when registration itself
-            failed.
+            failed. Logging context only now — see the race-guard note
+            above for why it is no longer passed to the union guard.
+
+    Returns:
+        A :class:`ChunkRollbackOutcome` describing exactly what happened;
+        callers word their error text from it via
+        :func:`describe_rollback_outcome`, never by assuming success.
     """
-    ids = sorted({d for d in doc_ids if d})
+    ids = tuple(sorted({d for d in doc_ids if d}))
     if not ids or not collection:
-        return
+        return ChunkRollbackOutcome(requested=ids)
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
     from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
 
     reader = make_catalog_reader()
     try:
-        orphaned = orphaned_chashes(reader, catalog_doc_id, ids, collection=collection)
+        orphaned = orphaned_chashes(reader, "", list(ids), collection=collection)
     finally:
         if reader is not None:
             try:
                 reader._db.close()
             except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
                 pass
-    if not orphaned:
-        return
+    protected = tuple(sorted(set(ids) - set(orphaned)))
+    attempted = tuple(sorted(orphaned))
+    if not attempted:
+        return ChunkRollbackOutcome(requested=ids, protected=protected)
     try:
-        result = t3.get_collection(collection).delete(ids=orphaned)
-    except Exception:  # noqa: BLE001 — store_put's own error return must not depend on cleanup succeeding
+        result = t3.get_collection(collection).delete(ids=list(attempted))
+    except Exception as exc:  # noqa: BLE001 — store_put's own error return must not depend on cleanup succeeding
         _log.warning(
             "store_put_rollback_chunk_delete_failed",
-            collection=collection, chashes=len(orphaned), exc_info=True,
+            collection=collection, chashes=len(attempted), exc_info=True,
         )
-        return
-    actual = result if isinstance(result, int) else len(orphaned)
+        return ChunkRollbackOutcome(
+            requested=ids, protected=protected, attempted=attempted,
+            delete_error=str(exc),
+        )
+    deleted_count = result if isinstance(result, int) else len(attempted)
     _log.warning(
         "store_put_rollback_chunk_deleted",
         collection=collection, catalog_doc_id=catalog_doc_id,
-        deleted=actual, requested=len(orphaned),
+        deleted=deleted_count, requested=len(attempted),
+    )
+    return ChunkRollbackOutcome(
+        requested=ids, protected=protected, attempted=attempted,
+        deleted_count=deleted_count,
     )
 
 
