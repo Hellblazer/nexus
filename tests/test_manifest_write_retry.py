@@ -242,3 +242,36 @@ def test_connect_error_also_trips_brake_with_escalating_default(monkeypatch) -> 
     test_brake.trip.assert_called_once_with(None, source="manifest")
     test_brake.release.assert_called_once()
     mock_sleep.assert_called_once_with(2.0)  # max(local 0.5, brake 2.0)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "widened"),
+    [("aborted", False), ("refused", True), (None, True)],
+)
+def test_a_combined_write_deadline_503_widens_only_for_a_refusal(
+    monkeypatch, outcome: str | None, widened: bool,
+) -> None:
+    """nexus-qajw7: the combined write (manifest + chunks) embeds server-side,
+    and its deadline 503 now reaches the client instead of an opaque 500. An
+    ``aborted`` one discarded embedded work, so it keeps the connectivity
+    budget; ``refused`` or unmarked widens to the rate-limit budget."""
+    test_brake = MagicMock()
+    test_brake.wait.return_value = 0.0
+    test_brake.trip.return_value = 5.0
+    monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
+    headers = {"Retry-After": "5"}
+    if outcome is not None:
+        headers["X-Nexus-Deadline-Outcome"] = outcome
+    request = httpx.Request("POST", "http://127.0.0.1:8765/v1/catalog/manifest/write_many")
+    response = httpx.Response(503, request=request, headers=headers)
+    calls = 0
+
+    def always_503() -> str:
+        nonlocal calls
+        calls += 1
+        raise httpx.HTTPStatusError("503", request=request, response=response)
+
+    with patch("nexus.retry.time.sleep"), pytest.raises(httpx.HTTPStatusError):
+        _manifest_write_with_retry(always_503)
+    expected = retry_mod._RATE_LIMIT_MAX_ATTEMPTS if widened else len(retry_mod._MANIFEST_WRITE_RETRY_DELAYS) + 1
+    assert calls == expected
