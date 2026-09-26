@@ -95,9 +95,13 @@ def _search_visible(client, collection: str, chash: str, text: str) -> bool:
 
 
 def _put_note(client, *, collection: str, title: str, content: str) -> tuple[str, list[str]]:
-    """R7's own write path: the real store_put shape, byte-identical call
-    sequence to the MCP ``store_put`` tool (mirrors ``test_bb6n2_
-    supersede_reap.py::_put_note``). Returns ``(tumbler, chashes)``."""
+    """R7's write path: the store_put shape (a registered note whose
+    manifest names its chunks), mirroring ``test_bb6n2_supersede_reap.py::
+    _put_note``. Not the MCP tool's exact sequence: it writes chunks with
+    ``upsert_chunks_with_embeddings`` and the bare
+    ``store_put_manifest_direct`` rather than ``put_note_pieces`` and the
+    recovery wrapper; none of the five predicates read the difference.
+    Returns ``(tumbler, chashes)``."""
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
         note_manifest_metadata,
