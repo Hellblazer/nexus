@@ -613,3 +613,5 @@ records carry the detail. No section needs trimming before acceptance.
 - `web/ci-board.html` (use-case page, draft)
 
 ## Revision History
+
+- 2026-09-26: Gate round 1 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `3059b5110`; critique `nexus_rdr/220-gate-critique-2026-09-26-r1`.
