@@ -1659,32 +1659,48 @@ class TestWbfpw28BoundedVerifyRetry:
 
 
 # ── RDR-192 Step 3a fix-round 2, Decision (b): the opposite-ordering race ───
-# ── — B's delete lands BEFORE A's manifest write, A recovers ────────────────
+# ── — B's delete used to land BEFORE A's manifest write; nexus-k54nk's ─────
+# ── notes guard now closes this race at the SOURCE instead ─────────────────
 
 
 class TestWbfpw28OppositeOrderingRecovery:
-    def test_a_recovers_via_repiece_and_retry_after_bs_delete_lands_first(
+    def test_bs_rollback_no_longer_deletes_as_in_flight_chunk(
         self, catalog_env: Path, t2_service_env: str,
     ) -> None:
         """The mirror-image ordering of fix-round 1's Significant 3 race
         (there: B's delete landed AFTER A's manifest write; here: B's
-        delete lands BEFORE A's manifest write even starts). Real
+        delete would land BEFORE A's manifest write even starts). Real
         HttpVectorClient against the engine substrate (the in-memory
         fake has no catalog awareness and cannot exhibit the REAL
-        fk_catalog_chunks_chunk violation this test needs — see
-        fix-round 1's TestWbfpw28GenuineInterleavedRace docstring for
-        why the fake can't stand in for the server side here either).
+        fk_catalog_chunks_chunk violation the pre-nexus-k54nk version of
+        this test needed — see fix-round 1's TestWbfpw28GenuineInterleavedRace
+        docstring for why the fake can't stand in for the server side
+        here either).
 
-        Deterministic by CONSTRUCTION, not a timing race: A's own chunk
-        write and catalog registration happen for real FIRST (mirroring
-        put_note_pieces's own ordering — t3.put always precedes the
-        manifest write), then B's FULL rollback (the same
-        rollback_uncataloged_chunk_write callers use, orphaned_chashes
-        union guard included) runs to completion against the SAME
-        chash, deleting it for real since nothing has manifested it
-        yet. Only THEN does A's manifest write run — genuinely racing a
-        chunk that is by now gone, the exact fk_catalog_chunks_chunk
-        violation Decision (b) exists to recover from."""
+        SUPERSEDED BY nexus-k54nk (T2 ``nexus/critique-wbfpw2`` Critical
+        2): before that fix, ``rollback_uncataloged_chunk_write`` composed
+        only ``orphaned_chashes`` (a manifest-based reverse lookup), so at
+        the instant B's rollback ran — A had registered (``catalog_store_
+        hook_tracked`` stamps ``meta.doc_id=chash`` at registration, BEFORE
+        A's own manifest write) but not yet manifested — nothing protected
+        the shared chash and B's delete removed it for real, forcing A's
+        subsequent manifest write to recover from a genuine
+        ``fk_catalog_chunks_chunk`` violation via repiece-and-retry
+        (Decision (b)). ``catalog_store_hook_tracked`` stamping
+        ``meta.doc_id`` at registration is UNIVERSAL to every store_put-
+        shaped write, not particular to this fixture — so A's row is, at
+        that instant, indistinguishable from a genuine permanent legacy
+        note (the exact R8 shape nexus-k54nk's notes guard exists to
+        protect). Composing ``live_note_chashes`` into the rollback
+        (nexus-k54nk) therefore also closes THIS race: B's rollback now
+        recognizes A's in-flight registration as note-shaped and leaves
+        the chash alone, so A's manifest write lands directly with no
+        FK violation and no repiece call at all. The repiece-and-retry
+        mechanism itself remains covered independently at the unit level
+        by ``TestWbfpw28PartialRepieceMessage`` and
+        ``TestWbfpw28RecoveryWordingTruthful`` — deleting this test would
+        lose the "does this specific race even still reach the recovery
+        path" evidence, so it stays, inverted."""
         import nexus.db.http_vector_client as hvc
         from nexus.catalog.store_hook import (
             catalog_store_hook_tracked,
@@ -1716,27 +1732,23 @@ class TestWbfpw28OppositeOrderingRecovery:
         # B: registration forced to fail (simulated by calling the
         # rollback directly with a blank catalog_doc_id, exactly what
         # every producer does on a registration failure); its FULL
-        # rollback — union-guard check AND delete — completes entirely
-        # BEFORE A's manifest write is ever attempted.
+        # rollback — union guard AND notes guard AND delete — runs to
+        # completion BEFORE A's manifest write is ever attempted.
         outcome_b = rollback_uncataloged_chunk_write(
             client, [chash], collection=collection, catalog_doc_id="",
         )
-        assert outcome_b.deleted_count == 1, (
-            "precondition: B's delete actually removed the shared chunk "
-            "— nothing yet references it, since A has registered but "
-            "has not written a manifest"
+        assert outcome_b.deleted_count == 0, (
+            "nexus-k54nk: A's registration (meta.doc_id=chash, no "
+            "manifest yet) is indistinguishable from a genuine legacy "
+            "note at this instant -- live_note_chashes must protect the "
+            "shared chash from B's rollback"
         )
-        from nexus.errors import CollectionNotFoundError  # noqa: PLC0415 — test-local, only needed for this precondition check
-        try:
-            still_present = client.get_collection(collection).get(ids=[chash], include=[]).get("ids") or []
-        except CollectionNotFoundError:
-            # The collection held exactly one chunk; deleting it can
-            # leave the collection itself unlisted — equally proof the
-            # chash is gone.
-            still_present = []
-        assert not still_present, (
-            "precondition: the chunk is genuinely gone before A's "
-            "manifest write is attempted"
+        assert chash in outcome_b.protected
+
+        present = client.get_collection(collection).get(ids=[chash], include=[])
+        assert chash in (present.get("ids") or []), (
+            "the chunk must still be physically present after B's "
+            "rollback attempt -- nothing was deleted"
         )
 
         repieced: list[str] = []
@@ -1748,22 +1760,24 @@ class TestWbfpw28OppositeOrderingRecovery:
                 metadatas=[{"title": "wbfpw28-opposite-a", "chunk_text_hash": missing_chash}],
             )
 
-        # A's manifest write now genuinely races the just-deleted chunk
-        # — a REAL fk_catalog_chunks_chunk violation, not simulated.
+        # A's manifest write now proceeds against a chunk that was never
+        # disturbed -- no fk_catalog_chunks_chunk violation, no repiece.
         store_put_manifest_direct_with_recovery(
             tumbler_a, manifest_metadatas, collection=collection, repiece=_repiece,
         )
 
-        assert repieced == [chash], (
-            "A must recover by re-putting exactly the chash a "
-            "concurrent rollback deleted"
+        assert repieced == [], (
+            "the notes guard closing the race means A's manifest write "
+            "never hits a missing chunk in the first place -- no "
+            "repiece call should ever fire"
         )
         assert chash in active_reader().get_chunk_chashes(tumbler_a), (
-            "A's manifest must reference the chash after recovery"
+            "A's manifest must reference the chash"
         )
         present = client.get_collection(collection).get(ids=[chash], include=[])
         assert chash in (present.get("ids") or []), (
-            "the re-put chunk must be physically present after recovery"
+            "the chunk must remain physically present after A's "
+            "manifest write lands"
         )
 
 
@@ -1918,3 +1932,99 @@ class TestWbfpw28PartialRepieceMessage:
         message = str(exc_info.value)
         assert "t3 put refused" in message
         assert "1 other chunk(s) were re-put" in message
+
+
+# ── nexus-k54nk (T2 critique-wbfpw2, Critical 2): rollback_uncataloged_ ─────
+# ── chunk_write had no live_note_chashes guard, unlike its two sibling ─────
+# ── orphaned_chashes callers ────────────────────────────────────────────────
+#
+# _sweep_superseded_vectors[_many] (mcp_infra.py) and _reap_superseded_note_
+# chunks (store_hook.py, above) both subtract live_note_chashes from
+# orphaned_chashes' candidate set before deleting. rollback_uncataloged_
+# chunk_write (RDR-192 Step 3a / nexus-wbfpw.28) called orphaned_chashes
+# alone -- a legacy note (pre-nexus-b6enc shape: a live document whose
+# meta.doc_id names its chunk, no manifest row anywhere -- the R8 row of
+# nexus-wbfpw.2's fixture matrix) is invisible to orphaned_chashes'
+# manifest-based reverse lookup and was protected only by live_note_chashes.
+# A store_put of byte-identical content (same content-addressed chash)
+# whose manifest write is CONFIRMED failed would delete the shared physical
+# chunk out from under the legacy note.
+
+
+class TestK54nkRollbackLiveNoteGuard:
+    """Seeding mirrors nexus-wbfpw.2's R8 row exactly (``cat.register(...,
+    meta={"doc_id": chash})`` with no manifest write at all) -- the
+    narrowest client call that reproduces the pre-nexus-b6enc legacy-note
+    shape, since a real ``store_put`` today always pairs the doc_id stamp
+    with a manifest write."""
+
+    _COLLECTION = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+
+    def test_legacy_note_chunk_survives_a_colliding_manifest_failure(
+        self, catalog_env: Path, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A legacy note owns chash X (meta.doc_id only, no manifest row).
+        A fresh store_put of byte-identical content shares X (content-
+        addressed collapse) and its manifest write is confirmed failed --
+        the rollback must never delete X: live_note_chashes must protect
+        it exactly like the sibling sweeps' composition does."""
+        content = "k54nk legacy note shared content"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        cat.register(
+            owner, "k54nk-legacy-note", content_type="knowledge",
+            physical_collection=self._COLLECTION, meta={"doc_id": chash},
+        )
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("manifest write refused")
+            ),
+        )
+        result = _mcp_store_put_with(local_t3, content, "k54nk-colliding-put")
+        assert result.startswith("Error"), result
+        assert "manifest write refused" in result
+
+        assert local_t3.get_by_id(self._COLLECTION, chash) is not None, (
+            "rollback must never delete a chash a legacy (manifest-less) "
+            "note's meta.doc_id still names -- live_note_chashes must "
+            "protect it exactly like _reap_superseded_note_chunks and "
+            "_sweep_superseded_vectors[_many] already do"
+        )
+
+    def test_note_lookup_failure_keeps_everything(
+        self, catalog_env: Path, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The live_note_chashes lookup itself failing (no legacy note
+        need be registered at all -- orphaned_chashes alone would report
+        the chash genuinely unreferenced) must keep everything: cannot
+        prove note-safety, same fail-open direction as orphaned_chashes'
+        own no-reverse-lookup case."""
+        content = "k54nk note lookup failure keeps everything"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("manifest write refused")
+            ),
+        )
+        monkeypatch.setattr(
+            "nexus.indexer_utils.catalog_documents_for_collection",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("catalog read boom")
+            ),
+        )
+        result = _mcp_store_put_with(local_t3, content, "k54nk-lookup-failure")
+        assert result.startswith("Error"), result
+        assert "manifest write refused" in result
+
+        assert local_t3.get_by_id(self._COLLECTION, chash) is not None, (
+            "a live_note_chashes lookup failure must keep everything -- "
+            "cannot prove orphanhood, same fail-safe direction as "
+            "orphaned_chashes' own no-reverse-lookup fail-open path"
+        )

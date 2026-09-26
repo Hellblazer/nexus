@@ -1498,10 +1498,12 @@ class ChunkRollbackOutcome:
 
     Attributes:
         requested: every chash the caller's put wrote this call.
-        protected: the subset :func:`nexus.indexer_utils.orphaned_chashes`
-            found still referenced by a live document's manifest (this
+        protected: the subset found still referenced by a live document's
+            manifest (:func:`nexus.indexer_utils.orphaned_chashes`, this
             call's own included — see that function's caller-side note)
-            — never attempted for delete.
+            OR named by a manifest-less legacy note's own ``meta.doc_id``
+            (:func:`nexus.indexer_utils.live_note_chashes`, nexus-k54nk) —
+            never attempted for delete.
         attempted: ``requested`` minus ``protected`` — the chashes this
             call actually asked the engine to delete.
         deleted_count: rows the engine reports it removed. May be LESS
@@ -1593,6 +1595,22 @@ def rollback_uncataloged_chunk_write(
     the guard excludes (never *catalog_doc_id*), so a reference from
     THIS call's own document counts exactly like any other's.
 
+    NOTES GUARD (nexus-k54nk, T2 ``nexus/critique-wbfpw2`` Critical 2):
+    ``orphaned_chashes`` alone cannot see a manifest-less LEGACY note
+    (pre-nexus-b6enc shape: a live document whose ``meta.doc_id`` names
+    its chunk, no manifest row anywhere — ``docs_for_chashes`` is a
+    manifest-based reverse lookup and a legacy note has no manifest row
+    to find). This now composes :func:`nexus.indexer_utils.
+    live_note_chashes` over :func:`nexus.indexer_utils.
+    catalog_documents_for_collection` on top of the union guard's
+    result, the identical two-guard composition :func:`_reap_superseded_
+    note_chunks` and ``mcp_infra._sweep_superseded_vectors[_many]``
+    already use — so a fresh store_put of byte-identical content whose
+    manifest write is confirmed failed never deletes a chash a legacy
+    note still depends on. Same fail-open direction as the union guard:
+    a notes-lookup failure keeps everything (cannot prove note-safety),
+    never narrows the keep set.
+
     Before fix-round 2, this guard was the ONLY thing standing between a
     write-call exception and deleting a chunk whose manifest write had
     actually landed (the ack-lost race): ``store_put_manifest_direct``
@@ -1644,11 +1662,28 @@ def rollback_uncataloged_chunk_write(
     if not ids or not collection:
         return ChunkRollbackOutcome(requested=ids)
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
-    from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+    from nexus.indexer_utils import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+        catalog_documents_for_collection,
+        live_note_chashes,
+        orphaned_chashes,
+    )
 
     reader = make_catalog_reader()
     try:
         orphaned = orphaned_chashes(reader, "", list(ids), collection=collection)
+        if orphaned:
+            try:
+                documents = catalog_documents_for_collection(reader, collection)
+                notes = live_note_chashes(documents)
+            except Exception:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
+                _log.warning(
+                    "store_put_rollback_skipped_note_lookup_failed",
+                    collection=collection, candidates=len(orphaned),
+                    exc_info=True,
+                )
+                orphaned = []
+            else:
+                orphaned = [h for h in orphaned if h not in notes]
     finally:
         if reader is not None:
             try:
