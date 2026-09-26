@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.HnswSettingsExtractor;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
@@ -546,18 +547,31 @@ class TaxonomyAssignCrossLateralHnswTest {
                         + " pair above -- see taxonomy-020's own header. Actual: %s",
                         (Object) proconfig)
                     .noneMatch(c -> c.startsWith("enable_seqscan") || c.startsWith("enable_sort"));
-                assertThat(prosrc)
-                    .as("assign_from_chashes_" + dim + "'s body must set both ANN recall settings;"
-                        + " dropping either reopens the no-row hazard silently")
-                    .contains("set_config('hnsw.iterative_scan', 'strict_order', true)")
-                    .contains("set_config('hnsw.ef_search', '400', true)");
-                assertThat(prosrc)
-                    .as("assign_from_chashes_" + dim + "'s body must ALSO pin the access path"
-                        + " itself (nexus-swam7, taxonomy-020): without these, the planner"
-                        + " reopens the Seq-Scan-below-crossover regression this bead exists"
-                        + " to close, silently")
-                    .contains("set_config('enable_seqscan', 'off', true)")
-                    .contains("set_config('enable_sort', 'off', true)");
+                // Round-3 review (critic, Significant, nexus-v4pj4): a
+                // per-line `.contains(...)` proves PRESENCE only -- not
+                // exclusivity, precedence, or reachability (a fifth
+                // setting, a later call silently overriding an earlier
+                // one's effective value, or the pin sitting only inside a
+                // comment would all still pass unchanged). Shared
+                // HnswSettingsExtractor with CrossPreviewDriftTest strips
+                // comments, reduces every set_config call to the
+                // LAST-OCCURRENCE-WINS map Postgres itself would apply,
+                // and returns the total call count -- see that class's own
+                // javadoc for the full rationale.
+                HnswSettingsExtractor.Extraction x = HnswSettingsExtractor.extract(prosrc);
+                assertThat(x.effective())
+                    .as("assign_from_chashes_" + dim + "'s EFFECTIVE (last-occurrence-wins,"
+                        + " comments stripped) hnsw/planner settings must be EXACTLY the four"
+                        + " expected pins; dropping one reopens the no-row hazard (taxonomy-018)"
+                        + " or the Seq-Scan-below-crossover regression (taxonomy-020) silently."
+                        + " Extracted: " + x.effective())
+                    .isEqualTo(HnswSettingsExtractor.EXPECTED_HNSW_SETTINGS);
+                assertThat(x.calls())
+                    .as("assign_from_chashes_" + dim + " must issue exactly the four expected"
+                        + " set_config calls -- a stray duplicate repeating an existing"
+                        + " name/value would be invisible to the effective-map check above"
+                        + " alone")
+                    .hasSize(4);
             }
         }
     }

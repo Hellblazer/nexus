@@ -83,7 +83,13 @@ trivially always agree with itself). If the two snapshots differ, this
 collection's batch is not compared this run; the whole before/call/after
 sequence is retried ONCE; if it still differs, the collection is reported
 CHANGED DURING PROBE -- reported, not a failure, and never folded into a
-disagreement or an INCONCLUSIVE result.
+disagreement or an INCONCLUSIVE result. The comparison is SCOPED to the
+sampled collection's own embedding dimension (round-3 review, Minor):
+``get_foreign`` returns every OTHER collection's centroids across every
+dim a tenant's collections use, so an unscoped before/after comparison
+would spuriously flag this collection over a centroid change in a
+completely unrelated dim, one this probe's own recompute never reads at
+all.
 
 Exit 0 when every sampled chunk's exact recompute agrees with the
 engine's live ANN pick (within :data:`SIMILARITY_TIE_TOLERANCE`), 1 when
@@ -197,16 +203,31 @@ def _live_foreign(taxo: Any, name: str) -> dict[str, list[Any]]:
     return taxo._centroid.get_foreign(name)
 
 
-def _foreign_snapshot_map(foreign: dict[str, list[Any]]) -> dict[int, list[float]]:
+def _foreign_snapshot_map(
+    foreign: dict[str, list[Any]], dim: int | None = None,
+) -> dict[int, list[float]]:
     """Collapse a ``get_foreign()`` envelope into ``{topic_id: embedding}``,
     order-independent, so two snapshots can be compared for equality
     regardless of what order the engine happened to return rows in. Catches
     an added, removed, OR revised-in-place centroid alike -- any of the
     three changes this dict's equality with an earlier snapshot.
+
+    *dim*, when given, SCOPES the map to centroids at that embedding
+    dimension only (round-3 review, Minor): ``get_foreign`` returns every
+    OTHER collection's centroids across every embedding dim a tenant's
+    collections use, not just the sampled source collection's own dim.
+    Without scoping, a centroid change in a completely UNRELATED dim (a
+    different collection's own rebuild, nothing to do with the one being
+    probed) would still change this dict and spuriously flag a
+    ``changed_during_probe`` for a collection nothing actually raced
+    against. ``dim=None`` (the caller could not determine the sampled
+    dim up front -- see :func:`probe_collection`) falls back to comparing
+    every dim, the original unscoped behavior.
     """
     return {
         int(meta["topic_id"]): list(emb)
         for emb, meta in zip(foreign.get("embeddings", []), foreign.get("metadatas", []))
+        if dim is None or len(emb) == dim
     }
 
 
@@ -330,6 +351,23 @@ def probe_collection(
         if not candidate_ids:
             return _finish()
 
+        # Fetched EARLY (round-3 review, Minor), before the ann/snapshot
+        # loop below, purely so `dim` (this SOURCE collection's own chunk
+        # embedding dimension) is known in time to SCOPE the before/after
+        # foreign-centroid comparison to it -- see `_foreign_snapshot_map`'s
+        # own docstring for why an unscoped comparison can spuriously flag
+        # a collection over an unrelated dim's centroid changing elsewhere.
+        # `vecs` covers every candidate (a superset of whatever `ann`
+        # answers for below), so it is reused directly further down instead
+        # of a second, separate fetch for `matched`. `dim=None` when NO
+        # candidate has a stored vector at all -- the before/after
+        # comparison then falls back to comparing every dim (this run's
+        # `ann` will end up empty regardless, since the engine cannot
+        # answer for a chunk with no vector either, so `not_applicable`
+        # already covers this case).
+        vecs = t3.get_embeddings_by_id(name, candidate_ids)
+        dim = len(next(iter(vecs.values()))) if vecs else None
+
         # The engine's LIVE answer, right now -- never a stored historical
         # row. An id absent from `ann` had no live chunk vector at this
         # dim, or `name` has no foreign centroid at all for THAT id's dim
@@ -338,9 +376,10 @@ def probe_collection(
         #
         # Bracketed by a before/after live foreign-centroid snapshot (round-2
         # review, critic Significant + code-review Minor; module docstring's
-        # RACE NOTE): if the snapshot changed WHILE cross_preview ran, this
-        # probe cannot know which snapshot the engine's own answer actually
-        # saw, so the whole sequence is retried once before giving up.
+        # RACE NOTE), scoped to `dim` (round-3 review, Minor): if the
+        # snapshot changed WHILE cross_preview ran, this probe cannot know
+        # which snapshot the engine's own answer actually saw, so the whole
+        # sequence is retried once before giving up.
         ann: dict[str, tuple[int, float]] = {}
         foreign: dict[str, list[Any]] = {}
         for _attempt in range(_MAX_SNAPSHOT_ATTEMPTS):
@@ -350,7 +389,7 @@ def probe_collection(
                 result.not_applicable = True
                 return result
             foreign_after = _live_foreign(taxo, name)
-            if _foreign_snapshot_map(foreign_before) == _foreign_snapshot_map(foreign_after):
+            if _foreign_snapshot_map(foreign_before, dim) == _foreign_snapshot_map(foreign_after, dim):
                 foreign = foreign_after
                 break
         else:
@@ -358,13 +397,11 @@ def probe_collection(
             return _finish()
 
         matched = sorted(ann)[:sample]
-        vecs = t3.get_embeddings_by_id(name, matched)
         found = [i for i in matched if i in vecs]
         result.no_vector = len(matched) - len(found)
         if not found:
             return _finish()
 
-        dim = len(vecs[found[0]])
         centroids: dict[int, list[float]] = {}
         for emb, meta in zip(foreign.get("embeddings", []), foreign.get("metadatas", [])):
             if len(emb) == dim:

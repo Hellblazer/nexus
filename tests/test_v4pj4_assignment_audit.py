@@ -34,6 +34,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
+import nexus.doctor_assignments as doctor_assignments
 from nexus.cli import main
 from nexus.db import make_t3
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -374,6 +375,138 @@ def test_probe_collection_reports_changed_during_probe_not_a_disagreement() -> N
     assert r.inconclusive is False, "changed_during_probe and inconclusive are mutually exclusive"
 
 
+def _mismatch_then_match_centroid_factory():
+    """A fresh ``_Centroid`` whose first ``get_foreign`` call returns a
+    ONE-topic snapshot, and every later call returns a TWO-topic snapshot
+    that stays constant from then on -- so the FIRST attempt's before/after
+    pair mismatches (topic 11 appeared mid-attempt), but the RETRY's
+    before/after pair matches (the snapshot already stabilized by call 3).
+    """
+
+    class _Centroid:
+        def __init__(self):
+            self.calls = 0
+
+        def get_foreign(self, name):
+            self.calls += 1
+            if self.calls == 1:
+                return {"embeddings": [[1.0, 0.0]], "metadatas": [{"topic_id": 10}]}
+            return {
+                "embeddings": [[1.0, 0.0], [0.0, 1.0]],
+                "metadatas": [{"topic_id": 10}, {"topic_id": 11}],
+            }
+
+    return _Centroid
+
+
+def test_probe_collection_recovers_on_retry_after_a_first_attempt_mismatch(monkeypatch) -> None:
+    """Round-3 review (Minor): the retry actually matters, not just the
+    detection. When the snapshot mismatches on the first attempt but has
+    already stabilized by the retry, the run must recover -- comparing
+    against the stabilized snapshot, no false disagreement, and
+    ``changed_during_probe`` must stay False. Then, forced down to
+    ``_MAX_SNAPSHOT_ATTEMPTS=1`` (no retry allowed), the IDENTICAL race
+    must NOT recover: this proves the retry is load-bearing, not a no-op.
+    """
+
+    class _Col:
+        def get(self, **kw):
+            return {"ids": ["a" * 64]}
+
+    class _T3:
+        def get_or_create_collection(self, name):
+            return _Col()
+
+        def get_embeddings_by_id(self, name, ids):
+            return {"a" * 64: [1.0, 0.0]}
+
+    _Centroid = _mismatch_then_match_centroid_factory()
+
+    class _Taxo:
+        def __init__(self):
+            self._centroid = _Centroid()
+
+        def cross_preview(self, name, ids):
+            return {"a" * 64: (10, 1.0)}
+
+        def get_assignment_details(self, ids):
+            return []
+
+    # Default _MAX_SNAPSHOT_ATTEMPTS=2: attempt 0 mismatches (1 topic vs 2),
+    # the retry's before/after pair both see the stabilized 2-topic
+    # snapshot -- recovers, no false disagreement.
+    r = probe_collection(_Taxo(), _T3(), "c", size=1, sample=20, rng=random.Random(1))
+    assert r.error is None
+    assert r.compared > 0
+    assert r.disagreements == []
+    assert r.changed_during_probe is False
+
+    # Non-vacuity: the SAME race, with NO retry allowed, must NOT recover --
+    # proving the recovery above genuinely came from the retry and not from
+    # some other path.
+    monkeypatch.setattr(doctor_assignments, "_MAX_SNAPSHOT_ATTEMPTS", 1)
+    r_no_retry = probe_collection(_Taxo(), _T3(), "c", size=1, sample=20, rng=random.Random(1))
+    assert r_no_retry.error is None
+    assert r_no_retry.compared == 0
+    assert r_no_retry.changed_during_probe is True
+
+
+def test_a_centroid_change_in_an_unrelated_dim_does_not_flag_this_collection() -> None:
+    """Round-3 review (Minor): ``get_foreign`` returns every OTHER
+    collection's centroids across every embedding dim a tenant's
+    collections use, not just the sampled source collection's own dim
+    (here, dim 2 -- the fixture's chunk vector is ``[1.0, 0.0]``). A
+    3-dim centroid appearing between this probe's before and after reads
+    is a change in a dim this probe never reads at all, and must not flag
+    ``changed_during_probe`` for a collection nothing actually raced
+    against.
+    """
+
+    class _Col:
+        def get(self, **kw):
+            return {"ids": ["a" * 64]}
+
+    class _T3:
+        def get_or_create_collection(self, name):
+            return _Col()
+
+        def get_embeddings_by_id(self, name, ids):
+            return {"a" * 64: [1.0, 0.0]}  # dim 2
+
+    class _Centroid:
+        """dim-2 topic 10 is STABLE across every call; a dim-3 topic (99)
+        appears only from the second call onward -- an unrelated-dim
+        change that must be invisible to the dim-scoped comparison."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def get_foreign(self, name):
+            self.calls += 1
+            embeddings = [[1.0, 0.0]]
+            metadatas = [{"topic_id": 10}]
+            if self.calls > 1:
+                embeddings.append([0.0, 0.0, 1.0])
+                metadatas.append({"topic_id": 99})
+            return {"embeddings": embeddings, "metadatas": metadatas}
+
+    class _Taxo:
+        _centroid = _Centroid()
+
+        def cross_preview(self, name, ids):
+            return {"a" * 64: (10, 1.0)}
+
+        def get_assignment_details(self, ids):
+            return []
+
+    r = probe_collection(_Taxo(), _T3(), "c", size=1, sample=20, rng=random.Random(1))
+
+    assert r.error is None
+    assert r.changed_during_probe is False
+    assert r.compared == 1
+    assert r.disagreements == []
+
+
 def test_report_names_changed_during_probe_collections_and_is_not_a_clean_pass() -> None:
     changed = CollectionAssignmentDrift(collection="racy", size=2, changed_during_probe=True)
     clean = CollectionAssignmentDrift(collection="busy", size=2, compared=2)
@@ -405,6 +538,9 @@ def test_probe_collection_no_candidate_answered_is_not_applicable() -> None:
     class _T3:
         def get_or_create_collection(self, name):
             return _Col()
+
+        def get_embeddings_by_id(self, name, ids):
+            return {}
 
     class _Centroid:
         def get_foreign(self, name):
