@@ -1397,7 +1397,14 @@ def index_repo_cmd(
             from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             nonlocal manifest_problems_detected
             indexed_files = n - skipped_files
-            if emit_identity_drop_summary(indexed_count=indexed_files):
+            # nexus-wbfpw.29 round 3: docs this run's OWN same-run
+            # manifest self-heal pass (indexer.py, nexus-c21fk) already
+            # restored -- a write failure in this set gets a "restored,
+            # no action needed" note instead of a false "run nx catalog
+            # reconcile" failure. `stats` (closed over from this
+            # function's enclosing scope) is set by the time this runs.
+            _healed = set((stats or {}).get("self_heal_reconciled_doc_ids") or [])
+            if emit_identity_drop_summary(indexed_count=indexed_files, healed_doc_ids=_healed):
                 manifest_problems_detected = True
 
         def _emit_ephemeral_skip_summary() -> None:
@@ -1772,7 +1779,11 @@ def index_repo_cmd(
             )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
-            raise_identity_drop_exception(subject="document")
+            # nexus-wbfpw.29 round 3: same healed-set exclusion as the
+            # emit_identity_drop_summary call above, so a self-healed
+            # write failure never appears in the "causes" list either.
+            _healed = set((stats or {}).get("self_heal_reconciled_doc_ids") or [])
+            raise_identity_drop_exception(subject="document", healed_doc_ids=_healed)
         if pdf_quality_gate_failed:
             raise click.ClickException(
                 f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "

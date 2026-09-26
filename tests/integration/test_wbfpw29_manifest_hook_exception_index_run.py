@@ -96,6 +96,28 @@ def _code_fixture_lines(n_functions: int) -> str:
     )
 
 
+def _channel3_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name: str) -> tuple[Path, Path]:
+    """Force ``ChunkBatcher.add()`` to REJECT a fixture file, routing it
+    through ``code_indexer.py``'s legacy per-file fallback -- the ONE call
+    site where the real, unpatched ``manifest_write_batch_hook`` fires
+    unconditionally for `nx index repo` (see the acceptance test's own
+    docstring for the full reachability argument). Returns (repo,
+    fixture_path)."""
+    import nexus.db.http_vector_client as http_vector_client
+
+    # per_collection_chunk_cap() re-reads this module global on every
+    # call (it is NOT captured at import time by any caller) -- see its
+    # own onnx-local branch, `return _ONNX_LOCAL_UPSERT_CHUNK_CAP`.
+    monkeypatch.setattr(http_vector_client, "_ONNX_LOCAL_UPSERT_CHUNK_CAP", 1)
+
+    repo = tmp_path / name
+    repo.mkdir()
+    fixture_path = repo / "big.py"
+    fixture_path.write_text(_code_fixture_lines(80))
+    _git_init(repo, "Initial commit")
+    return repo, fixture_path
+
+
 def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -136,10 +158,22 @@ def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
     for a code file -- inside ``manifest_write_batch_hook`` itself -- so a
     non-empty log is direct proof the REAL hook executed, not a
     plausible-looking double standing in for it.
+
+    ROUND-3 REWRITE (critic Critical): ``nx index repo``'s own SAME-RUN
+    manifest self-heal pass (indexer.py, nexus-c21fk) reads the catalog
+    via its OWN ``make_catalog_reader()`` call -- a DIFFERENT import path
+    than ``mcp_infra.get_catalog()``, which is all this test faults -- so
+    self-heal is HEALTHY here and genuinely repairs the exact gap the
+    faulted hook just left, in the SAME run. Before round 3's fix, the
+    run still failed non-zero with a stale "run nx catalog reconcile"
+    remedy for a document that no longer needed it. Now: the run exits 0,
+    with an INFORMATIONAL "restored by self-heal" line naming the doc --
+    not a failure. The companion test below
+    (``test_manifest_hook_exception_when_self_heal_is_also_faulted``)
+    covers the case where self-heal genuinely cannot repair the gap.
     """
     from click.testing import CliRunner
 
-    import nexus.db.http_vector_client as http_vector_client
     import nexus.mcp_infra as mcp_infra
     from nexus.cli import main
     from tests._catalog_fixture_ops import only_document
@@ -147,16 +181,7 @@ def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
 
-    # per_collection_chunk_cap() re-reads this module global on every
-    # call (it is NOT captured at import time by any caller) -- see its
-    # own onnx-local branch, `return _ONNX_LOCAL_UPSERT_CHUNK_CAP`.
-    monkeypatch.setattr(http_vector_client, "_ONNX_LOCAL_UPSERT_CHUNK_CAP", 1)
-
-    repo = tmp_path / "channel3-repo"
-    repo.mkdir()
-    fixture_path = repo / "big.py"
-    fixture_path.write_text(_code_fixture_lines(80))
-    _git_init(repo, "Initial commit")
+    repo, fixture_path = _channel3_repo(tmp_path, monkeypatch, name="channel3-repo")
 
     call_log: list[str] = []
     original_get_catalog = mcp_infra.get_catalog
@@ -179,27 +204,28 @@ def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
         "(check the chunk-cap monkeypatch and the fixture's chunk count)"
     )
 
-    # nexus-7lw6a: the run must fail loud, not report "Done." at
-    # rc=0 while the chunks landed with no manifest row.
-    assert first.exit_code != 0, first.output
-    assert "catalog manifest write failed for 1 document(s)" in first.output
-
-    # The chunks DID get written and the file WAS registered in the
-    # catalog (over-work-never-under-work: only the manifest LINKAGE
-    # failed) -- so the document's real tumbler is discoverable, and
-    # the bead's own wording ("names the documents to re-index")
-    # requires it actually appear in the failure output, not just a
-    # bare count.
     doc = only_document()
-    assert str(doc.tumbler) in first.output, (
-        f"expected the failing document's tumbler {doc.tumbler!r} to "
-        f"be named in the run's output:\n{first.output}"
-    )
 
-    # Remove the fault and force a genuine re-index (content change,
-    # not relying on the separate self-heal pass alone) so this run's
-    # OWN manifest hook call -- through the SAME real dispatch site,
-    # chunk cap still forced to 1 -- is what proves the recovery.
+    # nexus-wbfpw.29 round 3: self-heal is healthy on this path (it never
+    # calls the faulted mcp_infra.get_catalog), so it repairs the gap in
+    # THIS SAME run -- the run must exit 0 with an informational note,
+    # never the "run nx catalog reconcile" failure this bead's round-1/2
+    # fix used to print unconditionally for a document that no longer
+    # needs it.
+    assert first.exit_code == 0, first.output
+    assert "restored by self-heal in this same run" in first.output
+    assert str(doc.tumbler) in first.output, (
+        f"expected the restored document's tumbler {doc.tumbler!r} to be "
+        f"named in the run's output:\n{first.output}"
+    )
+    assert "run 'nx catalog reconcile'" not in first.output.lower(), (
+        "the manifest was already restored by self-heal -- the run must "
+        "not point the operator at a no-op remedy"
+    )
+    assert doc.chunk_count > 0
+
+    # Sanity: an unfaulted, genuinely-changed re-index still succeeds
+    # normally afterward.
     monkeypatch.setattr(mcp_infra, "get_catalog", original_get_catalog)
     fixture_path.write_text(_code_fixture_lines(80) + "\ndef fn_extra(x):\n    return x - 1\n")
     _git_commit_all(repo, "modify big.py")
@@ -208,8 +234,176 @@ def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
         second = runner.invoke(main, ["index", "repo", str(repo)])
 
     assert second.exit_code == 0, second.output
+
+
+def test_manifest_hook_exception_when_self_heal_is_also_faulted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-wbfpw.29 round 3 (critic Critical), the OTHER half: when the
+    SAME run's self-heal pass cannot repair the gap either (here: its
+    core, ``heal_manifest_gaps``, is faulted separately from the manifest
+    hook -- a genuinely independent failure, not the common case, but the
+    one this bead's fail-loud check exists for), the run must still exit
+    non-zero, name the document, and print the ORIGINAL "run nx catalog
+    reconcile" remedy -- because that remedy is now actually true. The
+    remedy is proven to actually work by the separate
+    ``test_reconcile_is_the_remedy_the_warning_actually_names`` test.
+    """
+    from click.testing import CliRunner
+
+    import nexus.catalog.manifest_heal as manifest_heal
+    import nexus.mcp_infra as mcp_infra
+    from nexus.catalog.manifest_heal import ManifestHealResult
+    from nexus.cli import main
+    from tests._catalog_fixture_ops import only_document
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+
+    repo, _fixture_path = _channel3_repo(tmp_path, monkeypatch, name="channel3-repo-noheal")
+
+    def faulting_get_catalog():
+        raise RuntimeError("nexus-wbfpw.29 fault injection (channel 3)")
+
+    def noop_heal(*args, **kwargs):
+        # Genuinely finds/repairs nothing -- the gap survives.
+        return ManifestHealResult()
+
+    runner = CliRunner()
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+        monkeypatch.setattr(manifest_heal, "heal_manifest_gaps", noop_heal)
+        result = runner.invoke(main, ["index", "repo", str(repo)])
+
     doc = only_document()
-    assert doc.chunk_count > 0
+
+    assert result.exit_code != 0, result.output
+    assert "catalog manifest write failed for 1 document(s)" in result.output
+    assert str(doc.tumbler) in result.output, (
+        f"expected the still-failing document's tumbler {doc.tumbler!r} "
+        f"to be named in the run's output:\n{result.output}"
+    )
+    assert "run 'nx catalog reconcile'" in result.output.lower(), (
+        "the gap genuinely was not repaired this run -- the remedy must "
+        "still be printed"
+    )
+    assert "restored by self-heal" not in result.output
+
+
+def test_heal_manifest_gaps_reports_which_documents_it_reconciled(
+    tmp_path: Path,
+) -> None:
+    """nexus-wbfpw.29 round 3: ``ManifestHealResult.reconciled`` was a
+    bare COUNT with no way to identify which documents it covered --
+    closing the self-heal/exit-check coordination gap needed the actual
+    doc_ids. Proves ``reconciled_doc_ids`` is populated (and agrees with
+    the count) against the same directly-seeded gap shape
+    ``test_reconcile_is_the_remedy_the_warning_actually_names`` uses,
+    calling ``heal_manifest_gaps`` directly rather than through the CLI.
+    """
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.catalog.manifest_heal import heal_manifest_gaps
+    from nexus.db import make_t3
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    collection = "docs__wbfpw29-heal-ids-gate__bge-base-en-v15-768__v1"
+    content_hash = "cc" * 32
+    chash = "dd" * 32
+
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner(
+            "wbfpw29-heal-ids-owner", "repo", repo_hash="wbfpw29-heal-ids-hash",
+        )
+        doc_id = str(cat.register(
+            owner, "Heal Ids Gate Doc",
+            content_type="pdf", physical_collection=collection,
+            chunk_count=1, meta={"content_hash": content_hash},
+        ))
+
+    HttpVectorClient().upsert_chunks_with_embeddings(
+        collection_name=collection,
+        ids=[chash],
+        documents=["nexus-wbfpw29 heal-ids gate content"],
+        embeddings=[[]],
+        metadatas=[{
+            "content_hash": content_hash,
+            "chunk_text_hash": chash,
+            "chunk_start_char": 0, "chunk_end_char": 10,
+            "line_start": 0, "line_end": 0,
+        }],
+    )
+
+    reader = make_catalog_reader()
+    entries = [e for e in reader.all_documents() if str(e.tumbler) == doc_id]
+    assert len(entries) == 1
+
+    result = heal_manifest_gaps(entries, reader, make_t3, make_catalog_writer)
+
+    assert result.reconciled == 1
+    assert result.reconciled_doc_ids == [doc_id]
+
+
+def _prose_fixture_text(n_paragraphs: int) -> str:
+    """A markdown file whose chunk count reliably exceeds a cap of 1."""
+    return "\n\n".join(
+        f"## Section {i}\n\nParagraph {i} of the wbfpw29 channel-3 prose "
+        f"fixture, with enough distinct content to force its own chunk "
+        f"under the semantic markdown chunker."
+        for i in range(n_paragraphs)
+    )
+
+
+def test_prose_indexer_channel3_manifest_hook_exception_fails_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """critic Minor (round 3): mirrors the code_indexer channel-3
+    acceptance test for ``prose_indexer.py::index_prose_file``'s
+    structurally-identical legacy per-file fallback (same
+    ``ctx.hooks.fire_batch(...)`` call shape, no ``grain=``, no
+    ``skip_hooks=``, confirmed by direct code comparison in round 3's
+    review) -- proving the real dispatch site end to end for prose, not
+    just inferring it from the shared mechanism. Self-heal is healthy
+    here too (same reasoning as the code test), so the correct outcome is
+    exit 0 with the restored-by-self-heal note.
+    """
+    from click.testing import CliRunner
+
+    import nexus.mcp_infra as mcp_infra
+    from nexus.cli import main
+    from tests._catalog_fixture_ops import only_document
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+
+    repo, _fixture_path = _channel3_repo(tmp_path, monkeypatch, name="channel3-prose-repo")
+    # Remove the code fixture from the shared helper's repo -- this test
+    # wants exactly ONE prose file, not a code+prose mix.
+    (repo / "big.py").unlink()
+    (repo / "big.md").write_text(_prose_fixture_text(60))
+    _git_commit_all(repo, "swap fixture for prose")
+
+    call_log: list[str] = []
+
+    def faulting_get_catalog():
+        call_log.append("get_catalog")
+        raise RuntimeError("nexus-wbfpw.29 fault injection (prose channel 3)")
+
+    runner = CliRunner()
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+        result = runner.invoke(main, ["index", "repo", str(repo)])
+
+    assert call_log, (
+        "get_catalog() was never called -- the real manifest_write_batch_hook "
+        "never fired for the prose file; channel 3 was not reached "
+        "(check the fixture's chunk count under the forced cap)"
+    )
+
+    doc = only_document()
+    assert result.exit_code == 0, result.output
+    assert "restored by self-heal in this same run" in result.output
+    assert str(doc.tumbler) in result.output
 
 
 def test_reconcile_is_the_remedy_the_warning_actually_names(

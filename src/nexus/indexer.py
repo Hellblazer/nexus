@@ -6109,6 +6109,16 @@ def _run_index(
         # near-nothing because identical empty files share one
         # content_hash. Best-effort: a heal failure must never fail the
         # index run.
+        #
+        # nexus-wbfpw.29 round 3: this pass can repair the EXACT gap a
+        # manifest-hook exception left moments earlier in THIS SAME run
+        # (see the placement comment above -- "gaps created by THIS run's
+        # own manifest-write hook are healed too" is not hypothetical).
+        # Captured here, outside the try, so the exit-code check below
+        # (via the return dict) sees an accurate empty list rather than an
+        # undefined name if self-heal never runs or raises before
+        # assigning it.
+        _self_heal_reconciled_doc_ids: list[str] = []
         _phase("Catalog manifest self-heal…")
         _t = time.monotonic()
         try:
@@ -6140,6 +6150,7 @@ def _run_index(
                         _cat.by_owner(_heal_owner), _cat, _mk_t3,
                         _tracked_writer, yield_before_write=_yield_fair,
                     )
+                    _self_heal_reconciled_doc_ids = list(heal.reconciled_doc_ids)
                     if heal.reconciled or heal.lost or heal.write_failed:
                         _phase(
                             f"Catalog manifest self-heal: "
@@ -6392,6 +6403,16 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
+        # nexus-wbfpw.29 round 3: tumblers of every document the SAME
+        # run's own manifest self-heal pass just reconciled (nexus-c21fk,
+        # above) -- index_repo_cmd subtracts these from the manifest-
+        # write-failure collector before deciding the exit code, so a
+        # hook failure self-heal already repaired in this run is reported
+        # as a "restored" WARNING, not a false "run nx catalog reconcile"
+        # failure. Always [] for every OTHER index verb (pdf/md/dt), which
+        # have no same-run self-heal pass -- they keep failing exactly as
+        # before this bead's round-3 fix.
+        "self_heal_reconciled_doc_ids": _self_heal_reconciled_doc_ids,
         # nexus-wi1uv round-2: count of PDFs that failed the post-extraction
         # quality gate this run (contained per-file, never aborted the run).
         # index_repo_cmd uses this to drive a non-zero exit after

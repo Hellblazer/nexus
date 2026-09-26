@@ -303,11 +303,15 @@ def _resolve_manifest_failure_display_paths(doc_ids: list[str]) -> dict[str, str
     return paths
 
 
-def _emit_write_failed_warning() -> bool:
+def _emit_write_failed_warning(
+    *, healed_doc_ids: "frozenset[str] | set[str]" = frozenset(),
+) -> bool:
     """GH #1371: a persistent (retries-exhausted or non-retryable) catalog
     manifest-write failure previously surfaced only as a structlog
     WARNING — invisible without log capture wired up. Returns ``True`` iff
-    the collector held an entry.
+    an UNHEALED entry remains (see *healed_doc_ids* below) — a doc that
+    failed but was restored is reported informationally and never trips
+    the caller's fail-loud gate on its own.
 
     Wording copied VERBATIM from the two existing call sites this
     replaces (``index_repo_cmd``, ``dt.py``'s ``index_cmd``) — including
@@ -333,6 +337,21 @@ def _emit_write_failed_warning() -> bool:
     resolved source path/URI when the catalog can supply one (a bare
     tumbler needs an extra ``nx catalog show`` lookup to be actionable) —
     see :func:`_resolve_manifest_failure_display_paths`.
+
+    nexus-wbfpw.29 round 3 (critic Critical): ``nx index repo``'s own
+    same-run manifest self-heal pass (nexus-c21fk, indexer.py) can repair
+    the EXACT gap a manifest-hook exception left moments earlier in the
+    SAME run — before this, the warning printed "will not appear in
+    catalog-aware queries. Run 'nx catalog reconcile' to repair." for a
+    document that already appears and needs no reconcile, a provably
+    false claim. *healed_doc_ids* is the set of doc_ids this run's own
+    self-heal pass (if any — most callers have none and pass the default
+    empty set, which reproduces the exact prior behavior) already
+    restored via the SAME ``atomic_manifest_replace`` path
+    ``nx catalog reconcile`` uses. Failures in this set print a SEPARATE,
+    informational line ("restored by self-heal ... no action needed")
+    and are excluded from both the count and the parenthetical list in
+    the fail-loud line below, and from this function's return value.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
@@ -341,13 +360,31 @@ def _emit_write_failed_warning() -> bool:
     failed = get_manifest_write_failures()
     if not failed:
         return False
-    paths = _resolve_manifest_failure_display_paths(failed)
+    healed = [d for d in failed if d in healed_doc_ids]
+    still_failed = [d for d in failed if d not in healed_doc_ids]
+
+    if healed:
+        healed_paths = _resolve_manifest_failure_display_paths(healed)
+        healed_text = ", ".join(
+            f"{doc_id} ({healed_paths[doc_id]})" if doc_id in healed_paths else doc_id
+            for doc_id in healed
+        )
+        click.echo(
+            f"  WARNING: catalog manifest write failed for {len(healed)} "
+            f"document(s) ({healed_text}) and was restored by self-heal "
+            f"in this same run — no action needed.",
+            err=True,
+        )
+
+    if not still_failed:
+        return False
+    paths = _resolve_manifest_failure_display_paths(still_failed)
     ids_text = ", ".join(
         f"{doc_id} ({paths[doc_id]})" if doc_id in paths else doc_id
-        for doc_id in failed
+        for doc_id in still_failed
     )
     click.echo(
-        f"  WARNING: catalog manifest write failed for {len(failed)} "
+        f"  WARNING: catalog manifest write failed for {len(still_failed)} "
         f"document(s) ({ids_text}) — they will not appear in "
         f"catalog-aware queries. Run 'nx catalog reconcile' to repair.",
         err=True,
@@ -520,7 +557,9 @@ def _emit_superseded_sweep_skipped_warning() -> bool:
 
 
 _IDENTITY_DROP_CHECKS = {
-    "write_failed": lambda indexed_count, **kw: _emit_write_failed_warning(),
+    "write_failed": lambda indexed_count, **kw: _emit_write_failed_warning(
+        healed_doc_ids=kw.get("healed_doc_ids", frozenset()),
+    ),
     "identity_drops": lambda indexed_count, **kw: _emit_identity_drops_warning(),
     "refused": lambda indexed_count, **kw: _emit_refused_warning(
         indexed_count=indexed_count,
@@ -543,6 +582,7 @@ _DEFAULT_ORDER = (
 def emit_identity_drop_summary(
     *, indexed_count: int, order: tuple[str, ...] = _DEFAULT_ORDER,
     refused_in_failed: int = 0,
+    healed_doc_ids: "frozenset[str] | set[str]" = frozenset(),
 ) -> bool:
     """Echo a WARNING line (stderr) for each populated collector since the
     last :func:`reset_identity_drop_collectors` call. Returns ``True`` if
@@ -566,20 +606,42 @@ def emit_identity_drop_summary(
     *refused_in_failed* (nexus-l6tr7): refusals the caller already
     bucketed into ``failed`` because they PROPAGATED as
     ``IndexRunVerifyRefused`` — see :func:`_emit_refused_warning`.
+
+    *healed_doc_ids* (nexus-wbfpw.29 round 3): doc_ids this run's own
+    same-run manifest self-heal pass already restored — forwarded only to
+    the ``write_failed`` check (identity drops have no catalog entry for
+    self-heal to have found in the first place; see
+    :func:`_emit_write_failed_warning`). Callers with no same-run
+    self-heal (every index verb except `nx index repo`) omit this and get
+    the exact prior behavior.
     """
     problems_detected = False
     for key in order:
-        if _IDENTITY_DROP_CHECKS[key](indexed_count, refused_in_failed=refused_in_failed):
+        if _IDENTITY_DROP_CHECKS[key](
+            indexed_count, refused_in_failed=refused_in_failed,
+            healed_doc_ids=healed_doc_ids,
+        ):
             problems_detected = True
     return problems_detected
 
 
-def raise_identity_drop_exception(*, subject: str = "document") -> None:
+def raise_identity_drop_exception(
+    *, subject: str = "document",
+    healed_doc_ids: "frozenset[str] | set[str]" = frozenset(),
+) -> None:
     """Raise the fail-loud ``ClickException`` for a BATCH run
     (``nx index repo`` / ``nx dt index``) that recorded manifest write
     failures, identity drops, completion refusals, and/or (nexus-39upx
     round 2 SIGNIFICANT 2) a superseded-chunk sweep skip. Call only after
     :func:`emit_identity_drop_summary` returned ``True``.
+
+    *healed_doc_ids* (nexus-wbfpw.29 round 3): pass the SAME set given to
+    :func:`emit_identity_drop_summary` — a write failure this run's own
+    same-run self-heal already restored must not itself count toward
+    ``write_failed`` here either, or a run with BOTH a self-healed write
+    failure AND some unrelated real problem (e.g. an identity drop) would
+    still wrongly list "manifest write failures" among the causes and
+    point the operator at a reconcile that has nothing left to do.
 
     The message names ONLY the cause(s) that actually fired this run and
     the matching remedy for each — nexus-39upx round 2 (substantive-
@@ -617,7 +679,9 @@ def raise_identity_drop_exception(*, subject: str = "document") -> None:
         get_superseded_sweep_stats,
     )
 
-    write_failed = bool(get_manifest_write_failures())
+    write_failed = bool(
+        [d for d in get_manifest_write_failures() if d not in healed_doc_ids]
+    )
     identity_dropped = bool(get_manifest_identity_drops())
     refused = bool(get_complete_refusals())
     sweep_skipped = bool(get_superseded_sweep_stats().get("skipped"))

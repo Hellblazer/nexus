@@ -59,6 +59,17 @@ class ManifestHealResult:
     #: ``never_chunked`` had chunk_count == 0 (expected — nothing to rebuild).
     lost: list = field(default_factory=list)
     never_chunked: list = field(default_factory=list)
+    #: nexus-wbfpw.29 round 3: the tumbler (str) of every entry actually
+    #: reconciled this pass -- ``reconciled`` was a bare count with no way
+    #: to identify WHICH documents it covered. The indexer's own same-run
+    #: self-heal call (nexus-c21fk) can repair the exact gap a manifest-
+    #: hook exception left moments earlier in the SAME `nx index repo` run
+    #: -- without this list, nx index's exit-code check had no way to tell
+    #: "already fixed by self-heal" apart from "still broken", so it
+    #: printed a stale "run nx catalog reconcile" remedy for a document
+    #: that no longer needed it. len(reconciled_doc_ids) == reconciled
+    #: always holds (both incremented together, same call site below).
+    reconciled_doc_ids: list = field(default_factory=list)
 
     @property
     def unmatched(self) -> list:
@@ -310,3 +321,4 @@ def _heal_collections(
                     result.write_failed += 1
                     continue
             result.reconciled += 1
+            result.reconciled_doc_ids.append(str(entry.tumbler))
