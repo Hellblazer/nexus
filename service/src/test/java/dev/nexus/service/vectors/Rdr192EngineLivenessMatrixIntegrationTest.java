@@ -572,18 +572,15 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * drift from the live checks. "true" means: P1g/P1s/P2/P9 visible, P3
      * sweep candidate, P4 swept, P6 deletable, P7 orphaned/moved.
      *
-     * <p>P1g and P1s agree on every row: {@code liveChunksCondition}
-     * (get/list) and {@code plain_search_<dim>}'s inlined anti-join
-     * (search) are collection-scoped, byte-identical-in-effect predicates
-     * as of GH #1546 (nexus-ky9ps, vectors-017) — verified here, not
-     * assumed; see this class's own javadoc P1s bullet. Had this bead run
-     * before that fix landed, R4/R6 could in principle have split the two
-     * columns (a chash live in a DIFFERENT collection could mask a
-     * same-collection tombstoned manifest row under the OLD unscoped
-     * anti-join) — this fixture doesn't manufacture that exact cross-
-     * collection-tombstone shape, so it wouldn't have caught that specific
-     * historical bug either, but it does now pin that both surfaces read
-     * identically going forward.
+     * <p>P1g and P1s agree on all eight rows today. {@code
+     * liveChunksCondition} (get/list) and {@code plain_search_<dim>}'s
+     * inlined anti-join (search) are separate SQL, both collection-scoped
+     * since GH #1546 (nexus-ky9ps, vectors-017). Agreement on these rows is
+     * what this table proves, not equivalence in general: no row here has
+     * an own-collection tombstoned-only manifest row AND a live manifest
+     * row for the same chash in another collection, the shape that split
+     * the two before GH #1546. That row is RDR-192 Step 4's to add
+     * (nexus-wbfpw.9), where live(c) is first written.
      */
     private static final Map<String, Map<String, Boolean>> EXPECTED_VALUE_TABLE = Map.ofEntries(
         Map.entry("R1", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", true,  "P6", true,  "P7", true,  "P9", false)),
