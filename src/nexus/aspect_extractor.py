@@ -1769,6 +1769,12 @@ def _run_claude_isolated(
         # fix at f1ae257d0; this second, un-modernized "claude -p" call
         # site did not, until now.
         "--strict-mcp-config",
+        # RDR-219 (nexus-wauo1.40): tool-free must mean TOOL-FREE, as in
+        # claude_dispatch. With no --tools "" the child keeps the CLI's
+        # built-in set, Bash included, and a permissive settings.json lets
+        # Bash run; its children would inherit NX_HARNESS_CLAUDE_OAUTH_TOKEN,
+        # which the grant keeps in this child's env.
+        "--tools", "",
     ]
     if _argv is None and model:
         # nexus-oc98c: the config's model_version is what the row will be

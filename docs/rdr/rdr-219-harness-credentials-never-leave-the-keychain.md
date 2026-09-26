@@ -340,7 +340,13 @@ shell, so a harness that exercises them grants the token to nx-mcp alone:
   The helper never changes `os.environ`, so git, nested MCP servers and other
   children of nx-mcp do not get the token under its protected name. It keeps
   the harness name in the child, so a tool-granting dispatch whose nested
-  nx-mcp dispatches again still works.
+  nx-mcp dispatches again still works. That is safe only while no dispatched
+  `claude -p` can run a shell, because a shell's children would inherit the
+  harness name: tool-free dispatches pass `--tools ""` (both call sites), and
+  the one tool-granting grant, `mcp/core.py`'s `_subprocess_tool_grant`, allows
+  `Read`, `Grep`, `Glob` and the two nexus MCP servers only.
+  `tests/test_dispatch_grants_no_shell_tool.py` fails if either changes
+  (nexus-wauo1.40).
 - **Detection.** When nx-mcp starts with the harness name present, it logs one
   warning saying LLM dispatch will authenticate with a harness grant, and
   `nx doctor` reports it.
@@ -593,9 +599,9 @@ find-generic-password` is denied by the plugin guard. The guard's rule matches
 the command and the item name whether or not `-w` or `-g` is present, so the
 metadata-only form stands for the printing form; in the 2026-09-25 run the
 model refused the `-w` form on its own, and the denial was observed on the
-metadata-only form (T2 `nexus_rdr/219-mvv-2026-09-25`). With the dispatch grant (amendment): the three Phase 3b proofs pass
-with ANTHROPIC_API_KEY absent, and a Bash-tool child in that session does not
-inherit the harness name.
+metadata-only form (T2 `nexus_rdr/219-mvv-2026-09-25`). With the dispatch grant (amendment): the four Phase 3b proofs pass
+with ANTHROPIC_API_KEY absent; the fourth is that a Bash-tool child in that
+session does not inherit the harness name.
 
 ### Phase 0: Spike
 
@@ -828,3 +834,4 @@ RDR over an epic, and the conexus plugin as the guard's home.
 - 2026-09-25: The print guard stops denying whole-environment dumps: Claude deletes the token from its own environment, so a dump from its Bash tool cannot contain it; the guard keeps keychain reads, credential-file reads, references to a protected name, and other processes' environments (Phase 3 code review round 2, nexus-wauo1.26).
 - 2026-09-25: The janitor also fails on leftover processes holding a token variable and on leftover harness tmux servers (Sam's decision, after five were found).
 - 2026-09-25: Phase 3 critique round 2: the janitor text states the tmux name list is a second signal behind the process check; the MVV guard criterion states what the run observed.
+- 2026-09-26: Phase 3b review round: "The nx-mcp dispatch grant" states the no-shell invariant the kept harness name depends on, pinned by a test; the aspect extractor's `claude -p` passes `--tools ""`; the MVV counts four Phase 3b proofs.

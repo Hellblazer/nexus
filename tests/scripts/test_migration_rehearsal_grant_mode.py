@@ -246,15 +246,57 @@ def test_rehearse_fullstack_prestart_block_shellchecks_clean(
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_default_fullstack_workload_prompt_unchanged_when_not_grant(
-    rehearse_fullstack_text: str,
-) -> None:
-    """The default (non-grant) fullstack run must not gain the grant-only
-    tool calls in its own workload prompt/allowedTools -- those exercise
-    the nx-mcp dispatch grant and would fail without it."""
-    idx_op = rehearse_fullstack_text.find("mcp__nexus__operator_summarize")
-    idx_grant_mode = rehearse_fullstack_text.find("GRANT_MODE")
-    assert idx_op != -1 and idx_grant_mode != -1 and idx_grant_mode < idx_op, (
-        "operator_summarize call is not gated behind a GRANT_MODE check "
-        "appearing earlier in the file"
+def _workload_block(text: str) -> str:
+    start = text.index('MARK="fsmark$$"')
+    end_marker = 'End your reply with the literal token WORKLOADDONE."'
+    end = text.index(end_marker) + len(end_marker)
+    return text[start:end]
+
+
+@pytest.mark.parametrize("grant", ["0", "1"])
+def test_workload_grant_tools_only_in_grant_mode(rehearse_fullstack_text: str, grant: str) -> None:
+    """Run the real prompt-building block under each mode: the grant-only
+    tools (which need the dispatch grant and would fail without it) appear in
+    the prompt and allowedTools exactly when GRANT_MODE=1."""
+    probe = (
+        f"GRANT_MODE={grant}\n"
+        + _workload_block(rehearse_fullstack_text)
+        + '\nprintf "%s\\n---\\n%s" "${allowed_tools[*]}" "$prompt"\n'
     )
+    out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True).stdout
+    tools, prompt = out.split("\n---\n", 1)
+    for name in ("operator_summarize", "nx_enrich_beads"):
+        assert (f"mcp__nexus__{name}" in tools) is (grant == "1"), tools
+        assert (name in prompt) is (grant == "1"), prompt
+    assert "mcp__nexus__store_put" in tools
+
+
+def test_argv_poller_window_covers_the_workload(rehearse_fullstack_text: str) -> None:
+    """The poller must be running before the grant workload's claude call
+    (where nx-mcp's nested dispatches happen) and stop after the leak check."""
+    t = rehearse_fullstack_text
+    started = t.index("ARGV_POLLER_PID=$!")
+    workload = t.index("--output-format stream-json")
+    leak = t.index('leakout="$(claude_mcp_grant')
+    stopped = t.index('kill "$ARGV_POLLER_PID"')
+    assert started < workload < leak < stopped
+
+
+def test_grant_tool_proofs_read_the_stream_not_a_marker(rehearse_fullstack_text: str) -> None:
+    t = rehearse_fullstack_text
+    assert "stream_tool_calls.py" in t
+    assert "'mcp__nexus__operator_summarize ok'" in t
+    assert "'mcp__nexus__nx_enrich_beads ok'" in t
+    assert "SUMMARY:" not in t and "ENRICHED:" not in t
+
+
+def test_model_reply_notes_are_redacted(rehearse_fullstack_text: str) -> None:
+    for label in ("claude workload tail:", "leak-check tail:"):
+        line = next(l for l in rehearse_fullstack_text.splitlines() if label in l)
+        assert "| redact |" in line, line
+    probe = (
+        next(l for l in rehearse_fullstack_text.splitlines() if l.startswith("redact()"))
+        + "\nprintf 'a sk-ant-oat01-Ab_c-9 b' | redact\n"
+    )
+    out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True).stdout
+    assert out == "a [REDACTED] b"

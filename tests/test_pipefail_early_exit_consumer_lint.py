@@ -868,7 +868,6 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
         ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('# signed bundle `nx init` extracted (<config>/pg-bundle/**/bin/psql).', 'PSQL="$(find "$HOME/.config/nexus/pg-bundle" -type f -name psql 2>/dev/null | head -1)"')),
         ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('authout="$(claude -p \'Reply with exactly the token AUTHOK and nothing else.\' --dangerously-skip-permissions 2>&1)"', 'if printf \'%s\' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"')),
         ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('if printf \'%s\' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"', 'else bad "claude -p auth failed — cannot drive the MCP/extraction"; note "$(printf \'%s\' "$authout" | head -3 | tr \'\\n\' \' \')"; say "ABORT (no claude auth)"; printf \'REHEARSAL FAILED\\n\'; exit 1; fi')),
-        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('note "claude workload tail: $(printf \'%s\' "$wlout" | tail -3 | tr \'\\n\' \' \' | cut -c1-280)"', 'printf \'%s\' "$wlout" | grep -q "WORKLOADDONE" && ok "MCP workload completed (claude drove the tools)" || bad "MCP workload did not finish cleanly"')),
         ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('sleep 3', 'if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "store_put materialized a knowledge collection (MCP tools really executed)"; STORED_OK=1')),
         ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "store_put materialized a knowledge collection (MCP tools really executed)"; STORED_OK=1', 'else bad "no knowledge collection — claude did NOT actually call store_put (MCP connect / allowedTools issue)"; note "$(nx collection list 2>&1 | head -3 | tr \'\\n\' \' \')"; STORED_OK=0; fi')),
         ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('# 3c. nx_answer produced a grounded composed answer (from the workload).', 'printf \'%s\' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "nx_answer (MCP) returned a grounded composed answer" || note "nx_answer answer not evident in workload output"')),
@@ -1077,7 +1076,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
 # and removed (rehearse_chash_window.sh and rehearse_guided.sh deleted
 # whole-file at nexus-lgdel.l2); see git blame on this constant for the
 # historical count derivation. 135 is the current live count.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 135
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 134
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:

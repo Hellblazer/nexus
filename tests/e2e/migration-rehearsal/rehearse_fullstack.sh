@@ -26,6 +26,10 @@ say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILS=$((FAILS+1)); }
 note() { printf '       %s\n' "$*"; }
+# Mask anything token-shaped before a model's reply reaches the log. The
+# prompts forbid printing values; this is the floor under a model that
+# ignores them (RDR-219, nexus-wauo1.40).
+redact() { sed -E 's/sk-ant-[A-Za-z0-9_-]+/[REDACTED]/g'; }
 
 # ── Phase A: install + provision + serve ─────────────────────────────────────
 say "Phase A — install + provision + serve"
@@ -200,23 +204,47 @@ prompt="You have the nexus MCP server; use ONLY its tools (names start mcp__nexu
 declare -a allowed_tools=(mcp__nexus__store_put mcp__nexus__search mcp__nexus__nx_answer)
 if [ "$GRANT_MODE" = 1 ]; then
   prompt="$prompt
-4. operator_summarize the text 'Widgets, sprockets and gadgets combine via retrieval-ranked assembly.'; put its returned summary text in your reply after the literal marker SUMMARY:.
-5. nx_enrich_beads with bead_description 'Test bead: assemble a widget from a sprocket and a gadget.'; put a short excerpt of its returned enriched description in your reply after the literal marker ENRICHED:."
+4. operator_summarize the text 'Widgets, sprockets and gadgets combine via retrieval-ranked assembly.'
+5. nx_enrich_beads with bead_description 'Test bead: assemble a widget from a sprocket and a gadget.'"
   allowed_tools+=(mcp__nexus__operator_summarize mcp__nexus__nx_enrich_beads)
 fi
 prompt="$prompt
 End your reply with the literal token WORKLOADDONE."
 if [ "$GRANT_MODE" = 1 ]; then
+  # Proof 4's argv poller starts HERE, before the workload, so its window
+  # covers nx-mcp's own nested claude -p dispatches (operator_summarize,
+  # nx_enrich_beads) and the worker it spawns, not only the leak check.
+  # It records the WORST count observed; it is stopped after the leak check.
+  ARGV_LEAK_FILE="$(mktemp)"
+  printf '0' > "$ARGV_LEAK_FILE"
+  ( while true; do
+      n="$(ps -axww -o args 2>/dev/null | grep -c '[s]k-ant-o' || true)"
+      cur="$(cat "$ARGV_LEAK_FILE" 2>/dev/null || echo 0)"
+      if [ "${n:-0}" -gt "${cur:-0}" ] 2>/dev/null; then printf '%s' "${n:-0}" > "$ARGV_LEAK_FILE"; fi
+      sleep 0.5
+    done ) &
+  ARGV_POLLER_PID=$!
+
   note "driving multivariate MCP workload via claude_mcp_grant (store_put x4 + search + nx_answer + operator_summarize + nx_enrich_beads)…"
-  wlout="$(claude_mcp_grant nx-mcp -- -p "$prompt" --dangerously-skip-permissions \
-    --allowedTools "${allowed_tools[@]}" 2>&1)"
+  # stream-json so proofs 1 and 3 read the tool_use/tool_result events
+  # themselves: a marker line in the reply proves nothing, since the model
+  # could write it without calling the tool.
+  WL_STREAM="$(mktemp)"; WL_RESULT="$(mktemp)"
+  claude_mcp_grant nx-mcp -- -p "$prompt" --dangerously-skip-permissions \
+    --output-format stream-json --verbose \
+    --allowedTools "${allowed_tools[@]}" > "$WL_STREAM" 2>&1
+  tool_status="$(python3 "$HOME/lib/stream_tool_calls.py" --result "$WL_RESULT" \
+    mcp__nexus__operator_summarize mcp__nexus__nx_enrich_beads < "$WL_STREAM")"
+  wlout="$(cat "$WL_RESULT")"
+  if [ -z "$wlout" ]; then wlout="$(tail -5 "$WL_STREAM")"; fi
+  rm -f "$WL_STREAM" "$WL_RESULT"
 else
   note "driving multivariate MCP workload via claude -p (store_put x4 + search + nx_answer)…"
   wlout="$(claude -p "$prompt" --mcp-config /home/nexus/mcp.json --dangerously-skip-permissions \
     --allowedTools "${allowed_tools[@]}" 2>&1)"
 fi
-note "claude workload tail: $(printf '%s' "$wlout" | tail -3 | tr '\n' ' ' | cut -c1-280)"
-printf '%s' "$wlout" | grep -q "WORKLOADDONE" && ok "MCP workload completed (claude drove the tools)" || bad "MCP workload did not finish cleanly"
+note "claude workload tail: $(printf '%s' "$wlout" | tail -3 | tr '\n' ' ' | redact | cut -c1-280)"
+[[ "$wlout" == *WORKLOADDONE* ]] && ok "MCP workload completed (claude drove the tools)" || bad "MCP workload did not finish cleanly"
 
 # 3b. Did store_put REALLY execute? (disambiguates 'claude didn't call the tool /
 #     MCP didn't connect' from 'tool ran but hook didn't enqueue'.)
@@ -228,19 +256,20 @@ else bad "no knowledge collection — claude did NOT actually call store_put (MC
 printf '%s' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "nx_answer (MCP) returned a grounded composed answer" || note "nx_answer answer not evident in workload output"
 
 # 3d. GRANT MODE proofs 1 and 3: operator_summarize and the tool-granting
-#     nested dispatch (nx_enrich_beads) must have returned REAL results --
-#     never an error or "Not logged in" -- proving nx-mcp's OWN nested
-#     claude -p authenticated under the dispatch grant.
+#     nested dispatch (nx_enrich_beads) must each appear as a tool_use in the
+#     stream with a non-error, non-empty tool_result free of any auth failure,
+#     proving nx-mcp's OWN nested claude -p authenticated under the grant.
 if [ "$GRANT_MODE" = 1 ]; then
-  if printf '%s' "$wlout" | grep -q "SUMMARY:" && ! printf '%s' "$wlout" | grep -qi "not logged in"; then
-    ok "operator_summarize (dispatch grant) returned a real reply"
+  note "tool calls: $(printf '%s' "$tool_status" | tr '\n' ' ')"
+  if [[ $'\n'"$tool_status"$'\n' == *$'\n''mcp__nexus__operator_summarize ok'$'\n'* ]]; then
+    ok "operator_summarize (dispatch grant) was called and returned a real result"
   else
-    bad "operator_summarize did not return a real reply under the dispatch grant"
+    bad "operator_summarize was not called, or did not return a real result, under the dispatch grant"
   fi
-  if printf '%s' "$wlout" | grep -q "ENRICHED:" && ! printf '%s' "$wlout" | grep -qi "not logged in"; then
-    ok "nx_enrich_beads (tool-granting dispatch, nested nx-mcp) returned a real result under the dispatch grant"
+  if [[ $'\n'"$tool_status"$'\n' == *$'\n''mcp__nexus__nx_enrich_beads ok'$'\n'* ]]; then
+    ok "nx_enrich_beads (tool-granting dispatch, nested nx-mcp) was called and returned a real result under the dispatch grant"
   else
-    bad "nx_enrich_beads did not return a real result under the dispatch grant"
+    bad "nx_enrich_beads was not called, or did not return a real result, under the dispatch grant"
   fi
 fi
 
@@ -249,19 +278,7 @@ fi
 #     match a token-shaped pattern while the session runs. The diagnostic
 #     prints COUNTS ONLY (TOKEN RULE) -- never a value or a whole environment.
 if [ "$GRANT_MODE" = 1 ]; then
-  # Sample every process's argv concurrently with the claude call below
-  # (not just a post-hoc snapshot after it exits): a background poller
-  # records the WORST count observed across the whole call.
-  ARGV_LEAK_FILE="$(mktemp)"
-  printf '0' > "$ARGV_LEAK_FILE"
-  ( while true; do
-      n="$(ps -axww -o args 2>/dev/null | grep -c '[s]k-ant-o' || true)"
-      cur="$(cat "$ARGV_LEAK_FILE" 2>/dev/null || echo 0)"
-      if [ "${n:-0}" -gt "${cur:-0}" ] 2>/dev/null; then printf '%s' "${n:-0}" > "$ARGV_LEAK_FILE"; fi
-      sleep 0.5
-    done ) &
-  ARGV_POLLER_PID=$!
-
+  # The argv poller started before the workload (step 3) is still running.
   leak_prompt="You have a Bash tool. Run exactly this one command and nothing else:
 env | grep -c NX_HARNESS_CLAUDE_OAUTH_TOKEN; env | grep -c CLAUDE_CODE_OAUTH_TOKEN
 Reply with exactly two lines, using the ACTUAL numbers the command printed, nothing else:
@@ -275,16 +292,16 @@ Then end with the literal token LEAKCHECKDONE. Never print the command's own env
   argv_hits="$(cat "$ARGV_LEAK_FILE" 2>/dev/null || echo 0)"
   rm -f "$ARGV_LEAK_FILE"
 
-  note "leak-check tail: $(printf '%s' "$leakout" | tail -3 | tr '\n' ' ' | cut -c1-200)"
-  if printf '%s' "$leakout" | grep -q "LEAKCHECKDONE" \
-     && printf '%s' "$leakout" | grep -qE 'HARNESS_COUNT=0\b' \
-     && printf '%s' "$leakout" | grep -qE 'TOKEN_COUNT=0\b'; then
+  note "leak-check tail: $(printf '%s' "$leakout" | tail -3 | tr '\n' ' ' | redact | cut -c1-200)"
+  if [[ "$leakout" == *LEAKCHECKDONE* ]] \
+     && [[ "$leakout" =~ (^|[^0-9A-Za-z_])HARNESS_COUNT=0([^0-9]|$) ]] \
+     && [[ "$leakout" =~ (^|[^0-9A-Za-z_])TOKEN_COUNT=0([^0-9]|$) ]]; then
     ok "no leak: a real Bash-tool child's environment names neither token (HARNESS_COUNT=0, TOKEN_COUNT=0)"
   else
     bad "no-leak diagnostic did not confirm both counts are 0 (leak, or the diagnostic itself failed)"
   fi
   if [ "${argv_hits:-0}" -eq 0 ] 2>/dev/null; then
-    ok "no process argv matched a token-shaped pattern while the session ran (ps -axww -o args | grep -c '[s]k-ant-o' = 0)"
+    ok "no process argv matched a token-shaped pattern from the workload through the leak check (ps -axww -o args | grep -c '[s]k-ant-o' = 0)"
   else
     bad "a process argv matched a token-shaped pattern while the session ran (${argv_hits} hit(s))"
   fi

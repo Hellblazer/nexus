@@ -197,10 +197,11 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "fresh per run.",
     ),
     "tests/e2e/migration-rehearsal/rehearse_fullstack.sh": (
-        8, "CONTAINER: runs INSIDE the container (own header comment: "
-           "\"Full-stack isolated shakeout\"); provisions its own bundled "
-           "PG/engine fresh per run; 7 extra matches are store_put/search/"
-           "nx_answer MCP-tool mentions inside the container.",
+        11, "CONTAINER: runs INSIDE the container (own header comment: "
+            "\"Full-stack isolated shakeout\"); provisions its own bundled "
+            "PG/engine fresh per run; 10 extra matches are store_put/search/"
+            "nx_answer MCP-tool mentions inside the container, 3 of them the "
+            "grant mode's pre-start-skip check (nexus-wauo1.40).",
     ),
     "tests/e2e/migration-rehearsal/rehearse_shakeout.sh": (
         7, "CONTAINER: runs INSIDE the container (own header comment); Phase D "
