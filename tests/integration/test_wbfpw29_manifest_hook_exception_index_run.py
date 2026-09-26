@@ -7,12 +7,25 @@ Drives the PRODUCTION entry point (``nx index repo`` via the real Click
 CLI, ``nexus.hook_registry.HookRegistry.fire_batch`` unmocked) against
 the shared engine substrate every test in this suite already boots
 (``tests/conftest.py``'s autouse ``_pin_t2_substrate``) — same shape as
-``tests/test_indexer_e2e.py::test_cli_index_repo``. Fault injection is at
-the one seam the bead names: ``nexus.mcp_infra.manifest_write_batch_hook``
-itself is replaced with a callable that raises, so the failure reaches
-``HookRegistry.fire_batch``'s generic except block exactly the way a real
-bug in the manifest hook would -- never mocking ``fire_batch`` or the
-exit-check machinery under test.
+``tests/test_indexer_e2e.py::test_cli_index_repo``.
+
+ROUND-2 (critic Critical): fault injection targets the REAL, unpatched
+``nexus.mcp_infra.manifest_write_batch_hook``'s own internal dependencies
+(``get_catalog``), never the hook object itself. Replacing the hook
+object with a bare double loses its ``batch_grain = "flush"``
+classification attribute, which silently changes WHICH of
+``HookRegistry``'s dispatch buckets fires it -- the round-1 version of
+this test passed by accident, exercising a dispatch site (per-file
+grain="file") the real hook never occupies for a ChunkBatcher-accepted
+file. This version forces the file through the ONE real dispatch site
+that fires the real hook unconditionally for ``nx index repo`` --
+``code_indexer.py``'s legacy per-file fallback, reached whenever
+``ChunkBatcher.add()`` rejects a file (chunk count over the onnx-local
+cap, forced down to 1 here) -- documented in each test's own docstring,
+along with a "guard test" pin
+(``tests/test_wbfpw29_manifest_hook_exception.py::
+test_manifest_write_batch_hook_declares_flush_grain``) against this
+exact class of test-artifact bug recurring.
 
 Marked ``integration`` per this directory's convention (drives a full
 repo-indexing round trip through the catalog); run explicitly with
@@ -71,65 +84,128 @@ def _clean_collectors():
     reset_identity_drop_collectors()
 
 
+def _code_fixture_lines(n_functions: int) -> str:
+    """A code file whose chunk count reliably exceeds a cap of 1 (and
+    stays well above the default 150-line/chunk window, so it chunks
+    into several pieces even under normal caps)."""
+    return "\n".join(
+        f"def fn_{i}(x):\n"
+        f"    \"\"\"Function {i} of the wbfpw29 channel-3 fixture.\"\"\"\n"
+        f"    return x + {i}\n"
+        for i in range(n_functions)
+    )
+
+
 def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
-    one_file_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bead's own acceptance scenario, verbatim: fault-inject the
-    manifest hook for the run's one document; the run exits non-zero and
-    names that document; a re-run with the fault removed writes the
-    manifest and exits 0."""
+    """The bead's acceptance scenario, driven through the REAL production
+    dispatch site the manifest hook actually occupies for `nx index repo`
+    -- channel 3, code_indexer.py's legacy per-file fallback.
+
+    ROUND-2 REWRITE (critic Critical): the original version of this test
+    replaced ``mcp_infra.manifest_write_batch_hook`` wholesale with a bare
+    function. That double has no ``batch_grain`` attribute, so
+    ``HookRegistry``'s classification (``getattr(hook, "batch_grain",
+    "file")``) silently defaulted it to "file" -- a bucket
+    (``indexer.py``'s per-file ``_fire_deferred_hooks``) the REAL,
+    correctly-classified hook (``batch_grain = "flush"``) never occupies
+    for a ChunkBatcher-ACCEPTED file. The test passed, but for a dispatch
+    the real hook cannot reach.
+
+    This version instead forces ``ChunkBatcher.add()`` to REJECT the
+    fixture file (monkeypatching the onnx-local chunk cap down to 1, so
+    the file's several chunks exceed it), which routes the file through
+    ``code_indexer.py``'s legacy per-file fallback
+    (``ctx.hooks.fire_batch(ids, ctx.corpus, ..., catalog_doc_id=...)``,
+    NO ``grain=`` override, NO ``skip_hooks=``) -- the ONE call site where
+    the real, unpatched ``manifest_write_batch_hook`` fires unconditionally
+    for `nx index repo`. Confirmed the dominant channel under onnx-local
+    (the default local/dev mode): ``per_collection_chunk_cap``'s onnx-local
+    branch applies its cap to EVERY prefix including code (nexus-33hpq), so
+    any ordinary source file whose chunk count exceeds the (default 16, here
+    forced to 1) cap takes this path -- not a rare/legacy corner.
+
+    Fault injection targets the hook's OWN dependency
+    (``nexus.mcp_infra.get_catalog``, one of the exact seams round 1's
+    unit tests already used against the real, unpatched function) instead
+    of replacing the hook object, so the hook keeps its real identity and
+    classification throughout. A call-log on the faulted ``get_catalog``
+    is the dispatch-trace proof this test needs: ``get_catalog()`` is
+    called from exactly one place during ordinary `nx index repo` traffic
+    for a code file -- inside ``manifest_write_batch_hook`` itself -- so a
+    non-empty log is direct proof the REAL hook executed, not a
+    plausible-looking double standing in for it.
+    """
     from click.testing import CliRunner
 
+    import nexus.db.http_vector_client as http_vector_client
+    import nexus.mcp_infra as mcp_infra
     from nexus.cli import main
     from tests._catalog_fixture_ops import only_document
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
 
-    import nexus.mcp_infra as mcp_infra
+    # per_collection_chunk_cap() re-reads this module global on every
+    # call (it is NOT captured at import time by any caller) -- see its
+    # own onnx-local branch, `return _ONNX_LOCAL_UPSERT_CHUNK_CAP`.
+    monkeypatch.setattr(http_vector_client, "_ONNX_LOCAL_UPSERT_CHUNK_CAP", 1)
 
-    original_hook = mcp_infra.manifest_write_batch_hook
+    repo = tmp_path / "channel3-repo"
+    repo.mkdir()
+    fixture_path = repo / "big.py"
+    fixture_path.write_text(_code_fixture_lines(80))
+    _git_init(repo, "Initial commit")
 
-    def faulty_manifest_hook(*args, **kwargs):
-        raise RuntimeError("nexus-wbfpw.29 fault injection")
+    call_log: list[str] = []
+    original_get_catalog = mcp_infra.get_catalog
+
+    def faulting_get_catalog():
+        call_log.append("get_catalog")
+        raise RuntimeError("nexus-wbfpw.29 fault injection (channel 3)")
 
     runner = CliRunner()
     with patch("nexus.config.get_credential", side_effect=fake_credentials()):
-        monkeypatch.setattr(mcp_infra, "manifest_write_batch_hook", faulty_manifest_hook)
-        first = runner.invoke(main, ["index", "repo", str(one_file_repo)])
+        monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+        first = runner.invoke(main, ["index", "repo", str(repo)])
 
-        # nexus-7lw6a: the run must fail loud, not report "Done." at
-        # rc=0 while the chunks landed with no manifest row.
-        assert first.exit_code != 0, first.output
-        assert "catalog manifest write failed for 1 document(s)" in first.output
+    # DISPATCH TRACE: proves the REAL manifest_write_batch_hook executed
+    # (its body is the only caller of get_catalog() on this run's path),
+    # not merely that fire_batch's generic exception handling works.
+    assert call_log, (
+        "get_catalog() was never called -- the real manifest_write_batch_hook "
+        "never fired, so channel 3 was not actually reached this run "
+        "(check the chunk-cap monkeypatch and the fixture's chunk count)"
+    )
 
-        # The chunks DID get written and the file WAS registered in the
-        # catalog (over-work-never-under-work: only the manifest LINKAGE
-        # failed) -- so the document's real tumbler is discoverable, and
-        # the bead's own wording ("names the documents to re-index")
-        # requires it actually appear in the failure output, not just a
-        # bare count.
-        doc = only_document()
-        assert str(doc.tumbler) in first.output, (
-            f"expected the failing document's tumbler {doc.tumbler!r} to "
-            f"be named in the run's output:\n{first.output}"
-        )
+    # nexus-7lw6a: the run must fail loud, not report "Done." at
+    # rc=0 while the chunks landed with no manifest row.
+    assert first.exit_code != 0, first.output
+    assert "catalog manifest write failed for 1 document(s)" in first.output
 
-        # Remove the fault and force a genuine re-index (content change,
-        # not relying on the separate self-heal pass alone) so this
-        # run's OWN manifest hook call -- the thing this bead fixes the
-        # failure-routing for -- is what proves the recovery. Restore
-        # ONLY the patched hook attribute (not monkeypatch.undo(), which
-        # would also unwind the autouse engine-substrate env patches
-        # sharing this same function-scoped monkeypatch instance).
-        monkeypatch.setattr(mcp_infra, "manifest_write_batch_hook", original_hook)
-        (one_file_repo / "only.py").write_text(
-            "def greet(name):\n"
-            "    return f'hello again {name}'\n"
-        )
-        _git_commit_all(one_file_repo, "modify only.py")
+    # The chunks DID get written and the file WAS registered in the
+    # catalog (over-work-never-under-work: only the manifest LINKAGE
+    # failed) -- so the document's real tumbler is discoverable, and
+    # the bead's own wording ("names the documents to re-index")
+    # requires it actually appear in the failure output, not just a
+    # bare count.
+    doc = only_document()
+    assert str(doc.tumbler) in first.output, (
+        f"expected the failing document's tumbler {doc.tumbler!r} to "
+        f"be named in the run's output:\n{first.output}"
+    )
 
-        second = runner.invoke(main, ["index", "repo", str(one_file_repo)])
+    # Remove the fault and force a genuine re-index (content change,
+    # not relying on the separate self-heal pass alone) so this run's
+    # OWN manifest hook call -- through the SAME real dispatch site,
+    # chunk cap still forced to 1 -- is what proves the recovery.
+    monkeypatch.setattr(mcp_infra, "get_catalog", original_get_catalog)
+    fixture_path.write_text(_code_fixture_lines(80) + "\ndef fn_extra(x):\n    return x - 1\n")
+    _git_commit_all(repo, "modify big.py")
+
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        second = runner.invoke(main, ["index", "repo", str(repo)])
 
     assert second.exit_code == 0, second.output
     doc = only_document()
@@ -228,6 +304,159 @@ def test_reconcile_is_the_remedy_the_warning_actually_names(
         f"manifest rows after={len(manifest_after)}"
     )
     assert manifest_after[0].chash == chash
+
+
+def _fake_pdf_extraction_result():
+    from nexus.pdf_extractor import ExtractionResult
+
+    text = "Page 0 nexus-wbfpw29 channel-4 content.\n"
+    return ExtractionResult(
+        text=text,
+        metadata={
+            "extraction_method": "docling", "page_count": 1,
+            "page_boundaries": [
+                {"page_number": 1, "start_char": 0, "page_text_length": len(text)}
+            ],
+            "table_regions": [], "format": "markdown",
+        },
+    )
+
+
+def _fake_pdf_extract_side_effect(result):
+    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, **kwargs):
+        if on_page:
+            on_page(0, "Page 0 nexus-wbfpw29 channel-4 content.", {"page_number": 1})
+        return result
+    return extract
+
+
+def _fake_pdf_chunks():
+    from nexus.pdf_chunker import TextChunk
+
+    return [
+        TextChunk(
+            text="nexus-wbfpw29 channel-4 unique chunk 0",
+            chunk_index=0, metadata={"page": 1},
+        )
+    ]
+
+
+def test_manifest_hook_exception_via_doc_indexer_pdf_channel_runfence_already_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """critic round-2 (code-review Important): covers the OTHER real
+    dispatch site the manifest hook occupies unconditionally --
+    doc_indexer.py's small-document PDF path (`index_pdf`,
+    streaming="never"): ``hooks.fire_batch(...)`` there carries no
+    ``grain=`` override at all, so it fires every hook including the real
+    ``manifest_write_batch_hook`` regardless of its own ``batch_grain``
+    classification (unlike channel 3's caller, whose grain filtering is
+    exactly what round 1's test-artifact bug hinged on).
+
+    Demonstrates why THIS bead's own collector-based signal is not what
+    surfaces a failure on this channel: RUNFENCE's own, INDEPENDENT,
+    PRE-EXISTING ``_fence_complete`` call (nexus-5xn3k, predates
+    nexus-wbfpw.29 entirely) already raises ``IndexRunVerifyRefused`` the
+    instant the manifest write comes back with zero referenced rows for a
+    claimed non-zero chunk count -- a different, older, and LOUDER failure
+    mode that fires before this bead's exit-code check is ever consulted
+    on this channel. Fault injection is the SAME seam as channel 3
+    (``mcp_infra.get_catalog`` raising), driving the REAL, unpatched hook.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.doc_indexer import _register_or_lookup_doc_id, index_pdf
+    from nexus.errors import IndexRunVerifyRefused
+
+    import nexus.mcp_infra as mcp_infra
+
+    collection = "docs__wbfpw29-channel4-gate__bge-base-en-v15-768__v1"
+    pdf_path = tmp_path / "channel4.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 nexus-wbfpw29 fake content\n")
+
+    doc_id = _register_or_lookup_doc_id(
+        pdf_path, "wbfpw29-channel4-gate",
+        content_type="pdf", physical_collection=collection,
+    )
+    assert doc_id, "catalog registration must succeed against the real service"
+
+    def faulting_get_catalog():
+        raise RuntimeError("nexus-wbfpw.29 fault injection (channel 4)")
+
+    monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+
+    t3 = HttpVectorClient()
+    with patch("nexus.doc_indexer.PDFExtractor") as ME, \
+         patch("nexus.doc_indexer.PDFChunker") as MC:
+        ME.return_value.extract.side_effect = _fake_pdf_extract_side_effect(
+            _fake_pdf_extraction_result()
+        )
+        MC.return_value.chunk.return_value = _fake_pdf_chunks()
+
+        with pytest.raises(IndexRunVerifyRefused) as excinfo:
+            index_pdf(
+                pdf_path, "wbfpw29-channel4-gate", t3=t3,
+                collection_name=collection, streaming="never",
+            )
+
+    # RUNFENCE's own counts prove the manifest was genuinely never
+    # written this run (referenced=0) despite one real chunk landing --
+    # exactly the shape this bead's collectors describe, caught here by
+    # an entirely separate, pre-existing mechanism.
+    assert excinfo.value.doc_id == doc_id
+    assert excinfo.value.referenced == 0
+    assert excinfo.value.chunk_count == 1
+
+
+def test_index_markdown_manifest_hook_exception_runfence_already_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """critic Significant: ``index_markdown`` (doc_indexer.py ~3498-3681
+    -- backing ``nx dt index``'s markdown records, ``nx collection
+    reindex``, and standalone RDR indexing) was never traced by either
+    prior round. Grepping its OWN function body for
+    ``fire_batch``/``manifest_write_batch_hook`` finds nothing because
+    ``index_markdown`` does not fire hooks itself at all -- it delegates
+    its entire body to ``_index_document`` (doc_indexer.py:1591), the
+    SAME shared pipeline function ``index_pdf``'s OTHER (non-small-doc)
+    paths use. ``_index_document`` fires ``hooks.fire_batch(...)`` with
+    NO ``grain=`` override (real hook fires unconditionally, same as the
+    channel-4 PDF test above) and then calls
+    ``_fence_complete(_catalog_doc_id_for_batch, content_hash,
+    len(prepared))`` -- byte-for-byte the same RUNFENCE backstop. A
+    manifest-hook failure during markdown/RDR/dt-markdown indexing is
+    therefore ALREADY loud via the identical pre-existing mechanism, not
+    an unresolved or silent gap.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.doc_indexer import _register_or_lookup_doc_id, index_markdown
+    from nexus.errors import IndexRunVerifyRefused
+
+    import nexus.mcp_infra as mcp_infra
+
+    collection = "docs__wbfpw29-channel-md-gate__bge-base-en-v15-768__v1"
+    md_path = tmp_path / "channel-md.md"
+    md_path.write_text("# Title\n\nSome markdown content for nexus-wbfpw29.\n")
+
+    doc_id = _register_or_lookup_doc_id(
+        md_path, "wbfpw29-channel-md-gate",
+        content_type="prose", physical_collection=collection,
+    )
+    assert doc_id, "catalog registration must succeed against the real service"
+
+    def faulting_get_catalog():
+        raise RuntimeError("nexus-wbfpw.29 fault injection (markdown channel)")
+
+    monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+
+    t3 = HttpVectorClient()
+    with pytest.raises(IndexRunVerifyRefused) as excinfo:
+        index_markdown(
+            md_path, "wbfpw29-channel-md-gate", t3=t3, collection_name=collection,
+        )
+
+    assert excinfo.value.doc_id == doc_id
+    assert excinfo.value.referenced == 0
+    assert excinfo.value.chunk_count == 1
 
 
 def test_non_manifest_hook_exception_does_not_change_exit_code(

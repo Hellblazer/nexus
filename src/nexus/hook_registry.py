@@ -669,29 +669,31 @@ def _record_manifest_hook_batch_exception(
     early return), the batch is recorded as an identity drop instead of
     a write failure, so it is never silently lost either way.
 
-    nexus-wbfpw.29 round 2 (code-review Critical): this whole body is
-    wrapped in its own try/except. It runs INSIDE ``fire_batch``'s own
-    ``except Exception`` block, after the ORIGINAL hook already failed —
-    any exception escaping here (e.g. a malformed, non-dict metadata
-    entry such as ``metadatas=[None]``, which used to raise
-    ``AttributeError`` out of ``meta.get(...)``) would abort the
-    ``for hook in self._batch:`` loop and propagate out of
+    nexus-wbfpw.29 round 2 (code-review Critical, and round 2 residual):
+    this whole body — INCLUDING the identity-check import itself, not just
+    the logic after it — is wrapped in its own try/except. It runs INSIDE
+    ``fire_batch``'s own ``except Exception`` block, after the ORIGINAL
+    hook already failed — any exception escaping here (e.g. a malformed,
+    non-dict metadata entry such as ``metadatas=[None]``, which used to
+    raise ``AttributeError`` out of ``meta.get(...)``; or, in principle,
+    the identity-check import itself, however unlikely a live import to
+    fail once ``nexus.mcp_infra`` is already loaded and cached) would
+    abort the ``for hook in self._batch:`` loop and propagate out of
     ``fire_batch`` entirely, breaking the class's own per-hook failure
     isolation contract: every hook registered AFTER the manifest hook
     would silently never fire for that batch. Best-effort by construction
     — this helper only ever ADDS a signal on top of the hook's own
     failure; it must never make that failure worse.
     """
-    from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred to avoid circular import (mirrors install_default_hooks above)
-
-    if hook is not manifest_write_batch_hook:
-        return
-
     try:
-        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred, same reason
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import (mirrors install_default_hooks above)
             _record_manifest_identity_drop,
             _record_manifest_write_failure,
+            manifest_write_batch_hook,
         )
+
+        if hook is not manifest_write_batch_hook:
+            return
 
         affected: set[str] = set()
         for meta in (metadatas or []):

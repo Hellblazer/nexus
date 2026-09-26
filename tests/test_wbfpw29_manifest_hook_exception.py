@@ -293,3 +293,65 @@ def test_write_failures_dedup_stable_order(monkeypatch):
     mcp_infra._record_manifest_write_failure("1.9.1")
 
     assert mcp_infra.get_manifest_write_failures() == ["1.9.1", "1.9.0"]
+
+
+# ── Fix round 2 ──────────────────────────────────────────────────────────────
+
+
+def test_manifest_hook_exception_routing_survives_a_broken_mcp_infra_import():
+    """code-review round-2 residual: the identity-check import
+    (`from nexus.mcp_infra import manifest_write_batch_hook`) used to sit
+    OUTSIDE the guarding try/except -- if it ever raised, the exact
+    original failure mode (item 1's bug) would reproduce despite the
+    try/except wrapping everything AFTER it. Poisoning sys.modules is the
+    standard way to force an `ImportError` on the next `from X import Y`;
+    this proves the WHOLE body, import included, is now covered.
+
+    Restores ``sys.modules`` manually (not via ``monkeypatch.setitem``):
+    the autouse ``_clean_collectors`` fixture's teardown itself imports
+    ``nexus.mcp_infra`` (via ``reset_identity_drop_collectors``), and
+    fixture-vs-monkeypatch teardown ORDER does not guarantee the module is
+    already unpoisoned by the time that runs -- observed directly: with
+    ``monkeypatch.setitem`` the fixture teardown itself raised
+    ``ModuleNotFoundError``. Restoring inline, before this test function
+    returns, sidesteps that ordering question entirely.
+    """
+    import sys
+
+    from nexus.hook_registry import _record_manifest_hook_batch_exception
+
+    real_mcp_infra = sys.modules.get("nexus.mcp_infra")
+    sys.modules["nexus.mcp_infra"] = None  # type: ignore[assignment]
+    try:
+        def faulty(*args, **kwargs):
+            raise RuntimeError("nexus-wbfpw.29 fault injection")
+
+        # Must not raise -- this is the assertion under test.
+        _record_manifest_hook_batch_exception(
+            faulty, doc_ids=["chash-1"], collection="code__x",
+            metadatas=[{"doc_id": "1.2.3"}], catalog_doc_id="",
+        )
+    finally:
+        if real_mcp_infra is not None:
+            sys.modules["nexus.mcp_infra"] = real_mcp_infra
+        else:
+            del sys.modules["nexus.mcp_infra"]
+
+
+def test_manifest_write_batch_hook_declares_flush_grain():
+    """Regression pin for the round-2 critic Critical: the production
+    ``manifest_write_batch_hook`` MUST keep its ``batch_grain = "flush"``
+    classification attribute. A bare function replacement (as several
+    unit tests above deliberately use to test HookRegistry's OWN
+    exception-routing mechanism in isolation) loses this attribute, which
+    made an earlier acceptance test pass for the wrong reason: the
+    replacement silently reclassified as grain="file" and fired through a
+    dispatch bucket (``indexer.py``'s per-file ``_fire_deferred_hooks``)
+    the REAL hook never occupies for a ChunkBatcher-accepted file. Any
+    test that exercises a REAL indexing entry point (not an isolated
+    HookRegistry unit test) must register the unpatched
+    ``mcp_infra.manifest_write_batch_hook`` -- see
+    tests/integration/test_wbfpw29_manifest_hook_exception_index_run.py's
+    channel-3 test -- and fault only its internal dependencies, never
+    replace the function object itself."""
+    assert mcp_infra.manifest_write_batch_hook.batch_grain == "flush"
