@@ -525,39 +525,31 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
     )
 
 
-def test_manifest_hook_exception_with_genuinely_short_self_heal_fails_with_reconcile_remedy(
+@pytest.mark.parametrize(
+    "expected_extra, repaired",
+    [
+        pytest.param(["56" * 32], False, id="expected-chash-missing-fails"),
+        pytest.param([], True, id="expected-chashes-all-present-restores"),
+    ],
+)
+def test_manifest_write_failure_verdict_reads_the_manifest_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    expected_extra: list[str], repaired: bool,
 ) -> None:
-    """nexus-wbfpw.29 round 5 (critique CRITICAL), end-to-end companion to
-    the direct-core test above: drives ``nx index repo`` for real against a
-    genuinely-short-and-write-failed document under the SAME owner the run
-    processes, so the REAL owner-scoped ``heal_manifest_gaps`` call
-    (indexer.py, unstubbed) discovers and attempts to repair it.
+    """nexus-wbfpw.29: drives ``nx index repo`` against a document under
+    the run's own owner that is registered with ``chunk_count=2`` while T3
+    holds one of its chunks, so the real owner-scoped self-heal rebuilds a
+    one-row manifest. A write failure for it is recorded through
+    ``_record_manifest_write_failure`` (the function every real producer
+    calls), with the chashes that write was trying to put in the manifest,
+    injected after ``index_repo_cmd``'s own per-run collector reset.
 
-    Why not the channel-3 manifest-hook-EXCEPTION fixture directly (as the
-    sibling acceptance tests above use): measured directly (round 5), a
-    manifest-hook exception's own document reads ``chunk_count=0`` at
-    self-heal time (only a SUCCESSFUL hook ever bumps it), which is
-    trivially "at least met" by any nonzero self-heal result -- so that
-    exact shape can never exercise a genuine shortfall at all. And a
-    RE-index whose hook fails leaves the PRIOR manifest untouched, so
-    self-heal never even considers it gapped. The compound fault this
-    fix targets -- a document with a real prior chunk_count, a genuine
-    manifest shortfall, AND a write failure recorded this run -- is
-    reachable only via a pre-existing gap (the same shape `nx catalog
-    reconcile`'s own remedy targets) that also picks up a fresh write
-    failure, e.g. a second, independent fault during the same run. This
-    test constructs exactly that shape directly at the data layer (same
-    seeding idiom as ``test_reconcile_is_the_remedy_the_warning_actually_
-    names`` above), then records a REAL write failure for it via
-    ``_record_manifest_write_failure`` -- the identical function every
-    real manifest-write hook calls (already the established substitution
-    for this exact scenario in ``tests/test_commands_helpers_identity_
-    drop.py``) -- injected via a thin wrapper around
-    ``reset_identity_drop_collectors`` so it survives ``index_repo_cmd``'s
-    own per-run reset. Everything downstream (owner-scoped
-    ``heal_manifest_gaps``, its real T3 fetch, the real exit-code
-    decision) runs unstubbed.
+    The verdict comes from reading the manifest back after the run. When
+    the recorded expectation holds a chash the rebuilt manifest lacks, the
+    run fails with the reconcile remedy. When every expected chash is
+    present, the same run reports the failure as restored and exits 0,
+    which proves the comparison ran rather than an UNKNOWN expectation
+    failing the run by default.
     """
     from click.testing import CliRunner
 
@@ -619,7 +611,7 @@ def test_manifest_hook_exception_with_genuinely_short_self_heal_fails_with_recon
         # set never touches, standing in for the compound "a genuinely
         # short pre-existing gap ALSO picks up a fresh write failure this
         # run" fault this fix targets.
-        _record_manifest_write_failure(seed_doc_id)
+        _record_manifest_write_failure(seed_doc_id, [chash, *expected_extra])
 
     with patch("nexus.config.get_credential", side_effect=fake_credentials()):
         monkeypatch.setattr(
@@ -628,28 +620,20 @@ def test_manifest_hook_exception_with_genuinely_short_self_heal_fails_with_recon
         )
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
-    assert result.exit_code != 0, result.output
-    assert "catalog manifest write failed for 1 document(s)" in result.output
-    assert seed_doc_id in result.output, (
-        f"expected the still-failing seeded document's tumbler "
-        f"{seed_doc_id!r} to be named in the run's output:\n{result.output}"
-    )
-    assert "run 'nx catalog reconcile'" in result.output.lower(), (
-        "the self-heal rebuild genuinely was short this run -- the "
-        "reconcile remedy must still be printed"
-    )
-    assert "restored by self-heal" not in result.output, (
-        "an UNCONFIRMED (genuinely short) self-heal rebuild must never be "
-        "reported as a completed restoration"
-    )
+    if repaired:
+        assert result.exit_code == 0, result.output
+        assert "restored by self-heal" in result.output, result.output
+    else:
+        assert result.exit_code != 0, result.output
+        assert "catalog manifest write failed for 1 document(s)" in result.output
+        assert seed_doc_id in result.output, result.output
+        assert "restored by self-heal" not in result.output, result.output
+        error_lines = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+        assert len(error_lines) == 1, result.output
+        assert "nx catalog reconcile" in error_lines[0], error_lines[0]
+        assert "--force" not in error_lines[0], error_lines[0]
 
-    error_lines = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
-    assert len(error_lines) == 1, result.output
-    assert "nx catalog reconcile" in error_lines[0], error_lines[0]
-    assert "--force" not in error_lines[0], error_lines[0]
-
-    # Self-heal DID write something for the seeded doc -- partial repair
-    # is still real work -- it is just genuinely short of chunk_count=2.
+    # Self-heal wrote the one-row manifest in both cases.
     manifest = make_catalog_reader().get_manifest(seed_doc_id)
     assert len(manifest) == 1, (
         f"expected the genuinely partial manifest write to have happened: "
