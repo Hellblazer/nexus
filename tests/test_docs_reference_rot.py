@@ -89,6 +89,8 @@ SHA_ALLOWLIST: dict[str, str] = {
     "1aa8e0f": "rdr-161: sha in the sigstore/cosign-installer repo, not this one",
     "bc9f2a0": "rdr-201: sha in the cwensel/intrastate repo, not this one",
     "a228e079": "docs/wire-contract-pending.md: sha in the conexus repo, not this one",
+    "5a0d3ad": "rdr-220: sha in the conexus repo (adapter run-origin check), not this one",
+    "ffe499f": "rdr-220: sha in the conexus repo (adapter follow-ups), not this one",
     "433b036": "rdr-066: release commit squashed away at merge (2026-04-11); PR #148 is the durable pointer",
     # Local-only commits: they open in a developer clone that still holds
     # the squashed feature branch, and nowhere else (CI run 33919575425).
