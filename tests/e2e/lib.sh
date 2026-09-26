@@ -88,7 +88,7 @@ claude_start() {
     # --mcp-config/--strict-mcp-config). Empty by default — no behavior change.
     # Through claude_fd_exec.sh: the token rides fd 3, not Claude's
     # environment (RDR-219, nexus-wauo1.36).
-    send_keys "bash $CLAUDE_FD_EXEC --dangerously-skip-permissions ${CLAUDE_EXTRA_ARGS:-}" Enter
+    send_keys "bash '$CLAUDE_FD_EXEC' --dangerously-skip-permissions ${CLAUDE_EXTRA_ARGS:-}" Enter
 
     # Give Claude time to initialize before checking screens.
     sleep 8

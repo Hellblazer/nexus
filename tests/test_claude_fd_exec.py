@@ -88,15 +88,27 @@ def test_grant_launcher_hands_claude_the_token_on_fd3_only(tmp_path: pathlib.Pat
     _assert_fd_route(out)
 
 
+# Container-side harnesses are excluded by design: their init process holds
+# the token via `docker run -e` either way (RDR-219 threat-model paragraph).
+CONTAINER_DIRS = ("hook-surface-shakeout", "rdr208-mvv", "migration-rehearsal")
+
+
+def _host_harness_scripts() -> list[pathlib.Path]:
+    roots = [REPO / "tests" / "e2e", REPO / "tests" / "cc-validation"]
+    return sorted(p for root in roots for p in root.rglob("*.sh")
+                  if not any(d in p.parts for d in CONTAINER_DIRS))
+
+
 def test_pane_launches_go_through_fd_exec() -> None:
-    """Every harness line that types `claude` into a tmux pane uses the fd
-    launcher, so none leaves the token in Claude's exec environment."""
-    sources = {LIB_SH: LIB_SH.read_text()}
-    sources.update({p: p.read_text() for p in sorted(SCENARIOS.glob("*.sh"))})
+    """Every host-side harness line that types `claude` into a tmux pane uses
+    the fd launcher, so none leaves the token in Claude's exec environment."""
+    sources = {p: p.read_text() for p in _host_harness_scripts()}
+    assert LIB_SH in sources and (REPO / "tests/e2e/release-sandbox.sh") in sources
     bare = [f"{p.relative_to(REPO)}: {line.strip()}"
             for p, text in sources.items() for line in text.splitlines()
-            if re.search(r'send_keys\s+"claude\s', line)]
+            if re.search(r'send[-_]keys\b.*"claude(\s|")', line)]
     assert not bare, "pane launches that bypass claude_fd_exec.sh:\n" + "\n".join(bare)
     via_fd = [line for text in sources.values() for line in text.splitlines()
-              if "send_keys" in line and "CLAUDE_FD_EXEC" in line]
-    assert len(via_fd) >= 3, via_fd  # lib.sh claude_start, scenarios 16 and 28
+              if re.search(r"send[-_]keys\b", line) and "claude_fd_exec" in line.replace("CLAUDE_FD_EXEC", "claude_fd_exec")]
+    # lib.sh claude_start, scenarios 16 and 28, release-sandbox.sh's tmux mode
+    assert len(via_fd) >= 4, via_fd

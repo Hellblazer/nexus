@@ -1655,7 +1655,9 @@ case "$MODE" in
         HOME="$SANDBOX_ORIG_HOME" _cred_tool run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 220 -y 50 \
             "env HOME='$SANDBOX' PATH='$SANDBOX/.local/bin:$PATH' bash -i"
         sleep 1
-        _tmux send-keys -t "$TMUX_SESSION" "claude" Enter
+        # Through claude_fd_exec.sh: the token rides fd 3, not Claude's
+        # environment (RDR-219, nexus-wauo1.36).
+        _tmux send-keys -t "$TMUX_SESSION" "bash '$SCRIPT_DIR/lib/claude_fd_exec.sh'" Enter
         echo "Attaching ... (Ctrl-b d to detach without killing)"
         _tmux attach -t "$TMUX_SESSION"
         ;;

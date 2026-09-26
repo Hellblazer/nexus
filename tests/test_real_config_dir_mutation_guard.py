@@ -148,6 +148,8 @@ class TestAllowlist:
             "t1_session_lease.",
             "context/",
             "mineru.pid",
+            "mcp_connect_marker.",
+            "mcp_connect_check_state.",
         }
         assert expected.issubset(set(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES))
 

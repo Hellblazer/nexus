@@ -373,7 +373,7 @@ started with the variable set (Claude removes it only from its own
 
 Host-side harness launches narrow the Claude part (nexus-wauo1.36): the tmux
 pane launches (`tests/e2e/lib.sh` `claude_start`, cc-validation scenarios 16
-and 28) start Claude through `tests/e2e/lib/claude_fd_exec.sh`, which pipes
+and 28, `tests/e2e/release-sandbox.sh`'s tmux mode) start Claude through `tests/e2e/lib/claude_fd_exec.sh`, which pipes
 the token into fd 3, unsets the variable and sets
 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3`. `claude_mcp_grant.sh` does the
 same three steps inline, because its exec also carries the piped
