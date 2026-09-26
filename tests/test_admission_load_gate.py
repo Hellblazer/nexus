@@ -44,6 +44,10 @@ from typing import Any
 import httpx
 import pytest
 
+import nexus.db as nexus_db_module
+import nexus.db.data_token as data_token_module
+from nexus.db import service_endpoint as service_endpoint_module
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _MODULE_PATH = REPO_ROOT / "tests" / "e2e" / "lib" / "admission_load.py"
 _SCRIPT_PATH = REPO_ROOT / "tests" / "e2e" / "admission-load-gate.sh"
@@ -476,6 +480,88 @@ def test_fire_step_hits_the_wall_clock_deadline_and_marks_incomplete_responses()
     assert admission_load.is_step_valid(responses) is False
 
 
+# ── Direct boundary tests: resolve_bearer, find_orphan_collections, ────
+# ── guard_write — the REAL implementations, faked only at their own ────
+# ── nexus.* boundary (fold 2, T2 [27139] Important 1) ───────────────────
+
+
+class _FakeDataTokenManager:
+    def __init__(self, token: str | None) -> None:
+        self._token = token
+
+    def bearer_for(self, base_url: str, tenant: str) -> str | None:
+        return self._token
+
+
+def test_resolve_bearer_uses_the_self_minted_token_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(data_token_module, "get_data_token_manager", lambda: _FakeDataTokenManager("minted-xyz"))
+    assert admission_load.resolve_bearer("https://fake.example", "default", "static-token") == "minted-xyz"
+
+
+def test_resolve_bearer_falls_back_to_the_static_token_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(data_token_module, "get_data_token_manager", lambda: _FakeDataTokenManager(None))
+    assert admission_load.resolve_bearer("https://fake.example", "default", "static-token") == "static-token"
+
+
+class _FakeT3ForOrphanScan:
+    def __init__(self, names: list[str]) -> None:
+        self._names = names
+
+    def list_collections(self) -> list[dict[str, str]]:
+        return [{"name": n} for n in self._names]
+
+    def delete_collection(self, name: str) -> None:
+        raise AssertionError(f"find_orphan_collections must never delete anything (attempted delete of {name!r})")
+
+
+def test_find_orphan_collections_lists_only_the_gate_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    names = [
+        "knowledge__u2mlh-load-abc123__voyage-context-3__v1",
+        "knowledge__u2mlh-load-def456__voyage-context-3__v1",
+        "knowledge__unrelated-subject__voyage-context-3__v1",
+        "docs__some-repo__voyage-context-3__v1",
+    ]
+    monkeypatch.setattr(nexus_db_module, "make_t3", lambda: _FakeT3ForOrphanScan(names))
+    result = admission_load.find_orphan_collections()
+    assert result == sorted(names[:2])
+
+
+def test_find_orphan_collections_excludes_the_current_runs_own_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    names = ["knowledge__u2mlh-load-abc123__voyage-context-3__v1", "knowledge__u2mlh-load-def456__voyage-context-3__v1"]
+    monkeypatch.setattr(nexus_db_module, "make_t3", lambda: _FakeT3ForOrphanScan(names))
+    result = admission_load.find_orphan_collections(exclude=names[0])
+    assert result == [names[1]]
+
+
+def test_find_orphan_collections_performs_no_delete_when_orphans_are_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fake's delete_collection raises unconditionally; a clean pass
+    here IS the proof that no delete/purge path is reachable from
+    find_orphan_collections -- if it were reachable, this test would fail
+    with the fake's own AssertionError instead of passing."""
+    names = ["knowledge__u2mlh-load-abc123__voyage-context-3__v1"]
+    monkeypatch.setattr(nexus_db_module, "make_t3", lambda: _FakeT3ForOrphanScan(names))
+    result = admission_load.find_orphan_collections()
+    assert result == names
+
+
+def test_guard_write_refuses_without_the_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # tests/conftest.py's blanket pytest exemption sets _test_only_opt_in_reason
+    # for the WHOLE suite (see service_endpoint.py's own docstring); clear it
+    # here so this test exercises the real env-var-absent refusal path
+    # rather than the ambient test bypass every other test in this suite
+    # silently rides.
+    monkeypatch.setattr(service_endpoint_module, "_test_only_opt_in_reason", None)
+    monkeypatch.delenv("NX_ALLOW_PROD_WRITE", raising=False)
+    with pytest.raises(service_endpoint_module.ProductionWriteGuardError):
+        admission_load.guard_write("https://fake.example")
+
+
+def test_guard_write_accepts_with_the_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service_endpoint_module, "_test_only_opt_in_reason", None)
+    monkeypatch.setenv("NX_ALLOW_PROD_WRITE", "test probe: exercising the real opt-in acceptance path")
+    admission_load.guard_write("https://fake.example")  # must not raise
+
+
 # ── run_gate end to end, every network function monkeypatched ──────────
 
 
@@ -499,14 +585,27 @@ def _patch_lifecycle(monkeypatch: pytest.MonkeyPatch, *, register_calls: list[st
     monkeypatch.setattr(admission_load, "delete_load_collection", _delete)
 
 
-def _client_factory_for(status_sequence: list[dict[str, Any]], upsert_responder):
+#: Sentinels for _client_factory_for's status_sequence: an entry that is
+#: one of these produces a failed /v1/status read (a 5xx, or a raised
+#: transport error) instead of a 200 body, so a fold-2 test can simulate a
+#: mid-ramp status-read failure at an exact call index.
+STATUS_FAIL_500 = object()
+STATUS_FAIL_TRANSPORT = object()
+
+
+def _client_factory_for(status_sequence: list, upsert_responder):
     calls = {"status": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/status":
             idx = min(calls["status"], len(status_sequence) - 1)
             calls["status"] += 1
-            return httpx.Response(200, json=status_sequence[idx])
+            entry = status_sequence[idx]
+            if entry is STATUS_FAIL_500:
+                return httpx.Response(500)
+            if entry is STATUS_FAIL_TRANSPORT:
+                raise httpx.ConnectError("boom", request=request)
+            return httpx.Response(200, json=entry)
         if request.url.path == "/v1/vectors/upsert-chunks":
             return upsert_responder(request)
         return httpx.Response(404)
@@ -602,6 +701,45 @@ def test_run_gate_fails_and_names_invalid_steps_on_heavy_transport_errors(monkey
     assert result["passed"] is False
     assert "invalid" in result["reason"]
     assert result["steps"][0]["valid"] is False
+
+
+def test_run_gate_marks_a_step_invalid_when_the_before_status_read_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fold 2 (T2 [27139] Important 2): a failed mid-ramp status read must
+    never silently become a zeroed counter via snapshot_counters' own
+    fail-closed default -- it must invalidate the step outright, never
+    contribute a pass or an unattributable verdict, and name the real
+    cause ("status read failed"), not misattribute it to "concurrent
+    activity on the shared tenant"."""
+    _patch_lifecycle(monkeypatch)
+    # idle precheck consumes 2 reads (both idle); the step's OWN "before"
+    # read is the 3rd call and fails (500); the "after" read (4th call)
+    # would show a real admission_refusals_total=1 if it were ever trusted.
+    factory = _client_factory_for(
+        [IDLE_STATUS, IDLE_STATUS, STATUS_FAIL_500, _status(admission=1)],
+        lambda request: httpx.Response(503, headers={"Retry-After": "1", "X-Nexus-Deadline-Outcome": "refused"}),
+    )
+    result = admission_load.run_gate(dry_run=False, ramp_steps=(2,), client_factory=factory, idle_sleep=lambda s: None)
+    assert result["passed"] is False
+    assert "status read failed" in result["reason"]
+    assert result["steps"][0]["valid"] is False
+    assert result["steps"][0]["status_read_failed"] is True
+    assert result["steps"][0]["admission_moved"] is False, "an invalid step must never report a moved counter"
+
+
+def test_run_gate_marks_a_step_invalid_when_the_after_status_read_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_lifecycle(monkeypatch)
+    # The step's "before" read (3rd call) succeeds with a real baseline;
+    # the "after" read (4th call) raises a transport error instead of a 5xx,
+    # covering the other named failure mode.
+    factory = _client_factory_for(
+        [IDLE_STATUS, IDLE_STATUS, _status(admission=0), STATUS_FAIL_TRANSPORT],
+        lambda request: httpx.Response(503, headers={"Retry-After": "1", "X-Nexus-Deadline-Outcome": "refused"}),
+    )
+    result = admission_load.run_gate(dry_run=False, ramp_steps=(2,), client_factory=factory, idle_sleep=lambda s: None)
+    assert result["passed"] is False
+    assert "status read failed" in result["reason"]
+    assert result["steps"][0]["valid"] is False
+    assert result["steps"][0]["status_read_failed"] is True
 
 
 def test_run_gate_stops_early_and_reports_the_wall_clock_cap(monkeypatch: pytest.MonkeyPatch) -> None:

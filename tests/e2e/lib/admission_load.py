@@ -845,6 +845,7 @@ def run_gate(
     verdicts: list[StepVerdict] = []
     evidence: list[dict[str, Any]] = []
     invalid_step_count = 0
+    status_read_failure_count = 0
     wall_clock_hit = False
     error: str | None = None
     is_preflight_failure = False
@@ -890,17 +891,34 @@ def run_gate(
                     )
                     break
 
-                before = snapshot_counters(fetch_status(client), embedder)
+                before_status = fetch_status(client)
+                status_read_failed = before_status is None
+                before = snapshot_counters(before_status, embedder)
                 t0 = time.monotonic()
                 responses, hit_deadline = fire_step(
                     client, name, nonce, step_index, concurrency, target_bytes=target_bytes, deadline_s=remaining,
                 )
                 elapsed = time.monotonic() - t0
-                after = snapshot_counters(fetch_status(client), embedder)
+                after_status = fetch_status(client)
+                status_read_failed = status_read_failed or after_status is None
+                after = snapshot_counters(after_status, embedder)
 
-                valid = is_step_valid(responses)
+                # fix round (T2 [27139] Important 2): snapshot_counters' own
+                # fail-closed-to-zero default is right for "no embedder_activity
+                # entry at all" but WRONG here -- a transiently failed before/after
+                # read must never silently become a zeroed counter, or a real
+                # nonzero value read back correctly on the OTHER side of the pair
+                # synthesizes a phantom admission_moved=True this driver's own
+                # request stream never actually produced (see this bead's T2
+                # review for the exact mechanism). A failed status read makes the
+                # step's measurement just as untrustworthy as a transport-error
+                # storm, so it is folded into the same `valid` gate rather than
+                # given its own RampOutcome field.
+                valid = is_step_valid(responses) and not status_read_failed
                 if not valid:
                     invalid_step_count += 1
+                    if status_read_failed:
+                        status_read_failure_count += 1
                 verdict = evaluate_step(before, after, responses) if valid else INVALID_STEP_VERDICT
 
                 steps_tried.append(concurrency)
@@ -911,6 +929,7 @@ def run_gate(
                     "before": dataclasses.asdict(before),
                     "after": dataclasses.asdict(after),
                     "valid": valid,
+                    "status_read_failed": status_read_failed,
                     "hit_wall_clock_cap": hit_deadline,
                     "admission_moved": verdict.admission_moved,
                     "deadline_moved": verdict.deadline_moved,
@@ -964,9 +983,15 @@ def run_gate(
     except (AdmissionLoadVacuousError, AdmissionLoadUnattributableError) as exc:
         reason = str(exc)
         if invalid_step_count:
+            causes = []
+            if status_read_failure_count:
+                causes.append(f"{status_read_failure_count} status read failed")
+            transport_only = invalid_step_count - status_read_failure_count
+            if transport_only:
+                causes.append(f"{transport_only} too many transport errors")
             reason += (
                 f" ({invalid_step_count} of {len(steps_tried)} step(s) tried were invalid: "
-                "too many transport errors -- see per-step evidence)"
+                f"{', '.join(causes)} -- see per-step evidence)"
             )
         if wall_clock_hit:
             reason += (
