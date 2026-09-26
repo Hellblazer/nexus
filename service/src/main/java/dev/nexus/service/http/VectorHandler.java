@@ -1196,11 +1196,18 @@ public final class VectorHandler implements HttpHandler {
      * </pre>
      * <p>A {@code collection} starting {@code quarantine-} is refused with 400 —
      * quarantine rows are out of the census by construction (RDR-192 MVV (a)).
-     * <p>Response 200: {@code {"collection": "...", "returned": N, "counts":
-     * {bucket: count, ...}, "chashes": {bucket: [chash, ...], ...}}} — {@code
-     * counts}/{@code chashes} always carry all five bucket keys. Paged by chash
+     * <p>Response 200: {@code {"collection": "...", "returned": N, "chashes":
+     * {bucket: [chash, ...], ...}, "totals": {bucket: count, ...},
+     * "scope_chunk_total": N}} (round 1 fix, critic + code-review Significant).
+     * {@code returned}/{@code chashes} are THIS PAGE only — paged by chash
      * ascending; loop while {@code returned == limit} (offset += limit), exactly
-     * like {@code /v1/vectors/store-list}.
+     * like {@code /v1/vectors/store-list}. {@code totals}/{@code
+     * scope_chunk_total} are collection-WIDE (computed before LIMIT/OFFSET) and
+     * identical on every page, including an empty one — {@code totals} always
+     * carries all five bucket keys, and {@code scope_chunk_total} is every chunk
+     * this tenant+collection holds in any manifest state, so a wrong tenant or an
+     * unknown/typo'd collection reads {@code scope_chunk_total: 0} rather than
+     * looking identical to a genuinely clean census.
      */
     private void handleManifestLessCensus(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1216,8 +1223,9 @@ public final class VectorHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(Map.of(
             "collection", collection,
             "returned", result.returned(),
-            "counts", result.counts(),
-            "chashes", result.chashes())));
+            "chashes", result.chashes(),
+            "totals", result.totals(),
+            "scope_chunk_total", result.scopeChunkTotal())));
     }
 
     /**
