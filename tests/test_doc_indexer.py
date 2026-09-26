@@ -1727,7 +1727,7 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_c
     set_credentials(monkeypatch)
     captured: list[dict] = []
     mock_t3.upsert_chunks_with_embeddings.side_effect = (
-        lambda collection, ids, documents, embeddings, metadatas: captured.extend(metadatas)
+        lambda collection, ids, documents, embeddings, metadatas, **_kw: captured.extend(metadatas)
     )
     mock_chunk = MagicMock()
     mock_chunk.text = "chunk text"
@@ -1766,8 +1766,14 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     # placeholder embeddings; this test only asserts metadata shape.
     index_pdf(simple_pdf, corpus="test", t3=mock_t3)
     assert captured
-    missing = (_BASE_REQUIRED_FIELDS | _PDF_EXTRA_FIELDS) - captured[0].keys()
+    # nexus-w94eo: this captures the streaming uploader's chunk-time STUB,
+    # which omits title/source_author (unknown until the post-pass) rather
+    # than stamping "" placeholders a late duplicate could re-merge.
+    missing = (
+        (_BASE_REQUIRED_FIELDS | _PDF_EXTRA_FIELDS) - {"title", "source_author"}
+    ) - captured[0].keys()
     assert not missing, f"Missing PDF metadata fields: {missing}"
+    assert "title" not in captured[0] and "source_author" not in captured[0]
 
 
 def test_sha256_does_not_call_read_bytes(tmp_path: Path):
@@ -1799,7 +1805,7 @@ def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, 
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
     mock_t3.upsert_chunks_with_embeddings.side_effect = (
-        lambda collection, ids, documents, embeddings, metadatas: captured.extend(metadatas)
+        lambda collection, ids, documents, embeddings, metadatas, **_kw: captured.extend(metadatas)
     )
     mock_chunk = MagicMock()
     mock_chunk.text = "text"
@@ -1846,7 +1852,7 @@ def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
     mock_t3.upsert_chunks_with_embeddings.side_effect = (
-        lambda collection, ids, documents, embeddings, metadatas: captured.extend(metadatas)
+        lambda collection, ids, documents, embeddings, metadatas, **_kw: captured.extend(metadatas)
     )
     mock_chunk = MagicMock()
     mock_chunk.text = "text"

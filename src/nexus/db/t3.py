@@ -931,6 +931,15 @@ class T3Database:
         ``PgVectorRepository`` (Postgres/service-mode engine); local Chroma
         mode has no such skip to bypass — ``col.upsert()`` always re-embeds
         via the collection's own embedding function regardless of this flag.
+
+        ``delete_keys`` (nexus-w94eo / nexus-y8xjh) on
+        :meth:`upsert_chunks_with_embeddings` and :meth:`update_chunks` is
+        accepted for signature parity with
+        :class:`~nexus.db.http_vector_client.HttpVectorClient` and IGNORED: the in-process store merges metadata at key level on both
+        upsert and update and exposes no key-removal primitive, so a stale key
+        survives a rewrite in this backend. Accepted, not honored: this class is
+        not the serving path in either mode (``HttpVectorClient`` is), so the
+        gap is confined to tests and tooling that construct it directly.
         """
         col = self.get_or_create_collection(collection, strict=False)
         self._write_batch(col, collection, ids, documents, metadatas)
@@ -944,6 +953,7 @@ class T3Database:
         metadatas: list[dict],
         *,
         force_re_embed: bool = False,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Upsert chunks with pre-computed embeddings (bypasses ChromaDB's EF).
 
@@ -960,7 +970,8 @@ class T3Database:
 
         See ``upsert_chunks`` for why ``strict=False`` here, and for why
         ``force_re_embed`` is accepted-but-no-op in local/Chroma mode
-        (RDR-181 — the embed-skip it bypasses is service-mode-only).
+        (RDR-181 — the embed-skip it bypasses is service-mode-only), and
+        why ``delete_keys`` is accepted but not honored.
         """
         col = self.get_or_create_collection(collection_name, strict=False)
         self._write_batch(col, collection_name, ids, documents, metadatas, embeddings=embeddings)
@@ -970,6 +981,8 @@ class T3Database:
         collection: str,
         ids: list[str],
         metadatas: list[dict],
+        *,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Update chunk metadata without re-embedding.
 
@@ -984,6 +997,8 @@ class T3Database:
         nexus-o6aa.9.16: programmatic vector-only collections
         (``taxonomy__*``) bypass the canonical schema — see
         :func:`_bypass_canonical_schema`.
+
+        ``delete_keys``: accepted but not honored, see :meth:`upsert_chunks`.
         """
         if not _bypass_canonical_schema(collection):
             metadatas = [_normalize_for_write(m, collection) for m in metadatas]

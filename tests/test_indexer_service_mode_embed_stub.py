@@ -38,7 +38,7 @@ class _RecordingDb:
 
     def upsert_chunks_with_embeddings(
         self, collection_name, ids, documents, embeddings, metadatas,
-        *, force_re_embed: bool = False,
+        *, force_re_embed: bool = False, delete_keys: list[str] | None = None,
     ) -> None:
         self.upserts.append({
             "collection_name": collection_name,

@@ -313,7 +313,7 @@ class TestIndexPdfFileForceReEmbedDecoupled:
         mock_db = MagicMock()
         flags: list[bool] = []
 
-        def capture(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False):
+        def capture(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False, **_kw):
             flags.append(force_re_embed)
 
         mock_db.upsert_chunks_with_embeddings.side_effect = capture
@@ -358,7 +358,7 @@ class TestIndexPdfFileGitMetadata:
 
         captured: list[list[dict]] = []
 
-        def capture(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False):
+        def capture(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False, **_kw):
             captured.append(metadatas)
 
         mock_db.upsert_chunks_with_embeddings.side_effect = capture

@@ -2430,8 +2430,16 @@ class HttpVectorClient:
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
         retry: bool = True,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Embed + write via the Java service.
+
+        ``delete_keys`` (nexus-w94eo / nexus-y8xjh): the engine MERGES each row's
+        metadata into the stored row instead of replacing it, so a full-rewrite
+        writer names the keys it dropped as empty (see
+        :func:`nexus.metadata_schema.rewrite_delete_keys`); the engine strips them
+        from the stored row before the merge. Forwarded on every page, and only
+        when non-empty, so a caller that passes none sends a byte-identical body.
 
         Dedup + conflict-merge are SERVER-ENFORCED (nexus-57dh4): the service's
         ``PgVectorRepository.upsertChunksInternal`` does first-wins in-batch dedup
@@ -2611,6 +2619,8 @@ class HttpVectorClient:
                 body["embeddings"] = embeddings[start:end]
             if force_re_embed:
                 body["force_re_embed"] = True
+            if delete_keys:
+                body["delete_keys"] = list(delete_keys)
             # nexus-gtl01 (upsert-chunks ACK coverage): log the OUTGOING
             # request before the POST, at INFO not DEBUG. This is the only
             # client-side evidence a write was even ATTEMPTED. INFO does NOT
@@ -2746,6 +2756,7 @@ class HttpVectorClient:
         metadatas: list[dict] | None = None,
         *,
         force_re_embed: bool = False,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Server-side embed path: forward chunk text, ignore caller's embeddings.
 
@@ -2768,7 +2779,7 @@ class HttpVectorClient:
         """
         self.upsert_chunks(
             collection_name, ids, documents, metadatas=metadatas,
-            force_re_embed=force_re_embed,
+            force_re_embed=force_re_embed, delete_keys=delete_keys,
         )
 
     def put(
@@ -3905,8 +3916,25 @@ class HttpVectorClient:
         collection: str,
         ids: list[str],
         metadatas: list[dict],
+        *,
+        delete_keys: list[str] | None = None,
     ) -> list[str] | None:
         """Metadata-only update on existing chunks — no re-embedding.
+
+        nexus-w94eo: the engine MERGES ``metadatas`` into the stored row
+        (``metadata = chunks.metadata || EXCLUDED.metadata``) rather than
+        replacing it wholesale — a caller no longer needs to read the
+        existing row back before writing a partial update; omitted keys are
+        left untouched instead of being wiped. ``delete_keys`` (optional),
+        when given, names top-level keys to remove from the merged result —
+        the escape for a caller that must actively CLEAR a stale key a merge
+        can no longer retract by omission (today: ``quality_gate_overridden``,
+        once a document that failed the extraction quality gate on a prior
+        run is re-indexed clean under ``--force`` — see
+        :func:`nexus.pipeline_stages._enrich_metadata_from_extraction`).
+        Forwarded verbatim on every page as ``delete_keys`` in the request
+        body; omitted from the wire payload when ``None``/empty so an older
+        engine that predates this field sees an unchanged request shape.
 
         RDR-152 bead nexus-enehl: the frecency-only reindex path calls
         ``db.update_chunks(collection=..., ids=..., metadatas=...)`` on the
@@ -3969,9 +3997,14 @@ class HttpVectorClient:
         for start in range(0, len(ids), size):
             batch_ids  = ids[start : start + size]
             batch_meta = metadatas[start : start + size]
+            body: dict[str, Any] = {
+                "collection": collection, "ids": batch_ids, "metadatas": batch_meta,
+            }
+            if delete_keys:
+                body["delete_keys"] = list(delete_keys)
             result = _post(
                 "/v1/vectors/update-metadata",
-                {"collection": collection, "ids": batch_ids, "metadatas": batch_meta},
+                body,
                 tenant=self._tenant,
             )
             if isinstance(result, dict) and "missing" in result:

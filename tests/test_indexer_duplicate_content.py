@@ -764,7 +764,7 @@ def test_single_file_index_of_a_byte_identical_copy_gets_its_own_manifest(
     # real install reaches), not T3Database's own, which never reports.
     orig_update_chunks = local_t3.update_chunks
 
-    def _reporting_update_chunks(collection, ids, metadatas):
+    def _reporting_update_chunks(collection, ids, metadatas, **_kw):
         orig_update_chunks(collection, ids, metadatas)
         return []
 
