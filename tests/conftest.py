@@ -993,6 +993,16 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # override, so no unit test can write here unless it explicitly opts
     # out of the suite-wide `_isolate_config_dir` autouse fixture.
     "logs/mcp.log",
+    # nx-mcp's connect-readiness marker, published and refreshed by every live
+    # MCP server's lifespan (mcp/core.py -> connect_marker.publish_mcp_connect_
+    # marker) and cleared at its teardown. Concurrent sessions on this box
+    # start and stop nx-mcp during any run. Seen as a transient guard failure
+    # on 2026-09-26 (nexus-4vsx8 fix round), gone on an immediate rerun.
+    "mcp_connect_marker.",
+    # The SessionStart/UserPromptSubmit connect-check hook's warn-once state
+    # (hooks/mcp_connect_check.py _STATE_PREFIX), written by the same live
+    # sessions' hooks, never by a unit test (the suite isolates the config dir).
+    "mcp_connect_check_state.",
     # SessionStart hook's session-id flat file -- the actual writer is
     # `nexus.session.write_claude_session_id()` (call-time-resolved via
     # `claude_session_file()`, not the retained-for-compat
