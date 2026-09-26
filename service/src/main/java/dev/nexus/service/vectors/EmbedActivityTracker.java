@@ -27,6 +27,8 @@ final class EmbedActivityTracker {
             new AtomicLong(Double.doubleToLongBits(0.0));
     /** nexus-8hdg9 phases 3/4: see {@link EmbedActivitySnapshot#deadlineAbortsTotal()}. */
     private final AtomicLong deadlineAbortsTotal = new AtomicLong(0);
+    /** nexus-u2mlh.2: see {@link EmbedActivitySnapshot#admissionRefusalsTotal()}. */
+    private final AtomicLong admissionRefusalsTotal = new AtomicLong(0);
 
     /** Sentinel meaning "never recorded" — mirrors {@link EmbedProgressGate}'s
      * {@code NEVER_LOGGED} convention. */
@@ -57,6 +59,12 @@ final class EmbedActivityTracker {
         deadlineAbortsTotal.incrementAndGet();
     }
 
+    /** Record one embed call refused at admission, before any work queued
+     * (nexus-u2mlh.2). Called immediately before the refusal is thrown. */
+    void recordAdmissionRefusal() {
+        admissionRefusalsTotal.incrementAndGet();
+    }
+
     /** A point-in-time view as of {@code nowNanos}. {@code active} is a
      * half-open window: {@code [0, activeWindowNanos)} since the last record
      * counts as active, exactly at or past the boundary does not.
@@ -77,6 +85,6 @@ final class EmbedActivityTracker {
         return new EmbedActivitySnapshot(
                 active, chunksDoneTotal.get(), subBatchesTotal.get(),
                 Double.longBitsToDouble(lastChunksPerSecBits.get()), ageMs,
-                queueDepth, threadWidth, deadlineAbortsTotal.get());
+                queueDepth, threadWidth, deadlineAbortsTotal.get(), admissionRefusalsTotal.get());
     }
 }

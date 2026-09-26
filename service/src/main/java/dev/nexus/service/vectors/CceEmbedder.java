@@ -27,6 +27,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * RDR-152 bead nexus-gmiaf.21 — Voyage AI Contextualized Chunk Embedding (CCE) embedder.
@@ -220,6 +222,15 @@ public final class CceEmbedder implements Embedder {
     private final Semaphore inFlight;
     /** Texts per request; 1 is the historical one-text-per-call shape. */
     private final int batchChunks;
+    /** The {@link #inFlight} bound, kept for admission arithmetic and the status snapshot. */
+    private final int parallelism;
+    /** Batch tasks started and blocked on {@link #inFlight} (nexus-u2mlh.2). Counted from
+     *  inside the task, not at submit, so a task cancelled before it ever runs is never
+     *  counted and cannot leak a count. */
+    private final AtomicInteger waitingBatches = new AtomicInteger(0);
+    /** Moving average of one batch's Voyage call time in nanos, 0 until the first call
+     *  completes (nexus-u2mlh.2). Admission refuses nothing without a measurement. */
+    private final AtomicLong callEwmaNanos = new AtomicLong(0L);
     /** The consolidated retry choreography (nexus-1vpal) — owns backoff,
      *  Retry-After, the 429 budget arithmetic, and the shared auth arm. */
     private final VoyageRetryLoop retryLoop;
@@ -236,8 +247,9 @@ public final class CceEmbedder implements Embedder {
      * Bead nexus-s71lr, pass 3: {@code GET /v1/status}'s {@code
      * local_embed_activity} was null for every cloud install — this class
      * now feeds the SAME {@link EmbedActivityTracker} mechanism {@link
-     * Bge768Embedder} does. {@code queue_depth}/{@code thread_width} stay
-     * -1 always here (no {@code LocalOnnxAdmission}-equivalent for cloud).
+     * Bge768Embedder} does. Since nexus-u2mlh.2, {@code queue_depth} is
+     * {@link #waitingBatches} and {@code thread_width} is {@link #parallelism};
+     * both were -1 before.
      */
     private static final long ACTIVE_WINDOW_NANOS = 2 * PROGRESS_LOG_INTERVAL_NANOS;
     private final EmbedActivityTracker activityTracker = new EmbedActivityTracker(ACTIVE_WINDOW_NANOS);
@@ -329,6 +341,7 @@ public final class CceEmbedder implements Embedder {
             throw new IllegalArgumentException("batchChunks must be >= 1, got " + batchChunks);
         }
         this.batchChunks = batchChunks;
+        this.parallelism = parallelism;
         this.apiKey      = apiKey;
         this.inputType   = inputType;
         this.url         = url;
@@ -359,7 +372,7 @@ public final class CceEmbedder implements Embedder {
      */
     @Override
     public EmbedActivitySnapshot activitySnapshot() {
-        return activityTracker.snapshot(System.nanoTime(), -1, -1);
+        return activityTracker.snapshot(System.nanoTime(), waitingBatches.get(), parallelism);
     }
 
     /**
@@ -456,6 +469,8 @@ public final class CceEmbedder implements Embedder {
     /** One batch's vectors and billed tokens, plus how long it queued for a permit
      *  and how long its Voyage call(s) took (nexus-u2mlh.4). */
     private record BatchOutcome(List<float[]> vectors, long tokens, long queuedNanos, long callNanos) {
+        /** A batch whose permit arrived after the request deadline; compared by identity. */
+        static final BatchOutcome SKIPPED = new BatchOutcome(List.of(), 0L, 0L, 0L);
     }
 
     /** Splits {@code texts} into consecutive batches of at most {@link #batchChunks}
@@ -504,6 +519,11 @@ public final class CceEmbedder implements Embedder {
      * collected batch; past it, not-yet-started batches are cancelled and a
      * {@link RequestDeadlineExceededException} is thrown.
      *
+     * <p><strong>Admission (nexus-u2mlh.2).</strong> Before anything is submitted,
+     * {@link #admit} refuses a request the waiting batches make late. A batch that gets
+     * its permit after the deadline returns {@code SKIPPED} without calling Voyage, and
+     * the collector turns that into the same deadline abort.
+     *
      * <p><strong>Logging (nexus-u2mlh.4).</strong> Each batch logs its queue wait and call
      * time at DEBUG, at INFO when the call exceeds {@link #SLOW_CALL_MS}; each request logs
      * one {@code event=embed_done} summary at INFO.
@@ -516,23 +536,33 @@ public final class CceEmbedder implements Embedder {
         // onto the executor, and the 400 fallback inside a task needs it.
         long requestDeadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
         List<int[]> ranges = planBatches(texts);
+        admit(n, ranges.size(), requestDeadlineNanos, System.nanoTime());
         List<Future<BatchOutcome>> futures = new ArrayList<>(ranges.size());
         for (int[] r : ranges) {
             List<String> sub = texts.subList(r[0], r[1]);
             long submittedNanos = System.nanoTime();
             futures.add(executor.submit(() -> {
+                waitingBatches.incrementAndGet();
                 try {
                     inFlight.acquire();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw e;
+                } finally {
+                    waitingBatches.decrementAndGet();
                 }
                 long startedNanos = System.nanoTime();
                 try {
+                    // nexus-u2mlh.2: a permit granted after the caller's deadline is
+                    // handed straight back. The collector turns SKIPPED into the abort.
+                    if (RequestDeadlineProbe.expired(requestDeadlineNanos, startedNanos)) {
+                        return BatchOutcome.SKIPPED;
+                    }
                     BatchOutcome o = embedBatch(sub, deadlineNanos, requestDeadlineNanos);
                     long callNanos = System.nanoTime() - startedNanos;
                     long queuedNanos = startedNanos - submittedNanos;
                     logCall(sub.size(), queuedNanos, callNanos);
+                    recordCallNanos(callNanos);
                     return new BatchOutcome(o.vectors(), o.tokens(), queuedNanos, callNanos);
                 } finally {
                     inFlight.release();
@@ -551,17 +581,7 @@ public final class CceEmbedder implements Embedder {
         for (int b = 0; b < futures.size(); b++) {
             if (RequestDeadlineProbe.expired(requestDeadlineNanos, lastNanos)) {
                 cancelFrom(futures, b);
-                long elapsedMs = (lastNanos - callStartNanos) / 1_000_000L;
-                long pastDeadlineMs = (lastNanos - requestDeadlineNanos) / 1_000_000L;
-                activityTracker.recordDeadlineAbort();  // GET /v1/status deadline_aborts_total
-                log.warn("event=embed_deadline_exceeded embedder=cce chunks_done={} chunks_total={} "
-                        + "elapsed_ms={} past_deadline_ms={} retry_after_s={}",
-                        chunksDone, n, elapsedMs, pastDeadlineMs,
-                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
-                throw new RequestDeadlineExceededException(
-                        "embed deadline exceeded after " + chunksDone + "/" + n + " chunks ("
-                                + elapsedMs + "ms elapsed, " + pastDeadlineMs + "ms past deadline)",
-                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+                throw deadlineAbort(chunksDone, n, callStartNanos, lastNanos, requestDeadlineNanos);
             }
             BatchOutcome outcome;
             try {
@@ -575,6 +595,11 @@ public final class CceEmbedder implements Embedder {
                 Thread.currentThread().interrupt();
                 cancelFrom(futures, b + 1);
                 throw new RuntimeException("CCE parallel embed interrupted", e);
+            }
+            if (outcome == BatchOutcome.SKIPPED) {
+                // Its permit came after the deadline, so the deadline has passed now too.
+                cancelFrom(futures, b + 1);
+                throw deadlineAbort(chunksDone, n, callStartNanos, System.nanoTime(), requestDeadlineNanos);
             }
             vectors.addAll(outcome.vectors());
             tokens += outcome.tokens();
@@ -601,6 +626,99 @@ public final class CceEmbedder implements Embedder {
                 n, futures.size(), elapsedMs, maxQueuedNanos / 1_000_000L, maxCallNanos / 1_000_000L,
                 futures.isEmpty() ? 0 : sumCallNanos / futures.size() / 1_000_000L, tokens);
         return new EmbedResult(vectors, tokens);
+    }
+
+    /** Longest {@code Retry-After} an admission refusal suggests, in seconds. The edge
+     *  deadline on the embed routes is 55 s; a longer pause than that only idles a client
+     *  that the next estimate may well admit. */
+    static final long MAX_ADMISSION_RETRY_AFTER_S = 30L;
+
+    /**
+     * Admission (nexus-u2mlh.2): refuse, before anything queues, a request that cannot
+     * finish inside its deadline behind the batches already waiting for {@link #inFlight}.
+     * Such a request would otherwise wait, take permits after its caller has gone, and
+     * push every later request past its own deadline too, which is how 2026-09-24's
+     * retries compounded.
+     *
+     * <p>The estimate is {@code ceil((waiting + mine) / parallelism)} waves of one
+     * average call ({@link #callEwmaNanos}). It is deliberately simple: batches differ in
+     * size and Voyage's latency moves several-fold within minutes, so the test is only
+     * whether the queue ahead makes the deadline unreachable. Three cases admit
+     * unconditionally: no deadline in context, no call measured yet, and a request that
+     * cannot finish even on an empty queue. The last matters: refusing it would refuse
+     * every retry too, while admitting it leaves it to the deadline checks in
+     * {@link #embedAll}, which bound its cost.
+     *
+     * <p>The refusal is a {@link RequestDeadlineExceededException}, so the wire shape is
+     * the existing 503 + {@code Retry-After}. The suggested wait is the estimated time for
+     * the waiting batches to drain, clamped to {@code [1, MAX_ADMISSION_RETRY_AFTER_S]}.
+     */
+    void admit(int chunks, int myBatches, long requestDeadlineNanos, long nowNanos) {
+        if (requestDeadlineNanos == RequestDeadlineProbe.NONE) {
+            return;
+        }
+        long perCall = callEwmaNanos.get();
+        if (perCall <= 0L) {
+            return;
+        }
+        long remaining = requestDeadlineNanos - nowNanos;
+        if (waves(myBatches) * perCall >= remaining) {
+            return;
+        }
+        int ahead = waitingBatches.get();
+        long predicted = waves(ahead + myBatches) * perCall;
+        if (predicted <= remaining) {
+            return;
+        }
+        long drainNanos = waves(ahead) * perCall;
+        long retryAfterS = Math.max(1L, Math.min(MAX_ADMISSION_RETRY_AFTER_S,
+                (drainNanos + 999_999_999L) / 1_000_000_000L));
+        activityTracker.recordAdmissionRefusal();  // GET /v1/status admission_refusals_total
+        log.warn("event=embed_admission_refused embedder=cce chunks={} batches={} waiting_batches={} "
+                + "parallelism={} mean_call_ms={} predicted_ms={} remaining_ms={} retry_after_s={}",
+                chunks, myBatches, ahead, parallelism, perCall / 1_000_000L,
+                predicted / 1_000_000L, remaining / 1_000_000L, retryAfterS);
+        throw new RequestDeadlineExceededException(
+                "embed admission refused: " + myBatches + " batches behind " + ahead
+                        + " waiting need about " + predicted / 1_000_000L + "ms, "
+                        + remaining / 1_000_000L + "ms left before the deadline",
+                retryAfterS);
+    }
+
+    private long waves(int batches) {
+        return (batches + parallelism - 1L) / parallelism;
+    }
+
+    /** Folds one batch's call time into {@link #callEwmaNanos}, weight 1/5 on the new
+     *  sample; the first sample seeds it. Package-private for tests. */
+    void recordCallNanos(long callNanos) {
+        long sample = Math.max(1L, callNanos);
+        callEwmaNanos.updateAndGet(prev -> prev == 0L ? sample : prev + (sample - prev) / 5L);
+    }
+
+    /** Test-only: the current call-time average, 0 before any call. */
+    long callEwmaNanos() {
+        return callEwmaNanos.get();
+    }
+
+    /** Test-only: tasks currently blocked on {@link #inFlight}. */
+    int waitingBatches() {
+        return waitingBatches.get();
+    }
+
+    private RequestDeadlineExceededException deadlineAbort(int chunksDone, int n, long callStartNanos,
+                                                           long nowNanos, long requestDeadlineNanos) {
+        long elapsedMs = (nowNanos - callStartNanos) / 1_000_000L;
+        long pastDeadlineMs = (nowNanos - requestDeadlineNanos) / 1_000_000L;
+        activityTracker.recordDeadlineAbort();  // GET /v1/status deadline_aborts_total
+        log.warn("event=embed_deadline_exceeded embedder=cce chunks_done={} chunks_total={} "
+                + "elapsed_ms={} past_deadline_ms={} retry_after_s={}",
+                chunksDone, n, elapsedMs, pastDeadlineMs,
+                RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+        return new RequestDeadlineExceededException(
+                "embed deadline exceeded after " + chunksDone + "/" + n + " chunks ("
+                        + elapsedMs + "ms elapsed, " + pastDeadlineMs + "ms past deadline)",
+                RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
     }
 
     private void logCall(int chunks, long queuedNanos, long callNanos) {

@@ -47,6 +47,13 @@ package dev.nexus.service.vectors;
  *                          asserts this is ZERO on a healthy run: a non-zero
  *                          count on a healthy baseline is a failed gate, not a
  *                          tuning note (design record §4).
+ * @param admissionRefusalsTotal cumulative embed calls refused at admission, before
+ *                          any work queued, because the batches already waiting
+ *                          made the request's deadline unreachable (nexus-u2mlh.2,
+ *                          {@code CceEmbedder.admit}). Monotonic over the process
+ *                          lifetime; 0 for an embedder with no admission step.
+ *                          Distinct from {@code deadlineAbortsTotal}: a refusal
+ *                          cost no Voyage call, an abort may have.
  */
 public record EmbedActivitySnapshot(
         boolean active,
@@ -56,5 +63,6 @@ public record EmbedActivitySnapshot(
         long lastActivityAgeMs,
         int queueDepth,
         int threadWidth,
-        long deadlineAbortsTotal) {
+        long deadlineAbortsTotal,
+        long admissionRefusalsTotal) {
 }

@@ -28,13 +28,18 @@ import java.util.function.Supplier;
  *  "local_embed_activity":{"active":true,"chunks_done_total":1024,
  *    "sub_batches_total":64,"last_chunks_per_sec":7.7,
  *    "last_activity_age_ms":230,"queue_depth":0,"thread_width":4,
- *    "deadline_aborts_total":0},
+ *    "deadline_aborts_total":0,"admission_refusals_total":0},
  *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}}}</pre>
  *
  * <p>{@code deadline_aborts_total} (nexus-8hdg9 phases 3/4, ADDITIVE, in
  * every entry of both shapes) counts embed calls the embedder aborted at a
  * cooperative request-deadline check point. The throughput A/B gate reads it
  * and requires ZERO on a healthy run.
+ *
+ * <p>{@code admission_refusals_total} (nexus-u2mlh.2, ADDITIVE, in every entry
+ * of both shapes) counts embed calls refused before queueing because the
+ * batches already waiting made the request's deadline unreachable. Only the
+ * CCE embedder refuses; every other embedder reports 0.
  *
  * <p>{@code embedding_mode} mirrors {@code /version}'s field (via the SAME
  * {@link EmbedderRouter#modeName()}) so a caller does not need a second probe
@@ -136,6 +141,9 @@ public final class StatusHandler implements HttpHandler {
             // nexus-8hdg9 phases 3/4, [additive]: the A/B gate asserts this is 0 on a
             // healthy run. Present in every entry, local_embed_activity included.
             .append(",\"deadline_aborts_total\":").append(snap.deadlineAbortsTotal())
+            // nexus-u2mlh.2, [additive]: requests refused before queueing because the
+            // batches already waiting made their deadline unreachable.
+            .append(",\"admission_refusals_total\":").append(snap.admissionRefusalsTotal())
             .append('}');
     }
 }
