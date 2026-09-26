@@ -1817,7 +1817,19 @@ Exit codes:
 | 4 | The connected engine predates the `manifest-less-census` route (bead nexus-wbfpw.4) — upgrade the engine (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`; which tags carry the route changes over time, so check the version, not a fixed date). Never a traceback. |
 | 5 | A real engine error other than "predates the route": a `quarantine-*` `--collection`'s 400 (`VectorHandler.requireNotQuarantineCollection`), a transient 5xx, or a failed `--all` collection listing. In `--all`, collections already censused before the failure are still printed (or, under `--json`, still emitted as a parseable document naming the failed collection under a `census_error` key). Never a traceback. |
 
-With `--json`, human-readable diagnostics (the `--require-zero` violation notice, an engine-error line) always go to stderr, never stdout — stdout carries only the JSON document, parseable regardless of exit code.
+Exit-code precedence: 4 and 5 (the census is INCOMPLETE) always win over 1 and 2 (a gate condition computed from what WAS censused) — an incomplete census cannot pass a gate. Between 4 and 5: 4 is a whole-engine condition (the connected engine predates the route entirely) and is checked first, on the very first collection attempted, before a later per-collection 5 could ever fire. This never hides a finding: `unclassified`/`--require-zero` are always computed over whatever collections DID succeed, even when 4/5 also fires, and both are always present in the output (text and `--json`) alongside the incomplete-census report.
+
+With `--json`, human-readable diagnostics (the `--require-zero` violation notice, an engine-error line, the "no collections found" notice) always go to stderr, never stdout — stdout carries exactly one JSON document on every exit code above, parseable regardless of exit code. The document's fields:
+
+| Field | Meaning |
+|-------|---------|
+| `collections` | Per-collection census results (possibly partial, if a later collection failed). |
+| `collections_discovered` | How many collections were found to census; `null` when discovery itself failed (the listing-failure flavor of exit 5). |
+| `collections_censused` | How many collections actually completed — compare against `collections_discovered` to tell "stopped after 1 of 50" from "stopped after 1 of 2". |
+| `census_error` | `null`, or `{"collection", "error", "kind"}` naming which collection failed and why (`kind` is `"no_route"`, `"engine_error"`, or `"listing_failed"`). |
+| `unclassified` | `true` if any censused collection reports `unclassified` > 0. |
+| `require_zero_violations` | List of `--require-zero` bucket names found above zero across the censused collections. |
+| `exit_code` | The process exit code, mirrored into the document. |
 
 **Sam's 2026-09-26 ruling on nexus-wbfpw.5**: this verb no longer gates the production census — that runs as direct SQL (`scripts/sql/manifest_less_census.sql`) against production until the rest of RDR-192 ships. This verb ships anyway, built and tested against a dev jar, for the client release paired with the eventual RDR-192 engine tag.
 

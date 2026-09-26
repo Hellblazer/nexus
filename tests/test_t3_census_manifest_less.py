@@ -551,3 +551,134 @@ def test_census_all_listing_failure_is_not_reported_as_exit_3(
     assert result.exit_code == _EXIT_ENGINE_ERROR, result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "503" in result.output or "service unavailable" in result.output.lower()
+
+
+# ── review round 2: --json must carry exactly one parseable document on
+# EVERY exit path, and exit-code precedence must never hide a finding ──────
+
+
+def test_census_all_json_no_collections_stdout_still_parses(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """Review round 2 CRITICAL finding: exit 3 (--all, listing succeeded
+    but genuinely empty) used to print a plain, non-err=True sentence to
+    stdout and never reach the --json render block at all, so
+    ``json.loads(result.stdout)`` raised ``JSONDecodeError`` -- the same
+    defect class round 1's CRITICAL fixed, on an untested path. The
+    notice is a diagnostic now (stderr, unconditionally); stdout carries
+    the document (empty collections, exit_code 3) under --json exactly
+    as it does for every other exit."""
+    stub_client = _StubT3Client(list_response=[])
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+    result = runner.invoke(t3, ["census-manifest-less", "--all", "--json"])
+    assert result.exit_code == 3, result.output
+
+    payload = _json.loads(result.stdout)
+    assert payload["collections"] == []
+    assert payload["collections_discovered"] == 0
+    assert payload["collections_censused"] == 0
+    assert payload["census_error"] is None
+    assert payload["exit_code"] == 3
+
+    assert "no" in result.stderr.lower() and "collection" in result.stderr.lower()
+    assert "no" not in result.stdout.lower()
+
+
+def test_census_no_route_json_stdout_still_parses(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """Review round 2 CRITICAL finding: exit 4 (no-route) used to
+    ``sys.exit`` before the JSON render block was ever reached, so
+    ``result.stdout`` was completely empty under --json --
+    ``json.loads('')`` raised ``JSONDecodeError``. Stdout must now carry a
+    parseable document even though there is nothing to census; the
+    human-readable upgrade message stays on stderr only."""
+    stub_client = _StubT3Client(
+        raise_error=VectorServiceError("POST ... -> HTTP 404: not found", code=404),
+    )
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+    result = runner.invoke(t3, ["census-manifest-less", "--collection", "c", "--json"])
+    assert result.exit_code == _EXIT_NO_ROUTE, result.output
+
+    payload = _json.loads(result.stdout)
+    assert payload["collections"] == []
+    assert payload["census_error"]["kind"] == "no_route"
+    assert payload["census_error"]["collection"] == "c"
+    assert payload["exit_code"] == _EXIT_NO_ROUTE
+
+    assert "upgrade" in result.stderr.lower()
+    assert "upgrade" not in result.stdout.lower()
+
+
+def test_census_all_listing_failure_json_stdout_still_parses(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """Review round 2 CRITICAL finding: the listing-failure flavor of
+    exit 5 (--all's ``list_collections(strict=True)`` raising) used to
+    ``sys.exit`` before the JSON render block, leaving ``result.stdout``
+    empty under --json -- the identical defect the mid-loop flavor of
+    exit 5 was already fixed for in round 1, just on the OTHER trigger
+    path for the same exit code."""
+    stub_client = _StubT3Client(
+        list_raise_error=VectorServiceError("HTTP 503: service unavailable", code=503),
+    )
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+    result = runner.invoke(t3, ["census-manifest-less", "--all", "--json"])
+    assert result.exit_code == _EXIT_ENGINE_ERROR, result.output
+
+    payload = _json.loads(result.stdout)
+    assert payload["collections"] == []
+    assert payload["collections_discovered"] is None
+    assert payload["census_error"]["kind"] == "listing_failed"
+    assert "503" in payload["census_error"]["error"]
+    assert payload["exit_code"] == _EXIT_ENGINE_ERROR
+
+
+def test_census_all_engine_error_wins_over_require_zero_but_violation_still_reported(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """Review round 2 Significant finding: exit-code precedence between a
+    real engine error (5) and a --require-zero violation already observed
+    on an earlier collection (2) was undocumented and untested -- an
+    engine error mid-`--all` used to short-circuit the require-zero check
+    entirely (the ``if census_error is not None: sys.exit(5)`` guard fired
+    before ``zero_violations`` was even computed), so a violation already
+    seen on "first" was silently absent from the exit code AND, before
+    this fix, from the require_zero_violations bookkeeping too. The exit
+    code must be 5 (an incomplete census cannot pass a gate), but the
+    violation itself must still be visible in the document (and in text
+    mode) -- never hidden behind the 5."""
+    empty_totals = {b: 0 for b in _CENSUS_BUCKETS}
+    violating_totals = dict(empty_totals)
+    violating_totals["no-owner"] = 1
+
+    def _census(collection, limit=100, offset=0):
+        if collection == "second":
+            raise VectorServiceError("HTTP 500: boom", code=500)
+        return {
+            "collection": collection, "returned": 0,
+            "chashes": {b: [] for b in _CENSUS_BUCKETS},
+            "owners": {}, "totals": violating_totals, "scope_chunk_total": 1,
+        }
+
+    stub_client = _StubT3Client(
+        list_response=[{"name": "first"}, {"name": "second"}],
+    )
+    stub_client.manifest_less_census = _census  # type: ignore[method-assign]
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+
+    result = runner.invoke(
+        t3, ["census-manifest-less", "--all", "--json", "--require-zero", "no-owner"],
+    )
+    assert result.exit_code == _EXIT_ENGINE_ERROR, result.output
+
+    payload = _json.loads(result.stdout)
+    assert payload["census_error"]["collection"] == "second"
+    assert payload["require_zero_violations"] == ["no-owner"]
+    assert payload["collections"][0]["totals"]["no-owner"] == 1
+
+    text_result = runner.invoke(
+        t3, ["census-manifest-less", "--all", "--require-zero", "no-owner"],
+    )
+    assert text_result.exit_code == _EXIT_ENGINE_ERROR, text_result.output
+    assert "no-owner: 1" in text_result.output

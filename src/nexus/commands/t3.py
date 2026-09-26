@@ -34,6 +34,7 @@ import signal
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn
 
 import click
 import structlog
@@ -1511,6 +1512,87 @@ def _render_census_text(result: dict) -> None:
     click.echo(f"  total: {result['scope_chunk_total']}")
 
 
+def _finish_census(
+    *,
+    as_json: bool,
+    results: list[dict],
+    collections_discovered: int | None,
+    census_error: dict[str, str | None] | None,
+    require_zero: tuple[str, ...],
+    exit_code: int | None = None,
+) -> NoReturn:
+    """Render the census result exactly once -- text, or one JSON
+    document -- and exit. Called on EVERY exit path (review round 2
+    CRITICAL: under --json, stdout must carry exactly one parseable
+    document regardless of exit code; round 1's fix only covered the
+    mid-loop-failure flavor of exit 5, leaving exit 3, exit 4, and the
+    listing-failure flavor of exit 5 emitting a plain sentence to stdout,
+    nothing at all, or nothing at all respectively).
+
+    ``unclassified``/``require_zero_violations`` are always computed over
+    whatever collections DID succeed, even when ``census_error`` is also
+    set (review round 2 Significant): --require-zero and unclassified are
+    gate conditions computed from the collections that succeeded;
+    ``census_error`` reports that the census itself is incomplete. Both
+    facts belong in the document together, so a violation already
+    observed is never hidden behind a later 4/5.
+
+    Exit-code precedence (mirrored in the command's own help text and
+    docs/cli-reference.md): ``census_error`` (4 no-route, 5 any other
+    engine error) always wins over 1 (unclassified) and 2
+    (--require-zero) -- an incomplete census cannot pass a gate. Between
+    4 and 5: 4 is a whole-engine condition (the CONNECTED ENGINE predates
+    the route) and is checked first, on the very first collection
+    attempted, before any per-collection 5 could fire. Exit 3 is passed
+    explicitly by the caller -- it is not a violation (the --all listing
+    SUCCEEDED and is genuinely empty), so it is never derived from
+    unclassified/require_zero/census_error, which would otherwise
+    trivially compute to a clean 0 over zero results.
+    """
+    any_unclassified = any(
+        result["totals"].get("unclassified", 0) > 0 for result in results
+    )
+    zero_violations = [
+        bucket for bucket in require_zero
+        if sum(result["totals"].get(bucket, 0) for result in results) > 0
+    ]
+    if exit_code is None:
+        if census_error is not None:
+            exit_code = (
+                _EXIT_NO_ROUTE if census_error["kind"] == "no_route"
+                else _EXIT_ENGINE_ERROR
+            )
+        elif any_unclassified:
+            exit_code = 1
+        elif zero_violations:
+            exit_code = 2
+        else:
+            exit_code = 0
+
+    if as_json:
+        click.echo(json.dumps({
+            "collections": results,
+            "collections_discovered": collections_discovered,
+            "collections_censused": len(results),
+            "census_error": census_error,
+            "unclassified": any_unclassified,
+            "require_zero_violations": zero_violations,
+            "exit_code": exit_code,
+        }, indent=2))
+    else:
+        for result in results:
+            _render_census_text(result)
+
+    if zero_violations:
+        # Always stderr (review round 1 CRITICAL finding): this line used
+        # to go to the SAME stdout stream as the --json payload above,
+        # corrupting it for the one combination (--json + a violated
+        # --require-zero) the exit-code contract exists to support.
+        click.echo(f"--require-zero violated: {', '.join(zero_violations)}", err=True)
+
+    sys.exit(exit_code)
+
+
 @t3.command("census-manifest-less")
 @click.option(
     "--collection", "-c", default=None,
@@ -1567,10 +1649,30 @@ def census_manifest_less_cmd(
          emitted as a parseable document naming the failed collection).
 
     \b
+    Exit-code precedence: 4 and 5 (the census is INCOMPLETE) always win
+    over 1 and 2 (a gate condition computed from what WAS censused) -- an
+    incomplete census cannot pass a gate. Between 4 and 5: 4 is a
+    whole-engine condition (the connected engine predates the route
+    entirely) and is checked first, on the very first collection
+    attempted, before a later per-collection 5 could ever fire. This
+    never hides a finding: unclassified/--require-zero are always
+    computed over whatever collections DID succeed, even when 4/5 also
+    fires, and both are always present in the output (text and --json)
+    alongside the incomplete-census report.
+
+    \b
     Human-readable diagnostics (the --require-zero violation notice, an
     engine-error line) always go to stderr, never stdout -- with --json,
-    stdout carries only the JSON document, parseable regardless of exit
-    code.
+    stdout carries exactly one JSON document on every exit path listed
+    above, parseable regardless of exit code. The document carries
+    "collections" (per-collection results, possibly partial),
+    "collections_discovered" (how many collections were found to census;
+    null when discovery itself failed), "collections_censused" (how many
+    actually completed -- compare against "collections_discovered" to
+    tell "stopped after 1 of 50" from "stopped after 1 of 2"),
+    "census_error" (null, or {"collection", "error", "kind"} naming which
+    collection failed and why), "unclassified" (bool) and
+    "require_zero_violations" (list of bucket names), and "exit_code".
 
     \b
     This verb no longer gates the production census (Sam's 2026-09-26
@@ -1619,14 +1721,36 @@ def census_manifest_less_cmd(
             ]
         except VectorServiceError as exc:
             click.echo(f"Failed to list T3 collections: {exc}", err=True)
-            sys.exit(_EXIT_ENGINE_ERROR)
-        if not names:
-            click.echo(
-                "No T3 collections found (excluding quarantine-*); nothing to census."
+            # Review round 2 CRITICAL: this used to sys.exit before the
+            # JSON render block was ever reached, leaving stdout empty
+            # under --json. collections_discovered is None -- the listing
+            # itself failed, so there is no count to report.
+            _finish_census(
+                as_json=as_json, results=[], collections_discovered=None,
+                census_error={
+                    "collection": None, "error": str(exc), "kind": "listing_failed",
+                },
+                require_zero=require_zero,
             )
-            sys.exit(3)
+        if not names:
+            # Review round 2 CRITICAL: this used to print a plain sentence
+            # to stdout with no err=True, which is both a diagnostic-on-
+            # stdout regression and, under --json, corrupts the "stdout is
+            # always one parseable document" contract. Exit 3 is not a
+            # violation (the listing SUCCEEDED and is genuinely empty), so
+            # exit_code is passed explicitly rather than derived.
+            click.echo(
+                "No T3 collections found (excluding quarantine-*); nothing to census.",
+                err=True,
+            )
+            _finish_census(
+                as_json=as_json, results=[], collections_discovered=0,
+                census_error=None, require_zero=require_zero, exit_code=3,
+            )
     else:
         names = [collection]
+
+    collections_discovered = len(names)
 
     # nexus.db.make_t3() with no injected _client (every production call,
     # local and cloud alike) returns the HttpVectorClient itself, not a
@@ -1636,50 +1760,26 @@ def census_manifest_less_cmd(
     client = t3_db
 
     results: list[dict] = []
-    census_error: dict[str, str] | None = None
+    census_error: dict[str, str | None] | None = None
     for name in names:
         try:
             results.append(_census_one_collection(client, name))
         except VectorServiceError as exc:
             if exc.code == 404:
                 click.echo(_NO_ROUTE_MESSAGE, err=True)
-                sys.exit(_EXIT_NO_ROUTE)
-            # Any other engine error (a quarantine-* collection's 400, a
-            # transient 5xx, ...) -- review round 1 Important-1: this used
-            # to fall through to a bare `raise` and surface as a raw
-            # traceback. Stop censusing further collections but keep
-            # what already succeeded (review round 1's --all decision).
-            click.echo(f"Census failed on collection {name!r}: {exc}", err=True)
-            census_error = {"collection": name, "error": str(exc)}
+                census_error = {"collection": name, "error": str(exc), "kind": "no_route"}
+            else:
+                # Any other engine error (a quarantine-* collection's 400,
+                # a transient 5xx, ...) -- review round 1 Important-1: this
+                # used to fall through to a bare `raise` and surface as a
+                # raw traceback. Stop censusing further collections but
+                # keep what already succeeded (review round 1's --all
+                # decision).
+                click.echo(f"Census failed on collection {name!r}: {exc}", err=True)
+                census_error = {"collection": name, "error": str(exc), "kind": "engine_error"}
             break
 
-    if as_json:
-        payload: dict = {"collections": results}
-        if census_error is not None:
-            payload["census_error"] = census_error
-        click.echo(json.dumps(payload, indent=2))
-    else:
-        for result in results:
-            _render_census_text(result)
-
-    if census_error is not None:
-        sys.exit(_EXIT_ENGINE_ERROR)
-
-    any_unclassified = any(
-        result["totals"].get("unclassified", 0) > 0 for result in results
+    _finish_census(
+        as_json=as_json, results=results, collections_discovered=collections_discovered,
+        census_error=census_error, require_zero=require_zero,
     )
-    zero_violations = [
-        bucket for bucket in require_zero
-        if sum(result["totals"].get(bucket, 0) for result in results) > 0
-    ]
-
-    if any_unclassified:
-        sys.exit(1)
-    if zero_violations:
-        # Always stderr (review round 1 CRITICAL finding): this line used
-        # to go to the SAME stdout stream as the --json payload above,
-        # corrupting it for the one combination (--json + a violated
-        # --require-zero) the exit-code contract exists to support.
-        click.echo(f"--require-zero violated: {', '.join(zero_violations)}", err=True)
-        sys.exit(2)
-    sys.exit(0)
