@@ -10,6 +10,17 @@
 # login (real billed calls). NOT DinD: PG provisioned in-box by `nx init --service`.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
+# RDR-219 amendment Phase 3b Step 3 (nexus-wauo1.40): the nx-mcp dispatch
+# grant proofs. Forwarded from run.sh's --grant sub-flag (--fullstack
+# --grant) as NX_FULLSTACK_GRANT; forwarded unconditionally as 0 or 1 (never
+# only when set), so an absent variable and an explicit "off" are the same
+# thing here. GRANT MODE (1): claude runs through claude_mcp_grant.sh
+# instead of a plain file-based MCP config, the Phase 2 aspect-worker
+# pre-start is skipped so nx-mcp must spawn its own worker under the grant,
+# and the workload adds operator_summarize, a tool-granting nested dispatch
+# (nx_enrich_beads) and a no-leak check. Default (0): every check below is
+# byte-for-byte the pre-existing --fullstack behavior.
+GRANT_MODE="${NX_FULLSTACK_GRANT:-0}"
 FAILS=0
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
@@ -88,8 +99,32 @@ say "Phase F — MCP-driven workload + queue enqueue + worker drain (real claude
 # what nx-mcp's own later ensure_aspect_worker_daemon() call reads to decide
 # whether to spawn at all.
 NXENV_PY="/home/nexus/nxenv/bin/python3"
-note "pre-starting the RDR-173 leased aspect-worker daemon (inherits CLAUDE_CODE_OAUTH_TOKEN from this shell)…"
-worker_status="$("$NXENV_PY" -c "
+# RDR-219 P3b.3 (nexus-wauo1.40), GRANT MODE proof 2 (nx-mcp-spawned aspect
+# worker): this pre-start must NOT run, so nx-mcp itself has to spawn the
+# worker later under the dispatch grant. Non-vacuity: assert the registry
+# lease is ABSENT right here, before the first store_put -- a document_aspects
+# count alone would not distinguish "nx-mcp spawned it" from "the pre-started
+# worker already did the work", so this check plus the post-teardown RF-4
+# LIVE check below are what make the later document_aspects>0 assertion mean
+# what proof 2 claims.
+if [ "$GRANT_MODE" = 1 ]; then
+  note "GRANT MODE (RDR-219 P3b.3): skipping the Phase 2 aspect-worker pre-start -- nx-mcp must spawn its OWN worker under the dispatch grant"
+  worker_lease_before="$("$NXENV_PY" -c "
+from nexus.config import nexus_config_dir
+from nexus.daemon.aspect_worker_daemon import TIER
+from nexus.daemon.service_registry import ServiceRegistry, ttl_for_tier
+registry = ServiceRegistry(dir=nexus_config_dir(), tier=TIER, ttl=ttl_for_tier(TIER))
+print('LIVE' if registry.discover('default') is not None else 'ABSENT')
+")"
+  if [ "$worker_lease_before" = "ABSENT" ]; then
+    ok "no worker lease before the first store_put (pre-start genuinely skipped -- GRANT MODE proof 2 non-vacuity)"
+  else
+    bad "a worker lease is ALREADY live before the first store_put -- the pre-start was not skipped, so a later document_aspects>0 would be vacuous for proof 2"
+  fi
+fi
+if [ "$GRANT_MODE" != 1 ]; then
+  note "pre-starting the RDR-173 leased aspect-worker daemon (inherits CLAUDE_CODE_OAUTH_TOKEN from this shell)…"
+  worker_status="$("$NXENV_PY" -c "
 import time
 from nexus.config import nexus_config_dir
 from nexus.daemon.aspect_worker_daemon import TIER, ensure_aspect_worker_daemon
@@ -105,20 +140,40 @@ for _ in range(15):
 else:
     print('ABSENT')
 ")"
-if [ "$worker_status" = "LIVE" ]; then ok "leased aspect-worker daemon pre-started (registry lease confirmed live)"; else bad "leased aspect-worker daemon registry lease not found after pre-start"; fi
+  if [ "$worker_status" = "LIVE" ]; then ok "leased aspect-worker daemon pre-started (registry lease confirmed live)"; else bad "leased aspect-worker daemon registry lease not found after pre-start"; fi
+fi
 
 # 1. Auth smoke — proves the mounted oauth + linux claude work (biggest unknown).
 authout="$(claude -p 'Reply with exactly the token AUTHOK and nothing else.' --dangerously-skip-permissions 2>&1)"
 if printf '%s' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"
 else bad "claude -p auth failed — cannot drive the MCP/extraction"; note "$(printf '%s' "$authout" | head -3 | tr '\n' ' ')"; say "ABORT (no claude auth)"; printf 'REHEARSAL FAILED\n'; exit 1; fi
 
-# 2. MCP config for the nexus server (inherits the service env -> routes to PG).
-cat > /home/nexus/mcp.json <<'MCPJSON'
+# 2. MCP config for the nexus server. Default mode: a plain file-based config
+#    (unchanged). GRANT MODE (RDR-219 P3b.3, nexus-wauo1.40): no file at all --
+#    claude runs through claude_mcp_grant (sourced from the staged lib/), which
+#    builds and pipes the config itself, with NX_HARNESS_CLAUDE_OAUTH_TOKEN in
+#    the nexus server's OWN env block so nx-mcp's nested claude -p calls
+#    (operator tools, the aspect worker it must now spawn itself) authenticate.
+if [ "$GRANT_MODE" = 1 ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/lib/claude_mcp_grant.sh"
+  note "GRANT MODE: claude will run through claude_mcp_grant (nexus MCP server env carries NX_HARNESS_CLAUDE_OAUTH_TOKEN only)"
+  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    ok "ANTHROPIC_API_KEY absent in the container before the workload"
+  else
+    bad "ANTHROPIC_API_KEY is set in the container -- the dispatch-grant proofs must run on the harness automation token alone"
+  fi
+else
+  cat > /home/nexus/mcp.json <<'MCPJSON'
 { "mcpServers": { "nexus": { "command": "nx-mcp", "args": [] } } }
 MCPJSON
+fi
 
 # 3. Drive a MULTIVARIATE workload THROUGH the nexus MCP (store_put x4 + search +
 #    nx_answer) so the post-store hook enqueues aspects and several tools fire.
+#    GRANT MODE additionally drives operator_summarize and a tool-granting
+#    nested dispatch (nx_enrich_beads) in the SAME prompt, exercising nx-mcp's
+#    own nested claude -p under the dispatch grant (proofs 1 and 3).
 MARK="fsmark$$"
 prompt="You have the nexus MCP server; use ONLY its tools (names start mcp__nexus__). Do ALL of:
 1. store_put four knowledge notes (collection 'knowledge'), ONE call each, unique titles.
@@ -131,11 +186,25 @@ prompt="You have the nexus MCP server; use ONLY its tools (names start mcp__nexu
    c) 'Gadgets combine widgets and sprockets into devices. $MARK gadget note.'
    d) 'Retrieval ranks documents by semantic similarity. $MARK retrieval note.'
 2. search 'widgets and sprockets' in the knowledge corpus.
-3. nx_answer the question 'what are widgets and sprockets?'.
+3. nx_answer the question 'what are widgets and sprockets?'."
+declare -a allowed_tools=(mcp__nexus__store_put mcp__nexus__search mcp__nexus__nx_answer)
+if [ "$GRANT_MODE" = 1 ]; then
+  prompt="$prompt
+4. operator_summarize the text 'Widgets, sprockets and gadgets combine via retrieval-ranked assembly.'; put its returned summary text in your reply after the literal marker SUMMARY:.
+5. nx_enrich_beads with bead_description 'Test bead: assemble a widget from a sprocket and a gadget.'; put a short excerpt of its returned enriched description in your reply after the literal marker ENRICHED:."
+  allowed_tools+=(mcp__nexus__operator_summarize mcp__nexus__nx_enrich_beads)
+fi
+prompt="$prompt
 End your reply with the literal token WORKLOADDONE."
-note "driving multivariate MCP workload via claude -p (store_put x4 + search + nx_answer)…"
-wlout="$(claude -p "$prompt" --mcp-config /home/nexus/mcp.json --dangerously-skip-permissions \
-  --allowedTools mcp__nexus__store_put mcp__nexus__search mcp__nexus__nx_answer 2>&1)"
+if [ "$GRANT_MODE" = 1 ]; then
+  note "driving multivariate MCP workload via claude_mcp_grant (store_put x4 + search + nx_answer + operator_summarize + nx_enrich_beads)…"
+  wlout="$(claude_mcp_grant nx-mcp -- -p "$prompt" --dangerously-skip-permissions \
+    --allowedTools "${allowed_tools[@]}" 2>&1)"
+else
+  note "driving multivariate MCP workload via claude -p (store_put x4 + search + nx_answer)…"
+  wlout="$(claude -p "$prompt" --mcp-config /home/nexus/mcp.json --dangerously-skip-permissions \
+    --allowedTools "${allowed_tools[@]}" 2>&1)"
+fi
 note "claude workload tail: $(printf '%s' "$wlout" | tail -3 | tr '\n' ' ' | cut -c1-280)"
 printf '%s' "$wlout" | grep -q "WORKLOADDONE" && ok "MCP workload completed (claude drove the tools)" || bad "MCP workload did not finish cleanly"
 
@@ -147,6 +216,69 @@ else bad "no knowledge collection — claude did NOT actually call store_put (MC
 
 # 3c. nx_answer produced a grounded composed answer (from the workload).
 printf '%s' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "nx_answer (MCP) returned a grounded composed answer" || note "nx_answer answer not evident in workload output"
+
+# 3d. GRANT MODE proofs 1 and 3: operator_summarize and the tool-granting
+#     nested dispatch (nx_enrich_beads) must have returned REAL results --
+#     never an error or "Not logged in" -- proving nx-mcp's OWN nested
+#     claude -p authenticated under the dispatch grant.
+if [ "$GRANT_MODE" = 1 ]; then
+  if printf '%s' "$wlout" | grep -q "SUMMARY:" && ! printf '%s' "$wlout" | grep -qi "not logged in"; then
+    ok "operator_summarize (dispatch grant) returned a real reply"
+  else
+    bad "operator_summarize did not return a real reply under the dispatch grant"
+  fi
+  if printf '%s' "$wlout" | grep -q "ENRICHED:" && ! printf '%s' "$wlout" | grep -qi "not logged in"; then
+    ok "nx_enrich_beads (tool-granting dispatch, nested nx-mcp) returned a real result under the dispatch grant"
+  else
+    bad "nx_enrich_beads did not return a real result under the dispatch grant"
+  fi
+fi
+
+# 3e. GRANT MODE proof 4 (no leak): a REAL Bash-tool child must not inherit
+#     either token name, and no process argv anywhere in the container may
+#     match a token-shaped pattern while the session runs. The diagnostic
+#     prints COUNTS ONLY (TOKEN RULE) -- never a value or a whole environment.
+if [ "$GRANT_MODE" = 1 ]; then
+  # Sample every process's argv concurrently with the claude call below
+  # (not just a post-hoc snapshot after it exits): a background poller
+  # records the WORST count observed across the whole call.
+  ARGV_LEAK_FILE="$(mktemp)"
+  printf '0' > "$ARGV_LEAK_FILE"
+  ( while true; do
+      n="$(ps -axww -o args 2>/dev/null | grep -c '[s]k-ant-o' || true)"
+      cur="$(cat "$ARGV_LEAK_FILE" 2>/dev/null || echo 0)"
+      if [ "${n:-0}" -gt "${cur:-0}" ] 2>/dev/null; then printf '%s' "${n:-0}" > "$ARGV_LEAK_FILE"; fi
+      sleep 0.5
+    done ) &
+  ARGV_POLLER_PID=$!
+
+  leak_prompt="You have a Bash tool. Run exactly this one command and nothing else:
+env | grep -c NX_HARNESS_CLAUDE_OAUTH_TOKEN; env | grep -c CLAUDE_CODE_OAUTH_TOKEN
+Reply with exactly two lines, using the ACTUAL numbers the command printed, nothing else:
+HARNESS_COUNT=<n>
+TOKEN_COUNT=<n>
+Then end with the literal token LEAKCHECKDONE. Never print the command's own environment or any variable's value, only the two counts."
+  leakout="$(claude_mcp_grant nx-mcp -- -p "$leak_prompt" --dangerously-skip-permissions --allowedTools Bash 2>&1)"
+
+  kill "$ARGV_POLLER_PID" 2>/dev/null || true
+  wait "$ARGV_POLLER_PID" 2>/dev/null || true
+  argv_hits="$(cat "$ARGV_LEAK_FILE" 2>/dev/null || echo 0)"
+  rm -f "$ARGV_LEAK_FILE"
+
+  note "leak-check tail: $(printf '%s' "$leakout" | tail -3 | tr '\n' ' ' | cut -c1-200)"
+  if printf '%s' "$leakout" | grep -q "LEAKCHECKDONE" \
+     && printf '%s' "$leakout" | grep -qE 'HARNESS_COUNT=0\b' \
+     && printf '%s' "$leakout" | grep -qE 'TOKEN_COUNT=0\b'; then
+    ok "no leak: a real Bash-tool child's environment names neither token (HARNESS_COUNT=0, TOKEN_COUNT=0)"
+  else
+    bad "no-leak diagnostic did not confirm both counts are 0 (leak, or the diagnostic itself failed)"
+  fi
+  if [ "${argv_hits:-0}" -eq 0 ] 2>/dev/null; then
+    ok "no process argv matched a token-shaped pattern while the session ran (ps -axww -o args | grep -c '[s]k-ant-o' = 0)"
+  else
+    bad "a process argv matched a token-shaped pattern while the session ran (${argv_hits} hit(s))"
+  fi
+fi
 
 # 4-6. ASPECT PIPELINE IN SERVICE MODE — POSITIVE END-TO-END ASSERTION.
 # RF-9 (RDR-172) corrects the prior stale comment here: store_put of a knowledge__

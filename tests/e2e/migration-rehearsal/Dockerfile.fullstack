@@ -24,7 +24,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release \
         python3 python3-venv python3-pip \
-        git \
+        git procps \
     && rm -rf /var/lib/apt/lists/*
 # nexus-5qefg: NO system PostgreSQL in this image. The always-install policy
 # (nexus-yv5m4, GH #1381) makes nx provision from the signed PG bundle
@@ -32,6 +32,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # this journey exists to exercise (the reason the yv5m4 bug survived the
 # gate's maiden run). The cold images (Dockerfile.cold) established the
 # bare-box posture; this brings the guided/shakeout images in line.
+# `procps` (ps) is added ONLY for the RDR-219 P3b.3 (nexus-wauo1.40) grant-mode
+# no-leak proof's live argv scan -- daemon liveness still never uses pgrep/ps
+# (registry.discover, per the nexus-5qefg posture note in
+# rehearse_fullstack.sh); it stays absent from every OTHER decision path.
 
 RUN useradd -m -s /bin/bash nexus
 ENV PATH="/home/nexus/.local/bin:/home/nexus/nxenv/bin:${PATH}"
@@ -59,6 +63,11 @@ RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     && nx --version
 
 COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
+
+# RDR-219 P3b.3 (nexus-wauo1.40): rehearse_fullstack.sh's grant-mode path
+# sources lib/claude_mcp_grant.sh, so the library has to travel into the
+# image -- same reason Dockerfile.package-upgrade COPYs lib/ (nexus-wo6sc).
+COPY lib/ /home/nexus/lib/
 
 COPY rehearse_fullstack.sh /home/nexus/rehearse_fullstack.sh
 COPY rehearse_shakeout_e2e.sh /home/nexus/rehearse_shakeout_e2e.sh

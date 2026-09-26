@@ -82,6 +82,7 @@ COLD=0
 COMPREHENSIVE=0
 STRESS=0
 FULLSTACK=0
+GRANT=0
 SHAKEOUT_E2E=0
 HOLE_PUNCH=0
 SHAKEOUT=0
@@ -286,6 +287,7 @@ for a in "$@"; do
     --comprehensive) COMPREHENSIVE=1 ;;  # Phase D: daily-driver surface on the default rehearse.sh
     --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
+    --grant)      GRANT=1 ;;             # RDR-219 P3b.3 (nexus-wauo1.40): --fullstack SUB-FLAG ONLY — claude runs through claude_mcp_grant.sh (nx-mcp dispatch grant), skips the Phase 2 aspect-worker pre-start, and drives the operator/nested-dispatch/no-leak proofs
     --shakeout-e2e) SHAKEOUT_E2E=1 ;;    # standalone: nexus-33hpq-class daily-driver shakeout — real-corpus code/md/pdf ingest, search/query retrieval, T2/T1 round-trip, doctor, MCP surface, live peak-RSS assertion during code ingest
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
     --acquire)    ACQUIRE=1 ;;         # nexus-1ddsy: PUBLISHED-artifact gate — cold-acquire NEXUS_SERVICE_TAG on a bare box and drive it
@@ -418,6 +420,12 @@ fi
 [ "$COMPREHENSIVE" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--comprehensive and --with-cloud are incoherent (Phase D is deterministic bge-768 local; --with-cloud boots a voyage-only service — the engine correctly 422s the cross-model write); run --comprehensive alone" >&2; exit 2; }
 [ "$STRESS" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--stress and --with-cloud are incoherent (Phase E's store/memory puts hit the same bge-768-vs-voyage-serving-mode collision as Phase D); run --stress alone" >&2; exit 2; }
 [ "$FULLSTACK" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ]; } && { echo "--fullstack is a standalone full-topology run (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+# --grant is a --fullstack SUB-FLAG (RDR-219 P3b.3, nexus-wauo1.40), never a
+# leg of its own: it proves the nx-mcp dispatch grant inside the SAME
+# full-topology image/entrypoint --fullstack already builds. Refused
+# standalone or combined with anything else, before the first mutation,
+# the same convention every other leg's guard above uses.
+[ "$GRANT" = 1 ] && [ "$FULLSTACK" != 1 ] && { echo "--grant is a --fullstack sub-flag; combine as '--fullstack --grant'" >&2; exit 2; }
 # --hole-punch is a standalone journey: it reuses the --cold box's staging
 # internally (cheapest to compose — no native GraalVM build) but drives its
 # own entrypoint (rehearse_hole_punch.sh, nexus-s3dd4.7), never combined with
@@ -981,6 +989,13 @@ elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   stage_native "$STAGE/native"
   cp "$HERE/Dockerfile.fullstack" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_fullstack.sh" "$HERE/rehearse_shakeout_e2e.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  # RDR-219 P3b.3 (nexus-wauo1.40): rehearse_fullstack.sh's grant-mode path
+  # sources lib/claude_mcp_grant.sh, so the library has to travel with it —
+  # same reason the --package-upgrade/--candidate-migration Dockerfiles
+  # COPY lib/ (nexus-wo6sc). Directory-wide so a second lib file is not
+  # repeated; staged unconditionally (not just under --grant) so the image
+  # is identical whether or not --grant is passed at run time.
+  cp -R "$HERE/lib" "$STAGE/lib"
 elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
   # the default/--shakeout path: the locally-built, now-stamped -Ob binary,
@@ -1144,6 +1159,14 @@ if [ "$WITH_CLOUD" = 1 ]; then
   key="${VOYAGE_API_KEY:-${NX_VOYAGE_API_KEY:-}}"
   [ -n "$key" ] || { echo "--with-cloud needs VOYAGE_API_KEY in .env" >&2; exit 1; }
   run_env+=(-e "NX_VOYAGE_API_KEY=$key" -e "VOYAGE_API_KEY=$key")
+fi
+if [ "$FULLSTACK" = 1 ]; then
+  # RDR-219 P3b.3 (nexus-wauo1.40): forward --grant into the container so
+  # rehearse_fullstack.sh can pick the dispatch-grant path. Forwarded
+  # unconditionally (0 or 1), never only when set, so the in-container
+  # script can tell "not requested" from "not forwarded at all" — same
+  # discipline as every other conditionally-forwarded knob above.
+  run_env+=(-e "NX_FULLSTACK_GRANT=$GRANT")
 fi
 
 # NOT `exec` — exec replaces this shell and would suppress the EXIT trap that

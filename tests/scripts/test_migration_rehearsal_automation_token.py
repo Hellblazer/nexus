@@ -314,12 +314,16 @@ def test_rehearse_fullstack_prestart_block_shellchecks_clean(
     comment header to the following `ok`/`bad` liveness assertion) and
     shellchecks it in isolation."""
     start = rehearse_fullstack_text.index("# 0. Pre-start")
-    end_marker = 'registry lease not found after pre-start"; fi'
+    # nexus-wauo1.40: the inner if/else/fi (the ok/bad liveness assertion, on
+    # one line) is nested inside an OUTER `if [ "$GRANT_MODE" != 1 ]; then`
+    # block -- the extraction needs BOTH closing `fi`s, one on the assertion
+    # line and one on the line right after it, or the probe is unbalanced.
+    end_marker = 'registry lease not found after pre-start"; fi\nfi'
     end = rehearse_fullstack_text.index(end_marker) + len(end_marker)
     block = rehearse_fullstack_text[start:end]
     probe_src = (
         "#!/usr/bin/env bash\nset -uo pipefail\n"
-        'ok() { :; }; bad() { :; }; note() { :; }; NXENV_PY=python3\n'
+        'ok() { :; }; bad() { :; }; note() { :; }; NXENV_PY=python3; GRANT_MODE=0\n'
         + block
         + "\n"
     )
