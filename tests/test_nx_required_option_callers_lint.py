@@ -12,25 +12,47 @@ holds the fact in checkable form (Click's own ``required=True``); what is
 missing is a scan wiring caller to requirement.
 
 THE REQUIRED-OPTION SET IS DERIVED, NEVER LISTED. Walking the LIVE Click
-command tree (``nexus.cli.main``) and reading each leaf command's
+command tree (``nexus.cli.main``) and reading each command's
 ``click.Option.required`` flag, exactly the way
 ``test_release_artifact_verb_rot.py``'s ``_click_tree()`` resolves verbs
 against the live tree rather than a hand-kept list. A hand-kept list is the
 seven-enumerations problem: the next ``required=True`` lands and nobody adds
-the row.
+the row. A GROUP's own required options (none exist today) are inherited by
+every one of its subcommands, since Click runs the group's callback -- and
+therefore requires the group's own options -- before dispatching to any
+subcommand at all.
 
 SCOPE: required OPTIONS only (``click.Option``, not ``click.Argument`` —
 required positionals are a different failure shape: an omitted positional is
 a wrong-arity error Click itself raises immediately and loudly at every call
 site, not a silently-accepted-then-later-refused flag). Every alias/secondary
 name a required option carries counts as satisfying it (``-c`` and
-``--collection`` are the same requirement).
+``--collection`` are the same requirement). An option that is ``required=True``
+but ALSO carries ``envvar=`` or ``prompt=`` is satisfiable without the flag at
+all (Click reads the environment variable, or asks interactively) -- these are
+excluded from the derived required set entirely rather than ever being
+flagged as "missing" (none exist on any live required option today; see
+``test_envvar_and_prompt_required_options_are_excluded_not_flagged`` for the
+mechanism pinned against a synthetic command, since there is nothing live to
+pin it against).
 
 CALLER DISCOVERY is imported from the sibling, not duplicated: same
-``CALLER_SCOPES`` / ``CALLER_SUFFIXES`` / ``_caller_files()``, so a caller
-that would be swept for a retired-command violation is swept here too.
+``CALLER_SCOPES`` / ``_caller_files()``, so a caller that would be swept for
+a retired-command violation is swept here too.
 
-WHAT THIS SCANNER CANNOT SEE, disclosed rather than silently mishandled:
+CALLER RECOGNITION beyond the literal word ``nx`` is shared with the sibling
+via ``tests/_nx_shell_lint.py`` (see that module's docstring for the full
+account): a shell wrapper function that injects env/config around a real
+``nx`` call and forwards every argument (``_nx()``, ``_client_nx()``, ...) is
+DISCOVERED structurally (its body invokes ``nx``/a path ending in ``/nx``/
+``uv run nx``, forwarding ``"$@"``) and calls to it are treated exactly like
+calls to ``nx`` itself; ``uv run nx ...`` (with or without flags between
+``run`` and the command) is recognized as a lead-in on its own. Both were
+found missing in code review (nexus-egei6 fix round) -- the wrapper gap alone
+made 3 of the 4 files the ``--collection`` incident itself fixed invisible to
+this lint's first cut.
+
+WHAT THIS SCANNER STILL CANNOT SEE, disclosed rather than silently mishandled:
 
   * A required flag added to an argv list by a LATER ``+=``/``.append`` in
     the same Python function is invisible to a single-AST-node list scan.
@@ -44,15 +66,23 @@ WHAT THIS SCANNER CANNOT SEE, disclosed rather than silently mishandled:
     violation — it is UNRESOLVED, counted and reported separately (see
     ``MAX_UNRESOLVED``), because the parser genuinely cannot tell whether the
     missing flag is hiding inside the opaque piece.
-  * Depth is whatever the live Click tree says: nested groups (``nx service
-    token issue``) are walked to their true leaf, unlike the retired lint's
-    shallower AST-decorator matching, which does not need to (this module
-    resolves against LIVE ``click.Command`` objects, not decorators, so
-    "how deep is a group" is never a design constraint here).
+  * The shell wrapper detector (``tests/_nx_shell_lint.py``) only bounds a
+    SIMPLE, non-nested ``name() { ... }`` function body (one-liner or a
+    multi-line block closed by a lone ``}``). A wrapper whose body contains
+    its own nested ``if``/``case``/subshell block is invisible to it and
+    silently NOT treated as a wrapper -- fail-closed, same posture as an
+    unresolved invocation, but undetected rather than counted. Not observed
+    in this corpus: every real wrapper here is one `env ...`/`uv run ...`
+    statement.
+  * The ``uv run [flags] <name>`` recognizer assumes each ``--flag`` between
+    ``run`` and the real command consumes at most one following value token
+    (``--project X``); an unusual multi-value flag shape between them could
+    defeat it. No real caller in this corpus puts a flag there at all.
 """
 from __future__ import annotations
 
 import ast
+import functools
 import re
 import shlex
 from dataclasses import dataclass
@@ -61,12 +91,14 @@ from pathlib import Path
 import click
 import pytest
 
-from tests.test_retired_command_callers_lint import (
-    CALLER_SCOPES,  # noqa: F401 -- re-exported for anyone importing this module
-    CALLER_SUFFIXES,  # noqa: F401
-    REPO_ROOT,
-    _caller_files,
+from tests._nx_shell_lint import (
+    NX_LEAD_IN,
+    alias_invocation,
+    discover_nx_wrapper_names,
+    join_continuations as _join_continuations,
+    strip_shell_comment as _strip_shell_comment,
 )
+from tests.test_retired_command_callers_lint import CALLER_SCOPES, REPO_ROOT, _caller_files
 
 #: Non-vacuity floor for the derivation (nexus-moht0): 26 required-option
 #: leaf commands exist today; the floor sits comfortably below that so
@@ -118,6 +150,48 @@ class Hit:
 # ── Deriving the required-option set from the LIVE Click tree ──────────────
 
 
+def _required_options_of(cmd: click.Command) -> tuple[RequiredOption, ...]:
+    """*cmd*'s own required options, excluding one satisfiable without the
+    flag: ``envvar=`` (settable via the environment) or ``prompt=`` (Click
+    asks interactively when the flag is omitted). Neither exists on any live
+    required option today (dumped and confirmed against the full tree); a
+    future one would otherwise be flagged as a false "missing" violation for
+    every caller that legitimately relies on the environment variable or the
+    prompt instead of the flag.
+    """
+    return tuple(
+        RequiredOption(p.name, tuple(dict.fromkeys([*p.opts, *p.secondary_opts])))
+        for p in cmd.params
+        if isinstance(p, click.Option) and p.required and not p.envvar and not p.prompt
+    )
+
+
+def _walk_required(
+    cmd: click.Command, path: list[str], inherited: tuple[RequiredOption, ...] = ()
+) -> dict[str, tuple[RequiredOption, ...]]:
+    """The recursive walk, factored out of :func:`_leaf_required_options` so
+    it can be exercised directly against a SYNTHETIC command tree (see
+    ``test_group_level_required_options_are_inherited_by_subcommands`` /
+    ``test_envvar_and_prompt_required_options_are_excluded_not_flagged``),
+    since neither shape exists in the live tree to pin a regression against.
+
+    A GROUP's own required options are folded into ``inherited`` and passed
+    down to every subcommand: Click runs a group's callback (and therefore
+    requires ITS OWN required options) before dispatching to any subcommand,
+    so ``nx <group> <leaf>`` must satisfy both the group's and the leaf's.
+    """
+    own = _required_options_of(cmd)
+    combined = inherited + own
+    found: dict[str, tuple[RequiredOption, ...]] = {}
+    if isinstance(cmd, click.Group):
+        for name, sub in cmd.commands.items():
+            found.update(_walk_required(sub, [*path, name], combined))
+        return found
+    if combined:
+        found[" ".join(["nx", *path])] = combined
+    return found
+
+
 def _leaf_required_options() -> dict[str, tuple[RequiredOption, ...]]:
     """``{"nx <group...> <cmd>": (RequiredOption, ...)}``, walked live.
 
@@ -127,73 +201,30 @@ def _leaf_required_options() -> dict[str, tuple[RequiredOption, ...]]:
     """
     from nexus.cli import main  # noqa: PLC0415 -- call-time import, not collection-time
 
-    found: dict[str, tuple[RequiredOption, ...]] = {}
-
-    def walk(cmd: click.Command, path: list[str]) -> None:
-        if isinstance(cmd, click.Group):
-            for name, sub in cmd.commands.items():
-                walk(sub, [*path, name])
-            return
-        required = tuple(
-            RequiredOption(p.name, tuple(dict.fromkeys([*p.opts, *p.secondary_opts])))
-            for p in cmd.params
-            if isinstance(p, click.Option) and p.required
-        )
-        if required:
-            found[" ".join(["nx", *path])] = required
-
-    walk(main, [])
-    return found
+    return _walk_required(main, [])
 
 
 # ── Shell scanning: command position, line continuations, quote-aware tail ─
 
-#: Same lead-in class as the sibling's ``_shell_invocations``, kept
-#: identical on purpose so "is this in command position" means the same
-#: thing in both lints. The TRAILING boundary deliberately does NOT reuse
-#: the sibling's plain ``\b``: several Click subcommand names in this tree
-#: are hyphenated prefixes of each other (``daemon service install`` vs.
-#: ``daemon service install-binary``), and ``\b`` treats the boundary
-#: between a word character and a hyphen as a match -- ``r"install\b"``
-#: matches inside ``"install-binary"`` too, which would wrongly charge
-#: every ``install-binary`` caller with ``install``'s required
-#: ``--autostart`` (found empirically: 5 files, all actually calling the
-#: unrelated ``install-binary`` verb). ``(?![\w-])`` additionally excludes a
-#: following hyphen, which the sibling's retired-command set never needed to
-#: because none of ITS entries collide with a longer hyphenated sibling verb.
+
 def _shell_command_position_re(invocation: str) -> re.Pattern[str]:
-    words = re.escape(invocation).replace(r"\ ", r"\s+")
-    return re.compile(
-        r"(?:^|[;&|(]|&&|\|\||\$\(|\b(?:if|then|else|do|sudo|exec|time)\s+)"
-        r"\s*" + words + r"(?![\w-])"
-    )
+    """"Command position" for *invocation* -- see :data:`tests._nx_shell_lint.NX_LEAD_IN`
+    for the shared lead-in class (now including ``uv run``).
 
-
-def _join_continuations(text: str) -> list[tuple[int, str]]:
-    """``[(starting_lineno, logical_line), ...]``, joining backslash continuations.
-
-    A line ending in a single, unescaped backslash is joined with the next
-    physical line (its own leading whitespace stripped, a single space
-    inserted). A line ending in an escaped backslash (``\\\\``, a literal
-    backslash character, not a continuation) is left alone.
+    The TRAILING boundary deliberately does NOT use a plain ``\\b``: several
+    Click subcommand names in this tree are hyphenated prefixes of each
+    other (``daemon service install`` vs. ``daemon service install-binary``),
+    and ``\\b`` treats the boundary between a word character and a hyphen as
+    a match -- ``r"install\\b"`` matches inside ``"install-binary"`` too,
+    which would wrongly charge every ``install-binary`` caller with
+    ``install``'s required ``--autostart`` (found empirically: 5 files, all
+    actually calling the unrelated ``install-binary`` verb). ``(?![\\w-])``
+    additionally excludes a following hyphen, which the sibling's
+    retired-command set never needed to because none of ITS entries collide
+    with a longer hyphenated sibling verb.
     """
-    lines = text.splitlines()
-    out: list[tuple[int, str]] = []
-    i = 0
-    n = len(lines)
-    while i < n:
-        start_lineno = i + 1
-        buf = lines[i]
-        while buf.endswith("\\") and not buf.endswith("\\\\") and i + 1 < n:
-            i += 1
-            buf = buf[:-1].rstrip() + " " + lines[i].lstrip()
-        out.append((start_lineno, buf))
-        i += 1
-    return out
-
-
-def _strip_shell_comment(line: str) -> str:
-    return re.sub(r"(^|\s)#.*$", "", line)
+    words = re.escape(invocation).replace(r"\ ", r"\s+")
+    return re.compile(NX_LEAD_IN + r"\s*" + words + r"(?![\w-])")
 
 
 def _statement_tail(line: str, start: int) -> str:
@@ -279,21 +310,36 @@ def _risky_opaque_snippet(tail: str) -> str | None:
     return None
 
 
-def _shell_hits(text: str, invocation: str, *, file_label: str) -> list[Hit]:
-    pattern = _shell_command_position_re(invocation)
+def _shell_file_hits(
+    text: str, required: dict[str, tuple[RequiredOption, ...]], *, file_label: str
+) -> list[Hit]:
+    """Every required-option invocation in *text*, scanning ONCE per file.
+
+    Line continuations are joined and wrapper names discovered ONCE (not
+    once per invocation, per nexus-egei6 fix-round's performance finding),
+    then every invocation is searched for under EVERY alias -- ``nx`` itself
+    plus any discovered wrapper name -- using the same command-position
+    rule for each.
+    """
+    joined = _join_continuations(text)
+    aliases = {"nx", *discover_nx_wrapper_names(text)}
     hits: list[Hit] = []
-    for lineno, raw_line in _join_continuations(text):
-        line = _strip_shell_comment(raw_line)
-        for m in pattern.finditer(line):
-            tail = _statement_tail(line, m.end())
-            tokens = _tokenize_shell(tail)
-            if tokens is None:
-                hits.append(
-                    Hit(file_label, lineno, invocation, "unresolved",
-                        f"shlex could not parse the tail: {tail!r}")
-                )
-                continue
-            hits.append(_evaluate(file_label, lineno, invocation, tokens, tail))
+    for invocation in required:
+        for alias in aliases:
+            variant = invocation if alias == "nx" else alias_invocation(invocation, alias)
+            pattern = _shell_command_position_re(variant)
+            for lineno, raw_line in joined:
+                line = _strip_shell_comment(raw_line)
+                for m in pattern.finditer(line):
+                    tail = _statement_tail(line, m.end())
+                    tokens = _tokenize_shell(tail)
+                    if tokens is None:
+                        hits.append(
+                            Hit(file_label, lineno, invocation, "unresolved",
+                                f"shlex could not parse the tail: {tail!r}")
+                        )
+                        continue
+                    hits.append(_evaluate(file_label, lineno, invocation, tokens, tail))
     return hits
 
 
@@ -382,15 +428,26 @@ def _python_string_hits(tree: ast.Module, invocation: str, *, file_label: str) -
     return hits
 
 
-def _python_hits(text: str, invocation: str, *, file_label: str, path: Path) -> list[Hit]:
+def _python_file_hits(
+    text: str, required: dict[str, tuple[RequiredOption, ...]], *, file_label: str, path: Path
+) -> list[Hit]:
+    """Every required-option invocation in *text*, parsing the AST ONCE.
+
+    The original per-(file, invocation) shape called ``ast.parse`` once for
+    every one of the 26 required-option commands on every Python file --
+    the measured cost of the whole suite's ~33-37s-per-call runtime
+    (nexus-egei6 fix round). Parsing is the expensive step; walking an
+    already-parsed tree per invocation is comparatively cheap.
+    """
     try:
         tree = ast.parse(text, filename=str(path))
     except SyntaxError:
         return []
-    return (
-        _python_argv_hits(tree, invocation, file_label=file_label)
-        + _python_string_hits(tree, invocation, file_label=file_label)
-    )
+    hits: list[Hit] = []
+    for invocation in required:
+        hits.extend(_python_argv_hits(tree, invocation, file_label=file_label))
+        hits.extend(_python_string_hits(tree, invocation, file_label=file_label))
+    return hits
 
 
 # ── Shared evaluation: is every required option present, missing, or opaque ─
@@ -453,8 +510,14 @@ def _evaluate_python(
 # ── Full scan ────────────────────────────────────────────────────────────
 
 
-def _all_hits() -> list[Hit]:
+@functools.cache
+def _all_hits() -> tuple[Hit, ...]:
+    """The whole scan, computed ONCE per process (nexus-egei6 fix round:
+    three tests each called this independently, ~33-37s per call; the lint
+    bucket must stay fast).
+    """
     required = _leaf_required_options()
+    active = {inv: opts for inv, opts in required.items() if inv not in ALLOWED_CALLERS}
     hits: list[Hit] = []
     for path in _caller_files():
         rel = str(path.relative_to(REPO_ROOT))
@@ -462,14 +525,11 @@ def _all_hits() -> list[Hit]:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        for invocation in required:
-            if invocation in ALLOWED_CALLERS:
-                continue
-            if path.suffix == ".py":
-                hits.extend(_python_hits(text, invocation, file_label=rel, path=path))
-            else:
-                hits.extend(_shell_hits(text, invocation, file_label=rel))
-    return hits
+        if path.suffix == ".py":
+            hits.extend(_python_file_hits(text, active, file_label=rel, path=path))
+        else:
+            hits.extend(_shell_file_hits(text, active, file_label=rel))
+    return tuple(hits)
 
 
 # ── Non-vacuity ──────────────────────────────────────────────────────────
@@ -487,6 +547,44 @@ def test_required_options_are_derivable_and_non_empty() -> None:
     assert "nx store put" in required, sorted(required)
     aliases = {a for opt in required["nx store put"] for a in opt.aliases}
     assert "--collection" in aliases, aliases
+
+
+@pytest.mark.lint
+def test_group_level_required_options_are_inherited_by_subcommands() -> None:
+    """No live group has its own required option today, so this is pinned
+    against a SYNTHETIC tree -- the mechanism, not a live regression."""
+    @click.group()
+    @click.option("--tenant", required=True)
+    def grp(tenant: str) -> None: ...
+
+    @grp.command("leaf")
+    def leaf_cmd() -> None: ...
+
+    found = _walk_required(grp, ["grp"])
+    assert "nx grp leaf" in found, found
+    names = {o.name for o in found["nx grp leaf"]}
+    assert "tenant" in names, names
+
+
+@pytest.mark.lint
+def test_envvar_and_prompt_required_options_are_excluded_not_flagged() -> None:
+    """No live required option carries ``envvar=``/``prompt=`` today, so this
+    is pinned against a SYNTHETIC command -- the mechanism, not a live
+    regression. A required option satisfiable via the environment or an
+    interactive prompt must never be counted as "missing" from a caller that
+    legitimately relies on either instead of the flag."""
+    @click.group()
+    def grp2() -> None: ...
+
+    @grp2.command("leaf")
+    @click.option("--from-env", required=True, envvar="X_FROM_ENV")
+    @click.option("--from-prompt", required=True, prompt=True)
+    @click.option("--plain", required=True)
+    def leaf2(from_env: str, from_prompt: str, plain: str) -> None: ...
+
+    found = _walk_required(grp2, ["grp2"])
+    names = {o.name for o in found.get("nx grp2 leaf", ())}
+    assert names == {"plain"}, names
 
 
 @pytest.mark.lint
@@ -563,6 +661,22 @@ def test_the_shell_tail_scanner_respects_quotes_and_terminators() -> None:
 
 
 @pytest.mark.lint
+def test_uv_run_is_recognized_as_a_command_position_lead_in() -> None:
+    """Undisclosed gap from code review (nexus-egei6 fix round): `uv run nx
+    ...` puts `uv` where bash actually looks for a command, with `nx`
+    arriving as `run`'s own argument -- neither lint's original lead-in
+    class recognised this at all. 6 real in-scope files used this shape."""
+    plain = 'uv run nx store put ./f.md --collection foo'
+    assert _shell_command_position_re("nx store put").search(plain) is not None, plain
+
+    with_env_prefix = 'NX_LOCAL=1 NEXUS_CONFIG_DIR="$X" uv run nx store put ./f.md --collection foo'
+    assert _shell_command_position_re("nx store put").search(with_env_prefix) is not None, with_env_prefix
+
+    with_uv_flag = 'uv run --project /repo nx store put ./f.md --collection foo'
+    assert _shell_command_position_re("nx store put").search(with_uv_flag) is not None, with_uv_flag
+
+
+@pytest.mark.lint
 def test_the_continuation_joiner_merges_a_backslash_continued_line() -> None:
     text = "nx store put ./f.md \\\n  --collection foo\n"
     joined = _join_continuations(text)
@@ -581,6 +695,85 @@ def test_the_python_argv_scanner_finds_a_literal_and_an_opaque_list() -> None:
     )
     hits = _python_argv_hits(tree, "nx store put", file_label="x.py")
     assert [h.status for h in hits] == ["ok", "unresolved", "violation"], hits
+
+
+@pytest.mark.lint
+def test_discover_nx_wrapper_names_recognizes_every_real_shape() -> None:
+    """One regression case per wrapper shape found in the caller corpus
+    (code review, nexus-egei6 fix round): the CRITICAL finding that made 3
+    of the 4 files the lint's own motivating incident fixed invisible."""
+    multiline_env_injection = (
+        '_nx() {\n'
+        '    env -i \\\n'
+        '        HOME="$HOME_DIR" \\\n'
+        '        "$BIN_DIR/nx" "$@"\n'
+        '}\n'
+    )
+    assert discover_nx_wrapper_names(multiline_env_injection) == {"_nx"}, "fresh-install-mvv.sh shape"
+
+    oneliner_uv_run = 'print_cli() { uv run nx "$@"; }\n'
+    assert discover_nx_wrapper_names(oneliner_uv_run) == {"print_cli"}, "scripts/validate/03-cli.sh shape"
+
+    uv_run_with_env_prefix = (
+        '_provisioner_nx() {\n'
+        '  NX_LOCAL=1 NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx "$@"\n'
+        '}\n'
+    )
+    assert discover_nx_wrapper_names(uv_run_with_env_prefix) == {"_provisioner_nx"}, (
+        "published-client-write-gate.sh shape"
+    )
+
+    chained_wrapper = (
+        '_nx() {\n'
+        '    "$BIN_DIR/nx" "$@"\n'
+        '}\n'
+        '_nx_poisoned() {\n'
+        '    NX_SERVICE_TOKEN=poison _nx "$@"\n'
+        '}\n'
+    )
+    assert discover_nx_wrapper_names(chained_wrapper) == {"_nx", "_nx_poisoned"}, (
+        "data-token-cli-gate.sh shape: a wrapper calling a previously-discovered wrapper"
+    )
+
+    not_a_wrapper_no_forward = (
+        '_describe_nx() {\n'
+        '    echo "nx lives at $BIN_DIR/nx"\n'
+        '}\n'
+    )
+    assert discover_nx_wrapper_names(not_a_wrapper_no_forward) == set(), (
+        "mentions nx but never forwards args -- not a wrapper"
+    )
+
+    not_a_wrapper_unrelated_forward = (
+        '_run_anything() {\n'
+        '    "$1" "$@"\n'
+        '}\n'
+    )
+    assert discover_nx_wrapper_names(not_a_wrapper_unrelated_forward) == set(), (
+        "forwards args to something unrelated to nx -- not a wrapper"
+    )
+
+
+@pytest.mark.lint
+def test_a_wrapper_call_site_missing_a_required_flag_is_a_violation() -> None:
+    """Regression pin for the code-review CRITICAL finding (nexus-egei6 fix
+    round), reproducing the exact shape of tests/e2e/fresh-install-mvv.sh:837
+    against a synthetic copy. Manually kill-controlled against the REAL file
+    too (removed --collection there, confirmed this exact test's underlying
+    mechanism went red via test_every_caller_passes_every_required_click_option,
+    then restored -- see the fix-round report)."""
+    text = (
+        '_nx() {\n'
+        '    env -i \\\n'
+        '        HOME="$HOME_DIR" \\\n'
+        '        "$BIN_DIR/nx" "$@"\n'
+        '}\n'
+        'echo "$SENTINEL" | _nx store put - --title "probe"\n'
+    )
+    required = _leaf_required_options()
+    hits = _shell_file_hits(text, required, file_label="synthetic.sh")
+    violations = [h for h in hits if h.status == "violation" and h.invocation == "nx store put"]
+    assert violations, hits
 
 
 # ── The gates themselves ────────────────────────────────────────────────

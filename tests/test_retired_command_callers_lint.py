@@ -58,6 +58,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._nx_shell_lint import NX_LEAD_IN, alias_invocation, discover_nx_wrapper_names
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_ROOT = REPO_ROOT / "src" / "nexus" / "commands"
 
@@ -164,24 +166,39 @@ def _retired_commands() -> dict[str, str]:
     return found
 
 
-def _shell_invocations(text: str, invocation: str) -> list[int]:
-    """Line numbers where *invocation* sits in COMMAND POSITION.
+def _shell_invocations(
+    text: str, invocation: str, *, aliases: tuple[str, ...] = ("nx",)
+) -> list[int]:
+    """Line numbers where *invocation* -- or a call through one of *aliases*
+    -- sits in COMMAND POSITION.
 
     Command position means the start of a statement, allowing the usual
     lead-ins (``&&``, ``||``, ``;``, ``|``, ``$(``, ``if``, ``then``, ``do``,
-    ``sudo``). A mention inside a comment or mid-sentence is not a call.
+    ``sudo``, and -- shared with the required-option sibling lint via
+    ``tests/_nx_shell_lint.py``, code review nexus-egei6 fix round --
+    ``uv run``, since ``uv`` is the word bash actually executes and ``nx``
+    only arrives as ``run``'s own argument). A mention inside a comment or
+    mid-sentence is not a call.
+
+    *aliases* defaults to just ``("nx",)`` -- unchanged behavior for any
+    caller that does not pass it. A file-scoped caller (e.g.
+    ``test_nothing_invokes_a_retired_command``) discovers a file's own
+    ``nx``-forwarding shell wrapper names (``_nx()``, ``_client_nx()``, ...)
+    ONCE via :func:`discover_nx_wrapper_names` and passes the resulting set
+    here, so a retired command called only via such a wrapper -- exactly as
+    invisible to the ORIGINAL regex as a required-option violation through
+    the same wrapper was -- is still caught.
     """
-    words = re.escape(invocation).replace(r"\ ", r"\s+")
-    pattern = re.compile(
-        r"(?:^|[;&|(]|&&|\|\||\$\(|\b(?:if|then|else|do|sudo|exec|time)\s+)"
-        r"\s*" + words + r"\b"
-    )
-    hits = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
-        line = re.sub(r"(^|\s)#.*$", "", raw)  # strip comments
-        if pattern.search(line):
-            hits.append(lineno)
-    return hits
+    hits: set[int] = set()
+    for alias in aliases:
+        variant = invocation if alias == "nx" else alias_invocation(invocation, alias)
+        words = re.escape(variant).replace(r"\ ", r"\s+")
+        pattern = re.compile(NX_LEAD_IN + r"\s*" + words + r"\b")
+        for lineno, raw in enumerate(text.splitlines(), start=1):
+            line = re.sub(r"(^|\s)#.*$", "", raw)  # strip comments
+            if pattern.search(line):
+                hits.add(lineno)
+    return sorted(hits)
 
 
 def _python_invocations(text: str, invocation: str, path: Path) -> list[int]:
@@ -278,13 +295,16 @@ def test_nothing_invokes_a_retired_command() -> None:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        # Discovered ONCE per file, not once per retired command: the same
+        # perf shape the required-option sibling lint was fixed to use.
+        aliases = ("nx", *discover_nx_wrapper_names(text)) if path.suffix != ".py" else ("nx",)
         for invocation, defined_at in retired.items():
             if rel == defined_at.split(":")[0] or invocation in ALLOWED_CALLERS:
                 continue
             lines = (
                 _python_invocations(text, invocation, path)
                 if path.suffix == ".py"
-                else _shell_invocations(text, invocation)
+                else _shell_invocations(text, invocation, aliases=aliases)
             )
             offenders.extend(f"{rel}:{n}  invokes '{invocation}'" for n in lines)
 
