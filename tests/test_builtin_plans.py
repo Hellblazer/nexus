@@ -207,3 +207,51 @@ def test_builtin_template_is_offerable_to_nx_answer(path: Path) -> None:
         f"nexus.plans.binding_infer to derive it, or do not ship the "
         f"template."
     )
+
+
+@pytest.mark.skipif(
+    not _BUILTIN_DIR.exists() or not _YAML_FILES,
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+)
+@pytest.mark.parametrize("path", _YAML_FILES, ids=[p.name for p in _YAML_FILES])
+def test_builtin_template_scope_topic_is_never_a_bound_var(path: Path) -> None:
+    """``scope.topic`` must never be a ``$var`` reference (nexus-opraf).
+
+    ``search``/``query``'s ``topic`` kwarg restricts results to documents
+    already assigned a DISCOVERED taxonomy label (``nx taxonomy discover``)
+    -- a small, fixed vocabulary, never a caller's free-text binding.
+    ``_apply_scope_to_args`` (``nexus.plans.runner``) resolves
+    ``scope.topic`` through the same ``$var`` substitution as ``args`` and
+    forwards the RESULT into the dispatched call's ``topic`` kwarg with no
+    validation that it names a real label.
+
+    Three shipped templates (``research-default``, ``analyze-default``,
+    ``document-default``) bound ``scope.topic`` to their own free-text
+    ``$concept``/``$area`` required binding -- the exact same text already
+    used as the search ``query``. That string essentially never matches a
+    real taxonomy label, so ``search_engine.search_cross_corpus``'s topic
+    pre-filter took the ``if not ids: return []`` branch and returned ZERO
+    results on every call -- even though the same query with no topic
+    filter, at the same ``corpus``, found the stored documents (nexus-opraf,
+    seen live in ``migration-rehearsal --fullstack`` via ``nx_answer``
+    matching the saved ``research-default`` plan). ``corpus='all'``
+    resolution itself was never the problem; the topic pre-filter discarded
+    every result before corpus scope was ever relevant.
+
+    A literal string (a real, known label) is fine and out of this test's
+    scope -- only a ``$var`` reference, which by construction can only ever
+    resolve to a caller-supplied binding rather than a vetted label, is
+    refused.
+    """
+    template = yaml.safe_load(path.read_text())
+    steps = (template.get("plan_json") or {}).get("steps") or []
+    for i, step in enumerate(steps):
+        scope = (step or {}).get("scope") or {}
+        topic = scope.get("topic")
+        assert not (isinstance(topic, str) and topic.startswith("$")), (
+            f"{path.name} steps[{i}]: scope.topic={topic!r} is a $var "
+            "reference. `topic` filters to an already-discovered taxonomy "
+            "label, never a caller-bound free-text value -- binding it to "
+            "a required search binding silently zeroes every result when "
+            "the text (as it always will) fails to match a real label."
+        )
