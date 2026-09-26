@@ -1515,10 +1515,9 @@
         <384|768|1024>(p_collection, p_chashes) — same nearest-foreign-
         centroid LATERAL under the same HNSW/access-path pins, no
         persist. Backs the doctor check-assignments mode's same-moment
-        ANN-vs-exact comparison. Placed after taxonomy-020 (this branch's
-        current tail, cherry-picked from feature/nexus-swam7-pin-cross-
-        hnsw ahead of that branch's own merge — see taxonomy-021's own
-        header for the cross-branch merge-ordering note) and before the
+        ANN-vs-exact comparison. Placed after taxonomy-020-pin-cross-
+        lateral-hnsw-plan.xml (current tail; nexus-swam7 merged to develop
+        as 5f2e7a1d7..0729bcabb before this bead landed) and before the
         grants-nexus-svc.xml runAlways block, matching the established
         late-append convention.
     -->

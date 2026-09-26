@@ -2,16 +2,14 @@
 <!--
     Bead nexus-v4pj4 (round-2 review decision: build the read-only ANN
     route now, in this bead, rather than filing it — it rides the same
-    engine cut as nexus-swam7/taxonomy-020, cherry-picked into this branch
-    ahead of it: feature/nexus-swam7-pin-cross-hnsw is NOT YET on develop,
-    so this changeset is authored AFTER taxonomy-020 in this branch's own
-    tree, and the two branches' commits will collide TEXTUALLY in
-    db.changelog-master.xml's include list when whichever merges second
-    lands — resolve by keeping BOTH includes in append order; there is no
-    SEMANTIC conflict, since each changeset is independently idempotent
-    and keyed by its own id/author, and taxonomy-020 already exists in
-    THIS branch's tree (cherry-picked) so taxonomy-021 below builds on it
-    directly.
+    engine cut as nexus-swam7/taxonomy-020). Authored AFTER taxonomy-020
+    in this branch's own tree, initially by cherry-picking feature/nexus-
+    swam7-pin-cross-hnsw's two commits ahead of that branch's own merge
+    (it was not yet on develop); nexus-swam7 has since merged to develop
+    for real (5f2e7a1d7..0729bcabb), and rebasing this branch onto develop
+    dropped the cherry-picked duplicate automatically (identical patch
+    content already upstream) — this changeset needed no change, since it
+    was already authored to build on taxonomy-020 directly.
 
     PROBLEM THIS CLOSES: the doctor check-assignments mode's round-1 cut
     compared a STORED projection pick against a Python exact recompute
@@ -62,10 +60,9 @@
     functions outright (never persisted, so nothing downstream depends on
     their existence across a rollback) and tolerantly REVOKEs the grant.
 
-    Placed after taxonomy-020-pin-cross-lateral-hnsw-plan.xml (this
-    branch's current tail, cherry-picked ahead of taxonomy-021) and
-    before the grants-nexus-svc.xml runAlways block, matching the
-    established late-append convention (D0.1).
+    Placed after taxonomy-020-pin-cross-lateral-hnsw-plan.xml (current
+    tail) and before the grants-nexus-svc.xml runAlways block, matching
+    the established late-append convention (D0.1).
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
