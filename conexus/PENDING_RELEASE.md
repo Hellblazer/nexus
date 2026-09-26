@@ -45,13 +45,17 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/hooks/scripts/routing/credential_print_guard.py` — new
-  PreToolUse:Bash guard (RDR-219 Gap 2, nexus-wauo1.22): denies a keychain
-  read naming `Claude Code-credentials`/`nexus-automation-oauth-token`, a
-  `.credentials.json` read, or printing `CLAUDE_CODE_OAUTH_TOKEN`. NO
-  escape token. Stdlib-only, no `nexus` import, never ported.
-- `conexus/hooks/hooks.json` — registers the guard above under the
-  PreToolUse:Bash matcher (nexus-wauo1.22), same shape as
+- `conexus/hooks/scripts/routing/credential_print_guard.py` — new (nexus-wauo1.22)
+  PreToolUse:Bash guard (RDR-219 Gap 2): denies a keychain read naming
+  `Claude Code-credentials`/`nexus-automation-oauth-token`, a
+  `.credentials.json` read, a command naming a protected variable
+  (`$CLAUDE_CODE_OAUTH_TOKEN`, `printenv` of it, python reading it), and
+  reads of other processes' environments (`ps -E`, `/proc/*/environ`).
+  Whole-environment dumps are not denied, since Claude Code removes the
+  token from its own environment. NO escape token. Stdlib-only, no `nexus`
+  import, never ported.
+- `conexus/hooks/hooks.json` — registers the guard above (nexus-wauo1.22) under the
+  PreToolUse:Bash matcher, same shape as
   `subagent_git_write_requires_orchestrator.py`. **RECORDED RESIDUAL
   (bead nexus-wauo1.22):** this adds a sixth bare `python3` hooks.json
   entry, the same interpreter-discovery shape RDR-215 and nexus-t9klx set
@@ -64,11 +68,11 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   Gap 2's only mitigation on that platform being the underlying fact that
   `CLAUDE_CODE_OAUTH_TOKEN` is deleted from Claude Code's own environment
   before a Bash-tool child ever starts.
-- `conexus/hooks/scripts/routing/registry.yaml` — documents the guard's
-  `credential_print_guard` rule entry (nexus-wauo1.22), `fail_closed:
+- `conexus/hooks/scripts/routing/registry.yaml` — the guard's rule entry (nexus-wauo1.22),
+  `credential_print_guard`, `fail_closed:
   false` (the marker-scoped split lives inside the hook itself).
-- `conexus/hooks/scripts/routing/README.md` — updated cumulative-cap
-  accounting table for the new rule (nexus-wauo1.22): nx's own
+- `conexus/hooks/scripts/routing/README.md` — cap accounting for the new rule (nexus-wauo1.22):
+  updated cumulative-cap table; nx's own
   PreToolUse:Bash count reaches the RDR-121 cap of 4.
 
 ## Deferred to the next client release
