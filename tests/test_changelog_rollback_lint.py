@@ -31,10 +31,12 @@ incidental. All six were wrapped in the same change that added this lint.
 
 WHAT THIS LINT DOES NOT COVER — read before trusting it. It checks SHAPE, not
 behaviour: a rollback can carry the attribute, parse fine, and still restore the
-wrong thing. Only executing a rollback proves that. See
-``ChangelogRollbackRoundTripTest`` (service/src/test) for the update -> rollback
--> update round trip that catches the semantic class; this lint is the cheap
-fast guard that runs on every PR without a container.
+wrong thing. Only executing a rollback proves that, and nothing in the repo
+does: an earlier version of this docstring pointed at a
+``ChangelogRollbackRoundTripTest`` that was never written (checked 2026-09-26,
+nexus-0rxvg). Until an update -> rollback -> update round trip exists, the
+semantic class is uncovered; this lint is only the cheap shape guard that runs
+on every PR without a container.
 """
 from __future__ import annotations
 

@@ -1252,8 +1252,9 @@
     -->
     <include file="db/changelog/hygiene-005-gc-registration-from-origin-row.xml"/>
     <!-- nexus-a6mon: bounded quarantine sweep. A NEW function beside the
-         unbounded one, so the indexer's incremental prune is untouched. After
-         hygiene-005 because it copies that changeset's registration shape. -->
+         unbounded one, so the indexer's incremental prune is untouched. Placed
+         after hygiene-005 to copy its registration shape, but it copied the
+         pre-fix body; hygiene-008 (nexus-0rxvg) corrects that. -->
     <include file="db/changelog/catalog-037-gc-quarantine-orphans-bounded.xml"/>
 
     <!--
@@ -1522,6 +1523,17 @@
         late-append convention.
     -->
     <include file="db/changelog/taxonomy-021-cross-preview.xml"/>
+
+    <!--
+        nexus-0rxvg: gc_quarantine_orphans_bounded (catalog-037-1) registered
+        its quarantine sibling by parsing the sibling's name, the defect
+        hygiene-005-1 retired in the unbounded form; catalog-037-1 copied the
+        pre-fix body despite its include comment above. hygiene-008-1
+        redefines it with the origin-row registration; hygiene-008-2 corrects
+        rows it already misregistered (hygiene-005-3 ran before catalog-037-1
+        existed). Late-append convention, before the grants tail.
+    -->
+    <include file="db/changelog/hygiene-008-gc-bounded-registration-from-origin-row.xml"/>
 
     <!--
         RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4, code-review Important)

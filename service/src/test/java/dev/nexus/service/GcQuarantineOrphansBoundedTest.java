@@ -205,6 +205,59 @@ class GcQuarantineOrphansBoundedTest {
         assertThat(chunkCount(p.src())).as("a cancelled batch moves nothing").isEqualTo(2);
     }
 
+    @Test
+    void quarantineSiblingIsRegisteredFromTheOriginRow_notParsedFromItsName() throws Exception {
+        // nexus-0rxvg: catalog-037-1 parsed the sibling's own name, so
+        // quarantine-knowledge__... registered with content_type
+        // 'quarantine-knowledge', the name's owner/version, and no dimension.
+        // The origin is given attributes its name does NOT imply, so a parse
+        // and a copy produce different rows.
+        var p = seed("reg", 2);
+        registerOriginAs(p.src(), "a6mon-registered-owner", "v7", 384);
+
+        vecRepo.quarantineOrphansBounded(TENANT, p.src(), p.dst(), "2026-09-16T00:00:00Z", 20, 10);
+
+        var origin = collectionRow(p.src());
+        var sibling = collectionRow(p.dst());
+        assertThat(sibling.get("content_type"))
+            .as("content_type is the origin's, never 'quarantine-<ct>' from the name")
+            .isEqualTo("knowledge").isEqualTo(origin.get("content_type"));
+        assertThat(sibling.get("owner_id")).as("owner from the origin row, not the name")
+            .isEqualTo("a6mon-registered-owner");
+        assertThat(sibling.get("model_version")).as("model_version from the origin row, not the name")
+            .isEqualTo("v7");
+        assertThat(sibling.get("embedding_model")).isEqualTo(origin.get("embedding_model"));
+        assertThat(sibling.get("dimension")).as("dimension is copied; the name parse never set it")
+            .isEqualTo(384);
+        assertThat(sibling.get("lifecycle_state")).isEqualTo("quarantine");
+    }
+
+    @Test
+    void aMisregisteredSiblingIsRefiledByTheNextCall() throws Exception {
+        // catalog-037-1 used ON CONFLICT DO NOTHING, so a sibling it had already
+        // misregistered stayed wrong forever. The fixed body re-files it.
+        var p = seed("refile", 2);
+        registerOriginAs(p.src(), "a6mon-refile-owner", "v3", 384);
+        try (Connection su = pg.createConnection("")) {
+            su.createStatement().executeUpdate(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, "
+                    + "embedding_model, model_version, dimension, lifecycle_state) "
+                    + "SELECT tenant_id, '" + p.dst() + "', 'quarantine-knowledge', 'a6mon-refile', "
+                    + "embedding_model, 'v1', NULL, 'quarantine' FROM nexus.catalog_collections "
+                    + "WHERE tenant_id = '" + TENANT + "' AND name = '" + p.src() + "'");
+        }
+        assertThat(collectionRow(p.dst()).get("content_type"))
+            .as("guard: the sibling starts in the defect's shape").isEqualTo("quarantine-knowledge");
+
+        vecRepo.quarantineOrphansBounded(TENANT, p.src(), p.dst(), "2026-09-16T00:00:00Z", 20, 10);
+
+        var sibling = collectionRow(p.dst());
+        assertThat(sibling.get("content_type")).isEqualTo("knowledge");
+        assertThat(sibling.get("owner_id")).isEqualTo("a6mon-refile-owner");
+        assertThat(sibling.get("model_version")).isEqualTo("v3");
+        assertThat(sibling.get("dimension")).isEqualTo(384);
+    }
+
     private static String sqlState(Throwable t) {
         Throwable c = t;
         for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
@@ -259,6 +312,36 @@ class GcQuarantineOrphansBoundedTest {
             .where(DSL.field("collection", String.class).eq(collection))
             .fetch(0, OffsetDateTime.class))
             .stream().map(t -> t.withOffsetSameInstant(ZoneOffset.UTC)).toList();
+    }
+
+    /** Give the origin registered attributes its conformant name does not imply. */
+    private void registerOriginAs(String collection, String owner, String modelVersion, int dimension)
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+               .update(DSL.table(DSL.name("nexus", "catalog_collections")))
+               .set(DSL.field("owner_id", String.class), owner)
+               .set(DSL.field("model_version", String.class), modelVersion)
+               .set(DSL.field("dimension", Integer.class), dimension)
+               .where(DSL.field("tenant_id", String.class).eq(TENANT))
+               .and(DSL.field("name", String.class).eq(collection))
+               .execute();
+            assertThat(n).as("guard: the origin row exists to re-register").isEqualTo(1);
+        }
+    }
+
+    private Map<String, Object> collectionRow(String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var r = DSL.using(su, SQLDialect.POSTGRES)
+               .select(DSL.field("content_type"), DSL.field("owner_id"), DSL.field("embedding_model"),
+                       DSL.field("model_version"), DSL.field("dimension"), DSL.field("lifecycle_state"))
+               .from(DSL.table(DSL.name("nexus", "catalog_collections")))
+               .where(DSL.field("tenant_id", String.class).eq(TENANT))
+               .and(DSL.field("name", String.class).eq(collection))
+               .fetchOne();
+            assertThat(r).as("catalog_collections row for %s", collection).isNotNull();
+            return r.intoMap();
+        }
     }
 
     private void backdate(String collection, OffsetDateTime to) throws Exception {
