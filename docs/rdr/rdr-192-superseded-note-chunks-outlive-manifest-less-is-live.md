@@ -428,7 +428,7 @@ reapable(c) :=
           AND m.collection = c.collection
           AND m.chash = c.chash
     )
-    AND c.created_at < now() - <grace window>
+    AND c.created_at < now() - <grace window>   -- default 30 days
 ```
 
 Use `reapable(c)` for predicates 7 (`gc_quarantine_orphans`) and 8
@@ -653,8 +653,10 @@ grown.
   note from search before backfill completes — Phase 2 changes what
   `live(c)` returns; it deletes nothing (see Migration order above).
   **Mitigation**: Phase 1's census is a hard prerequisite gate, not
-  advisory — Phase 2 does not start until the census classifies every row
-  and the legacy class reads zero after backfill.
+  advisory for the one step that changes visibility: Step 5 does not ship
+  until the census classifies every row and the legacy class reads zero
+  after backfill. Steps 4 and 6 change no search result and may ship
+  earlier (Sam, 2026-09-26).
 - **Risk**: A new engine reaper duplicates work the client-side reap
   already does, doubling load. **Mitigation**: the reaper only needs to run
   where the client-side reap can fail (`knowledge__*`, where
@@ -752,7 +754,29 @@ by this census — they are the no-owner and dead-owner buckets respectively.
 
 #### Step 3: Run `manifest_backfill` against the legacy-unmanifested class
 
-Gate: a follow-up census of the same class reads zero before Phase 2 begins.
+Gate: a follow-up census of the same class reads zero before Step 5 ships.
+The census is an engine route plus an `nx` verb, not a one-off SQL script,
+because it is re-run before Steps 5, 8, 9 and 11 (Sam, 2026-09-26).
+
+#### Step 3a: `store_put` leaves no manifest-less chunk on a failed catalog or manifest write
+
+Plan audit, 2026-09-26: a census that reads zero once does not stay zero.
+`mcp/core.py:4895-4906` swallows a failed catalog registration and still
+writes the chunk, `catalog/store_hook.py:1022` then returns early on the
+empty `catalog_doc_id`, and a failed manifest write returns "stored but NOT
+cataloged" with the chunk left behind. Each of these writes a new current
+note with no manifest row, which Step 5 would hide from search and Step 9
+would later reap. On a failed catalog or manifest write, `store_put`
+deletes the chunk it just wrote and returns an error (Sam, 2026-09-26:
+rollback, not a marker column).
+
+#### Step 3b: A failed indexer manifest hook fails the `nx index` run
+
+The indexer's manifest hook has the same shape: a failure leaves written
+chunks without a manifest row and the run still succeeds. The run fails
+instead. Steps 3a and 3b ship in a client release before the engine tag
+carrying Step 5 is deployed, and the census covers every collection except
+`quarantine-*`, not only `knowledge__*`.
 
 ### Phase 2: `live(c)` and search-side migration (non-destructive)
 
@@ -770,6 +794,10 @@ Gate: a follow-up census of the same class reads zero before Phase 2 begins.
 
 #### Step 9: Ship the periodic `knowledge__*` engine reaper driven by `reapable(c)` against current state, writing `gc_audit` rows (`nexus-2x9xa`)
 
+Defaults: the grace window is 30 days (the current `nx t3 gc
+--orphan-window`); the reaper runs hourly, at most 300 chunks per collection
+per pass.
+
 #### Step 10: Ship `nx store list --reapable`, a read-only list of the chunks `reapable(c)` currently selects for a collection, so an operator can inspect what the reaper is about to remove before it runs
 
 ### Phase 4: Cleanup (gated on Phase 1's backfill census reading zero)
@@ -781,6 +809,10 @@ Gate: a follow-up census of the same class reads zero before Phase 2 begins.
 #### Step 13: Add `superseded: [...]` to the `store_put` result (Gap 7)
 
 #### Step 14: Ship a `catalog doctor` check for "title with more than one live chunk" — the divergence signature named under Failure Modes, and the one thing that currently detects nothing
+
+Read narrowly: a split note legitimately has several live chunks, so the
+check flags a chunk the census classes as superseded that raw `get()` can
+still return.
 
 ### Day 2 Operations
 
@@ -897,3 +929,10 @@ To be completed at gate (Layer 3 AI critique).
 - 2026-09-26: All six gate-round-1 findings fixed in `503fabbb1`. CA3
   acknowledged by Sam (T2 `nexus_rdr/192-research-7`); it stays a Phase 2
   prerequisite. Accepted by Sam.
+- 2026-09-26: Amended after planning (epic `nexus-wbfpw`, plan audit READY
+  round 2). Added Steps 3a and 3b: three writers still leave manifest-less
+  current notes after a failed catalog or manifest write, so a zero census
+  did not stay zero. Sam's decisions recorded in place: only Step 5 waits for
+  the census, the census is a route plus a verb, a failed `store_put` write
+  rolls back. Defaults recorded: 30-day grace window, hourly reaper at 300
+  chunks per collection per pass, the narrow Step 14 reading.
