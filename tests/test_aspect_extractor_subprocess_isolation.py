@@ -442,3 +442,62 @@ def test_stdin_race_error_stderr_is_transient_on_batch_path(monkeypatch) -> None
     monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
     with pytest.raises(ax._TransientFailure):
         ax._invoke_once_batch("some batch prompt", timeout=30)
+
+
+# ── Hard-failure stdout surfacing (nexus-4vsx8) ──────────────────────────────
+
+
+def test_hard_failure_surfaces_stdout_error_envelope_when_stderr_empty(monkeypatch) -> None:
+    """``claude -p --output-format json`` reports its OWN error (not
+    logged in, rate limit, overload) inside the JSON envelope on
+    STDOUT, not stderr. Before this fix a non-zero exit with an empty
+    stderr and a populated stdout envelope raised ``_HardFailure`` with
+    no error text at all -- the RDR-219 grant-proof failure this bead
+    records could not be diagnosed from the log line alone."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1,
+        json.dumps({"result": "Not logged in. Run `claude setup-token`."}),
+        "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure, match="Not logged in"):
+        ax._invoke_once("some prompt")
+
+
+def test_hard_failure_surfaces_stdout_error_envelope_on_batch_path(monkeypatch) -> None:
+    """Same recognition, batch call site -- the fix lives in both
+    non-zero-exit branches, not just the single-paper one."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1,
+        json.dumps({"result": "rate limit exceeded, try again later"}),
+        "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure, match="rate limit exceeded"):
+        ax._invoke_once_batch("some batch prompt", timeout=30)
+
+
+def test_hard_failure_redacts_token_shaped_stdout(monkeypatch) -> None:
+    """A token-shaped string reaching stdout must never reach the
+    hard-failure message that gets logged (or any exception message
+    built from it)."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1,
+        json.dumps({"result": "auth failed for sk-ant-api03-FAKEFAKEFAKE1234567890"}),
+        "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure) as exc_info:
+        ax._invoke_once("some prompt")
+    message = str(exc_info.value)
+    assert "sk-ant-" not in message
+    assert "[REDACTED]" in message
+
+
+def test_hard_failure_falls_back_to_raw_stdout_excerpt_when_not_json(monkeypatch) -> None:
+    """Non-JSON stdout (e.g. a crash dump) still surfaces something
+    rather than silently falling back to an empty excerpt."""
+    cp = subprocess.CompletedProcess(["claude"], 1, "segmentation fault (core dumped)", "")
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure, match="segmentation fault"):
+        ax._invoke_once("some prompt")

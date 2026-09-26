@@ -1029,6 +1029,42 @@ class _HardFailure(Exception):
     immediately without further attempts."""
 
 
+# Token-shaped substrings must never reach a log line or exception
+# message (nexus-4vsx8).
+_TOKEN_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+
+
+def _redact_tokens(text: str) -> str:
+    """Replace any token-shaped substring in *text* with ``[REDACTED]``."""
+    return _TOKEN_PATTERN.sub("[REDACTED]", text)
+
+
+def _stdout_excerpt_for_hard_failure(stdout: str | None) -> str:
+    """Build a short, redacted stdout excerpt for a non-zero-exit
+    ``_HardFailure`` message (nexus-4vsx8).
+
+    ``claude -p --output-format json`` reports its OWN error (not
+    logged in, rate limit, overload) inside the JSON envelope on
+    STDOUT, not stderr. Before this, a non-zero exit with an empty
+    stderr and a populated stdout envelope raised ``_HardFailure``
+    with no error text at all -- unrecognized failures were logged
+    with 200 chars of nothing. Prefer the parsed envelope's
+    ``result``/``error`` field when stdout is valid JSON; fall back to
+    a raw excerpt otherwise.
+    """
+    raw = stdout or ""
+    try:
+        envelope = json.loads(raw)
+    except (ValueError, TypeError):
+        envelope = None
+    if isinstance(envelope, dict):
+        for key in ("result", "error"):
+            value = envelope.get(key)
+            if isinstance(value, str) and value.strip():
+                return _redact_tokens(value[:200])
+    return _redact_tokens(raw[:200])
+
+
 # ── T3 content sourcing (RDR-089 follow-up) ──────────────────────────────────
 
 
@@ -1549,8 +1585,11 @@ def _invoke_once_batch(prompt: str, *, timeout: int, model: str | None = None) -
                 f"{(result.stderr or '')[:200]}",
             )
         raise _HardFailure(
-            f"non-zero exit (rc={result.returncode}): "
-            f"{(result.stderr or '')[:200]}",
+            _redact_tokens(
+                f"non-zero exit (rc={result.returncode}): "
+                f"{(result.stderr or '')[:200]} | stdout: "
+                f"{_stdout_excerpt_for_hard_failure(result.stdout)}",
+            ),
         )
 
     try:
@@ -1877,8 +1916,11 @@ def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
                 f"{(result.stderr or '')[:200]}",
             )
         raise _HardFailure(
-            f"non-zero exit (rc={result.returncode}): "
-            f"{(result.stderr or '')[:200]}",
+            _redact_tokens(
+                f"non-zero exit (rc={result.returncode}): "
+                f"{(result.stderr or '')[:200]} | stdout: "
+                f"{_stdout_excerpt_for_hard_failure(result.stdout)}",
+            ),
         )
 
     # Outer parse: --output-format json returns a session-metadata
