@@ -33,31 +33,65 @@ export NX_ALLOW_PROD_WRITE="admission-load-gate: deliberate concurrent embed loa
 # deadline-outcome header per attempt needs one un-retried POST per
 # request — see tests/e2e/lib/admission_load.py's own header for the
 # full read and the exact functions/line numbers this was verified
-# against.
+# against. Auth reuses the real write path's own bearer resolution (a
+# self-minted data token when configured, else the static service
+# token) rather than always sending the static token.
 #
-# WHAT IT DOES: mints a throwaway knowledge collection
-# (u2mlh-load-<nonce>) via the same name-resolution and registration
-# functions a normal write uses, ramps concurrency (32/64/128/256
-# documents by default, each 6-24KB and content-unique so the server's
-# existing-chunk embed-skip can never elide one), and after each step
-# re-reads the engine's live counters and checks whether either moved for
-# voyage-context-3. Stops at the first step that moves either counter;
-# FAILS (non-vacuity) if the whole ramp passes with neither ever moving.
-# The collection is deleted in the driver's own try/finally regardless of
-# outcome, via the interactive collection-delete verb's own underlying
-# function — never left behind, success or failure.
+# PASS CRITERION: admission_refusals_total (voyage-context-3) must move
+# AND this driver must have observed at least one of its OWN raw 503
+# responses in that same step carrying X-Nexus-Deadline-Outcome=refused.
+# deadline_aborts_total is a genuinely distinct counter at a distinct
+# call site (nexus-u2mlh.3's mechanism, already closed) -- reported per
+# step for corroboration only, never sufficient on its own. A step where
+# admission moved but no refused 503 was observed fails the whole run
+# immediately as UNATTRIBUTABLE (the movement cannot be pinned on this
+# run's own load).
+#
+# WHAT IT DOES: before any write, confirms GET /v1/status is readable
+# with these credentials and that voyage-context-3 is idle
+# (active=false, queue_depth<=0) across two reads a few seconds apart --
+# refusing to start otherwise, so this driver never piles onto real
+# traffic. Reports (never deletes) any pre-existing u2mlh-load-* orphan
+# collection left by a prior killed run. Mints a throwaway knowledge
+# collection (u2mlh-load-<nonce>) via the same name-resolution and
+# registration functions a normal write uses, then ramps concurrency
+# (32/64/128/256 documents by default, each 6-24KB and content-unique so
+# the server's existing-chunk embed-skip can never elide one) against a
+# connection pool sized to the largest step, stopping at the first step
+# that satisfies the pass criterion above, or once an overall wall-clock
+# cap (default 360s / 6 minutes, --wall-clock-cap-s overridable) is
+# reached, whichever comes first. A step whose responses are mostly
+# transport errors is marked invalid and never counted as evidence
+# either way. The collection is deleted in the driver's own try/finally
+# on every exit path this process can control, including Ctrl-C.
 #
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint) — refuses (exit 2) on a local-mode box, like
 # tests/e2e/cloud-client-path-gate.sh.
 #
 # Usage:
-#   tests/e2e/admission-load-gate.sh             # the real thing: real
-#                                                 # Voyage cost, real
-#                                                 # concurrent load on the
-#                                                 # only environment
-#   tests/e2e/admission-load-gate.sh --dry-run   # prints the plan; NO
-#                                                 # network touched at all
+#   tests/e2e/admission-load-gate.sh                     # the real thing:
+#                                                         # real Voyage
+#                                                         # cost, real
+#                                                         # concurrent load
+#                                                         # on the only
+#                                                         # environment
+#   tests/e2e/admission-load-gate.sh --dry-run           # prints the
+#                                                         # plan; NO
+#                                                         # network
+#                                                         # touched at all
+#   tests/e2e/admission-load-gate.sh --ramp-steps 64,128,256,384
+#                                                         # override the
+#                                                         # default
+#                                                         # 32,64,128,256
+#                                                         # ramp (strictly
+#                                                         # increasing)
+#   tests/e2e/admission-load-gate.sh --wall-clock-cap-s 180
+#                                                         # override the
+#                                                         # default 360s
+#                                                         # (6 min) overall
+#                                                         # time budget
+# Flags combine freely, in any order.
 #
 # Exit 0 == ADMISSION LOAD GATE PASSED (literal sentinel on the last line).
 # Exit 2 == not applicable (not a cloud-mode box).
@@ -91,17 +125,37 @@ case "$SERVICE_URL" in
 esac
 echo "Driving admission load against: $SERVICE_URL"
 
-DRY_RUN_FLAG=()
-if [ "${1:-}" = "--dry-run" ]; then
-    DRY_RUN_FLAG=(--dry-run)
-    echo "DRY RUN: plan only, no network"
-fi
+# ── Flag parsing: --dry-run, --ramp-steps <csv>, --wall-clock-cap-s <n> ──
+DRIVER_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --dry-run)
+            DRIVER_ARGS+=(--dry-run)
+            echo "DRY RUN: plan only, no network"
+            shift
+            ;;
+        --ramp-steps)
+            [ -n "${2:-}" ] || { echo "ADMISSION LOAD GATE FAILED: --ramp-steps needs a value" >&2; exit 1; }
+            DRIVER_ARGS+=(--ramp-steps "$2")
+            shift 2
+            ;;
+        --wall-clock-cap-s)
+            [ -n "${2:-}" ] || { echo "ADMISSION LOAD GATE FAILED: --wall-clock-cap-s needs a value" >&2; exit 1; }
+            DRIVER_ARGS+=(--wall-clock-cap-s "$2")
+            shift 2
+            ;;
+        *)
+            echo "ADMISSION LOAD GATE FAILED: unrecognized argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
 
 RESULT_FILE="$(mktemp)"
 trap 'rm -f "$RESULT_FILE"' EXIT
 
 set +e
-uv run python "$LIB" run --result-file "$RESULT_FILE" "${DRY_RUN_FLAG[@]}"
+uv run python "$LIB" run --result-file "$RESULT_FILE" "${DRIVER_ARGS[@]}"
 RC=$?
 set -e
 
