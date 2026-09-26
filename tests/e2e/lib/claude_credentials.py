@@ -27,7 +27,11 @@ Modes (argv[1]):
                  and the keychain item if the token is absent or expired;
                  the child is never started in that case. Prints nothing
                  else (except the single ANTHROPIC_API_KEY warning line
-                 below).
+                 below). The child also gets ``ANTHROPIC_MODEL=haiku`` and
+                 ``CLAUDE_CODE_SUBAGENT_MODEL=haiku`` unless the caller set
+                 them (``HARNESS_MODEL_DEFAULTS``), on local, docker and
+                 --remote runs alike, since Claude Code's default model is
+                 Opus.
 
                  With --remote, THIS HELPER's own remote side reads the
                  token (RDR-219 Approach rule 2, as written: "the helper's
@@ -165,6 +169,17 @@ AUTOMATION_SERVICE = "nexus-automation-oauth-token"
 #: The environment variable `run` sets for the child process.
 TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 
+#: Harness sessions run on a low-cost model unless the caller chose one.
+#: Claude Code's own default is Opus, and no harness passed --model (Sam,
+#: 2026-09-26). ANTHROPIC_MODEL sets the session's model and
+#: CLAUDE_CODE_SUBAGENT_MODEL its subagents'; both are inherited by the
+#: `claude -p` processes nx-mcp starts, since Claude Code deletes only the
+#: token from its own environment.
+HARNESS_MODEL_DEFAULTS: dict[str, str] = {
+    "ANTHROPIC_MODEL": "haiku",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku",
+}
+
 #: `claude setup-token` mints a one-year token (RDR-219 Technical Design).
 #: Everything below counts from the keychain item's own `cdat` (creation
 #: date). VERIFIED 2026-09-25 against a throwaway dummy item
@@ -195,6 +210,8 @@ DEFAULT_REMOTE_SHELL = "bash -s --"
 _REMOTE_READER_READ_LINE = "IFS= read -r CLAUDE_CODE_OAUTH_TOKEN"
 _REMOTE_READER_TAIL = (
     "export CLAUDE_CODE_OAUTH_TOKEN\n"
+    'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-haiku}"\n'
+    'export CLAUDE_CODE_SUBAGENT_MODEL="${CLAUDE_CODE_SUBAGENT_MODEL:-haiku}"\n'
     'test -n "${ANTHROPIC_API_KEY-}" && echo "[auth] ANTHROPIC_API_KEY is set'
     ' on the remote host -- the child bills the API key, not the automation'
     ' token" >&2\n'
@@ -326,6 +343,9 @@ def _ensure_docker_flags(command: list[str]) -> list[str]:
         result = result + ["--rm"]
     if not any(_names_token_env(tok) for tok in tail):
         result = result + ["-e", TOKEN_ENV_VAR]
+    for name in HARNESS_MODEL_DEFAULTS:
+        if not any(tok == name or tok.startswith(name + "=") for tok in tail):
+            result = result + ["-e", name]
     return result + command[run_idx + 1 :]
 
 
@@ -336,6 +356,8 @@ def _child_env(token: str) -> dict[str, str]:
     (see `_cmd_run`'s single warning line instead of stripping it)."""
     env = dict(os.environ)
     env[TOKEN_ENV_VAR] = token
+    for name, value in HARNESS_MODEL_DEFAULTS.items():
+        env.setdefault(name, value)
     return env
 
 

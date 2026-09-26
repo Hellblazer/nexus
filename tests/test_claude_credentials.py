@@ -688,3 +688,52 @@ def _NOW():
 
 def _TODAY_CDAT() -> str:
     return _NOW().strftime("%Y%m%d%H%M%S")
+
+
+# ---------------------------------------------------------------------------
+# Harness sessions run on a low-cost model by default (Sam, 2026-09-26: the
+# Claude Code default is Opus, and no harness chose a model).
+# ---------------------------------------------------------------------------
+
+
+def test_run_defaults_the_child_to_haiku(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SUBAGENT_MODEL", raising=False)
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["mycommand"])
+    _argv, env = spy.calls[0]
+    assert env["ANTHROPIC_MODEL"] == "haiku"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "haiku"
+
+
+def test_run_keeps_a_model_the_caller_already_chose(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    monkeypatch.setenv("ANTHROPIC_MODEL", "sonnet")
+    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "sonnet")
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["mycommand"])
+    _argv, env = spy.calls[0]
+    assert env["ANTHROPIC_MODEL"] == "sonnet"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "sonnet"
+
+
+def test_run_forwards_the_model_into_a_docker_run(cc, tmp_path, monkeypatch) -> None:
+    _install_fake_security(monkeypatch, tmp_path, mode="present", cdat=_TODAY_CDAT())
+    spy = _ExecSpy(rc=0)
+    monkeypatch.setattr(cc, "_exec", spy)
+    cc._cmd_run(["docker", "run", "myimage"])
+    argv, _env = spy.calls[0]
+    for name in ("ANTHROPIC_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"):
+        assert name in argv, argv
+        assert argv[argv.index(name) - 1] == "-e"
+    assert argv.index("myimage") > argv.index("ANTHROPIC_MODEL")
+
+
+def test_remote_reader_defaults_the_model_to_haiku(cc) -> None:
+    tail = cc._REMOTE_READER_TAIL
+    assert 'ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-haiku}"' in tail
+    assert 'CLAUDE_CODE_SUBAGENT_MODEL="${CLAUDE_CODE_SUBAGENT_MODEL:-haiku}"' in tail
+    assert tail.index("ANTHROPIC_MODEL") < tail.index('exec "$@"')
