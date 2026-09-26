@@ -153,7 +153,8 @@ class TupleHandlerWiringTest {
         assertThat(body).containsKey("digest");
         // 6, not 3: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
         // lock/<resource>, queue/<name> beside directory/ledger/mailbox.
-        assertThat((java.util.List<?>) body.get("templates")).hasSize(6);
+        // 7 since RDR-220 added board/ci/<topic>.
+        assertThat((java.util.List<?>) body.get("templates")).hasSize(7);
     }
 
     /**

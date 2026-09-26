@@ -45,8 +45,9 @@ class TemplateRegistryTest {
         // lock, mailbox, queue -- RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added
         // board/<topic>, lock/<resource>, queue/<name> beside the three RDR-205/208
         // templates.
-        assertEquals(List.of("board/<topic>", "directory/<name>", "ledger/<session_id>",
-                "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
+        // RDR-220 added board/ci/<topic> (sorts after board/<topic>).
+        assertEquals(List.of("board/<topic>", "board/ci/<topic>", "directory/<name>",
+                "ledger/<session_id>", "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
     }
 
     @Test
@@ -277,8 +278,26 @@ class TemplateRegistryTest {
         // board/<topic>, lock/<resource>, queue/<name>; queue and lock declare their
         // own (shorter) claim_log_ttl_seconds, board declares none, and every one of
         // the six passes this same boot check.
+        // 7 since RDR-220 added board/ci/<topic>, which declares no claim-log
+        // override either.
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
-        assertEquals(6, registry.templates().size());
+        assertEquals(7, registry.templates().size());
+    }
+
+    @Test
+    void ciBoardResolvesApartFromTheGeneralBoard() {
+        // RDR-220: the three-segment CI board and the two-segment board never
+        // collide, and the CI board carries its own cap and retention.
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        assertEquals("board/ci/<topic>", registry.resolve("board/ci/nexus-develop").name());
+        assertEquals("board/<topic>", registry.resolve("board/ci-develop").name());
+        assertEquals("board/<topic>", registry.resolve("board/ci").name());
+        assertNull(registry.resolve("board/ci/bad topic"));
+        TemplateSchema ci = registry.byName("board/ci/<topic>");
+        assertEquals(Long.valueOf(5000), ci.maxLiveRows());
+        assertEquals(259200L, ci.retentionSeconds());
+        assertEquals(Long.valueOf(1024), ci.maxBodyBytes());
+        assertFalse(ci.take().enabled());
     }
 
     @Test
@@ -505,8 +524,9 @@ class TemplateRegistryTest {
         assertEquals(TemplateRegistry.SOURCE_RESOURCES, registry.sources().get(0));
         assertTrue(registry.sources().get(1).startsWith("directory:"), registry.sources().get(1));
         // 7, not 4: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
-        // lock/<resource>, queue/<name> beside the three bundled resource templates.
-        assertEquals(7, registry.templates().size());
+        // lock/<resource>, queue/<name> beside the three bundled resource templates;
+        // 8 since RDR-220 added board/ci/<topic>.
+        assertEquals(8, registry.templates().size());
         assertTrue(registry.templates().stream().anyMatch(t -> t.name().equals("test/<id>")));
     }
 

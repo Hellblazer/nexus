@@ -1,0 +1,48 @@
+# RDR-220: CI status posts. The GitHub webhook adapter writes one post per
+# state change of every workflow run and job to board/ci/<repo>-<branch>.
+# Same shape as board/<topic> (keys, dims, take disabled, body cap), so a
+# session subscribes and receives it exactly like any board post: the
+# client's subscription and channel paths accept every board/ subspace, and
+# the engine keys no board behaviour on the template name.
+#
+# Three segments, so a subspace like board/ci/nexus-develop resolves here and
+# never to the two-segment board/<topic> (TemplateRegistry.resolve matches on
+# segment count). <topic> is one address segment: <repo>-<branch>, normalised
+# by the adapter to ADDRESS_SEGMENT_PATTERN.
+#
+# Why a separate template (T2 nexus_rdr/220-research-3): one develop push
+# writes about 72 posts (CI 18 jobs, Service CI 2, the coverage audit 1,
+# three states each, plus run posts). board/<topic>'s 500-row cap would fill
+# in about seven pushes, and past the cap the engine refuses every write
+# (MaxLiveRowsExceeded, HTTP 429) until rows expire.
+#
+# retention_seconds: 259200 (3 days): CI state is read within hours; three
+# days covers a weekend. The adapter also passes a shorter ttl_seconds for
+# queued and in_progress posts.
+#
+# max_live_rows: 5000: about 70 pushes of headroom at the retention ceiling,
+# still bounded against a runaway writer.
+name: board/ci/<topic>
+
+keys:
+  - topic
+
+dimensions:
+  from:
+    type: string
+    required: true
+  kind:
+    type: string
+
+id_from: keys+nonce
+id_dims:
+  - from
+
+take:
+  enabled: false
+
+retention_seconds: 259200
+
+max_body_bytes: 1024
+
+max_live_rows: 5000
