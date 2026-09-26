@@ -964,8 +964,11 @@ def test_manifest_write_failure_summary_surfaces_failures(runner, repo_dir, mock
     # code — was WARNING-only (rc=0) before this bead.
     assert result.exit_code != 0, result.output
     assert "WARNING: catalog manifest write failed for 2 document(s)" in result.output
-    assert "nx catalog reconcile" in result.output
-    assert "nx catalog show" in result.output
+    # nexus-wbfpw.29: the Error line names the WARNING's remedy too.
+    error_lines = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert len(error_lines) == 1, result.output
+    assert "nx catalog reconcile" in error_lines[0]
+    assert "--force" not in error_lines[0]
 
 
 # ── nexus-u8n4r: ephemeral-path registration-skip summary ───────────────────
@@ -1981,8 +1984,12 @@ def test_identity_drop_summary_surfaces_drops(runner, repo_dir, mock_reg, monkey
         "WARNING: 2 chunk batch(es) (27 chunks; collection(s): rdr__nexus) "
         "were indexed WITHOUT a catalog document identity" in result.output
     )
-    assert "nx catalog reconcile" in result.output
-    assert "nx catalog show" in result.output
+    # nexus-wbfpw.29: reconcile first, --force re-index as the fallback
+    # for a document that never registered.
+    error_lines = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert len(error_lines) == 1, result.output
+    assert "nx catalog reconcile" in error_lines[0]
+    assert "--force" in error_lines[0]
 
 
 # ── nexus-7f5qj: identity-drop / manifest-write-failure / completion-

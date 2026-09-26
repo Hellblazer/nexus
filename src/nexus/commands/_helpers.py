@@ -710,8 +710,25 @@ def raise_identity_drop_exception(
         else ", ".join(causes[:-1]) + f", and {causes[-1]}"
     )
 
+    # nexus-wbfpw.29: each cause names the remedy its own WARNING line
+    # names. Manifest write failures and identity drops are both manifest
+    # gaps that 'nx catalog reconcile' rebuilds from T3 (identity drops as
+    # the GH #1397 ghost class: registered, chunk_count 0, content_hash
+    # recorded). The old single write-class remedy ("catalog show / re-index
+    # with --force") contradicted both WARNINGs. It stays for completion
+    # refusals, whose WARNING says "Re-index or --force to retry", and as
+    # the identity-drop fallback: reconcile cannot rebuild a document that
+    # never registered (no catalog row to repair) or whose chunks it
+    # cannot match (reported LOST).
     remedies = []
-    if any_write_class:
+    if write_failed and not identity_dropped:
+        remedies.append("Run 'nx catalog reconcile' to repair the manifests")
+    if identity_dropped:
+        remedies.append(
+            f"Run 'nx catalog reconcile' to repair the manifests; re-index "
+            f"with --force any {subject} still missing afterwards"
+        )
+    if refused:
         remedies.append(
             f"Run 'nx catalog show <tumbler>' to inspect a specific "
             f"{subject}'s index_state, or re-index with --force"

@@ -289,6 +289,16 @@ def test_manifest_hook_exception_when_self_heal_is_also_faulted(
     )
     assert "restored by self-heal" not in result.output
 
+    # The fail-loud Error line must name the SAME remedy as the WARNING
+    # above it. Before this fix it said "re-index with --force", a costly
+    # re-embed, while the WARNING (and
+    # test_reconcile_is_the_remedy_the_warning_actually_names) establish
+    # `nx catalog reconcile` as the repair, rebuilt from T3 directly.
+    error_lines = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert len(error_lines) == 1, result.output
+    assert "nx catalog reconcile" in error_lines[0], error_lines[0]
+    assert "--force" not in error_lines[0], error_lines[0]
+
 
 def test_heal_manifest_gaps_reports_which_documents_it_reconciled(
     tmp_path: Path,

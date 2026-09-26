@@ -419,9 +419,42 @@ def test_raise_identity_drop_exception_write_failure_only_does_not_mention_sweep
     msg = str(exc_info.value)
 
     assert "manifest write failures" in msg
-    assert "nx catalog show" in msg
+    # nexus-wbfpw.29: the same remedy its WARNING names, not the old
+    # "catalog show / re-index with --force".
+    assert "nx catalog reconcile" in msg
+    assert "--force" not in msg
     assert "t3 gc" not in msg
     assert "sweep" not in msg
+
+
+def test_raise_identity_drop_exception_identity_drop_names_reconcile_with_force_fallback():
+    from nexus.mcp_infra import _record_manifest_identity_drop
+
+    _record_manifest_identity_drop("docs__x", 4)
+
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception(subject="document")
+    msg = str(exc_info.value)
+
+    assert "identity drops" in msg
+    assert "nx catalog reconcile" in msg
+    # reconcile cannot rebuild a document that never registered, so the
+    # --force re-index stays as the fallback for this class only.
+    assert "--force" in msg
+    assert "nx catalog show" not in msg
+
+
+def test_raise_identity_drop_exception_refusal_keeps_its_own_remedy():
+    _record_complete_refusal("1.2.3")
+
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception(subject="document")
+    msg = str(exc_info.value)
+
+    assert "completion refusals" in msg
+    assert "nx catalog show" in msg
+    assert "--force" in msg
+    assert "reconcile" not in msg
 
 
 def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
@@ -436,7 +469,7 @@ def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
 
     assert "manifest write failures" in msg
     assert "a superseded-chunk sweep skip" in msg
-    assert "nx catalog show" in msg
+    assert "nx catalog reconcile" in msg
     assert "t3 gc -c COLLECTION" in msg
 
 
