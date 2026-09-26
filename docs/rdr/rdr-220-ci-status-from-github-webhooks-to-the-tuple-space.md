@@ -640,3 +640,4 @@ records carry the detail. No section needs trimming before acceptance.
 
 - 2026-09-26: Gate round 1 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `3059b5110`; critique `nexus_rdr/220-gate-critique-2026-09-26-r1`.
 - 2026-09-26: Gate round 2 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `6ba55326c`; critique `nexus_rdr/220-gate-critique-2026-09-26-r2`.
+- 2026-09-26: Gate round 3 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `e575f38d8`; critique `nexus_rdr/220-gate-critique-2026-09-26-r3`.
