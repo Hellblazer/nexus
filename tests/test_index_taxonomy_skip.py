@@ -278,6 +278,74 @@ def test_postprocessing_discovers_only_subset(monkeypatch) -> None:
     assert discovered == ["code__a__m__v1"]
 
 
+def _record_derived_steps(monkeypatch, index_mod) -> dict[str, list]:
+    """Run the real postprocessing body; record which trailing steps fire."""
+    import nexus.commands.taxonomy_cmd as tax_cmd
+    import nexus.context as ctx_mod
+    import nexus.db as dbmod
+    import nexus.mcp_infra as infra
+
+    fired: dict[str, list] = {"projection": [], "t2_write": [], "l1": []}
+    monkeypatch.setattr(dbmod, "make_t3", lambda: MagicMock())
+    monkeypatch.setattr(index_mod, "_discover_taxonomy", lambda *_a, **_k: 0)
+    monkeypatch.setattr(
+        index_mod, "_run_projection_pass", lambda *a, **_k: fired["projection"].append(a[1]),
+    )
+    monkeypatch.setattr(infra, "t2_index_write", lambda fn, **_k: fired["t2_write"].append(fn) or 0)
+    monkeypatch.setattr(tax_cmd, "_try_load_catalog", lambda: None)
+    monkeypatch.setattr(
+        ctx_mod, "generate_context_l1", lambda _tax, repo_path: fired["l1"].append(repo_path),
+    )
+    return fired
+
+
+def test_established_taxonomy_refreshes_links_and_l1_without_discovery(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    # nexus-x3gig round 2: discovery returns 0 for a collection that already
+    # has topics (nexus-vgtff), and a deferred run discovers nothing at all.
+    # Links and the L1 cache must still refresh; they used to sit behind the
+    # discovered-this-run count and never ran for an established collection.
+    from nexus.commands import index as index_mod
+
+    fired = _record_derived_steps(monkeypatch, index_mod)
+    _patch_t2(monkeypatch, _FakeTaxonomy({"code__a__m__v1": [{"id": 1}]}))
+
+    index_mod.run_collection_postprocessing(
+        ["code__a__m__v1", "docs__a__m__v1"],
+        repo_path=tmp_path, quiet=True, discover_collections=[],
+    )
+    assert len(fired["t2_write"]) == 1  # co-occurrence links
+    assert fired["l1"] == [tmp_path]
+    # Projection re-reads every embedding; it waits for new topics.
+    assert fired["projection"] == []
+
+
+def test_no_taxonomy_anywhere_skips_the_derived_steps(monkeypatch, tmp_path: Path) -> None:
+    from nexus.commands import index as index_mod
+
+    fired = _record_derived_steps(monkeypatch, index_mod)
+    _patch_t2(monkeypatch, _FakeTaxonomy({}))
+
+    index_mod.run_collection_postprocessing(
+        ["code__a__m__v1"], repo_path=tmp_path, quiet=True, discover_collections=[],
+    )
+    assert fired == {"projection": [], "t2_write": [], "l1": []}
+
+
+def test_a_failed_topics_probe_still_refreshes(monkeypatch, tmp_path: Path) -> None:
+    # The steps are idempotent; a probe failure errs toward running them.
+    from nexus.commands import index as index_mod
+
+    fired = _record_derived_steps(monkeypatch, index_mod)
+    _patch_t2(monkeypatch, _FakeTaxonomy({}, raise_for="code__a__m__v1"))
+
+    index_mod.run_collection_postprocessing(
+        ["code__a__m__v1"], repo_path=tmp_path, quiet=True, discover_collections=[],
+    )
+    assert fired["l1"] == [tmp_path]
+
+
 def test_discover_subset_precomputed_no_topics_skips_probe(monkeypatch) -> None:
     # Gate path passes the probe result in — _discover_subset must NOT
     # re-open T2 (review Medium-2).
@@ -350,3 +418,40 @@ def test_postprocessing_default_discovers_all(monkeypatch) -> None:
         ["code__a__m__v1", "docs__a__m__v1"], quiet=True
     )
     assert discovered == ["code__a__m__v1", "docs__a__m__v1"]
+
+
+def test_a_precomputed_topics_probe_is_reused(monkeypatch, tmp_path: Path) -> None:
+    # Code review round 3: nx index repo already knows which collections lack
+    # topics; one with topics answers without a second T2 probe.
+    from nexus.commands import index as index_mod
+
+    fired = _record_derived_steps(monkeypatch, index_mod)
+    _patch_t2(monkeypatch, _FakeTaxonomy({}, raise_for="code__a__m__v1"))
+    probed: list[str] = []
+    original = _FakeTaxonomy.get_topics_for_collection
+    monkeypatch.setattr(
+        _FakeTaxonomy, "get_topics_for_collection",
+        lambda self, col: probed.append(col) or original(self, col),
+    )
+
+    index_mod.run_collection_postprocessing(
+        ["code__a__m__v1", "docs__a__m__v1"], repo_path=tmp_path, quiet=True,
+        discover_collections=[], collections_without_topics={"docs__a__m__v1"},
+    )
+    assert fired["l1"] == [tmp_path]
+    assert probed == []
+
+
+def test_all_without_topics_is_rechecked_not_trusted(monkeypatch, tmp_path: Path) -> None:
+    # The precomputed set also means "probe failed" (it returns every
+    # collection on error), so it never answers "no taxonomy" by itself.
+    from nexus.commands import index as index_mod
+
+    fired = _record_derived_steps(monkeypatch, index_mod)
+    _patch_t2(monkeypatch, _FakeTaxonomy({"code__a__m__v1": [{"id": 1}]}))
+
+    index_mod.run_collection_postprocessing(
+        ["code__a__m__v1"], repo_path=tmp_path, quiet=True,
+        discover_collections=[], collections_without_topics={"code__a__m__v1"},
+    )
+    assert fired["l1"] == [tmp_path]

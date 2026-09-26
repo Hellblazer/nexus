@@ -130,7 +130,18 @@ redraw_until_distinct() {  # PRE_NAME REDRAW_FN DISCOVER_FN CAP -> stdout: "NAME
         fi
         n=$((n + 1))
         echo "  resumed name collided with $pre (draw $n/$cap): redrawing" >&2
-        "$redraw_fn" || { printf '%s\n%s\n' "$cur" "$n"; return 2; }
+        # REDRAW_FN is launch()+arm() for real (nexus-wauo1.13 coordinator
+        # finding, 2026-09-25): both print PASS/FAIL/echo progress lines to
+        # STDOUT, not stderr. Left unredirected, that noise becomes part of
+        # THIS function's own `_rd_out="$(redraw_until_distinct ...)"`
+        # capture at the call site below, corrupting the two-line
+        # "NAME\nREDRAW_COUNT" contract this function promises -- the
+        # caller's `A2_NAME="${_rd_out%%$'\n'*}"` / `A2_REDRAWS="${_rd_out#*
+        # $'\n'}"` parse then split on the WRONG newlines, producing a
+        # garbled name and a multi-line "count" that later fails an
+        # integer comparison outright. `1>&2` here sends it to the
+        # terminal/log same as before, just not into this capture.
+        "$redraw_fn" 1>&2 || { printf '%s\n%s\n' "$cur" "$n"; return 2; }
         cur="$("$discover_fn")"
         if [ -z "$cur" ]; then
             printf '%s\n%s\n' "" "$n"
@@ -328,12 +339,36 @@ stop() {  # NAME: /exit, a plain process exit (releases nothing, as Claude Code 
     wait_for 30 exited "$1" || { kill -TERM "${PID_OF[$1]}" 2>/dev/null; sleep 1; }
     T kill-session -t "$1" 2>/dev/null
 }
-discover_name() {  # NAME -> the instance name this session actually armed
+discover_name() {  # NAME [EXCLUDE] -> the instance name this session actually armed
     # Read from the ENGINE, never from the model's words: scan the live
-    # directory subspaces for the one whose holders include this session id.
-    local sid="${SID_OF[$1]}" sub n
+    # directory subspaces for the one whose holders include this session
+    # id. EXCLUDE (optional) skips one specific candidate name even when it
+    # matches.
+    #
+    # nexus-wauo1.13 coordinator finding, 2026-09-25: without EXCLUDE, this
+    # scan is ambiguous for a RESUMED session. `/resume` keeps the SAME
+    # session id as the pre-resume launch, and `stop()`'s own comment says
+    # plainly that a plain `/exit` "releases nothing" -- the pre-resume
+    # launch's own directory/<name> entry stays live for its full TTL. So
+    # once A2 (the resume) shares A's session id, EVERY subspace A ever
+    # armed also lists A2's session id as a holder (they are the same id),
+    # and an unqualified scan cannot tell "A's still-live, stale entry"
+    # apart from "A2's own, just-armed one" -- it returns whichever the
+    # underlying query happens to enumerate first, which was measured
+    # (two consecutive real proof runs, 2026-09-25) to be the STALE
+    # pre-resume name on 4 of 5, then 1 of 2, consecutive arm attempts.
+    # That produced the exact symptom nexus-4ahul's own comments predict
+    # for a genuine ~1-in-256 collision (`redraw_until_distinct` seeing
+    # `cur = pre` and redrawing) -- but it was not a real collision each
+    # time: A2 may already have armed a genuinely different name, and this
+    # scan simply failed to surface it. Passing EXCLUDE lets a caller ask
+    # "is there any OTHER entry for this session id" -- which is exactly
+    # "has a rename actually happened" -- without depending on the scan's
+    # enumeration order at all.
+    local sid="${SID_OF[$1]}" exclude="${2:-}" sub n
     for sub in $(nx tuple list --prefix directory/ --json 2>/dev/null | jq -r '.[] | .subspace // empty'); do
         n="${sub#directory/}"
+        [ -n "$exclude" ] && [ "$n" = "$exclude" ] && continue
         if nx tuple directory "$n" --json 2>/dev/null | jq -e --arg s "$sid" '.holders | index($s)' > /dev/null 2>&1; then
             printf '%s' "$n"
             return 0
@@ -341,21 +376,68 @@ discover_name() {  # NAME -> the instance name this session actually armed
     done
     return 1
 }
-armed_name_known() { [ -n "$(discover_name "$1")" ]; }
-arm() {  # NAME: the session subscribes ITS OWN instance name
-    # The harness no longer assigns the name. Three billed runs died here
-    # because it did: a session's instance name comes from ListAgents, the
-    # tool's contract is "this session's OWN instance-name mailbox", and a
-    # model asked to subscribe some other string checks, finds the mismatch
-    # and declines -- correctly, and unpredictably (2026-09-18: in one run
-    # session A complied and session B refused, same prompt). Asking for the
-    # session's own name removes the false premise entirely, and the name
-    # this journey then uses is the REAL one, so the rename across a
-    # /resume is a genuine rename rather than a scripted one.
-    local t; t="$(tok DONE-ARM)"
+armed_name_known() { [ -n "$(discover_name "$1" "${2:-}")" ]; }
+_own_directory_created_ats() {  # NAME SID -> this SID's own row created_at values under directory/NAME
+    # `nx tuple directory NAME --json`'s `entries` array carries one row
+    # per LIVE tuple (session_id, created_at, expires_at) --
+    # src/nexus/commands/tuple_cmd.py's own docstring: "several live rows
+    # of the SAME session -- a re-armed watcher's new nonce beside its old
+    # row -- are one holder, not a conflict". A session's directory lease
+    # (src/nexus/mcp/subscriptions.py: DIRECTORY_TTL_S=300,
+    # DIRECTORY_HEARTBEAT_S=60) is armed with a FRESH nonce on its first
+    # send and the SAME nonce on every 60s renewal after that, so a LIVE
+    # holder's row is updated in place -- but a genuinely NEW arm (a
+    # different process, its own fresh in-process lease state) always
+    # mints a brand-new nonce on ITS first send, writing a NEW physical
+    # row alongside any existing one for the same (name, session_id).
+    # That is the observable signal this function exists to read: a
+    # BEFORE/AFTER snapshot of created_at values reveals whether anything
+    # NEW was written, resolving the exclude/collision ambiguity in arm()
+    # below without guessing (nexus-wauo1.13 coordinator finding,
+    # 2026-09-25).
+    nx tuple directory "$1" --json 2>/dev/null | jq -r --arg s "$2" '.entries[] | select(.session_id == $s) | .created_at'
+}
+arm() {  # NAME [EXCLUDE]: the session subscribes ITS OWN instance name.
+    # EXCLUDE (optional, nexus-wauo1.13 coordinator finding, 2026-09-25): a
+    # directory name known to be a STALE, still-live entry for this session
+    # id -- passed only by the /resume site (step 2), where A2 shares A's
+    # session id and A's own pre-resume entry survives a plain /exit (see
+    # stop()'s own comment). WITHOUT it, "did I arm at all" is vacuously
+    # true from the moment step 2 begins: A's stale entry alone satisfies
+    # "some entry exists for this session id", so the check could never
+    # catch a genuine arm FAILURE on a resumed session -- it proves
+    # nothing, exactly as reported. The default (empty) leaves every OTHER
+    # caller (A, B, C, and A2's own re-arm after /clear at step 4, a
+    # DIFFERENT session id with no stale entry to exclude) unchanged.
+    local t exclude="${2:-}" before_created=""; t="$(tok DONE-ARM)"
+    [ -n "$exclude" ] && before_created="$(_own_directory_created_ats "$exclude" "${SID_OF[$1]}" | sort)"
     prompt "$1" "Call ListAgents to read this session's own instance name, then call the nexus MCP tool tuple_subscribe with subspace \"mailbox/<that exact name>\" -- this arms your own name in the session directory, which is what that tool accepts. Then reply with exactly $t and nothing else." "$t" || return 1
-    wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
-    NAME_OF[$1]="$(discover_name "$1")"
+    if [ -n "$exclude" ] && ! wait_for 30 armed_name_known "$1" "$exclude"; then
+        # Nothing OTHER than $exclude showed up within 30s. That is either
+        # a genuine arm failure, or a genuine SAME-NAME re-collision
+        # (Claude re-assigned the identical pre-resume name) -- do NOT
+        # guess: a silent PASS here is the exact vacuous-pass bug this
+        # fix exists to close, and a naive fallback to the unqualified
+        # check (which always finds $exclude's own still-live entry) puts
+        # it right back. Ask the lease evidence instead: did THIS session
+        # write a NEW directory/$exclude row (a fresh nonce, per
+        # _own_directory_created_ats's comment) since before this arm
+        # attempt began?
+        local after_created new_created
+        after_created="$(_own_directory_created_ats "$exclude" "${SID_OF[$1]}" | sort)"
+        new_created="$(comm -13 <(printf '%s\n' "$before_created") <(printf '%s\n' "$after_created"))"
+        if [ -n "$new_created" ]; then
+            echo "  session $1 re-armed a name matching the excluded $exclude (a new lease row since the arm began -- a same-name collision, not an arm failure)"
+            NAME_OF[$1]="$exclude"
+            return 0
+        fi
+        echo "  no directory entry for ${SID_OF[$1]} after the arm (excluding $exclude finds nothing new, and $exclude's own row shows no lease write since the arm began -- a real failure, not a benign collision)"
+        return 1
+    fi
+    if [ -z "$exclude" ]; then
+        wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
+    fi
+    NAME_OF[$1]="$(discover_name "$1" "$exclude")"
     echo "  session $1 armed its own name: ${NAME_OF[$1]}"
 }
 model_send() {  # NAME TO CORR: a send with the DEFAULT sender, from inside the session
@@ -492,12 +574,33 @@ say "step 2: /resume (new process, same session id, new name)"
 stop A
 RESUME_T="$(now)"
 launch A2 "$SA" || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume"; exit 1; }
-arm A2 || bad "arm A2 (a resumed session subscribes its NEW name)"
+# $A_NAME excludes A's own still-live pre-resume entry from arm()'s
+# "did I arm at all" verification (nexus-wauo1.13 coordinator finding,
+# 2026-09-25) -- without it the check is vacuously true here, since A2
+# shares A's session id.
+arm A2 "$A_NAME" || bad "arm A2 (a resumed session subscribes its NEW name)"
 # nexus-4ahul: redraw (a real relaunch, a genuine new process start) up to
 # COLLISION_RETRY_CAP times if the resumed session's draw collides with the
 # pre-resume name, before asserting anything below -- see redraw_until_distinct.
-redraw_a2() { T kill-session -t A2 2>/dev/null; launch A2 "$SA" && arm A2; }
-discover_a2_name() { printf '%s' "${NAME_OF[A2]:-}"; }
+redraw_a2() { T kill-session -t A2 2>/dev/null; launch A2 "$SA" && arm A2 "$A_NAME"; }
+discover_a2_name() {  # -> A2's CURRENT name, distinct from A's still-held pre-resume entry
+    # NAME_OF[A2] (set by arm()'s own unqualified discover_name call,
+    # line 358) is exactly the ambiguous read discover_name's EXCLUDE
+    # parameter exists to correct -- re-derive directly here, excluding
+    # the known pre-resume name $A_NAME (a top-level variable, set at line
+    # 452 before step 2 begins), rather than trusting that cached value.
+    # Falling back to $A_NAME itself when nothing else is found is
+    # correct either way: that means the ONLY entry for this session id is
+    # still the pre-resume one, which is genuinely "not yet distinct"
+    # (arm() hasn't run yet, or Claude Code really did re-assign the
+    # identical name) -- both cases should make redraw_until_distinct's
+    # `cur = pre` comparison hold and trigger a real redraw, same as
+    # before.
+    local fresh
+    fresh="$(discover_name A2 "$A_NAME")"
+    if [ -n "$fresh" ]; then printf '%s' "$fresh"; return 0; fi
+    printf '%s' "$A_NAME"
+}
 _rd_out="$(redraw_until_distinct "$A_NAME" redraw_a2 discover_a2_name "$COLLISION_RETRY_CAP")"
 redraw_rc=$?
 A2_NAME="${_rd_out%%$'\n'*}"

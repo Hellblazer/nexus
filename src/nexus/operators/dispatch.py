@@ -393,7 +393,14 @@ def _build_dispatch_env(
 
     if parent_session_id:
         base["NX_SESSION_ID"] = parent_session_id
-    return base
+
+    # RDR-219 amendment (nexus-wauo1.35 / .38): map a harness's dispatch
+    # grant into this child's own CLAUDE_CODE_OAUTH_TOKEN, never into
+    # os.environ. No-op when NX_HARNESS_CLAUDE_OAUTH_TOKEN is absent, so a
+    # production dispatch (no harness) is byte-identical to before this.
+    from nexus.claude_child_env import apply_harness_oauth_grant  # noqa: PLC0415 — deferred to avoid import-time cost on the hot dispatch path
+
+    return apply_harness_oauth_grant(base)
 
 
 def _effective_phase_timeout(timeout: float, deadline: float | None) -> float:

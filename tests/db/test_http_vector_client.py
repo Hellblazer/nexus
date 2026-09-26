@@ -438,6 +438,31 @@ class TestUpdateChunks:
         tenant_client.update_chunks("col", ["id1"], [{"k": "v"}])
         assert tenant_calls == ["my-tenant"]
 
+    def test_delete_keys_forwarded_when_given_omitted_when_not(self, monkeypatch):
+        """nexus-w94eo: delete_keys is forwarded verbatim in the wire body
+        when given, and OMITTED entirely (not sent as an empty list) when
+        absent — an older engine that predates the field must see an
+        unchanged request shape."""
+        client = HttpVectorClient()
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append(body)
+            return {"updated": 1}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+        client.update_chunks("col", ["id1"], [{"k": "v"}])
+        assert "delete_keys" not in calls[-1], (
+            "no delete_keys kwarg passed must mean no delete_keys wire field"
+        )
+
+        client.update_chunks("col", ["id1"], [{"k": "v"}], delete_keys=[])
+        assert "delete_keys" not in calls[-1], (
+            "an empty delete_keys must not add a wire field either"
+        )
+
+        client.update_chunks("col", ["id1"], [{"k": "v"}], delete_keys=["quality_gate_overridden"])
+        assert calls[-1]["delete_keys"] == ["quality_gate_overridden"]
+
     def test_batches_at_300(self, monkeypatch):
         """update_chunks MUST batch at 300 to match the service quota validator."""
         client = HttpVectorClient()
@@ -2324,6 +2349,53 @@ class TestGatewayTransientRetry:
             assert sleeps == [hv._EMBED_WRITE_504_BACKOFF_FLOOR_S] * 2
         else:
             assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_a_deadline_abort_503_is_not_resent_by_the_gateway_loop(self, monkeypatch):
+        """nexus-qajw7: an engine 503 marked aborted discarded embedded work;
+        resending it 2/5/10 s later runs the whole request to its deadline
+        again. It goes straight to the caller's retry wrapper (ordinary budget,
+        shared brake) instead. A refused or unmarked 503 keeps the gateway
+        loop."""
+        import io
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+
+        def aborted(*a, **k):
+            calls.append(1)
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/x", code=503, msg="err",
+                hdrs={"X-Nexus-Deadline-Outcome": "aborted", "Retry-After": "5"},
+                fp=io.BytesIO(b'{"error":"deadline"}'),
+            )
+
+        monkeypatch.setattr(hv, "_request_once", aborted)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/upsert-chunks",
+                        tenant="default", timeout=600, body={})
+        assert len(calls) == 1
+
+    def test_a_refused_deadline_503_keeps_the_gateway_loop(self, monkeypatch):
+        import io
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+
+        def refused(*a, **k):
+            calls.append(1)
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/x", code=503, msg="err",
+                hdrs={"X-Nexus-Deadline-Outcome": "refused", "Retry-After": "5"},
+                fp=io.BytesIO(b'{"error":"refused"}'),
+            )
+
+        monkeypatch.setattr(hv, "_request_once", refused)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/upsert-chunks",
+                        tenant="default", timeout=600, body={})
+        assert len(calls) == 1 + len(hv._GATEWAY_RETRY_SLEEPS)
 
     def test_exhausted_retries_raise_original(self, monkeypatch):
         import urllib.error

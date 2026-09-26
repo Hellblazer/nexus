@@ -172,6 +172,39 @@ class VectorHandlerUpstreamRateLimitedTest {
         assertThat(genericIdx).isGreaterThan(armIdx);
     }
 
+    @Test
+    void catalogHandlerMapsARequestDeadlineThroughTheSharedShape() throws Exception {
+        // nexus-qajw7: the combined write embeds through the same embedders, so a
+        // deadline refusal or abort there must reach the client as the shared 503
+        // shape (proved live in VectorHandlerDeadlineMappingTest), not the generic
+        // arm's opaque 500. Static pin for the same reason as the 429 arm above.
+        String src = Files.readString(Path.of(
+            "src", "main", "java", "dev", "nexus", "service", "http", "CatalogHandler.java"));
+        int armIdx = src.indexOf("catch (dev.nexus.service.vectors.RequestDeadlineExceededException");
+        assertThat(armIdx).as("CatalogHandler must catch RequestDeadlineExceededException").isPositive();
+        String arm = src.substring(armIdx, Math.min(src.length(), armIdx + 1200));
+        assertThat(arm).contains("HttpUtil.sendRequestDeadlineExceeded(exchange, e)");
+        int genericIdx = src.indexOf("catch (Exception e)", armIdx);
+        assertThat(genericIdx).isGreaterThan(armIdx);
+    }
+
+    @Test
+    void stagingHandlerMapsBothEmbedFailuresThroughTheirShapes() throws Exception {
+        // nexus-qajw7 fix round: embed_fill calls the embedder directly, so both
+        // typed embed exceptions must be caught ahead of the generic 500 arm.
+        String src = Files.readString(Path.of(
+            "src", "main", "java", "dev", "nexus", "service", "http", "StagingHandler.java"));
+        int deadlineIdx = src.indexOf("catch (dev.nexus.service.vectors.RequestDeadlineExceededException");
+        int rateIdx = src.indexOf("catch (dev.nexus.service.vectors.UpstreamRateLimitedException");
+        assertThat(deadlineIdx).isPositive();
+        assertThat(rateIdx).isPositive();
+        assertThat(src.substring(deadlineIdx, deadlineIdx + 800))
+            .contains("HttpUtil.sendRequestDeadlineExceeded(exchange, e)");
+        assertThat(src.substring(rateIdx, rateIdx + 900)).contains("Retry-After").contains("429");
+        int genericIdx = src.indexOf("catch (Exception e)", Math.max(deadlineIdx, rateIdx));
+        assertThat(genericIdx).isGreaterThan(Math.max(deadlineIdx, rateIdx));
+    }
+
     /** Always throws the typed exception, simulating a budget-exhausted sustained 429. */
     private static final class RateLimitedEmbedder implements Embedder {
         @Override

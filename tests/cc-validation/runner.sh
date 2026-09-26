@@ -15,8 +15,16 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-AUTH_DIR="$REPO_ROOT/tests/e2e/.claude-auth"
 ONLY_SCENARIO=""
+
+# RDR-219: the harness's own automation identity (`nexus-automation-oauth-token`
+# in the keychain), never the operator's interactive `Claude Code-credentials`
+# login. Thin wrapper around the shared helper (nexus-galkv.19,
+# tests/e2e/lib/claude_credentials.py) so this file has one call site to
+# change if the helper's path ever moves.
+_cred_tool() {
+    python3 "$REPO_ROOT/tests/e2e/lib/claude_credentials.py" "$@"
+}
 
 # Distinct from e2e harness — keeps state separate so concurrent runs don't collide.
 TEST_HOME="${TMPDIR%/}/nexus-cc-val-home"
@@ -39,9 +47,12 @@ done
 
 # NOTE: there is deliberately NO early "do we have credentials?" check here.
 # The one that used to live at this spot asked only whether a keychain lookup
-# SUCCEEDED, which a token-less husk item satisfies (see provision_credentials
-# below, 2026-08-28). provision_credentials is the single fail-loud gate, and
-# it runs before tmux starts, so nothing expensive happens ahead of it.
+# SUCCEEDED, which a token-less husk item satisfies -- see RDR-219
+# nexus_rdr/219-research-9. The fail-loud gate now lives at the tmux
+# server-start call below (`_cred_tool run -- tmux ... new-session`): `run`
+# exits non-zero, naming the remedy, before it execs anything, if the
+# automation token is absent or expired, and it runs before any scenario
+# starts, so nothing expensive happens ahead of it.
 
 source "$REPO_ROOT/tests/e2e/lib.sh"
 TMUX_SESSION="cc-val"  # override the e2e default after sourcing
@@ -189,89 +200,15 @@ echo "Setting up isolated test home at $TEST_HOME..."
 rm -rf "$TEST_HOME"
 mkdir -p "$TEST_HOME/.claude/plugins" "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
 
-# Provision OAuth credentials into the isolated TEST_HOME.
-#
-# The sandbox session reads $TEST_HOME/.claude/.credentials.json (and
-# .env.test unsets ANTHROPIC_API_KEY so this file is the auth source).
-# A frozen snapshot file goes stale fast: OAuth access tokens are
-# short-lived and the refresh token rotates out from under a frozen copy
-# once the live CLI refreshes, so a stale snapshot 401s ("Invalid
-# authentication credentials") and every scenario fails before the model
-# runs anything. Prefer the live macOS keychain at runtime; refresh the
-# on-disk snapshot from it so the Linux/CI fallback path stays usable.
-#
-# TWO DEFECTS FIXED 2026-08-28 (nexus-qs1g6), both of the same class —
-# treating a successful FETCH as a valid CREDENTIAL:
-#
-#   1. MORE THAN ONE keychain item can carry the service name
-#      'Claude Code-credentials'. Measured on this box: an acct="unknown"
-#      item created 2026-08-23 whose claudeAiOauth is an empty husk
-#      (accessToken "", refreshToken "", expiresAt 0) sitting alongside the
-#      live acct="<login user>" item the CLI actually refreshes. `security
-#      find-generic-password -s <svc> -w` with no `-a` returns an ARBITRARY
-#      match, and it returned the husk. The old code's only validity test
-#      was json.load() parseability — which a husk passes — so it printed
-#      "provisioned from macOS keychain (live)" and every scenario then ran
-#      against a logged-out session. The pane showed the real answer the
-#      whole time ("Login expired · Please run /login"), while the verdicts
-#      blamed the MCP connection. Choose the credential by CONTENT now:
-#      enumerate the accounts under the service and take the freshest item
-#      that actually carries a token.
-#   2. The snapshot refresh (`cp "$dest" "$AUTH_DIR/..."`) ran on that path
-#      too, so the husk OVERWROTE the fallback snapshot — the harness
-#      destroyed its own only alternative credential source. The snapshot is
-#      only ever refreshed from a credential that passed the check now.
-#
-# _cred_tool pick  → freshest usable keychain credential on stdout, rc 1 if none
-# _cred_tool check <file> → rc 0 iff that file holds a usable credential
-#
-# Thin wrapper around the shared picker (nexus-galkv.19) — the verdict logic
-# above (husk rejection, expiry-without-refresh rejection, freshest-survivor
-# selection by attribute-only `dump-keychain` enumeration) used to be
-# duplicated inline here; it now lives in one place so
-# tests/e2e/auth-login.sh and tests/e2e/migration-rehearsal/run.sh's
-# --fullstack/--shakeout-e2e legs (which used to fetch with a bare,
-# unscoped `security find-generic-password`, silently able to select the
-# same kind of husk this tool exists to reject) share it instead of
-# re-deriving it.
-_cred_tool() {
-    python3 "$REPO_ROOT/tests/e2e/lib/claude_credentials.py" "$@"
-}
-
-provision_credentials() {
-    local dest="$TEST_HOME/.claude/.credentials.json"
-    local kc_json=""
-    if command -v security >/dev/null 2>&1; then
-        kc_json="$(_cred_tool pick || true)"
-    fi
-    if [[ -n "$kc_json" ]]; then
-        printf '%s' "$kc_json" > "$dest"
-        # Only now — with a credential that passed the check — is it safe to
-        # refresh the Linux/CI fallback snapshot.
-        cp "$dest" "$AUTH_DIR/.credentials.json" 2>/dev/null || true
-        echo "  [auth] provisioned from macOS keychain (token present, refreshable)"
-    elif [[ -f "$AUTH_DIR/.credentials.json" ]] && _cred_tool check "$AUTH_DIR/.credentials.json"; then
-        cp "$AUTH_DIR/.credentials.json" "$dest"
-        echo "  [auth] provisioned from snapshot file (no usable keychain item)"
-    else
-        # FAIL LOUD. The alternative — proceeding on an unusable credential —
-        # burns ~5 minutes per scenario and then reports "MCP connection issue"
-        # for what is really a logged-out session.
-        echo "Error: no USABLE credentials — every candidate is token-less or expired." >&2
-        echo "       Keychain items under 'Claude Code-credentials' were checked (reasons above)" >&2
-        echo "       and the snapshot at $AUTH_DIR/.credentials.json is missing or unusable." >&2
-        echo "       Remedy: run 'claude /login' in a normal session, then re-run this harness." >&2
-        exit 1
-    fi
-    chmod 600 "$dest"
-}
-provision_credentials
-
-if [[ -f "$AUTH_DIR/claude.json" ]]; then
-    cp "$AUTH_DIR/claude.json" "$TEST_HOME/.claude.json"
-else
-    echo '{"hasCompletedOnboarding":true}' > "$TEST_HOME/.claude.json"
-fi
+# RDR-219: no credential is provisioned into $TEST_HOME at all. The
+# harness's `claude` sessions authenticate from CLAUDE_CODE_OAUTH_TOKEN,
+# which reaches them via the private tmux SERVER's own environment (see the
+# tmux-start section below) -- there is nothing to write, refresh or fall
+# back to here. The Phase 0 spike (T2 nexus_rdr/219-research-14) verified
+# that a `.claude.json` holding only `hasCompletedOnboarding` authenticates
+# in this launch shape; the `oauthAccount` seed this harness used to copy
+# from tests/e2e/.claude-auth/claude.json is not needed.
+echo '{"hasCompletedOnboarding":true}' > "$TEST_HOME/.claude.json"
 
 # Empty plugin registry — no plugins loaded by default.
 cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<'EOF'
@@ -288,7 +225,12 @@ EOF
 # Env file the tmux pane sources before launching claude.
 cat > "$TEST_HOME/.env.test" <<EOF
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
-unset ANTHROPIC_API_KEY  # OAuth from .credentials.json takes priority
+# RDR-219: an API key outranks CLAUDE_CODE_OAUTH_TOKEN in Claude Code's auth
+# precedence, so a stray key in the pane's own environment would make the
+# session bill it instead of the automation token this harness provisions
+# via the tmux server's environment (see the tmux-start section) -- unset
+# it here so nothing but the automation token can be picked up.
+unset ANTHROPIC_API_KEY
 export HOME="$TEST_HOME"
 export PATH="\$HOME/.local/bin:\$PATH"
 export STUB_LOG="$STUB_LOG"
@@ -363,8 +305,17 @@ export -f write_command
 echo "Starting tmux session '$TMUX_SESSION' on private socket '$NX_TMUX_SOCKET'..."
 echo "  (run 'tmux -L $NX_TMUX_SOCKET attach -t $TMUX_SESSION' to watch live)"
 
-_tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-_tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50
+# RDR-219 transport rule: a tmux session takes its environment from the tmux
+# SERVER, not from the command that asks for the session -- so kill-server
+# (not just kill-session) first, ensuring a stale server from a killed prior
+# run is never reused, then start the private server fresh under
+# `_cred_tool run --`. That exec puts CLAUDE_CODE_OAUTH_TOKEN in the
+# environment of the process that starts the server, which every later
+# pane and session on this socket inherits; it is also this harness's
+# fail-loud credential gate (see the NOTE near the top of this file) and
+# runs before anything else in the harness, tmux included.
+_tmux kill-server 2>/dev/null || true
+_cred_tool run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 220 -y 50
 
 _tmux send-keys -t "$TMUX_SESSION" "source $TEST_HOME/.env.test" Enter
 sleep 1

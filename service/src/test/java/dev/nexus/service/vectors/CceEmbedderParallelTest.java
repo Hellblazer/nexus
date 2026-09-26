@@ -673,10 +673,10 @@ class CceEmbedderParallelTest {
             EmbedActivitySnapshot snap = cce.activitySnapshot();
             assertThat(snap.active()).isFalse();
             assertThat(snap.chunksDoneTotal()).isZero();
-            assertThat(snap.queueDepth())
-                    .as("no LocalOnnxAdmission-equivalent for the cloud path")
-                    .isEqualTo(-1);
-            assertThat(snap.threadWidth()).isEqualTo(-1);
+            // nexus-u2mlh.2: CCE reports its own queue and permit bound, no longer -1.
+            assertThat(snap.queueDepth()).as("nothing waiting on a fresh embedder").isZero();
+            assertThat(snap.threadWidth()).as("the constructor's parallelism").isEqualTo(4);
+            assertThat(snap.admissionRefusalsTotal()).isZero();
         }
     }
 
@@ -713,6 +713,9 @@ class CceEmbedderParallelTest {
         assertThat(cce.inFlightAvailablePermits())
                 .as("every dispatched sibling released its permit after the abort")
                 .isEqualTo(parallelism);
+        assertThat(cce.waitingBatches())
+                .as("nexus-u2mlh.2: every admission reservation was handed back")
+                .isZero();
     }
 
     @Test
@@ -751,7 +754,8 @@ class CceEmbedderParallelTest {
         // Records the class javadoc's documented asymmetry: a deadline that expires
         // mid-batch cannot un-send the first wave. Parallelism 4 dispatches four calls
         // at once; the deadline (40ms) expires while they are in flight (150ms each),
-        // so the check before futures.get(1) aborts -- but all four were billed.
+        // so the bounded wait on batch 0 aborts and cancels all four (nexus-u2mlh.3) --
+        // but all four had already been sent, and Voyage bills a request it received.
         int parallelism = 4;
         List<String> texts = new ArrayList<>();
         for (int i = 0; i < 8; i++) {
@@ -772,6 +776,66 @@ class CceEmbedderParallelTest {
         assertThat(requestTexts.stream().filter(t -> t.startsWith("dl-billed-")).count())
                 .as("the first wave was dispatched (and billed) before the deadline was observed")
                 .isGreaterThanOrEqualTo(parallelism);
+    }
+
+    @Test
+    void anInFlightCallIsCancelledAtTheDeadlineNotAwaited() throws Exception {
+        // nexus-u2mlh.3: the collector used to block on an untimed Future.get(), so a
+        // call already in flight when the deadline passed held its permit until Voyage
+        // answered, and a single-batch request then RETURNED SUCCESS to a caller that had
+        // left. The wait is now bounded by the deadline and the call is interrupted.
+        String t = "dl-inflight-0";
+        latencyMs.put(t, 3_000L);
+        try (CceEmbedder cce = embedder(1)) {
+            long start = System.nanoTime();
+            setRequestDeadline(start + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(200));
+            try {
+                assertThatThrownBy(() -> cce.embed(List.of(t)))
+                        .isInstanceOfSatisfying(RequestDeadlineExceededException.class, e ->
+                                assertThat(e.outcome())
+                                        .as("nexus-qajw7: an abort discards work; the client must not widen")
+                                        .isEqualTo(RequestDeadlineExceededException.Outcome.ABORTED));
+            } finally {
+                clearRequestDeadline();
+            }
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+            assertThat(elapsedMs)
+                    .as("the abort fires at the deadline, not when the 3 s call returns")
+                    .isLessThan(1_500L);
+            awaitPermitsBack(cce, 1);
+            long permitsBackMs = (System.nanoTime() - start) / 1_000_000L;
+            assertThat(permitsBackMs)
+                    .as("the interrupted call hands its permit back without waiting for Voyage")
+                    .isLessThan(1_500L);
+            assertThat(cce.callEwmaNanos())
+                    .as("a call cut short by cancellation is not a latency sample")
+                    .isZero();
+            assertThat(cce.activitySnapshot().deadlineAbortsTotal()).isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void aRetryBackoffIsCutAtTheDeadline() throws Exception {
+        // A 429 with Retry-After 5 s: the retry loop would sleep past the caller's
+        // deadline and then call Voyage again. The cancellation interrupts the sleep.
+        String t = "dl-retry-0";
+        rateLimitsRemaining.put(t, new AtomicInteger(1));
+        rateLimitRetryAfter.put(t, "5");
+        try (CceEmbedder cce = embedder(1)) {
+            long start = System.nanoTime();
+            setRequestDeadline(start + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(300));
+            try {
+                assertThatThrownBy(() -> cce.embed(List.of(t)))
+                        .isInstanceOf(RequestDeadlineExceededException.class);
+            } finally {
+                clearRequestDeadline();
+            }
+            assertThat((System.nanoTime() - start) / 1_000_000L).isLessThan(2_000L);
+            awaitPermitsBack(cce, 1);
+        }
+        assertThat(requestTexts.stream().filter(t::equals).count())
+                .as("the retry after the deadline is never sent")
+                .isEqualTo(1L);
     }
 
     @Test
@@ -914,14 +978,17 @@ class CceEmbedderParallelTest {
         maxInputsPerRequest.set(1);  // every multi-text batch is refused
         List<String> texts = List.of("fb-0", "fb-1", "fb-2", "fb-3");
         try (CceEmbedder cce = batchedEmbedder(1, 12)) {
-            // Far enough out that the first check passes and the batch is sent and
-            // refused; the fallback then finds it expired between its single calls.
+            // Far enough out that the first check passes and the batch is sent; it
+            // expires while the refused batch is still in flight. Since nexus-u2mlh.3
+            // the collector's bounded wait aborts there, before the fallback starts, so
+            // the message names the collector; the fallback's own check between single
+            // calls stays as a second line for the moment between the deadline passing
+            // and the collector's cancel reaching the task.
             latencyMs.put("fb-0", 300L);
             setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(150));
             try {
                 assertThatThrownBy(() -> cce.embed(texts))
-                        .isInstanceOf(RequestDeadlineExceededException.class)
-                        .hasMessageContaining("per-text fallback");
+                        .isInstanceOf(RequestDeadlineExceededException.class);
             } finally {
                 clearRequestDeadline();
             }
@@ -929,5 +996,179 @@ class CceEmbedderParallelTest {
         }
         assertThat(requestSizes).as("the refused batch, and no single call after the deadline")
                 .containsExactly(4);
+    }
+
+    // ── nexus-u2mlh.2: admission ahead of the shared permit pool ─────────────
+
+    /** Starts a deadline-free embed of {@code n} slow single-text batches on another
+     *  thread and waits until at least {@code minWaiting} of them are blocked on a permit. */
+    private java.util.concurrent.CompletableFuture<List<float[]>> occupy(
+            CceEmbedder cce, String prefix, int n, long latency, int minWaiting) throws Exception {
+        List<String> texts = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String t = prefix + i;
+            texts.add(t);
+            latencyMs.put(t, latency);
+        }
+        var bg = java.util.concurrent.CompletableFuture.supplyAsync(() -> cce.embed(texts));
+        long giveUp = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (cce.waitingBatches() < minWaiting && System.nanoTime() - giveUp < 0) {
+            Thread.sleep(5);
+        }
+        assertThat(cce.waitingBatches()).as("precondition: a queue ahead of the request").isGreaterThanOrEqualTo(minWaiting);
+        return bg;
+    }
+
+    @Test
+    void aRequestTheQueueAheadMakesLateIsRefusedBeforeItQueues() throws Exception {
+        try (CceEmbedder cce = embedder(1)) {
+            cce.recordCallNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(200));
+            var bg = occupy(cce, "adm-busy-", 6, 200L, 4);
+            // Alone, one 200 ms call fits in 1 s; behind 4+ queued and 1 running it cannot.
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(1_000));
+            try {
+                assertThatThrownBy(() -> cce.embed(List.of("adm-refused")))
+                        .isInstanceOfSatisfying(RequestDeadlineExceededException.class, e -> {
+                            assertThat(e.getMessage()).contains("admission refused");
+                            assertThat(e.retryAfterSeconds()).isBetween(1L, CceEmbedder.MAX_ADMISSION_RETRY_AFTER_S);
+                            assertThat(e.outcome())
+                                    .as("nexus-qajw7: nothing was embedded, so the client may widen its retries")
+                                    .isEqualTo(RequestDeadlineExceededException.Outcome.REFUSED);
+                        });
+            } finally {
+                clearRequestDeadline();
+            }
+            assertThat(cce.activitySnapshot().admissionRefusalsTotal()).isEqualTo(1L);
+            assertThat(cce.activitySnapshot().deadlineAbortsTotal()).as("a refusal is not an abort").isZero();
+            assertThat(bg.get(10, java.util.concurrent.TimeUnit.SECONDS)).hasSize(6);
+            assertThat(cce.waitingBatches()).as("reservations all handed back").isZero();
+        }
+        assertThat(requestTexts).as("the refused request never reached Voyage").doesNotContain("adm-refused");
+    }
+
+    @Test
+    void anEmptyQueueAdmitsARequestThatFitsItsDeadline() {
+        try (CceEmbedder cce = embedder(2)) {
+            cce.recordCallNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(50));
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5));
+            try {
+                assertThat(cce.embed(List.of("adm-ok-0", "adm-ok-1", "adm-ok-2"))).hasSize(3);
+            } finally {
+                clearRequestDeadline();
+            }
+            assertThat(cce.activitySnapshot().admissionRefusalsTotal()).isZero();
+        }
+    }
+
+    @Test
+    void aRequestThatCannotFitEvenAloneIsAdmittedNotRefusedForever() {
+        // Refusing it would refuse every retry too; the deadline checks bound it instead.
+        try (CceEmbedder cce = embedder(1)) {
+            cce.recordCallNanos(java.util.concurrent.TimeUnit.SECONDS.toNanos(1));
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(500));
+            try {
+                assertThat(cce.embed(List.of("adm-alone"))).hasSize(1);
+            } finally {
+                clearRequestDeadline();
+            }
+            assertThat(cce.activitySnapshot().admissionRefusalsTotal()).isZero();
+        }
+        assertThat(requestTexts).contains("adm-alone");
+    }
+
+    @Test
+    void aRequestThatCannotFitEvenAloneIsRefusedBehindAQueue() {
+        try (CceEmbedder cce = embedder(1)) {
+            cce.recordCallNanos(java.util.concurrent.TimeUnit.SECONDS.toNanos(1));
+            long now = System.nanoTime();
+            long deadline = now + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(500);
+            cce.admit(1, 1, now + java.util.concurrent.TimeUnit.SECONDS.toNanos(60), now);  // someone queued
+            assertThatThrownBy(() -> cce.admit(1, 1, deadline, now))
+                    .isInstanceOf(RequestDeadlineExceededException.class);
+            cce.releaseReservations(1);
+            cce.admit(1, 1, deadline, now);  // same request, empty queue: admitted
+            assertThat(cce.waitingBatches()).isEqualTo(1);
+            cce.releaseReservations(1);
+        }
+    }
+
+    @Test
+    void aFailedCallStillCountsTowardTheCallAverage() {
+        failuresRemaining.put("avg-fail", new AtomicInteger(100));
+        latencyMs.put("avg-fail", 30L);
+        try (CceEmbedder cce = embedder(1)) {
+            assertThatThrownBy(() -> cce.embed(List.of("avg-fail"))).isInstanceOf(RuntimeException.class);
+            assertThat(cce.callEwmaNanos()).as("the failed call's permit time was recorded").isPositive();
+        }
+    }
+
+    @Test
+    void noMeasurementYetAdmitsEvenBehindAQueue() throws Exception {
+        try (CceEmbedder cce = embedder(1)) {
+            var bg = occupy(cce, "adm-cold-", 3, 100L, 2);
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5));
+            try {
+                assertThat(cce.embed(List.of("adm-cold-mine"))).hasSize(1);
+            } finally {
+                clearRequestDeadline();
+            }
+            assertThat(cce.activitySnapshot().admissionRefusalsTotal()).isZero();
+            bg.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void aPermitGrantedAfterTheDeadlineSkipsTheVoyageCall() throws Exception {
+        try (CceEmbedder cce = embedder(1)) {
+            // No measurement, so admission lets it queue behind a 400 ms holder.
+            var bg = occupy(cce, "late-busy-", 1, 400L, 0);
+            long giveUp = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (cce.inFlightAvailablePermits() != 0 && System.nanoTime() - giveUp < 0) {
+                Thread.sleep(5);
+            }
+            assertThat(cce.inFlightAvailablePermits()).as("precondition: the permit is held").isZero();
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(100));
+            try {
+                assertThatThrownBy(() -> cce.embed(List.of("late-mine")))
+                        .isInstanceOf(RequestDeadlineExceededException.class)
+                        .hasMessageContaining("0/1 chunks");
+            } finally {
+                clearRequestDeadline();
+            }
+            assertThat(cce.activitySnapshot().deadlineAbortsTotal()).isEqualTo(1L);
+            bg.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            awaitPermitsBack(cce, 1);
+            assertThat(cce.waitingBatches()).isZero();
+        }
+        assertThat(requestTexts).as("the late batch gave its permit back unused").doesNotContain("late-mine");
+    }
+
+    @Test
+    void admissionReservesSoRequestsArrivingTogetherSeeEachOther() {
+        try (CceEmbedder cce = embedder(1)) {
+            cce.recordCallNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(200));
+            long now = System.nanoTime();
+            long deadline = now + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(500);
+            cce.admit(1, 1, deadline, now);  // 1 wave, 200 ms
+            cce.admit(1, 1, deadline, now);  // behind the first: 400 ms
+            assertThat(cce.waitingBatches()).isEqualTo(2);
+            assertThatThrownBy(() -> cce.admit(1, 1, deadline, now))  // 600 ms > 500 ms
+                    .isInstanceOf(RequestDeadlineExceededException.class)
+                    .hasMessageContaining("behind 2 queued");
+            assertThat(cce.waitingBatches()).as("a refusal reserves nothing").isEqualTo(2);
+            cce.releaseReservations(2);
+            assertThat(cce.waitingBatches()).isZero();
+        }
+    }
+
+    @Test
+    void callAverageSeedsOnTheFirstSampleThenMovesAFifth() {
+        try (CceEmbedder cce = embedder(1)) {
+            assertThat(cce.callEwmaNanos()).as("no measurement yet").isZero();
+            cce.recordCallNanos(1_000L);
+            assertThat(cce.callEwmaNanos()).isEqualTo(1_000L);
+            cce.recordCallNanos(2_000L);
+            assertThat(cce.callEwmaNanos()).isEqualTo(1_200L);
+        }
     }
 }

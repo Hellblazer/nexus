@@ -64,15 +64,56 @@ public final class RequestDeadlineExceededException extends RuntimeException {
      */
     public static final long DEFAULT_RETRY_AFTER_SECONDS = 5L;
 
-    private final long retryAfterSeconds;
+    /**
+     * What the caller loses by retrying (nexus-qajw7), surfaced by {@code VectorHandler}
+     * as the {@code X-Nexus-Deadline-Outcome} header and the {@code deadline_outcome} body
+     * field so the client can budget its retries by it.
+     */
+    public enum Outcome {
+        /** Refused before any embedding started: a retry costs one cheap request, and a
+         *  queue that drains in the meantime can admit it. */
+        REFUSED("refused"),
+        /** Aborted after work was submitted, even if none of it had finished: batches
+         *  may have returned or still be in flight, and all of it is discarded. A retry
+         *  redoes that work, which Voyage bills again or, for a local embedder such as
+         *  bge768, spends as CPU again. The two refusal sites are the only places where
+         *  nothing was submitted; anything else is ABORTED. */
+        ABORTED("aborted");
 
+        private final String wire;
+
+        Outcome(String wire) {
+            this.wire = wire;
+        }
+
+        /** The lowercase value sent on the wire. */
+        public String wire() {
+            return wire;
+        }
+    }
+
+    private final long retryAfterSeconds;
+    private final Outcome outcome;
+
+    /** An {@link Outcome#ABORTED} deadline; the conservative default, since it is the
+     *  outcome the client does not widen its retries for. */
     public RequestDeadlineExceededException(String message, long retryAfterSeconds) {
+        this(message, retryAfterSeconds, Outcome.ABORTED);
+    }
+
+    public RequestDeadlineExceededException(String message, long retryAfterSeconds, Outcome outcome) {
         super(message);
         this.retryAfterSeconds = retryAfterSeconds;
+        this.outcome = outcome;
     }
 
     /** Suggested client wait, surfaced as the response's {@code Retry-After}. */
     public long retryAfterSeconds() {
         return retryAfterSeconds;
+    }
+
+    /** Whether work was discarded; see {@link Outcome}. */
+    public Outcome outcome() {
+        return outcome;
     }
 }

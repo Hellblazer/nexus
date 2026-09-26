@@ -277,6 +277,22 @@ def reset_brake() -> None:
         _default_brake = RateLimitBrake()
 
 
+#: nexus-qajw7: the engine's header on a request-deadline 503, ``refused``
+#: (nothing was embedded) or ``aborted`` (embedded work was discarded). Only
+#: ``aborted`` changes client behaviour; an absent header keeps the old one.
+DEADLINE_OUTCOME_HEADER: str = "X-Nexus-Deadline-Outcome"
+
+
+def is_deadline_abort(headers: Mapping[str, str] | None) -> bool:
+    """True when *headers* mark an engine deadline 503 as ``aborted``: the
+    request's embedded batches were discarded, so a retry embeds (and bills)
+    them again and gets no widened budget or immediate resend (nexus-qajw7)."""
+    if headers is None:
+        return False
+    value = headers.get(DEADLINE_OUTCOME_HEADER)
+    return isinstance(value, str) and value.strip().lower() == "aborted"
+
+
 def parse_retry_after(headers: Mapping[str, str] | None) -> float | None:
     """Parse a ``Retry-After`` header value (from *headers*, any mapping —
     plain dict or ``httpx.Headers``) into seconds. Accepts an integer/float

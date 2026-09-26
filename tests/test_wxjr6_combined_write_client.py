@@ -15,6 +15,7 @@ import pytest
 from nexus.mcp_infra import (
     _apply_combined_write_response,
     get_complete_refusals,
+    get_manifest_write_failure_chashes,
     get_manifest_write_failures,
     get_superseded_sweep_stats,
     reset_complete_refusals,
@@ -143,3 +144,33 @@ class TestSweepAccounting:
         assert len(stats["skipped"]) == 1
         assert stats["skipped"][0]["doc_id"] == "1.2"
         assert stats["skipped"][0]["reason"] == "gate_timeout"
+
+
+class TestChashAttribution:
+    """T2 critique-wbfpw29-r5 Significant: chash_by_doc is keyed per
+    doc_id and threaded into _record_manifest_write_failure for every
+    failed doc -- must not swap or merge across docs in the same
+    response, and a doc absent from chash_by_doc (or carrying a blank
+    entry) must be recorded UNKNOWN, never confirmed against nothing."""
+
+    def test_two_failed_docs_keep_their_own_chashes(self) -> None:
+        res = {"failed_doc_ids": ["1.1", "1.2"]}
+        chash_by_doc = {
+            "1.1": ["a" * 64, "b" * 64],
+            "1.2": ["c" * 64],
+        }
+        _apply_combined_write_response(res, {}, "code__x", chash_by_doc=chash_by_doc)
+        expected = get_manifest_write_failure_chashes()
+        assert expected["1.1"] == frozenset({"a" * 64, "b" * 64})
+        assert expected["1.2"] == frozenset({"c" * 64})
+
+    def test_doc_missing_from_chash_by_doc_marks_unknown(self) -> None:
+        res = {"failed_doc_ids": ["1.1"]}
+        _apply_combined_write_response(res, {}, "code__x", chash_by_doc={})
+        assert get_manifest_write_failure_chashes()["1.1"] is None
+
+    def test_blank_chash_entry_marks_unknown(self) -> None:
+        res = {"failed_doc_ids": ["1.1"]}
+        chash_by_doc = {"1.1": ["a" * 64, ""]}
+        _apply_combined_write_response(res, {}, "code__x", chash_by_doc=chash_by_doc)
+        assert get_manifest_write_failure_chashes()["1.1"] is None

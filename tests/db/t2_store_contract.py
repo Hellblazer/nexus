@@ -339,6 +339,18 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # job there, which is exactly the split that let a reset leave live
         # centroids behind. No oracle method for the contract to see.
         'reset_collection': ['collection'],
+        # nexus-iygza: one page of a collection's unassigned, manifest-backed
+        # chunks (engine-service-v0.1.132). Service-only by construction: the
+        # route is an engine antijoin the SQLite era never had. Production
+        # caller: mcp_infra.drain_unassigned_chunks (nx taxonomy drain, and the
+        # drain at the end of every nx index repo).
+        'unassigned_chashes': ['collection', 'limit', 'after'],
+        # nexus-v4pj4: the engine's live cross-pass ANN pick for a batch of
+        # chunks, computed read-only under the cross pass's own HNSW and plan
+        # settings (taxonomy-021, next engine tag). Service-only by
+        # construction: no SQLite twin ever had an HNSW cross pass. Production
+        # caller: nexus.doctor_assignments (nx doctor --check-assignments).
+        'cross_preview': ['collection', 'chashes'],
         # nexus-onjvy: the quality columns (similarity / assigned_at /
         # source_collection) were WRITE-ONLY until engine-service-v0.1.58 added
         # /assignments/details. The SQLite twin read them through a raw

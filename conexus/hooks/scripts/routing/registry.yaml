@@ -66,3 +66,22 @@ rules:
       by construction (see feedback_phase_closeout_scope_audit).
     escape_token: "# routing-allow:"
     fail_closed: true
+  credential_print_guard:
+    hook_script: credential_print_guard.py
+    matcher: Bash
+    mode: block
+    rationale: >-
+      never read a Claude Code credential straight from the keychain, a
+      .credentials.json file, or a shell expansion of
+      CLAUDE_CODE_OAUTH_TOKEN — use claude_credentials.py status/run --
+      instead (RDR-219 Gap 2, nexus-wauo1.22). NO ESCAPE TOKEN: this rule
+      never honours # routing-allow:, unlike every other rule in this
+      registry — the message naming claude_credentials.py is RDR-219's
+      only answer to a false positive.
+    escape_token: "none (RDR-219: this guard is deliberately un-escapable)"
+    # Hook-level: a crash in the guard must not brick every agent's Bash.
+    # The marker-scoped fail-closed/fail-open split lives INSIDE the hook
+    # itself (see its own module docstring, "FAILURE BEHAVIOUR") — the
+    # all-or-nothing run_hook(fail_closed=...) wrapper stays False here,
+    # exactly like subagent_git_write_requires_orchestrator's split above.
+    fail_closed: false

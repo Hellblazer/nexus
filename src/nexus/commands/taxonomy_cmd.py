@@ -806,6 +806,21 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         )
 
 
+def _echo_stale_projection_hint() -> None:
+    """Tell the operator other collections' projections may now be stale.
+
+    rebuild, merge and split change one collection's topics in place.
+    Other collections' cross-collection projections onto those topics are
+    not recomputed: the engine projects only chunks as they are written,
+    and nx index repo re-projects only when discovery creates topics
+    (nexus-x3gig round 3).
+    """
+    click.echo(
+        "Note: other collections' projections onto these topics are not "
+        "recomputed. Run `nx taxonomy project --backfill --persist` to refresh them."
+    )
+
+
 @taxonomy.command("rebuild")
 @click.option("--collection", "-c", default="", help="T3 collection to rebuild taxonomy for")
 @click.option("--project", "-p", default="", hidden=True, help="Deprecated: use --collection instead")
@@ -840,6 +855,8 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
             click.echo(f"Refused: {exc}", err=True)
             raise SystemExit(1) from None
     click.echo(f"Rebuilt {count} topics for collection {collection!r}.")
+    if count:
+        _echo_stale_projection_hint()
 
 
 @taxonomy.command("reset")
@@ -1168,6 +1185,130 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
         click.echo(f"Assigned '{doc_id}' to topic '{topic_label}' (id={topic_id}).")
 
 
+@taxonomy.command("drain")
+@click.option("--collection", "-c", "collections", multiple=True,
+              help="Collection to drain (repeatable).")
+@click.option("--all", "all_collections", is_flag=True, default=False,
+              help="Drain every live collection.")
+@click.option("--max-chunks", type=click.IntRange(min=1), default=None,
+              help="Chunks per collection this run (default 2000); the rest wait for the next drain.")
+def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: int | None) -> None:
+    """Assign chunks that have no topic in their collection's taxonomy.
+
+    Lists, per collection, the manifest-backed chunks with no assignment to
+    the collection's own topics and assigns them through the same retrying
+    path indexing uses (nexus-iygza). Recovers assignments lost to a failed
+    batch, a crash, or a deferred hook. Collections without topics are
+    reported and left alone. Exits 1 when any chunk still failed to assign
+    or any collection could not be drained.
+    """
+    from nexus.mcp_infra import (  # noqa: PLC0415 - deferred to avoid circular import at module load
+        _DRAIN_MAX_CHUNKS,
+        drain_unassigned_chunks,
+        get_live_collection_names,
+    )
+
+    if bool(collections) == all_collections:
+        raise click.UsageError("name collections with -c, or pass --all (one of the two).")
+    names = list(collections)
+    if all_collections:
+        names = sorted(get_live_collection_names())
+        # Same exclusion the per-flush hook honours in local mode
+        # (taxonomy.local_exclude_collections; code__* by default, since
+        # general-purpose local embeddings cluster code poorly).
+        from fnmatch import fnmatch  # noqa: PLC0415 - stdlib, only this branch needs it
+
+        from nexus.config import is_local_mode, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
+        if is_local_mode():
+            exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
+            names = [n for n in names if not any(fnmatch(n, pat) for pat in exclude)]
+    budget = max_chunks or _DRAIN_MAX_CHUNKS
+    any_lost = False
+    for name in names:
+        try:
+            r = drain_unassigned_chunks(name, max_chunks=budget)
+        except Exception as exc:  # noqa: BLE001 - one collection's failure is reported; the rest still drain
+            click.echo(f"{name}: failed ({type(exc).__name__}: {exc})")
+            any_lost = True
+            continue
+        if r.skipped_reason:
+            click.echo(f"{name}: skipped ({r.skipped_reason})")
+        elif not r.has_taxonomy:
+            click.echo(f"{name}: no taxonomy, nothing to assign to")
+        else:
+            more = "; more remain, run again" if r.truncated else ""
+            acked = f", {r.acknowledged} acknowledged stuck (skipped)" if r.acknowledged else ""
+            click.echo(f"{name}: {r.found} unassigned, {r.assigned} assigned, {r.lost} lost{acked}{more}")
+        any_lost = any_lost or r.lost > 0
+    if any_lost:
+        raise SystemExit(1)
+
+
+@taxonomy.command("acknowledge")
+@click.argument("chashes", nargs=-1)
+@click.option("--collection", "-c", default="", help="Collection the chunks belong to (required, except with --list).")
+@click.option("--note", default="", help="What was diagnosed (required when acknowledging).")
+@click.option("--remove", is_flag=True, default=False, help="Withdraw the acknowledgment for CHASHES in COLLECTION.")
+@click.option("--list", "list_acks", is_flag=True, default=False, help="Show every acknowledged chunk.")
+def acknowledge_cmd(chashes: tuple[str, ...], collection: str, note: str, remove: bool, list_acks: bool) -> None:
+    """Record chunks the engine permanently refuses to assign a topic.
+
+    A drain lists every unassigned chunk on every run, so one the engine
+    always refuses would fail every `nx index repo` (nexus-j7ae6). After
+    diagnosing it, acknowledge it with a note: the drain then skips it in
+    that collection instead of retrying, names how many it skipped on every
+    run, and does not count it as a loss. Scoped per collection (identical
+    text elsewhere is not covered) and stored in T2, so every box on the
+    same tenant sees it. `--remove` withdraws; `--list` shows them.
+    """
+    from nexus.mcp_infra import (  # noqa: PLC0415 - deferred to avoid circular import at module load
+        TAXONOMY_ACK_PROJECT,
+        t2_index_write,
+        taxonomy_ack_title,
+    )
+
+    if list_acks:
+        if chashes or remove:
+            raise click.UsageError("--list takes no CHASHES and no --remove.")
+        entries = t2_index_write(lambda db: db.memory.get_all(TAXONOMY_ACK_PROJECT), op="taxonomy_ack_read")
+        if not entries:
+            click.echo("No acknowledged stuck chunks.")
+        for e in sorted(entries, key=lambda e: e.get("title", "")):
+            coll, _, chash = str(e.get("title", "")).rpartition("/")
+            click.echo(f"{coll}  {chash}  {e.get('timestamp', '')}  {e.get('content', '')}")
+        return
+    if not chashes:
+        raise click.UsageError("name at least one CHASH, or pass --list.")
+    if not collection:
+        raise click.UsageError("--collection is required: acknowledgments are per collection.")
+    bad = [c for c in chashes if not _DOC_ID_HEX_RE.match(c)]
+    if bad:
+        raise click.UsageError(f"not a 64-hex chunk chash: {', '.join(bad)}")
+    if remove:
+        gone = sum(
+            bool(t2_index_write(
+                lambda db, _t=taxonomy_ack_title(collection, c): db.memory.delete(
+                    project=TAXONOMY_ACK_PROJECT, title=_t),
+                op="taxonomy_ack_delete",
+            ))
+            for c in chashes
+        )
+        click.echo(f"Withdrew {gone} acknowledgment(s); those chunks count as losses again if they fail.")
+        return
+    if not note.strip():
+        raise click.UsageError("--note is required: record what was diagnosed.")
+    for c in chashes:
+        t2_index_write(
+            lambda db, _t=taxonomy_ack_title(collection, c): db.memory.put(
+                project=TAXONOMY_ACK_PROJECT, title=_t, content=note, tags="taxonomy-ack"),
+            op="taxonomy_ack_put",
+        )
+    click.echo(
+        f"Acknowledged {len(chashes)} stuck chunk(s) in {collection}: the drain skips them there "
+        "and reports the count every run. Withdraw with --remove once fixed."
+    )
+
+
 @taxonomy.command("rename")
 @click.argument("topic_label")
 @click.argument("new_label")
@@ -1233,6 +1374,7 @@ def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
         _tgt = target_id
         t2_index_write(lambda db, _s=_src, _t=_tgt: db.taxonomy.merge_topics(_s, _t))
         click.echo(f"Merged '{source_label}' into '{target_label}'.")
+        _echo_stale_projection_hint()
 
 
 @taxonomy.command("split")
@@ -1292,6 +1434,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
             redistribution = "/".join(str(c) for c in child_counts) or "0"
             note = f" ({retained} retained on parent)" if retained else ""
             click.echo(f"Redistribution: {parent_doc_count} -> {redistribution}{note}")
+            _echo_stale_projection_hint()
 
             coll_scope = collection_name or collection
             scope = f" -c {coll_scope}" if coll_scope else ""

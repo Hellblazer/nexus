@@ -60,11 +60,11 @@ def _shared_doc_id() -> str:
 #   unsatisfiable assertion. "Catalog not initialized" is a LOCAL-only state;
 #   in service mode make_catalog_reader always returns a handle.
 #
-#   _needs_diagnosis_nexus_t0nrd — five tests around the extraction loop's
-#   routed-write seam and the re-extract outdated filter. NOT retired, NOT
-#   understood: tracked in nexus-t0nrd with what has already been ruled out
-#   (the aspect store round-trips identically on both substrates, so the
-#   divergence is in the CLI verb, not document_aspects).
+#   _needs_diagnosis_nexus_t0nrd — RETIRED 2026-09-25 (nexus-3foc9 work
+#   found it stale): its three surviving tests (persist routes through
+#   t2_index_write, the re-extract outdated filter, single-row delete) pass
+#   on the engine substrate, 3 of 3 runs, so the skip was hiding working
+#   behaviour. nexus-t0nrd itself was closed as a duplicate of nexus-02avu.
 #
 # nexus-i711w Stage 1b (2026-07-28): the SQLite substrate is gone, so what
 # remains is the t0nrd marker, now UNCONDITIONAL — a skipif whose predicate
@@ -75,10 +75,6 @@ def _shared_doc_id() -> str:
 # two markers went with their tests: the local-only "Catalog not initialized"
 # assertion is unsatisfiable on the only remaining substrate, and
 # _rich_catalog_dies_at_flip had already been emptied by the aqbrk correction.
-_needs_diagnosis_nexus_t0nrd = pytest.mark.skip(
-    reason="nexus-t0nrd: engine-substrate behaviour of the enrich write path "
-    "not yet diagnosed — tracked, not retired",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -186,18 +182,17 @@ class TestRouting:
         assert "No extractor config" in result.output
         assert "knowledge__" in result.output
 
-    def test_unsupported_docs_collection_names_the_z70w_note(self, env) -> None:
-        """nexus-ft04v.23: ``collection.startswith("docs__")`` funnelled to
-        ``collection_content_type(collection) == "docs"`` -- the extra
-        docs__-specific note (nexus-z70w) must still fire for a docs__
-        collection, and only for one (code__nexus above gets the generic
-        message with no z70w note)."""
+    def test_unsupported_docs_collection_names_the_opt_in(self, env) -> None:
+        """nexus-ft04v.23 kept a docs__-specific note on this refusal; since
+        nexus-kk4ut it names the opt-in instead of the old z70w explanation,
+        and still fires only for a docs__ collection (code__nexus above gets
+        the generic message)."""
         runner = CliRunner()
         result = runner.invoke(enrich, ["aspects", "docs__manual"])
         assert result.exit_code == 0
         assert "No extractor config" in result.output
-        assert "nexus-z70w" in result.output
-        assert "not paper-shaped" in result.output
+        assert "aspects.docs_collections" in result.output
+        assert "docs__manual" in result.output
 
 
 # ── --dry-run ───────────────────────────────────────────────────────────────
@@ -729,7 +724,6 @@ class TestDefaultExtraction:
         assert "2 extracted" in result.output
         assert "by_extractor" not in result.output
 
-    @_needs_diagnosis_nexus_t0nrd
     def test_aspect_persist_routes_through_t2_index_write(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -818,7 +812,6 @@ class TestDefaultExtraction:
 
 
 class TestReExtract:
-    @_needs_diagnosis_nexus_t0nrd
     def test_re_extract_filters_to_outdated_rows(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1535,7 +1528,6 @@ class TestDay2Ops:
         assert result.exit_code == 0
         assert "No aspect row" in result.output
 
-    @_needs_diagnosis_nexus_t0nrd
     def test_delete_removes_row(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1595,6 +1587,151 @@ class TestDay2Ops:
             assert db.document_aspects.get(
                 "knowledge__delos", "/p1.pdf",
             ) is not None
+
+
+# ── nexus-3foc9: nx enrich delete COLLECTION --all (bulk removal) ────────────
+
+
+class TestDeleteAll:
+    """`nx enrich delete COLLECTION --all`: bulk removal of every aspect
+    row in one collection. Dry-run by default; `--no-dry-run --yes` (or
+    the confirmation prompt) actually deletes. The cleanup step for a
+    collection opted out of `aspects.docs_collections` (nexus-kk4ut),
+    whose rows extraction wrote stay behind and fully visible to
+    aspect-scoped search/groupby until removed."""
+
+    @staticmethod
+    def _seed(db_path: Path, *, collection: str, source_paths: list[str]) -> None:
+        from nexus.aspect_readers import uri_for
+        from nexus.db.t2 import T2Database
+        from nexus.db.t2.records import AspectRecord
+
+        with T2Database(db_path) as db:
+            for sp in source_paths:
+                db.document_aspects.upsert(AspectRecord(
+                    collection=collection,
+                    source_path=sp,
+                    problem_formulation="P", proposed_method="M",
+                    experimental_datasets=["d1"], experimental_baselines=["b1"],
+                    experimental_results="R", extras={"venue": "V"},
+                    confidence=0.9,
+                    extracted_at=datetime.now(UTC).isoformat(),
+                    model_version="claude-haiku-4-5-20251001",
+                    extractor_name="scholarly-paper-v1",
+                    source_uri=uri_for(collection, sp),
+                    doc_id=_shared_doc_id(),
+                ))
+
+    # ── argument validation ──────────────────────────────────────────────
+
+    def test_requires_source_path_or_all(self, env) -> None:
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["delete", "knowledge__delos"])
+        assert result.exit_code != 0
+        assert "Pass SOURCE_PATH, or --all" in result.output
+
+    def test_rejects_both_source_path_and_all(self, env) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["delete", "knowledge__delos", "/p1.pdf", "--all"],
+        )
+        assert result.exit_code != 0
+        assert "not both" in result.output
+
+    # ── dry-run default ──────────────────────────────────────────────────
+
+    def test_dry_run_reports_count_and_writes_nothing(self, env) -> None:
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        self._seed(
+            db_path, collection="knowledge__delos",
+            source_paths=["/p1.pdf", "/p2.pdf", "/p3.pdf"],
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["delete", "knowledge__delos", "--all"])
+        assert result.exit_code == 0, result.output
+        assert "3 aspect row(s) in 'knowledge__delos'" in result.output
+        assert "dry-run" in result.output.lower()
+
+        with T2Database(db_path) as db:
+            assert len(db.document_aspects.list_by_collection("knowledge__delos")) == 3
+
+    # ── actual bulk delete ───────────────────────────────────────────────
+
+    def test_no_dry_run_removes_every_row_for_collection_only(
+        self, env,
+    ) -> None:
+        """--no-dry-run --yes removes every row of the named collection and
+        none of a different collection's rows."""
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        self._seed(
+            db_path, collection="knowledge__delos",
+            source_paths=["/p1.pdf", "/p2.pdf"],
+        )
+        self._seed(
+            db_path, collection="knowledge__other",
+            source_paths=["/o1.pdf"],
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["delete", "knowledge__delos", "--all", "--no-dry-run", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Deleted 2 aspect row(s)" in result.output
+
+        with T2Database(db_path) as db:
+            assert db.document_aspects.list_by_collection("knowledge__delos") == []
+            assert len(db.document_aspects.list_by_collection("knowledge__other")) == 1
+
+    def test_no_dry_run_requires_confirmation_without_yes(self, env) -> None:
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        self._seed(
+            db_path, collection="knowledge__delos", source_paths=["/p1.pdf"],
+        )
+
+        runner = CliRunner()
+        # Send "n\n" to the prompt to abort.
+        result = runner.invoke(
+            enrich,
+            ["delete", "knowledge__delos", "--all", "--no-dry-run"],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+
+        with T2Database(db_path) as db:
+            assert len(db.document_aspects.list_by_collection("knowledge__delos")) == 1
+
+    # ── unknown / empty collection ───────────────────────────────────────
+
+    def test_unknown_collection_refuses(self, env) -> None:
+        """A name with zero aspect rows AND zero catalog entries is a
+        refusal, not a silent zero-row dry run."""
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["delete", "knowledge__totally-unregistered-xyz", "--all"],
+        )
+        assert result.exit_code != 0
+        assert "No catalog rows in" in result.output
+
+    def test_known_collection_with_no_aspect_rows_is_a_noop(self, env) -> None:
+        """A collection the catalog DOES know (has documents) but with zero
+        aspect rows is a no-op, not a refusal -- there is nothing wrong
+        with it, just nothing to delete."""
+        _, _, cat = env
+        _register_entries(cat, ["/untouched.pdf"])
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["delete", "knowledge__delos", "--all"])
+        assert result.exit_code == 0, result.output
+        assert "nothing to delete" in result.output
 
 
 # ── nexus-r0kum (review S2): the CLI batch path applies the same refusal ──────
@@ -1663,3 +1800,54 @@ class TestCliBatchAttribution:
         from nexus.db.t2 import T2Database
         with T2Database(db_path) as db:
             assert db.document_aspects.list_by_collection("rdr__nexus-foo") == []
+
+
+class TestDocsOptInEnrich:
+    """nexus-kk4ut: ``nx enrich aspects`` on an opted-in docs__ collection
+    extracts its prose files only, and a collection whose files are all
+    non-prose is skipped with a message, never refused as empty."""
+
+    @staticmethod
+    def _opt_in(monkeypatch, pattern: str) -> None:
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda *a, **k: {"aspects": {"docs_collections": [pattern]}},
+        )
+
+    def _register(self, cat, files: list[str]) -> None:
+        owner = cat.register_owner("optrepo", "repo", repo_hash="feed1234", repo_root="/Users/test/optrepo")
+        for f in files:
+            cat.register(owner=owner, title=f, content_type="prose",
+                         physical_collection="docs__optrepo-feed1234", file_path=f)
+
+    def test_only_prose_files_are_dispatched(self, env, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus.aspect_readers import ReadOk
+
+        _, _, cat = env
+        self._opt_in(monkeypatch, "docs__optrepo-*")
+        self._register(cat, ["docs/guide.md", "data/rows.jsonl", "notes.txt"])
+        seen: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            seen.append(uri)
+            return ReadOk(text="content", metadata={})
+
+        class _FakeT3:
+            pass
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.aspect_readers.read_source", fake_read)
+
+        result = CliRunner().invoke(enrich, ["aspects", "docs__optrepo-feed1234", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Skipping 1 non-prose document(s)" in result.output
+        assert not any("rows.jsonl" in u for u in seen), seen
+
+    def test_a_collection_of_only_non_prose_files_is_not_refused_as_empty(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _, cat = env
+        self._opt_in(monkeypatch, "docs__optrepo-*")
+        self._register(cat, ["data/rows.jsonl", "graph.dot"])
+        result = CliRunner().invoke(enrich, ["aspects", "docs__optrepo-feed1234", "--dry-run"])
+        assert "Skipping 2 non-prose document(s)" in result.output
+        assert "No catalog rows" not in result.output

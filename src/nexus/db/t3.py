@@ -95,6 +95,21 @@ def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
     return normalize(metadata, content_type=content_type)
 
 
+
+def _normalize_partial(metadata: dict, collection_name: str) -> dict:
+    """Normalise a PARTIAL update without injecting defaults (nexus-w94eo).
+
+    Keeps a normalised key when the caller sent it, or when ``normalize``
+    produced it with a value other than its default (a legacy-key rename).
+    Drops the defaults ``normalize`` fills in for keys the caller left out,
+    which a merging store would otherwise write over the stored values.
+    """
+    content_type = _infer_content_type(metadata, collection_name)
+    out = normalize(metadata, content_type=content_type)
+    defaults = normalize({}, content_type=content_type)
+    return {k: v for k, v in out.items()
+            if k in metadata or k not in defaults or defaults[k] != v}
+
 # nexus-o6aa.9.16: collection prefixes whose writes bypass the canonical
 # chunk schema. These are programmatically-populated collections that
 # carry their own metadata vocabulary — applying the canonical
@@ -931,6 +946,15 @@ class T3Database:
         ``PgVectorRepository`` (Postgres/service-mode engine); local Chroma
         mode has no such skip to bypass — ``col.upsert()`` always re-embeds
         via the collection's own embedding function regardless of this flag.
+
+        ``delete_keys`` (nexus-w94eo / nexus-y8xjh) on
+        :meth:`upsert_chunks_with_embeddings` and :meth:`update_chunks` is
+        accepted for signature parity with
+        :class:`~nexus.db.http_vector_client.HttpVectorClient` and IGNORED: the in-process store merges metadata at key level on both
+        upsert and update and exposes no key-removal primitive, so a stale key
+        survives a rewrite in this backend. Accepted, not honored: this class is
+        not the serving path in either mode (``HttpVectorClient`` is), so the
+        gap is confined to tests and tooling that construct it directly.
         """
         col = self.get_or_create_collection(collection, strict=False)
         self._write_batch(col, collection, ids, documents, metadatas)
@@ -944,6 +968,7 @@ class T3Database:
         metadatas: list[dict],
         *,
         force_re_embed: bool = False,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Upsert chunks with pre-computed embeddings (bypasses ChromaDB's EF).
 
@@ -960,7 +985,8 @@ class T3Database:
 
         See ``upsert_chunks`` for why ``strict=False`` here, and for why
         ``force_re_embed`` is accepted-but-no-op in local/Chroma mode
-        (RDR-181 — the embed-skip it bypasses is service-mode-only).
+        (RDR-181 — the embed-skip it bypasses is service-mode-only), and
+        why ``delete_keys`` is accepted but not honored.
         """
         col = self.get_or_create_collection(collection_name, strict=False)
         self._write_batch(col, collection_name, ids, documents, metadatas, embeddings=embeddings)
@@ -970,6 +996,8 @@ class T3Database:
         collection: str,
         ids: list[str],
         metadatas: list[dict],
+        *,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Update chunk metadata without re-embedding.
 
@@ -984,9 +1012,19 @@ class T3Database:
         nexus-o6aa.9.16: programmatic vector-only collections
         (``taxonomy__*``) bypass the canonical schema — see
         :func:`_bypass_canonical_schema`.
+
+        ``delete_keys``: accepted but not honored, see :meth:`upsert_chunks`.
+
+        nexus-w94eo: an update is PARTIAL. The engine merges it into the
+        stored row, and so does the in-process store, so only the keys the
+        caller sent may reach it. ``normalize`` fills every missing key with
+        its default (``content_type`` becomes ``prose``), and writing those
+        defaults overwrote stored values the caller never touched, as the
+        PDF post-pass's enrichment-only write showed. A key ``normalize``
+        produced with a non-default value (a rename) is kept.
         """
         if not _bypass_canonical_schema(collection):
-            metadatas = [_normalize_for_write(m, collection) for m in metadatas]
+            metadatas = [_normalize_partial(m, collection) for m in metadatas]
             for m in metadatas:
                 validate(m)
         # See ``upsert_chunks`` for why ``strict=False`` here. Update

@@ -285,6 +285,12 @@ def _heal_collections(
                 # design, so a rebuilt manifest can legitimately have fewer
                 # rows than the document's stale chunk_count. Not an error —
                 # tracked so the summary reports it instead of hiding it.
+                # A shortfall can equally be a partial rebuild; this core
+                # cannot tell the two apart, and a document whose manifest
+                # hook raised reads chunk_count==0 here. nx index repo's
+                # exit code therefore does not rely on this accounting: it
+                # reads the manifest back after the run
+                # (commands._helpers.resolve_confirmed_write_failure_doc_ids).
                 result.dup_collapsed += 1
                 result.dup_old_total += entry.chunk_count
                 result.dup_new_total += len(chunks)

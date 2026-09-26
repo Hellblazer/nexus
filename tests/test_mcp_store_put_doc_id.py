@@ -250,28 +250,26 @@ def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
 # reachable trigger), and the service-side counterpart it named lives in
 # tests/test_e9ru2_catalog_gate_sweep.py::
 # test_register_or_lookup_fresh_box_no_local_catalog_created.
-def test_mcp_store_put_skips_aspect_enqueue_when_catalog_hook_raises(
+def test_mcp_store_put_rolls_back_when_catalog_hook_raises(
     inject_local_t3: T3Database,
     catalog_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RDR-172 / nexus-pyn35, SUPERSEDED TWICE by hygiene-001
-    (nexus-tk070.p6a follow-on): when ``catalog_store_hook`` RAISES (the
-    best-effort boundary catch in store_put), ``catalog_doc_id`` stays the
-    pre-initialized ''.
+    """RDR-172 / nexus-pyn35, SUPERSEDED THREE TIMES, now by RDR-192 Step
+    3a (nexus-wbfpw.28, Sam's ruling 2026-09-26: rollback, not a marker
+    column): when ``catalog_store_hook`` RAISES (the best-effort boundary
+    catch in store_put), ``catalog_doc_id`` stays the pre-initialized ''.
 
-    Review round item B (critic C2) supersedes the prior-turn contract
-    pinned here (store_put itself skipping ``fire_document`` outright): the
-    resolve-or-skip decision for a blank doc_id moved to the CHOKE POINT,
-    ``aspect_extraction_enqueue_hook`` itself, which every ``fire_document``
-    call site (this one included) now shares -- so store_put no longer
-    pre-empts the hook by skipping the call here. It forwards
-    ``catalog_doc_id`` VERBATIM, blank or not, and lets the hook's own
-    resolve-by-(collection, source_path) fallback or its
-    ``aspect_enqueue_skipped_no_doc_id`` warning make the call (covered
-    directly by ``tests/test_aspect_worker.py::TestEnqueueHookDocIdWiring``,
-    not here -- ``fire_document`` is mocked in this test, so the real hook
-    body never runs). store_put itself must still not crash.
+    This test used to pin the hygiene-001 contract: store_put still wrote
+    the chunk and returned a bare "Stored:", forwarding the blank
+    ``catalog_doc_id`` to ``fire_document`` for the hook's own
+    resolve-or-skip decision. That contract is exactly the no-owner
+    census shape RDR-192 exists to close — a live, manifest-less T3
+    chunk with no catalog document at all. store_put now detects the
+    blank ``catalog_doc_id`` right after the registration attempt, rolls
+    back the chunk ``put_note_pieces`` already wrote, and returns an
+    explicit error BEFORE any post-store hook (including
+    ``fire_document``) ever runs.
     """
     import structlog.testing
 
@@ -302,13 +300,25 @@ def test_mcp_store_put_skips_aspect_enqueue_when_catalog_hook_raises(
             title="pyn35-hook-raises",
             tags="test",
         )
-    assert "Stored" in result, (
-        f"store_put must not crash when catalog_store_hook raises: {result}"
+    assert result.startswith("Error"), (
+        f"store_put must not crash when catalog_store_hook raises, but "
+        f"must fail loud (RDR-192 Step 3a) rather than return a bare "
+        f"'Stored:' for a manifest-less chunk: {result}"
     )
+    assert "catalog registration failed" in result
 
-    assert called == [{"doc_id": ""}], (
-        "store_put must forward catalog_doc_id verbatim to fire_document, "
-        f"blank included -- the hook itself now decides resolve-or-skip; got {called!r}"
+    assert called == [], (
+        "a rolled-back store_put must never reach fire_document — the "
+        f"chunk it would enqueue is being deleted; got {called!r}"
+    )
+    import hashlib as _hashlib
+    chash = _hashlib.sha256(content.encode()).hexdigest()
+    cols = [c["name"] for c in local_t3.list_collections()
+            if c["name"].startswith("knowledge__")]
+    assert cols, "expected the knowledge collection to exist in T3"
+    assert local_t3.get_by_id(cols[0], chash) is None, (
+        "a failed catalog registration must roll back the chunk it just "
+        "wrote, not leave a no-owner orphan in T3"
     )
 
 

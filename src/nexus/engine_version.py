@@ -556,7 +556,7 @@ from __future__ import annotations
 #: (nexus-33q80, no changeset). Both wire-ledger entries lead with
 #: [additive], so the engine deploys BEFORE this client tag (nexus-1emxn
 #: choreography (a)).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 131)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 133)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
@@ -572,6 +572,35 @@ REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 131)
 #: SAME tree this constant lands in (same session, Sam-authorized), so the
 #: value is a real tag, not a standing guess — any later tag is >= it.
 TRIM_DRY_RUN_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 81)
+
+#: nexus-6konb.15 (RDR-213 MVV finding L1, T2 ``nexus_rdr/6konb15-mvv-
+#: 2026-09-25``): the first engine version whose ``POST /v1/tuples/wait``
+#: stamps ``announce_count`` on every row it returns (bead nexus-vsipz,
+#: changeset ``tuples-006-announce-columns``). Below this, the engine
+#: answers ``/wait`` but silently ignores the ``announce`` fields --
+#: :meth:`nexus.mcp.channel.ChannelWaiter._engine_ignores_announce` only
+#: catches it once a row actually arrives, so a mailbox that stays empty
+#: leaves the waiter reporting "alive" for as long as it stays empty
+#: (measured: 16+ minutes against engine-service-v0.1.127 with nothing
+#: sent). ``ChannelWaiter.run()`` checks this floor against the engine's
+#: own ``/version`` identity once, before the first wait, purely so a
+#: known-below-floor engine never gets to report alive at all; a probe
+#: that cannot resolve a version (unreachable, or a blank/dev release on
+#: a checkout jar) changes nothing and leaves the row-based fallback as
+#: the floor. Independent of :data:`REQUIRED_ENGINE_VERSION` for the same
+#: reason :data:`TRIM_DRY_RUN_MIN_ENGINE_VERSION` above is: this names a
+#: FEATURE floor on whatever engine is actually SERVING right now, which
+#: on a local install can lag the pinned dependency until convergence
+#: runs (``nx daemon restart-stale``).
+CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 128)
+
+#: nexus-6konb.15: the first engine version that echoes
+#: ``announce.subscriber`` on a board result (bead nexus-q82tk, the
+#: per-subscriber board stamp in ``nexus.tuple_deliveries``) -- see
+#: :meth:`nexus.mcp.channel.ChannelWaiter._engine_ignores_subscriber`.
+#: Same at-start check and same rationale as
+#: :data:`CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION` above.
+CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 129)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

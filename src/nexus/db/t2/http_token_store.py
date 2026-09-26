@@ -42,6 +42,61 @@ from nexus.db.service_endpoint import (
 )
 
 
+class TokenAdminAuthError(httpx.HTTPStatusError):
+    """nexus-xzeml: a 401/403 from the token-admin or session surface, with a
+    message that names the endpoint, the credential that was sent, the
+    engine's own reason, and the remedy. Subclasses ``HTTPStatusError`` so
+    callers that already catch that (T1 session start/close) and read
+    ``.response.status_code`` are unchanged; the CLI group renders it as one
+    message instead of a traceback.
+
+    ``str()`` is ONE line (parts joined by ``"; "``) because the session
+    callers log it into single-line structlog records; the CLI prints
+    :attr:`lines` one per row."""
+
+    def __init__(self, lines: list[str], *, request: httpx.Request,
+                 response: httpx.Response) -> None:
+        self.lines = lines
+        super().__init__("; ".join(line.strip() for line in lines),
+                         request=request, response=response)
+
+
+def _token_fingerprint(token: str) -> str:
+    import hashlib  # noqa: PLC0415 — only on the error path
+
+    return hashlib.sha256(token.encode()).hexdigest()[:8]
+
+
+def _static_token_source(token: str) -> str:
+    """Where a static bearer came from, matched by value so the answer is
+    what was actually sent, not what resolution order suggests."""
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    if token and os.environ.get("NX_SERVICE_TOKEN", "").strip() == token:
+        return "NX_SERVICE_TOKEN env"
+    if token and (get_credential("service_token") or "").strip() == token:
+        return "service_token in config.yml"
+    # Exhaustive because no production caller passes ``_token=`` explicitly
+    # (tests do); a new explicit-token caller would need its own label here.
+    return "the local supervisor lease"
+
+
+def _endpoint_reason(resp: httpx.Response, token: str) -> str:
+    try:
+        parsed = resp.json()
+    except ValueError:
+        reason = resp.text
+    else:
+        # An edge or proxy may answer valid JSON that is not an object.
+        reason = (str(parsed.get("error") or "") if isinstance(parsed, dict)
+                  else str(parsed))
+    # Redact BEFORE truncating: a cut landing inside the token would leave a
+    # prefix that no longer matches it.
+    if token:
+        reason = reason.replace(token, "<redacted>")
+    return " ".join(reason.split())[:200]
+
+
 class HttpTokenStore:
     """Client for the token lifecycle admin endpoints.
 
@@ -120,15 +175,13 @@ class HttpTokenStore:
         # indexer turned out not to construct stores per file at all
         # (T2 nexus_rdr/198-research-2, 198-research-3). Convert BEFORE
         # sharing, never after.
-        return httpx.Client(
-            base_url=self._base_url,
-            headers={
-                "Authorization": f"Bearer {self._auth_token}",
-                "X-Nexus-Tenant": self._tenant,
-                "Content-Type": "application/json",
-            },
-            timeout=30.0,
-        )
+        headers = {"X-Nexus-Tenant": self._tenant, "Content-Type": "application/json"}
+        if self._auth_token:
+            # nexus-xzeml: a mint-armed box may resolve no static bearer; an
+            # empty "Bearer " is an illegal header value, so send none and let
+            # the endpoint's 401 name the problem.
+            headers["Authorization"] = f"Bearer {self._auth_token}"
+        return httpx.Client(base_url=self._base_url, headers=headers, timeout=30.0)
 
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused, re-resolve the endpoint from the
@@ -227,8 +280,60 @@ class HttpTokenStore:
                 pass
             self._client = self._build_client()
             resp = self._client.post(path, json=body)
+        if resp.status_code in (401, 403):
+            raise TokenAdminAuthError(
+                self._auth_error_lines(path, resp), request=resp.request, response=resp
+            )
         resp.raise_for_status()
         return resp.json()
+
+    def _auth_error_lines(self, path: str, resp: httpx.Response) -> list[str]:
+        """nexus-xzeml: say which credential was refused and what to do,
+        instead of httpx's bare "Client error '401 Unauthorized'"."""
+        from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+        token = self._auth_token
+        status = resp.status_code
+        armed = bool((get_credential("mint_token") or "").strip())
+        if self._using_data_token:
+            sent = "a data token minted from mint_token"
+        elif not token:
+            sent = "no bearer (no static service_token is configured)"
+        else:
+            sent = (f"the static token from {_static_token_source(token)} "
+                    f"(sha256 {_token_fingerprint(token)})")
+        lines = [
+            f"{status} {'Unauthorized' if status == 401 else 'Forbidden'} "
+            f"from {self._base_url}{path}",
+            f"  sent: {sent}",
+        ]
+        if reason := _endpoint_reason(resp, token):
+            lines.append(f"  endpoint said: {reason}")
+        if status == 401 and token and not self._using_data_token:
+            lines.append("  the endpoint does not accept this token: it is expired, "
+                         "revoked, or was issued for a different endpoint")
+        if armed and not self._using_data_token:
+            lines.append("  this box's other commands authenticate with data tokens "
+                         "minted from mint_token; the token-admin surface refuses "
+                         "those, so token administration here needs a live tenant "
+                         "or operator token")
+        if status == 403:
+            lines.append("  remedy: use a credential allowed this operation (a tenant "
+                         "token acts only on its own tenant; mint, data and "
+                         "cross-tenant operations need the operator token)")
+        elif self._using_data_token:
+            lines.append("  remedy: the minted data token was refused; check mint_token "
+                         "and mint_tenant (`nx doctor` reports the self-minting row)")
+        elif (get_credential("service_url") or "").strip():
+            lines.append("  remedy: set a live token with `nx config set service_token "
+                         "<bearer>` or NX_SERVICE_TOKEN; on a managed endpoint, ask "
+                         "its operator to issue one")
+        else:
+            # Local supervisor: config.yml's service_token is not read on
+            # this path, only NX_SERVICE_TOKEN and the supervisor's lease.
+            lines.append("  remedy: unset a stale NX_SERVICE_TOKEN, or restart the "
+                         "supervisor (`nx daemon service start`) to republish its lease")
+        return lines
 
     # ── Lifecycle verbs ─────────────────────────────────────────────────────────
 

@@ -21,7 +21,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.rate_brake import get_brake, parse_retry_after, reset_brake
+from nexus.rate_brake import get_brake, is_deadline_abort, parse_retry_after, reset_brake
 
 _log = structlog.get_logger(__name__)
 
@@ -101,13 +101,28 @@ def _extract_status_and_retry_after(exc: BaseException) -> tuple[int, float | No
 
 class _RateLimitSignal:
     """Normalised ``(code, retry_after)`` for a rate-limit-shaped failure.
-    See :func:`_rate_limit_signal`."""
+    See :func:`_rate_limit_signal`. ``widens`` is False for an engine
+    deadline 503 marked ``aborted`` (nexus-qajw7): its Retry-After still
+    paces the brake, but it keeps the ordinary attempt budget."""
 
-    __slots__ = ("code", "retry_after")
+    __slots__ = ("code", "retry_after", "widens")
 
-    def __init__(self, code: int, retry_after: float | None) -> None:
+    def __init__(self, code: int, retry_after: float | None, widens: bool = True) -> None:
         self.code = code
         self.retry_after = retry_after
+        self.widens = widens
+
+
+def _deadline_aborted(exc: BaseException) -> bool:
+    """True when *exc* chains an HTTP error whose headers mark an engine
+    deadline 503 as ``aborted`` (nexus-qajw7). Same chain walk as
+    :func:`_extract_status_and_retry_after`."""
+    err = _find_chained_exc(exc, (httpx.HTTPStatusError, urllib.error.HTTPError))
+    if err is None:
+        return False
+    if isinstance(err, httpx.HTTPStatusError):
+        return is_deadline_abort(err.response.headers)
+    return is_deadline_abort(getattr(err, "headers", None))
 
 
 def _rate_limit_signal(exc: BaseException) -> _RateLimitSignal | None:
@@ -127,7 +142,10 @@ def _rate_limit_signal(exc: BaseException) -> _RateLimitSignal | None:
     if code == 429:
         return _RateLimitSignal(code, retry_after)
     if code == 503 and retry_after is not None:
-        return _RateLimitSignal(code, retry_after)
+        # nexus-qajw7 (Sam, 2026-09-26): an engine deadline ABORT discarded the
+        # request's embedded batches, so each retry re-embeds and re-bills them.
+        # It paces the brake like any 503 but does not widen the budget.
+        return _RateLimitSignal(code, retry_after, widens=not _deadline_aborted(exc))
     return None
 
 
@@ -442,6 +460,19 @@ def _vector_with_retry(
     300s, worst case 7 x 300s = 2100s if every attempt reports a large one
     — the inner gateway retry never applies to a 429, which is not in
     ``_GATEWAY_RETRY_CODES``).
+
+    nexus-qajw7: an engine request-deadline 503 marked ``aborted``
+    (``X-Nexus-Deadline-Outcome``) does NOT widen and gets no inner gateway
+    resend, because each resend redoes the request's discarded embedding.
+    Its cost is dominated by the engine, not by these sleeps: every one of
+    the *max_attempts* (default 5) calls can run the full request deadline
+    before the 503 returns (540s on upsert-chunks in local mode, the
+    client's ``_UPSERT_CHUNKS_DEADLINE_MS``). The 4 sleeps between them are
+    short: every deadline 503 carries ``Retry-After: 5``, so the brake
+    trips for 5s, and each sleep is max(the local 2/4/8/16s backoff, 5s),
+    about 39s in all. About 5 x 540s + 39s = 2739s, some 46 minutes, for a
+    page that cannot finish inside its deadline even alone. Under 8
+    widened attempts with 3 inner resends each it was up to 32 such runs.
     """
     brake = get_brake()
     delay = 2.0
@@ -470,7 +501,7 @@ def _vector_with_retry(
             rate_limit_err = _rate_limit_signal(exc)
             effective_max_attempts = (
                 max(max_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
-                if rate_limit_err is not None else max_attempts
+                if rate_limit_err is not None and rate_limit_err.widens else max_attempts
             )
             if attempt >= effective_max_attempts:
                 raise
@@ -758,7 +789,7 @@ def _etl_with_retry(
             rate_limit_err = _rate_limit_signal(exc)
             effective_max_attempts = (
                 max(max_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
-                if rate_limit_err is not None else max_attempts
+                if rate_limit_err is not None and rate_limit_err.widens else max_attempts
             )
             if attempt >= effective_max_attempts:
                 raise
@@ -1056,7 +1087,7 @@ def _manifest_write_with_retry(
                 raise
             effective_max_attempts = (
                 max(max_connectivity_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
-                if rate_limit_err is not None else max_connectivity_attempts
+                if rate_limit_err is not None and rate_limit_err.widens else max_connectivity_attempts
             )
             if attempt >= effective_max_attempts:
                 raise

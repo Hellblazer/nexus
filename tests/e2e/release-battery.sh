@@ -183,6 +183,10 @@ define_leg pluginls   group  "PLUGIN-LOCKSTEP GATE (PASSED|FAILED|UNVERIFIED)"  
 # nexus-rcoze: this checkout's hooks.json fired against every published CLI a
 # user may still have (7.55.0 on), this wheel, and none -- no entry may block.
 define_leg hookskew   group  "HOOK-CLI SKEW GATE (PASSED|FAILED|UNVERIFIED)"   tests/e2e/hook-cli-skew/run.sh
+# RDR-219 Phase 3 Step 2b (nexus-wauo1.24): no credential-shaped file left
+# under a harness-owned root. Fails on any find; the token/expiry status
+# check it also runs only ever warns, never fails this leg.
+define_leg janitor    group  "CREDENTIAL JANITOR (PASSED|FAILED)"        python3 scripts/credential_janitor.py
 define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
 ONLY_SKIPPED=0

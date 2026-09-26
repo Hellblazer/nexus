@@ -222,12 +222,29 @@ def _build_chunk_metadata(
     git provenance from chunk metadata (RDR-101 Phase 5c). Catalog Document
     carries it at the document level. Parameter retained so existing call
     sites do not need to drop the kwarg simultaneously.
+
+    nexus-w94eo: ``title``/``source_author`` are OMITTED from the returned
+    dict rather than stamped as ``""`` placeholders. They are ALWAYS unknown
+    at this call site — this function builds the streaming pipeline's STUB,
+    written before extraction finishes, and the post-pass (:func:`
+    _enrich_metadata_from_extraction`) is the only place either field is ever
+    resolved (even when the caller passed ``title_override``, since that is
+    threaded to the post-pass, never here). Under the pre-nexus-w94eo
+    wholesale-REPLACE write semantics an explicit ``""`` was harmless — the
+    post-pass's own write replaced it a moment later. Under the engine's new
+    MERGE semantics (``metadata = chunks.metadata || EXCLUDED.metadata``) an
+    explicit key, even an empty one, is itself a value the merge can
+    re-assert: a late-committing duplicate of THIS stub write (e.g. the
+    gateway-504-retry shape the nexus-w94eo diagnosis traced) landing after
+    the post-pass would re-merge ``title=""`` back on top of the post-pass's
+    real title. Omitting the keys here means a stale stub write has nothing
+    to re-assert — the merge leaves whatever the post-pass already set alone.
     """
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
 
     # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
     # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id.
-    return make_chunk_metadata(
+    meta = make_chunk_metadata(
         content_type="pdf",
         chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
         content_hash=content_hash,
@@ -236,13 +253,19 @@ def _build_chunk_metadata(
         page_number=chunk.metadata.get("page_number", 0),
         indexed_at=now_iso,
         embedding_model=embedding_model,
-        title="",                 # post-pass: from ExtractionResult
-        source_author="",         # post-pass: from ExtractionResult
         section_title=chunk.metadata.get("section_title", ""),
         section_type=chunk.metadata.get("section_type", ""),
         tags="pdf",
         category="paper",
     )
+    # nexus-w94eo: drop the placeholder keys make_chunk_metadata's defaults
+    # (title="", source_author="") would otherwise have stamped — see the
+    # docstring above. Popped rather than never built, so the shared factory
+    # (other content_types legitimately want an explicit empty title) stays
+    # untouched.
+    meta.pop("title", None)
+    meta.pop("source_author", None)
+    return meta
 
 
 def _embed_and_write_batch(
@@ -1286,6 +1309,13 @@ def pipeline_index_pdf(
         if doc_id and not dry_run and not fenced:
             from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
             _fence_fail(doc_id, str(first_exc))
+        elif doc_id and fenced:
+            # nexus-4pj54: the fenced path skips _fence_fail, which is where
+            # a failed run's deferred superseded-vector sweep is discarded.
+            # Discard it here instead: this run no longer owns the manifest,
+            # so its held candidates must never be swept.
+            from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
+            discard_deferred_superseded_vectors(doc_id)
         raise first_exc
 
     # ── Post-passes (after all three stages complete) ────────────────────────
@@ -1498,45 +1528,46 @@ def _enrich_metadata_from_extraction(
     # is_image_pdf, has_formulas) are dropped by metadata_schema.normalize()
     # so writing them costs cycles for no payload. Keep this dict minimal.
     #
-    # nexus-wi1uv round-2 CORRECTION: the historical comment here claimed
-    # "t3.update_chunks re-runs metadata_schema.normalize() before
-    # writing" for the empty-extraction_method case. VERIFIED FALSE for
-    # the production path: HttpVectorClient.update_chunks (src/nexus/db/
-    # http_vector_client.py) posts the raw metadata dict straight to
-    # /v1/vectors/update-metadata with no client-side normalize() call —
-    # only the LOCAL/in-memory T3Database.update_chunks normalizes, which
-    # is not the serving path in either mode post-RDR-155-P4a. Harmless
-    # for extraction_method (a PDF's value is never empty by the time
-    # this post-pass runs, so the drop-when-empty branch was dead code
-    # via THIS call site regardless), but NOT harmless for quality_gate_
-    # overridden, whose False default is the COMMON case for every
-    # streamed PDF — merging it in unconditionally would silently stamp
-    # every healthy document with an explicit False, defeating the
-    # sparse-key design in metadata_schema.normalize(). So: build this
-    # dict conditionally instead of trusting a downstream normalize that
-    # does not run on this path.
+    # nexus-w94eo: the engine now MERGES this dict into each row's stored
+    # metadata (metadata = chunks.metadata || EXCLUDED.metadata) rather than
+    # replacing it, so omitting quality_gate_overridden no longer clears a
+    # stale True from an earlier degraded run — a merge can only add/
+    # overwrite a key, never retract one by omission. When THIS run's
+    # extraction did not trip the quality gate, request the key's removal
+    # explicitly via delete_keys instead of counting on the write to wipe it.
+    # Deleting a key that was never present is a Postgres jsonb no-op, so
+    # this is safe to send unconditionally on the healthy branch.
     enrichment = {
         "title": source_title,
         "source_author": meta.get("pdf_author", ""),
         "extraction_method": meta.get("extraction_method", ""),
     }
+    delete_keys: list[str] = []
     if meta.get("quality_gate_overridden", False):
         enrichment["quality_gate_overridden"] = True
+    else:
+        delete_keys.append("quality_gate_overridden")
 
     try:
+        # nexus-w94eo: ids only — no read-modify-write. The pre-fix shape
+        # ({**m, **enrichment} over every fetched row's CURRENT metadata) was
+        # itself a second race on top of the one this bead fixes: any write
+        # landing between this read and this method's own write (another
+        # post-pass, a concurrent frecency reindex) was silently discarded
+        # the moment this method's copy-of-the-old-state committed over it.
+        # The engine's merge makes the read unnecessary — sending only
+        # `enrichment`'s keys leaves every other key (and any write that
+        # lands in between) untouched.
         all_ids: list[str] = []
-        all_metas: list[dict] = []
         offset = 0
         while True:
             batch = _vector_with_retry(
                 col.get,
                 where={"content_hash": content_hash},
-                include=["metadatas"],
                 limit=300,
                 offset=offset,
             )
             all_ids.extend(batch.get("ids", []))
-            all_metas.extend(batch.get("metadatas", []))
             if len(batch.get("ids", [])) < 300:
                 break
             offset += 300
@@ -1544,9 +1575,9 @@ def _enrich_metadata_from_extraction(
         if not all_ids:
             return True
 
-        updated_metas = [{**m, **enrichment} for m in all_metas]
-
-        t3.update_chunks(collection, all_ids, updated_metas)
+        t3.update_chunks(
+            collection, all_ids, [enrichment] * len(all_ids), delete_keys=delete_keys,
+        )
         return True
     except Exception as exc:  # noqa: BLE001 - best-effort metadata enrichment; logged via log.warning, returns False
         _log.warning("metadata_enrichment_failed", content_hash=content_hash, error=str(exc))

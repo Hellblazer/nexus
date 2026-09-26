@@ -281,9 +281,44 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
     try:
         with (
             patch("nexus.commands.memory.t2_handle", return_value=t2),
-            patch("nexus.config.get_credential", return_value="fake-key"),
+            # Every credential but the mint pair: a "fake-key" mint_token
+            # makes the per-request data-token override (nexus-kqnlg) mint
+            # against the test engine, which 401s it.
+            patch(
+                "nexus.config.get_credential",
+                side_effect=lambda key, *a, **k: (
+                    None if key in ("mint_token", "mint_tenant") else "fake-key"
+                ),
+            ),
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", return_value=mt3),
+            # RDR-192 Step 3a (nexus-wbfpw.28): a blank/failed catalog
+            # registration is now a fail-loud rollback, not a tolerated
+            # degraded success — this helper's "fake-key" creds make a
+            # REAL registration attempt 400/401 against the test engine,
+            # which used to be silently swallowed. These tests are about
+            # promote's T3-put/remove/TTL behavior, not catalog wiring
+            # (that contract is pinned in test_b6enc_store_put_ghost_
+            # compensation.py's TestPromote* classes), so give it a
+            # working stand-in instead of a real registration attempt.
+            patch(
+                "nexus.catalog.store_hook.catalog_store_hook_tracked",
+                return_value=("9.9.9", True),
+            ),
+            patch(
+                "nexus.catalog.store_hook.store_put_manifest_direct",
+                return_value=None,
+            ),
+            # The stand-in id above is not a real catalog document, and
+            # these fake credentials point at no reachable catalog, so the
+            # real manifest hook in the post-store chains would retry an
+            # unreachable write (180s per call once the rate-limit brake
+            # escalates). Its contract is pinned elsewhere; here it is a
+            # no-op, installed where install_default_hooks imports it.
+            patch(
+                "nexus.mcp_infra.manifest_write_batch_hook",
+                lambda *a, **k: None,
+            ),
         ):
             result = runner.invoke(main, args)
     finally:

@@ -1606,6 +1606,74 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             totals["unmatched_chashes"].extend(resp.get("unmatched_chashes", []))
         return totals
 
+    def cross_preview(self, collection: str, chashes: list[str]) -> dict[str, tuple[int, float]]:
+        """POST ``/v1/taxonomy/assignments/cross-preview`` (nexus-v4pj4, round-2
+        review decision engine half; ``nexus.cross_preview_<dim>``, taxonomy-021):
+        the engine's LIVE cross-pass ANN pick for *chashes*, computed under the
+        EXACT same HNSW/access-path settings ``assign_from_chashes``'s cross
+        branch uses (``hnsw.iterative_scan=strict_order``, ``hnsw.ef_search=400``,
+        ``enable_seqscan=off``, ``enable_sort=off``) -- but this route NEVER
+        persists. It exists so a caller can compare the engine's real ANN answer
+        against an independent exact recompute over the SAME live foreign-
+        centroid snapshot, fetched in the same run, instead of trusting a
+        historical stored assignment (see ``nexus.doctor_assignments``'s module
+        docstring for the full same-moment-comparison design and the round-1
+        review finding that motivated it).
+
+        Returns ``{chash: (topic_id, similarity)}`` -- a chash with no live
+        chunk row at *collection*'s dim, or whose collection has no foreign
+        centroid at all, is simply absent from the result, never an error.
+
+        NO FALLBACK (mirrors :meth:`assign_from_chashes`'s own contract): an
+        engine below the version that carries this route 404s, and this method
+        lets that exception propagate verbatim to the caller -- never a silent
+        client-side recompute standing in for the engine's actual pick.
+
+        Paged client-side at the engine's ``MAX_CROSS_PREVIEW_CHASHES`` cap
+        (300; same ``_PAGE`` pattern as :meth:`assign_from_chashes`), though a
+        typical caller (a doctor sample, capped at 300 itself) never spans more
+        than one page.
+        """
+        out: dict[str, tuple[int, float]] = {}
+        _PAGE = 300  # engine cap (TaxonomyRepository.MAX_CROSS_PREVIEW_CHASHES parity)
+        for start in range(0, len(chashes), _PAGE):
+            rows = self._post(
+                "/assignments/cross-preview",
+                {"collection": collection, "chashes": chashes[start : start + _PAGE]},
+                mutates=False,
+            )
+            for r in rows or []:
+                out[r["chash"]] = (int(r["topic_id"]), float(r["similarity"]))
+        return out
+
+    def unassigned_chashes(
+        self, collection: str, *, limit: int = 1000, after: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of *collection*'s chunks that have no assignment to the
+        collection's own topics (nexus-iygza; engine-service-v0.1.132).
+
+        POST ``/v1/taxonomy/assignments/unassigned``. Only chunks a catalog
+        manifest references are listed: a manifest-less chunk is RDR-192's
+        population, not a lost assignment. Pages are keyset-ordered by
+        chash; pass the previous page's ``next_after`` as *after*, which is
+        ``None`` once a page comes back short.
+
+        Returns ``{"chashes": list[str], "has_taxonomy": bool,
+        "next_after": str | None}``. ``has_taxonomy`` is false when the
+        collection has no centroids at its dim, so "nothing to assign to"
+        and "fully assigned" are told apart. An engine below v0.1.132 has
+        no such route and 404s; the error propagates.
+        """
+        body: dict[str, Any] = {"collection": collection, "limit": limit}
+        if after:
+            body["after"] = after
+        resp = self._post("/assignments/unassigned", body, mutates=False)
+        return {
+            "chashes": list(resp.get("chashes") or []),
+            "has_taxonomy": bool(resp.get("has_taxonomy")),
+            "next_after": resp.get("next_after") or None,
+        }
+
     def rebuild_taxonomy(
         self,
         collection_name: str,

@@ -3252,6 +3252,88 @@ def _check_mint_token() -> list[HealthResult]:
     )]
 
 
+def _check_static_service_token() -> list[HealthResult]:
+    """nexus-xzeml: is the static ``service_token`` still accepted by the
+    configured ``service_url``?
+
+    An armed box (``mint_token`` set) talks to the managed endpoint with
+    minted data tokens, so a dead static token stays invisible until a
+    token-admin verb (``nx service token``, ``nx tenant``) sends it, since that
+    surface refuses data tokens by design. Measured 2026-09-26: a revoked
+    static token sat in config.yml and the first sign was a 401 traceback on
+    ``nx service token issue``.
+
+    Not applicable (a pass) when there is no ``service_url`` (local mode:
+    the bearer is the supervisor lease's or an ``NX_SERVICE_TOKEN`` override,
+    not probed here) or no static ``service_token``; that
+    keeps a virgin box clean. Otherwise one ``GET /v1/_whoami`` with the
+    static token: 200 passes; a refusal is a warning on an armed box (data
+    commands are unaffected) and a failure on an unarmed one (every command
+    sends it); a probe that cannot complete is a warning, never a pass.
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    label = "Static service_token"
+    url = (get_credential("service_url") or "").strip().rstrip("/")
+    if not url:
+        return [HealthResult(label=label, ok=True,
+                             detail="not applicable — no service_url configured")]
+    token = (get_credential("service_token") or "").strip()
+    if not token:
+        return [HealthResult(label=label, ok=True,
+                             detail="not applicable — no static service_token configured")]
+
+    import hashlib  # noqa: PLC0415 — branch-local
+    import urllib.parse  # noqa: PLC0415 — branch-local
+
+    import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
+
+    host = urllib.parse.urlsplit(url).netloc or url
+    fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
+    armed = bool((get_credential("mint_token") or "").strip())
+    try:
+        resp = httpx.get(f"{url}/v1/_whoami",
+                         headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
+    except httpx.HTTPError as exc:
+        return [HealthResult(label=label, ok=False, warn=True,
+                             detail=f"could not verify against {host}: {type(exc).__name__}")]
+    if resp.status_code == 200:
+        return [HealthResult(label=label, ok=True,
+                             detail=f"accepted by {host} (sha256 {fingerprint})")]
+    if resp.status_code not in (401, 403):
+        return [HealthResult(label=label, ok=False, warn=True,
+                             detail=f"could not verify against {host}: HTTP {resp.status_code}")]
+    if resp.status_code == 403:
+        # The engine's AuthFilter answers 403 on a data route ONLY for a live
+        # mint- or mint-locked-scoped bearer (a dead token is a 401), so this
+        # is a working mint credential, not a refused one.
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(f"sha256 {fingerprint} is a mint-scoped credential ({host} "
+                    "answers 403 on data routes by design); token-admin "
+                    "commands need a tenant or operator token"),
+        )]
+    refused = f"{host} refuses it (HTTP {resp.status_code}, sha256 {fingerprint})"
+    if armed:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"{refused}. Data commands are unaffected (they mint data "
+                    "tokens from mint_token); token-admin commands (nx service "
+                    "token, nx tenant) send this token and will fail."),
+            fix_suggestions=[
+                "Delete the service_token line from config.yml: this box mints "
+                "data tokens and needs no static token. Replace it instead "
+                "(nx config set service_token <bearer>) only if you administer "
+                "tokens from this box."
+            ],
+        )]
+    return [HealthResult(
+        label=label, ok=False,
+        detail=f"{refused}. Every command that reaches the service sends this token.",
+        fix_suggestions=["Replace it with a live token: nx config set service_token <bearer>"],
+    )]
+
+
 # ── RDR-152 / bead nexus-gmiaf.33: storage-service health checks ──────────────
 
 # Authoritative set of tenant tables that MUST have RLS enabled, forced, and at
@@ -5895,6 +5977,56 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
 _TUPLE_CHANNEL_DELIVERY_LABEL = "tuples.channel_delivery"
 
 
+def _channel_waiter_engine_fix_suggestions() -> list[str]:
+    """nexus-6konb.15 (D1): the remedy for a below-floor serving engine
+    differs by how this box reaches its engine at all.
+
+    The old text here said "nx daemon service install a current engine" --
+    `nx daemon service install` registers the autostart UNIT, it installs
+    no engine, and there is no `nx daemon service install` verb that takes
+    a bare "a current engine" argument either; the line named nothing a
+    user could actually run. The two LIVE local-mode verbs are
+    `nx daemon restart-stale` (converges to the pinned dependency and
+    cycles the service -- the same suggestion the adjacent "Engine
+    convergence" doctor row already gives) and `nx daemon service
+    install-binary <tag>` (installs one named tag directly).
+
+    "rebuild the local engine's cached build" is dev-checkout advice -- a
+    `service/` tree to rebuild from -- and misleads every installed user,
+    who has no such tree; shown only when THIS process is a dev checkout
+    (:func:`nexus.db.service_endpoint.is_dev_checkout_process`), never
+    unconditionally.
+
+    A cloud-mode session has no local engine to install, converge, or
+    rebuild at all: the managed deployment is conexus's to upgrade, never
+    this box's, so the local-mode verbs above would send a cloud user at
+    commands that do not apply to their install.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+    if not is_local_mode():
+        return [
+            "this is a managed-service engine below the version this client "
+            "expects -- there is nothing to install or rebuild locally; "
+            "report it (conexus owns the managed deployment's upgrade)",
+        ]
+
+    fixes = [
+        "nx daemon restart-stale  # converges to the pinned engine and cycles the service",
+        "nx daemon service install-binary <tag>  # install one named engine tag directly",
+    ]
+
+    from nexus.db.service_endpoint import is_dev_checkout_process  # noqa: PLC0415 — deferred to avoid circular import
+
+    if is_dev_checkout_process():
+        fixes.append(
+            "this process is a dev checkout — rebuild the local engine's cached build "
+            "(see AGENTS.md's Engine-service release section for the exact script) if "
+            "you are iterating on service/ code locally",
+        )
+    return fixes
+
+
 def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[HealthResult]:
     """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13), rewritten
     under RDR-213: the `claude/channel` push-delivery waiter's own status
@@ -5935,10 +6067,14 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     delivery for this session is not actually happening. `stopped_reason`
     (bead nexus-vsipz review round) names WHY when the waiter itself
     knows: `"no_announce_support"`, `"no_subscriber_support"` (bead
-    nexus-q82tk) or `"no_wait_support"` all mean the LOCAL ENGINE
-    predates a feature this client's waiter depends on, so
-    the fix is to rebuild/reinstall the engine, not to restart the MCP
-    server (a restart would hit the identical stale engine); any other
+    nexus-q82tk) or `"no_wait_support"` all mean the ENGINE this session
+    is serving through predates a feature this client's waiter depends
+    on, so `/mcp` restart alone cannot fix it (a restart would hit the
+    identical stale engine) -- `_channel_waiter_engine_fix_suggestions`
+    (bead nexus-6konb.15) names the actual remedy, which differs by mode:
+    local-mode verbs (`nx daemon restart-stale` / `install-binary <tag>`)
+    for a local install, and no local fix at all (report it; conexus owns
+    the managed deployment) for a cloud-mode session. Any other
     not-alive or stale case has no known cause and the fix stays
     `/mcp` restart. The drain hook still delivers at the next prompt
     either way, so this is a soft warning, never fatal.
@@ -6015,23 +6151,19 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         # module, and this is a doctor-row fix suggestion, not a launch
         # path -- see AGENTS.md's Engine-service release section for the
         # exact script name and invocation.
-        rebuild_fix = [
-            "rebuild the local engine's cached build (see AGENTS.md's Engine-service "
-            "release section for the exact script), or nx daemon service install a "
-            "current engine",
-        ]
+        rebuild_fix = _channel_waiter_engine_fix_suggestions()
         restart_fix = ["Restart the MCP server: /mcp"]
         if not alive and stopped_reason == "no_announce_support":
-            reason = "the waiter stopped: the local engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
+            reason = "the waiter stopped: the engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "no_subscriber_support":
             reason = (
-                "the waiter stopped: the local engine never echoes announce.subscriber on a board result "
+                "the waiter stopped: the engine never echoes announce.subscriber on a board result "
                 "(predates the per-subscriber board stamp, bead nexus-q82tk); mailboxes still arrive through the drain hook"
             )
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "no_wait_support":
-            reason = "the waiter stopped: the local engine predates /wait entirely (a bare 404)"
+            reason = "the waiter stopped: the engine predates /wait entirely (a bare 404)"
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "superseded":
             reason = (
@@ -7792,6 +7924,218 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     )]
 
 
+#: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
+#: ``rdr__`` holds only RDR markdown; skipping both saves one request each.
+_PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
+#: Pages read per collection before the scan of that collection stops and
+#: is reported as partial. The filter matches only placeholder chunks
+#: (111 on the production tenant, 2026-09-24), so one page is the norm.
+_PDF_STUB_MAX_PAGES = 20
+#: Concurrent collection reads. Matches the search fan-out ceiling
+#: (``search_engine``); the round trip, not the query, is the cost.
+#: Measured 2026-09-25 against the managed service, 58 collections, during
+#: a period of 1.9 s requests: 6.3 s for the whole check (a 47 s baseline
+#: doctor run).
+_PDF_STUB_WORKERS = 8
+#: How many affected documents the WARN detail names.
+_PDF_STUB_MAX_NAMED = 10
+#: Source-key prefix for a chunk whose catalog source URI did not resolve.
+_PDF_STUB_NO_URI = "content_hash "
+
+
+def _is_pdf_stub_metadata(meta: dict) -> bool:
+    """True when a PDF chunk still carries the streaming uploader's
+    placeholder metadata: empty title AND no ``extraction_method``.
+
+    Both halves are needed. A PDF chunk written before nexus-1oguj has no
+    ``extraction_method`` but has a title, and is healthy. ``normalize``
+    drops an empty ``extraction_method``, so absent and empty mean the same.
+    """
+    return not meta.get("title") and not meta.get("extraction_method")
+
+
+def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], bool]:
+    """Placeholder-metadata PDF chunks in one collection, keyed by source.
+
+    Returns ``(source -> chunk count, truncated)``. The source is the
+    catalog source URI, or ``"content_hash <prefix>"`` when the engine
+    resolves none: it returns null both for a chunk no manifest names and
+    for a document registered without a URI, so the two cannot be told
+    apart here. The engine filters on ``content_type`` and the literal empty
+    ``title`` the uploader writes; ``extraction_method`` is checked here,
+    because the vector bridge has no absent-key predicate. Raises on a read
+    failure; the caller names it.
+    """
+    # Not get_collection(): that re-lists every collection in the tenant to
+    # prove existence, one extra stats round trip per collection, and the
+    # caller has just listed them.
+    col = t3.get_or_create_collection(name)  # type: ignore[attr-defined]
+    stubs: dict[str, int] = {}
+    for page_no in range(_PDF_STUB_MAX_PAGES):
+        page = col.get(
+            where={"content_type": "pdf", "title": ""},
+            include=["metadatas"],
+            limit=page_size,
+            offset=page_no * page_size,
+            include_source_uri=True,
+        )
+        metas = page.get("metadatas") or []
+        uris = page.get("source_uris") or []
+        for i, meta in enumerate(metas):
+            meta = meta or {}
+            if not _is_pdf_stub_metadata(meta):
+                continue
+            source = (uris[i] if i < len(uris) else "") or (
+                _PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?")
+            )
+            stubs[source] = stubs.get(source, 0) + 1
+        if len(metas) < page_size:
+            return stubs, False
+    # Every page was full. Truncated only if a row exists past the cap; an
+    # exact multiple of the page size ends here too.
+    beyond = col.get(
+        where={"content_type": "pdf", "title": ""},
+        include=[],
+        limit=1,
+        offset=_PDF_STUB_MAX_PAGES * page_size,
+    )
+    return stubs, bool(beyond.get("ids"))
+
+
+def _check_pdf_stub_metadata() -> list[HealthResult]:
+    """Count PDF chunks whose post-pass metadata never landed
+    (nexus-rte90, indexing-brittleness P0.6; the defect is nexus-w94eo).
+
+    The streaming PDF uploader writes ``title=''`` and no
+    ``extraction_method``; ``_enrich_metadata_from_extraction`` fills both
+    in after the upload. A late upsert-chunks retry that commits after the
+    post-pass, or a run that dies before it, leaves the placeholder in
+    place, and ``nx enrich bib`` (keyed on chunk title) then skips those
+    chunks without saying so. Measured 2026-09-24: 111 chunks in 2
+    documents, both of which this check names.
+
+    Blind spot: a PDF chunk with NO ``title`` key at all is not matched,
+    because the engine filter is the literal empty string. The uploader
+    always writes the key, so the known failure shapes carry it.
+
+    Read-only; degrades to a skip when T3 is unreachable; a collection it
+    could not read, or read only in part, is named, never counted as clean.
+    """
+    label = "PDF chunk metadata"
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches make_t3
+
+        t3 = make_t3()
+        names = sorted(
+            str(c.get("name", "")) for c in t3.list_collections()
+            if str(c.get("name", "")).startswith(_PDF_STUB_SCAN_PREFIXES)
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_pdf_stub_metadata_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (T3 unavailable)")]
+
+    if not names:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable (no knowledge or docs collections)",
+        )]
+
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
+
+    def _scan(name: str) -> tuple[str, dict[str, int] | None, bool]:
+        try:
+            found, cut = _pdf_stubs_in_collection(t3, name, MAX_QUERY_RESULTS)
+            return name, found, cut
+        except Exception as exc:  # noqa: BLE001 — one unreadable collection must not hide the rest
+            _log.debug("doctor_pdf_stub_metadata_collection_failed", collection=name, error=str(exc))
+            return name, None, False
+
+    with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
+        scanned = list(pool.map(_scan, names))
+
+    unreadable = [n for n, found, _ in scanned if found is None]
+    partial = [n for n, found, cut in scanned if found is not None and cut]
+    stubs: dict[tuple[str, str], int] = {
+        (n, src): count
+        for n, found, _ in scanned if found
+        for src, count in found.items()
+    }
+
+    gaps = ""
+    if unreadable:
+        shown = ", ".join(unreadable[:5])
+        more = f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""
+        gaps += f" NOT CHECKED: {len(unreadable)} collection(s) could not be read: {shown}{more}."
+    if partial:
+        gaps += (
+            f" PARTIAL: {len(partial)} collection(s) hit the "
+            f"{_PDF_STUB_MAX_PAGES}-page cap, so their count is a floor: "
+            f"{', '.join(partial[:5])}."
+        )
+
+    if stubs:
+        documents = {k: n for k, n in stubs.items() if not k[1].startswith(_PDF_STUB_NO_URI)}
+        unowned = {k: n for k, n in stubs.items() if k[1].startswith(_PDF_STUB_NO_URI)}
+        parts: list[str] = []
+        fixes: list[str] = []
+        if documents:
+            total = sum(documents.values())
+            named = sorted(documents.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
+            listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)
+            more = f" (+{len(documents) - len(named)} more)" if len(documents) > len(named) else ""
+            parts.append(
+                f"{total} PDF chunk(s) in {len(documents)} document(s) still carry "
+                "the upload placeholder metadata (empty title, no "
+                "extraction_method): the post-pass never landed, or a late "
+                "write overwrote it (nexus-w94eo). Title-keyed tools such as "
+                f"`nx enrich bib` skip them. {listing}{more}."
+            )
+            fixes += [
+                "nx index pdf <path> --force        (file-backed document)",
+                "nx dt index --uuid <uuid> --force  (DEVONthink record)",
+                "nx enrich bib <collection>         (after the re-index)",
+            ]
+        if unowned:
+            named = sorted(unowned.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
+            listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)
+            more = f" (+{len(unowned) - len(named)} more)" if len(unowned) > len(named) else ""
+            parts.append(
+                f"{sum(unowned.values())} {'more ' if documents else ''}placeholder PDF chunk(s) resolve "
+                "to no catalog source URI, so they cannot be named for a "
+                "re-index: either no manifest names them, or their document "
+                f"was registered without a URI. {listing}{more}."
+            )
+            # No verb reclaims manifest-less chunks: purge-trash sweeps
+            # chunks whose documents are tombstoned, and `nx t3 gc`
+            # hard-deletes. RDR-192 is the design for them.
+            fixes.append(
+                "no source URI: find the owning document first; if no manifest "
+                "names the chunks, see RDR-192 before any delete"
+            )
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=" ".join(parts) + gaps,
+            fix_suggestions=fixes,
+        )]
+    if gaps:
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=f"no placeholder metadata found, but the scan is incomplete.{gaps}",
+        )]
+    return [HealthResult(
+        label=label, ok=True,
+        detail=(
+            f"{len(names)} knowledge/docs collection(s) checked, no PDF chunk "
+            "carries placeholder metadata"
+        ),
+    )]
+
+
 def _check_next_seq_drift() -> list[HealthResult]:
     """Name owners whose tumbler allocator has fallen BEHIND its own children
     (nexus-0ehwe item 4).
@@ -8153,6 +8497,7 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_worktree_developer_agent())
     results.extend(_check_credential_persistence())
     results.extend(_check_mint_token())
+    results.extend(_check_static_service_token())  # nexus-xzeml
 
     _local = is_local_mode()
     if _local:
@@ -8195,6 +8540,9 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
     results.extend(_check_stale_indexing_runs())
+    # nexus-rte90: PDF chunks left with the upload placeholder metadata
+    # (nexus-w94eo). Degrades internally.
+    results.extend(_check_pdf_stub_metadata())
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.

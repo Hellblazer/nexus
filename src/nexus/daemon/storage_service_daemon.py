@@ -1293,16 +1293,6 @@ class StorageServiceSupervisor:
         except Exception:  # noqa: BLE001 — no answer: timeout, refused, anything
             return False
 
-    def _service_healthy(self, port: int | None = None) -> bool:
-        """Back-compat boolean: True iff /health answered 200.
-
-        Retained for the STARTUP readiness gate, which genuinely wants "is it
-        serving yet" and for which UNREADY and UNKNOWN are equivalent. The
-        HEARTBEAT path must use :meth:`_probe_service_health` — there, the
-        distinction is the whole point.
-        """
-        return self._probe_service_health(port) is HealthProbe.OK
-
     def _pg_reachable(self) -> bool:
         """Return True iff the Postgres port accepts TCP."""
         return _port_accepting(_SERVICE_HOST, self._pg_port, timeout=0.5)

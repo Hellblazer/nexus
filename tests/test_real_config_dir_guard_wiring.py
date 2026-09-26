@@ -101,6 +101,28 @@ def test_sessionfinish_wiring_fails_the_run_on_a_real_mutation(
     # etc. never apply here (this sandbox has its own, separate conftest
     # that does not re-export them) -- only the two hook functions we
     # explicitly wired above run.
+    #
+    # nexus-kx2s5: the child's own `pytest_sessionstart` is the REAL
+    # `tests/conftest.py` one (wired above), which calls
+    # `_gate_on_build_lease()` / `_take_suite_lease()` unless
+    # `NX_TEST_T2_SUBSTRATE=none`. Both read a lease rooted at this repo's
+    # git COMMON dir -- shared by every worktree and session on the box,
+    # not just this process tree. Under a full-suite `-n auto` run that
+    # window is 13+ minutes wide, and a peer session's `scripts/mvnw-
+    # leased.sh` build anywhere on the box during that window makes the
+    # child call `pytest.exit(...)` at session start, before it ever
+    # collects or runs a test. `pytest.exit()` skips the normal terminal
+    # summary line entirely, so `result.assert_outcomes()` below fails
+    # with "ValueError: Pytest terminal summary report not found" --
+    # reproduced directly by pointing `NX_BUILD_LEASE_ROOT` at a fake
+    # held lease and confirming this exact ValueError, before this fix.
+    # This sandbox test needs no engine substrate at all (only the two
+    # hook functions run; no fixture here touches T1/T2/T3), so opting
+    # the child out of both gates is the correct fix, not a workaround:
+    # it removes a real, unrelated failure mode this test should never
+    # have been exposed to, rather than papering over a timeout or a
+    # crash that doesn't actually happen here.
+    monkeypatch.setenv("NX_TEST_T2_SUBSTRATE", "none")
     result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
 
     # The INNER test itself does nothing wrong -- it passes.

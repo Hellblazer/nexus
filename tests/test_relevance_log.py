@@ -281,7 +281,14 @@ def test_store_put_only_logs_latest_trace(t1, tmp_path, monkeypatch):
     record_search_trace("test-session-e2", "old query", [(_cid("c-old"), "knowledge__a")])
     record_search_trace("test-session-e2", "newer query", [(_cid("c-new-1"), "knowledge__a"), (_cid("c-new-2"), "knowledge__a")])
 
-    store_put(content="notes", collection="fixture-subject")
+    # RDR-192 Step 3a (nexus-wbfpw.28): a manifest write that can't find
+    # its chash's real T3 chunk row now rolls back and returns early —
+    # before this relevance log ever gets written — so the FK the real
+    # engine catalog enforces must be satisfied here too, same as the two
+    # sibling tests above.
+    _seed_for_store_put("notes")
+    result = store_put(content="notes", collection="fixture-subject")
+    assert "Stored" in result
 
     with T2Database(t2_path) as db:
         rows = db.get_relevance_log()

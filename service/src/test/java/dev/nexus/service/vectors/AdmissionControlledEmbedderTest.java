@@ -263,8 +263,11 @@ class AdmissionControlledEmbedderTest {
         dev.nexus.service.http.RequestContext.setDeadlineNanos(System.nanoTime());
         try {
             assertThatThrownBy(() -> gated.embedWithUsage(List.of("x")))
-                    .isInstanceOf(RequestDeadlineExceededException.class)
-                    .hasMessageContaining("before delegate call");
+                    .isInstanceOfSatisfying(RequestDeadlineExceededException.class, e -> {
+                        assertThat(e.getMessage()).contains("before delegate call");
+                        // nexus-qajw7: the delegate never ran, so nothing was discarded.
+                        assertThat(e.outcome()).isEqualTo(RequestDeadlineExceededException.Outcome.REFUSED);
+                    });
         } finally {
             dev.nexus.service.http.RequestContext.clearDeadline();
         }

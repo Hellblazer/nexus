@@ -540,9 +540,15 @@ def _fence_begin_many(pairs: list[tuple[str, str]], collection: str) -> None:
 def _fence_fail(doc_id: str, error: str) -> None:
     """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
     own exception (the reason this is being called) must always propagate
-    unmasked."""
-    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    unmasked.
 
+    Also discards any superseded-vector sweep ``_manifest_write_loop``
+    deferred for *doc_id* (nexus-4pj54): a failed run's manifest is not
+    complete, so its held candidates are dropped, never swept."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+    discard_deferred_superseded_vectors(doc_id)
     w = None
     try:
         w = make_catalog_writer()
@@ -590,8 +596,15 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
         w = make_catalog_writer()
         result = w.complete_index_run(doc_id, content_hash, chunk_count)
     except IndexRunVerifyRefused:
-        from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+            _record_complete_refusal,
+            discard_deferred_superseded_vectors,
+        )
         _record_complete_refusal(doc_id)
+        # nexus-4pj54: a refused stamp means the manifest is NOT verified
+        # complete, and the refusal propagates past every _fence_fail call
+        # site, so drop this doc's deferred sweep here -- never sweep it.
+        discard_deferred_superseded_vectors(doc_id)
         raise
     except Exception:  # noqa: BLE001 — boundary catch: transport failure leaves the fence 'indexing' (over-work, never data loss); only the typed refusal propagates
         _log.warning("index_run_complete_write_failed", doc_id=doc_id)
@@ -602,6 +615,18 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
             close()
     if result is None:
         _log.debug("index_run_complete_pre_fence_engine", doc_id=doc_id)
+    # nexus-4pj54: this point is reached ONLY on a successful (or
+    # pre-fence-engine, still successful from the client's own view)
+    # completion — the IndexRunVerifyRefused branch above re-raises before
+    # reaching here, and a transport failure returns early. That makes this
+    # the right place to run the sweep `_manifest_write_loop` deferred for a
+    # multi-batch document whose first batch could not prove it was the
+    # whole file: the manifest is now confirmed complete, so any candidate
+    # still held for doc_id can be diffed against the FINAL manifest and
+    # swept if truly superseded. No-op (one dict lookup) for the common
+    # file-atomic case, which never stashes anything.
+    from nexus.mcp_infra import sweep_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+    sweep_deferred_superseded_vectors(doc_id)
 
 
 def _repo_owner_document_for(reader, abs_path):
@@ -1286,14 +1311,25 @@ def _upsert_skip_reembed(
     ``force``-alone behaviour. Forwarded verbatim as
     ``upsert_chunks_with_embeddings(..., force_re_embed=force_re_embed)``.
 
+    ``metadatas`` is the COMPLETE intended state of each row (every caller is a
+    batch indexer). The engine merges chunk metadata rather than replacing it
+    (nexus-w94eo), so every write below carries ``delete_keys`` naming the
+    writer-owned keys this batch dropped as empty (nexus-y8xjh,
+    :func:`nexus.metadata_schema.rewrite_delete_keys`); without it a clean
+    re-index could not clear a stale ``quality_gate_overridden`` or
+    ``extraction_source``. Passed only when non-empty.
+
     Returns the number of chunks actually sent down the embed path.
     """
     from nexus.db import http_vector_client as _hvc  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     if not ids:
         return 0
+    _dk_list = rewrite_delete_keys(metadatas)
+    _dk: dict[str, Any] = {"delete_keys": _dk_list} if _dk_list else {}
     if not _hvc.is_vector_service_mode():
-        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas, **_dk)
         return len(ids)
     if not _hvc.is_service_backed(db):
         # nexus-5lygi: NX_STORAGE_BACKEND_VECTORS says service mode (the
@@ -1327,7 +1363,7 @@ def _upsert_skip_reembed(
         )
         db.upsert_chunks_with_embeddings(
             collection_name, ids, documents, embeddings, metadatas,
-            force_re_embed=force_re_embed,
+            force_re_embed=force_re_embed, **_dk,
         )
         return len(ids)
     present: set[str] = set()
@@ -1360,7 +1396,7 @@ def _upsert_skip_reembed(
             branch="full_upsert_no_existing",
             count=len(ids),
         )
-        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas, **_dk)
         # nexus-gtl01 (upsert-chunks ACK coverage): tie the outcome to the
         # branch event above via collection + count. This is the branch the
         # captured 2026-08-08 recurrence took (probe present=0, branch=
@@ -1420,6 +1456,7 @@ def _upsert_skip_reembed(
             [documents[i] for i in new_idx],
             [embeddings[i] for i in new_idx],
             [metadatas[i] for i in new_idx],
+            **_dk,
         )
     if old_idx:
         # Metadata-only refresh — no embedding cost, preserves the
@@ -1428,6 +1465,7 @@ def _upsert_skip_reembed(
             collection_name,
             [ids[i] for i in old_idx],
             [metadatas[i] for i in old_idx],
+            **_dk,
         )
         # nexus-gtl01: the update_chunks "missing"-list disposition, logged
         # at the decision point regardless of which of the three branches
@@ -1527,6 +1565,7 @@ def _upsert_skip_reembed(
                     [documents[i] for i in reroute_idx],
                     [embeddings[i] for i in reroute_idx],
                     [metadatas[i] for i in reroute_idx],
+                    **_dk,
                 )
     _log.debug(
         "upsert_skip_reembed",

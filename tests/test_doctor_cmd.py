@@ -1354,6 +1354,82 @@ def test_ghost_sweep_row_absent_from_fresh_install_mvv_allowlist() -> None:
     assert "ghost_sweep" not in allowlist_regex
 
 
+class TestCheckHarnessGrant:
+    """Direct unit tests of ``_run_check_harness_grant`` (RDR-219
+    amendment, nexus-wauo1.35 / .38): the ``nx doctor`` row reporting
+    whether this process is running under the harness dispatch grant.
+    Same shape as ``TestCheckGhostSweep`` / ``TestCheckTupleProjection``:
+    no dedicated ``--check-*`` flag, runs only in the default
+    supplementary sweep, called directly (no ``CliRunner``).
+
+    nexus-7zhag doctrine: absent on a virgin box (the overwhelming
+    majority of installs, which never opt into a harness) reads
+    not-applicable, never red/warn -- this check needs no engine, no
+    catalog, nothing but the process's own environment, so there is no
+    ambiguous-cause collapse the way ``ghost-sweep`` has.
+    """
+
+    def test_absent_is_not_applicable(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_harness_grant
+
+        monkeypatch.delenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", raising=False)
+
+        _run_check_harness_grant()
+        out = capsys.readouterr().out
+        assert "not applicable" in out
+        assert "[!]" not in out
+        assert "[✓]" not in out
+
+    def test_empty_value_is_not_applicable(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_harness_grant
+
+        monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "")
+
+        _run_check_harness_grant()
+        out = capsys.readouterr().out
+        assert "not applicable" in out
+
+    def test_present_reports_and_never_prints_the_value(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_harness_grant
+
+        monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "super-secret-fake-value-zzz")
+
+        _run_check_harness_grant()
+        out = capsys.readouterr().out
+        assert "[!]" in out
+        assert "NX_HARNESS_CLAUDE_OAUTH_TOKEN" in out
+        assert "super-secret-fake-value-zzz" not in out
+
+
+def test_harness_grant_row_registered_in_supplementary_checks() -> None:
+    """Registration proof, mirroring
+    ``test_ghost_sweep_row_registered_in_supplementary_checks``."""
+    import inspect
+
+    from nexus.commands.doctor import _SUPPLEMENTARY_CHECK_NAMES, _run_supplementary_checks
+
+    assert "harness-grant" in _SUPPLEMENTARY_CHECK_NAMES
+    source = inspect.getsource(_run_supplementary_checks)
+    assert '"harness-grant": _run_check_harness_grant' in source
+
+
+def test_harness_grant_row_absent_from_fresh_install_mvv_allowlist() -> None:
+    """nexus-7zhag doctrine, mirroring
+    ``test_ghost_sweep_row_absent_from_fresh_install_mvv_allowlist``: a
+    virgin box never sets NX_HARNESS_CLAUDE_OAUTH_TOKEN, so this row must
+    never gain an entry in ``tests/e2e/fresh-install-mvv.sh``'s doctor
+    warnings allowlist."""
+    import re as _re
+
+    mvv_path = Path(__file__).resolve().parent / "e2e" / "fresh-install-mvv.sh"
+    source = mvv_path.read_text(encoding="utf-8")
+    match = _re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
+    assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
+    allowlist_regex = match.group(1)
+    assert "harness-grant" not in allowlist_regex
+    assert "harness_grant" not in allowlist_regex
+
+
 def test_tuple_projection_row_registered_in_supplementary_checks() -> None:
     """Registration proof (mirrors ``test_all_three_rows_are_registered_
     in_run_health_checks`` in ``tests/test_health_tuple_doctor_rows.py``,

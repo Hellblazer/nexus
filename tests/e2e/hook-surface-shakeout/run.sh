@@ -25,10 +25,12 @@
 # stop running. That is the exposure `conexus/PENDING_RELEASE.md` names as
 # the wheel floor, and it is invisible to every green suite.
 #
-# AUTH IS NOT RE-DERIVED HERE. `tests/e2e/lib/claude_credentials.py pick` is
-# the one shared picker (a bare keychain lookup returns an empty husk: two
-# items share the service name). This script uses it exactly as
-# rdr208-mvv/run.sh does and adds nothing of its own.
+# AUTH (RDR-219): the harness's OWN automation token, never a copy of the
+# operator's interactive login. `claude_credentials.py status` gates the
+# run; `claude_credentials.py run -- docker run ...` execs the container
+# build with CLAUDE_CODE_OAUTH_TOKEN forced into the docker client's own
+# environment as a bare `-e` flag, so the value reaches the container
+# without ever touching argv or a mounted file.
 #
 # Sessions are REAL and BILLED. Ends "HOOK-SURFACE SHAKEOUT PASSED" or
 # FAILED; exits 2 (UNVERIFIED) with no usable credential, which is never a
@@ -48,22 +50,18 @@ while [ $# -gt 0 ]; do
         # plugin updated before their CLI. Asserts nothing blocks; see the
         # OLD-CLI MODE block in shakeout_in_container.sh.
         --cli-version) CLI_VERSION="${2:?--cli-version needs X.Y.Z}"; shift 2 ;;
-        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 command -v docker > /dev/null || { echo "docker is required" >&2; exit 2; }
 
-# --- credential: the shared picker, never a bare keychain read -------------
-FRESHCREDS="$(python3 "$CRED_TOOL" pick 2>/dev/null || true)"
-if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ] \
-   && python3 "$CRED_TOOL" check "$HOME/.claude/.credentials.json" > /dev/null 2>&1; then
-    echo "(keychain miss: falling back to ~/.claude/.credentials.json, may be stale)" >&2
-    FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
-fi
-if [ -z "$FRESHCREDS" ]; then
-    echo "HOOK-SURFACE SHAKEOUT UNVERIFIED: no usable Claude oauth credential" >&2
-    echo "(run tests/e2e/auth-login.sh -- it is interactive, a human must do it)" >&2
+# --- credential: the harness's own automation token (RDR-219), never the
+# operator's interactive login. `status` never prints token material --
+# it only reports presence/expiry -- so it is safe to run as a gate.
+if ! python3 "$CRED_TOOL" status > /dev/null 2>&1; then
+    echo "HOOK-SURFACE SHAKEOUT UNVERIFIED: no usable automation token" >&2
+    python3 "$CRED_TOOL" status >&2 || true
     exit 2
 fi
 
@@ -78,9 +76,6 @@ fi
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/hook-shakeout.XXXXXX")"
 [ -n "$KEEP" ] || trap 'rm -rf "$STAGE"' EXIT
-umask 077
-printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"
-umask 022
 
 SHA="$(git -C "$ROOT" rev-parse --short HEAD)"
 echo "[stage] wheel + plugin + checkout from $SHA"
@@ -291,15 +286,49 @@ set +e
 # (nexus-h5olw). The comment lives ABOVE the command, not inside it: a `#` line
 # within a backslash-continued command ENDS that command, and `bash -n` calls
 # the result valid because it is — it just runs `-e` as its own command.
-docker run --rm \
-    -e NX_NO_TELEMETRY=1 \
-    -v "$STAGE/.claude-credentials.json:/creds/.credentials.json:ro" \
-    -v "$ART:/artifacts" \
-    -e SHAKEOUT_SHA="$SHA" \
-    -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}" \
-    -e SHAKEOUT_RACE_DELAY="${SHAKEOUT_RACE_DELAY:-}" \
-    -e SHAKEOUT_CLI_VERSION="$CLI_VERSION" \
-    "$IMAGE"
+# RDR-219 A2 launch shape (T2 nexus_rdr/219-research-10): `claude_credentials.py
+# run --` execs this `docker run`, whose argv[0] is the literal `docker`
+# _ensure_docker_flags looks for, so the automation token is forced in as a
+# bare `-e CLAUDE_CODE_OAUTH_TOKEN` (no `=value` -- docker copies the value
+# from ITS OWN client environment, which `run` already set) alongside the
+# `--rm` this invocation already carries. No credential file, no mount.
+DOCKER_ARGS=(
+    -e NX_NO_TELEMETRY=1
+    -v "$ART:/artifacts"
+    -e SHAKEOUT_SHA="$SHA"
+    -e SHAKEOUT_PROBE="${SHAKEOUT_PROBE:-}"
+    -e SHAKEOUT_RACE_DELAY="${SHAKEOUT_RACE_DELAY:-}"
+    -e SHAKEOUT_CLI_VERSION="$CLI_VERSION"
+    # nexus-wauo1.37: SHAKEOUT_HOOK_PROBE runs the single cheap subagent-
+    # dispatch turn instead of the full eight-turn sequence; SHAKEOUT_MCP_
+    # OVERRIDE additionally launches with --strict-mcp-config --mcp-config
+    # naming the entry `plugin:conexus:nexus` (see shakeout_in_container.sh).
+    -e SHAKEOUT_HOOK_PROBE="${SHAKEOUT_HOOK_PROBE:-}"
+    -e SHAKEOUT_MCP_OVERRIDE="${SHAKEOUT_MCP_OVERRIDE:-}"
+)
+if [ -n "$KEEP" ]; then
+    # --keep (header comment above: "leave the container up"): a bare
+    # `docker run --rm ...` NEVER survives past this call, and
+    # claude_credentials.py's `run --` wrapper forces `--rm` into any
+    # `docker run` invocation it can SEE (RDR-219 review requirement 3 --
+    # a token-bearing container must not outlive the run; no opt-out at
+    # that layer, by design). The wrapper's own docs name the one caller-
+    # side escape hatch: nest the invocation inside a shell string so
+    # argv[0] is `bash`, not `docker`, and write both the token flag and
+    # the container's lifetime yourself. Used ONLY for this explicit,
+    # operator-requested debug path -- never the default (bare) run
+    # above -- and the container must be removed by hand right after
+    # inspecting it; it still carries the raw token in `docker inspect`
+    # for as long as it exists, so that command must never be run on it.
+    CONTAINER_NAME="hook-shakeout-$SHA"
+    docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1 || true
+    echo "[run] --keep: container will survive as $CONTAINER_NAME for inspection -- remove it yourself (docker rm -f $CONTAINER_NAME) when done" >&2
+    python3 "$CRED_TOOL" run -- \
+        bash -c 'exec docker run --name "$0" -e CLAUDE_CODE_OAUTH_TOKEN "$@"' \
+        "$CONTAINER_NAME" "${DOCKER_ARGS[@]}" "$IMAGE"
+else
+    python3 "$CRED_TOOL" run -- docker run --rm "${DOCKER_ARGS[@]}" "$IMAGE"
+fi
 rc=$?
 set -e
 echo "[run] artifacts:"

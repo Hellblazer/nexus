@@ -25,6 +25,7 @@ from nexus.commands._helpers import (
     raise_identity_drop_exception,
     raise_identity_drop_exception_for_file,
     reset_identity_drop_collectors,
+    resolve_confirmed_write_failure_doc_ids,
 )
 
 
@@ -74,7 +75,10 @@ def test_reset_identity_drop_collectors_also_zeroes_the_sweep_collector():
 
     reset_identity_drop_collectors()
 
-    assert get_superseded_sweep_stats() == {"swept": 0, "skipped": []}
+    stats = get_superseded_sweep_stats()
+    assert stats["swept"] == 0
+    assert stats["skipped"] == []
+    assert stats["deferred_discarded"] == 0  # nexus-4pj54
 
 
 def test_reset_identity_drop_collectors_also_zeroes_the_partial_doc_skip_collector():
@@ -115,6 +119,51 @@ def test_emit_identity_drop_summary_surfaces_write_failures(capsys):
     err = capsys.readouterr().err
     assert "WARNING: catalog manifest write failed for 2 document(s)" in err
     assert "nx catalog reconcile" in err
+
+
+def test_emit_identity_drop_summary_write_failures_include_resolved_path(monkeypatch, capsys):
+    """nexus-wbfpw.29 round 2 (critic Significant): a bare tumbler like
+    "1.2.3" needs an extra 'nx catalog show' lookup to be actionable --
+    the warning must include the resolved source path/URI when the
+    catalog can supply one."""
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")
+
+    class _FakeEntry:
+        file_path = "src/nexus/foo.py"
+
+    class _FakeCatalog:
+        def resolve_many(self, doc_ids):
+            return {"1.2.3": _FakeEntry()}
+
+    monkeypatch.setattr("nexus.mcp_infra.get_catalog", lambda: _FakeCatalog())
+
+    result = emit_identity_drop_summary(indexed_count=1)
+
+    assert result is True
+    err = capsys.readouterr().err
+    assert "1.2.3 (src/nexus/foo.py)" in err
+
+
+def test_emit_identity_drop_summary_write_failures_path_lookup_failure_is_non_fatal(monkeypatch, capsys):
+    """A catalog-unreachable path lookup (plausible: unreachable-catalog is
+    exactly one of the conditions the write-failure warning fires for)
+    must never crash the summary -- the bare tumbler still prints."""
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")
+
+    def _raise():
+        raise RuntimeError("catalog unreachable")
+
+    monkeypatch.setattr("nexus.mcp_infra.get_catalog", _raise)
+
+    result = emit_identity_drop_summary(indexed_count=1)
+
+    assert result is True
+    err = capsys.readouterr().err
+    assert "1.2.3" in err
 
 
 def test_emit_identity_drop_summary_surfaces_identity_drops(capsys):
@@ -371,9 +420,42 @@ def test_raise_identity_drop_exception_write_failure_only_does_not_mention_sweep
     msg = str(exc_info.value)
 
     assert "manifest write failures" in msg
-    assert "nx catalog show" in msg
+    # nexus-wbfpw.29: the same remedy its WARNING names, not the old
+    # "catalog show / re-index with --force".
+    assert "nx catalog reconcile" in msg
+    assert "--force" not in msg
     assert "t3 gc" not in msg
     assert "sweep" not in msg
+
+
+def test_raise_identity_drop_exception_identity_drop_names_reconcile_with_force_fallback():
+    from nexus.mcp_infra import _record_manifest_identity_drop
+
+    _record_manifest_identity_drop("docs__x", 4)
+
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception(subject="document")
+    msg = str(exc_info.value)
+
+    assert "identity drops" in msg
+    assert "nx catalog reconcile" in msg
+    # reconcile cannot rebuild a document that never registered, so the
+    # --force re-index stays as the fallback for this class only.
+    assert "--force" in msg
+    assert "nx catalog show" not in msg
+
+
+def test_raise_identity_drop_exception_refusal_keeps_its_own_remedy():
+    _record_complete_refusal("1.2.3")
+
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception(subject="document")
+    msg = str(exc_info.value)
+
+    assert "completion refusals" in msg
+    assert "nx catalog show" in msg
+    assert "--force" in msg
+    assert "reconcile" not in msg
 
 
 def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
@@ -388,8 +470,32 @@ def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
 
     assert "manifest write failures" in msg
     assert "a superseded-chunk sweep skip" in msg
-    assert "nx catalog show" in msg
+    assert "nx catalog reconcile" in msg
     assert "t3 gc -c COLLECTION" in msg
+
+
+def test_raise_identity_drop_exception_write_failed_and_identity_dropped_names_one_remedy():
+    """nexus-wbfpw.29 round 5 (critique observation): no prior test drove
+    ``write_failed`` AND ``identity_dropped`` simultaneously through the
+    remedy-list logic (``if write_failed and not identity_dropped:``).
+    The identity-drop remedy's own reconcile-then-force text is meant to
+    implicitly subsume the write-failed remedy when both causes fire in
+    the same run -- the reconcile instruction must appear exactly ONCE,
+    not once per cause.
+    """
+    from nexus.mcp_infra import _record_manifest_identity_drop, _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")
+    _record_manifest_identity_drop("docs__x", 4)
+
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception(subject="document")
+    msg = str(exc_info.value)
+
+    assert "manifest write failures" in msg
+    assert "identity drops" in msg
+    assert msg.count("Run 'nx catalog reconcile'") == 1, msg
+    assert "--force" in msg
 
 
 def test_raise_identity_drop_exception_for_file_names_file_and_remedy(tmp_path):
@@ -400,6 +506,81 @@ def test_raise_identity_drop_exception_for_file_names_file_and_remedy(tmp_path):
     assert str(target) in msg
     assert "7 chunk" in msg
     assert "orphaned" in msg.lower()
-    assert "reconcile" in msg.lower()
-    # remedy: re-run once reachable, chunks reconcile via upsert identity
-    assert "re-run" in msg.lower() or "reindex" in msg.lower() or "re-index" in msg.lower()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_empty_when_nothing_failed():
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_unknown_expectation_never_confirms():
+    """nexus-wbfpw.29 round 6: a write failure recorded with NO chash
+    expectation (the default -- any producer that cannot determine what
+    it was trying to write) must never be confirmed. It never even
+    reaches the catalog: an unknown-expectation doc_id is filtered out
+    before it becomes a verification candidate, so this test needs no
+    real catalog row for "1.2.3" at all -- if the function tried to
+    verify it, the lookup would either 404 or find nothing and the
+    result would still be "not confirmed", but the point of this test is
+    that it isn't even attempted.
+    """
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")  # chashes omitted -> UNKNOWN
+
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_empty_expectation_never_confirms():
+    """A KNOWN but EMPTY expected-chash set must also never confirm --
+    an empty set is trivially a subset of anything, so without this
+    exclusion every empty-expectation doc_id would confirm regardless of
+    what (if anything) the manifest holds."""
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3", set())
+
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_reader_failure_confirms_nothing(
+    monkeypatch,
+):
+    """nexus-wbfpw.29 round 6: a catalog-reader failure during
+    verification must confirm NOTHING -- fail loud via the caller's
+    existing gate rather than guess either way. A doc_id with a real,
+    non-empty expected-chash set becomes a genuine verification
+    candidate, so the (faulted) reader is actually reached."""
+    import nexus.catalog.factory as catalog_factory
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3", {"aa" * 32})
+
+    def faulting_make_catalog_reader(*args, **kwargs):
+        raise RuntimeError("nexus-wbfpw.29 fault injection (verification reader)")
+
+    monkeypatch.setattr(
+        catalog_factory, "make_catalog_reader", faulting_make_catalog_reader,
+    )
+
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_manifest_write_failure_with_a_blank_chash_records_unknown():
+    """A failing write whose rows include one with no chash only partly
+    knows what it was writing. Filtering the blank out would leave a
+    partial expectation that a partial repair could satisfy, so the doc
+    is recorded UNKNOWN, also when an earlier slice for the same doc
+    recorded a complete set."""
+    from nexus.mcp_infra import (
+        _record_manifest_write_failure,
+        get_manifest_write_failure_chashes,
+    )
+
+    _record_manifest_write_failure("1.2.7", ["a" * 64, ""])
+    _record_manifest_write_failure("1.2.8", ["b" * 64])
+    _record_manifest_write_failure("1.2.8", ["", "c" * 64])
+
+    expected = get_manifest_write_failure_chashes()
+    assert expected["1.2.7"] is None
+    assert expected["1.2.8"] is None
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()

@@ -90,11 +90,16 @@ class _StorageBackendGuardGroup(click.Group):
 
     def invoke(self, ctx: click.Context):
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
+        from nexus.db.t2.http_token_store import TokenAdminAuthError  # noqa: PLC0415 — deferred: keep CLI import surface light
 
         try:
             return super().invoke(ctx)
         except StorageModeFlagError as exc:
             raise click.UsageError(str(exc)) from exc
+        except TokenAdminAuthError as exc:
+            # nexus-xzeml: a refused token-admin call is a credential problem
+            # the operator has to act on, not a crash.
+            raise click.ClickException("\n".join(exc.lines)) from exc
 
 
 @click.group(cls=_StorageBackendGuardGroup)

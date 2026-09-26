@@ -69,6 +69,73 @@ def test_happy_path_returns_completed_process() -> None:
     assert cp.stdout == "hello-stdin"
 
 
+# ── RDR-219 amendment (nexus-wauo1.35 / .38): the nx-mcp dispatch grant ────
+#
+# _run_claude_isolated is the second of the two launch sites that must
+# route a harness's NX_HARNESS_CLAUDE_OAUTH_TOKEN into the child's own
+# CLAUDE_CODE_OAUTH_TOKEN through the shared nexus.claude_child_env helper,
+# via an explicit env= (not implicit Popen inheritance). Fake token values
+# only -- see the project CLAUDE.md TOKEN RULE.
+
+_ENV_PROBE_ARGV = [
+    "python", "-c",
+    "import os, sys; sys.stdout.write(os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', ''))",
+]
+
+
+def test_no_harness_name_child_gets_no_claude_token(monkeypatch) -> None:
+    """Production unchanged: with no harness name, the child sees no
+    CLAUDE_CODE_OAUTH_TOKEN it did not already have."""
+    monkeypatch.delenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    cp = ax._run_claude_isolated("hello", timeout=10, _argv=_ENV_PROBE_ARGV)
+
+    assert cp.stdout == ""
+
+
+def test_harness_name_grants_claude_token_to_child_without_touching_os_environ(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "fake-harness-token-xyz")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    cp = ax._run_claude_isolated("hello", timeout=10, _argv=_ENV_PROBE_ARGV)
+
+    assert cp.stdout == "fake-harness-token-xyz"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ, (
+        "the parent's own os.environ must never be mutated by this call"
+    )
+
+
+def test_existing_claude_token_wins_for_the_child(monkeypatch) -> None:
+    monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "fake-harness-token")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fake-existing-token")
+
+    cp = ax._run_claude_isolated("hello", timeout=10, _argv=_ENV_PROBE_ARGV)
+
+    assert cp.stdout == "fake-existing-token"
+
+
+def test_run_claude_isolated_routes_through_the_shared_helper(monkeypatch) -> None:
+    """Route-through proof (fails if _run_claude_isolated stops calling
+    apply_harness_oauth_grant)."""
+    import nexus.claude_child_env as child_env
+
+    calls: list[dict] = []
+    original = child_env.apply_harness_oauth_grant
+
+    def _spy(base):
+        calls.append(dict(base))
+        return original(base)
+
+    monkeypatch.setattr(child_env, "apply_harness_oauth_grant", _spy)
+
+    ax._run_claude_isolated("hello-stdin", timeout=10, _argv=["python", "-c", "pass"])
+
+    assert calls, "_run_claude_isolated must call apply_harness_oauth_grant"
+
+
 def test_timeout_kills_grandchild_not_just_direct_child(tmp_path) -> None:
     """NON-VACUOUS group-kill: the child spawns a REAL grandchild in the same
     group and blocks; on TimeoutExpired the whole group is SIGKILL'd, so the
@@ -375,3 +442,89 @@ def test_stdin_race_error_stderr_is_transient_on_batch_path(monkeypatch) -> None
     monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
     with pytest.raises(ax._TransientFailure):
         ax._invoke_once_batch("some batch prompt", timeout=30)
+
+
+# ── Hard-failure stdout surfacing (nexus-4vsx8) ──────────────────────────────
+
+
+def test_hard_failure_surfaces_stdout_error_envelope_when_stderr_empty(monkeypatch) -> None:
+    """``claude -p --output-format json`` reports its OWN error (not
+    logged in, rate limit, overload) inside the JSON envelope on
+    STDOUT, not stderr. Before this fix a non-zero exit with an empty
+    stderr and a populated stdout envelope raised ``_HardFailure`` with
+    no error text at all -- the RDR-219 grant-proof failure this bead
+    records could not be diagnosed from the log line alone."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1,
+        json.dumps({"result": "Not logged in. Run `claude setup-token`."}),
+        "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure, match="Not logged in"):
+        ax._invoke_once("some prompt")
+
+
+def test_hard_failure_surfaces_stdout_error_envelope_on_batch_path(monkeypatch) -> None:
+    """Same recognition, batch call site -- the fix lives in both
+    non-zero-exit branches, not just the single-paper one."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1,
+        json.dumps({"result": "Credit balance is too low"}),
+        "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure, match="Credit balance is too low"):
+        ax._invoke_once_batch("some batch prompt", timeout=30)
+
+
+@pytest.mark.parametrize("path", ["single", "batch"])
+def test_rate_limit_reported_on_stdout_is_transient(monkeypatch, path: str) -> None:
+    """A rate limit or overload arrives in the stdout envelope, not stderr,
+    so the transient check reads both; before, it read stderr only and a
+    retriable failure was raised as hard (nexus-4vsx8 fix round)."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1, json.dumps({"result": "API Error: 529 overloaded_error"}), "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._TransientFailure, match="overloaded_error"):
+        if path == "single":
+            ax._invoke_once("p")
+        else:
+            ax._invoke_once_batch("p", timeout=30)
+
+
+def test_transient_failure_message_is_redacted(monkeypatch) -> None:
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1, "", "rate limit hit for sk-ant-oat01-FAKEFAKEFAKE1234567890",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._TransientFailure) as exc_info:
+        ax._invoke_once("p")
+    assert "sk-ant-" not in str(exc_info.value)
+    assert "[REDACTED]" in str(exc_info.value)
+
+
+def test_hard_failure_redacts_token_shaped_stdout(monkeypatch) -> None:
+    """A token-shaped string reaching stdout must never reach the
+    hard-failure message that gets logged (or any exception message
+    built from it)."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1,
+        json.dumps({"result": "auth failed for sk-ant-api03-FAKEFAKEFAKE1234567890"}),
+        "",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure) as exc_info:
+        ax._invoke_once("some prompt")
+    message = str(exc_info.value)
+    assert "sk-ant-" not in message
+    assert "[REDACTED]" in message
+
+
+def test_hard_failure_falls_back_to_raw_stdout_excerpt_when_not_json(monkeypatch) -> None:
+    """Non-JSON stdout (e.g. a crash dump) still surfaces something
+    rather than silently falling back to an empty excerpt."""
+    cp = subprocess.CompletedProcess(["claude"], 1, "segmentation fault (core dumped)", "")
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._HardFailure, match="segmentation fault"):
+        ax._invoke_once("some prompt")

@@ -2819,6 +2819,135 @@ class TestRemintSingleFlight:
             self._reset_manager()
 
 
+class TestProactiveDataTokenRefresh:
+    """nexus-kqnlg: ``_auth_headers()`` must proactively refresh a
+    near-expiry data token BEFORE sending a request, not only react to a
+    401 after the engine has already rejected it -- see that method's own
+    docstring for the measured production symptom (a long-lived
+    ``HttpAspectQueue`` presenting tokens 40s-4min past ``expires_at``).
+    """
+
+    def _reset_manager(self) -> None:
+        from nexus.db.data_token import reset_data_token_manager
+
+        reset_data_token_manager()
+
+    def test_near_expiry_token_refreshes_before_request_no_401_round_trip(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch, tmp_path,
+    ) -> None:
+        """A token within DataTokenManager's own 20% pre-expiry margin
+        (``_REFRESH_THRESHOLD``) is re-minted BEFORE the request goes out --
+        proven by exactly ONE inbound request (never a 401 then a retry).
+
+        WOULD FAIL against the pre-fix code: ``_auth_headers()`` returned
+        ``self._token`` verbatim, so the stale ctor-minted token would be
+        the only one ever sent -- no second mint call occurs until the
+        engine 401s it.
+        """
+        from nexus.db.data_token import DataTokenManager
+        import nexus.db.data_token as dt_mod
+
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        clock = _FakeMonotonicClock()
+        manager = DataTokenManager(clock=clock, mint_credential=lambda: _MINT_CREDENTIAL, config_dir=tmp_path)
+        monkeypatch.setattr(dt_mod, "get_data_token_manager", lambda: manager)
+        try:
+            store = _make_echo_store()
+            assert _MINT_CALLS == 1, "ctor mints exactly once"
+
+            # The fake mint grants expires_in_seconds=300; the manager's
+            # own margin is 20% of that (60s remaining). Advance past it
+            # (55s remaining) -- still short of actual expiry, which is
+            # exactly the case the pre-fix code got wrong: a token that is
+            # not yet expired, but close enough that it WILL be by the time
+            # a slow request completes, must be refreshed now rather than
+            # gambled on.
+            clock.advance(245.0)
+
+            result = store.echo_post("near-expiry")
+
+            assert result == {"echo": {"value": "near-expiry"}}
+            assert _MINT_CALLS == 2, (
+                "expected exactly one proactive re-mint before the request, "
+                f"saw {_MINT_CALLS} total mints"
+            )
+            assert _REQUEST_COUNT["POST /v1/echo"] == 1, (
+                "the fresh token must be presented on the FIRST and ONLY "
+                "request -- a 401-then-retry round trip means the refresh "
+                "happened reactively, not proactively"
+            )
+        finally:
+            self._reset_manager()
+
+    def test_fresh_token_is_reused_no_extra_mint(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch, tmp_path,
+    ) -> None:
+        """A token well within its TTL is reused across many requests --
+        the per-request proactive check must be a cheap cache hit, never an
+        extra mint, on the common path."""
+        from nexus.db.data_token import DataTokenManager
+        import nexus.db.data_token as dt_mod
+
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        clock = _FakeMonotonicClock()
+        manager = DataTokenManager(clock=clock, mint_credential=lambda: _MINT_CREDENTIAL, config_dir=tmp_path)
+        monkeypatch.setattr(dt_mod, "get_data_token_manager", lambda: manager)
+        try:
+            store = _make_echo_store()
+            assert _MINT_CALLS == 1, "ctor mints exactly once"
+
+            clock.advance(10.0)  # well under the 60s (20% of 300s) margin
+            for i in range(3):
+                result = store.echo_post(f"fresh-{i}")
+                assert result == {"echo": {"value": f"fresh-{i}"}}
+
+            assert _MINT_CALLS == 1, "a still-fresh token must never trigger an extra mint"
+            assert _REQUEST_COUNT["POST /v1/echo"] == 3
+        finally:
+            self._reset_manager()
+
+    def test_401_fallback_still_works_when_token_is_revoked_out_of_band(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch, tmp_path,
+    ) -> None:
+        """The reactive 401 self-heal path is a FALLBACK, not replaced by
+        the proactive check: a token DataTokenManager still considers fresh
+        (per its own TTL bookkeeping) can be revoked out of band (a key
+        rotation, an operator action) -- the engine's 401 must still
+        trigger an invalidate-and-remint-and-retry exactly as before."""
+        from nexus.db.data_token import DataTokenManager
+        import nexus.db.data_token as dt_mod
+
+        global _REJECT_TOKEN
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        clock = _FakeMonotonicClock()
+        manager = DataTokenManager(clock=clock, mint_credential=lambda: _MINT_CREDENTIAL, config_dir=tmp_path)
+        monkeypatch.setattr(dt_mod, "get_data_token_manager", lambda: manager)
+        try:
+            store = _make_echo_store()
+            assert _MINT_CALLS == 1, "ctor mints exactly once"
+
+            # No clock advance -- the manager still considers this token
+            # fresh. The server nonetheless rejects THIS EXACT token,
+            # modeling an out-of-band revocation the manager cannot know
+            # about ahead of time.
+            _REJECT_TOKEN = _MINTED_DATA_TOKEN
+
+            result = store.echo_post("revoked-out-of-band")
+
+            assert result == {"echo": {"value": "revoked-out-of-band"}}
+            assert _MINT_CALLS == 2, "the 401 must still trigger exactly one reactive re-mint"
+            assert _REQUEST_COUNT["POST /v1/echo"] == 2, (
+                "one rejected attempt on the revoked token, one successful "
+                "retry on the freshly re-minted one"
+            )
+        finally:
+            _REJECT_TOKEN = None
+            self._reset_manager()
+
+
 class TestRemintSingleFlightCrossSurface:
     """nexus-umue1 Sam's decision follow-up (critic Critical 2): the
     coordination this bead ports into DataTokenManager lives in that ONE

@@ -85,6 +85,7 @@ public final class TemplateRegistry {
      */
     private static final List<String> RESOURCE_TEMPLATE_PATHS = List.of(
             "/tuples/templates/board.yaml",
+            "/tuples/templates/board-ci.yaml",
             "/tuples/templates/directory.yaml",
             "/tuples/templates/ledger.yaml",
             "/tuples/templates/lock.yaml",

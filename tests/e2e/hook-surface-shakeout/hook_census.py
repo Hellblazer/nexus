@@ -180,7 +180,34 @@ def transcript_trouble(paths: list[pathlib.Path]) -> list[str]:
     return out
 
 
+#: The mcp_tool handlers one subagent-dispatch turn provokes (SHAKEOUT_HOOK_PROBE,
+#: nexus-wauo1.37): PreToolUse on the Agent tool, the three SubagentStart
+#: entries, SubagentStop, and the turn's own Stop.
+PROBE_HOOKS: tuple[str, ...] = (
+    "hook_agent_dispatch_expect",
+    "hook_subagent_start",
+    "hook_subagent_start_stamp",
+    "hook_subagent_start_tuple",
+    "hook_subagent_stop_tuple",
+    "hook_stop_verification",
+)
+
+
+def probe_main(jsonl: pathlib.Path) -> int:
+    """``--probe <mcp-stdin.jsonl>``: exit 1 unless every PROBE_HOOKS name
+    reached the nexus server, so the probe run asserts its own verdict."""
+    seen, _calls = tool_roster(jsonl)
+    missing = [name for name in PROBE_HOOKS if name not in seen]
+    if missing:
+        print(f"PROBE FAILED: {len(missing)} of {len(PROBE_HOOKS)} mcp_tool hooks never reached the server: {', '.join(missing)}")
+        return 1
+    print(f"PROBE PASSED: all {len(PROBE_HOOKS)} provoked mcp_tool hooks reached the server")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 3 and argv[1] == "--probe":
+        return probe_main(pathlib.Path(argv[2]))
     decl = declared(pathlib.Path(argv[1]))
     cmd_seen, cmd_rows = command_roster(pathlib.Path(argv[2]))
     tool_seen, tool_calls = tool_roster(pathlib.Path(argv[3]))

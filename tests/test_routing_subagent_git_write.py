@@ -1411,13 +1411,16 @@ class TestNexus3c92mRound6SplicedExpansions:
         spec.loader.exec_module(guard)
 
         def scan_ms(text: str) -> float:
+            # nexus-kx2s5: CPU time, not wall time -- same nexus-scc9t
+            # fix as the sibling tests above (lines 1310, 1356). This one
+            # was still on perf_counter and is the same defect class.
             best = float("inf")
             for _ in range(3):
-                t0 = time.perf_counter()
+                t0 = time.process_time()
                 normalized = guard._normalize_for_primary_scan(text)
                 guard._find_spliced_expansion(normalized)
                 guard._primary_match(normalized)
-                best = min(best, time.perf_counter() - t0)
+                best = min(best, time.process_time() - t0)
             return best * 1000
 
         unit = chr(36) + "{v}ar" + chr(36) + "{i}able "
@@ -1845,15 +1848,28 @@ class TestNexus3c92mRound9ChainedExpansions:
         spec.loader.exec_module(guard)
 
         def timed(cmd: str) -> float:
+            # nexus-kx2s5: CPU time, not wall time (same nexus-scc9t fix as
+            # the other near-linear-scan tests in this file). Went red
+            # under full-suite -n auto load: 2.812ms -> 95.787ms (34.1x,
+            # over _MAX_LINEAR_RATIO), passing alone every time. Wall time
+            # includes scheduler-preemption gaps under 16-worker CPU
+            # contention, and a longer-running measurement (the 1MB side)
+            # has a proportionally larger window to get preempted in than
+            # the 100KB side, inflating the ratio in exactly the direction
+            # that looks like a regression. process_time() only counts
+            # CPU cycles this process actually consumed, so it is immune
+            # to that contention artifact while still measuring the same
+            # real work -- a genuine O(n^2) regression still burns CPU
+            # time proportionally and still blows the ratio.
             best = float("inf")
             for _ in range(3):
-                t0 = time.perf_counter()
+                t0 = time.process_time()
                 normalized = guard._normalize_for_primary_scan(cmd)
                 zero = guard._delete_all_expansions(normalized)
                 guard._find_spliced_expansion(normalized)
                 guard._primary_match(normalized)
                 guard._primary_match(zero)
-                best = min(best, time.perf_counter() - t0)
+                best = min(best, time.process_time() - t0)
             return best * 1000
 
         def assert_near_linear(

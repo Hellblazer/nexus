@@ -57,7 +57,7 @@ def _isolate_default_brake(monkeypatch):
 
 
 def _make_vector_service_error(
-    status: int, retry_after: str | None = None,
+    status: int, retry_after: str | None = None, deadline_outcome: str | None = None,
 ) -> VectorServiceError:
     """Construct a ``VectorServiceError`` EXACTLY the way
     ``http_vector_client.py``'s ``_post``/``_get`` raise it in production:
@@ -72,6 +72,8 @@ def _make_vector_service_error(
     hdrs = email.message.Message()
     if retry_after is not None:
         hdrs["Retry-After"] = retry_after
+    if deadline_outcome is not None:
+        hdrs["X-Nexus-Deadline-Outcome"] = deadline_outcome
     http_err = urllib.error.HTTPError(
         "http://engine.internal/v1/vectors/upsert-chunks", status, "error", hdrs, None,
     )
@@ -503,6 +505,68 @@ def test_503_without_retry_after_now_trips_brake_with_escalating_default(
         assert _vector_with_retry(flaky) == "ok"
     test_brake.trip.assert_called_once_with(None, source="vector")
     mock_sleep.assert_called_once_with(2.0)  # max(local jittered 2.0, brake 2.0)
+
+
+def test_admission_refusal_503_retry_after_floors_the_shared_brake(monkeypatch) -> None:
+    """nexus-u2mlh.2: the engine's CCE admission refusal is a 503 on
+    upsert-chunks carrying ``Retry-After`` (the waiting batches' estimated
+    drain time, 1-30 s). The client needs no code for it, but that claim
+    rests on this path: the server's value reaches the process-wide brake,
+    which paces every other indexer worker too, and floors this caller's
+    own pause above its local backoff."""
+    test_brake = MagicMock()
+    test_brake.wait.return_value = 0.0
+    test_brake.trip.return_value = 7.0
+    monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
+
+    call_count = 0
+
+    def refused_once() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise _make_vector_service_error(503, retry_after="7")
+        return "ok"
+
+    with patch("nexus.retry.time.sleep") as mock_sleep, patch(
+        "nexus.retry.random.random", return_value=0.5,
+    ):
+        assert _vector_with_retry(refused_once) == "ok"
+    test_brake.trip.assert_called_once_with(7.0, source="vector")
+    mock_sleep.assert_called_once_with(7.0)  # server's 7 s beats the local 2 s
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_calls"),
+    [
+        ("aborted", 5),  # nexus-qajw7: embedded work was discarded; ordinary budget
+        ("refused", 8),  # nothing embedded; a draining queue can admit a retry
+        (None, 8),       # an engine that predates the header keeps today's widening
+    ],
+)
+def test_a_deadline_abort_503_gets_the_ordinary_budget(
+    monkeypatch, outcome: str | None, expected_calls: int,
+) -> None:
+    """nexus-qajw7 (Sam, 2026-09-26): a deadline ABORT discards every batch the
+    request had embedded, so each retry re-embeds and re-bills them; it gets the
+    ordinary attempt budget, not the rate-limit widening. The Retry-After still
+    reaches the shared brake either way."""
+    test_brake = MagicMock()
+    test_brake.wait.return_value = 0.0
+    test_brake.trip.return_value = 5.0
+    monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
+    calls = 0
+
+    def always_503() -> str:
+        nonlocal calls
+        calls += 1
+        raise _make_vector_service_error(503, retry_after="5", deadline_outcome=outcome)
+
+    with patch("nexus.retry.time.sleep"), patch("nexus.retry.random.random", return_value=0.5):
+        with pytest.raises(VectorServiceError):
+            _vector_with_retry(always_503, max_attempts=5)
+    assert calls == expected_calls
+    assert test_brake.trip.call_args_list[0].args == (5.0,)
 
 
 def test_502_no_retry_after_trips_brake_and_is_retried(monkeypatch) -> None:

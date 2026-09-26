@@ -363,6 +363,12 @@ def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
         _, lease_token = discover_lease_with_wait(budget_s=wait_budget_s)
         token = lease_token or ""
     if not token:
+        from nexus.db.service_endpoint import mint_armed  # noqa: PLC0415 — deferred to avoid circular import
+
+        if mint_armed():
+            # nexus-xzeml: the data-token override supplies the bearer.
+            return ""
+    if not token:
         raise RuntimeError(
             "no service token is resolvable: base_url was supplied "
             "explicitly but no token was — set NX_SERVICE_TOKEN, run "
@@ -731,7 +737,38 @@ class RefreshableHttpStoreMixin:
         Never baked once at ``__init__`` — this is what lets a same-instance
         retry (after :meth:`_invalidate_and_reresolve`) actually pick up a
         rotated credential instead of resending the same stale header.
+
+        nexus-kqnlg: also proactively re-applies :meth:`_apply_data_token_override`
+        on EVERY call, not just at construction and post-401 re-resolution.
+        Without this, a long-lived instance (the aspect worker's singleton
+        ``HttpAspectQueue`` is the measured case — see
+        ``nexus.db.t2.http_aspect_queue.HttpAspectQueue.claim_batch``'s own
+        docstring) only ever refreshed its cached ``self._token`` reactively,
+        on a 401 via :meth:`_invalidate_and_reresolve`. ``DataTokenManager``
+        already refuses to serve a token once less than
+        :data:`~nexus.db.data_token._REFRESH_THRESHOLD` (20%) of its TTL
+        remains (:meth:`~nexus.db.data_token.DataTokenManager._needs_refresh`)
+        — but that check only ever ran again when something called
+        :meth:`~nexus.db.data_token.DataTokenManager.bearer_for` a second
+        time, which nothing did between construction and the first 401. The
+        engine therefore 401'd an already-expired token, the worker
+        re-minted reactively, and the retry succeeded — one wasted round
+        trip plus WARN-level edge noise per expiry (measured: tokens
+        presented 40s-4min past their own ``expires_at``). Mirrors
+        ``http_vector_client._request_once``'s per-request
+        ``get_data_token_manager().bearer_for(...)`` call — T3 never had
+        this gap because it never caches a token across requests to begin
+        with.
+
+        Cheap on the common (fresh) path: ``bearer_for`` is a per-key
+        ``threading.Lock`` acquire plus a dict lookup and an in-process TTL
+        comparison when the cached entry is not yet due for refresh — it
+        mints (a real HTTP round trip) ONLY when within the margin, exactly
+        as it already does for every other caller. A no-op (returns
+        immediately) for a pinned-token instance or an unconfigured install,
+        identical to :meth:`_apply_data_token_override`'s own contract.
         """
+        self._apply_data_token_override()
         return {
             "Authorization": f"Bearer {self._token}",
             "X-Nexus-Tenant": self._tenant,

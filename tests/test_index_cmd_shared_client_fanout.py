@@ -142,10 +142,14 @@ def test_real_index_repo_command_shares_one_t2_httpx_client(
     # no topics yet, which depends on what earlier tests in the session did.
     # Pin the range and the sharing invariant, not a state-dependent exact
     # count (it read 1 on a warm substrate and 2 on a cold one).
-    assert 1 <= len(t2_snapshots) <= 2, (
-        f"expected 1 or 2 T2Database constructions for `nx index repo` "
-        f"(_collections_without_topics, plus run_collection_postprocessing "
-        f"when the collection still needs topics); got {len(t2_snapshots)}"
+    # nexus-iygza added a third site, _drain_repo_collections (the
+    # unassigned-chunk drain, which runs on every run including a no-change
+    # one), so the range is 2 or 3; it shares the same client like the others.
+    assert 2 <= len(t2_snapshots) <= 3, (
+        f"expected 2 or 3 T2Database constructions for `nx index repo` "
+        f"(_collections_without_topics and _drain_repo_collections, plus "
+        f"run_collection_postprocessing when the collection still needs "
+        f"topics); got {len(t2_snapshots)}"
     )
     assert len(shared_client_tally) == 1, (
         f"expected build_shared_t2_client() to be called exactly ONCE per "

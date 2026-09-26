@@ -148,5 +148,5 @@ def test_reset_taxonomy_assign_run_stats_zeroes_all_counters(monkeypatch):
 
     mcp_infra.reset_taxonomy_assign_run_stats()
     assert mcp_infra.taxonomy_assign_run_stats() == {
-        "attempted": 0, "failed_batches": 0, "failed_chunks": 0,
+        "attempted": 0, "failed_batches": 0, "failed_chunks": 0, "deferred_chunks": 0,
     }

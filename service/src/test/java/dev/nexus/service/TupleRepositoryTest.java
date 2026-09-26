@@ -1073,7 +1073,8 @@ class TupleRepositoryTest {
         // since RDR-211 Phase 1 Step 2, bead nexus-rplay.8) + probe (this class's
         // extra template directory, bead nexus-em75s.39's multi-pinned-key fixture) +
         // probe-lease (nexus-xapt8's default_lease_seconds fixture) -- see startAll.
-        assertThat(snap.templates()).hasSize(8);
+        // 9 since RDR-220 added board/ci/<topic> to the bundled resources.
+        assertThat(snap.templates()).hasSize(9);
         assertThat(snap.digest()).isNotBlank();
     }
 

@@ -693,6 +693,46 @@ _AMBIENT_DAEMON_DIRS: tuple[str, ...] = ("logs/",)
 _DiffEntry = tuple[str, str]
 
 
+#: nexus-pfuns follow-up (2026-09-25): index.log's single-generation
+#: rotation (``src/nexus/commands/hooks.py``'s post-commit stanza -- when
+#: ``NX_INDEX_LOG`` exceeds 4 MiB it does a same-filesystem
+#: ``mv -f "$NX_INDEX_LOG" "$NX_INDEX_LOG.1"`` before a fresh ``index.log``
+#: is appended to). A same-filesystem ``mv`` is a rename: it does not touch
+#: the renamed inode's content or (mtime, size) at all. So the ONE thing
+#: this exact rotation produces -- and nothing else does -- is
+#: ``index.log.1``'s POST-session stat landing byte-for-byte equal to
+#: ``index.log``'s PRE-session stat (see :func:`_is_index_log_rotation`).
+#: An in-place rewrite of ``index.log`` (the case that must still fail)
+#: leaves ``index.log.1`` untouched, so it can never produce that equality.
+#:
+#: Deliberately two exact names, not a prefix: ``index.log`` stays governed
+#: SOLELY by this module (nexus-wjkc7) -- it must never be added to
+#: :data:`_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES`, which would make this
+#: stricter, shape-checked rule unreachable, and a blanket ``index.log*``
+#: prefix here would swallow the in-place-rewrite case this rule exists to
+#: keep failing.
+#:
+#: Known narrow limitation, accepted rather than papered over: a SECOND
+#: rotation within one pytest session (two hook runs each crossing the 4
+#: MiB threshold before the session ends) clobbers ``index.log.1`` a second
+#: time, so its final stat no longer matches this session's baseline
+#: ``index.log`` and the guard correctly falls through to reporting it --
+#: a false positive investigation-worthy on a genuinely rare double-
+#: rotation, preferred over a broader rule that could mask a real leak.
+_ROTATED_LOG_NAME = "index.log"
+_ROTATED_LOG_BACKUP_NAME = "index.log.1"
+
+
+def _is_index_log_rotation(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]],
+) -> bool:
+    """True iff ``index.log.1``'s current stat exactly matches
+    ``index.log``'s session-start stat -- see :data:`_ROTATED_LOG_NAME`."""
+    before_log = before.get(_ROTATED_LOG_NAME)
+    after_backup = after.get(_ROTATED_LOG_BACKUP_NAME)
+    return before_log is not None and after_backup is not None and before_log == after_backup
+
+
 def _split_appends_from_state(
     changed: list[_DiffEntry],
     before: dict[str, tuple[int, int]],
@@ -752,6 +792,10 @@ def _split_appends_from_state(
     """
     state: list[_DiffEntry] = []
     appends: list[_DiffEntry] = []
+    # Computed once (not per-entry): both `changed` entries a rotation can
+    # produce (`index.log` and `index.log.1`) test the SAME before/after
+    # pair, so there is exactly one verdict for the whole diff.
+    index_log_rotated = _is_index_log_rotation(before, after)
     for entry in changed:
         _verb, rel = entry
         b, a = before.get(rel), after.get(rel)
@@ -784,6 +828,18 @@ def _split_appends_from_state(
             # Deliberately the ONLY content-driven exemption left: unlike a
             # version-mismatch, "before == after byte-for-byte" cannot be
             # produced by a genuine state mutation, in-session or not.
+            appends.append(entry)
+        elif (
+            rel in (_ROTATED_LOG_NAME, _ROTATED_LOG_BACKUP_NAME)
+            and index_log_rotated
+        ):
+            # index.log's single-generation rotation (mv -f index.log ->
+            # index.log.1, then a fresh index.log). See
+            # _is_index_log_rotation's docstring for the exact signature.
+            # An in-place rewrite of index.log without a rotation never
+            # reaches this branch (index_log_rotated is False for it), so
+            # it still falls through to the append-only growth check below
+            # (fails on shrink) or the state verdict.
             appends.append(entry)
         elif name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
             appends.append(entry)
@@ -937,6 +993,16 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # override, so no unit test can write here unless it explicitly opts
     # out of the suite-wide `_isolate_config_dir` autouse fixture.
     "logs/mcp.log",
+    # nx-mcp's connect-readiness marker, published and refreshed by every live
+    # MCP server's lifespan (mcp/core.py -> connect_marker.publish_mcp_connect_
+    # marker) and cleared at its teardown. Concurrent sessions on this box
+    # start and stop nx-mcp during any run. Seen as a transient guard failure
+    # on 2026-09-26 (nexus-4vsx8 fix round), gone on an immediate rerun.
+    "mcp_connect_marker.",
+    # The SessionStart/UserPromptSubmit connect-check hook's warn-once state
+    # (hooks/mcp_connect_check.py _STATE_PREFIX), written by the same live
+    # sessions' hooks, never by a unit test (the suite isolates the config dir).
+    "mcp_connect_check_state.",
     # SessionStart hook's session-id flat file -- the actual writer is
     # `nexus.session.write_claude_session_id()` (call-time-resolved via
     # `claude_session_file()`, not the retained-for-compat
@@ -1065,6 +1131,42 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # or resolve the config dir through the autouse `_isolate_config_dir`
     # tmp path, so they never write the real directory.
     "tuple-watch/",
+    # RDR-072 per-repo Knowledge Map cache (`nexus.context.generate_context_l1`;
+    # `CONTEXT_L1_DIR = _ctx_nexus_config_dir() / "context"`,
+    # `<repo>-<hash>.txt` per repo). A THIRD artifact of the SAME
+    # post-commit-hook `nx index repo --on-locked=skip` background
+    # dispatch already covered by `logs/index-` and `locks/` above
+    # (src/nexus/commands/index.py:2253-2254 calls `generate_context_l1`
+    # when a repo_path is supplied), plus `nx taxonomy` rebuilds
+    # (commands/taxonomy_cmd.py:795-796) and `nx context refresh`
+    # (commands/context_cmd.py) run by any live Claude Code session on
+    # this box, independent of pytest. MEASURED 2026-09-25: a full
+    # `pytest -n auto` run (0 test failures) exited 1 over exactly
+    # `MODIFIED context/tmp-d0f036b9.txt`, coinciding with a real session's
+    # SessionStart hook (src/nexus/hooks/session_context.py) picking up a
+    # freshly regenerated Knowledge Map built from the live cloud store --
+    # no test produces that content. The writer honours `NEXUS_CONFIG_DIR`
+    # (`_ctx_nexus_config_dir()`), and every direct
+    # `generate_context_l1`/`refresh_context_l1` call in
+    # tests/test_context.py passes an explicit `output_path=tmp_path/...`,
+    # bypassing this directory entirely -- confirmed no test reaches the
+    # real path through this writer.
+    "context/",
+    # Live MinerU server's own PID/port/started_at registration file
+    # (`nexus._mineru_pid._pid_file_path` -> `nexus_config_dir() /
+    # "mineru.pid"`), rewritten whenever the server (re)starts --
+    # including a restart triggered by an operator's `nx` reinstall on
+    # this box (`config.py`'s `_restart_mineru_server`), independent of
+    # any test. Same class as the already-allowlisted
+    # `aspect_worker_addr.`: a live daemon's own state file. MEASURED
+    # 2026-09-25: tripped alongside `last_seen_version` during a peer's
+    # operator-driven `nx` reinstall mid-run. Every test that touches this
+    # path (tests/test_mineru_cmd.py, tests/test_mineru_config_drift.py,
+    # tests/test_mineru_spawn_logging.py,
+    # tests/daemon/test_mineru_lifecycle.py) isolates `NEXUS_CONFIG_DIR`
+    # via `monkeypatch.setenv` first -- none `delenv`s it -- so the writer
+    # never reaches the real path from a test.
+    "mineru.pid",
 )
 
 
@@ -1826,6 +1928,35 @@ def _check_mandatory_pin_non_vacuity(session) -> None:
         ),
         override_note="rare — e.g. a deliberately token-less/tag-less integration run",
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_engine_restart_taxonomy_deferral(monkeypatch):
+    """nexus-tawfg: ``nx index repo`` defers taxonomy work while the engine's
+    /version reports ``process_uptime_seconds`` under a threshold. The
+    per-process substrate engine starts minutes before the tests that index,
+    so without this a test's taxonomy behaviour depends on wall-clock time
+    since boot: green on a warm local box, red on a fresh CI shard (the
+    shared-client fanout test, run 36203715158). A zero threshold means no
+    uptime ever defers. tests/test_tawfg_taxonomy_deferral.py deletes this
+    to exercise the real threshold."""
+    monkeypatch.setenv("NX_TAXONOMY_DEFER_UPTIME_S", "0")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limit_brake():
+    """The shared ``RateLimitBrake`` is process-global and escalates on
+    every retried failure toward a 60s cap, so a test whose writes fail
+    against an unreachable endpoint leaves every later test in the same
+    process paying that escalation. Measured on CI shard 3 (runs
+    36250371264 onward): three ``nx memory promote`` tests at 180s, 180s
+    and 108s each, 14s for the first. A fresh brake per test keeps one
+    test's retries out of the next test's wall time."""
+    from nexus.rate_brake import reset_brake
+
+    reset_brake()
+    yield
+    reset_brake()
 
 
 @pytest.fixture(autouse=True)

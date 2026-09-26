@@ -368,8 +368,10 @@ _REGISTRY: dict[str, ExtractorConfig] = {
     # forced. Paper-shaped content in a repo should be ingested via
     # `nx index pdf --collection knowledge__<repo>-papers` (the
     # convention nexus-olg5 established for the ART corpus split).
-    # If a dedicated doc-summary extractor with the right schema
-    # ever lands, register it here.
+    # A collection opts in one at a time instead (nexus-kk4ut, Sam
+    # 2026-09-25, option A2): see docs_collection_opted_in below. Only its
+    # prose files are enqueued (extraction_applies_to_source), which keeps
+    # the .dict/.jsonl/.dot sweep this comment describes out of the LLM.
     # rdr__* — pure-Python extractor (RDR-089 Phase F). RDRs carry
     # YAML frontmatter + labelled markdown sections; a deterministic
     # parser is more reliable and zero-cost compared to forcing the
@@ -747,6 +749,62 @@ def _truncate(text: str, cap: int) -> str:
     return text[:cap].rstrip() + "..."
 
 
+#: nexus-kk4ut: docs__ aspect extraction is opt-in per collection (Sam
+#: 2026-09-25, option A2). Every docs__ document costs an LLM call on each
+#: change, so nothing is extracted until ``aspects.docs_collections`` in
+#: config.yml names the collection (glob patterns, a YAML list or a comma-
+#: separated string, the ``taxonomy.local_exclude_collections`` shape).
+_DOCS_PREFIX: str = "docs__"
+#: The files in an opted-in docs__ collection that are prose worth a call.
+#: Not ``classifier.classify_file``: every file in a docs__ collection is
+#: already PROSE by that classifier, whose unknown-extension fall-through is
+#: exactly how .jsonl fixtures, .dict word lists and .dot graphs land there
+#: (measured 2026-09-25). This is the narrower "prose a reader wrote" set.
+_DOCS_PROSE_SUFFIXES: tuple[str, ...] = (
+    ".md", ".markdown", ".mdx", ".rst", ".adoc", ".asciidoc", ".org", ".txt",
+)
+
+
+def _docs_opt_in_patterns() -> list[str]:
+    """The configured opt-in patterns, or ``[]`` when the config cannot be
+    read. Never raises: ``select_config`` runs on the aspect worker's batch
+    path outside any row-level handler, and a malformed config.yml must not
+    kill the worker thread (and with it knowledge__/rdr__ extraction) over a
+    docs__ lookup. Failing closed means "not opted in"."""
+    from nexus.config import load_config  # noqa: PLC0415 — deferred: config import is heavier than this module's callers need at load
+
+    try:
+        raw = (load_config().get("aspects") or {}).get("docs_collections") or []
+    except Exception as exc:  # noqa: BLE001 — any config failure means "not opted in", never a crash on the worker path
+        _log.warning("aspects_docs_opt_in_unreadable", error=f"{type(exc).__name__}: {exc}")
+        return []
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.split(",")]
+    return [str(p) for p in raw if str(p).strip()]
+
+
+def docs_collection_opted_in(collection: str) -> bool:
+    """True when ``collection`` is a docs__ collection that
+    ``aspects.docs_collections`` opts in to aspect extraction (nexus-kk4ut)."""
+    if not collection.startswith(_DOCS_PREFIX):
+        return False
+    import fnmatch  # noqa: PLC0415 — stdlib, only needed on this branch
+
+    return any(fnmatch.fnmatchcase(collection, p) for p in _docs_opt_in_patterns())
+
+
+def extraction_applies_to_source(collection: str, source_path: str) -> bool:
+    """Whether a document from ``source_path`` should be enqueued for
+    ``collection``'s extractor. The prose-file rule applies only to a docs__
+    collection that gets its extractor through the opt-in (nexus-kk4ut);
+    anything the registry itself covers is unaffected."""
+    if not collection.startswith(_DOCS_PREFIX):
+        return True
+    if any(collection.startswith(prefix) for prefix in _REGISTRY):
+        return True
+    return source_path.lower().endswith(_DOCS_PROSE_SUFFIXES)
+
+
 def select_config(collection: str) -> ExtractorConfig | None:
     """Return the registered BASE ``ExtractorConfig`` whose prefix matches
     ``collection``, or ``None`` if no prefix matches.
@@ -766,12 +824,18 @@ def select_config(collection: str) -> ExtractorConfig | None:
       frontmatter parser, RDR-089 Phase F; zero API cost). Not
       shape-routed: every ``rdr__*`` row carries this one extractor_name.
 
-    Other prefixes (``docs__``, ``code__``, bare ``knowledge``
-    without the double-underscore separator, etc.) return ``None``.
+    ``docs__*`` → ``general-prose-v1`` ONLY when the collection is opted in
+    through ``aspects.docs_collections`` (nexus-kk4ut, option A2); every
+    other docs__ collection returns ``None``, as before.
+
+    Other prefixes (``code__``, bare ``knowledge`` without the
+    double-underscore separator, etc.) return ``None``.
     """
     for prefix, config in _REGISTRY.items():
         if collection.startswith(prefix):
             return config
+    if docs_collection_opted_in(collection):
+        return _GENERAL_PROSE_CONFIG
     return None
 
 
@@ -963,6 +1027,42 @@ class _TransientFailure(Exception):
 class _HardFailure(Exception):
     """Raised on a non-retriable failure; the retry loop returns
     immediately without further attempts."""
+
+
+# Token-shaped substrings must never reach a log line or exception
+# message (nexus-4vsx8).
+_TOKEN_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+
+
+def _redact_tokens(text: str) -> str:
+    """Replace any token-shaped substring in *text* with ``[REDACTED]``."""
+    return _TOKEN_PATTERN.sub("[REDACTED]", text)
+
+
+def _stdout_excerpt_for_hard_failure(stdout: str | None) -> str:
+    """Build a short, redacted stdout excerpt for a non-zero-exit
+    ``_HardFailure`` message (nexus-4vsx8).
+
+    ``claude -p --output-format json`` reports its OWN error (not
+    logged in, rate limit, overload) inside the JSON envelope on
+    STDOUT, not stderr. Before this, a non-zero exit with an empty
+    stderr and a populated stdout envelope raised ``_HardFailure``
+    with no error text at all -- unrecognized failures were logged
+    with 200 chars of nothing. Prefer the parsed envelope's
+    ``result``/``error`` field when stdout is valid JSON; fall back to
+    a raw excerpt otherwise.
+    """
+    raw = stdout or ""
+    try:
+        envelope = json.loads(raw)
+    except (ValueError, TypeError):
+        envelope = None
+    if isinstance(envelope, dict):
+        for key in ("result", "error"):
+            value = envelope.get(key)
+            if isinstance(value, str) and value.strip():
+                return _redact_tokens(value[:200])
+    return _redact_tokens(raw[:200])
 
 
 # ── T3 content sourcing (RDR-089 follow-up) ──────────────────────────────────
@@ -1478,15 +1578,22 @@ def _invoke_once_batch(prompt: str, *, timeout: int, model: str | None = None) -
         raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
     if result.returncode != 0:
-        stderr_lc = (result.stderr or "").lower()
-        if any(p in stderr_lc for p in _TRANSIENT_STDERR_PATTERNS):
+        # The CLI reports a rate limit or overload in the stdout envelope,
+        # not stderr, so the transient check reads both (nexus-4vsx8).
+        stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
+        seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
+        if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
             raise _TransientFailure(
-                f"transient stderr (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]}",
+                _redact_tokens(
+                    f"transient failure (rc={result.returncode}): "
+                    f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+                ),
             )
         raise _HardFailure(
-            f"non-zero exit (rc={result.returncode}): "
-            f"{(result.stderr or '')[:200]}",
+            _redact_tokens(
+                f"non-zero exit (rc={result.returncode}): "
+                f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+            ),
         )
 
     try:
@@ -1687,6 +1794,14 @@ def _run_claude_isolated(
     scheduling delay. Reuses ``operators.dispatch._write_prompt_file``
     rather than duplicating it -- that helper is already pure-sync (no
     asyncio), so it drops in here unchanged.
+
+    **Environment (RDR-219 amendment, nexus-wauo1.38)**: ``env=`` is now
+    passed explicitly, built from ``os.environ`` through
+    ``nexus.claude_child_env.apply_harness_oauth_grant`` -- the same
+    mapping ``operators.dispatch._build_dispatch_env`` applies. A
+    production run (no ``NX_HARNESS_CLAUDE_OAUTH_TOKEN``) gets the same
+    inheritance ``Popen`` would have given it implicitly with no ``env=``
+    at all.
     """
     argv = _argv or [
         "claude", "-p", "--output-format", "json",
@@ -1697,12 +1812,27 @@ def _run_claude_isolated(
         # fix at f1ae257d0; this second, un-modernized "claude -p" call
         # site did not, until now.
         "--strict-mcp-config",
+        # RDR-219 (nexus-wauo1.40): tool-free must mean TOOL-FREE, as in
+        # claude_dispatch. With no --tools "" the child keeps the CLI's
+        # built-in set, Bash included, and a permissive settings.json lets
+        # Bash run; its children would inherit NX_HARNESS_CLAUDE_OAUTH_TOKEN,
+        # which the grant keeps in this child's env.
+        "--tools", "",
     ]
     if _argv is None and model:
         # nexus-oc98c: the config's model_version is what the row will be
         # stamped with, so it is what the child runs on.
         argv = [*argv, "--model", model]
     prompt_path = _write_prompt_file(prompt)
+    # RDR-219 amendment (nexus-wauo1.35 / .38): map a harness's dispatch
+    # grant (NX_HARNESS_CLAUDE_OAUTH_TOKEN) into this child's own
+    # CLAUDE_CODE_OAUTH_TOKEN, never into os.environ. No-op when the
+    # harness name is absent, so a production run (no harness) gets
+    # byte-identical inheritance to before this -- the same dict Popen
+    # would otherwise inherit implicitly.
+    from nexus.claude_child_env import apply_harness_oauth_grant  # noqa: PLC0415 — deferred to avoid import-time cost on the aspect-extraction hot path
+
+    child_env = apply_harness_oauth_grant(os.environ)
     try:
         # The file object is only needed to hand Popen a real fd to
         # redirect the child's stdin from; the child gets its own
@@ -1718,6 +1848,7 @@ def _run_claude_isolated(
                 stderr=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
+                env=child_env,
                 preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
             )
         try:
@@ -1782,15 +1913,22 @@ def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
         raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
     if result.returncode != 0:
-        stderr_lc = (result.stderr or "").lower()
-        if any(p in stderr_lc for p in _TRANSIENT_STDERR_PATTERNS):
+        # The CLI reports a rate limit or overload in the stdout envelope,
+        # not stderr, so the transient check reads both (nexus-4vsx8).
+        stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
+        seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
+        if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
             raise _TransientFailure(
-                f"transient stderr (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]}",
+                _redact_tokens(
+                    f"transient failure (rc={result.returncode}): "
+                    f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+                ),
             )
         raise _HardFailure(
-            f"non-zero exit (rc={result.returncode}): "
-            f"{(result.stderr or '')[:200]}",
+            _redact_tokens(
+                f"non-zero exit (rc={result.returncode}): "
+                f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+            ),
         )
 
     # Outer parse: --output-format json returns a session-metadata

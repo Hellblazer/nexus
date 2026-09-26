@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E test helpers — local tmux-based Claude Code interaction
 
-TMUX_SESSION="e2e"
+TMUX_SESSION="${TMUX_SESSION:-e2e}"
 # Optional dedicated tmux socket. When NX_TMUX_SOCKET is set, every tmux
 # command runs against that private socket (tmux -L <name>), so the harness
 # cannot see or kill sessions on the user's default socket. Empty = default
@@ -86,7 +86,9 @@ poll_until_gone() {
 claude_start() {
     # CLAUDE_EXTRA_ARGS lets a caller inject launch flags (e.g. cc-val's
     # --mcp-config/--strict-mcp-config). Empty by default — no behavior change.
-    send_keys "claude --dangerously-skip-permissions ${CLAUDE_EXTRA_ARGS:-}" Enter
+    # Through claude_fd_exec.sh: the token rides fd 3, not Claude's
+    # environment (RDR-219, nexus-wauo1.36).
+    send_keys "bash '$CLAUDE_FD_EXEC' --dangerously-skip-permissions ${CLAUDE_EXTRA_ARGS:-}" Enter
 
     # Give Claude time to initialize before checking screens.
     sleep 8
@@ -111,6 +113,13 @@ claude_start() {
 
         if [[ $_trust_done -eq 0 ]] && echo "$pane" | grep -qiE "trust this folder|project you trust"; then
             echo "    [auth] Workspace trust — accepting..."
+            # The highlighted default differs by Claude Code build: 2.1.282
+            # highlights "No, exit", so a bare Enter quits Claude. Move the
+            # cursor to "Yes" when it is not already there.
+            if echo "$pane" | grep -qE "❯ *(2\. *)?No, exit"; then
+                _tmux send-keys -t "${TMUX_SESSION}" Up
+                sleep 0.5
+            fi
             _tmux send-keys -t "${TMUX_SESSION}" Enter
             _trust_done=1
             sleep 2
@@ -191,6 +200,8 @@ claude_wait() {
 
 # ─── Assertions ──────────────────────────────────────────────────────────────
 
+# Absolute, because it is typed into a tmux pane whose cwd is elsewhere.
+CLAUDE_FD_EXEC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/claude_fd_exec.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
 pass() { echo "    ✓ $1"; PASS=$(( PASS + 1 )); }
 fail() { echo "    ✗ $1"; FAIL=$(( FAIL + 1 )); }

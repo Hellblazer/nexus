@@ -110,6 +110,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
+from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 
 if TYPE_CHECKING:
@@ -145,6 +146,15 @@ DEFAULT_BOARD_MAX_ANNOUNCES = 1
 #: "engine without wait" (a transient HTTP or store error) before the next
 #: tick. The loop never dies on one bad round-trip.
 DEFAULT_TICK_ERROR_BACKOFF_S: float = 5.0
+#: Bead nexus-ymfak (nexus-rxuiq residual): the startup catch-up read's
+#: recency window is `wait_timeout_s + this margin`, seconds -- wide
+#: enough to cover a row an orphaned predecessor waiter's still-parked
+#: `wait()` stamped in the gap between that predecessor's process dying
+#: and this waiter's construction (bounded by `wait_timeout_s`, the
+#: longest that parked call can still be live), plus slack for the
+#: catch-up read's own round trip.
+DEFAULT_CATCHUP_MARGIN_S: float = 5.0
+
 #: Belt-and-braces floor: a minimum real-clock gap `run()` enforces
 #: between the START of one tick and the START of the next, whenever a
 #: tick returns faster than this. Genuinely defensive, not the fix, for
@@ -354,6 +364,22 @@ def _board_notification_content(subspace: str, tuple_id: str) -> str:
     )
 
 
+def _parse_announced_at(value: str | None) -> datetime | None:
+    """``TupleRow.announced_at`` as the wire actually sends it -- an
+    ISO-8601 timestamp string, or ``None`` for a row nothing has ever
+    announced. Returns ``None`` on a missing or unparseable value (never
+    raises): the catch-up read this backs (:meth:`ChannelWaiter.
+    _catchup_mailbox_rows`) treats "can't tell" exactly like "not
+    recent" -- skip the row, let the ordinary announce-mode `tick()` loop
+    find it on its own schedule instead."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 _last_waiter_token_ns = 0
 
 
@@ -371,6 +397,61 @@ def _mint_waiter_token() -> str:
     now = max(time.time_ns(), _last_waiter_token_ns + 1)
     _last_waiter_token_ns = now
     return f"{now}-{uuid.uuid4().hex}"
+
+
+def _probe_serving_engine_version() -> tuple[int, int, int] | None:
+    """Best-effort ``GET /version`` ``release_version`` for the engine THIS
+    session is actually talking to (local or cloud, whichever
+    :func:`~nexus.db.service_endpoint.resolve_service_endpoint_with_
+    evidence_gate` resolves) -- nexus-6konb.15 (RDR-213 MVV finding L1).
+
+    Fails closed to ``None`` on ANY resolution, transport, non-200, or
+    parse failure, INCLUDING a blank/dev ``release_version`` (a
+    dev-checkout jar reports none): this call site has no fatal to raise
+    on a probe failure, since "don't know" simply leaves the row-based
+    fallback (:meth:`ChannelWaiter._engine_ignores_announce`/
+    :meth:`~ChannelWaiter._engine_ignores_subscriber`) as the only
+    detector, exactly as it was before this probe existed. Mirrors the
+    ``GET /version`` probe idiom :func:`nexus.db.managed_endpoint.
+    probe_managed_service` and :func:`nexus.db.http_engine_status.
+    fetch_engine_status` already use, but never raises.
+
+    Called once, at :meth:`ChannelWaiter.run`'s start -- never per tick.
+
+    Worst-case start delay: in the local cold-lease path only --
+    ``resolve_service_endpoint_with_evidence_gate`` retrying with
+    ``DEFAULT_LEASE_WAIT_BUDGET_S`` (12.0s, as of this writing) after a
+    first resolution fails for a process that has previously seen a live
+    lease -- plus this probe's own 5s HTTP timeout, for up to roughly 17s
+    total. That budget belongs to endpoint resolution and is unrelated to
+    this probe's own failure handling. It delays only this waiter's FIRST
+    tick, never the MCP server's own startup (the probe runs inside
+    `run()`, which is already an independent asyncio task by the time it
+    executes) and never a cloud-mode session (no lease to wait on there).
+    """
+    try:
+        from nexus.db.service_endpoint import (  # noqa: PLC0415 — rare/branch-local: one call per waiter lifetime
+            resolve_service_endpoint_with_evidence_gate,
+        )
+        base_url, _token = resolve_service_endpoint_with_evidence_gate()
+    except Exception as exc:  # noqa: BLE001 — best-effort: an unresolvable endpoint means "don't know", not a crash
+        _log.debug("channel_waiter_version_probe_endpoint_unresolvable", error=str(exc))
+        return None
+
+    try:
+        resp = httpx.get(f"{base_url.rstrip('/')}/version", timeout=5.0)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — best-effort: a transport blip or a pre-/version engine means "don't know"
+        _log.debug("channel_waiter_version_probe_failed", error=str(exc))
+        return None
+
+    if not isinstance(body, dict):
+        return None
+
+    from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — leaf module, rare/branch-local path
+
+    return parse_engine_version(body.get("release_version"))
 
 
 class ChannelWaiter:
@@ -443,11 +524,17 @@ class ChannelWaiter:
         max_announces: int = DEFAULT_MAX_ANNOUNCES,
         tick_error_backoff_s: float = DEFAULT_TICK_ERROR_BACKOFF_S,
         min_tick_interval_s: float = DEFAULT_MIN_TICK_INTERVAL_S,
+        engine_version_probe: Callable[[], tuple[int, int, int] | None] = _probe_serving_engine_version,
     ) -> None:
         self.session_id = session_id
         self.store_factory = store_factory
         self.subs = subs
         self.sender = sender
+        #: nexus-6konb.15: a real ``GET /version`` probe by default (see
+        #: :func:`_probe_serving_engine_version`); tests inject a fake
+        #: returning a fixed tuple (or `None`) instead of touching HTTP.
+        #: Called once, at :meth:`run`'s start.
+        self.engine_version_probe = engine_version_probe
         #: `None` (the default; tests that do not care about the on-disk
         #: status record) means :meth:`_publish_status` is a no-op. A real
         #: caller (`nexus.mcp.core._start_channel_waiter`) passes
@@ -578,11 +665,30 @@ class ChannelWaiter:
         healthy tick never returns faster than a genuine wake or its own
         capped timeout for either shape; the floor below is a defensive
         belt on top of that, not the fix -- see
-        `DEFAULT_MIN_TICK_INTERVAL_S`."""
+        `DEFAULT_MIN_TICK_INTERVAL_S`.
+
+        nexus-6konb.15 (RDR-213 MVV finding L1): before the first tick,
+        `_check_engine_floor_at_start` asks the SAME question
+        `_engine_ignores_announce`/`_engine_ignores_subscriber` answer from
+        a returned row's shape, but from the engine's own `/version`
+        identity instead -- so a below-floor engine never gets to report
+        "alive" even while its mailbox stays empty (measured: 16+ minutes
+        against engine-service-v0.1.127 with nothing sent, T2
+        `nexus_rdr/6konb15-mvv-2026-09-25`).
+
+        Bead nexus-ymfak (nexus-rxuiq residual): also before the first
+        tick, `_catchup_mailbox_rows` -- see its own docstring for what
+        gap it closes. Skipped when `_check_engine_floor_at_start` has
+        already stopped this waiter (a confirmed below-floor engine):
+        there is nothing to catch up against a substrate this waiter has
+        already refused to trust."""
         self._loop = asyncio.get_running_loop()
         self._alive = True
         self._publish_status()
         try:
+            await self._check_engine_floor_at_start()
+            if not self._stopped:
+                await self._catchup_mailbox_rows()
             while not self._stopped:
                 tick_started = time.monotonic()
                 try:
@@ -612,6 +718,128 @@ class ChannelWaiter:
         finally:
             self._alive = False
             self._publish_status()
+
+    async def _check_engine_floor_at_start(self) -> None:
+        """nexus-6konb.15: ask the engine's own `/version` identity, once,
+        whether it is below the announce/subscriber floor -- BEFORE the
+        first `tick()`, so a confirmed below-floor engine never reports
+        `alive` at all rather than only after its first mail row arrives
+        (`_engine_ignores_announce`/`_engine_ignores_subscriber`'s own
+        row-based detection, unchanged and still the fallback here).
+
+        `self.engine_version_probe` runs off the event loop
+        (`asyncio.to_thread`) exactly like every other blocking call this
+        waiter makes -- it is a real synchronous `httpx.get` in production
+        (see `_probe_serving_engine_version`).
+
+        A probe that cannot resolve a version -- unreachable, a
+        non-nexus/non-200 response, or a blank/dev `release_version` (a
+        dev-checkout jar reports none) -- returns `None` and changes
+        NOTHING: this is "don't know", never "assume below floor". The
+        loop starts normally and the row-based fallback stays the only
+        detector for that case, exactly as it was before this check
+        existed.
+
+        `_probe_serving_engine_version` itself never raises (it fails
+        closed to `None` internally), but `self.engine_version_probe` is
+        an injectable callable -- a caller-supplied replacement, or a
+        test double, could still raise. Reviewer fold: a raising probe
+        must never crash the waiter's start any more than a failing one
+        does, so it is treated identically to a `None` result -- logged,
+        then the row-based fallback takes over."""
+        try:
+            version = await asyncio.to_thread(self.engine_version_probe)
+        except Exception as exc:  # noqa: BLE001 — best-effort: a raising probe must never crash the waiter's start
+            _log.warning(
+                "channel_waiter_version_probe_raised", session_id=self.session_id, error=repr(exc),
+            )
+            return
+        if version is None:
+            return
+        from nexus.engine_version import (  # noqa: PLC0415 — leaf module, rare/branch-local path
+            CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION,
+            CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION,
+        )
+        if version < CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION:
+            self._stop_no_announce_support()
+        elif version < CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION:
+            self._stop_no_subscriber_support()
+
+    async def _catchup_mailbox_rows(self) -> None:
+        """Bead nexus-ymfak (nexus-rxuiq residual, DECISION: Sam
+        2026-09-24): closes the gap the waiter-token fence (`Announce
+        .waiter`, `_mint_waiter_token`) does not -- a row that arrives
+        and gets announce-stamped by an ORPHANED predecessor waiter's
+        still-parked `wait()` AFTER that predecessor's process has died
+        but BEFORE this (successor) waiter's own first `tick()` ever
+        calls `wait()` itself. The fence stops a superseded waiter's
+        parked call from stamping a FUTURE row once the successor has
+        admitted its own token; it does nothing for a row the orphan's
+        call already claimed and stamped in the seconds before the
+        successor existed at all, since there is no successor wait for
+        the engine to prefer yet. That window is bounded by
+        `wait_timeout_s` -- the longest a park predating this waiter's
+        construction can still be live -- which is exactly what a
+        `claude --resume` costs today: up to `wait_timeout_s` seconds of
+        silence for a row the dead process's own parked call took and
+        will never tell anyone about.
+
+        One plain, non-blocking `rd` (never `wait` -- this is a read, not
+        a park) per subscribed MAILBOX subspace, for rows `announced_at`
+        within the last `wait_timeout_s + DEFAULT_CATCHUP_MARGIN_S`
+        seconds: `rd` never stamps `announced_at`/`announce_count` (only
+        an announce-mode `wait` does), so this cannot itself create a
+        second orphan-shaped stamp. Every unclaimed, recently-stamped row
+        found gets a reference through the SAME path a real tick's find
+        would (`_reference_mailbox_row`) -- crediting `_announced_total`
+        only on the row's own first send, recording `_last_seen`, no
+        different from the tick that would eventually have rediscovered
+        it on its own schedule. Boards are never touched (RDR-213 bead
+        nexus-q82tk): a board's stamp is per `(subspace, subscriber)`,
+        keyed on THIS session's id rather than a waiter token, so an
+        orphan and its successor for the SAME session read the identical
+        per-subscriber budget -- there is no orphan gap for a board post
+        to fall into in the first place.
+
+        A row the orphan ALREADY referenced before dying gets a harmless
+        DUPLICATE reference here: this method has no way to know whether
+        a notification already went out for it, and the notification
+        text itself already covers a stale or already-claimed row (the
+        model's `tuple_in` on it either claims cleanly or comes back
+        empty, and either outcome is already explained). Cheaper to
+        accept an occasional duplicate than to add state whose only job
+        would be suppressing it.
+
+        Failure-isolated per subspace: an `rd` failure (a transient HTTP
+        or store error) is logged and this method moves on to the next
+        mailbox, never raising past `run()`'s start -- exactly the same
+        posture `tick()`'s own per-round-trip failures take, just before
+        there is a loop to back off inside yet."""
+        cutoff_s = self.wait_timeout_s + DEFAULT_CATCHUP_MARGIN_S
+        now = datetime.now(UTC)
+        for entry in self.subs.entries():
+            subspace = entry["subspace"]
+            if not subspace.startswith("mailbox/"):
+                continue
+            try:
+                rows = await asyncio.to_thread(self._call, lambda t, sp=subspace: t.rd(sp, n=MAX_QUERY_RESULTS))
+            except Exception as exc:  # noqa: BLE001 — failure-isolated: one bad mailbox must never block the others or the first tick
+                _log.warning(
+                    "channel_waiter_catchup_rd_failed",
+                    session_id=self.session_id, subspace=subspace, error=repr(exc),
+                )
+                continue
+            for row in rows:
+                if row.claim_state is not None:
+                    continue  # already claimed (or dead) -- not this method's job to re-surface it
+                announced_at = _parse_announced_at(row.announced_at)
+                if announced_at is None:
+                    continue  # never announced, or an unparseable stamp -- "can't tell" is not "recent"
+                age_s = (now - announced_at).total_seconds()
+                # Symmetric: an engine clock far ahead of this host would
+                # otherwise make every old row's age negative, "recent" forever.
+                if abs(age_s) <= cutoff_s:
+                    await self._reference_mailbox_row(subspace, row)
 
     def _call(self, fn: Callable[[Any], Any]) -> Any:
         """Run *fn* against a freshly opened tuples store, closing it

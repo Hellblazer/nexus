@@ -1377,6 +1377,12 @@ def index_repo_cmd(
         # _emit_manifest_write_failure_summary below; checked at the tail
         # of this command to fail the run loudly (see CHANGELOG).
         manifest_problems_detected = False
+        # nexus-wbfpw.29 round 6: computed once, inside the summary closure
+        # below (right after `stats` is set), and reused by the fail-loud
+        # raise further down -- both must see the SAME verified set, and
+        # the verification itself does a real catalog round trip so it
+        # must not run twice per invocation.
+        _confirmed_write_failure_doc_ids: frozenset[str] = frozenset()
 
         def _emit_manifest_write_failure_summary() -> None:
             # GH #1371 + GH #1397 + nexus-5xn3k.6: silent on zero problems
@@ -1394,10 +1400,30 @@ def index_repo_cmd(
             # restructured, the chunks are real. What was missing is
             # stating that overlap out loud instead of leaving two
             # unconnected numbers for the operator to reconcile by hand.
-            from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
-            nonlocal manifest_problems_detected
+            from nexus.commands._helpers import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
+                emit_identity_drop_summary,
+                resolve_confirmed_write_failure_doc_ids,
+            )
+            nonlocal manifest_problems_detected, _confirmed_write_failure_doc_ids
             indexed_files = n - skipped_files
-            if emit_identity_drop_summary(indexed_count=indexed_files):
+            # nexus-wbfpw.29 round 3 (round 6: verified by reading the
+            # catalog manifest back after the WHOLE run, self-heal
+            # included, instead of trusting self-heal's own AT-HEAL-TIME
+            # chunk_count comparison -- round 5's ManifestHealResult.
+            # confirmed_doc_ids read chunk_count=0 for any document whose
+            # manifest hook RAISED, which trivially "confirmed" even a
+            # genuinely partial same-run rebuild. See
+            # resolve_confirmed_write_failure_doc_ids's own docstring.
+            # A write failure in this set gets a "restored, no action
+            # needed" note instead of a false "run nx catalog reconcile"
+            # failure. A merely PARTIALLY-healed doc is deliberately
+            # excluded, per Sam's locked decision: unconfirmed is not
+            # repaired.
+            _confirmed_write_failure_doc_ids = resolve_confirmed_write_failure_doc_ids()
+            if emit_identity_drop_summary(
+                indexed_count=indexed_files,
+                healed_doc_ids=_confirmed_write_failure_doc_ids,
+            ):
                 manifest_problems_detected = True
 
         def _emit_ephemeral_skip_summary() -> None:
@@ -1485,6 +1511,35 @@ def index_repo_cmd(
         # explicitly to every T2-touching call this command makes.
         from nexus.commands._helpers import t2_shared_client_from_context  # noqa: PLC0415 — deferred to avoid circular import at module load
         _t2_client = t2_shared_client_from_context()
+
+        # nexus-tawfg (indexing-brittleness P0.3): defer taxonomy assignment
+        # (the per-flush hook and the drain below) when the engine restarted
+        # moments ago or a recent run lost assignments. Deferred chunks are
+        # not losses: a later run's drain assigns them. Cleared when the
+        # command ends so nothing else in the process inherits it.
+        import nexus.config as _nx_config  # noqa: PLC0415 — circular-dep avoidance; module attribute so a patched nexus_config_dir is seen (nexus-78blw)
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+            decide_taxonomy_deferral,
+            engine_process_uptime_seconds,
+            set_taxonomy_deferral,
+            taxonomy_failure_marker_path,
+        )
+        _failure_marker = taxonomy_failure_marker_path(_nx_config.nexus_config_dir())
+        _deferred_at_start = ""
+        # Not gated on --no-taxonomy: that flag skips discovery only, and the
+        # per-flush assign (the path that lost chunks in mg8gx) still runs.
+        if not frecency_only:
+            _deferred_at_start = decide_taxonomy_deferral(
+                uptime_fn=engine_process_uptime_seconds, marker=_failure_marker,
+                now_fn=time.time,
+            )
+        set_taxonomy_deferral(_deferred_at_start, arm_breaker=True)
+        click.get_current_context().call_on_close(lambda: set_taxonomy_deferral(""))
+        if _deferred_at_start:
+            click.echo(
+                f"  Taxonomy deferred: {_deferred_at_start}; a later run's drain "
+                "assigns what this run skips"
+            )
 
         stats: dict = {}
         try:
@@ -1584,7 +1639,26 @@ def index_repo_cmd(
             # One topic-existence probe serves both the qgc4b self-heal gate
             # and the tevzq subset (review Medium-2: was two T2 opens).
             no_topics = _collections_without_topics(collections, client=_t2_client)
-            if files_changed > 0 or no_topics:
+            if _deferred_at_start and (files_changed > 0 or no_topics):
+                # nexus-x3gig: discovery reads every embedding of a collection
+                # to the client (RDR-193 Gap 2), the heaviest cold read in the
+                # run, so it waits out the same window as assign. ONLY
+                # discovery: co-occurrence and topic links and the L1 context
+                # cache still refresh from the existing taxonomy (skipping the
+                # whole chain left L1 stale, the nexus-azss4 class); the
+                # projection pass waits because it follows new topics and
+                # re-reads every embedding. Nothing is lost: a zero-topic collection
+                # self-heals on the next run and the drain assigns new chunks
+                # to existing topics. Decided from the mechanism, not
+                # measured: measuring needs restarts of an engine other
+                # sessions share.
+                run_collection_postprocessing(
+                    collections, repo_path=path, discover_collections=[],
+                    client=_t2_client,
+                    discover_skip_reason=f"deferred: {_deferred_at_start}",
+                    collections_without_topics=no_topics,
+                )
+            elif files_changed > 0 or no_topics:
                 # nexus-tevzq: collection-grain refinement of the qgc4b gate.
                 # Only collections whose own kind wrote files this run (plus
                 # zero-topic self-heal candidates) re-discover; a collection
@@ -1596,10 +1670,47 @@ def index_repo_cmd(
                 )
                 run_collection_postprocessing(
                     collections, repo_path=path, discover_collections=discover,
-                    client=_t2_client,
+                    client=_t2_client, collections_without_topics=no_topics,
                 )
             else:
                 click.echo("  Taxonomy: no files changed — skipping discovery")
+            # nexus-iygza (indexing-brittleness P0.1): assign any chunk the
+            # per-flush hook lost or deferred, derived from state. Runs on a
+            # no-change run too, since that is exactly when an earlier run's
+            # loss would otherwise sit forever. Bounded per collection
+            # (drain_unassigned_chunks' own budget and deadline) and silent
+            # when there is nothing to do.
+            # The exit-code check below (nexus-7lw6a) reads `stats`, which
+            # index_repository snapshotted before the drain ran. Add the
+            # drain's own share of the run counters to it, so a chunk the
+            # drain still lost fails the run like any other lost assignment.
+            from nexus.mcp_infra import taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import
+            _before = taxonomy_assign_run_stats()
+            if not _deferred_at_start:
+                _drain_repo_collections(collections, client=_t2_client)
+            _after = taxonomy_assign_run_stats()
+            for _key, _counter in (
+                ("taxonomy_assign_batches_attempted", "attempted"),
+                ("taxonomy_assign_batches_failed", "failed_batches"),
+                ("taxonomy_assign_chunks_failed", "failed_chunks"),
+            ):
+                stats[_key] = stats.get(_key, 0) + _after[_counter] - _before[_counter]
+
+        # nexus-tawfg: a run that lost assignments makes later runs against
+        # this engine back off. Outside the taxonomy block above: the
+        # per-flush assign runs under --no-taxonomy too.
+        if stats.get("taxonomy_assign_batches_failed"):
+            from nexus.mcp_infra import record_taxonomy_failure  # noqa: PLC0415 — deferred to avoid circular import
+            try:
+                record_taxonomy_failure(_failure_marker, now=time.time())
+            except OSError as exc:
+                _log.warning("taxonomy_failure_marker_write_failed", error=str(exc))
+        from nexus.mcp_infra import taxonomy_assign_run_stats as _tars  # noqa: PLC0415 — deferred to avoid circular import
+        _deferred_chunks = _tars().get("deferred_chunks", 0)
+        if _deferred_chunks:
+            click.echo(
+                f"  Taxonomy: {_deferred_chunks} chunk(s) deferred; a later run's drain assigns them"
+            )
 
         if not frecency_only:
             try:
@@ -1687,7 +1798,16 @@ def index_repo_cmd(
             )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
-            raise_identity_drop_exception(subject="document")
+            # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the
+            # emit_identity_drop_summary call above computed -- see
+            # resolve_confirmed_write_failure_doc_ids -- reused rather
+            # than recomputed, since verification does a real catalog
+            # round trip), so a self-healed write failure never appears
+            # in the "causes" list either.
+            raise_identity_drop_exception(
+                subject="document",
+                healed_doc_ids=_confirmed_write_failure_doc_ids,
+            )
         if pdf_quality_gate_failed:
             raise click.ClickException(
                 f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "
@@ -1821,6 +1941,74 @@ def _taxonomy_incomplete(collections: list[str], *, client=None) -> bool:
     an active ``nx index`` invocation passes its own shared client in.
     """
     return bool(_collections_without_topics(collections, client=client))
+
+
+def _drain_repo_collections(collections: list[str], *, client=None) -> None:
+    """Drain unassigned chunks in *collections* (nexus-iygza).
+
+    Prints one line per collection that had any, one line when the engine
+    has no drain route (below engine-service-v0.1.132), and nothing
+    otherwise. Never raises: a drain problem is reported and left for the
+    next run, which lists the same chunks again. A lost chunk lands in the
+    taxonomy-assign run stats, which the caller re-reads before its
+    exit-code check (nexus-7lw6a).
+
+    *client* is the command's shared T2 client (nexus-m20mf): the page
+    reads go through one ``T2Database`` built on it, like
+    :func:`_collections_without_topics`.
+    """
+    if not collections:
+        return
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+        TAXONOMY_ACK_PROJECT,
+        acknowledged_chashes,
+        drain_unassigned_chunks,
+    )
+
+    try:
+        with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only unassigned listing; assigns route through the hook's own retrying path
+            try:
+                ack_entries = db.memory.get_all(TAXONOMY_ACK_PROJECT)
+            except Exception as exc:  # noqa: BLE001 — fail safe: nothing acknowledged, losses count loudly
+                _log.warning("taxonomy_ack_read_failed", error=str(exc))
+                ack_entries = []
+            for name in collections:
+                if _drain_one(
+                    name, drain_unassigned_chunks, taxonomy=db.taxonomy,
+                    acknowledged=acknowledged_chashes(ack_entries, name),
+                ):
+                    # Engine below v0.1.132: every collection would skip for
+                    # the same reason, so say it once and stop asking.
+                    break
+    except Exception as exc:  # noqa: BLE001 — best-effort; _drain_one already contains per-collection failures, so this is the T2 open itself
+        _log.warning("taxonomy_drain_t2_unavailable", error=str(exc))
+
+
+def _drain_one(name: str, drain, *, taxonomy, acknowledged=None) -> bool:
+    """One collection's drain and its report line (see :func:`_drain_repo_collections`).
+
+    Returns True when the engine has no drain route, so the caller stops.
+    """
+    try:
+        r = drain(name, taxonomy=taxonomy, acknowledged=acknowledged)
+    except Exception as exc:  # noqa: BLE001 — best-effort; the next run lists the same chunks
+        _log.warning("taxonomy_drain_failed", collection=name, error=str(exc))
+        click.echo(f"  Taxonomy drain: {name} failed ({type(exc).__name__}); next run retries")
+        return False
+    if r.skipped_reason:
+        _log.info("taxonomy_drain_skipped", collection=name, reason=r.skipped_reason)
+        click.echo(f"  Taxonomy drain: skipped, {r.skipped_reason}")
+        return True
+    if r.found:
+        more = ", more remain" if r.truncated else ""
+        acked = f", {r.acknowledged} acknowledged stuck (skipped)" if r.acknowledged else ""
+        click.echo(
+            f"  Taxonomy drain: {name}: {r.assigned} of {r.found} unassigned chunk(s) "
+            f"assigned, {r.lost} lost{acked}{more}"
+        )
+    return False
 
 
 def _collections_without_topics(collections: list[str], *, client=None) -> set[str]:
@@ -2110,6 +2298,8 @@ def run_collection_postprocessing(
     quiet: bool = False,
     discover_collections: list[str] | None = None,
     client=None,
+    discover_skip_reason: str = "",
+    collections_without_topics: set[str] | None = None,
 ) -> None:
     """Run the post-index taxonomy + projection + topic-link chain
     against *collections* and refresh the L1 context cache.
@@ -2172,10 +2362,8 @@ def run_collection_postprocessing(
             _discover_targets = [c for c in collections if c in _allowed]
             _n_skipped = len(collections) - len(_discover_targets)
             if _n_skipped:
-                _say(
-                    f"  Taxonomy: {_n_skipped} unchanged collection(s) skipped "
-                    f"(no files written this run)"
-                )
+                _why = discover_skip_reason or "no files written this run"
+                _say(f"  Taxonomy: discovery skipped for {_n_skipped} collection(s) ({_why})")
         with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for _tax_i, col_name in enumerate(_discover_targets, start=1):
                 _say(f"  [{_tax_i}/{len(_discover_targets)}] Taxonomy: discovering {col_name}...")
@@ -2226,39 +2414,86 @@ def run_collection_postprocessing(
                     db.taxonomy, collections, getattr(t3, "_client", t3), _say,
                 )
 
-                # Co-occurrence topic links from projections (RDR-075 SC-5)
-                # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
-                try:
-                    cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
-                    if cooc:
-                        _log.info("cooccurrence_links_generated", count=cooc)
-                except Exception:  # noqa: BLE001 — best-effort co-occurrence link generation; failure logged and chain continues
-                    _log.debug("cooccurrence_links_failed", exc_info=True)
-
-                # Auto-populate topic links if catalog available
-                # compute_topic_links routes upsert_topic_links internally.
-                try:
-                    from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
-                    cat = _try_load_catalog()
-                    if cat:
-                        for col_name in collections:
-                            compute_topic_links(
-                                db.taxonomy, cat, collection=col_name, persist=True,
-                            )
-                except Exception:  # noqa: BLE001 — best-effort topic-link population; non-fatal trailing enrichment step in a guarded chain
-                    pass  # Non-fatal
-                # Refresh L1 context cache
-                if repo_path is not None:
-                    try:
-                        from nexus.context import generate_context_l1  # noqa: PLC0415 — deliberate function-local import (rare branch: L1 refresh only when repo_path supplied)
-                        generate_context_l1(db.taxonomy, repo_path=repo_path)
-                    except Exception:  # noqa: BLE001 — best-effort L1 context-cache refresh; non-fatal trailing enrichment step in a guarded chain
-                        # nexus-azss4: a bare `pass` here hid the service-mode
-                        # raw-handle break for weeks (SessionStart Knowledge
-                        # Map permanently stale). Still non-fatal — but LOUD.
-                        _log.warning("context_l1_refresh_failed", exc_info=True)
+            # The steps below derive from assignments, which change on every
+            # run that writes chunks (per-flush assign and the drain), so they
+            # run whenever these collections HAVE a taxonomy, not only when
+            # this run discovered one. Gating them on total_topics made them
+            # dead for every established collection once nexus-vgtff taught
+            # discovery to return 0 when topics exist: links and the L1
+            # cache went stale after a collection's first run. Projection
+            # stays above: it re-reads every embedding, and the engine's
+            # cross pass already projects each new chunk as it is written.
+            if total_topics or _any_collection_has_topics(
+                db.taxonomy, collections, collections_without_topics,
+            ):
+                _refresh_derived_taxonomy(db, collections, repo_path, t2_index_write)
     except Exception:  # noqa: BLE001 — boundary catch wrapping the whole post-processing chain; failure logged and never crashes the index command
         _log.debug("taxonomy_discover_failed", exc_info=True)
+
+
+def _any_collection_has_topics(
+    taxonomy: Any, collections: list[str], without_topics: set[str] | None = None,
+) -> bool:
+    """True when any of *collections* already has topics.
+
+    *without_topics* is the caller's own _collections_without_topics result
+    for the same run, when it has one (code review round 3: nx index repo
+    probed moments earlier). A collection missing from it has topics, so the
+    answer needs no second probe. It cannot answer False, though: that
+    helper returns every collection on a probe error, so "all without
+    topics" is ambiguous and falls through to a fresh probe here.
+
+    A failed probe answers True: the derived steps are idempotent and
+    best-effort, so running them needlessly costs little, while skipping them
+    wrongly is the silent staleness this probe exists to end.
+    """
+    if without_topics is not None and any(c not in without_topics for c in collections):
+        return True
+    for col_name in collections:
+        try:
+            if taxonomy.get_topics_for_collection(col_name):
+                return True
+        except Exception:  # noqa: BLE001 — probe failure errs toward running the idempotent steps
+            _log.debug("taxonomy_topics_probe_failed", collection=col_name, exc_info=True)
+            return True
+    return False
+
+
+def _refresh_derived_taxonomy(
+    db: Any, collections: list[str], repo_path: Path | None, t2_index_write: Callable[..., Any],
+) -> None:
+    """Co-occurrence links, catalog topic links and the L1 context cache."""
+    # Co-occurrence topic links from projections (RDR-075 SC-5)
+    # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
+    try:
+        cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
+        if cooc:
+            _log.info("cooccurrence_links_generated", count=cooc)
+    except Exception:  # noqa: BLE001 — best-effort co-occurrence link generation; failure logged and chain continues
+        _log.debug("cooccurrence_links_failed", exc_info=True)
+
+    # Auto-populate topic links if catalog available
+    # compute_topic_links routes upsert_topic_links internally.
+    try:
+        from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+        cat = _try_load_catalog()
+        if cat:
+            for col_name in collections:
+                compute_topic_links(
+                    db.taxonomy, cat, collection=col_name, persist=True,
+                )
+    except Exception:  # noqa: BLE001 — best-effort topic-link population; non-fatal trailing enrichment step in a guarded chain
+        pass  # Non-fatal
+    # Refresh L1 context cache
+    if repo_path is not None:
+        try:
+            from nexus.context import generate_context_l1  # noqa: PLC0415 — deliberate function-local import (rare branch: L1 refresh only when repo_path supplied)
+            generate_context_l1(db.taxonomy, repo_path=repo_path)
+        except Exception:  # noqa: BLE001 — best-effort L1 context-cache refresh; non-fatal trailing enrichment step in a guarded chain
+            # nexus-azss4: a bare `pass` here hid the service-mode
+            # raw-handle break for weeks (SessionStart Knowledge
+            # Map permanently stale). Still non-fatal — but LOUD.
+            _log.warning("context_l1_refresh_failed", exc_info=True)
 
 
 def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str = "") -> str:

@@ -2127,6 +2127,44 @@ def _run_check_mineru() -> None:
 #                                          | never a health failure; exit 1
 #                                          | only when the tenant cannot be
 #                                          | read (nexus-ger23).
+#   --check-embeddings            | NO        | one embedding call per sampled
+#                                          | chunk per collection: billed
+#                                          | Voyage work and minutes of
+#                                          | wall time on a large tenant
+#                                          | (nexus-f9duo).
+#   --check-assignments           | NO        | no billed calls (one route
+#                                          | call per sampled chunk plus one
+#                                          | live foreign-centroid fetch per
+#                                          | collection audited, never
+#                                          | re-embeds), but still opt-in: a
+#                                          | full run does real per-collection
+#                                          | network work (up to `sample`
+#                                          | cross-preview calls plus a
+#                                          | get_foreign fetch each), not the
+#                                          | O(1) round trip the promoted
+#                                          | checks above are. Also a NEW
+#                                          | audit surface (nexus-v4pj4,
+#                                          | substantive-critic follow-on to
+#                                          | nexus-f3yxx) whose false-positive
+#                                          | behavior against a real corpus
+#                                          | is not yet observed; promoting it
+#                                          | before that is a separate,
+#                                          | reviewed decision, not a side
+#                                          | effect of adding the check. Not a
+#                                          | gate on the engine-service-
+#                                          | v0.1.132 LATERAL/HNSW rewrite it
+#                                          | audits — compares the engine's
+#                                          | LIVE cross-preview ANN pick
+#                                          | (POST /v1/taxonomy/assignments/
+#                                          | cross-preview, taxonomy-021, a
+#                                          | read-only twin of the persisting
+#                                          | route built for this bead's
+#                                          | round-2 review) against an exact
+#                                          | Python recompute over the SAME
+#                                          | live foreign-centroid snapshot;
+#                                          | see doctor_assignments.py's
+#                                          | module docstring for the full
+#                                          | round-1/round-2 design history.
 #   --check-wal-retention         | NO        | explicitly "Always exit 0:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
@@ -2190,7 +2228,7 @@ def _run_check_mineru() -> None:
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
-    "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep",
+    "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep", "harness-grant",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -2204,6 +2242,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-mcp-logs", "--check-tier-discipline",
     "--check-storage-boundary", "--check-post-store-hooks",
     "--check-mineru", "--check-wal-retention", "--check-collection-shape",
+    "--check-embeddings", "--check-assignments",
 )
 
 
@@ -2231,6 +2270,7 @@ def _run_supplementary_checks() -> None:
         "fanout-floor": _run_check_fanout_floor,
         "tuple-projection": _run_check_tuple_projection,
         "ghost-sweep": _run_check_ghost_sweep,
+        "harness-grant": _run_check_harness_grant,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -2489,6 +2529,94 @@ def _run_supplementary_checks() -> None:
          "tenant does (exit 1).",
 )
 @click.option(
+    "--check-embeddings",
+    "check_embeddings",
+    is_flag=True,
+    default=False,
+    help="Sample chunks per collection, embed their stored text again with "
+         "the collection's model, and compare with the stored vector "
+         "(nexus-f9duo). Exits 1 when any sampled chunk falls below cosine "
+         "0.99 or any collection could not be probed. Costs one embedding "
+         "call per sampled chunk.",
+)
+@click.option(
+    "--embeddings-sample",
+    "embeddings_sample",
+    type=click.IntRange(min=1, max=300),
+    default=20,
+    show_default=True,
+    help="Chunks sampled per collection by --check-embeddings.",
+)
+@click.option(
+    "--embeddings-collection",
+    "embeddings_collections",
+    multiple=True,
+    help="Restrict --check-embeddings to this collection (repeatable). "
+         "Default: every collection that holds chunks.",
+)
+@click.option(
+    "--embeddings-seed",
+    "embeddings_seed",
+    type=int,
+    default=None,
+    help="Sampling seed for --check-embeddings. Default: today's UTC date "
+         "as YYYYMMDD, printed in the result so a run can be repeated.",
+)
+@click.option(
+    "--check-assignments",
+    "check_assignments",
+    is_flag=True,
+    default=False,
+    help="Sample chunks per collection and compare the engine's LIVE "
+         "cross-collection ('projection') ANN pick (POST /v1/taxonomy/"
+         "assignments/cross-preview, never persisted) against an exact "
+         "Python recompute over the SAME live foreign-centroid snapshot, "
+         "fetched in the same run (nexus-v4pj4: the engine-service-"
+         "v0.1.132 LATERAL/HNSW ANN rewrite measures equal to exact, but "
+         "a future recall drift would be silent). A currently-stored "
+         "assignment, if any, is shown in the report as context only, "
+         "never consulted to decide pass or fail. At the default sample "
+         "of 20, a systemic wrong-pick rate of 10% is caught with ~88% "
+         "probability, 20% with ~99%; a rare, isolated bad pick under 1% "
+         "of a collection's population may need a larger "
+         "--assignments-sample or a different --assignments-seed to land "
+         "in any one run's sample. Exits 1 when any sampled chunk "
+         "disagrees beyond a float-noise tolerance, any collection could "
+         "not be probed, or nothing was compared. A collection with no "
+         "live foreign centroid to project onto is not applicable; a "
+         "sample that turned up no comparable chunk is INCONCLUSIVE; a "
+         "live foreign-centroid snapshot that changed between this "
+         "check's own before/after reads, even after one retry, is "
+         "CHANGED DURING PROBE (not compared, not a disagreement); an "
+         "engine older than this route is not applicable (exit 0) -- none "
+         "of the four counts as a failure alone.",
+)
+@click.option(
+    "--assignments-sample",
+    "assignments_sample",
+    type=click.IntRange(min=1, max=300),
+    default=20,
+    show_default=True,
+    help="Chunks sampled per collection by --check-assignments.",
+)
+@click.option(
+    "--assignments-collection",
+    "assignments_collections",
+    multiple=True,
+    help="Restrict --check-assignments to this collection (repeatable). "
+         "Default: every collection holding chunks (a collection with no "
+         "live foreign centroid to project onto is reported not "
+         "applicable, not skipped silently).",
+)
+@click.option(
+    "--assignments-seed",
+    "assignments_seed",
+    type=int,
+    default=None,
+    help="Sampling seed for --check-assignments. Default: today's UTC "
+         "date as YYYYMMDD, printed in the result so a run can be repeated.",
+)
+@click.option(
     "--check-wal-retention",
     "check_wal_retention",
     is_flag=True,
@@ -2560,6 +2688,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_aspect_queue: bool,
                check_t1: bool,
                check_collection_shape: bool,
+               check_embeddings: bool,
+               embeddings_sample: int,
+               embeddings_collections: tuple[str, ...],
+               embeddings_seed: int | None,
+               check_assignments: bool,
+               assignments_sample: int,
+               assignments_collections: tuple[str, ...],
+               assignments_seed: int | None,
                check_wal_retention: bool,
                check_engine_activity: bool,
                check_index_failures: bool,
@@ -2587,6 +2723,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-aspect-queue": check_aspect_queue,
             "--check-t1": check_t1,
             "--check-collection-shape": check_collection_shape,
+            "--check-embeddings": check_embeddings,
+            "--check-assignments": check_assignments,
             "--check-wal-retention": check_wal_retention,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
@@ -2663,6 +2801,24 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_collection_shape:
         _run_check_collection_shape()
+        return
+
+    if check_embeddings:
+        from nexus.doctor_embeddings import run_check_embeddings  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        run_check_embeddings(
+            sample=embeddings_sample,
+            collections=embeddings_collections,
+            seed=embeddings_seed,
+        )
+        return
+
+    if check_assignments:
+        from nexus.doctor_assignments import run_check_assignments  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        run_check_assignments(
+            sample=assignments_sample,
+            collections=assignments_collections,
+            seed=assignments_seed,
+        )
         return
 
     if check_wal_retention:
@@ -3206,6 +3362,35 @@ def _run_check_ghost_sweep() -> None:
         f"[!] Ghost collections: {ghosts} collection(s) would be reclaimed -- "
         f"run 'nx catalog sweep-ghosts --apply' to reclaim "
         f"(preview: 'nx catalog sweep-ghosts')"
+    )
+
+
+def _run_check_harness_grant() -> None:
+    """Diagnostic: is this process running under the RDR-219 amendment's
+    nx-mcp dispatch grant (nexus-wauo1.35 / .38)?
+
+    Reads ``NX_HARNESS_CLAUDE_OAUTH_TOKEN`` from the current process's own
+    environment -- nothing else, no engine call, no I/O -- so it cannot
+    fail for a reason unrelated to the harness name itself.
+
+    nexus-7zhag doctrine: a NEW doctor row must be not-applicable on a
+    virgin box, never allowlisted in the fresh-install MVV. The harness
+    name is absent on every install that has not deliberately opted into a
+    harness's dispatch grant -- the overwhelming majority, including every
+    fresh install -- so absence reads not-applicable, never red or warn.
+    """
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+
+    from nexus.claude_child_env import HARNESS_OAUTH_TOKEN_ENV_VAR  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if not os.environ.get(HARNESS_OAUTH_TOKEN_ENV_VAR):
+        click.echo("[ ] Harness dispatch grant: not applicable (NX_HARNESS_CLAUDE_OAUTH_TOKEN absent)")
+        return
+    click.echo(
+        "[!] Harness dispatch grant: NX_HARNESS_CLAUDE_OAUTH_TOKEN is present -- "
+        "LLM dispatch (claude -p children) authenticates via the harness "
+        "grant, not the operator's own login (RDR-219). Expected only "
+        "under a harness launched through tests/e2e/lib/claude_mcp_grant.sh."
     )
 
 

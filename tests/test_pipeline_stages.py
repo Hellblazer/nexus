@@ -1006,6 +1006,60 @@ class TestPipelineIndexPdf:
         else:
             pytest.fail("metadata enrichment post-pass not called")
 
+    def test_metadata_enrichment_postpass_clears_stale_quality_gate_override(self, db) -> None:
+        """nexus-w94eo: the engine now MERGES metadata rather than replacing
+        it, so a healthy re-index (this run's extraction did NOT trip the
+        quality gate) must actively request removal of a stale
+        ``quality_gate_overridden`` from an earlier degraded run — omitting
+        the key from this write's dict is no longer enough to clear it."""
+        fr = _er(1)
+        fr.metadata["docling_title"] = "My Paper Title"
+        t3, _ = _run_with_col(
+            db,
+            col_get_return={"ids": ["abc_0"], "metadatas": [{"content_hash": "abc123"}]},
+            fake_result=fr,
+            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
+            pdf_path="/paper.pdf")
+        for call in t3.update_chunks.call_args_list:
+            args, kwargs = call
+            if args and args[0] == "docs__test" and any(
+                m.get("title") == "My Paper Title" for m in args[2]
+            ):
+                assert kwargs.get("delete_keys") == ["quality_gate_overridden"], (
+                    f"a healthy re-index must clear a stale override; got kwargs={kwargs!r}"
+                )
+                assert "quality_gate_overridden" not in args[2][0], (
+                    "a healthy run must not itself stamp quality_gate_overridden"
+                )
+                break
+        else:
+            pytest.fail("metadata enrichment post-pass not called")
+
+    def test_metadata_enrichment_postpass_sets_quality_gate_override_no_delete(self, db) -> None:
+        """The inverse of the test above: when THIS run's extraction DID trip
+        the quality gate, the post-pass sets the key (not delete_keys)."""
+        fr = _er(1)
+        fr.metadata["docling_title"] = "My Paper Title"
+        fr.metadata["quality_gate_overridden"] = True
+        t3, _ = _run_with_col(
+            db,
+            col_get_return={"ids": ["abc_0"], "metadatas": [{"content_hash": "abc123"}]},
+            fake_result=fr,
+            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
+            pdf_path="/paper.pdf")
+        for call in t3.update_chunks.call_args_list:
+            args, kwargs = call
+            if args and args[0] == "docs__test" and any(
+                m.get("title") == "My Paper Title" for m in args[2]
+            ):
+                assert args[2][0]["quality_gate_overridden"] is True
+                assert kwargs.get("delete_keys") == [], (
+                    f"a degraded run must not request its own key's deletion; got kwargs={kwargs!r}"
+                )
+                break
+        else:
+            pytest.fail("metadata enrichment post-pass not called")
+
     def test_stale_chunk_pruning_post_pass_removed_as_dead_code(self, db) -> None:
         """nexus-tbkk1: the stale-chunk-pruning post-pass (formerly
         ``_prune_stale_chunks``, called from ``pipeline_index_pdf`` after
@@ -1366,9 +1420,11 @@ _REQUIRED_META = {
     "content_hash", "chunk_text_hash",
     "chunk_start_char", "chunk_end_char", "line_start", "line_end", "page_number",
     # Display / routing — RDR-101 Phase 5c (nexus-o6aa.13) dropped
-    # ``store_type``, ``corpus``, ``git_meta``. ``title`` kept (audit
-    # finding: find_ids_by_title is load-bearing).
-    "title", "source_author", "section_title", "section_type", "tags", "category",
+    # ``store_type``, ``corpus``, ``git_meta``. ``title``/``source_author``
+    # are NOT required here (nexus-w94eo): both are unknown at streaming
+    # chunk-time and are omitted rather than stamped as "" placeholders —
+    # see test_streaming_metadata_omits_title_and_source_author below.
+    "section_title", "section_type", "tags", "category",
     "content_type", "embedding_model",
     # Lifecycle
     "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
@@ -1389,6 +1445,45 @@ def test_streaming_metadata_has_all_batch_fields(db, done_event) -> None:
                      corpus="mycorpus", target_model="voyage-context-3")
     meta = json.loads(db.read_ready_chunks("h1")[0]["metadata_json"])
     assert _REQUIRED_META - set(meta.keys()) == set()
+    # nexus-w94eo: title/source_author must be ABSENT, not present as "".
+    # See test_streaming_metadata_omits_title_and_source_author for the
+    # dedicated regression test and the full rationale.
+    assert "title" not in meta
+    assert "source_author" not in meta
+
+
+def test_streaming_metadata_omits_title_and_source_author(db, done_event) -> None:
+    """nexus-w94eo: the streaming uploader's chunk-time stub must not stamp
+    ``title``/``source_author`` as empty-string placeholders.
+
+    Diagnosis (T2 nexus/nexus-w94eo-diagnosis): the engine used to REPLACE a
+    chunk's metadata wholesale on every write. A late-committing duplicate of
+    THIS chunk-time write (the gateway-504-retry shape the diagnosis traced)
+    landing after the post-extraction enrichment post-pass would revert
+    title/extraction_method back to this stub's payload. The engine now
+    MERGES metadata instead (this bead's other half, in
+    ``PgVectorRepository``), so a stale duplicate can no longer overwrite a
+    key it doesn't carry — but that only helps for keys this stub never
+    sends. An explicit ``title=""`` here would still be a real value the
+    merge could re-assert. Omitting the key entirely closes the gap.
+    """
+    db.create_pipeline("h1", "/doc.pdf", "docs__test")
+    db.write_page("h1", 0, "Some text here.", metadata={"page_number": 1, "text_length": 15})
+    db.update_progress("h1", total_pages=1, pages_extracted=1)
+    with patch(_P_CHK) as MC:
+        MC.return_value.chunk.return_value = _tc(
+            ("chunk text", 0, {"page_number": 1, "chunk_type": "text",
+                               "chunk_start_char": 0, "chunk_end_char": 10}))
+        chunker_loop("h1", db, threading.Event(), embed_fn=_embed,
+                     extraction_done=done_event, pdf_path="/doc.pdf",
+                     corpus="mycorpus", target_model="voyage-context-3")
+    meta = json.loads(db.read_ready_chunks("h1")[0]["metadata_json"])
+    assert "title" not in meta, (
+        f"streaming chunk-time metadata must omit title, not stamp it \"\"; got {meta!r}"
+    )
+    assert "source_author" not in meta, (
+        f"streaming chunk-time metadata must omit source_author, not stamp it \"\"; got {meta!r}"
+    )
 
 
 @pytest.mark.parametrize("get_exc,upd_exc,expected", [

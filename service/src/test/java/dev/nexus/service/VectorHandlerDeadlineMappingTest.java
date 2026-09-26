@@ -166,10 +166,37 @@ class VectorHandlerDeadlineMappingTest {
             .contains("rdln-simulated-deadline-exceeded");
         assertThat(((Number) body.get("retry_after_seconds")).longValue())
             .isEqualTo(SIMULATED_RETRY_AFTER_SECONDS);
+        // nexus-qajw7: the default outcome is aborted, which the client does not widen for.
+        assertThat(resp.headers().firstValue("X-Nexus-Deadline-Outcome")).contains("aborted");
+        assertThat(body.get("deadline_outcome")).isEqualTo("aborted");
+    }
+
+    @Test
+    void anAdmissionRefusalSaysSoOnTheWire() throws Exception {
+        // nexus-qajw7: a refusal (nothing embedded) is marked so the client can keep the
+        // wider retry budget for it; an abort (embedded work discarded) is not.
+        ThrowingEmbedder.outcome = RequestDeadlineExceededException.Outcome.REFUSED;
+        try {
+            var resp = post("/v1/vectors/upsert-chunks", Map.of(
+                "collection", COLLECTION,
+                "ids",        List.of(Chash.ofText("rdln-c2").toHex()),
+                "documents",  List.of("chunk refused before any embedding"),
+                "metadatas",  List.of(Map.of())));
+            assertThat(resp.statusCode()).isEqualTo(503);
+            assertThat(resp.headers().firstValue("X-Nexus-Deadline-Outcome")).contains("refused");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
+            assertThat(body.get("deadline_outcome")).isEqualTo("refused");
+        } finally {
+            ThrowingEmbedder.outcome = RequestDeadlineExceededException.Outcome.ABORTED;
+        }
     }
 
     /** Always throws the typed exception, simulating an expired write-path deadline. */
     private static final class ThrowingEmbedder implements Embedder {
+        static volatile RequestDeadlineExceededException.Outcome outcome =
+            RequestDeadlineExceededException.Outcome.ABORTED;
+
         @Override
         public String modelToken() {
             return "voyage-code-3";
@@ -188,7 +215,7 @@ class VectorHandlerDeadlineMappingTest {
         private static RequestDeadlineExceededException simulated() {
             return new RequestDeadlineExceededException(
                 "rdln-simulated-deadline-exceeded: write-path deadline elapsed mid-embed",
-                SIMULATED_RETRY_AFTER_SECONDS);
+                SIMULATED_RETRY_AFTER_SECONDS, outcome);
         }
     }
 }

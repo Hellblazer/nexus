@@ -130,7 +130,9 @@ public final class AdmissionControlledEmbedder implements Embedder {
                         "embed deadline exceeded before delegate call (" + texts.size()
                                 + " texts, " + admissionWaitMs + "ms admission wait, "
                                 + pastDeadlineMs + "ms past deadline)",
-                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS,
+                        // Nothing was embedded: the delegate never ran.
+                        RequestDeadlineExceededException.Outcome.REFUSED);
             }
             return delegate.embedWithUsage(texts);
         } finally {

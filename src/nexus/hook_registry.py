@@ -310,6 +310,13 @@ class HookRegistry:
                     hook_name=hook_name,
                     error=str(exc),
                 )
+                _record_manifest_hook_batch_exception(
+                    hook,
+                    doc_ids=doc_ids,
+                    collection=collection,
+                    metadatas=metadatas,
+                    catalog_doc_id=catalog_doc_id,
+                )
             finally:
                 if hook_timings is not None:
                     hook_timings[hook_name] = (
@@ -620,6 +627,102 @@ def _record_batch_hook_failure(
         collection=collection, hook_name=hook_name, error=error,
         chain="batch", batch_doc_ids=json.dumps(doc_ids), is_batch=True,
     )
+
+
+def _record_manifest_hook_batch_exception(
+    hook: Callable,
+    *,
+    doc_ids: list[str],
+    collection: str,
+    metadatas: "list[dict] | None",
+    catalog_doc_id: str,
+) -> None:
+    """RDR-192 S3b (nexus-wbfpw.29): route an EXCEPTION raised by the
+    manifest hook into the same per-document collectors its own
+    short-circuit path (GH #1397 / nexus-94fxl,
+    ``mcp_infra._record_manifest_identity_drop``) already feeds, so
+    ``nx index``'s existing exit-code check (nexus-7lw6a) catches this
+    failure mode too — without a parallel signal path.
+
+    Before this, an exception raised BY ``manifest_write_batch_hook``
+    (as opposed to a write failure the hook *detects and reports
+    itself*) was caught generically by :meth:`HookRegistry.fire_batch`
+    above exactly like any other hook's failure: logged and persisted to
+    T2 ``hook_failures``, never propagated. The just-stored chunks then
+    land with no ``document_chunks`` manifest row — invisible to
+    catalog-aware search and, post RDR-192 Phase 3, reapable — while the
+    run still reports "Done." and exits 0.
+
+    No-op for every OTHER hook (identity check against the production
+    ``manifest_write_batch_hook`` callable, imported lazily to avoid a
+    circular import — same pattern as :func:`install_default_hooks`
+    above): other hooks stay best-effort and must not change the exit
+    code.
+
+    Document identity is derived with the SAME rule
+    ``manifest_write_batch_hook`` itself uses to group chunks by
+    document (``mcp_infra.py``'s ``by_doc`` construction): the batch's
+    own *catalog_doc_id* wins when present, else each chunk's legacy
+    per-metadata ``doc_id``. When neither yields anything (the batch
+    carried no document identity at all — the same shape nexus-94fxl's
+    short-circuit closes, just reached via an exception instead of an
+    early return), the batch is recorded as an identity drop instead of
+    a write failure, so it is never silently lost either way.
+
+    nexus-wbfpw.29 round 2 (code-review Critical, and round 2 residual):
+    this whole body — INCLUDING the identity-check import itself, not just
+    the logic after it — is wrapped in its own try/except. It runs INSIDE
+    ``fire_batch``'s own ``except Exception`` block, after the ORIGINAL
+    hook already failed — any exception escaping here (e.g. a malformed,
+    non-dict metadata entry such as ``metadatas=[None]``, which used to
+    raise ``AttributeError`` out of ``meta.get(...)``; or, in principle,
+    the identity-check import itself, however unlikely a live import to
+    fail once ``nexus.mcp_infra`` is already loaded and cached) would
+    abort the ``for hook in self._batch:`` loop and propagate out of
+    ``fire_batch`` entirely, breaking the class's own per-hook failure
+    isolation contract: every hook registered AFTER the manifest hook
+    would silently never fire for that batch. Best-effort by construction
+    — this helper only ever ADDS a signal on top of the hook's own
+    failure; it must never make that failure worse.
+    """
+    try:
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import (mirrors install_default_hooks above)
+            _record_manifest_identity_drop,
+            _record_manifest_write_failure,
+            manifest_write_batch_hook,
+        )
+
+        if hook is not manifest_write_batch_hook:
+            return
+
+        # nexus-wbfpw.29 round 6: group by doc_id AND collect the chash
+        # this failing write was trying to put in each doc's manifest
+        # (the same ``chunk_text_hash`` field ``manifest_write_batch_hook``
+        # itself reads) — feeds the post-run verification that decides
+        # whether self-heal actually closed the gap this exception left.
+        chash_by_doc: dict[str, list[str]] = {}
+        for meta in (metadatas or []):
+            doc_id = catalog_doc_id
+            if not doc_id and isinstance(meta, dict):
+                doc_id = meta.get("doc_id", "")
+            if not doc_id:
+                continue
+            # Unfiltered: a row with no chash makes the recorder mark the
+            # doc UNKNOWN rather than confirm against a partial expectation.
+            chash_by_doc.setdefault(doc_id, []).append(
+                meta.get("chunk_text_hash", "") if isinstance(meta, dict) else ""
+            )
+        if not chash_by_doc:
+            _record_manifest_identity_drop(collection, len(doc_ids))
+            return
+        for doc_id in sorted(chash_by_doc):
+            _record_manifest_write_failure(doc_id, chash_by_doc[doc_id])
+    except Exception:  # noqa: BLE001 — this helper must never crash fire_batch's own exception handler (nexus-wbfpw.29 round 2)
+        _log.warning(
+            "manifest_hook_failure_routing_failed",
+            hook=getattr(hook, "__name__", "?"),
+            exc_info=True,
+        )
 
 
 def record_catalog_hook_failure(

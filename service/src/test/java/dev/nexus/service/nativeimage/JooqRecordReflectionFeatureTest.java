@@ -206,7 +206,25 @@ class JooqRecordReflectionFeatureTest {
     // added ONE table, nexus.tuple_deliveries (the per-subscriber board
     // announce stamp), one generated Record type (TupleDeliveriesRecord).
     // No function, no column change elsewhere, so this is the whole delta.
-    private static final int EXPECTED_RECORD_TYPES = 98;
+    // 98 -> 101: nexus-iygza (indexing-brittleness P0.1),
+    // taxonomy-019-unassigned-chashes.xml added THREE RETURNS TABLE
+    // functions, nexus.taxonomy_unassigned_chashes_384/768/1024, three
+    // generated Record types (TaxonomyUnassignedChashes_384/768/1024Record)
+    // -- same shape as the taxonomy_ann_query_<dim> RETURNS TABLE functions
+    // above, +3. nexus-f3yxx's sibling taxonomy-018-assign-cross-lateral-
+    // hnsw.xml is CREATE OR REPLACE on the pre-existing
+    // assign_from_chashes_<dim> functions (same signature, same Record
+    // types), contributing zero to this delta.
+    // 101 -> 104: nexus-v4pj4 (round-2 review decision), taxonomy-021-
+    // cross-preview.xml added THREE RETURNS TABLE functions, nexus.
+    // cross_preview_384/768/1024, three generated Record types
+    // (CrossPreview_384/768/1024Record) -- same shape as the
+    // taxonomy_unassigned_chashes_<dim> RETURNS TABLE functions above, +3.
+    // taxonomy-020-pin-cross-lateral-hnsw-plan.xml (cherry-picked from
+    // feature/nexus-swam7-pin-cross-hnsw ahead of this bead) is likewise
+    // CREATE OR REPLACE on the pre-existing assign_from_chashes_<dim>
+    // functions, contributing zero.
+    private static final int EXPECTED_RECORD_TYPES = 104;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

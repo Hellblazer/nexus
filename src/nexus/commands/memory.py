@@ -574,10 +574,14 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # Without this, the promoted entry lands in T3 with no catalog
         # identity — same regression class as nexus-zq79 / nexus-lf8f.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
+            ManifestVerifyUncertainError,
             catalog_store_hook_tracked,
+            describe_rollback_outcome,
+            put_note_pieces,
             rollback_minted_catalog_entry,
+            rollback_uncataloged_chunk_write,
             single_chunk_manifest_metadata,
-            store_put_manifest_direct,
+            store_put_manifest_direct_with_recovery,
         )
         # single_chunk_manifest_metadata mirrors T3Database.put's natural-id
         # derivation (full sha256 hex per RDR-180) AND yields the manifest
@@ -637,10 +641,45 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # here) so the remaining post-store consumers still fire; the
         # command then fails loudly instead of echoing a bare "Promoted:".
         manifest_error = ""
+        manifest_uncertain = ""
         if catalog_doc_id:
+            # RDR-192 Step 3a fix-round 2, Decision (b): the chunk this
+            # call just wrote can be deleted out from under it by a
+            # CONCURRENT rollback before this manifest write's own INSERT
+            # lands (the opposite-ordering race from fix-round 1's
+            # Significant 3) — store_put_manifest_direct_with_recovery
+            # re-puts it (single-chunk producer, so there is exactly one
+            # possible missing chash) and retries once; every other
+            # outcome reaches this try/except unchanged.
+            # put_note_pieces with one piece is exactly the t3.put above;
+            # the post-store chains fire once, below, after the manifest
+            # write (recovered or not) — same as the other three producers'
+            # repiece callbacks.
+            def _repiece_promote(chash: str) -> None:
+                put_note_pieces(
+                    t3, collection, [entry["content"]],
+                    title=entry["title"], tags=merged_tags,
+                    ttl_days=ttl_days, catalog_doc_id=catalog_doc_id,
+                )
+
             try:
-                store_put_manifest_direct(
-                    catalog_doc_id, manifest_metadatas, collection=collection)
+                store_put_manifest_direct_with_recovery(
+                    catalog_doc_id, manifest_metadatas, collection=collection,
+                    repiece=_repiece_promote,
+                )
+            except ManifestVerifyUncertainError as manifest_exc:
+                manifest_uncertain = str(manifest_exc)
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, manifest_uncertain)
+                import structlog  # noqa: PLC0415 — branch-local logging
+                structlog.get_logger(__name__).warning(
+                    "store_put_manifest_verify_uncertain",
+                    doc_id=doc_id,
+                    catalog_doc_id=catalog_doc_id,
+                    collection=collection,
+                    error=manifest_uncertain[:300],
+                    exc_info=True,
+                )
             except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit ClickException below
                 manifest_error = str(manifest_exc)
                 # nexus-cotmr: the vector put already succeeded (t3.put
@@ -659,6 +698,45 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                     error=manifest_error[:300],
                     exc_info=True,
                 )
+
+        # RDR-192 Step 3a fix-round 1 (critic Critical 1): verify infra
+        # failed — outcome unknown, must not roll back (the write may
+        # have landed). Deliberately BEFORE the --remove branch too.
+        if manifest_uncertain:
+            raise click.ClickException(
+                f"could not confirm the catalog manifest landed for "
+                f"{doc_id} in {collection}: {manifest_uncertain}. Nothing "
+                f"was rolled back — the write may already have "
+                f"succeeded; check before retrying (a retry is an "
+                f"idempotent re-write either way)."
+            )
+
+        # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26:
+        # rollback, not a marker column): a blank catalog_doc_id
+        # (registration failed above) or a manifest write CONFIRMED not
+        # to have landed each leave the chunk t3.put just wrote with no
+        # manifest owner — the census's no-owner / legacy-unmanifested
+        # shape. Delete it (only if no other live document's manifest
+        # references it) and fail loud, deliberately BEFORE the --remove
+        # branch and before any post-store hook chain ever sees this
+        # chunk — never delete the T2 source of a promotion whose
+        # catalog leg failed.
+        if not catalog_doc_id or manifest_error:
+            reason = manifest_error or "catalog registration failed"
+            # fix-round 1 Important (both reviewers): also roll back the
+            # ghost catalog row when THIS call minted it, mirroring the
+            # sibling t3.put-failure branch above exactly.
+            if catalog_doc_id and catalog_row_minted:
+                rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=reason,
+                )
+            outcome = rollback_uncataloged_chunk_write(
+                t3, [doc_id], collection=collection, catalog_doc_id=catalog_doc_id,
+            )
+            raise click.ClickException(
+                f"could not catalog promoted entry in {collection}: "
+                f"{reason}. {describe_rollback_outcome(outcome)}"
+            )
 
         # nexus-9099: fire post-store chains so the promoted T3 row
         # reaches chash_index / taxonomy / aspect queue. RDR-095
@@ -682,15 +760,9 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
 
-        if manifest_error:
-            # Deliberately BEFORE the --remove branch: never delete the
-            # T2 source of a promotion whose catalog leg failed.
-            raise click.ClickException(
-                f"promoted to T3 ({doc_id} in {collection}) but NOT "
-                f"cataloged: {manifest_error}. Catalog row {catalog_doc_id} "
-                f"may show chunk_count=0; retry the promote with the same "
-                f"entry (idempotent dedup makes retry safe)."
-            )
+        # RDR-192 Step 3a: a manifest failure already raised above (with
+        # the chunk rolled back) before any of this post-store work ran
+        # — manifest_error is always empty here.
 
         if remove:
             _delete_with_taxonomy_cascade(

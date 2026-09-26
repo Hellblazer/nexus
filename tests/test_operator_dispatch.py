@@ -1645,6 +1645,71 @@ class TestBuildDispatchEnvStripsT1Session:
         assert env.get("NX_SESSION_ID") == "live-parent-session"
 
 
+# ── RDR-219 amendment (nexus-wauo1.35 / .38): the nx-mcp dispatch grant ────
+#
+# _build_dispatch_env is one of the two launch sites that must route a
+# harness's NX_HARNESS_CLAUDE_OAUTH_TOKEN into the child's own
+# CLAUDE_CODE_OAUTH_TOKEN through the shared nexus.claude_child_env helper.
+# Fake token values only -- see the module CLAUDE.md TOKEN RULE.
+
+class TestBuildDispatchEnvHarnessOauthGrant:
+    def test_no_harness_name_env_matches_pre_amendment_shape(self, monkeypatch) -> None:
+        """Production unchanged: with no harness name, neither the harness
+        name nor CLAUDE_CODE_OAUTH_TOKEN appears in the child's env."""
+        monkeypatch.delenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        env = _build_dispatch_env()
+
+        assert "NX_HARNESS_CLAUDE_OAUTH_TOKEN" not in env
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+    def test_harness_name_grants_claude_token_without_touching_os_environ(
+        self, monkeypatch
+    ) -> None:
+        import os
+
+        monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "fake-harness-token")
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        env = _build_dispatch_env()
+
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "fake-harness-token"
+        assert env["NX_HARNESS_CLAUDE_OAUTH_TOKEN"] == "fake-harness-token"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+
+    def test_existing_claude_token_wins(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_HARNESS_CLAUDE_OAUTH_TOKEN", "fake-harness-token")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fake-existing-token")
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        env = _build_dispatch_env()
+
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "fake-existing-token"
+
+    def test_routes_through_the_shared_helper(self, monkeypatch) -> None:
+        """Route-through proof (fails if _build_dispatch_env stops calling
+        apply_harness_oauth_grant)."""
+        import nexus.claude_child_env as child_env
+
+        calls: list[dict] = []
+        original = child_env.apply_harness_oauth_grant
+
+        def _spy(base):
+            calls.append(dict(base))
+            return original(base)
+
+        monkeypatch.setattr(child_env, "apply_harness_oauth_grant", _spy)
+
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        _build_dispatch_env()
+
+        assert calls, "_build_dispatch_env must call apply_harness_oauth_grant"
+
+
 # ── Minted-session lifecycle (nexus-bjltu Significant #1) ──────────────────
 #
 # operator dispatch is the high-volume default path; a per-dispatch mint

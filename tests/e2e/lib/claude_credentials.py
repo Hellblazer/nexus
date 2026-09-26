@@ -1,180 +1,533 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Shared Claude Code OAuth credential picker (nexus-galkv.19).
+"""Claude Code automation-token exec helper (nexus-galkv.19 archive; RDR-219 P1.1).
 
-THE DEFECT THIS CLOSES. Three scripts fetched the Claude Code OAuth
-credential with a bare ``security find-generic-password -s 'Claude
-Code-credentials' -w`` (no ``-a``): ``tests/e2e/auth-login.sh`` (which then
-WRITES the result to ``tests/e2e/.claude-auth/.credentials.json``), and both
-the ``--fullstack`` and ``--shakeout-e2e`` legs of
-``tests/e2e/migration-rehearsal/run.sh`` (which mount it into a container).
-More than one keychain item can carry that service name — on this box an
-``acct="unknown"`` item is an empty husk (``accessToken ""``,
-``refreshToken ""``, ``expiresAt 0``) sitting alongside the live
-``acct=<login user>`` item the CLI actually refreshes — and the bare,
-unscoped lookup returns an ARBITRARY match, which on 2026-09-15 was the
-husk: ``auth-login.sh`` overwrote its own snapshot with it and interactive
-Claude Code showed "Not logged in", while ``claude -p`` failed with "OAuth
-session expired and could not be refreshed".
-
-``tests/cc-validation/runner.sh``'s ``_cred_tool`` (nexus-qs1g6, 2026-08-28;
-see ``tests/cc-validation/README.md`` § "Auth" /
-"More than one keychain item carries the service name") already solved
-this by choosing the credential by CONTENT rather than trusting the first
-match: enumerate every account under the service (attribute-only
-``security dump-keychain``, no secret read, no unlock prompt), fetch each
-with ``-a``, reject any item that carries no usable token, and take the
-freshest survivor. That fix was never shared with the two callers above —
-this module is the one shared home, so a fourth caller finds it here too
-instead of re-deriving it a third time.
+HISTORY. This module originally picked the operator's interactive-login
+OAuth credential by CONTENT across every keychain item under its service,
+because more than one such item could exist and a bare, unscoped lookup
+returned an arbitrary match — on 2026-09-15 that arbitrary match was an
+empty husk, and both ``tests/e2e/auth-login.sh`` and
+``tests/e2e/migration-rehearsal/run.sh`` broke from it (nexus-galkv.19,
+nexus-qs1g6). RDR-219 replaced that design outright: harnesses now
+authenticate under a dedicated automation identity, never the operator's
+interactive login, so nothing here reads that item anymore. The
+``pick``/``check FILE`` modes that did the old picking were removed once
+every caller had migrated to ``run`` (nexus-wauo1.18) — see git history
+before this bead if the old mechanics are ever needed again.
 
 Modes (argv[1]):
-  pick        -- print the freshest usable keychain credential JSON on
-                 stdout, exit 0. Exit 1 with a reason on stderr if no
-                 keychain item under the service is usable (or `security`
-                 is unavailable — non-macOS, missing binary).
-  check FILE  -- exit 0 iff FILE holds JSON that `verdict()` below judges
-                 usable. Exit 1 with a reason on stderr otherwise. Never
-                 writes anything.
+  run [--remote HOST [--remote-shell ENTRY]] -- <command> [args...]
+                 (RDR-219 P1.1.) Reads the harness's OWN automation token
+                 from the keychain item ``nexus-automation-oauth-token``
+                 (account ``$USER`` — never the operator's interactive
+                 login) and execs
+                 <command> with ``CLAUDE_CODE_OAUTH_TOKEN`` set in its
+                 environment. Exit non-zero naming ``claude setup-token``
+                 and the keychain item if the token is absent or expired;
+                 the child is never started in that case. Prints nothing
+                 else (except the single ANTHROPIC_API_KEY warning line
+                 below). The child also gets ``ANTHROPIC_MODEL=haiku`` and
+                 ``CLAUDE_CODE_SUBAGENT_MODEL=haiku`` unless the caller set
+                 them (``HARNESS_MODEL_DEFAULTS``), on local, docker and
+                 --remote runs alike, since Claude Code's default model is
+                 Opus.
 
-Diagnostic ``[auth] ...`` lines go to stderr only; stdout carries the
-credential JSON (mode ``pick``) and nothing else, so a caller can safely
-capture it via command substitution without capturing diagnostics too, and
-a credential is never accidentally echoed into a log via stderr.
+                 With --remote, THIS HELPER's own remote side reads the
+                 token (RDR-219 Approach rule 2, as written: "the helper's
+                 own remote side reads the token from stdin into the
+                 environment it then execs" — a caller-written reader was
+                 tried in an earlier round of this bead and rejected in
+                 review for not matching that sentence). ``--remote-shell
+                 ENTRY`` names the remote shell invocation to run over ssh
+                 (default ``bash -s --``); the ssh remote command is
+                 ``["ssh", HOST] + shlex.split(ENTRY) + <command>`` — HOST,
+                 ENTRY's tokens and <command> only, never the token, so
+                 nothing token-shaped is ever on ssh's own argv or in the
+                 local ssh process's environment. What travels on the ssh
+                 channel's STDIN is a small, fixed, vetted POSIX reader
+                 (never echoed: no ``set -x``, no printing the variable)
+                 with the token spliced in as data right after the
+                 reader's own ``read`` line — the same "script read
+                 incrementally from a pipe, data follows inline"
+                 technique that makes ``curl url | bash -s -- args``
+                 installers work: a non-interactive shell fed its own
+                 script via ``-s`` on a pipe reads that pipe ONE COMMAND
+                 AT A TIME, so when the reader's ``read`` builtin runs
+                 mid-script, it consumes the very next unread bytes on
+                 that SAME stream — which are the token line the helper
+                 placed there, not more script text. The remaining reader
+                 lines (``export ...; exec "$@"``) are what the shell
+                 parses AFTER that read returns, and the token is fully
+                 consumed by the read itself, so the exec'd command's own
+                 stdin inherits nothing token-shaped. The stdin payload,
+                 verbatim:
 
-`verdict()` and `pick_usable_credential()` are importable directly for unit
-tests — see ``tests/test_claude_credentials.py``.
+                     IFS= read -r CLAUDE_CODE_OAUTH_TOKEN
+                     <token>
+                     export CLAUDE_CODE_OAUTH_TOKEN
+                     exec "$@"
+
+                 The remote shell entry must be something that (a) reads
+                 ITS OWN script from stdin and (b) exposes <command>'s
+                 argv as ``"$@"`` inside that script — ``bash -s --
+                 <command...>`` and ``sh -s -- <command...>`` both do.
+                 qwentescence's ssh endpoint is PowerShell, not a POSIX
+                 shell, so a bare default cannot reach it; the RDR-219
+                 Phase 0 spike's own qwentescence shape
+                 (T2 ``nexus_rdr/219-spike-script``) is the worked
+                 example: ``--remote-shell 'wsl -d Ubuntu -u nexus --exec
+                 /bin/bash -s --'``. LIVE-VERIFIED 2026-09-25 against the
+                 real host with a fake token only
+                 (T2 ``nexus_rdr/219-review-fix-round-2``): the mechanism
+                 works end to end through the real PowerShell endpoint —
+                 but <command> ITSELF must stay free of shell
+                 metacharacters (``;``, ``[``, ``]``, embedded quotes).
+                 PowerShell re-parses the WHOLE ssh-assembled command line
+                 (--remote-shell's tokens plus <command>) as its OWN
+                 script BEFORE wsl.exe ever runs, so e.g. ``bash -c "if [
+                 -n \"$X\" ]; then ...; fi"`` breaks (PowerShell tries to
+                 execute the embedded ``;``/``[`` as its own syntax); a
+                 bare program invocation (``claude --dangerously-...``)
+                 or a reference to an ALREADY-STAGED script by its bare
+                 path both work cleanly. This is exactly why the Phase 0
+                 spike staged ``wsl-run.sh`` on disk first and invoked it
+                 by path, rather than inlining its body on the ssh
+                 command line — the STAGING is a separate, ordinary ssh
+                 call with no token involved, since <command>'s
+                 metacharacter constraint is about ssh/PowerShell command-
+                 line parsing, not about anything on stdin (the token and
+                 the reader script above are unaffected either way).
+                 Also observed: qwentescence's WSL2 ``/tmp`` did not
+                 survive a gap between staging and invoking (the idle
+                 WSL2 VM appears to reset its tmpfs on the next `wsl.exe`
+                 launch) — the spike's own choice of
+                 ``/home/nexus/rdr219-spike`` rather than ``/tmp`` avoids
+                 this; stage-then-invoke in tight succession, or use a
+                 path on the persistent root filesystem.
+
+                 A bare ``docker run`` in <command> gets ``--rm`` and
+                 (when nothing already names ``CLAUDE_CODE_OAUTH_TOKEN``
+                 after ``run``) a bare ``-e CLAUDE_CODE_OAUTH_TOKEN`` (no
+                 ``=value`` — docker reads the value from ITS OWN
+                 environment, which already carries it) forced in when
+                 absent (RDR-219 Phase 0 code review requirement 3, T2
+                 ``nexus_rdr/219-review-p0-code``): a container holding
+                 the token in its environment must not outlive the run,
+                 where ``docker inspect`` could still read it. This only
+                 fires when <command>[0] is literally ``docker`` (or ends
+                 in ``/docker``); a ``docker run`` NESTED inside a shell
+                 string, e.g. ``bash -c "docker run ..."``, is invisible
+                 to this check by construction (<command>[0] is ``bash``,
+                 not ``docker``) — the caller must write both flags
+                 itself in that shape.
+
+                 ``ANTHROPIC_API_KEY``, when present in the caller's own
+                 environment, is left untouched (RDR-219's own harnesses
+                 that need it pass it through) — but Claude Code's
+                 documented authentication precedence puts
+                 ``ANTHROPIC_API_KEY`` above ``CLAUDE_CODE_OAUTH_TOKEN``,
+                 so `run` prints exactly one stderr line naming that the
+                 child bills the API key, not the automation token,
+                 whenever it's present. Locally that is the caller's own
+                 environment. For --remote the check runs on the REMOTE
+                 side, inside the helper's reader, because ssh never
+                 forwards the caller's environment: a local key never
+                 reaches the remote child, and a key set on the remote
+                 host does (the reader prints the same line there; the
+                 local check stays quiet for --remote).
+  status         -- print whether the automation token is present, its
+                 creation date and days to expiry (creation date + 365
+                 days), with a warning line at 30 days or fewer. Never
+                 prints token material — it never asks `security` for the
+                 secret itself, only its attributes. Exit 0 present and
+                 unexpired, 1 absent, 2 expired, 3 present but the
+                 keychain item's creation date could not be parsed (a
+                 distinct code from 0-2: this is a `security` output-shape
+                 problem, not a token-lifecycle state).
+
+Diagnostic ``[auth] ...`` lines go to stderr only. ``run`` and ``status``
+print no credential material on any path, by construction: ``run`` prints
+only a named error (or nothing, on success, before the exec that replaces
+the process), and ``status`` never issues the keychain read (`-w`) that
+would return the secret at all.
 """
 from __future__ import annotations
 
-import json
+import os
 import re
 import subprocess
 import sys
-import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
-SERVICE = "Claude Code-credentials"
+#: RDR-219: the harness's own automation identity, never the operator's
+#: interactive login. Created once with `claude setup-token` and stored
+#: under the invoking user's own account.
+AUTOMATION_SERVICE = "nexus-automation-oauth-token"
+
+#: The environment variable `run` sets for the child process.
+TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
+
+#: Harness sessions run on a low-cost model unless the caller chose one.
+#: Claude Code's own default is Opus, and no harness passed --model (Sam,
+#: 2026-09-26). ANTHROPIC_MODEL sets the session's model and
+#: CLAUDE_CODE_SUBAGENT_MODEL its subagents'; both are inherited by the
+#: `claude -p` processes nx-mcp starts, since Claude Code deletes only the
+#: token from its own environment.
+HARNESS_MODEL_DEFAULTS: dict[str, str] = {
+    "ANTHROPIC_MODEL": "haiku",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku",
+}
+
+#: `claude setup-token` mints a one-year token (RDR-219 Technical Design).
+#: Everything below counts from the keychain item's own `cdat` (creation
+#: date). VERIFIED 2026-09-25 against a throwaway dummy item
+#: (`nexus-cdat-probe-*`, dummy value, deleted immediately after): `security
+#: add-generic-password -U` (update-if-exists, the natural "rotate the
+#: token in place" command) does NOT reset `cdat` -- it only bumps `mdat`
+#: (modification date). Only delete-then-add resets `cdat`. A FUTURE
+#: rotation helper for `nexus-automation-oauth-token` MUST delete-then-add,
+#: never `-U`, or `status`'s day-count keeps counting from the ORIGINAL
+#: token's creation instead of the rotated one's.
+TOKEN_TTL_DAYS = 365
+
+#: `status` (and the doctor/battery leg that will call it) warns inside
+#: this many days of expiry.
+TOKEN_WARN_DAYS = 30
+
+#: --remote's default remote shell entry when the caller doesn't pass
+#: --remote-shell: a plain POSIX target reachable directly over ssh.
+DEFAULT_REMOTE_SHELL = "bash -s --"
+
+#: The fixed, vetted POSIX reader the helper's own remote side runs. Never
+#: expands the token variable and never traces (no `set -x`); its only
+#: output is the fixed ANTHROPIC_API_KEY warning, on stderr, when the
+#: remote environment carries a key that outranks the token. `_remote_stdin_payload`
+#: splices the token in as DATA right after the `read` line -- see the
+#: `run` docstring entry above for why that placement, not the ssh argv
+#: or environment, is where the token travels.
+_REMOTE_READER_READ_LINE = "IFS= read -r CLAUDE_CODE_OAUTH_TOKEN"
+_REMOTE_READER_TAIL = (
+    "export CLAUDE_CODE_OAUTH_TOKEN\n"
+    'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-haiku}"\n'
+    'export CLAUDE_CODE_SUBAGENT_MODEL="${CLAUDE_CODE_SUBAGENT_MODEL:-haiku}"\n'
+    'test -n "${ANTHROPIC_API_KEY-}" && echo "[auth] ANTHROPIC_API_KEY is set'
+    ' on the remote host -- the child bills the API key, not the automation'
+    ' token" >&2\n'
+    'exec "$@"\n'
+)
+
+_CDAT_RE = re.compile(r'"cdat"<timedate>=0x[0-9A-Fa-f]+\s+"(\d{14})Z')
 
 
-def verdict(data: dict | None) -> tuple[bool, str]:
-    """(ok, reason). Usable == carries a token we can authenticate or
-    refresh with."""
-    oauth = (data or {}).get("claudeAiOauth") or {}
-    access = oauth.get("accessToken") or ""
-    refresh = oauth.get("refreshToken") or ""
-    if not access and not refresh:
-        return False, "empty husk — accessToken and refreshToken are both blank"
-    expires = oauth.get("expiresAt") or 0
-    if expires and expires <= int(time.time() * 1000) and not refresh:
-        return False, "accessToken expired and no refreshToken to renew it"
-    return True, ""
+# ===========================================================================
+# RDR-219 P1.1: the automation identity (`run`, `status`)
+# ===========================================================================
 
 
-def expiry(data: dict | None) -> int:
-    return ((data or {}).get("claudeAiOauth") or {}).get("expiresAt") or 0
+@dataclass(frozen=True)
+class AutomationTokenStatus:
+    present: bool
+    created: "datetime | None"
+    days_left: "int | None"
+    #: Set only when the keychain lookup itself couldn't run at all (e.g.
+    #: `security` isn't on PATH) -- a distinct condition from "item not
+    #: found", which leaves this None and `present=False`.
+    error: "str | None" = None
 
 
-def _fetch(acct: str | None) -> dict | None:
-    cmd = ["security", "find-generic-password", "-s", SERVICE]
-    if acct is not None:
-        cmd += ["-a", acct]
-    proc = subprocess.run(cmd + ["-w"], capture_output=True, text=True)
+def _automation_account() -> str:
+    """The keychain account the automation token is stored under —
+    always the invoking user's own account, never a fixed name."""
+    import getpass
+
+    return os.environ.get("USER") or getpass.getuser()
+
+
+def _parse_cdat(attrs_text: str) -> "datetime | None":
+    match = _CDAT_RE.search(attrs_text)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+
+
+def automation_token_status(
+    account: str | None = None, now: "datetime | None" = None
+) -> AutomationTokenStatus:
+    """Present/creation-date/days-to-expiry for the automation token,
+    without ever reading the secret itself — this calls `security
+    find-generic-password` WITHOUT `-w`, so it is structurally incapable
+    of returning token material."""
+    account = account or _automation_account()
+    now = now or datetime.now(timezone.utc)
+    try:
+        proc = subprocess.run(
+            ["security", "find-generic-password", "-a", account, "-s", AUTOMATION_SERVICE],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return AutomationTokenStatus(
+            present=False, created=None, days_left=None,
+            error="`security` not found -- not macOS or no Keychain access",
+        )
+    if proc.returncode != 0:
+        return AutomationTokenStatus(present=False, created=None, days_left=None)
+    created = _parse_cdat(proc.stdout)
+    if created is None:
+        return AutomationTokenStatus(present=True, created=None, days_left=None)
+    expires = created + timedelta(days=TOKEN_TTL_DAYS)
+    days_left = (expires - now).days
+    return AutomationTokenStatus(present=True, created=created, days_left=days_left)
+
+
+def fetch_automation_token(account: str | None = None) -> "str | None":
+    """The automation token's actual value, or None if absent/unreadable.
+    Only `run` calls this — `status` never does."""
+    account = account or _automation_account()
+    try:
+        proc = subprocess.run(
+            ["security", "find-generic-password", "-a", account, "-s", AUTOMATION_SERVICE, "-w"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return None
     if proc.returncode != 0:
         return None
+    token = proc.stdout.strip()
+    return token or None
+
+
+def _remedy(account: str) -> str:
+    return (
+        f"run `claude setup-token` and store the result in keychain item "
+        f"{AUTOMATION_SERVICE!r} (account {account!r})"
+    )
+
+
+def _names_token_env(tok: str) -> bool:
+    """True when a docker argv token passes CLAUDE_CODE_OAUTH_TOKEN itself:
+    `NAME`, `NAME=...`, `-eNAME`, `--env=NAME`. An exact name match, so a
+    variable whose name merely contains the token's name does not count."""
+    for prefix in ("--env=", "-e"):
+        if tok.startswith(prefix) and tok != prefix:
+            tok = tok[len(prefix):]
+            break
+    return tok.split("=", 1)[0] == TOKEN_ENV_VAR
+
+
+def _ensure_docker_flags(command: list[str]) -> list[str]:
+    """If `command` invokes `docker run` at the TOP LEVEL (`command[0]` is
+    literally `docker`, or ends in `/docker`; any leading docker global
+    flags before `run` are tolerated), force `--rm` and a bare `-e
+    CLAUDE_CODE_OAUTH_TOKEN` (no `=value` — docker reads the value from
+    ITS OWN environment, which `_child_env` already set) in when absent. A
+    container holding the automation token in its environment must not
+    outlive the run: `docker inspect` can still read it while it exists
+    (RDR-219 Phase 0 code review requirement 3). A `docker run` NESTED
+    inside a shell string, e.g. `bash -c "docker run ..."`, is invisible
+    to this check by construction (`command[0]` is `bash`, not `docker`)
+    — the caller must add both flags itself in that shape."""
+    if not command:
+        return command
+    prog = command[0]
+    if prog != "docker" and not prog.endswith("/docker"):
+        return command
     try:
-        return json.loads(proc.stdout)
-    except Exception:
-        return None
+        run_idx = command.index("run", 1)
+    except ValueError:
+        return command
+    tail = command[run_idx:]
+    result = command[: run_idx + 1]
+    if "--rm" not in tail:
+        result = result + ["--rm"]
+    if not any(_names_token_env(tok) for tok in tail):
+        result = result + ["-e", TOKEN_ENV_VAR]
+    for name in HARNESS_MODEL_DEFAULTS:
+        if not any(tok == name or tok.startswith(name + "=") for tok in tail):
+            result = result + ["-e", name]
+    return result + command[run_idx + 1 :]
 
 
-def _accounts() -> list[str]:
-    """Enumerate keychain accounts under SERVICE via an ATTRIBUTE-ONLY dump
-    (no ``-d``, so no secret is read and no unlock prompt fires)."""
-    accounts: list[str] = []
-    block: list[str] = []
-    dump = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True).stdout
-    for line in dump.splitlines() + ["keychain: <eof>"]:
-        if line.startswith("keychain: "):
-            text = "\n".join(block)
-            svce = re.search(r'"svce"<blob>="([^"]*)"', text)
-            acct = re.search(r'"acct"<blob>="([^"]*)"', text)
-            if svce and acct and svce.group(1) == SERVICE:
-                accounts.append(acct.group(1))
-            block = [line]
-        else:
-            block.append(line)
-    return accounts
+def _child_env(token: str) -> dict[str, str]:
+    """The local child's environment: a plain copy of the caller's own,
+    plus the token. ANTHROPIC_API_KEY, if the caller has it set, is left
+    untouched here — RDR-219's own harnesses that need it pass it through
+    (see `_cmd_run`'s single warning line instead of stripping it)."""
+    env = dict(os.environ)
+    env[TOKEN_ENV_VAR] = token
+    for name, value in HARNESS_MODEL_DEFAULTS.items():
+        env.setdefault(name, value)
+    return env
 
 
-def pick_usable_credential() -> dict | None:
-    """The freshest usable credential across every keychain account under
-    SERVICE, or None if none is usable (including when `security` itself
-    is unavailable). Emits ``[auth]`` progress/skip lines to stderr;
-    NEVER prints a credential to stderr."""
-    try:
-        accounts = _accounts()
-    except FileNotFoundError:
-        print("[auth] `security` not found — not macOS or no Keychain access", file=sys.stderr)
-        return None
-    usable: list[tuple[int, str, dict]] = []
-    seen: set[str | None] = set()
-    for acct in accounts + [None]:  # None == the old first-match form, tried last
-        if acct in seen:
-            continue
-        seen.add(acct)
-        payload = _fetch(acct)
-        if payload is None:
-            continue
-        label = acct if acct is not None else "<first-match>"
-        ok, why = verdict(payload)
-        if ok:
-            usable.append((expiry(payload), label, payload))
-        else:
-            print(f"[auth] skipping keychain item acct={label!r}: {why}", file=sys.stderr)
-    if not usable:
-        return None
-    usable.sort(key=lambda row: row[0], reverse=True)
-    exp, label, payload = usable[0]
-    print(f"[auth] keychain item acct={label!r} selected (expiresAt={exp})", file=sys.stderr)
-    return payload
+def _exec(command: list[str], env: dict[str, str]) -> int:
+    """Replaces this process with `command`, `env` and all — the token
+    lives only in `env`, never as a `command` element, so it can never
+    land on the child's own argv. Does not return on success; the `127`
+    below is unreachable and exists only so callers (and mypy) see an
+    int."""
+    os.execvpe(command[0], command, env)
+    return 127  # pragma: no cover — os.execvpe never returns on success
 
 
-def _cmd_pick() -> int:
-    payload = pick_usable_credential()
-    if payload is None:
-        print("[auth] no usable keychain credential found", file=sys.stderr)
+def _remote_stdin_payload(token: str) -> str:
+    """The exact bytes shipped on the ssh channel's stdin: the reader's
+    own `read` line, then the token AS DATA (not as more script text),
+    then the rest of the reader. See the `run` docstring entry for why
+    this placement is what lets the token be consumed cleanly."""
+    return f"{_REMOTE_READER_READ_LINE}\n{token}\n{_REMOTE_READER_TAIL}"
+
+
+def _run_remote(
+    host: str, command: list[str], token: str, remote_shell: "str | None" = None
+) -> int:
+    """Ships `command` to `host` over ssh. ssh's own argv is
+    `["ssh", host] + shlex.split(remote_shell or DEFAULT_REMOTE_SHELL) +
+    command` — host, the remote-shell tokens and `command` only, so
+    nothing token-shaped is ever on ssh's argv or in the LOCAL ssh
+    process's environment. THIS HELPER's own fixed reader (never the
+    caller's) does the read/export/exec on the remote side; see
+    `_remote_stdin_payload`."""
+    import shlex
+
+    shell_tokens = shlex.split(remote_shell or DEFAULT_REMOTE_SHELL)
+    argv = ["ssh", host] + shell_tokens + command
+    proc = subprocess.run(argv, input=_remote_stdin_payload(token), text=True)
+    return proc.returncode
+
+
+def _cmd_run(
+    command: list[str], remote: "str | None" = None, remote_shell: "str | None" = None
+) -> int:
+    account = _automation_account()
+    status = automation_token_status(account)
+    if status.error:
+        print(f"[auth] {status.error}", file=sys.stderr)
         return 1
-    sys.stdout.write(json.dumps(payload))
+    if not status.present:
+        print(f"[auth] automation token absent -- {_remedy(account)}", file=sys.stderr)
+        return 1
+    if status.created is None:
+        print(
+            f"[auth] automation token's keychain creation date is unparseable "
+            f"(account {account!r}, item {AUTOMATION_SERVICE!r}) -- this is a "
+            "`security` output-shape problem, not a token-lifecycle one",
+            file=sys.stderr,
+        )
+        return 1
+    if status.days_left is not None and status.days_left < 0:
+        print(
+            f"[auth] automation token expired {-status.days_left} day(s) ago -- "
+            f"{_remedy(account)}",
+            file=sys.stderr,
+        )
+        return 1
+    token = fetch_automation_token(account)
+    if not token:
+        print(f"[auth] automation token unreadable -- {_remedy(account)}", file=sys.stderr)
+        return 1
+    if not remote and "ANTHROPIC_API_KEY" in os.environ:
+        print(
+            "[auth] ANTHROPIC_API_KEY is set -- the child bills the API key, "
+            "not the automation token",
+            file=sys.stderr,
+        )
+    command = _ensure_docker_flags(command)
+    if remote:
+        return _run_remote(remote, command, token, remote_shell=remote_shell)
+    return _exec(command, _child_env(token))
+
+
+def _cmd_status(account: "str | None" = None, now: "datetime | None" = None) -> int:
+    account = account or _automation_account()
+    status = automation_token_status(account, now=now)
+    if status.error:
+        print(status.error)
+        return 1
+    if not status.present:
+        print(f"absent -- {_remedy(account)}")
+        return 1
+    if status.created is None:
+        print(
+            f"present (account {account!r}) -- keychain creation date unparseable; "
+            "cannot compute expiry"
+        )
+        return 3
+    created_str = status.created.date().isoformat()
+    if status.days_left is not None and status.days_left < 0:
+        print(
+            f"expired -- created {created_str}, {-status.days_left} day(s) ago "
+            f"(account {account!r})"
+        )
+        return 2
+    print(
+        f"present -- created {created_str}, {status.days_left} day(s) to expiry "
+        f"(account {account!r})"
+    )
+    if status.days_left is not None and status.days_left <= TOKEN_WARN_DAYS:
+        print(
+            f"warning: automation token expires in {status.days_left} day(s) -- "
+            "run `claude setup-token` to renew"
+        )
     return 0
 
 
-def _cmd_check(path: str) -> int:
-    try:
-        with open(path) as fh:
-            payload = json.load(fh)
-    except Exception as exc:
-        print(f"[auth] unreadable: {exc}", file=sys.stderr)
-        return 1
-    ok, why = verdict(payload)
-    if not ok:
-        print(f"[auth] {why}", file=sys.stderr)
-        return 1
-    return 0
+def _parse_run_args(
+    argv: list[str],
+) -> "tuple[str | None, str | None, list[str]] | None":
+    """Parses the argv AFTER `run`:
+    `[--remote HOST [--remote-shell ENTRY]] -- <command> [args...]`.
+    Returns (remote_host_or_None, remote_shell_or_None, command), or None
+    if malformed (no `--`, an empty command, `--remote`/`--remote-shell`
+    with no value, `--remote-shell` without `--remote`)."""
+    remote: "str | None" = None
+    remote_shell: "str | None" = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--remote":
+            if i + 1 >= len(argv):
+                return None
+            remote = argv[i + 1]
+            i += 2
+            continue
+        if argv[i] == "--remote-shell":
+            if i + 1 >= len(argv):
+                return None
+            remote_shell = argv[i + 1]
+            i += 2
+            continue
+        if argv[i] == "--":
+            command = argv[i + 1 :]
+            if not command or (remote_shell is not None and remote is None):
+                return None
+            return remote, remote_shell, command
+        return None
+    return None
 
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        print("usage: claude_credentials.py pick | check FILE", file=sys.stderr)
+        print(
+            "usage: claude_credentials.py "
+            "run [--remote HOST [--remote-shell ENTRY]] -- <command> [args...] | status",
+            file=sys.stderr,
+        )
         return 2
     mode = argv[1]
-    if mode == "pick":
-        return _cmd_pick()
-    if mode == "check":
-        if len(argv) < 3:
-            print("usage: claude_credentials.py check FILE", file=sys.stderr)
+    if mode == "run":
+        parsed = _parse_run_args(argv[2:])
+        if parsed is None:
+            print(
+                "usage: claude_credentials.py run [--remote HOST [--remote-shell ENTRY]] "
+                "-- <command> [args...]",
+                file=sys.stderr,
+            )
             return 2
-        return _cmd_check(argv[2])
+        remote, remote_shell, command = parsed
+        return _cmd_run(command, remote=remote, remote_shell=remote_shell)
+    if mode == "status":
+        return _cmd_status()
     print(f"unknown mode: {mode!r}", file=sys.stderr)
     return 2
 

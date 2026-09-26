@@ -592,6 +592,40 @@ class PgVectorServingContractTest {
             .isEqualTo(503);
     }
 
+    @Test
+    @Order(14)
+    void upsertChunks_deleteKeysField_stripsStaleKeyOverHttp() throws Exception {
+        // nexus-y8xjh: the wire field reaches the repository. Own chash, runs after
+        // every count/stats assertion above.
+        String chash = "60" + "0".repeat(62);
+        String text = "delete keys wire probe chunk";
+        postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
+            "collection", COL, "ids", List.of(chash), "documents", List.of(text),
+            "metadatas", List.of(Map.of("lang", "java", "quality_gate_overridden", true))));
+        postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
+            "collection", COL, "ids", List.of(chash), "documents", List.of(text),
+            "metadatas", List.of(Map.of("lang", "py")),
+            "delete_keys", List.of("quality_gate_overridden")));
+
+        try (Connection su = pg.createConnection("")) {
+            var metadata = DSL.field(DSL.name("metadata"), org.jooq.JSONB.class);
+            org.jooq.JSONB stored = DSL.using(su, SQLDialect.POSTGRES)
+                .select(metadata)
+                .from(DSL.table(DSL.name("nexus", "chunks")))
+                .where(DSL.field(DSL.name("collection"), String.class).eq(COL))
+                .and(DSL.field(DSL.name("chash"), byte[].class)
+                    .eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetchOne(metadata);
+            assertThat(stored).isNotNull();
+            Map<String, Object> meta = new ObjectMapper().readValue(
+                stored.data(), new TypeReference<Map<String, Object>>() { });
+            assertThat(meta)
+                .as("delete_keys on /upsert-chunks strips the stale key")
+                .doesNotContainKey("quality_gate_overridden");
+            assertThat(meta.get("lang")).isEqualTo("py");
+        }
+    }
+
     // nexus-lgdel.l1: Order(90) (search_legacyWindowRow_servedNotRejected)
     // DELETED — its subject was enrichSearchRows' auto-converge-window
     // degrade-per-row tolerance for legacy 16-byte-key rows (nexus-p78a0),

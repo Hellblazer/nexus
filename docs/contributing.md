@@ -527,7 +527,7 @@ Every step below is **required**. Missing any one of them has caused problems in
 
 10. **Verify the release**
     ```bash
-    gh run watch   # watch CI until green
+    gh run watch --interval 60   # the release workflow; ONE watcher per box (AGENTS.md worktree rule 7)
     gh release view vX.Y.Z
     uv pip compile --no-deps conexus==X.Y.Z  # confirm version resolves on PyPI
     ```

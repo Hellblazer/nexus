@@ -137,6 +137,30 @@ def _default_aspect_queue(tenant: str) -> Any:
     return HttpAspectQueue(tenant=tenant)
 
 
+def _process_age_ms_from(stat: str, uptime: str, clk_tck: int) -> float | None:
+    """Age of the process in ms from ``/proc/<pid>/stat`` and ``/proc/uptime``
+    text. Field 22 of stat is the start time in clock ticks since boot; the
+    fields are counted after the last ``)`` because comm may hold spaces."""
+    try:
+        fields = stat[stat.rindex(")") + 2:].split()
+        start_ticks = int(fields[19])
+        return round((float(uptime.split()[0]) - start_ticks / clk_tck) * 1000, 1)
+    except (ValueError, IndexError):
+        return None
+
+
+def _process_age_ms() -> float | None:
+    """This process's age in ms on Linux, None where /proc is absent (nexus-1m9sb:
+    the slow boot was in a Linux container, and the time before start() -- CLI
+    startup -- is invisible to start()'s own phase timings)."""
+    try:
+        stat = Path("/proc/self/stat").read_text()
+        uptime = Path("/proc/uptime").read_text()
+        return _process_age_ms_from(stat, uptime, os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError):
+        return None
+
+
 class AspectWorkerDaemon:
     """A per-tenant leased host for the aspect-extraction worker loop.
 
@@ -213,7 +237,18 @@ class AspectWorkerDaemon:
 
     def start(self) -> None:
         """Claim the per-tenant lease, start the hosted worker, and begin
-        heartbeating. Idempotent only across distinct instances — call once."""
+        heartbeating. Idempotent only across distinct instances — call once.
+
+        nexus-1m9sb: a fullstack-container run measured ~3 minutes between
+        this daemon's pid being assigned and ``aspect_worker_daemon.started``
+        logging, with nothing in between naming which phase was slow (no
+        code-level cause was found — see the module's own investigation
+        record). ``t_*`` below time each phase against the injected
+        ``self._clock`` so the final log line carries a per-phase
+        millisecond breakdown instead of a single opaque timestamp; a
+        recurrence is then diagnosable from the log alone.
+        """
+        t_start = self._clock()
         endpoint = {"pid": os.getpid()}
         self._supervisor = ServiceSupervisor(
             self._registry,
@@ -222,7 +257,9 @@ class AspectWorkerDaemon:
             endpoint_provider=lambda: endpoint,
         )
         self._supervisor.publish_once()
+        t_lease = self._clock()
         self._worker = self._worker_factory()
+        t_worker_built = self._clock()
         # nexus-59611 stage 2 (review): the daemon's --config-dir is the one
         # the wake file must be read from; fakes without the hook are untouched.
         bind = getattr(self._worker, "bind_config_dir", None)
@@ -243,6 +280,7 @@ class AspectWorkerDaemon:
         # that stand-down (nexus-yg70j).
         self._stop.clear()
         self._worker.start()
+        t_worker_started = self._clock()
         self._hb_thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"aspect-worker-hb-{self._tenant}",
@@ -252,13 +290,24 @@ class AspectWorkerDaemon:
         # RDR-173 P3 (RF-5): the reclaim owner. Built here (not in __init__) so a
         # failed queue construction surfaces at start, alongside the lease.
         self._reclaim_queue = self._queue_factory()
+        t_queue_built = self._clock()
         self._reclaim_thread = threading.Thread(
             target=self._reclaim_loop,
             name=f"aspect-worker-reclaim-{self._tenant}",
             daemon=True,
         )
         self._reclaim_thread.start()
-        _log.info("aspect_worker_daemon.started", tenant=self._tenant, pid=os.getpid())
+        t_done = self._clock()
+        _log.info(
+            "aspect_worker_daemon.started",
+            tenant=self._tenant, pid=os.getpid(),
+            lease_publish_ms=round((t_lease - t_start) * 1000, 1),
+            worker_build_ms=round((t_worker_built - t_lease) * 1000, 1),
+            worker_start_ms=round((t_worker_started - t_worker_built) * 1000, 1),
+            queue_build_ms=round((t_queue_built - t_worker_started) * 1000, 1),
+            total_startup_ms=round((t_done - t_start) * 1000, 1),
+            process_age_ms=_process_age_ms(),
+        )
 
     def _on_worker_self_fault(self, reason: str) -> None:
         """Stand this daemon down because the hosted worker reported that THIS

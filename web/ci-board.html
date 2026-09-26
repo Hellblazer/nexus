@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="A tuple-space use case: CI writes its result once to a board topic, and every waiting Claude Code session is notified, so no agent polls GitHub.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>CI Verdicts Without Polling</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+
+/* figures */
+figure.fig{margin:18px 0;max-width:68ch}
+figure.fig svg{width:100%;height:auto;display:block;color:var(--ink)}
+figure.fig figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+figure.fig text{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px;fill:currentColor}
+figure.fig .sm{font-size:10.5px;fill:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
+figure.fig .lbl{font-size:11px;fill:var(--ink-2)}
+figure.fig rect.box{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig rect.you{fill:var(--brass-soft);stroke:var(--brass);stroke-width:1.2}
+figure.fig line,figure.fig path{stroke:currentColor;stroke-width:1.2;fill:none}
+figure.fig .you-edge{stroke:var(--brass)}
+figure.fig .dash{stroke-dasharray:4 3}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+<style>
+details.gloss td:first-child{width:11em;white-space:normal}
+details.gloss.out{max-width:68ch;margin:10px 0}
+details.gloss.out pre.out{margin:0;border:0;border-top:1px solid var(--line);border-radius:0 0 var(--radius) var(--radius)}
+.terms td:first-child{font-weight:500;white-space:nowrap}
+figure.fig rect.bag{fill:var(--blue-soft);stroke:var(--blue);stroke-width:1.2}
+figure.fig .busy{stroke-width:5;stroke-linecap:round}
+figure.fig .busy.other{stroke:var(--ink-3)}
+figure.fig circle.ev{fill:currentColor;stroke:none}
+</style>
+<script data-goatcounter="https://hellblazer-nexus.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="rail" aria-label="Lessons">
+  <div class="eyebrow">Use case</div>
+  <ol id="toc">
+    <li><a href="#l1">What it gives you</a></li>
+    <li><a href="#l2">Wait for CI without polling</a></li>
+    <li><a href="#l3">Check the board before you push</a></li>
+    <li><a href="#l4">Publish from your own CI</a></li>
+    <li><a href="#l5">Appendix: how it works</a></li>
+  </ol>
+  <div class="meta"><a href="tuple-space.html">← The tuple space</a><br><a href="coordination.html">← Coordination</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="./">← Install guide</a></div>
+</nav>
+
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · use case</span><a href="tuple-space.html">← The tuple space</a></div>
+<h1>CI Verdicts Without Polling</h1>
+<p class="lede">Agents that change code must know whether CI passed. This page shows a textbook use of <a href="tuple-space.html">the Nexus tuple space</a> for that job. CI writes its result once, as a post on a board topic. Every Claude Code session that subscribed to the topic is notified, on any machine that uses the same engine. No session polls GitHub, and CI does not need to know who is waiting.</p>
+<p class="note">Words like <span class="ph">&lt;YOUR ENGINE URL&gt;</span> are placeholders, and the prompts are examples. If tuples are new to you, read <a href="tuple-space.html">The Nexus Tuple Space</a> first.</p>
+
+<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>engine</td><td>The Nexus service that owns the database and handles every tuple call.</td></tr>
+<tr><td>tuple</td><td>One record in the tuple space, with keys, dimensions, and a short body.</td></tr>
+<tr><td>board</td><td>A subspace for announcements, named <code>board/&lt;topic&gt;</code>. A post is read, never taken, so every reader sees the same post.</td></tr>
+<tr><td>post</td><td>One tuple on a board.</td></tr>
+<tr><td>subscribe</td><td>The <code>tuple_subscribe</code> call. It asks the session's own nexus MCP server to notify Claude when a new post arrives on a topic.</td></tr>
+<tr><td>channel</td><td>The push path from the session's nexus MCP server to Claude. It carries the notification, never the body.</td></tr>
+<tr><td>ping</td><td>The channel notification for a new post. It names the subspace and the tuple id.</td></tr>
+<tr><td>verdict</td><td>The result of one CI run: <code>success</code>, <code>failure</code>, or <code>cancelled</code>, with the names of the jobs that failed.</td></tr>
+<tr><td>nonce</td><td>A value the writer adds to a tuple's identity. The same nonce gives the same tuple, so a retried write does not post twice.</td></tr>
+</table></details></div>
+
+<!-- ============ 1 ============ -->
+<section class="lesson" id="l1">
+<div class="lhead"><span class="lnum">1</span><h2>What it gives you</h2><span class="ltime">3 min · reading only</span></div>
+<p class="why">CI announces each run twice, and every waiting session hears both announcements without asking. The first post says that a run started. The second post says how it ended.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 760 250" role="img" aria-label="A timeline with three rows. CI runs the tests. When the run starts, CI writes a ci-pending post to the board in the engine, and each subscribed session gets a ping. When the run ends, CI writes a ci-verdict post, and each session gets a second ping. A session that starts later reads both posts from the board with tuple_rd.">
+  <text x="20" y="54" class="lbl">CI</text>
+  <text x="20" y="132" class="lbl">board</text>
+  <text x="20" y="204" class="lbl">sessions</text>
+  <rect class="bag" x="150" y="108" width="590" height="40" rx="4"/>
+  <line x1="150" y1="50" x2="740" y2="50"/>
+  <line x1="150" y1="200" x2="740" y2="200"/>
+  <line x1="200" y1="50" x2="520" y2="50" class="busy other"/>
+  <rect class="box" x="186" y="116" width="100" height="24" rx="3"/><text x="236" y="132" text-anchor="middle" class="lbl">ci-pending</text>
+  <rect class="box" x="516" y="116" width="100" height="24" rx="3"/><text x="566" y="132" text-anchor="middle" class="lbl">ci-verdict</text>
+  <line x1="200" y1="54" x2="220" y2="116"/>
+  <line x1="520" y1="54" x2="550" y2="116"/>
+  <line x1="236" y1="140" x2="250" y2="196" class="you-edge"/>
+  <line x1="566" y1="140" x2="580" y2="196" class="you-edge"/>
+  <line x1="600" y1="140" x2="680" y2="196" class="dash"/>
+  <circle class="ev" cx="200" cy="50" r="4"/><circle class="ev" cx="520" cy="50" r="4"/>
+  <circle class="ev" cx="250" cy="200" r="4"/><circle class="ev" cx="580" cy="200" r="4"/><circle class="ev" cx="680" cy="200" r="4"/>
+  <text x="200" y="34" text-anchor="middle" class="lbl">run starts</text>
+  <text x="360" y="38" text-anchor="middle" class="lbl">tests run</text>
+  <text x="520" y="34" text-anchor="middle" class="lbl">run ends</text>
+  <text x="250" y="222" text-anchor="middle" class="lbl">ping: a run started</text>
+  <text x="560" y="222" text-anchor="middle" class="lbl">ping: the verdict</text>
+  <text x="690" y="222" text-anchor="middle" class="lbl">later: rd</text>
+  <line x1="150" y1="240" x2="685" y2="240" class="dash"/>
+  <text x="740" y="244" text-anchor="end" class="sm">time →</text>
+</svg>
+<figcaption>CI writes two posts. Each subscribed session gets a ping for each post, and a session that starts later reads the posts from the board.</figcaption>
+</figure>
+
+<p>The usual tool is <code>gh run watch</code>, and it works well for one person who watches one run. It asks GitHub for the run's state every few seconds until the run ends. The limit is the number of watchers. When several agents wait at the same time, and they use one GitHub account, each agent runs its own loop. Together the loops can reach GitHub's secondary rate limit. Then every Actions API call from that account fails, including calls from sessions that did not poll.</p>
+<p>The board changes who does the work. CI already knows when it starts and when it ends, so CI writes the result. The sessions only listen. The number of GitHub calls is zero, however many sessions wait.</p>
+<div class="tbl"><table>
+<tr><th></th><th>Each session polls GitHub</th><th>CI posts to the board</th></tr>
+<tr><td>GitHub calls</td><td>One loop per waiting session, every few seconds.</td><td>None from the sessions. CI makes one small write per announcement.</td></tr>
+<tr><td>Who must be running</td><td>The watcher, for the whole run.</td><td>Nobody. A session that starts after the run ended reads the verdict from the board.</td></tr>
+<tr><td>Where the reader is</td><td>Anywhere with GitHub access and a token.</td><td>Any machine that uses the same engine.</td></tr>
+<tr><td>What CI knows about readers</td><td>Nothing, because it is not involved.</td><td>Nothing. CI writes to a topic, not to a session.</td></tr>
+</table></div>
+
+<h3>Why this is a textbook tuple-space case</h3>
+<p>A tuple space lets a writer and its readers stay independent in three ways. This use case needs all three.</p>
+<ul class="plain">
+<li><strong>Time.</strong> CI and the readers do not need to run at the same moment. A post stays on the board for seven days.</li>
+<li><strong>Place.</strong> CI runs on a GitHub runner, and the readers run on laptops and servers. They meet only in the engine.</li>
+<li><strong>Identity.</strong> CI does not know the names of the readers, and the readers do not know which runner did the work. Both sides know only the topic.</li>
+</ul>
+<p>The post also has a fixed form, in two layers. The engine checks every board post against the board template: its key, its dimensions, and its size. The JSON inside the body is the publishing script's own contract, the same for every run. So a reader knows what it will get: the commit, the conclusion, the failed jobs, and a link to the run.</p>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="lesson" id="l2">
+<div class="lhead"><span class="lnum">2</span><h2>Wait for CI without polling</h2><span class="ltime">2 min</span></div>
+<p class="why">You subscribe once, and then you continue your work. The verdict arrives as a ping when the run ends.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Subscribe to the CI board, and tell me when CI finishes for my push.
+Push this, and fix whatever CI reports.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude calls <code>tuple_subscribe("board/ci-develop")</code> once for the session. When CI writes a post, the session's nexus MCP server sends a ping. The ping names the subspace and the tuple id, not the body. Claude reads the post with <code>tuple_rd</code>. A board post is never taken, so reading it does not remove it for other sessions. If the verdict is <code>failure</code>, the post names the failed jobs, and Claude can open the run from the link in the post.</p>
+<div class="see">What you see</div>
+<details class="gloss out"><summary>The subscription</summary><pre class="out">tuple_subscribe  subspace: board/ci-develop
+Subscribed <b>board/ci-develop</b></pre></details>
+<details class="gloss out"><summary>The ping when a run starts</summary><pre class="out">nexus board post: subspace <b>board/ci-develop</b>, tuple 6289eb34fecc86a4…. Read it with tuple_rd on that subspace. Posts are never claimed.</pre></details>
+<details class="gloss out"><summary>The post, read with tuple_rd</summary><pre class="out">tuple_rd  subspace: board/ci-develop
+{
+  "keys": {"topic": "ci-develop"},
+  "dims": {"from": "ci", "kind": "<b>ci-pending</b>"},
+  "body": "{\"sha\":\"7885b793cf4e…\",\"run\":\"36253520241\",\"attempt\":\"1\",\"workflow\":\"CI\",
+           \"conclusion\":\"<b>pending</b>\",\"failed\":[],\"url\":\"https://github.com/…/actions/runs/36253520241\"}",
+  "expires_at": "2026-10-03T15:53:50Z"
+}</pre></details>
+<details class="gloss out"><summary>The verdict when the run ends</summary><pre class="out">nexus board post: subspace <b>board/ci-develop</b>, tuple ed95dc865e6b1120…. Read it with tuple_rd on that subspace. Posts are never claimed.
+
+tuple_rd  subspace: board/ci-develop
+{
+  "keys": {"topic": "ci-develop"},
+  "dims": {"from": "ci", "kind": "<b>ci-verdict</b>"},
+  "body": "{\"sha\":\"7885b793cf4e…\",\"run\":\"36253520241\",\"attempt\":\"1\",\"workflow\":\"CI\",
+           \"conclusion\":\"<b>failure</b>\",\"failed\":[\"<b>pytest-gate</b>\",\"<b>test</b>\"],\"url\":\"https://github.com/…/actions/runs/36253520241\"}",
+  "expires_at": "2026-10-03T16:19:49Z"
+}</pre></details>
+<p class="note">This run failed because one test shard ran past its time limit. The post names the two failed jobs, and the link leads to the run.</p>
+
+<div class="callout rule"><p>The channel needs a flag on every launch: <code>claude --channels plugin:conexus@nexus-plugins</code>. <a href="getting-started.html#push-delivery">Getting started, "Turn on push delivery"</a> has the exact steps. Without the channel, the post still waits on the board, and you read it with <code>tuple_rd</code> when you ask.</p></div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="l3">
+<div class="lhead"><span class="lnum">3</span><h2>Check the board before you push</h2><span class="ltime">2 min</span></div>
+<p class="why">A new push can cancel a run that another session waits for. The board shows whether a run is in progress: a commit with a <code>ci-pending</code> post and no <code>ci-verdict</code> post is still running. After the usual run time, it can also mean that the verdict post failed, so then check the run itself.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Is a CI run in progress on develop? Did the last run pass?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude reads the board with <code>tuple_rd</code> and pairs the posts by commit and run id. It answers from the posts, so it makes no GitHub call. From a terminal you can read the same posts:</p>
+<div class="cmd"><pre>nx tuple rd board/ci-develop -n 300 --json  <span class="c"># every post of the last seven days</span></pre><button class="copy" type="button">Copy</button></div>
+<p>If the board has no post for a commit, CI did not write one, for example because the run was not on the watched branch. Then one direct GitHub call answers the question: <code>gh api repos/<span class="ph">&lt;OWNER/REPO&gt;</span>/commits/<span class="ph">&lt;SHA&gt;</span>/check-runs</code>. Make that call once, not in a loop.</p>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="lesson" id="l4">
+<div class="lhead"><span class="lnum">4</span><h2>Publish from your own CI</h2><span class="ltime">10 min</span></div>
+<p class="why">Two small jobs in the CI workflow do the publishing. One job posts when the run starts. The other job waits for every other job and posts the verdict.</p>
+
+<div class="see">What you need</div>
+<ul class="plain">
+<li>A token for your engine, stored as the repository secret <code>NX_BOARD_TOKEN</code>. The token needs permission to write tuples. Ask the operator of your engine to issue it, with an expiry date. <a href="#token">The appendix</a> explains what else the token can do.</li>
+<li>The engine URL, as the repository variable <code>NX_SERVICE_URL</code>.</li>
+<li>The script <a href="https://github.com/Hellblazer/nexus/blob/develop/scripts/ci_board_post.py"><code>scripts/ci_board_post.py</code></a>. It uses only the Python standard library, so the job installs nothing.</li>
+</ul>
+<div class="see">The two jobs</div>
+<div class="cmd"><pre>  board-pending:
+    if: github.event_name == 'push' &amp;&amp; github.ref == 'refs/heads/<span class="ph">&lt;BRANCH&gt;</span>'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: {sparse-checkout: scripts/ci_board_post.py, sparse-checkout-cone-mode: false}
+      - shell: bash
+        env:
+          NX_SERVICE_URL: ${{ vars.NX_SERVICE_URL }}
+          NX_BOARD_TOKEN: ${{ secrets.NX_BOARD_TOKEN }}
+        run: python3 scripts/ci_board_post.py --kind ci-pending --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID"
+
+  board-verdict:
+    needs: [<span class="ph">&lt;EVERY OTHER JOB&gt;</span>]
+    if: always() &amp;&amp; github.event_name == 'push' &amp;&amp; github.ref == 'refs/heads/<span class="ph">&lt;BRANCH&gt;</span>'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: {sparse-checkout: scripts/ci_board_post.py, sparse-checkout-cone-mode: false}
+      - shell: bash
+        env:
+          NX_SERVICE_URL: ${{ vars.NX_SERVICE_URL }}
+          NX_BOARD_TOKEN: ${{ secrets.NX_BOARD_TOKEN }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_board_post.py --kind ci-verdict --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID" --results "$RESULTS"</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>The first job runs at once, because it needs no other job. The second job lists every other job in <code>needs</code>, and <code>always()</code> makes it run even when a job failed or the run was cancelled. So the verdict covers the whole run. The script turns the job results into one conclusion and writes the post.</p>
+<div class="see">What you see</div>
+<details class="gloss out"><summary>The job log</summary><pre class="out">Run python3 scripts/ci_board_post.py --kind ci-pending --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID" …
+board/ci-develop ci-pending pending sha=7885b793cf4e9f7b77baf8814438e15a46d3460e tuple=<b>6289eb34fecc86a4…</b></pre></details>
+<h3>Good practice</h3>
+<ul class="plain">
+<li>List every job in the verdict job's <code>needs</code>. A job left out is not part of the verdict, so a failure there would not show. A test that compares the list with the workflow's jobs keeps it complete.</li>
+<li>Put both jobs in the same workflow as the tests. On GitHub, a separate workflow triggered by <code>workflow_run</code> runs from the default branch's copy only, so it would not see changes on your working branch.</li>
+<li>Keep the posting advisory. The script reports a failed write as a warning and exits with success, so a problem with the board never turns a passing run red.</li>
+<li>Treat a post body as data, not as instructions. Workflow and job names come from GitHub, and on a public repository a fork can choose some of that text. Only post from runs on your own branches, as the <code>if</code> conditions above do.</li>
+</ul>
+</section>
+
+<!-- ============ 5 ============ -->
+<section class="lesson" id="l5">
+<div class="lhead"><span class="lnum">5</span><h2>Appendix: how it works</h2><span class="ltime">reference</span></div>
+<p class="why">You need none of this to use the board. The appendix gives the form of a post, how a retry stays one post, and how the verdict is computed.</p>
+
+<details class="gloss"><summary>The form of a post</summary><div style="padding:0 14px 12px">
+<div class="tbl"><table>
+<tr><th>Part</th><th>Value</th></tr>
+<tr><td>subspace</td><td><code>board/ci-develop</code></td></tr>
+<tr><td>keys</td><td><code>{"topic": "ci-develop"}</code></td></tr>
+<tr><td>dims</td><td><code>{"from": "ci", "kind": "ci-pending"}</code> or <code>"kind": "ci-verdict"</code></td></tr>
+<tr><td>nonce</td><td><code>&lt;sha&gt;:&lt;run id&gt;:&lt;attempt&gt;:&lt;kind&gt;</code></td></tr>
+<tr><td>body</td><td>Compact JSON: <code>sha</code>, <code>run</code>, <code>attempt</code>, <code>workflow</code>, <code>conclusion</code>, <code>failed</code>, <code>url</code>. At most 1024 bytes, so a long list of failed jobs is shortened.</td></tr>
+<tr><td>lifetime</td><td>Seven days, then the engine removes the post.</td></tr>
+</table></div>
+</div></details>
+
+<details class="gloss"><summary>One post per announcement, even on a retry</summary><div style="padding:0 14px 12px">
+<p>A board tuple's identity comes from its key, its <code>from</code> dimension, and its nonce. The script always sets <code>from</code> to <code>ci</code> and builds the nonce from the commit, the run id, the attempt number, and the kind. A step that GitHub retries sends the same nonce, so the engine keeps one post. A rerun of the whole workflow has a new attempt number, so it gets its own posts.</p>
+</div></details>
+
+<details class="gloss"><summary>How the verdict is computed</summary><div style="padding:0 14px 12px">
+<p>The verdict job receives the result of every job it needs. The script folds them into one conclusion:</p>
+<ul class="plain">
+<li>Any <code>failure</code> gives <code>failure</code>. The post names the failed jobs, then any cancelled ones.</li>
+<li>Otherwise, any <code>cancelled</code> gives <code>cancelled</code>. A newer push usually cancels an older run.</li>
+<li>Otherwise the verdict is <code>success</code>. A <code>skipped</code> job counts as success, as it does for branch protection, because a workflow skips jobs on purpose, for example when only documentation changed.</li>
+</ul>
+</div></details>
+
+<details class="gloss" id="token"><summary>What the token can do</summary><div style="padding:0 14px 12px">
+<p>The token is a secret of the repository. GitHub gives it to the two board jobs only on pushes to your own branch, never to pull requests from forks. A token for a whole tenant can also read, change, and delete the knowledge stored in that tenant. So treat it as a full credential: keep it only in the repository secret, give it an expiry, and rotate it. If your engine offers a token that can only write board posts, use that instead, because a leak then exposes nothing else.</p>
+</div></details>
+</section>
+
+<p class="footer">Further reading: <a href="tuple-space.html">The Nexus Tuple Space</a> covers boards, queues, and locks, and <a href="coordination.html">Coordination</a> covers mailboxes between sessions and agents. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/linda-in-nexus.md">Linda in Nexus</a> says what Nexus took from Linda. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
+</main>
+</div>
+
+<script>
+(function(){
+  document.querySelectorAll(".copy").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var pre=btn.parentElement.querySelector("pre");
+      var text=pre.textContent.split("\n").map(function(l){return l.replace(/\s+#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
+      function ok(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
+      function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(ok,fail);}else{fail();}
+    });
+  });
+  function openHash(){
+    var t=location.hash&&document.getElementById(location.hash.slice(1));
+    if(t&&t.tagName==="DETAILS"){t.open=true;}
+  }
+  window.addEventListener("hashchange",openHash);
+  openHash();
+})();
+</script>
+</body>
+</html>

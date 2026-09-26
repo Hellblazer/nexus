@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.62.0] - 2026-09-26
+
+Plugin version aligned with conexus 7.62.0. The plugin-side changes go live as
+`source.ref` advances to `v7.62.0`.
+
+- `hooks/scripts/routing/credential_print_guard.py`, a new PreToolUse:Bash
+  guard, denies printing a Claude Code credential: keychain reads of the
+  credential items, `.credentials.json`, the protected token variables
+  (`CLAUDE_CODE_OAUTH_TOKEN`, `NX_HARNESS_CLAUDE_OAUTH_TOKEN`) and other
+  processes' environments (nexus-wauo1.22, nexus-wauo1.39). Registered in
+  `hooks.json` and `routing/registry.yaml`. It runs through `python3`, so it
+  does not run on native Windows yet.
+
 ## [7.61.0] - 2026-09-24
 
 Plugin version aligned with conexus 7.61.0. The plugin-side changes go live as

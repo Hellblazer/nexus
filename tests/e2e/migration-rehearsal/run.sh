@@ -82,6 +82,7 @@ COLD=0
 COMPREHENSIVE=0
 STRESS=0
 FULLSTACK=0
+GRANT=0
 SHAKEOUT_E2E=0
 HOLE_PUNCH=0
 SHAKEOUT=0
@@ -147,7 +148,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.131}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.133}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -286,6 +287,7 @@ for a in "$@"; do
     --comprehensive) COMPREHENSIVE=1 ;;  # Phase D: daily-driver surface on the default rehearse.sh
     --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
+    --grant)      GRANT=1 ;;             # RDR-219 P3b.3 (nexus-wauo1.40): --fullstack SUB-FLAG ONLY — claude runs through claude_mcp_grant.sh (nx-mcp dispatch grant), skips the Phase 2 aspect-worker pre-start, and drives the operator/nested-dispatch/no-leak proofs
     --shakeout-e2e) SHAKEOUT_E2E=1 ;;    # standalone: nexus-33hpq-class daily-driver shakeout — real-corpus code/md/pdf ingest, search/query retrieval, T2/T1 round-trip, doctor, MCP surface, live peak-RSS assertion during code ingest
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
     --acquire)    ACQUIRE=1 ;;         # nexus-1ddsy: PUBLISHED-artifact gate — cold-acquire NEXUS_SERVICE_TAG on a bare box and drive it
@@ -418,6 +420,12 @@ fi
 [ "$COMPREHENSIVE" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--comprehensive and --with-cloud are incoherent (Phase D is deterministic bge-768 local; --with-cloud boots a voyage-only service — the engine correctly 422s the cross-model write); run --comprehensive alone" >&2; exit 2; }
 [ "$STRESS" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--stress and --with-cloud are incoherent (Phase E's store/memory puts hit the same bge-768-vs-voyage-serving-mode collision as Phase D); run --stress alone" >&2; exit 2; }
 [ "$FULLSTACK" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ]; } && { echo "--fullstack is a standalone full-topology run (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+# --grant is a --fullstack SUB-FLAG (RDR-219 P3b.3, nexus-wauo1.40), never a
+# leg of its own: it proves the nx-mcp dispatch grant inside the SAME
+# full-topology image/entrypoint --fullstack already builds. Refused
+# standalone or combined with anything else, before the first mutation,
+# the same convention every other leg's guard above uses.
+[ "$GRANT" = 1 ] && [ "$FULLSTACK" != 1 ] && { echo "--grant is a --fullstack sub-flag; combine as '--fullstack --grant'" >&2; exit 2; }
 # --hole-punch is a standalone journey: it reuses the --cold box's staging
 # internally (cheapest to compose — no native GraalVM build) but drives its
 # own entrypoint (rehearse_hole_punch.sh, nexus-s3dd4.7), never combined with
@@ -981,6 +989,16 @@ elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   stage_native "$STAGE/native"
   cp "$HERE/Dockerfile.fullstack" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_fullstack.sh" "$HERE/rehearse_shakeout_e2e.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  # RDR-219 P3b.3 (nexus-wauo1.40): rehearse_fullstack.sh's grant-mode path
+  # sources lib/claude_mcp_grant.sh, so the library has to travel with it —
+  # same reason the --package-upgrade/--candidate-migration Dockerfiles
+  # COPY lib/ (nexus-wo6sc). Directory-wide so a second lib file is not
+  # repeated; staged unconditionally (not just under --grant) so the image
+  # is identical whether or not --grant is passed at run time. The launcher
+  # itself lives in tests/e2e/lib, not in this directory's lib/, so it is
+  # copied in by name (its absence was measured in the first grant run).
+  cp -R "$HERE/lib" "$STAGE/lib"
+  cp "$HERE/../lib/claude_mcp_grant.sh" "$STAGE/lib/"
 elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
   # the default/--shakeout path: the locally-built, now-stamped -Ob binary,
@@ -1145,50 +1163,47 @@ if [ "$WITH_CLOUD" = 1 ]; then
   [ -n "$key" ] || { echo "--with-cloud needs VOYAGE_API_KEY in .env" >&2; exit 1; }
   run_env+=(-e "NX_VOYAGE_API_KEY=$key" -e "VOYAGE_API_KEY=$key")
 fi
+if [ "$FULLSTACK" = 1 ]; then
+  # RDR-219 P3b.3 (nexus-wauo1.40): forward --grant into the container so
+  # rehearse_fullstack.sh can pick the dispatch-grant path. Forwarded
+  # unconditionally (0 or 1), never only when set, so the in-container
+  # script can tell "not requested" from "not forwarded at all" — same
+  # discipline as every other conditionally-forwarded knob above.
+  run_env+=(-e "NX_FULLSTACK_GRANT=$GRANT")
+fi
 
 # NOT `exec` — exec replaces this shell and would suppress the EXIT trap that
 # restores ~/.docker/config.json + release.properties and removes the staging
 # dir. Run as a child and propagate its exit code.
 if [ "$FULLSTACK" = 1 ]; then
-  # Provide FRESH claude oauth so the in-container `claude -p` (MCP driver + real
-  # aspect extraction) authenticates. The ~/.claude/.credentials.json FILE goes
-  # stale within ~1h (oauth access tokens are short-lived + the refresh token
-  # rotates); the live token lives in the macOS keychain. Pull it at run time
-  # (same approach as tests/cc-validation), stage it (ephemeral, cleaned on exit),
-  # mount read-only. Real, billed calls; data/PG stay container-isolated.
-  # nexus-galkv.19: `pick` chooses by CONTENT across every keychain item
-  # under the service, never a bare unscoped `security find-generic-password`
-  # (which can silently select a token-less husk — see CRED_TOOL's note
-  # above). The ~/.claude/.credentials.json fallback is used only if it
-  # itself passes `check`, so a stale/husk file on disk never gets mounted
-  # either.
-  FRESHCREDS="$(python3 "$CRED_TOOL" pick || true)"
-  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ] && python3 "$CRED_TOOL" check "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
-    echo "      (keychain miss — falling back to ~/.claude/.credentials.json, may be stale)" >&2
-    FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
+  # RDR-219: the harness's OWN automation token (never the operator's
+  # interactive login) authenticates the in-container `claude -p` (MCP
+  # driver + real aspect extraction). `claude_credentials.py status` gates
+  # the run (never prints token material); `claude_credentials.py run --
+  # docker run ...` execs the container with CLAUDE_CODE_OAUTH_TOKEN forced
+  # into the docker client's own environment as a bare `-e` flag (A2 launch
+  # shape, T2 nexus_rdr/219-research-10), so the value reaches the
+  # container without ever touching argv, a mounted file, or disk. Real,
+  # billed calls; data/PG stay container-isolated.
+  if ! python3 "$CRED_TOOL" status >/dev/null 2>&1; then
+    echo "--fullstack needs the harness automation token:" >&2
+    python3 "$CRED_TOOL" status >&2 || true
+    exit 1
   fi
-  [ -n "$FRESHCREDS" ] || { echo "--fullstack needs claude oauth (keychain 'Claude Code-credentials' or a usable ~/.claude/.credentials.json)" >&2; exit 1; }
-  printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"; chmod 600 "$STAGE/.claude-credentials.json"
-  docker run --rm "${run_env[@]}" \
-    -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
+  python3 "$CRED_TOOL" run -- docker run --rm "${run_env[@]}" \
     "$IMAGE"
 elif [ "$SHAKEOUT_E2E" = 1 ]; then
-  # nexus-33hpq-class daily-driver shakeout: same fresh-oauth mounting as
-  # --fullstack (Step 7's MCP workload is a real, billed claude -p call
+  # nexus-33hpq-class daily-driver shakeout: same automation-token gating
+  # as --fullstack (Step 7's MCP workload is a real, billed claude -p call
   # too), but override the image's default entrypoint (rehearse_fullstack.sh)
   # to run this journey's own driver instead — mirrors how --acquire/
   # --shakeout override the entrypoint on a shared/reused image.
-  # nexus-galkv.19: same shared picker as --fullstack above — see that
-  # branch's comment.
-  FRESHCREDS="$(python3 "$CRED_TOOL" pick || true)"
-  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ] && python3 "$CRED_TOOL" check "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
-    echo "      (keychain miss — falling back to ~/.claude/.credentials.json, may be stale)" >&2
-    FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
+  if ! python3 "$CRED_TOOL" status >/dev/null 2>&1; then
+    echo "--shakeout-e2e needs the harness automation token:" >&2
+    python3 "$CRED_TOOL" status >&2 || true
+    exit 1
   fi
-  [ -n "$FRESHCREDS" ] || { echo "--shakeout-e2e needs claude oauth (keychain 'Claude Code-credentials' or a usable ~/.claude/.credentials.json)" >&2; exit 1; }
-  printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"; chmod 600 "$STAGE/.claude-credentials.json"
-  docker run --rm "${run_env[@]}" \
-    -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
+  python3 "$CRED_TOOL" run -- docker run --rm "${run_env[@]}" \
     --entrypoint /bin/bash "$IMAGE" /home/nexus/rehearse_shakeout_e2e.sh
 elif [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-s3dd4.7: override the cold box's default entrypoint to drive the

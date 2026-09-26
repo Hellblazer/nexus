@@ -282,6 +282,25 @@ class RawSqlGateTest {
         // nexus.taxonomy_ann_query_<dim> (vectors-013), a generated jOOQ function
         // table -- same conversion, same reasoning, and the same dead-entry-
         // avoidance discipline as the rawVectorFetch removal immediately above.
+        Map.entry("PgVectorRepository.java", Map.of(
+            // SANCTIONED RAW (nexus-wbfpw.4, round-1 fix, code-review Important):
+            // manifestLessCensus executes MANIFEST_LESS_CENSUS_SQL, the PUBLISHED
+            // statement scripts/sql/manifest_less_census.sql and
+            // ManifestLessCensusSqlIdentityTest pin byte-identical to it -- same
+            // precedent as ChashRepository#lookup/PROBE_SQL above. EMPTY statement
+            // multiset, for the identical reason lookup's is: the constant is
+            // passed BY NAME (`ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, ...)`),
+            // and RAW_EXECUTE's name-based heuristic only matches an argument
+            // starting with the literal text "sql"/"SQL" -- MANIFEST_LESS_CENSUS_SQL
+            // starts with "M", so this call never matches RAW_EXECUTE at all (a
+            // documented, pre-existing KNOWN RESIDUAL of the SAME shape as
+            // ChashRepository#lookup, not something this bead introduces or is
+            // asked to close -- see the round-1 fix's own report for why the
+            // RAW_EXECUTE regex is not widened to close the _SQL-suffix blind spot
+            // in this change). Registered here anyway so a future LITERAL raw call
+            // accidentally added to manifestLessCensus is caught immediately
+            // rather than silently inheriting a blanket excuse.
+            "manifestLessCensus", Map.of())),
         Map.entry("CatalogRepository.java", Map.of(
             // nexus-zrcj7: acquireIndexRunLock's entry (SANCTIONED RAW,
             // nexus-5xn3k.2 — pg_advisory_xact_lock over a hashtext'd
@@ -902,6 +921,13 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 17),
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 21),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
+        // nexus-v4pj4 (round-2 review decision): 4 raw-JDBC fixture sites, the
+        // same idiom TaxonomyAssignFromChashesRepositoryTest uses above --
+        // seedChunk's chunks INSERT, seedCentroid's taxonomy_centroids INSERT,
+        // and startAll's two su.createStatement().execute(...) GRANT EXECUTE
+        // call sites (one per function family, each looped over the three
+        // dims) -- no jOOQ codegen for GRANT EXECUTE.
+        Map.entry("dev/nexus/service/CrossPreviewRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 7),
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
@@ -1078,10 +1104,32 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 11),
+        // nexus-f3yxx: seedFixtures' raw chunk/centroid INSERTs (2), plan-shape's
+        // raw hnsw-off session-var SETs for the second role bootstrap (2), the
+        // recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
+        // and role-bootstrap statements (5) -- same idiom as
+        // TaxonomyCentroidAnnPlanShapeTest's own REALCALL-role bootstrap.
+        // nexus-swam7: +1 (10) -- the realistic-scale plan-shape rework's
+        // EXPLAIN-the-exact-statement-text raw ctx.resultQuery(...).fetch()
+        // call, replacing the prior proxy-function ctx.explain(...) call
+        // (which was typed jOOQ, not raw SQL, and so carried no entry here).
+        // nexus-swam7 review round: +2 (12) -- the negative-control test's own
+        // ctx.resultQuery(...).fetch() (EXPLAIN without the access-path pins)
+        // and the prosrc drift check's raw su.prepareStatement(...) fetching
+        // pg_proc.prosrc (no jOOQ codegen for pg_catalog reads, same idiom
+        // TaxonomyCentroidAnnPlanShapeTest's own REALCALL bootstrap uses).
+        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 12),
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 2),
         Map.entry("dev/nexus/service/TaxonomyRepositoryTest.java", 6),
+        // nexus-iygza rework round: manifest-exclusion + keyset-cursor + scale-test
+        // coverage added several more raw-JDBC fixture/probe sites -- seedChunk's
+        // manifest INSERT, seedChunkNoManifest, the scale test's 4 bulk generate_series
+        // INSERTs (chunks, catalog_documents, catalog_document_chunks,
+        // topic_assignments) -- same raw-JDBC-fixture idiom as
+        // TaxonomyAssignFromChashesRepositoryTest; 5 -> 10.
+        Map.entry("dev/nexus/service/TaxonomyUnassignedChashesRepositoryTest.java", 10),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 1),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 2),
@@ -1118,18 +1166,39 @@ class RawSqlGateTest {
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 28 -> 30 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 27),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
+        // nexus-v4pj4 (round-2 review decision): 1 raw-JDBC site -- prosrc(...)'s
+        // su.prepareStatement(...) fetching pg_proc.prosrc (no jOOQ codegen for
+        // pg_catalog reads), same idiom TaxonomyAssignCrossLateralHnswTest's own
+        // prosrc drift check uses.
+        Map.entry("dev/nexus/service/db/CrossPreviewDriftTest.java", 1),
         // CollectionRegistryTest.java: RETIRED at nexus-ft04v.7 — the file's two raw-SQL
         // sites (HeldLock's UPDATE/INSERT probes for a lock-contention mechanism the
         // stub-insert retirement deleted) are gone; the file now seeds fixtures via
         // generated jOOQ DSL only. No entry: actual count is 0.
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 7),
+        // nexus-f3yxx rework round: topicsLockHeldByAnotherBackend's raw pg_locks
+        // probe -- pg_locks.relation = 'X'::regclass and pg_backend_pid() are
+        // assembled SQL expressions with no typed jOOQ DSL form, so this is plain
+        // JDBC (RawSqlGateTest's OWN noRawSqlDslTemplatesInMainOrTestSources check
+        // is what ruled out a DSL.condition(String) form for exactly this query).
+        Map.entry("dev/nexus/service/db/TaxonomyAssignSeparateTransactionsTest.java", 1),
         Map.entry("dev/nexus/service/http/AspectHandlerEnqueueErrorTest.java", 1),
         Map.entry("dev/nexus/service/http/CatalogHandlerManifestFkTest.java", 1),
         Map.entry("dev/nexus/service/http/IndexRunFenceTest.java", 12),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFkTest.java", 1),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFromChashesTest.java", 2),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerImportRlsTest.java", 2),
+        // RDR-192 Step 2 (bead nexus-wbfpw.4), as of round 4: 5 raw-JDBC sites --
+        // two generate_series bulk INSERT seeds (the in-collection live notes and
+        // the other-collection documents that make the collection predicate
+        // selective; no jOOQ codegen benefit for one-off fixture loads), the
+        // per-target-row INSERT, the bind-parameterized EXPLAIN (ANALYZE) of the
+        // exact MANIFEST_LESS_CENSUS_SQL text run through the RLS-subject pool
+        // (it asserts live_notes/rev_candidates materialize once and live_notes
+        // uses idx_catalog_documents_collection_live), and the pg_proc
+        // proleakproof probe for texteq and jsonb_object_field_text.
+        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
@@ -1468,7 +1537,32 @@ class RawSqlGateTest {
     // counts-unavailable test the round-2 review found missing) reuses the
     // shared fixture and its own REVOKE is typed jOOQ, so
     // SchemaMigratorIntegrationTest.java's own count above stays 55.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 930;
+    // nexus-f3yxx/nexus-iygza: 930 -> 944 (+14: TaxonomyAssignCrossLateralHnswTest.java
+    // new at 9, TaxonomyUnassignedChashesRepositoryTest.java new at 5 -- both new test
+    // files, same raw-JDBC PreparedStatement/role-bootstrap fixture idiom
+    // TaxonomyAssignFromChashesRepositoryTest.java and TaxonomyCentroidAnnPlanShapeTest.java
+    // already carry entries for, no jOOQ codegen for a raw `<=>`/hnsw-GUC-off
+    // session-variable SET).
+    // nexus-f3yxx/nexus-iygza rework round: 944 -> 950 (+6: TaxonomyUnassignedChashes-
+    // RepositoryTest.java 5 -> 10 (+5, manifest-exclusion + keyset-cursor + scale-test
+    // fixtures/probes) and TaxonomyAssignSeparateTransactionsTest.java new at 1 (the
+    // pg_locks lock-hold proof's raw JDBC probe, same idiom).
+    // nexus-swam7: 950 -> 951 (+1: TaxonomyAssignCrossLateralHnswTest.java 9 -> 10,
+    // the realistic-scale plan-shape test's raw EXPLAIN-the-exact-statement-text
+    // resultQuery call, see that entry's own comment above).
+    // nexus-swam7 review round: 951 -> 953 (+2: TaxonomyAssignCrossLateralHnswTest.java
+    // 10 -> 12, the negative-control EXPLAIN and the prosrc drift check's
+    // prepareStatement, see that entry's own comment above).
+    // nexus-v4pj4 (round-2 review decision): 953 -> 958 (+5: two new test files,
+    // CrossPreviewRepositoryTest.java new at 4 and db/CrossPreviewDriftTest.java
+    // new at 1, same raw-JDBC fixture/prosrc-probe idiom their siblings above
+    // already carry entries for; see both entries' own comments).
+    // nexus-wbfpw.4 (RDR-192 Step 2 round-2 fix): 958 -> 961 (+3: one new test
+    // file, vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java new at
+    // 3 -- see that entry's own comment).
+    // nexus-wbfpw.4 round 4: 961 -> 963 (+2: that file 3 -> 5, the other-
+    // collection seed INSERT and the proleakproof probe; see its entry).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 963;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
@@ -2876,6 +2970,18 @@ class RawSqlGateTest {
      * A new exemption is a deliberate, reviewed decision — bump this ceiling in the
      * SAME edit as the new {@link #EXEMPTION_REGISTRY} entry, never as a side effect of
      * an unrelated change. {@link #exemptionRegistry_sizeStaysAtOrBelowCeiling} pins it.
+     *
+     * <p>NOT bumped for nexus-wbfpw.4's round-1 fix (deliberate — see the fix's own
+     * report): {@code PgVectorRepository.java#manifestLessCensus} got a {@link
+     * #SANCTIONED_STATEMENTS} entry (the actual enforcement hook, matching
+     * ChashRepository.java#lookup's shape) but NOT an {@link #EXEMPTION_REGISTRY} entry,
+     * because {@link #checkExemptionEntry}'s file lookup is hardcoded to {@code
+     * dev.nexus.service.db} ({@code Path.of("src","main","java","dev","nexus","service",
+     * "db", e.file())}) — every existing entry lives in that one package.
+     * {@code PgVectorRepository.java} lives in {@code dev.nexus.service.vectors};
+     * making it resolvable would mean adding a package field to {@link ExemptionEntry}
+     * and updating that path construction, a change to this SHARED registry
+     * infrastructure broader than one route's fix round should make as a side effect.
      */
     private static final int EXEMPTION_REGISTRY_CEILING = 5;
 

@@ -487,6 +487,18 @@ def resolve_service_config(
     return host, port, token
 
 
+def mint_armed() -> bool:
+    """True when a data-token mint credential (``mint_token``) is configured.
+
+    nexus-xzeml: every data-path client replaces the static bearer with a
+    minted data token on such a box (``DataTokenManager.bearer_for``), so the
+    resolvers accept a ``service_url`` with no static token there instead of
+    refusing to start."""
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    return bool((get_credential("mint_token") or "").strip())
+
+
 def resolve_service_endpoint(
     *,
     wait_budget_s: float = 0.0,
@@ -529,6 +541,13 @@ def resolve_service_endpoint(
         token = (get_credential("service_token") or "").strip() or None
         if token is None:
             _, token = discover_lease()  # deliberately NOT discover_lease_with_wait — see docstring
+        if not token and mint_armed():
+            # nexus-xzeml: a mint-armed box authenticates with data tokens
+            # the stores mint per request; it needs no static bearer, and
+            # demanding one forced such boxes to keep a revoked token in
+            # config.yml as a placeholder. Token-admin verbs, which refuse
+            # data tokens, then send no bearer and get a named 401.
+            return url, ""
         if not token:
             raise RuntimeError(
                 "service_url is set but no service_token is resolvable (neither "

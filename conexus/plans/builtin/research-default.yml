@@ -24,9 +24,13 @@ plan_json:
       query: $concept
       limit: $limit
       corpus: all
+    # nexus-opraf: no `topic` here. `search`'s `topic` restricts to an
+    # already-discovered taxonomy label (`nx taxonomy discover`), never
+    # a caller's free-text binding -- `topic: $concept` matched no real
+    # label on any live install, so `search_cross_corpus`'s topic
+    # pre-filter returned [] before `corpus: all` was ever consulted.
     scope:
       taxonomy_domain: prose
-      topic: $concept
   - tool: traverse
     args:
       seeds: $step1.tumblers
@@ -38,9 +42,9 @@ plan_json:
       query: $concept
       limit: $limit
       corpus: all
+    # nexus-opraf: see the step-1 comment above -- same reason.
     scope:
       taxonomy_domain: code
-      topic: $concept
   - tool: store_get_many
     args:
       ids:

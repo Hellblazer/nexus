@@ -50,6 +50,7 @@ import java.util.Map;
  *   GET  /v1/vectors/count           count chunks in a collection
  *   GET  /v1/vectors/stats           per-collection live stats (count/dim/last_write) — RDR-156 P3
  *   POST /v1/vectors/embed           embed-only (parity gate); 503 without a router
+ *   POST /v1/vectors/manifest-less-census  read-only manifest-less classification — RDR-192 S2
  * </pre>
  *
  * <p><strong>Fused rerank stage (RDR-188, bead nexus-9o6y2.2).</strong> The five
@@ -199,6 +200,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/gc/quarantine-orphans"  -> handleGcQuarantineOrphans(exchange, method);   // RDR-191 P1
                 case "/gc/restore-rereferenced" -> handleGcRestoreRereferenced(exchange, method); // RDR-191 P1
                 case "/gc/expire-quarantine"   -> handleGcExpireQuarantine(exchange, method);     // RDR-191 P1
+                case "/manifest-less-census"   -> handleManifestLessCensus(exchange, method);     // RDR-192 S2
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (SkipHandlerException e) {
@@ -265,10 +267,9 @@ public final class VectorHandler implements HttpHandler {
             // VectorHandlerDeadlineMappingTest.
             log.warn("event=vector_request_deadline_exceeded op={} retry_after_s={} error={}",
                      op, e.retryAfterSeconds(), e.getMessage());
-            exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
-            HttpUtil.send(exchange, 503, json(Map.of(
-                    "error", e.getMessage(),
-                    "retry_after_seconds", e.retryAfterSeconds())));
+            // nexus-qajw7: the shared shape also carries whether work was refused
+            // or aborted, which the client budgets its retries by.
+            HttpUtil.sendRequestDeadlineExceeded(exchange, e);
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
@@ -340,7 +341,8 @@ public final class VectorHandler implements HttpHandler {
      *   "ids":        ["sha256hex...", ...],
      *   "documents":  ["chunk text", ...],
      *   "metadatas":  [{...}, ...]    // optional; length must match ids if provided
-     *   "force_re_embed": false       // optional, default false — see below
+     *   "force_re_embed": false,      // optional, default false — see below
+     *   "delete_keys": ["k", ...]     // optional (nexus-y8xjh) — see below
      * }
      * </pre>
      *
@@ -362,6 +364,17 @@ public final class VectorHandler implements HttpHandler {
      * signature parity with {@code HttpVectorClient} (callers duck-type against
      * {@code IndexContext.db} regardless of mode) but treats it as a documented
      * no-op — local mode has no server-side existence-partition to bypass.
+     *
+     * <p>{@code delete_keys} (nexus-w94eo / nexus-y8xjh, optional): top-level
+     * metadata keys stripped from each written row's STORED metadata before this
+     * request's {@code metadatas} are merged on top. Every write here merges rather
+     * than replacing, so a full-rewrite writer whose own normalize step drops a
+     * sparse key as empty (a clean re-index's {@code quality_gate_overridden=False})
+     * names the key here, or a stale value from an earlier write would outlive the
+     * rewrite. A key the incoming row also carries lands with the incoming value.
+     * Applies on every branch: the insert's {@code ON CONFLICT}, the have-vector
+     * metadata-only refresh, and the vector-passthrough branch. Absent or empty
+     * means nothing is stripped.
      *
      * <p>Response 200: {"upserted": N}
      */
@@ -386,6 +399,8 @@ public final class VectorHandler implements HttpHandler {
         List<Map<String, Object>> metadatas = optMetadataList(body, "metadatas", ids.size());
         List<float[]> embeddings = optEmbeddingsList(body, "embeddings");
         boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+        List<String> deleteKeys = optStringList(body, "delete_keys");
+        if (deleteKeys == null) deleteKeys = List.of();
 
         if (ids.size() != documents.size()) {
             throw new IllegalArgumentException(
@@ -402,14 +417,15 @@ public final class VectorHandler implements HttpHandler {
                 throw new IllegalArgumentException(
                         "embeddings length " + embeddings.size() + " != ids length " + ids.size());
             }
-            repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas);
+            repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas,
+                    deleteKeys);
             emitTokenUsage(ex, 0L);
             HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
             return;
         }
 
         var upsertResult = repo.upsertChunksWithTokens(
-                tenant, collection, ids, documents, metadatas, forceReEmbed);
+                tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys);
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
@@ -941,6 +957,16 @@ public final class VectorHandler implements HttpHandler {
      * an id here believing it already has a stored vector — when that belief is wrong the
      * client must be able to re-route the id through a full upsert instead of silently
      * losing content. Detection lives here; the client-side reroute is a separate bead.
+     *
+     * <p>{@code delete_keys} (nexus-w94eo, optional): top-level metadata keys to remove
+     * from every id in this batch, stripped from the STORED row before this request's
+     * {@code metadatas} are merged on top — this endpoint no longer REPLACES metadata
+     * wholesale ({@code PgVectorRepository.mergeMetadata}). A merge can only add or
+     * overwrite a key, never retract one by omission, so a caller that must clear a
+     * stale key (e.g. {@code quality_gate_overridden} once a document's re-index comes
+     * back clean) names it here instead of relying on leaving it out of {@code
+     * metadatas}. A named key the incoming row also carries lands with the incoming
+     * value.
      */
     private void handleUpdateMetadata(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -950,6 +976,7 @@ public final class VectorHandler implements HttpHandler {
         String collection                     = requireString(body, "collection");
         List<String> ids                      = requireStringList(body, "ids");
         List<Map<String, Object>> metadatas   = optMetadataList(body, "metadatas", ids.size());
+        List<String> deleteKeys               = optStringList(body, "delete_keys");
 
         if (metadatas.size() != ids.size()) {
             throw new IllegalArgumentException(
@@ -960,7 +987,8 @@ public final class VectorHandler implements HttpHandler {
         // affected-row count rather than void — report it verbatim instead of
         // assuming every id existed (a stale/deleted id previously reported as
         // "updated" with no row actually touched).
-        var outcome = repo.updateMetadataWithMissing(tenant, collection, ids, metadatas);
+        var outcome = repo.updateMetadataWithMissing(
+                tenant, collection, ids, metadatas, deleteKeys == null ? List.of() : deleteKeys);
         HttpUtil.send(ex, 200, json(Map.of("updated", outcome.updated(), "missing", outcome.missing())));
     }
 
@@ -1135,6 +1163,90 @@ public final class VectorHandler implements HttpHandler {
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);
         HttpUtil.send(ex, 200, json(Map.of("expired", outcome.expired(), "refused", outcome.refused())));
+    }
+
+    /**
+     * Upper bound on the {@code limit} field accepted by {@code
+     * /v1/vectors/manifest-less-census} (RDR-192 S2, bead nexus-wbfpw.4) — the
+     * AGENTS.md paging convention (N &lt;= 300). Clamped, never rejected with a
+     * 400, mirroring {@code TelemetryHandler.MAX_QUERY_RUNS_LIMIT}'s precedent.
+     */
+    static final int MAX_CENSUS_LIMIT = 300;
+
+    /**
+     * POST /v1/vectors/manifest-less-census (RDR-192 Step 2, bead nexus-wbfpw.4)
+     *
+     * <p>Read-only: classifies every chunk in {@code collection} carrying no
+     * OWN-COLLECTION manifest row into exactly one of five buckets (superseded,
+     * legacy-unmanifested, dead-owner, no-owner, unclassified) — see {@link
+     * PgVectorRepository#MANIFEST_LESS_CENSUS_SQL}'s header comment for the full
+     * bucket definitions. Sam's ruling 2026-09-26: no engine tag carries this
+     * route until the rest of RDR-192 ships; the production census runs the
+     * identical text ({@code scripts/sql/manifest_less_census.sql}) directly
+     * until then.
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection": "knowledge__owner__voyage-context-3__v1",
+     *   "limit":      100,     // optional, default 100, clamped to 300
+     *   "offset":     0        // optional, default 0
+     * }
+     * </pre>
+     * <p>A {@code collection} starting {@code quarantine-} is refused with 400 —
+     * quarantine rows are out of the census by construction (RDR-192 MVV (a)).
+     * <p>Response 200: {@code {"collection": "...", "returned": N, "chashes":
+     * {bucket: [chash, ...], ...}, "owners": {chash: {"owner_tumbler": str|null,
+     * "owner_path": "forward"|"reverse"|null}, ...}, "totals": {bucket: count,
+     * ...}, "scope_chunk_total": N}} (round 1 fix, critic + code-review
+     * Significant; {@code owners} added in round 4 so a reverse tie-break's
+     * winner is visible). {@code owners} carries one entry per chash on THIS
+     * page.
+     * {@code returned}/{@code chashes} are THIS PAGE only — paged by chash
+     * ascending; loop while {@code returned == limit} (offset += limit), exactly
+     * like {@code /v1/vectors/store-list}. {@code totals}/{@code
+     * scope_chunk_total} are collection-WIDE (computed before LIMIT/OFFSET) and
+     * identical on every page, including an empty one — {@code totals} always
+     * carries all five bucket keys, and {@code scope_chunk_total} is every chunk
+     * this tenant+collection holds in any manifest state, so a wrong tenant or an
+     * unknown/typo'd collection reads {@code scope_chunk_total: 0} rather than
+     * looking identical to a genuinely clean census.
+     */
+    private void handleManifestLessCensus(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        requireNotQuarantineCollection(collection);
+        int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_CENSUS_LIMIT));
+        int offset = Math.max(0, optInt(body, "offset", 0));
+
+        var result = repo.manifestLessCensus(tenant, collection, limit, offset);
+        HttpUtil.send(ex, 200, json(Map.of(
+            "collection", collection,
+            "returned", result.returned(),
+            "chashes", result.chashes(),
+            "owners", result.owners(),
+            "totals", result.totals(),
+            "scope_chunk_total", result.scopeChunkTotal())));
+    }
+
+    /**
+     * {@code /v1/vectors/manifest-less-census}'s quarantine refusal (RDR-192 S2):
+     * a {@code quarantine-*} collection is out of the census by construction, so
+     * the route 400s rather than silently classifying quarantine rows. Extracted
+     * to a package-private static method so it is directly unit-testable without
+     * an HTTP round trip or a database — same precedent as {@link
+     * #resolveRowLimit}/{@link #clampSampleLimit}, see {@code
+     * VectorHandlerManifestLessCensusRoutingTest}.
+     */
+    static void requireNotQuarantineCollection(String collection) {
+        if (collection != null && collection.startsWith("quarantine-")) {
+            throw new IllegalArgumentException(
+                "collection " + collection + " is a quarantine collection; quarantine rows "
+                + "are out of the manifest-less census by construction (RDR-192 MVV (a))");
+        }
     }
 
     /**

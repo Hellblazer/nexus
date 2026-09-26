@@ -220,7 +220,7 @@ class TestDtIndexSummaryTruthful:
         )
         assert result.exit_code != 0, result.output
         assert "manifest write failed" in result.output
-        assert "nx catalog show" in result.output
+        assert "nx catalog reconcile" in result.output
 
     def test_manifest_identity_drop_alone_exits_nonzero(self, runner, monkeypatch):
         """nexus-tp8yk D2b: an identity DROP (GH #1397 class — a batch
@@ -522,7 +522,7 @@ class TestIndexRepoSummaryTruthful:
         )
         assert result.exit_code != 0, result.output
         assert "manifest write failed" in result.output
-        assert "nx catalog show" in result.output
+        assert "nx catalog reconcile" in result.output
 
     def test_manifest_identity_drop_alone_exits_nonzero(
         self, runner, repo_dir, mock_reg, monkeypatch,

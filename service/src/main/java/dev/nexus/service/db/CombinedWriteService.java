@@ -203,10 +203,23 @@ public final class CombinedWriteService {
         // between two indexing runs is chunk METADATA (byte-identical
         // text, e.g. RDR-200 Phase 1c's section_type reclassification)
         // never saw that metadata land. The metadataOnly subset below gets
-        // an explicit metadata-only UPDATE, mirroring PgVectorRepository's
-        // own have-vector branch (resolveNeedEmbedIdx / batchUpdateMetadata)
+        // an explicit metadata-only UPDATE, like PgVectorRepository's own
+        // have-vector branch (resolveNeedEmbedIdx / batchUpdateMetadata)
         // -- the DIRECT upsert path already had this; the combined-write
         // path did not.
+        //
+        // nexus-w94eo: the two branches DIVERGE on semantics. The direct
+        // path's have-vector branch MERGES ((stored - delete_keys) ||
+        // incoming); this one calls the 6-arg batchUpdateMetadata, which
+        // REPLACES, matching CatalogRepository.upsertManifestChunkVectors'
+        // insert on the same payload. write_many carries no delete_keys, so
+        // switching this to merge alone would let keys the caller omits
+        // (the normalize() sparse drops) survive a rewrite they used to be
+        // cleared by -- the nexus-y8xjh class. One consequence of REPLACE:
+        // stored keys the write_many caller does not send (e.g. bib_* on a
+        // docs/rdr/code chunk re-indexed by `nx index repo`) are cleared.
+        // Pinned by PgVectorRepositoryContractTest
+        // .batchUpdateMetadata_sixArgCombinedWriteMode_stillReplaces.
         //
         // nexus-hxrcm: under the same 40P01 retry belt as every multi-row
         // vector write (DeadlockRetry). batchUpdateMetadata now orders its

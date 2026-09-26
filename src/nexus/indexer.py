@@ -3046,6 +3046,13 @@ def _index_pdf_file(
         _fence_begin(catalog_doc_id, content_hash_hex, collection_name)
 
     with _stage("upload"):
+        # nexus-y8xjh: the engine merges chunk metadata (nexus-w94eo), and both
+        # normalize() and the _EMPTY_VALUES filter above drop falsy keys, so a
+        # clean --force re-index would otherwise leave a stale
+        # quality_gate_overridden=True (and any other key this rewrite dropped
+        # as empty) on the stored row. Name them so the engine strips them.
+        from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+        _pdf_delete_keys = rewrite_delete_keys(metadatas)
         try:
             db.upsert_chunks_with_embeddings(
                 collection_name=collection_name,
@@ -3056,6 +3063,7 @@ def _index_pdf_file(
                 # nexus-4jj40: --force alone re-sends without re-embedding;
                 # only the explicit --re-embed opt-in forces a re-embed.
                 force_re_embed=force_re_embed,
+                **({"delete_keys": _pdf_delete_keys} if _pdf_delete_keys else {}),
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
@@ -5326,6 +5334,11 @@ def _run_index(
                     collection=collection,
                     count=len(orphan_ids),
                 )
+                # nexus-y8xjh: batch-indexer rows are complete dicts, so name
+                # the writer-owned keys they dropped as empty (see
+                # _index_pdf_file's upload for why).
+                from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+                _orphan_delete_keys = rewrite_delete_keys(orphan_metas)
                 db.upsert_chunks_with_embeddings(
                     collection_name=collection,
                     ids=orphan_ids,
@@ -5333,6 +5346,7 @@ def _run_index(
                     embeddings=[[] for _ in orphan_ids],  # Seam B: server embeds
                     metadatas=orphan_metas,
                     force_re_embed=force_re_embed,
+                    **({"delete_keys": _orphan_delete_keys} if _orphan_delete_keys else {}),
                 )
 
             if not full_docs:
@@ -5389,7 +5403,17 @@ def _run_index(
                 if callable(_close):
                     _close()
 
-            _apply_combined_write_response(res, complete_map, collection)
+            # nexus-wbfpw.29 round 6: hand the batch's own doc_id -> chash
+            # map through so a failed doc's write-failure record carries
+            # what this write was trying to put in its manifest (post-run
+            # verification reads this back against the manifest).
+            _apply_combined_write_response(
+                res, complete_map, collection,
+                chash_by_doc={
+                    _d: [c["chash"] for c in _chunks]
+                    for _d, _chunks in full_docs
+                },
+            )
 
         # nexus-duoak follow-up: split "file" into its 3 constituent calls
         # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook
@@ -5605,7 +5629,7 @@ def _run_index(
             # uniform across the whole upload batch, so the extractor-config
             # gate (aspect_extraction_enqueue_hook's own early-return) can be
             # checked ONCE here instead of once per file.
-            from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
+            from nexus.aspect_extractor import extraction_applies_to_source, select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
             if select_config(collection) is None:
                 return  # No extractor for this collection — nothing to enqueue.
             from nexus.aspect_worker import _canonicalize_source_path  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
@@ -5613,6 +5637,8 @@ def _run_index(
             for _path, _c in _file_contexts:
                 if not isinstance(_c, dict):
                     continue
+                if not extraction_applies_to_source(collection, str(_path)):
+                    continue  # nexus-kk4ut: a docs__ collection's non-prose file
                 rows.append({
                     "collection": collection,
                     # content="" (CLI ingest scope, matches the per-file
@@ -6107,6 +6133,22 @@ def _run_index(
         # near-nothing because identical empty files share one
         # content_hash. Best-effort: a heal failure must never fail the
         # index run.
+        #
+        # nexus-wbfpw.29 round 3: this pass can repair the EXACT gap a
+        # manifest-hook exception left moments earlier in THIS SAME run
+        # (see the placement comment above -- "gaps created by THIS run's
+        # own manifest-write hook are healed too" is not hypothetical).
+        # Round 5 threaded a "confirmed" subset of this pass's OWN result
+        # through the return dict for the exit-code check to consume;
+        # round 6 REMOVED that (see ``ManifestHealResult.reconciled_doc_
+        # ids``'s class docstring) -- a document whose manifest hook
+        # RAISED reads chunk_count==0 here, so this pass cannot tell a
+        # genuinely partial same-run rebuild from a complete one for
+        # EXACTLY the document shape this bead exists to protect. The
+        # exit-code check now verifies confirmation itself, after this
+        # whole run (this pass included) completes, by reading the
+        # catalog manifest back (``commands._helpers.resolve_confirmed_
+        # write_failure_doc_ids``) -- nothing here needs to feed it.
         _phase("Catalog manifest self-heal…")
         _t = time.monotonic()
         try:
@@ -6390,6 +6432,21 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
+        # nexus-wbfpw.29 round 3 through round 5 carried a
+        # "self_heal_confirmed_doc_ids" stat here (tumblers this run's own
+        # self-heal pass provably fully repaired, per ManifestHealResult.
+        # confirmed_doc_ids) for index_repo_cmd to subtract from the
+        # manifest-write-failure collector before deciding the exit code.
+        # Round 6 REMOVED it: that comparison read the document's
+        # chunk_count AT SELF-HEAL TIME, which is 0 for any document whose
+        # manifest hook RAISED (only a successful hook write ever bumps
+        # it) -- so it trivially "confirmed" ANY rebuild, including a
+        # genuinely partial one, for exactly the document shape this bead
+        # exists to protect. index_repo_cmd now verifies confirmation
+        # itself, AFTER this whole run (self-heal included) completes, by
+        # reading the catalog manifest back
+        # (``commands._helpers.resolve_confirmed_write_failure_doc_ids``)
+        # -- nothing in this return dict needs to feed it.
         # nexus-wi1uv round-2: count of PDFs that failed the post-extraction
         # quality gate this run (contained per-file, never aborted the run).
         # index_repo_cmd uses this to drive a non-zero exit after

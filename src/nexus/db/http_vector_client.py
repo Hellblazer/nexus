@@ -47,6 +47,7 @@ from nexus.db.gateway_backoff import (
     is_non_idempotent_sweep_path,
 )
 from nexus.logging_setup import emit_import_time_warning
+from nexus.rate_brake import is_deadline_abort
 from nexus.redact import redact_credentials
 
 _log = structlog.get_logger(__name__)
@@ -125,6 +126,12 @@ _store_get_truncated_logged: bool = False
 #: bearing default. The ``ids`` branch has NO analogous default — see
 #: ``_ServiceCollectionStub.get`` docstring (nexus-hdx2u).
 _WHERE_GET_DEFAULT_LIMIT = 10
+
+#: Texts per ``/v1/vectors/embed`` request from :meth:`embed_for_collection`.
+#: Small on purpose: the edge cuts the exchange at 30 s, and a CCE embed is
+#: one Voyage call per text behind the engine-wide semaphore (nexus-u2mlh).
+#: The nexus-tysei probes used 5 against the managed service.
+_EMBED_PROBE_BATCH = 10
 
 
 #: nexus-hdx2u E4: log ``_ServiceCollectionStub.get``'s count-unreported
@@ -327,6 +334,14 @@ def _resolve_endpoint() -> tuple[str, str]:
             _log.debug(
                 "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
             )
+    if env_url is not None and token is None:
+        # nexus-xzeml: a mint-armed box needs no static bearer; the
+        # data token minted per request (see the bearer_for override
+        # below) authenticates every T3 call.
+        from nexus.db.service_endpoint import mint_armed  # noqa: PLC0415 — deferred to avoid circular import
+
+        if mint_armed():
+            token = ""
     if url is None or token is None:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
         # migration module; stranded pre-PG installs are redirected by the
@@ -1299,6 +1314,12 @@ def _request(
                 )
             except urllib.error.HTTPError as exc:
                 if exc.code not in _GATEWAY_RETRY_CODES or delay is None or no_auto_retry:
+                    raise
+                # nexus-qajw7: an engine deadline ABORT discarded embedded work;
+                # a resend seconds later runs the request to its deadline again.
+                # Hand it straight to the caller's retry wrapper, which paces it
+                # through the shared brake on the ordinary attempt budget.
+                if exc.code == 503 and is_deadline_abort(exc.headers):
                     raise
                 floored = exc.code == 504 and embed_write_path
                 sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay
@@ -2409,8 +2430,16 @@ class HttpVectorClient:
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
         retry: bool = True,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Embed + write via the Java service.
+
+        ``delete_keys`` (nexus-w94eo / nexus-y8xjh): the engine MERGES each row's
+        metadata into the stored row instead of replacing it, so a full-rewrite
+        writer names the keys it dropped as empty (see
+        :func:`nexus.metadata_schema.rewrite_delete_keys`); the engine strips them
+        from the stored row before the merge. Forwarded on every page, and only
+        when non-empty, so a caller that passes none sends a byte-identical body.
 
         Dedup + conflict-merge are SERVER-ENFORCED (nexus-57dh4): the service's
         ``PgVectorRepository.upsertChunksInternal`` does first-wins in-batch dedup
@@ -2590,6 +2619,8 @@ class HttpVectorClient:
                 body["embeddings"] = embeddings[start:end]
             if force_re_embed:
                 body["force_re_embed"] = True
+            if delete_keys:
+                body["delete_keys"] = list(delete_keys)
             # nexus-gtl01 (upsert-chunks ACK coverage): log the OUTGOING
             # request before the POST, at INFO not DEBUG. This is the only
             # client-side evidence a write was even ATTEMPTED. INFO does NOT
@@ -2725,6 +2756,7 @@ class HttpVectorClient:
         metadatas: list[dict] | None = None,
         *,
         force_re_embed: bool = False,
+        delete_keys: list[str] | None = None,
     ) -> None:
         """Server-side embed path: forward chunk text, ignore caller's embeddings.
 
@@ -2747,7 +2779,7 @@ class HttpVectorClient:
         """
         self.upsert_chunks(
             collection_name, ids, documents, metadatas=metadatas,
-            force_re_embed=force_re_embed,
+            force_re_embed=force_re_embed, delete_keys=delete_keys,
         )
 
     def put(
@@ -3884,8 +3916,25 @@ class HttpVectorClient:
         collection: str,
         ids: list[str],
         metadatas: list[dict],
+        *,
+        delete_keys: list[str] | None = None,
     ) -> list[str] | None:
         """Metadata-only update on existing chunks — no re-embedding.
+
+        nexus-w94eo: the engine MERGES ``metadatas`` into the stored row
+        (``metadata = chunks.metadata || EXCLUDED.metadata``) rather than
+        replacing it wholesale — a caller no longer needs to read the
+        existing row back before writing a partial update; omitted keys are
+        left untouched instead of being wiped. ``delete_keys`` (optional),
+        when given, names top-level keys to remove from the merged result —
+        the escape for a caller that must actively CLEAR a stale key a merge
+        can no longer retract by omission (today: ``quality_gate_overridden``,
+        once a document that failed the extraction quality gate on a prior
+        run is re-indexed clean under ``--force`` — see
+        :func:`nexus.pipeline_stages._enrich_metadata_from_extraction`).
+        Forwarded verbatim on every page as ``delete_keys`` in the request
+        body; omitted from the wire payload when ``None``/empty so an older
+        engine that predates this field sees an unchanged request shape.
 
         RDR-152 bead nexus-enehl: the frecency-only reindex path calls
         ``db.update_chunks(collection=..., ids=..., metadatas=...)`` on the
@@ -3948,9 +3997,14 @@ class HttpVectorClient:
         for start in range(0, len(ids), size):
             batch_ids  = ids[start : start + size]
             batch_meta = metadatas[start : start + size]
+            body: dict[str, Any] = {
+                "collection": collection, "ids": batch_ids, "metadatas": batch_meta,
+            }
+            if delete_keys:
+                body["delete_keys"] = list(delete_keys)
             result = _post(
                 "/v1/vectors/update-metadata",
-                {"collection": collection, "ids": batch_ids, "metadatas": batch_meta},
+                body,
                 tenant=self._tenant,
             )
             if isinstance(result, dict) and "missing" in result:
@@ -4074,6 +4128,45 @@ class HttpVectorClient:
             if on_progress is not None:
                 on_progress(start + len(batch), len(ids))
         return np.array(rows, dtype=np.float32)
+
+    def get_embeddings_by_id(self, collection_name: str, ids: list[str]) -> dict[str, list[float]]:
+        """Stored vectors for *ids*, keyed by id (nexus-f9duo).
+
+        :meth:`get_embeddings` returns rows by position and drops ids the
+        service does not find, so one missing id misaligns every row after
+        it. The route already returns ``ids``; this keeps them. Absent ids
+        are simply absent from the result.
+        """
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
+
+        out: dict[str, list[float]] = {}
+        for start in range(0, len(ids), QUOTAS.MAX_RECORDS_PER_WRITE):
+            batch = ids[start : start + QUOTAS.MAX_RECORDS_PER_WRITE]
+            result = _post(
+                "/v1/vectors/get-embeddings",
+                {"collection": collection_name, "ids": batch},
+                tenant=self._tenant,
+            )
+            out.update(zip(result.get("ids", []), result.get("embeddings", [])))
+        return out
+
+    def embed_for_collection(self, collection_name: str, texts: list[str]) -> list[list[float]]:
+        """Embed *texts* with *collection_name*'s registered model, storing
+        nothing (``POST /v1/vectors/embed``; nexus-f9duo).
+
+        The engine embeds each text as its own document, which is how it
+        embeds chunks on write, so a stored vector the engine wrote should
+        match a fresh one to within the model's call-to-call noise.
+        """
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), _EMBED_PROBE_BATCH):
+            result = _post(
+                "/v1/vectors/embed",
+                {"collection": collection_name, "texts": texts[start : start + _EMBED_PROBE_BATCH]},
+                tenant=self._tenant,
+            )
+            vectors.extend(result.get("embeddings", []))
+        return vectors
 
     # ── Stubs for T3Database surface not used by Seam B ─────────────────────
 

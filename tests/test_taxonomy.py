@@ -1622,6 +1622,7 @@ def test_rebuild_cli_is_discover_force_alias() -> None:
     mock_fn.assert_called_once()
     _, kwargs = mock_fn.call_args
     assert kwargs.get("force") is True
+    assert "nx taxonomy project --backfill --persist" in result.output
 
 
 # ── MiniLM topic quality validation (RDR-070, nexus-7m8) ─────────────────────
@@ -2526,6 +2527,8 @@ class TestSplitCLI:
         assert sum(child_counts) == 30
         expected_redistribution = "/".join(str(c) for c in child_counts)
         assert f"Redistribution: 30 -> {expected_redistribution}" in result.output
+        # nexus-x3gig round 3: other collections' projections are stale now.
+        assert "nx taxonomy project --backfill --persist" in result.output
 
 
 class TestGetAllTopics:
@@ -2906,6 +2909,7 @@ class TestManualOpsCLI:
             )
 
         assert result.exit_code == 0, result.output
+        assert "nx taxonomy project --backfill --persist" in result.output
         with T2Database(db_path) as db:
             # Source deleted
             assert db.taxonomy.get_topic_by_id(source_id) is None

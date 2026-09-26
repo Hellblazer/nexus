@@ -10,12 +10,15 @@ import contextlib
 import os
 import threading
 import time
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from nexus.config import default_db_path
 from nexus.service_handles import SharedClientSlot, cached_endpoint_key
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     import httpx
 
 
@@ -223,6 +226,9 @@ def reset_service_t2_op_stats(slot: SharedClientSlot | None = None) -> None:
 # "every batch failed" total-loss determination.
 _taxonomy_assign_run_stats: dict[str, int] = {
     "attempted": 0, "failed_batches": 0, "failed_chunks": 0,
+    # nexus-tawfg: chunks whose assign was deferred this run. Not a loss:
+    # the nexus-iygza drain assigns them on a later run.
+    "deferred_chunks": 0,
 }
 _taxonomy_assign_stats_lock = threading.Lock()
 
@@ -244,7 +250,7 @@ def _record_taxonomy_assign_batch_failure(chunk_count: int) -> None:
 
 
 def taxonomy_assign_run_stats() -> dict[str, int]:
-    """Snapshot of ``{attempted, failed_batches, failed_chunks}`` for the
+    """Snapshot of ``{attempted, failed_batches, failed_chunks, deferred_chunks}`` for the
     current run. Mirrors ``service_t2_op_stats()``'s snapshot contract."""
     with _taxonomy_assign_stats_lock:
         return dict(_taxonomy_assign_run_stats)
@@ -257,6 +263,253 @@ def reset_taxonomy_assign_run_stats() -> None:
         _taxonomy_assign_run_stats["attempted"] = 0
         _taxonomy_assign_run_stats["failed_batches"] = 0
         _taxonomy_assign_run_stats["failed_chunks"] = 0
+        _taxonomy_assign_run_stats["deferred_chunks"] = 0
+
+
+# nexus-tawfg (indexing-brittleness P0.3): defer taxonomy assignment while
+# the engine is freshly restarted or assign failed recently. mg8gx lost 800
+# chunks' topics in the minutes after an engine restart (cold cache), and
+# r0vkh's 782 s pool wedge was the same shape: sending more assign work to a
+# sick engine makes it sicker. Deferring is safe because the nexus-iygza
+# drain assigns any chunk left without a topic on a later run, so a deferred
+# assign is neither attempted nor counted as a loss.
+#
+# The flag is process-wide and set only by `nx index repo` (and by the
+# in-run breaker in taxonomy_assign_batch_hook); the MCP store_put path and
+# `nx taxonomy drain` never set it, so they always assign.
+
+#: Engine uptime below which a run defers. The engine's own javadoc: low
+#: uptime reliably means a recent restart; high uptime does NOT mean a warm
+#: cache, so this only ever excludes.
+TAXONOMY_DEFER_UPTIME_S = 600
+#: How long after a recorded assign failure later runs defer.
+TAXONOMY_FAILURE_BACKOFF_S = 900
+#: Prefix of the file under the nexus config dir holding the wall-clock
+#: time of the last run that lost an assignment (seconds since the epoch).
+#: One file per engine endpoint: see
+#: :func:`taxonomy_failure_marker_path`.
+TAXONOMY_FAILURE_MARKER = "taxonomy_assign_failed_at"
+
+
+def _env_seconds(name: str, default: int) -> int:
+    """A non-negative integer from env *name*, or *default*.
+
+    Both thresholds are proxies (conexus measured cache recovery as
+    work-driven, not time-driven), so they can be retuned without a
+    release. An unparsable or negative value is logged and ignored.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if value < 0:
+            raise ValueError("negative")
+    except ValueError:
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning("taxonomy_deferral_env_ignored", var=name, value=raw, default=default)
+        return default
+    return value
+
+
+def taxonomy_defer_uptime_s() -> int:
+    """:data:`TAXONOMY_DEFER_UPTIME_S`, or ``NX_TAXONOMY_DEFER_UPTIME_S``."""
+    return _env_seconds("NX_TAXONOMY_DEFER_UPTIME_S", TAXONOMY_DEFER_UPTIME_S)
+
+
+def taxonomy_failure_backoff_s() -> int:
+    """:data:`TAXONOMY_FAILURE_BACKOFF_S`, or ``NX_TAXONOMY_FAILURE_BACKOFF_S``."""
+    return _env_seconds("NX_TAXONOMY_FAILURE_BACKOFF_S", TAXONOMY_FAILURE_BACKOFF_S)
+
+
+def taxonomy_failure_marker_path(config_dir: Any) -> Any:
+    """The failure marker for the engine this process talks to.
+
+    Keyed on a digest of the resolved service URL alone. What the backoff
+    tracks is the ENGINE's health, and a struggling engine is struggling for
+    every tenant on it, so neither tenant nor token belongs in the key: the
+    token would also restart the backoff on every rotation (substantive
+    critic, round 2), and ``_process_default_tenant()`` is the literal
+    ``"default"`` on every client, the real tenant being bound to the token
+    server-side. Different engines on one box get different files, so a loss
+    against one never defers another (round 1). An endpoint that cannot be
+    resolved gets its own ``unresolved`` file.
+    """
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    return Path(config_dir) / f"{TAXONOMY_FAILURE_MARKER}.{_engine_file_key()}"
+
+
+def _engine_file_key() -> str:
+    """A filesystem-safe digest of the resolved engine URL, ``unresolved``
+    when there is none. Shared by the per-engine taxonomy state files."""
+    import hashlib  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    try:
+        from nexus.db.http_vector_client import _resolve_endpoint  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
+
+        url, _token = _resolve_endpoint()
+        return hashlib.sha256(url.rstrip("/").encode()).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 — an unresolvable endpoint fails the index run elsewhere; here it only picks a file name
+        return "unresolved"
+
+
+# nexus-j7ae6 (Sam 2026-09-25: visible acknowledgment). A chunk the engine
+# permanently refuses to assign would fail every `nx index repo` forever,
+# because the drain lists the whole collection each run. The other two
+# recurring exit checks already have an explicit escape: a flush failure
+# (nexus-4s1ww) through the index ignore patterns, a PDF quality-gate skip
+# (nexus-wi1uv) through --allow-degraded-extraction. An operator who has
+# diagnosed a stuck chunk acknowledges it; the drain then skips it in that
+# collection instead of retrying, names the count on every run, and does
+# not count it as a loss. Anything unacknowledged still fails the run.
+#
+# Stored in T2 memory, one entry per (collection, chash), so every box and
+# CI runner talking to the same tenant sees the same acknowledgments
+# (substantive critic: a per-box file relocated the failure from "every
+# run" to "every box"). Keyed by collection as well as chash because a
+# chash is the hash of the text alone, and identical text in another
+# collection must never be silenced by an acknowledgment made here (code
+# review).
+
+#: T2 memory project holding the acknowledgments; titles are
+#: ``<collection>/<chash>``, content is the operator's note.
+TAXONOMY_ACK_PROJECT = "nexus_taxonomy_ack"
+
+
+def taxonomy_ack_title(collection: str, chash: str) -> str:
+    return f"{collection}/{chash}"
+
+
+def acknowledged_chashes(entries: Any, collection: str) -> set[str]:
+    """The chashes acknowledged for *collection*, and only that collection,
+    from T2 memory entries of :data:`TAXONOMY_ACK_PROJECT`."""
+    prefix = f"{collection}/"
+    out: set[str] = set()
+    for e in entries or []:
+        title = str((e or {}).get("title", ""))
+        if title.startswith(prefix):
+            out.add(title[len(prefix):])
+    return out
+
+
+def load_acknowledged_chashes(collection: str) -> set[str]:
+    """Acknowledged chashes for *collection* through the shared T2 slot.
+
+    A failed read is logged and treated as none acknowledged, which fails
+    safe: those chunks count as losses again, loudly.
+    """
+    try:
+        entries = t2_index_write(
+            lambda db: db.memory.get_all(TAXONOMY_ACK_PROJECT), op="taxonomy_ack_read",
+        )
+    except Exception as exc:  # noqa: BLE001 — fail safe and say so
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning("taxonomy_ack_read_failed", error=str(exc))
+        return set()
+    return acknowledged_chashes(entries, collection)
+
+
+_taxonomy_deferral = ""
+_taxonomy_breaker_armed = False
+_taxonomy_deferral_lock = threading.Lock()
+
+
+def set_taxonomy_deferral(reason: str, *, arm_breaker: bool = False) -> None:
+    """Defer taxonomy assignment for this process (``""`` clears it).
+
+    *arm_breaker* lets a lost batch defer the rest of the run (see
+    :func:`taxonomy_assign_batch_hook`). Only ``nx index repo`` arms it, for
+    the duration of the command: a long-lived process such as the MCP
+    server must never have one failure switch its assigns off for good.
+    Clearing (``""``) disarms it.
+    """
+    global _taxonomy_deferral, _taxonomy_breaker_armed
+    with _taxonomy_deferral_lock:
+        _taxonomy_deferral = reason
+        _taxonomy_breaker_armed = arm_breaker
+
+
+def _trip_taxonomy_breaker() -> None:
+    """Defer the rest of an armed run after a lost batch; no-op unarmed."""
+    global _taxonomy_deferral
+    with _taxonomy_deferral_lock:
+        if _taxonomy_breaker_armed and not _taxonomy_deferral:
+            _taxonomy_deferral = "taxonomy assign failed earlier in this run"
+
+
+def taxonomy_deferral() -> str:
+    """The current deferral reason, or ``""`` when assignment runs."""
+    with _taxonomy_deferral_lock:
+        return _taxonomy_deferral
+
+
+def _record_taxonomy_deferred(chunk_count: int) -> None:
+    with _taxonomy_assign_stats_lock:
+        _taxonomy_assign_run_stats["deferred_chunks"] += chunk_count
+
+
+def engine_process_uptime_seconds() -> int | None:
+    """The engine's ``/version`` ``process_uptime_seconds``, or ``None``.
+
+    ``None`` for anything but an integer (an older engine or edge omits the
+    field; a bool is not an uptime) and for any failure to ask. Callers
+    must treat ``None`` as "no evidence of a restart", never as "warm".
+    """
+    try:
+        from nexus.db.http_vector_client import _get, _process_default_tenant  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
+
+        info = _get("/version", tenant=_process_default_tenant())
+    except Exception as exc:  # noqa: BLE001 — advisory probe; absence defers nothing
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().debug("engine_uptime_probe_failed", error=str(exc))
+        return None
+    value = info.get("process_uptime_seconds") if isinstance(info, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def record_taxonomy_failure(marker: Any, *, now: float) -> None:
+    """Record that a run lost an assignment at wall-clock *now*."""
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    path = Path(marker)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Temp file then rename: two runs recording at once never leave a torn
+    # value (a torn one would read as "no backoff", which is safe but wrong).
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(f"{now:.0f}\n")
+    os.replace(tmp, path)
+
+
+def decide_taxonomy_deferral(*, uptime_fn: Any, marker: Any, now_fn: Any) -> str:
+    """Why this run should defer taxonomy assignment, or ``""``.
+
+    Two exclusions, checked in order: the engine restarted less than
+    :func:`taxonomy_defer_uptime_s` ago; or a run lost an assignment less
+    than :func:`taxonomy_failure_backoff_s` ago (the *marker* file). Unknown
+    uptime and an unreadable marker both defer nothing.
+
+    Known limits, accepted: "under load" is caught only after a batch has
+    failed (the client has no engine load signal); a deploy that does not
+    restart the engine is not seen; and the MCP ``store_put`` path is never
+    deferred, by design, so a long-lived server cannot lose its assigns to
+    one stuck flag.
+    """
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    uptime = uptime_fn()
+    if uptime is not None and uptime < taxonomy_defer_uptime_s():
+        return f"engine restarted {uptime} s ago"
+    try:
+        failed_at = float(Path(marker).read_text().strip())
+    except (OSError, ValueError):
+        return ""
+    age = now_fn() - failed_at
+    if 0 <= age < taxonomy_failure_backoff_s():
+        return f"taxonomy assign failed {age:.0f} s ago"
+    return ""
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
@@ -1123,6 +1376,265 @@ def _record_taxonomy_tripwire(
         )
 
 
+# nexus-mg8gx: client-side retry for a failed taxonomy-assign batch. A
+# statement/lock timeout at the engine's r0vkh 30s bound, an edge 5xx, or a
+# 499 (nginx "client closed request", seen when the upstream took too long
+# and the caller's own timeout fired first) dropped the WHOLE batch — ~270
+# chunks lost their topic assignment on one failed POST, and nothing
+# re-sent it until someone re-ran the index by hand. The assign upsert is
+# ``ON CONFLICT (tenant, doc_id, topic_id)``, so resending all or part of a
+# batch is always safe: it can only re-apply the same assignment, never
+# duplicate or corrupt one. A 4xx (validation) is never retried — resending
+# the same bad request gets the same rejection, so it fails immediately
+# exactly as before this bead.
+#
+# Bounded so one bad batch cannot stall an index run: the split floor stops
+# recursion, the backoff schedule is short and capped, and
+# ``_TAXONOMY_ASSIGN_MAX_RETRY_SECONDS`` caps the total wall-clock time
+# spent retrying ONE top-level batch — the deadline is checked before every
+# split AND before every sub-batch attempt, so once the clock runs out no
+# further engine call is made. The bound is the deadline plus at most one
+# in-flight call's own timeout, not the deadline alone. No durable
+# pending list here (that is P0.1 of a separate, PG-backed proposal): what
+# still fails at the floor is reported lost, exactly as it was before this
+# fix, just scoped down from the whole original batch.
+_TAXONOMY_ASSIGN_RETRY_FLOOR = 16
+_TAXONOMY_ASSIGN_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 4.0)
+_TAXONOMY_ASSIGN_MAX_RETRY_SECONDS = 60.0
+
+
+def _is_retryable_taxonomy_assign_error(exc: Exception) -> bool:
+    """True for a transient failure worth retrying (a statement/lock
+    timeout surfacing as a client-side timeout or connection error, a
+    5xx, or a 499), false for a genuine 4xx validation error or anything
+    else unrecognized.
+
+    Deferred ``httpx`` import: this module only ever needs it for this one
+    isinstance check (see the ``TYPE_CHECKING``-only import at module top);
+    importing it eagerly here would be the only runtime use in the module.
+    """
+    import httpx  # noqa: PLC0415 — deferred; see docstring
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status >= 500 or status == 499
+    if isinstance(exc, httpx.TransportError):
+        return True
+    return isinstance(exc, (ConnectionError, TimeoutError))
+
+
+def _assign_from_chashes_with_retry(
+    collection: str,
+    doc_ids: list[str],
+    *,
+    deadline: float,
+    floor: int = _TAXONOMY_ASSIGN_RETRY_FLOOR,
+    depth: int = 0,
+    sleep_fn: Any = None,
+    now_fn: Any = None,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Attempt ``assign_from_chashes`` for *doc_ids*; on a retryable
+    failure, split the batch in half and recurse with a short backoff,
+    down to *floor*. Returns ``(merged_result, lost_doc_ids,
+    failure_messages)``:
+
+    - ``merged_result`` is a ``{"assigned", "cross_assigned",
+      "unmatched_chashes"}`` dict (the shape
+      ``HttpTaxonomyStore.assign_from_chashes`` itself returns), aggregated
+      across every sub-batch that succeeded.
+    - ``lost_doc_ids`` is empty unless a sub-batch is STILL failing once it
+      hits *floor*, the deadline, or a non-retryable error — exactly the
+      chashes that keep today's "lost their topic assignment" contract,
+      scoped down to whatever is genuinely unrecoverable rather than the
+      whole original batch.
+    - ``failure_messages`` names the exception for each terminal loss (one
+      entry per terminal sub-batch, never per doc_id).
+
+    ``sleep_fn``/``now_fn`` are injectable for tests: a fake clock and a
+    no-op sleep prove the backoff schedule and the deadline cutoff without
+    a real wall-clock wait. Left ``None`` (the production default), they
+    resolve to ``time.sleep``/``time.monotonic`` HERE, at call time, rather
+    than as bound default-argument values — a default bound at function-def
+    time would freeze the real ``time.sleep`` into ``__defaults__`` before
+    any test could monkeypatch ``nexus.mcp_infra.time.sleep``.
+    """
+    sleep_fn = sleep_fn if sleep_fn is not None else time.sleep
+    now_fn = now_fn if now_fn is not None else time.monotonic
+    empty_result: dict[str, Any] = {"assigned": 0, "cross_assigned": 0, "unmatched_chashes": []}
+    if depth > 0 and now_fn() >= deadline:
+        # A split half scheduled before the clock ran out is not attempted
+        # after it: without this the deadline only stopped FURTHER splits,
+        # and each already-scheduled half still paid a full statement bound.
+        return empty_result, list(doc_ids), ["retry deadline exceeded before attempt"]
+    try:
+        result = t2_index_write(
+            lambda db: db.taxonomy.assign_from_chashes(
+                collection, doc_ids, cross_collection=True,
+            ),
+            op="taxonomy_assign",
+        )
+        return result, [], []
+    except Exception as exc:  # noqa: BLE001 — classified below; a terminal case is reported by the caller, never re-raised
+        retryable = _is_retryable_taxonomy_assign_error(exc)
+        can_split = len(doc_ids) > floor and now_fn() < deadline
+        if not retryable or not can_split:
+            return empty_result, list(doc_ids), [f"{type(exc).__name__}: {exc}"]
+        sleep_fn(_TAXONOMY_ASSIGN_RETRY_BACKOFF_S[min(depth, len(_TAXONOMY_ASSIGN_RETRY_BACKOFF_S) - 1)])
+        mid = len(doc_ids) // 2
+        left_result, left_lost, left_failures = _assign_from_chashes_with_retry(
+            collection, doc_ids[:mid],
+            deadline=deadline, floor=floor, depth=depth + 1, sleep_fn=sleep_fn, now_fn=now_fn,
+        )
+        right_result, right_lost, right_failures = _assign_from_chashes_with_retry(
+            collection, doc_ids[mid:],
+            deadline=deadline, floor=floor, depth=depth + 1, sleep_fn=sleep_fn, now_fn=now_fn,
+        )
+        merged = {
+            "assigned": left_result.get("assigned", 0) + right_result.get("assigned", 0),
+            "cross_assigned": left_result.get("cross_assigned", 0) + right_result.get("cross_assigned", 0),
+            "unmatched_chashes": [
+                *left_result.get("unmatched_chashes", []),
+                *right_result.get("unmatched_chashes", []),
+            ],
+        }
+        return merged, [*left_lost, *right_lost], [*left_failures, *right_failures]
+
+
+# nexus-iygza (indexing-brittleness P0.1, client half; Sam's design
+# 2026-09-25): recover assignments from STATE, not from a record of what
+# failed. The tripwire's hook_failures row keeps only doc_ids[0], so nothing
+# could replay a lost batch; the engine (v0.1.132) now lists a taxonomized
+# collection's manifest-backed chunks that carry no assignment to the
+# collection's own topics, and the drain feeds each page through the same
+# split-in-half retry the per-flush hook uses. It recovers losses from any
+# box, any crash, and any hook that deferred its assign, at the cost that
+# chunks HDBSCAN left as noise at discover time get their nearest topic too
+# (accepted: the per-flush hook already does that for every new chunk).
+
+#: Chashes requested per page; the size of one flush's assign batch.
+_DRAIN_PAGE = 270
+#: Default ceiling on chunks one drain call handles, so a large backlog is
+#: worked off over several runs rather than inside one post-commit index.
+_DRAIN_MAX_CHUNKS = 2000
+
+
+@dataclass(frozen=True)
+class DrainResult:
+    """Outcome of one :func:`drain_unassigned_chunks` call.
+
+    ``found`` counts chashes the engine listed, ``assigned`` those whose
+    assign call succeeded, ``lost`` those that still failed after the retry.
+    ``truncated`` means the budget or deadline stopped the drain with pages
+    left. ``skipped_reason`` is non-empty when nothing was asked: an engine
+    without the route, or taxonomy deferred for this run (nexus-tawfg).
+    """
+
+    collection: str
+    has_taxonomy: bool = False
+    found: int = 0
+    assigned: int = 0
+    lost: int = 0
+    truncated: bool = False
+    skipped_reason: str = ""
+    #: Listed chunks skipped because an operator acknowledged them as stuck
+    #: (nexus-j7ae6); not assigned, not lost.
+    acknowledged: int = 0
+
+
+def drain_unassigned_chunks(
+    collection: str,
+    *,
+    page_size: int = _DRAIN_PAGE,
+    max_chunks: int = _DRAIN_MAX_CHUNKS,
+    deadline_s: float = _TAXONOMY_ASSIGN_MAX_RETRY_SECONDS,
+    now_fn: Any = time.monotonic,
+    taxonomy: Any = None,
+    acknowledged: Any = None,
+) -> DrainResult:
+    """Assign *collection*'s manifest-backed chunks that have no assignment
+    to its own topics, page by page, up to *max_chunks* or *deadline_s*.
+
+    Pages advance on the engine's keyset cursor, so a chunk that fails to
+    assign never blocks the ones after it. A lost chunk is recorded on the
+    same tripwire the per-flush hook uses and is listed again by the next
+    drain, which is the recovery.
+
+    *taxonomy* is an open taxonomy store for the page reads, so a command
+    that already holds a shared-client ``T2Database`` (``nx index repo``,
+    nexus-m20mf) reads through it; ``None`` routes each read through
+    :func:`t2_index_write`. The assigns always go through the same retrying
+    path the per-flush hook uses.
+    """
+    import httpx  # noqa: PLC0415 — deferred; see _is_retryable_taxonomy_assign_error
+
+    reason = taxonomy_deferral()
+    if reason:
+        return DrainResult(collection, skipped_reason=f"deferred: {reason}")
+    if acknowledged is None:
+        acknowledged = load_acknowledged_chashes(collection)
+    deadline = now_fn() + deadline_s
+    after: str | None = None
+    has_taxonomy = False
+    found = assigned = lost = acked = 0
+    while True:
+        remaining = max_chunks - found
+        if remaining <= 0 or now_fn() >= deadline:
+            return DrainResult(collection, has_taxonomy, found, assigned, lost, truncated=True, acknowledged=acked)
+        try:
+            n = min(page_size, remaining)
+            if taxonomy is not None:
+                page = taxonomy.unassigned_chashes(collection, limit=n, after=after)
+            else:
+                page = t2_index_write(
+                    lambda db, _a=after, _n=n: db.taxonomy.unassigned_chashes(
+                        collection, limit=_n, after=_a),
+                    op="taxonomy_unassigned",
+                )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return DrainResult(
+                    collection,
+                    skipped_reason="engine has no /v1/taxonomy/assignments/unassigned "
+                    "(below engine-service-v0.1.132)",
+                )
+            if exc.response.status_code == 422:
+                # Not registered for this tenant: the collection holds no
+                # chunks, so there is nothing to assign and nothing to report.
+                return DrainResult(collection)
+            raise
+        has_taxonomy = bool(page.get("has_taxonomy"))
+        chashes = list(page.get("chashes") or [])
+        if not has_taxonomy or not chashes:
+            return DrainResult(collection, has_taxonomy, found, assigned, lost, acknowledged=acked)
+        found += len(chashes)
+        cursor = page.get("next_after") or None
+        if acknowledged:
+            to_assign = [c for c in chashes if c not in acknowledged]
+            acked += len(chashes) - len(to_assign)
+            chashes = to_assign
+        if not chashes:
+            after = cursor
+            if after is None:
+                return DrainResult(collection, has_taxonomy, found, assigned, lost, acknowledged=acked)
+            continue
+        _record_taxonomy_assign_attempt()
+        _result, lost_ids, failures = _assign_from_chashes_with_retry(
+            collection, chashes, deadline=deadline,
+        )
+        if lost_ids:
+            _record_taxonomy_tripwire(
+                collection, lost_ids,
+                f"drain: {len(lost_ids)}/{len(chashes)} chashes lost after retry/split: "
+                + "; ".join(failures),
+                kind="drain",
+            )
+            _record_taxonomy_assign_batch_failure(len(lost_ids))
+        assigned += len(chashes) - len(lost_ids)
+        lost += len(lost_ids)
+        after = cursor
+        if after is None:
+            return DrainResult(collection, has_taxonomy, found, assigned, lost, acknowledged=acked)
+
 
 def taxonomy_assign_batch_hook(
     doc_ids: list[str],
@@ -1148,7 +1660,11 @@ def taxonomy_assign_batch_hook(
     engine reports no assignable chashes (empty ``doc_ids``). No client-side
     fallback: an engine that lacks the route fails the batch loud via the
     RDR-172 tripwire (a ``hook_failures`` row + a warning log), never a
-    silent client-side recompute.
+    silent client-side recompute. A retryable failure (a statement/lock
+    timeout, a 5xx, or a 499) is retried split in half, recursively with
+    backoff, down to a floor (nexus-mg8gx,
+    :func:`_assign_from_chashes_with_retry`) before the tripwire fires —
+    only what still fails at the floor is reported lost.
 
     Wired by :func:`nexus.hook_registry.install_default_hooks` onto every
     runtime-constructed registry.
@@ -1192,26 +1708,41 @@ def taxonomy_assign_batch_hook(
         # that (or any other transport failure) is caught below and reported
         # via the SAME tripwire every other service-path failure uses — the
         # hook fails loud and reports, it never recomputes client-side.
+        if taxonomy_deferral():
+            # nexus-tawfg: deferred, not attempted and not a loss; the
+            # nexus-iygza drain assigns these chunks on a later run.
+            _record_taxonomy_deferred(len(doc_ids))
+            return
         # nexus-7lw6a: counted regardless of outcome — the denominator the
         # run-summary exit-code check uses to tell "some batches failed"
         # from "every batch failed" (total loss).
         _record_taxonomy_assign_attempt()
-        try:
-            result = t2_index_write(
-                lambda db: db.taxonomy.assign_from_chashes(
-                    collection, doc_ids, cross_collection=True,
-                ),
-                op="taxonomy_assign",
-            )
-        except Exception as exc:  # noqa: BLE001 — taxonomy service path best-effort; tripwire-recorded, returns
+        # nexus-mg8gx: a statement/lock timeout, a 5xx, or a 499 used to
+        # drop the WHOLE batch here. _assign_from_chashes_with_retry retries
+        # a retryable failure split in half, recursively, down to a floor —
+        # only what still fails at the floor (or a non-retryable 4xx) comes
+        # back as `lost`.
+        result, lost, failures = _assign_from_chashes_with_retry(
+            collection, doc_ids, deadline=time.monotonic() + _TAXONOMY_ASSIGN_MAX_RETRY_SECONDS,
+        )
+        if lost:
             _record_taxonomy_tripwire(
-                collection, doc_ids, f"service path: {type(exc).__name__}: {exc}",
+                collection, lost,
+                f"service path: {len(lost)}/{len(doc_ids)} chashes lost after "
+                f"retry/split ({len(failures)} still-failing sub-batch(es)): "
+                + "; ".join(failures),
             )
-            # nexus-7lw6a: this IS the whole-batch-loss case the bead is
-            # about (e.g. an HTTP 500 from the assign endpoint) — every
-            # doc_id in this batch lost its taxonomy assignment.
-            _record_taxonomy_assign_batch_failure(len(doc_ids))
-            return
+            # nexus-7lw6a: this IS the batch-loss case the bead is about
+            # (e.g. an HTTP 500 from the assign endpoint that retry/split
+            # never recovered) — every doc_id named in `lost` lost its
+            # taxonomy assignment. Scoped to what's actually still lost
+            # (nexus-mg8gx), not the whole original batch.
+            _record_taxonomy_assign_batch_failure(len(lost))
+            # nexus-tawfg breaker: a batch still lost after the split-in-half
+            # retry means the engine is struggling now. Stop sending it
+            # assign work for the rest of this run (only an armed run, i.e.
+            # nx index repo); the drain recovers the deferred chunks later.
+            _trip_taxonomy_breaker()
         unmatched = result.get("unmatched_chashes") if isinstance(result, dict) else None
         if unmatched:
             # Route contract: a chash never actually upserted into
@@ -1289,8 +1820,47 @@ taxonomy_assign_batch_hook.batch_grain = "flush"
 # their catalog_document_chunks manifest linkage this way. This collector
 # lets `nx index`'s end-of-run summary surface the gap directly, with the
 # remediation command (`nx catalog reconcile`).
+#
+# nexus-wbfpw.29 round 2 (code-review Important): both collectors below
+# (and the identity-drop one further down) exist SOLELY to feed
+# ``nx index``/``nx dt index``'s end-of-run exit-code check
+# (commands/_helpers.py's emit_identity_drop_summary /
+# raise_identity_drop_exception) — only those four CLI entry points ever
+# call reset_identity_drop_collectors() (which resets both). The MCP
+# server is a LONG-LIVED process whose store_put path fires the SAME
+# manifest hook on every store and never resets or reads either list, so
+# recording into them there was a pure, unbounded-for-process-lifetime
+# leak with zero consumer (widened, not introduced, by this bead's own
+# exception-routing — the hook's pre-existing internal write-failure
+# recording already fed the same lists from store_put). Gate recording
+# behind a flag that ONLY an active-CLI-run reset turns on: a CLI
+# invocation is a short-lived, one-shot process, so leaving the flag on
+# for its remaining lifetime after the first reset is harmless, while the
+# MCP server — which never calls reset — never turns it on at all. T2
+# ``hook_failures`` (the durable record ``nx taxonomy status``/triage
+# reads) is unaffected: it is written unconditionally, by a separate
+# function, earlier in the same HookRegistry.fire_batch except block.
+_identity_drop_collectors_active = False
+
 _manifest_write_failures_lock = threading.Lock()
 _MANIFEST_WRITE_FAILURES: list[str] = []
+#: nexus-wbfpw.29 round 6: per-doc_id set of chashes the FAILING write was
+#: trying to put in that document's manifest, unioned across calls for the
+#: same doc (a document spanning multiple continuation-slice flushes can
+#: fail more than once, at different flushes, each carrying a different
+#: slice of the whole file's chunks). ``None`` is the sticky UNKNOWN
+#: marker: a producer that cannot determine what it was trying to write
+#: (the default for any call to :func:`_record_manifest_write_failure`
+#: that omits *chashes* — the safe fallback for a call site nobody has
+#: updated yet) sets it, and once a doc_id is unknown it STAYS unknown
+#: even if a later call for the same doc_id supplies a real set — a
+#: verifier can never reconstruct confidence a prior call already threw
+#: away. See :func:`get_manifest_write_failure_chashes` and
+#: ``commands._helpers.resolve_confirmed_write_failure_doc_ids``, the
+#: post-run verification this collector exists to feed: an unknown or
+#: empty expected set is NEVER treated as confirmed-repaired, because
+#: an empty set is trivially a subset of anything.
+_MANIFEST_WRITE_FAILURE_CHASHES: "dict[str, set[str] | None]" = {}
 
 
 def get_manifest_write_failures() -> list[str]:
@@ -1302,17 +1872,68 @@ def get_manifest_write_failures() -> list[str]:
         return list(_MANIFEST_WRITE_FAILURES)
 
 
+def get_manifest_write_failure_chashes() -> "dict[str, frozenset[str] | None]":
+    """Return, per failed doc_id, the chash set its failing write was
+    trying to put in the manifest — ``None`` means UNKNOWN (see the
+    module comment on ``_MANIFEST_WRITE_FAILURE_CHASHES``). Snapshot copy.
+    """
+    with _manifest_write_failures_lock:
+        return {
+            doc_id: (None if chashes is None else frozenset(chashes))
+            for doc_id, chashes in _MANIFEST_WRITE_FAILURE_CHASHES.items()
+        }
+
+
 def reset_manifest_write_failures() -> None:
     """Clear the collector. CLI callers invoke this at the start of an
     indexing run so the end-of-run summary reflects only that run's
-    failures (mirrors ``nexus.retry.reset_retry_stats``)."""
+    failures (mirrors ``nexus.retry.reset_retry_stats``). Also arms
+    ``_identity_drop_collectors_active`` (nexus-wbfpw.29 round 2) — see
+    the section comment above."""
+    global _identity_drop_collectors_active
+    _identity_drop_collectors_active = True
     with _manifest_write_failures_lock:
         _MANIFEST_WRITE_FAILURES.clear()
+        _MANIFEST_WRITE_FAILURE_CHASHES.clear()
 
 
-def _record_manifest_write_failure(doc_id: str) -> None:
+def _record_manifest_write_failure(
+    doc_id: str, chashes: "Iterable[str] | None" = None,
+) -> None:
+    """Record *doc_id* as a manifest write failure this run.
+
+    No-op when no active CLI index run has reset the collector
+    (nexus-wbfpw.29 round 2 — see the section comment above): this is
+    what keeps a long-lived MCP server process's store_put path from
+    growing this list forever with no reader. Deduplicates by doc_id,
+    stable insertion order (nexus-wbfpw.29 round 2, Important): a
+    document that fails across multiple continuation-slice flushes
+    previously appended once per flush, so both the count and the
+    printed id list repeated the same doc_id — cosmetically wrong and
+    proportionally weakened "names the documents to re-index".
+
+    *chashes* (nexus-wbfpw.29 round 6): the chashes THIS failing write
+    was trying to put in *doc_id*'s manifest, unfiltered, when the caller
+    has the batch rows in hand. ``None`` (the default), or any blank
+    entry, records the doc as UNKNOWN-expectation — see ``_MANIFEST_WRITE_FAILURE_CHASHES``'s
+    module comment for why this is sticky and why unknown/empty never
+    confirms.
+    """
+    if not _identity_drop_collectors_active:
+        return
     with _manifest_write_failures_lock:
-        _MANIFEST_WRITE_FAILURES.append(doc_id)
+        if doc_id not in _MANIFEST_WRITE_FAILURES:
+            _MANIFEST_WRITE_FAILURES.append(doc_id)
+        existing = _MANIFEST_WRITE_FAILURE_CHASHES.get(doc_id, set())
+        incoming = None if chashes is None else list(chashes)
+        # A row with no chash means this write's expectation is only
+        # partly known; a partial expectation could confirm a partial
+        # repair, so the doc becomes UNKNOWN (never confirmed).
+        if existing is None or incoming is None or not all(incoming):
+            _MANIFEST_WRITE_FAILURE_CHASHES[doc_id] = None
+        else:
+            existing |= set(incoming)
+            _MANIFEST_WRITE_FAILURE_CHASHES[doc_id] = existing
 
 
 # nexus-gup3b: a multi-batch document's every flush AFTER the first lacks
@@ -1377,12 +1998,21 @@ def get_manifest_identity_drops() -> list[dict]:
 
 def reset_manifest_identity_drops() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing run,
-    mirroring ``reset_manifest_write_failures``)."""
+    mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active`` (nexus-wbfpw.29 round 2) — see the
+    section comment above ``_manifest_write_failures_lock``."""
+    global _identity_drop_collectors_active
+    _identity_drop_collectors_active = True
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.clear()
 
 
 def _record_manifest_identity_drop(collection: str, batch_size: int) -> None:
+    """No-op when no active CLI index run has reset the collector
+    (nexus-wbfpw.29 round 2) — see the section comment above
+    ``_manifest_write_failures_lock``."""
+    if not _identity_drop_collectors_active:
+        return
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.append(
             {"collection": collection, "batch_size": batch_size}
@@ -1471,31 +2101,59 @@ def _record_complete_refusal(doc_id: str) -> None:
 _superseded_sweep_stats_lock = threading.Lock()
 _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
 _SUPERSEDED_SWEEP_SKIPS: list[dict] = []
+# nexus-4pj54: deferred-sweep entries a failed or fenced run threw away
+# (``discard_deferred_superseded_vectors``). Their superseded rows stay in
+# T3 until ``nx t3 gc``.
+_SUPERSEDED_SWEEP_DEFERRED_DISCARDED = 0
 
 
 def get_superseded_sweep_stats() -> dict:
     """Superseded-vector sweep outcomes this process/run.
 
     ``{"swept": int, "skipped": [{"doc_id": str, "collection": str,
-    "reason": str}, ...]}``. ``swept`` is the total count of T3 rows
-    actually deleted; ``skipped`` names every run where the sweep could
-    not complete (and therefore may have left superseded rows searchable)
-    — never silent. Snapshot copy.
+    "reason": str}, ...], "deferred_discarded": int,
+    "deferred_pending": int, "deferred_pending_doc_ids": [str, ...]}``.
+    ``swept`` is the total count of T3 rows actually deleted; ``skipped``
+    names every run where the sweep could not complete (and therefore may
+    have left superseded rows searchable) — never silent.
+    ``deferred_discarded`` counts documents whose deferred sweep
+    (nexus-4pj54) was dropped because their run failed or was fenced;
+    ``deferred_pending`` counts documents stashed since the last reset
+    that still hold deferred candidates (a run in flight, one that died
+    without reaching either fence call, or one whose completion-stamp
+    write failed in transport), and ``deferred_pending_doc_ids`` names
+    them. An entry held from before the last reset is not counted: it
+    belongs to an earlier run or file. Both name documents whose
+    superseded rows may remain in T3. Snapshot copy.
     """
+    with _pending_sweep_lock:
+        pending_ids = sorted(
+            d for d in _PENDING_SWEEP_CANDIDATES
+            if d in _PENDING_SWEEP_STASHED_SINCE_RESET
+        )
     with _superseded_sweep_stats_lock:
         return {
             "swept": _SUPERSEDED_SWEEP_SWEPT_TOTAL,
             "skipped": [dict(d) for d in _SUPERSEDED_SWEEP_SKIPS],
+            "deferred_discarded": _SUPERSEDED_SWEEP_DEFERRED_DISCARDED,
+            "deferred_pending": len(pending_ids),
+            "deferred_pending_doc_ids": pending_ids,
         }
 
 
 def reset_superseded_sweep_stats() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``)."""
-    global _SUPERSEDED_SWEEP_SWEPT_TOTAL
+    run, mirroring ``reset_manifest_write_failures``). Does not touch the
+    pending deferred-sweep entries themselves: those are live state, not
+    counters. It only forgets which of them this run stashed, so the next
+    run's pending stat does not inherit them."""
+    global _SUPERSEDED_SWEEP_SWEPT_TOTAL, _SUPERSEDED_SWEEP_DEFERRED_DISCARDED
+    with _pending_sweep_lock:
+        _PENDING_SWEEP_STASHED_SINCE_RESET.clear()
     with _superseded_sweep_stats_lock:
         _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
         _SUPERSEDED_SWEEP_SKIPS.clear()
+        _SUPERSEDED_SWEEP_DEFERRED_DISCARDED = 0
 
 
 def _record_superseded_swept(count: int) -> None:
@@ -1591,6 +2249,17 @@ def manifest_write_batch_hook(
     streaming chunks fall back to local positions which are still
     monotone within a batch — Phase 4 retargeting will pass per-call
     chunk_positions explicitly.
+
+    *manifest_complete* (``{doc_id: content_hash}``) is the producer's claim
+    that this batch carries the WHOLE document for that doc_id, not a
+    prefix of it. Besides feeding the completion stamp, the claim decides
+    what happens to the T3 rows a manifest REPLACE drops (nexus-4pj54):
+    with the claim they are swept immediately; without it the sweep is
+    deferred to the document's completion fence
+    (``doc_indexer._fence_complete``) and runs against the final manifest.
+    Never set it for a partial batch, such as the first batch of a
+    streaming or incremental upload: that batch carries position 0, and the
+    claim would sweep rows a later batch in the same run re-appends.
     """
     if not metadatas:
         return
@@ -1624,15 +2293,38 @@ def manifest_write_batch_hook(
     # read locks and contribute to the very write starvation this RDR closes.
     try:
         _gate = get_catalog()
-    except Exception:  # noqa: BLE001 — no-catalog path best-effort; logged at debug, returns
+    except Exception:  # noqa: BLE001 — no-catalog path best-effort; must not propagate
+        # nexus-wbfpw.29 round 2 (critic Critical): this used to be a
+        # zero-signal return — by_doc's document identity WAS resolved
+        # (we are past the identity-drop return above), but the catalog
+        # is unreachable, so every one of these documents' manifests will
+        # NOT be written this batch. Previously debug-logged only, so a
+        # catalog outage during `nx index repo` voided manifest writes
+        # for the whole run while it still reported "Done." and exited 0.
+        # Record every doc in by_doc as a write failure so nx index's
+        # existing exit-code check (nexus-7lw6a) catches this too.
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
+        structlog.get_logger().warning("manifest_write_hook_no_catalog", collection=collection, exc_info=True)
+        for _doc_id in sorted(by_doc):
+            _record_manifest_write_failure(
+                _doc_id,
+                [m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]],
+            )
         return
     if _gate is None:
+        # nexus-wbfpw.29 round 2 (critic Critical): same silent-loss shape
+        # as the exception path directly above — the catalog is configured
+        # but not yet initialised, so the manifest write below cannot
+        # happen for ANY of by_doc's documents this batch.
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug(
+        structlog.get_logger().warning(
             "manifest_write_hook_catalog_uninitialised", collection=collection,
         )
+        for _doc_id in sorted(by_doc):
+            _record_manifest_write_failure(
+                _doc_id,
+                [m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]],
+            )
         return
     # (The local-mode read-handle cleanup that lived here — a lint-dodging
     # ``getattr(_gate, "_db", None)`` — died with the local catalog,
@@ -1672,10 +2364,19 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
 
 def _apply_combined_write_response(
     res: dict, complete_map: dict[str, str], collection: str | None,
+    chash_by_doc: "dict[str, list[str]] | None" = None,
 ) -> list[str]:
     """Record accounting from a nexus-kl2z6/nexus-wxjr6 combined write's
     response: failed docs, completion refusals, and — the flush-grain
     path's whole reason for existing — the ENGINE's own sweep accounting.
+
+    *chash_by_doc* (nexus-wbfpw.29 round 6): the caller's own doc_id ->
+    chash-set map for the batch it submitted (``full_docs`` at the one
+    real call site, ``indexer.py``'s flush closure) — threaded into
+    :func:`_record_manifest_write_failure` for every doc_id this response
+    reports failed, so the post-run verification step can confirm exactly
+    what this write was trying to put in the manifest. ``None`` (the
+    default) records every failure as UNKNOWN-expectation.
 
     Deliberately NOT a reuse of :func:`_manifest_write_loop`'s write_many
     branch parsing: that block ALSO computes a local before/after chash
@@ -1709,7 +2410,7 @@ def _apply_combined_write_response(
 
     failed = list(res.get("failed_doc_ids") or [])
     for doc_id in failed:
-        _record_manifest_write_failure(doc_id)
+        _record_manifest_write_failure(doc_id, (chash_by_doc or {}).get(doc_id))
     refused = res.get("complete_refused") or []
     refused_count = int(res.get("complete_refused_count") or 0)
     if refused_count != len(refused):
@@ -1749,6 +2450,155 @@ def _apply_combined_write_response(
             str(outcome.get("reason") or "sweep_failed"),
         )
     return failed
+
+
+# nexus-4pj54: a REPLACE whose batch is not PROVABLY the whole document
+# (a streaming multi-batch upload's first batch legitimately carries
+# position 0 -- the position-0 gate above -- without being complete; see
+# doc_indexer.py's ``_index_pdf_incremental`` and pipeline_stages.py's
+# ``uploader_loop``, neither of which ever populates ``manifest_complete``
+# for the same reason) must not sweep its dropped chashes immediately --
+# they may be rows a LATER batch in the same run is about to re-append.
+# Measured (T2 nexus/swept-count-streaming-reindex-2026-09-25): a 66-chunk
+# PDF re-index reported "swept 64" against 2 truly superseded chashes; 62
+# live chunks were deleted from T3 and re-uploaded by later batches.
+#
+# Candidates are held here, keyed on doc_id, instead of swept on the spot;
+# ``sweep_deferred_superseded_vectors`` (called from
+# ``doc_indexer._fence_complete`` on a SUCCESSFUL completion stamp only)
+# pops the entry and sweeps it against the FINAL manifest. A run that fails,
+# whose stamp is refused, or that is fenced (``doc_indexer._fence_fail``,
+# ``_fence_complete``'s IndexRunVerifyRefused branch, pipeline_stages.py's
+# PipelineRunFenced abort) DISCARDS its entry via
+# ``discard_deferred_superseded_vectors`` -- never sweeps it. Process-lifetime
+# only, by design: an interrupted run loses its pending entry rather than
+# risking deletion of a row a later batch was about to re-append -- no sweep
+# beats a wrong sweep. Superseded rows left unswept this way stay in T3
+# until an operator runs ``nx t3 gc`` (manual, the only backstop that exists
+# today); the automatic reaper is planned in RDR-192 Phase 3 (nexus-2x9xa,
+# OPEN) and is not built.
+#
+# Concurrent runs on one doc_id in one process share this entry (keyed on
+# doc_id alone, no run epoch). Epoch fencing does NOT cover it: the fence
+# guards pipeline-row writes, and the uploader stashes (via fire_batch)
+# BEFORE its epoch-fenced mark_uploaded, so a superseded run can stash one
+# more batch and then, on discovering the fence, discard the MERGED entry,
+# the newer owner's candidates included. The newer owner's completion then
+# finds nothing to sweep. Accepted residual, safe direction only: rows are
+# left for ``nx t3 gc``, never wrongly deleted.
+_pending_sweep_lock = threading.Lock()
+_PENDING_SWEEP_CANDIDATES: dict[str, tuple[str, set[str]]] = {}
+# doc_ids stashed since the last ``reset_superseded_sweep_stats``. The
+# pending stat reports only these, so an entry a much earlier file left held
+# (a transport failure on its completion stamp) is not re-reported against
+# every later file of a ``--dir`` batch. Guarded by ``_pending_sweep_lock``.
+_PENDING_SWEEP_STASHED_SINCE_RESET: set[str] = set()
+
+
+def _stash_pending_sweep(doc_id: str, collection: str, dropped: set[str]) -> None:
+    """Hold *dropped* chashes for *doc_id* instead of sweeping now. Merges
+    with any candidates already held for this doc_id (a run should only
+    ever REPLACE a document's manifest once — at its first, position-0-
+    bearing batch — but merging keeps this safe if that ever changes)."""
+    if not dropped:
+        return
+    with _pending_sweep_lock:
+        _, prev = _PENDING_SWEEP_CANDIDATES.get(doc_id, (collection, set()))
+        _PENDING_SWEEP_CANDIDATES[doc_id] = (collection, prev | dropped)
+        _PENDING_SWEEP_STASHED_SINCE_RESET.add(doc_id)
+
+
+def sweep_deferred_superseded_vectors(doc_id: str) -> None:
+    """Sweep candidates :func:`_stash_pending_sweep` held for *doc_id*,
+    against the FINAL manifest, now that the document's index run is
+    confirmed complete (nexus-4pj54).
+
+    Called from ``doc_indexer._fence_complete`` immediately after a
+    SUCCESSFUL completion stamp — never on ``IndexRunVerifyRefused`` or a
+    transport failure, since the manifest is not confirmed complete there.
+    A refusal discards the entry (:func:`discard_deferred_superseded_vectors`);
+    a transport failure leaves it held and counted in ``deferred_pending``.
+    No-op when nothing is
+    pending for *doc_id*: the common case (a file-atomic single-batch
+    write) sweeps immediately in ``_manifest_write_loop`` and never
+    stashes anything here, so this call costs one dict lookup.
+    """
+    with _pending_sweep_lock:
+        entry = _PENDING_SWEEP_CANDIDATES.pop(doc_id, None)
+    if entry is None:
+        return
+    collection, candidates = entry
+    if not candidates or not collection:
+        return
+    try:
+        reader = get_catalog()
+    except Exception as exc:  # noqa: BLE001 — advisory: this is called from _fence_complete's success tail and must never raise there
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning(
+            "superseded_sweep_deferred_no_catalog", doc_id=doc_id, collection=collection,
+            error=str(exc),
+        )
+        _record_superseded_sweep_skip(doc_id, collection, "no_catalog")
+        return
+    if reader is None:
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning(
+            "superseded_sweep_deferred_no_catalog", doc_id=doc_id, collection=collection,
+        )
+        _record_superseded_sweep_skip(doc_id, collection, "no_catalog")
+        return
+    try:
+        try:
+            final_chashes = {h for h in (reader.get_chunk_chashes(doc_id) or []) if h}
+        except Exception as exc:  # noqa: BLE001 — no sweep beats a wrong sweep
+            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+            structlog.get_logger().warning(
+                "superseded_sweep_deferred_final_read_failed",
+                doc_id=doc_id, collection=collection, error=str(exc))
+            _record_superseded_sweep_skip(doc_id, collection, "before_read_failed")
+            return
+        from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+        _cache = CollectionDocumentsCache(reader, collection)
+        _sweep_superseded_vectors(
+            None, doc_id, candidates, [{"chash": h} for h in final_chashes], collection,
+            reader=reader, notes_provider=lambda: live_note_chashes(_cache.get()))
+    finally:
+        _close = getattr(reader, "close", None)
+        if callable(_close):
+            _close()
+
+
+def discard_deferred_superseded_vectors(doc_id: str) -> int:
+    """Drop, never sweep, the candidates held for *doc_id* (nexus-4pj54).
+
+    Called when *doc_id*'s index run failed (``doc_indexer._fence_fail``),
+    its completion stamp was refused (``doc_indexer._fence_complete``'s
+    ``IndexRunVerifyRefused`` branch, which propagates past every
+    ``_fence_fail`` call site), or it was fenced by a newer run
+    (pipeline_stages.py's PipelineRunFenced abort, which skips
+    ``_fence_fail``). The manifest is not confirmed complete on any of these
+    paths, so a sweep could delete a row the document
+    still needs; holding the entry instead would leak it for the life of
+    the process. The superseded rows stay in T3 until ``nx t3 gc``; the
+    discard is counted in :func:`get_superseded_sweep_stats` so the run
+    summary names it. Returns the number of candidate chashes dropped
+    (0 when nothing was pending). Never raises.
+    """
+    global _SUPERSEDED_SWEEP_DEFERRED_DISCARDED
+    with _pending_sweep_lock:
+        entry = _PENDING_SWEEP_CANDIDATES.pop(doc_id, None)
+    if entry is None:
+        return 0
+    collection, candidates = entry
+    with _superseded_sweep_stats_lock:
+        _SUPERSEDED_SWEEP_DEFERRED_DISCARDED += 1
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+    structlog.get_logger().info(
+        "superseded_sweep_deferred_discarded", doc_id=doc_id,
+        collection=collection, candidates=len(candidates),
+    )
+    return len(candidates)
 
 
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
@@ -2147,10 +2997,21 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             # POSITION-0 GATE (review Important #1): write_many is
             # REPLACE — a doc whose batch lacks position 0 is a
             # continuation slice, and replacing would DELETE its
-            # earlier rows (silent manifest corruption). Today's only
-            # flush-grain producer (ChunkBatcher) is file-atomic so
-            # position 0 is always present; this guard defends the
-            # invariant against any future producer.
+            # earlier rows (silent manifest corruption). The flush-grain
+            # producer (ChunkBatcher) is file-atomic so position 0 is
+            # always present there; the streaming PDF pipeline
+            # (pipeline_stages.uploader_loop) and doc_indexer's
+            # ``_index_pdf_incremental`` ALSO land here with position 0
+            # in their FIRST batch even though that batch is NOT the
+            # whole document (nexus-4pj54 correction — this comment
+            # previously assumed only a file-atomic producer could reach
+            # this branch). The CATALOG replace below is still correct
+            # for a partial-first-batch producer (later batches append
+            # onto it); what is NOT safe for one is treating the replace
+            # as proof of completeness for the T3 SWEEP, which is why that
+            # decision is gated on the producer's explicit
+            # ``manifest_complete`` claim, not on position-0 presence —
+            # see the dropped-set handling below.
             if not any(c["position"] == 0 for c in chunks):
                 continuation[doc_id] = indexed_metas
                 continue
@@ -2301,8 +3162,17 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                     structlog.get_logger().warning(
                         "manifest_write_many_partial", failed_doc_ids=failed,
                     )
+                    # nexus-wbfpw.29 round 6: record what THIS write was
+                    # trying to put in each failed doc's manifest, so the
+                    # post-run verification can confirm whether self-heal
+                    # actually closed the gap.
+                    _failed_chashes = {
+                        _d: [c["chash"] for c in _chunks]
+                        for _d, _chunks in full_docs
+                    }
                     for doc_id in failed:
-                        _record_manifest_write_failure(doc_id)
+                        _record_manifest_write_failure(
+                            doc_id, _failed_chashes.get(doc_id))
                 # nexus-tgrgs/jk88j (2026-08-08): the 39upx sweep, folded
                 # into the fast branch. Runs only here — after the POST has
                 # returned — because every doc's write has now committed
@@ -2332,8 +3202,20 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                         continue  # unknown write outcome: no sweep beats a wrong sweep
                     _dropped = _before_by_doc.get(_d, set()) - _new_by_doc[_d]
                     _dropped -= _live_union
-                    if _dropped:
+                    if not _dropped:
+                        continue
+                    if _d in _complete_map:
                         _dropped_by_doc[_d] = _dropped
+                    else:
+                        # nexus-4pj54: this doc's batch carries position 0
+                        # (it is in `full_docs`/`_full_ids`) but the
+                        # producer did NOT assert it is the whole document
+                        # — a streaming multi-batch upload's first batch is
+                        # exactly this shape. Sweeping now could delete
+                        # rows a later batch in this same run is about to
+                        # re-append. Hold; the document's completion fence
+                        # sweeps against the FINAL manifest.
+                        _stash_pending_sweep(_d, collection, _dropped)
                 if _dropped_by_doc:
                     _sweep_superseded_vectors_many(
                         cat, _dropped_by_doc, collection,
@@ -2358,8 +3240,9 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                         error=str(exc),
                         exc_info=True,
                     )
-                    for doc_id, _ in full_docs:
-                        _record_manifest_write_failure(doc_id)
+                    for doc_id, _chunks in full_docs:
+                        _record_manifest_write_failure(
+                            doc_id, [c["chash"] for c in _chunks])
                     wrote_many = True
         if wrote_many:
             # per-doc loop handles ONLY the continuation remainder (may
@@ -2389,8 +3272,11 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             # between the purge and the new write cannot leave the catalog
             # with zero chunks for a doc the documents row still claims N.
             # Multi-batch writes never include position 0 in batches other
-            # than the first, so the atomic-replace path is safe for the
-            # streaming PDF / doc_indexer paths.
+            # than the first — but the FIRST batch of a streaming/incremental
+            # multi-batch upload DOES contain position 0 and lands here too,
+            # without being the whole document (nexus-4pj54; the sweep below
+            # is gated on `manifest_complete`, not on this branch, for
+            # exactly that reason — see its comment).
             if any(c["position"] == 0 for c in chunks):
                 # nexus-39upx: capture what the manifest referenced BEFORE the
                 # replace, so the vector rows that fall out of it can be swept.
@@ -2420,8 +3306,23 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                     _record_superseded_sweep_skip(doc_id, collection, "before_read_failed")
                 _manifest_write_with_retry(
                     cat.atomic_manifest_replace, doc_id, chunks, collection=collection)
-                _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
-                                          reader=reader, notes_provider=_notes_provider)
+                # nexus-4pj54: a position-0 batch is not provably the whole
+                # document — the producer's `manifest_complete` claim is
+                # the only proof of that (see the comment ~15 lines above).
+                # A doc lacking that claim has its dropped set HELD, not
+                # swept: a streaming/incremental multi-batch upload's first
+                # batch is exactly this shape, and sweeping here could
+                # delete rows a later batch in this same run is about to
+                # re-append (measured: 62 of 64 "swept" rows were live).
+                _claimed_hash = (manifest_complete or {}).get(doc_id)
+                if _claimed_hash:
+                    _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
+                                              reader=reader, notes_provider=_notes_provider)
+                else:
+                    _new = {c["chash"] for c in chunks if c.get("chash")}
+                    _dropped = {h for h in _before if h and h not in _new}
+                    if _dropped:
+                        _stash_pending_sweep(doc_id, collection, _dropped)
                 # chunk_count parity (critique Critical): the HTTP
                 # client's replace does NOT touch documents.chunk_count
                 # (only write_many folds it in); the local Catalog does
@@ -2440,7 +3341,6 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                 # the manifest this doc just wrote. Position-0 only — a
                 # continuation slice is not a whole document (handled in the
                 # else branch).
-                _claimed_hash = (manifest_complete or {}).get(doc_id)
                 if _claimed_hash:
                     _stamp_index_run_complete(
                         cat, doc_id, _claimed_hash, len(chunks))
@@ -2479,7 +3379,8 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             structlog.get_logger().warning(
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
-            _record_manifest_write_failure(doc_id)
+            _record_manifest_write_failure(
+                doc_id, [c["chash"] for c in chunks])
 
 
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────

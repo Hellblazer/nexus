@@ -408,12 +408,15 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     this module sits below ``commands/`` and the chain's pieces live in
     sibling modules with heavy import graphs."""
     from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred, sibling with heavy import graph
+        ManifestVerifyUncertainError,
         catalog_store_hook_tracked,
+        describe_rollback_outcome,
         note_manifest_metadata,
         note_pieces,
         put_note_pieces,
         raise_if_oversized,
-        store_put_manifest_direct,
+        rollback_uncataloged_chunk_write,
+        store_put_manifest_direct_with_recovery,
     )
     from nexus.doc_indexer import _fence_begin, _fence_fail  # noqa: PLC0415 — deferred; test patch target
 
@@ -453,14 +456,75 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
             from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — deferred, sibling module
             rollback_minted_catalog_entry(catalog_doc_id, original_error=str(put_exc))
         raise
-    if catalog_doc_id:
-        try:
-            store_put_manifest_direct(
-                catalog_doc_id, manifest_metadatas, collection=col_name,
-            )
-        except Exception as manifest_exc:
-            _fence_fail(catalog_doc_id, str(manifest_exc))
-            raise
+    # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26: rollback,
+    # not a marker column): a blank catalog_doc_id (registration failed
+    # above) leaves the chunk put_note_pieces just wrote with no catalog
+    # owner at all — the census's no-owner shape. Roll it back and fail
+    # this record loud (import_bundle's per-record catch already
+    # attributes the failure without aborting the rest of the import).
+    if not catalog_doc_id:
+        outcome = rollback_uncataloged_chunk_write(
+            t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+        )
+        raise RuntimeError(
+            f"could not catalog {rec.get('title', '')!r} in {col_name}: "
+            f"catalog registration failed. {describe_rollback_outcome(outcome)}"
+        )
+    # RDR-192 Step 3a fix-round 2, Decision (b): the chunk(s) this call
+    # just wrote can be deleted out from under it by a CONCURRENT
+    # rollback before this manifest write's own INSERT lands (the
+    # opposite-ordering race from fix-round 1's Significant 3) —
+    # store_put_manifest_direct_with_recovery re-puts exactly the
+    # affected piece(s) and retries once; every other outcome reaches
+    # this try/except unchanged.
+    _chash_to_piece = {
+        m.get("chunk_text_hash", ""): pieces[i]
+        for i, m in enumerate(manifest_metadatas)
+    }
+
+    def _repiece_import(chash: str) -> None:
+        put_note_pieces(
+            t3, col_name, [_chash_to_piece[chash]],
+            title=rec["title"], tags=rec.get("tags", ""),
+            category=rec.get("category", ""), catalog_doc_id=catalog_doc_id,
+        )
+
+    try:
+        store_put_manifest_direct_with_recovery(
+            catalog_doc_id, manifest_metadatas, collection=col_name,
+            repiece=_repiece_import,
+        )
+    except ManifestVerifyUncertainError as manifest_exc:
+        # RDR-192 Step 3a fix-round 1 (critic Critical 1): verify infra
+        # failed — outcome unknown, must not roll back (the write may
+        # have landed). Fence stamped 'failed' regardless so a stuck
+        # 'indexing' state doesn't wait on the 6h doctor sweep alone;
+        # the raised message says "uncertain", never "rolled back".
+        _fence_fail(catalog_doc_id, str(manifest_exc))
+        raise RuntimeError(
+            f"could not confirm the catalog manifest landed for "
+            f"{rec.get('title', '')!r} in {col_name}: {manifest_exc}. "
+            f"Nothing was rolled back — the write may already have "
+            f"succeeded; check before retrying (a retry is an "
+            f"idempotent re-write either way)."
+        ) from manifest_exc
+    except Exception as manifest_exc:
+        _fence_fail(catalog_doc_id, str(manifest_exc))
+        # RDR-192 Step 3a: the manifest write CONFIRMED it did not land
+        # after the chunk was already written — same no-manifest-owner
+        # shape as the blank-catalog_doc_id branch above, just discovered
+        # one step later. fix-round 1 Important (both reviewers): also
+        # roll back the ghost catalog row when THIS call minted it.
+        if minted:
+            from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — deferred, sibling module
+            rollback_minted_catalog_entry(catalog_doc_id, original_error=str(manifest_exc))
+        outcome = rollback_uncataloged_chunk_write(
+            t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+        )
+        raise RuntimeError(
+            f"could not catalog {rec.get('title', '')!r} in {col_name}: "
+            f"{manifest_exc}. {describe_rollback_outcome(outcome)}"
+        ) from manifest_exc
     # Post-store hook chains (review-fold blocker): chash index, taxonomy,
     # aspect-queue enqueue — the same unconditional ride put_cmd/MCP
     # store_put fire; per-hook failures are isolated by fire_batch.

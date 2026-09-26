@@ -31,6 +31,7 @@ __all__ = [
     "raise_identity_drop_exception",
     "raise_identity_drop_exception_for_file",
     "reset_identity_drop_collectors",
+    "resolve_confirmed_write_failure_doc_ids",
     "t2_handle",
     "t2_shared_client_from_context",
 ]
@@ -265,11 +266,122 @@ def emit_retry_summary() -> None:
         )
 
 
-def _emit_write_failed_warning() -> bool:
+def resolve_confirmed_write_failure_doc_ids() -> frozenset[str]:
+    """nexus-wbfpw.29 round 6: which of this run's manifest-write-failed
+    documents are ACTUALLY repaired, verified by reading the catalog
+    manifest back AFTER the whole run (same-run self-heal included) has
+    completed.
+
+    Round 5's ``ManifestHealResult.confirmed_doc_ids`` compared the
+    rebuilt chunk count against the document's ``chunk_count`` AT
+    SELF-HEAL TIME — but a document whose manifest hook RAISED (as
+    opposed to detecting and reporting its own failure) never has its
+    ``chunk_count`` bumped at all, so that comparison read 0 and
+    confirmed ANY rebuild, including one built from a T3 write that
+    itself only partially landed this same run (round 5's own documented
+    gap). This checks the only claim that actually means "this run's
+    damage is undone": every chash the failing write was TRYING to put
+    in the document's manifest (recorded per doc_id by
+    ``mcp_infra._record_manifest_write_failure``, unioned across
+    continuation-slice flushes — see
+    ``mcp_infra.get_manifest_write_failure_chashes``) is present in the
+    manifest now, after self-heal has had its chance.
+
+    A doc_id with no recorded expected-chash set, an explicitly UNKNOWN
+    one, or an empty one is never confirmed — a claim we cannot verify is
+    a claim we do not make (Sam's locked decision: unconfirmed is not
+    repaired).
+
+    A catalog-reader failure during verification confirms NOTHING — fail
+    loud rather than guess either way. The caller's existing fail-loud
+    plumbing (``raise_identity_drop_exception``) then treats every write
+    failure as still-failed, which is the correct outcome when the
+    verification itself could not run.
+    """
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when a write failure was recorded
+        get_manifest_write_failure_chashes,
+        get_manifest_write_failures,
+    )
+
+    failed = get_manifest_write_failures()
+    if not failed:
+        return frozenset()
+
+    expected = get_manifest_write_failure_chashes()
+    candidates = {
+        doc_id: chashes
+        for doc_id in failed
+        if (chashes := expected.get(doc_id)) is not None and chashes
+    }
+    if not candidates:
+        return frozenset()
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-local import: heavy catalog dep, rare branch
+
+        manifests = make_catalog_reader().get_manifests(list(candidates))
+    except Exception:  # noqa: BLE001 — fail loud via the caller's existing gate: nothing is confirmed here, never a guess
+        import structlog  # noqa: PLC0415 — deliberate function-local import: rare branch
+
+        structlog.get_logger(__name__).warning(
+            "manifest_write_failure_verification_read_failed", exc_info=True,
+        )
+        return frozenset()
+
+    return frozenset(
+        doc_id
+        for doc_id, chashes in candidates.items()
+        if chashes <= {row.chash for row in manifests.get(doc_id, []) if row.chash}
+    )
+
+
+def _resolve_manifest_failure_display_paths(doc_ids: list[str]) -> dict[str, str]:
+    """Best-effort doc_id -> source path/URI lookup for the manifest
+    write-failure warning (nexus-wbfpw.29 round 2, critic Significant):
+    a bare catalog tumbler like ``"1.2.3"`` is not directly actionable —
+    an operator needs an extra ``nx catalog show <tumbler>`` lookup to
+    find the actual file to re-index. One batched ``resolve_many`` call
+    resolves every failed doc_id's ``CatalogEntry`` in a single round
+    trip (nexus-7lm3q's existing batch API).
+
+    Never raises: a lookup failure (the catalog being unreachable is
+    exactly one of the failure modes THIS warning fires for — see
+    ``manifest_write_hook_no_catalog`` in ``mcp_infra.py``) must still
+    let the bare-tumbler warning print rather than crash the run's
+    end-of-run summary. Doc ids with no resolvable path/URI are simply
+    absent from the returned mapping.
+    """
+    try:
+        from nexus.mcp_infra import get_catalog  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
+
+        cat = get_catalog()
+        if cat is None:
+            return {}
+        entries = cat.resolve_many(doc_ids)
+    except Exception:  # noqa: BLE001 — best-effort: the warning must still print bare ids if path lookup fails
+        import structlog  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached on lookup failure
+
+        structlog.get_logger(__name__).debug(
+            "manifest_write_failure_path_lookup_failed", exc_info=True,
+        )
+        return {}
+    paths: dict[str, str] = {}
+    for doc_id, entry in entries.items():
+        display = getattr(entry, "file_path", "") or getattr(entry, "source_uri", "")
+        if display:
+            paths[doc_id] = display
+    return paths
+
+
+def _emit_write_failed_warning(
+    *, healed_doc_ids: "frozenset[str] | set[str]" = frozenset(),
+) -> bool:
     """GH #1371: a persistent (retries-exhausted or non-retryable) catalog
     manifest-write failure previously surfaced only as a structlog
     WARNING — invisible without log capture wired up. Returns ``True`` iff
-    the collector held an entry.
+    an UNHEALED entry remains (see *healed_doc_ids* below) — a doc that
+    failed but was restored is reported informationally and never trips
+    the caller's fail-loud gate on its own.
 
     Wording copied VERBATIM from the two existing call sites this
     replaces (``index_repo_cmd``, ``dt.py``'s ``index_cmd``) — including
@@ -280,6 +392,36 @@ def _emit_write_failed_warning() -> bool:
     a per-caller parameter, which would have silently changed ``dt.py``'s
     output; keeping it hardcoded is what makes this a behavior-preserving
     refactor rather than a wording change).
+
+    nexus-wbfpw.29 (RDR-192 S3b): the parenthetical doc-id list is new —
+    a run failing this way must NAME the document(s) to re-index, not
+    just count them (a manifest-hook EXCEPTION now lands here too, via
+    ``HookRegistry.fire_batch``'s ``_record_manifest_hook_batch_exception``,
+    alongside the pre-existing detected-write-failure path). Appended
+    after the existing "N document(s)" phrase so the pinned substring
+    checks in ``test_index_cmd.py`` / ``test_commands_helpers_identity_
+    drop.py`` (which assert on the prefix, not the full line) keep
+    passing unchanged.
+
+    nexus-wbfpw.29 round 2 (critic Significant): each id also carries its
+    resolved source path/URI when the catalog can supply one (a bare
+    tumbler needs an extra ``nx catalog show`` lookup to be actionable) —
+    see :func:`_resolve_manifest_failure_display_paths`.
+
+    nexus-wbfpw.29 round 3 (critic Critical): ``nx index repo``'s own
+    same-run manifest self-heal pass (nexus-c21fk, indexer.py) can repair
+    the EXACT gap a manifest-hook exception left moments earlier in the
+    SAME run — before this, the warning printed "will not appear in
+    catalog-aware queries. Run 'nx catalog reconcile' to repair." for a
+    document that already appears and needs no reconcile, a provably
+    false claim. *healed_doc_ids* is the set of doc_ids this run's own
+    self-heal pass (if any — most callers have none and pass the default
+    empty set, which reproduces the exact prior behavior) already
+    restored via the SAME ``atomic_manifest_replace`` path
+    ``nx catalog reconcile`` uses. Failures in this set print a SEPARATE,
+    informational line ("restored by self-heal ... no action needed")
+    and are excluded from both the count and the parenthetical list in
+    the fail-loud line below, and from this function's return value.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
@@ -288,10 +430,33 @@ def _emit_write_failed_warning() -> bool:
     failed = get_manifest_write_failures()
     if not failed:
         return False
+    healed = [d for d in failed if d in healed_doc_ids]
+    still_failed = [d for d in failed if d not in healed_doc_ids]
+
+    if healed:
+        healed_paths = _resolve_manifest_failure_display_paths(healed)
+        healed_text = ", ".join(
+            f"{doc_id} ({healed_paths[doc_id]})" if doc_id in healed_paths else doc_id
+            for doc_id in healed
+        )
+        click.echo(
+            f"  WARNING: catalog manifest write failed for {len(healed)} "
+            f"document(s) ({healed_text}) and was restored by self-heal "
+            f"in this same run — no action needed.",
+            err=True,
+        )
+
+    if not still_failed:
+        return False
+    paths = _resolve_manifest_failure_display_paths(still_failed)
+    ids_text = ", ".join(
+        f"{doc_id} ({paths[doc_id]})" if doc_id in paths else doc_id
+        for doc_id in still_failed
+    )
     click.echo(
-        f"  WARNING: catalog manifest write failed for {len(failed)} "
-        f"document(s) — they will not appear in catalog-aware "
-        f"queries. Run 'nx catalog reconcile' to repair.",
+        f"  WARNING: catalog manifest write failed for {len(still_failed)} "
+        f"document(s) ({ids_text}) — they will not appear in "
+        f"catalog-aware queries. Run 'nx catalog reconcile' to repair.",
         err=True,
     )
     return True
@@ -407,12 +572,29 @@ def _emit_superseded_swept_info() -> bool:
 
     from nexus.mcp_infra import get_superseded_sweep_stats  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
 
-    swept = get_superseded_sweep_stats().get("swept", 0)
+    stats = get_superseded_sweep_stats()
+    swept = stats.get("swept", 0)
     if swept:
         click.echo(
             f"  swept {swept} superseded T3 chunk(s) left behind by a "
             f"changed re-index (nexus-39upx)"
         )
+    # nexus-4pj54: a multi-batch document's sweep is deferred to its
+    # completion stamp. A failed or fenced run drops it (discarded); a run
+    # that never reached either fence call leaves it held (pending). Either
+    # way superseded rows may remain in T3. The run's own failure already
+    # drives the exit code, so this stays informational.
+    discarded = stats.get("deferred_discarded", 0)
+    pending = stats.get("deferred_pending", 0)
+    if discarded or pending:
+        click.echo(
+            f"  superseded-chunk sweep not run for {discarded} failed/fenced "
+            f"and {pending} unfinished document(s); old T3 rows may remain "
+            f"until 'nx t3 gc -c COLLECTION' (nexus-4pj54)"
+        )
+        pending_ids = stats.get("deferred_pending_doc_ids", [])
+        if pending_ids:
+            click.echo(f"    unfinished: {', '.join(pending_ids)}")
     return False
 
 
@@ -445,7 +627,9 @@ def _emit_superseded_sweep_skipped_warning() -> bool:
 
 
 _IDENTITY_DROP_CHECKS = {
-    "write_failed": lambda indexed_count, **kw: _emit_write_failed_warning(),
+    "write_failed": lambda indexed_count, **kw: _emit_write_failed_warning(
+        healed_doc_ids=kw.get("healed_doc_ids", frozenset()),
+    ),
     "identity_drops": lambda indexed_count, **kw: _emit_identity_drops_warning(),
     "refused": lambda indexed_count, **kw: _emit_refused_warning(
         indexed_count=indexed_count,
@@ -468,6 +652,7 @@ _DEFAULT_ORDER = (
 def emit_identity_drop_summary(
     *, indexed_count: int, order: tuple[str, ...] = _DEFAULT_ORDER,
     refused_in_failed: int = 0,
+    healed_doc_ids: "frozenset[str] | set[str]" = frozenset(),
 ) -> bool:
     """Echo a WARNING line (stderr) for each populated collector since the
     last :func:`reset_identity_drop_collectors` call. Returns ``True`` if
@@ -491,20 +676,42 @@ def emit_identity_drop_summary(
     *refused_in_failed* (nexus-l6tr7): refusals the caller already
     bucketed into ``failed`` because they PROPAGATED as
     ``IndexRunVerifyRefused`` — see :func:`_emit_refused_warning`.
+
+    *healed_doc_ids* (nexus-wbfpw.29 round 3): doc_ids this run's own
+    same-run manifest self-heal pass already restored — forwarded only to
+    the ``write_failed`` check (identity drops have no catalog entry for
+    self-heal to have found in the first place; see
+    :func:`_emit_write_failed_warning`). Callers with no same-run
+    self-heal (every index verb except `nx index repo`) omit this and get
+    the exact prior behavior.
     """
     problems_detected = False
     for key in order:
-        if _IDENTITY_DROP_CHECKS[key](indexed_count, refused_in_failed=refused_in_failed):
+        if _IDENTITY_DROP_CHECKS[key](
+            indexed_count, refused_in_failed=refused_in_failed,
+            healed_doc_ids=healed_doc_ids,
+        ):
             problems_detected = True
     return problems_detected
 
 
-def raise_identity_drop_exception(*, subject: str = "document") -> None:
+def raise_identity_drop_exception(
+    *, subject: str = "document",
+    healed_doc_ids: "frozenset[str] | set[str]" = frozenset(),
+) -> None:
     """Raise the fail-loud ``ClickException`` for a BATCH run
     (``nx index repo`` / ``nx dt index``) that recorded manifest write
     failures, identity drops, completion refusals, and/or (nexus-39upx
     round 2 SIGNIFICANT 2) a superseded-chunk sweep skip. Call only after
     :func:`emit_identity_drop_summary` returned ``True``.
+
+    *healed_doc_ids* (nexus-wbfpw.29 round 3): pass the SAME set given to
+    :func:`emit_identity_drop_summary` — a write failure this run's own
+    same-run self-heal already restored must not itself count toward
+    ``write_failed`` here either, or a run with BOTH a self-healed write
+    failure AND some unrelated real problem (e.g. an identity drop) would
+    still wrongly list "manifest write failures" among the causes and
+    point the operator at a reconcile that has nothing left to do.
 
     The message names ONLY the cause(s) that actually fired this run and
     the matching remedy for each — nexus-39upx round 2 (substantive-
@@ -542,7 +749,9 @@ def raise_identity_drop_exception(*, subject: str = "document") -> None:
         get_superseded_sweep_stats,
     )
 
-    write_failed = bool(get_manifest_write_failures())
+    write_failed = bool(
+        [d for d in get_manifest_write_failures() if d not in healed_doc_ids]
+    )
     identity_dropped = bool(get_manifest_identity_drops())
     refused = bool(get_complete_refusals())
     sweep_skipped = bool(get_superseded_sweep_stats().get("skipped"))
@@ -571,8 +780,41 @@ def raise_identity_drop_exception(*, subject: str = "document") -> None:
         else ", ".join(causes[:-1]) + f", and {causes[-1]}"
     )
 
+    # nexus-wbfpw.29: each cause names the remedy its own WARNING line
+    # names. Manifest write failures and identity drops are both manifest
+    # gaps that 'nx catalog reconcile' rebuilds from T3 (identity drops as
+    # the GH #1397 ghost class: registered, chunk_count 0, content_hash
+    # recorded). The old single write-class remedy ("catalog show / re-index
+    # with --force") contradicted both WARNINGs. It stays for completion
+    # refusals, whose WARNING says "Re-index or --force to retry", and as
+    # the identity-drop fallback.
+    #
+    # round 4 critique (narrowed round 5): "reconcile cannot rebuild a
+    # document that never registered" is NOT a blanket truth for every
+    # identity-drop producer. It holds for a REGISTRATION failure
+    # (indexer.py's preflight register call itself failed -- no catalog
+    # row, no tumbler, nothing for reconcile's ghost path to find). It
+    # does NOT hold for the OTHER identity-drop producer
+    # (mcp_infra.py's manifest_write_batch_hook, fired when a chunk
+    # batch's own catalog_doc_id/meta.doc_id never resolved): `nx index
+    # repo` registers catalog entries UPFRONT, independently of whether a
+    # later hook call correctly threads that id through, so a registered
+    # entry with a resolvable content_hash MAY already exist for that
+    # document -- reconcile's ghost-candidate match (content_hash +
+    # physical_collection, no chunk_count requirement) can genuinely
+    # repair that shape. --force stays as the fallback either way, since
+    # this function cannot tell which of the two producers a given run's
+    # drops came from and a document reconcile could not reach (never
+    # registered, or its chunks are reported LOST) still needs it.
     remedies = []
-    if any_write_class:
+    if write_failed and not identity_dropped:
+        remedies.append("Run 'nx catalog reconcile' to repair the manifests")
+    if identity_dropped:
+        remedies.append(
+            f"Run 'nx catalog reconcile' to repair the manifests; re-index "
+            f"with --force any {subject} still missing afterwards"
+        )
+    if refused:
         remedies.append(
             f"Run 'nx catalog show <tumbler>' to inspect a specific "
             f"{subject}'s index_state, or re-index with --force"

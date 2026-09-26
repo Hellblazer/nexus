@@ -1192,6 +1192,13 @@ _DEFAULTS: dict[str, Any] = {
         # Empty dict disables — labeler behaves as pre-RDR-085.
         "glossary": {},
     },
+    "aspects": {
+        # nexus-kk4ut (Sam 2026-09-25, option A2): docs__ collections whose
+        # prose files get aspect extraction (general-prose-v1). Glob
+        # patterns. Empty (the default) means no docs__ collection is
+        # extracted; every document costs an LLM call on each change.
+        "docs_collections": [],
+    },
     "plans": {
         # RDR-084: Auto-save successful ad-hoc plans for this many days.
         # Set 0 to disable grown-plan persistence entirely (library stays

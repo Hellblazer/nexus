@@ -37,11 +37,14 @@ Layers, cheapest first:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import threading
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -369,6 +372,38 @@ class _Db:
 
 def _fake_store_factory(fake: _FakeTupleStore):
     return lambda: _Db(fake)
+
+
+async def _poll_until(predicate, *, timeout_s: float = 5.0, interval_s: float = 0.05) -> None:
+    """Bounded-poll a synchronous *predicate* until it is true, or raise.
+
+    Replaces a fixed `asyncio.sleep(N)` before an assertion (nexus-6konb.15
+    fix round, critic-reproduced flake: 3/5 failures once against a fixed
+    0.2s/0.3s sleep) -- the flake was a race against the FIRST
+    `asyncio.to_thread` call's executor spin-up (`ThreadPoolExecutor`
+    thread creation on first use), which a fixed sleep can lose under load
+    but a bounded poll on the actual condition cannot: it simply keeps
+    checking until the condition holds or the 5s budget is spent, well
+    past any plausible spin-up delay."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(interval_s)
+    raise AssertionError(f"condition not met within {timeout_s}s: {predicate!r}")
+
+
+async def _cancel_and_await(task: "asyncio.Task") -> None:
+    """Cancel *task* and await it, tolerating either outcome: the task may
+    already have finished on its own (a below-floor stop exits `run()`'s
+    loop before ever needing cancellation, so `cancel()` is then a no-op
+    and awaiting raises nothing) or still be running (a genuine
+    `CancelledError`). Centralizing this in one helper, called from every
+    test's `finally`, is what guarantees a failed assertion can never leak
+    a live background task into the next test."""
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 class _CountingTuples:
@@ -1095,7 +1130,14 @@ class TestChannelWaiterRealEngine:
     def test_one_row_is_referenced_once_and_wait_genuinely_parks(self, t2_service_env) -> None:
         """(a) real-engine companion: over a real bounded window, `wait()`
         must genuinely PARK once the engine's stamp excludes the one row --
-        never return immediately -- so the call count stays small."""
+        never return immediately -- so the call count stays small.
+
+        `rd` is called exactly ONCE: the startup catch-up read (bead
+        nexus-ymfak), run once before the loop starts. It finds nothing
+        to reference here -- the row is freshly written, `announced_at`
+        is still `None` -- so it costs one `rd()` call and zero
+        references, and the loop's `wait()` calls are otherwise the only
+        read path, exactly as before this bead."""
         from concurrent.futures import ThreadPoolExecutor
 
         from nexus.mcp.core import tuple_out
@@ -1122,7 +1164,7 @@ class TestChannelWaiterRealEngine:
             f"wait() must genuinely park over a 2.5s window at wait_timeout_s=1; "
             f"got {counts['wait']} calls"
         )
-        assert counts["rd"] == 0, "nothing is ever read back"
+        assert counts["rd"] == 1, "exactly one rd() call: the startup catch-up read, finding nothing here"
         mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
         assert len(mail_sends) == 1
 
@@ -1597,6 +1639,471 @@ class TestWaiterSupersession:
         assert sender.calls == []
 
 
+class TestProbeServingEngineVersion:
+    """Direct tests of `channel._probe_serving_engine_version` -- nexus-6konb.15
+    fix round (both reviewers): the earlier round only exercised this probe
+    indirectly, through `ChannelWaiter`'s injectable `engine_version_probe`.
+    Mirrors `tests/test_http_engine_status.py`'s pattern for the sibling
+    `fetch_engine_status` probe: patch `nexus.db.service_endpoint.
+    resolve_service_endpoint_with_evidence_gate` and `channel.httpx.get`."""
+
+    def test_returns_none_when_endpoint_unresolvable(self) -> None:
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            side_effect=RuntimeError("no lease"),
+        ):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_transport_error(self) -> None:
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", side_effect=httpx.ConnectError("refused")):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_non_200(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=MagicMock(status_code=404),
+        )
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_non_dict_body(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = ["not", "a", "dict"]
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_missing_release_version(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"app_version": "1.0-SNAPSHOT"}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_none_on_blank_release_version(self) -> None:
+        """A dev-checkout jar reports an empty string, not a null field."""
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"release_version": ""}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_returns_the_parsed_tuple_on_a_good_body(self) -> None:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"release_version": "0.1.127", "app_version": "1.0-SNAPSHOT"}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp):
+            assert channel._probe_serving_engine_version() == (0, 1, 127)  # noqa: SLF001
+
+    def test_calls_the_exact_version_url_with_no_authorization_header(self) -> None:
+        """`/version` is unauthenticated by contract (Java `VersionHandler`,
+        same as `probe_managed_service`'s own comment) -- unlike
+        `fetch_engine_status`'s auth-gated `/v1/status`, this probe sends
+        no bearer even when the resolver hands one back."""
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"release_version": "0.1.131"}
+        with patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1/", "tok"),
+        ), patch("nexus.mcp.channel.httpx.get", return_value=resp) as mock_get:
+            channel._probe_serving_engine_version()  # noqa: SLF001
+        mock_get.assert_called_once()
+        assert mock_get.call_args.args[0] == "http://127.0.0.1:1/version", (
+            "trailing slash on the resolved base must not become a double slash"
+        )
+        assert mock_get.call_args.kwargs.get("timeout") == 5.0
+        assert "headers" not in mock_get.call_args.kwargs, "no Authorization header for the unauthenticated /version route"
+
+
+class TestEngineVersionFloorAtStart:
+    """nexus-6konb.15 (RDR-213 MVV finding L1, T2 `nexus_rdr/6konb15-mvv-
+    2026-09-25`): an engine below the announce floor answers `/wait` and
+    silently ignores the announce fields, so the row-based detection in
+    `_engine_ignores_announce`/`_engine_ignores_subscriber` only catches
+    it once a mail row actually arrives -- measured, against a real
+    engine-service-v0.1.127, the waiter reported `alive` for 16+ minutes
+    with an empty mailbox before the first send finally tripped the
+    row-based stop. `ChannelWaiter.run()` now checks the SAME floor
+    against the engine's own `/version` identity once, before the first
+    `tick()`, via the injectable `engine_version_probe` callable -- these
+    tests drive that callable directly rather than touching real HTTP.
+
+    Every test polls the actual condition (`_poll_until`) instead of a
+    fixed sleep, and cancels+awaits its `run_task` in a `finally`
+    (`_cancel_and_await`) -- fix round, critic-reproduced flake (3/5
+    failures once against a fixed 0.2s/0.3s sleep racing the first
+    `asyncio.to_thread` call's executor spin-up). A failed assertion must
+    not leak a live background task into the next test either way."""
+
+    @pytest.mark.asyncio
+    async def test_an_engine_below_the_announce_floor_never_reports_alive(self) -> None:
+        """Before this fix: with no mail ever sent, the row-based detector
+        has nothing to look at, so the waiter would stay `alive=True`
+        indefinitely against engine-service-v0.1.127 (below
+        `CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION == (0, 1, 128)`) -- this is
+        the exact reproduction of the MVV's measured 16+ minute gap. Fails
+        on the pre-fix code (no at-start check existed, so the fake
+        `_FakeTupleStore` would just keep ticking and `alive` would stay
+        `True`); passes after it."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()  # never seeded: an empty mailbox throughout
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: (0, 1, 127),
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: waiter.status()["stopped_reason"] is not None)
+            assert waiter.status()["alive"] is False
+            assert waiter.status()["stopped_reason"] == "no_announce_support"
+            assert fake.wait_calls == [], "must stop BEFORE ever parking a wait on a known below-floor engine"
+            assert sender.calls == []
+        finally:
+            await _cancel_and_await(run_task)
+
+    @pytest.mark.asyncio
+    async def test_an_engine_below_the_subscriber_floor_but_at_or_above_the_announce_floor_stops_with_no_subscriber_support(
+        self,
+    ) -> None:
+        """v0.1.128 sits at the announce floor but below
+        `CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION == (0, 1, 129)`."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: (0, 1, 128),
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: waiter.status()["stopped_reason"] is not None)
+            assert waiter.status()["alive"] is False
+            assert waiter.status()["stopped_reason"] == "no_subscriber_support"
+            assert fake.wait_calls == []
+        finally:
+            await _cancel_and_await(run_task)
+
+    @pytest.mark.asyncio
+    async def test_an_engine_at_or_above_both_floors_starts_normally(self) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: (0, 1, 129),
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 1)
+            assert waiter.status()["alive"] is True
+            assert waiter.status()["stopped_reason"] is None
+        finally:
+            await _cancel_and_await(run_task)
+
+    @pytest.mark.asyncio
+    async def test_a_blank_or_dev_release_version_does_not_stop_the_waiter(self) -> None:
+        """A dev-checkout jar reports no parseable `release_version` at
+        all -- `engine_version_probe` returning `None` (exactly what
+        `_probe_serving_engine_version` returns for an unresolvable
+        endpoint, a non-200, or an unparseable/blank/dev release, per
+        `nexus.engine_version.parse_engine_version`) must NOT stop the
+        waiter: "don't know" is not evidence of a below-floor engine, and
+        the row-based fallback stays the only detector in that case."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: None,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 1)
+            assert waiter.status()["alive"] is True
+            assert waiter.status()["stopped_reason"] is None
+        finally:
+            await _cancel_and_await(run_task)
+
+    @pytest.mark.asyncio
+    async def test_a_raising_probe_does_not_stop_the_waiter(self) -> None:
+        """nexus-6konb.15 fix round (both reviewers): `engine_version_probe`
+        is caller-injectable, so a raising implementation must be treated
+        exactly like a `None` result -- logged, then the row-based
+        fallback takes over -- never a crash of `run()`'s start."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+
+        def probe():
+            raise RuntimeError("boom")
+
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=probe,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 1)
+            assert waiter.status()["alive"] is True
+            assert waiter.status()["stopped_reason"] is None
+        finally:
+            await _cancel_and_await(run_task)
+
+    @pytest.mark.asyncio
+    async def test_the_probe_runs_off_the_event_loop_not_per_tick(self) -> None:
+        """`engine_version_probe` is called exactly once per waiter
+        lifetime (at `run()`'s start), never once per `tick()` -- the
+        opposite would add an HTTP round trip to every wake."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        calls = []
+
+        def probe():
+            calls.append(1)
+            return (0, 1, 131)
+
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=probe, min_tick_interval_s=0.0,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 2)
+            assert calls == [1], "the probe must run exactly once, not once per tick"
+        finally:
+            await _cancel_and_await(run_task)
+
+
+class TestStartupCatchupRead:
+    """Bead nexus-ymfak (nexus-rxuiq residual, DECISION: Sam 2026-09-24):
+    `ChannelWaiter._catchup_mailbox_rows`, called once at `run()`'s start
+    (before the loop, right after `_check_engine_floor_at_start`), reads
+    unclaimed, recently-announced mailbox rows the engine has ALREADY
+    stamped -- via an orphaned predecessor waiter's still-parked `wait()`
+    -- so they are referenced within seconds instead of waiting out
+    whatever's left of the row's own `reannounce_interval_s` budget. Most
+    tests below call `_catchup_mailbox_rows()` directly (white-box, same
+    style as `waiter.tick()` elsewhere in this module); one drives
+    `run()` itself to prove the wiring."""
+
+    @staticmethod
+    def _iso(delta_s: float) -> str:
+        return (datetime.now(UTC) + timedelta(seconds=delta_s)).isoformat()
+
+    @pytest.mark.asyncio
+    async def test_a_recently_stamped_unclaimed_row_gets_one_reference_and_no_stamp_change(self) -> None:
+        """A row an orphan's announce-mode `wait()` stamped moments ago:
+        exactly one reference, and the row's own `announced_at`/
+        `announce_count` are untouched by this read -- `rd` never stamps
+        anything, unlike the announce-mode `wait` path."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "orphaned")
+        stamped_at = self._iso(-2.0)
+        fake._mutate(addr, "t1", announced_at=stamped_at, announce_count=1)
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001 — white-box, mirrors this module's `tick()` calls
+
+        mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
+        assert len(mail_sends) == 1
+        stored = fake._rows[addr][0]  # noqa: SLF001 — white-box: asserting the store was never mutated
+        assert stored.announced_at == stamped_at
+        assert stored.announce_count == 1
+
+    @pytest.mark.asyncio
+    async def test_an_old_stamped_row_gets_no_reference(self) -> None:
+        """Outside the `wait_timeout_s + DEFAULT_CATCHUP_MARGIN_S` window
+        -- an ordinary re-announce, not an orphan artifact -- so the
+        catch-up read leaves it for the engine's own announce-mode
+        schedule to handle."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "stale")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+        cutoff_s = waiter.wait_timeout_s + channel.DEFAULT_CATCHUP_MARGIN_S
+        fake._mutate(addr, "t1", announced_at=self._iso(-(cutoff_s + 30)), announce_count=1)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001
+
+        assert sender.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_row_stamped_far_in_the_future_gets_no_reference(self) -> None:
+        """An engine clock far ahead of this host would otherwise make every
+        old row's age negative, and so "recent", forever. The window is
+        symmetric: small skew either way still passes."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "skewed")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+        cutoff_s = waiter.wait_timeout_s + channel.DEFAULT_CATCHUP_MARGIN_S
+        fake._mutate(addr, "t1", announced_at=self._iso(cutoff_s + 30), announce_count=1)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001
+
+        assert sender.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_never_announced_row_gets_no_reference(self) -> None:
+        """`announced_at=None` -- a genuinely fresh row nothing has ever
+        stamped -- is left for the ordinary announce-mode `tick()` to
+        discover; the catch-up read only re-surfaces a PRIOR stamp."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "never-announced")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001
+
+        assert sender.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_claimed_row_gets_no_reference_even_if_recently_stamped(self) -> None:
+        """`claim_state` set -- someone already claimed it -- is excluded
+        regardless of how recent the stamp is: "unclaimed" per the bead."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "claimed-already", claim_state="claimed")
+        fake._mutate(addr, "t1", announced_at=self._iso(-1.0), announce_count=1)
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001
+
+        assert sender.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_board_row_gets_no_reference_even_if_recently_stamped(self) -> None:
+        """Mailbox subspaces only, never boards (RDR-213 bead nexus-q82tk):
+        a board's stamp is per `(subspace, subscriber)` keyed on this
+        session's own id, not a waiter token, so there is no orphan gap
+        for it to fall into -- the catch-up read must not even `rd` it."""
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        subs.subscribe(
+            "board/release-notes", templates=[],
+            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+            state_dir=None,
+        )
+        fake = _FakeTupleStore()
+        fake.seed("board/release-notes", "p1", "hi")
+        fake._mutate("board/release-notes", "p1", announced_at=self._iso(-1.0), announce_count=1)
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001
+
+        assert sender.calls == []
+        touched = {c[0] for c in fake.rd_calls}
+        assert "board/release-notes" not in touched, "boards are never read by the catch-up pass"
+
+    @pytest.mark.asyncio
+    async def test_an_rd_failure_is_failure_isolated_and_never_raises(self) -> None:
+        """A transient `rd` failure (HTTP blip, store error) is logged and
+        the method returns normally -- it must never strand `run()`
+        before its own loop has even started."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "irrelevant")
+
+        def _raising_rd(*_a: Any, **_kw: Any) -> list[TupleRow]:
+            raise RuntimeError("engine hiccup")
+
+        fake.rd = _raising_rd  # type: ignore[method-assign]
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter._catchup_mailbox_rows()  # noqa: SLF001 — must not raise
+
+        assert sender.calls == []
+
+    @pytest.mark.asyncio
+    async def test_an_rd_failure_at_catchup_does_not_prevent_the_waiter_from_starting(self) -> None:
+        """Wired through `run()`: a catch-up failure must not stop the
+        waiter's own loop from starting and ticking normally right after."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "irrelevant")
+
+        def _raising_rd(*_a: Any, **_kw: Any) -> list[TupleRow]:
+            raise RuntimeError("engine hiccup")
+
+        fake.rd = _raising_rd  # type: ignore[method-assign]
+        sender = _FakeSender()
+        # Probe injected: the default dials whatever engine this process
+        # resolves, and one below the floor would stop the waiter.
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: None,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(fake.wait_calls) >= 1)
+            assert waiter.status()["alive"] is True
+        finally:
+            await _cancel_and_await(run_task)
+
+    @pytest.mark.asyncio
+    async def test_catchup_runs_at_run_start_before_the_ordinary_tick_would_have_found_it(self) -> None:
+        """Integration through `run()`: the row's own `announce_count=1`
+        means the ordinary announce-mode `tick()` path would not consider
+        it due again until `reannounce_interval_s` elapses (default
+        150s) -- so a reference arriving well before that can only have
+        come from the startup catch-up read, proving it is actually
+        wired into `run()`, not merely unit-tested in isolation."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "orphaned")
+        fake._mutate(addr, "t1", announced_at=self._iso(-2.0), announce_count=1)
+        sender = _FakeSender()
+        # Probe injected: the default dials whatever engine this process
+        # resolves, and one below the floor would stop the waiter.
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            engine_version_probe=lambda: None,
+        )
+
+        run_task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: any(m.get("tuple_id") == "t1" for _c, m in sender.calls))
+        finally:
+            await _cancel_and_await(run_task)
+
+
 class TestWaiterSupersessionRealEngine:
     """The reproduction behind nexus-rxuiq, against the real engine: the first
     waiter lives in a process that dies with its wait still parked, and a
@@ -1666,6 +2173,50 @@ asyncio.run(main())
             "the live waiter must be told about the row written after the old process died; "
             f"it was told about {sent}"
         )
+
+
+class TestStartupCatchupReadRealEngine:
+    """The pre-first-wait window nexus-ymfak closes, reproduced against
+    the real engine without a subprocess: a row is announce-stamped by a
+    SEPARATE waiter token's `wait()` call -- standing in for an orphaned
+    predecessor waiter's already-live park, which the nexus-rxuiq fence
+    does not retroactively un-stamp -- and only THEN is a brand-new
+    `ChannelWaiter` (a distinct waiter token, one that has never itself
+    called `wait()`) constructed. Its startup catch-up read must
+    reference the row via `rd`: the row's own `announce_count=1` means
+    this new waiter's first `tick()` would not find it due again until
+    `reannounce_interval_s` elapses (default 150s), so a reference this
+    quickly can only be the catch-up read."""
+
+    def test_catchup_references_a_row_an_orphaned_waiters_wait_already_stamped(self, t2_service_env) -> None:
+        from nexus.mcp.core import tuple_out
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        tuple_out(addr, {"to": session_id}, {"from": "sender"}, "orphaned", nonce=uuid.uuid4().hex)
+
+        # Simulate the orphan: a DIFFERENT waiter token's announce-mode
+        # wait, stamping the row directly. It never actually parks --
+        # the row is already available -- so this is a synchronous
+        # stand-in for "an orphaned predecessor's live wait already
+        # claimed this row's announce slot before the new waiter existed".
+        orphan_token = f"{time.time_ns()}-{uuid.uuid4().hex}"
+        with t2_ctx_factory()() as db:
+            results = db.tuples.wait(
+                [WaitSpec(subspace=addr, n=1, announce=Announce(interval_s=150, max=5, waiter=orphan_token))],
+                0,
+            )
+        assert results and results[0].tuples, "the orphan's announce-mode wait must have actually stamped the row"
+        stamped_id = results[0].tuples[0].id
+
+        async def scenario() -> list[str]:
+            sender = _FakeSender()
+            waiter = channel.ChannelWaiter(session_id, t2_ctx_factory(), _subs(session_id), sender=sender)
+            await waiter._catchup_mailbox_rows()  # noqa: SLF001 — white-box: proving catch-up alone finds it
+            return [m.get("tuple_id") for _c, m in sender.calls]
+
+        sent = asyncio.run(scenario())
+        assert stamped_id in sent, f"catch-up must reference the row the orphan already stamped; got {sent}"
 
 
 def t2_ctx_factory():
