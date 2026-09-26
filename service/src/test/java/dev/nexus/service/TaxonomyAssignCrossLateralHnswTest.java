@@ -10,7 +10,6 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
-import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -29,8 +28,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.stream.Collectors;
 
-import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,12 +74,33 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       &gt;=40-own-centroid source collection. Proves the fixture actually
  *       exercises the hazard the SET clauses exist to close: without them,
  *       some chunks get NO row back at all.</li>
- *   <li>{@link #crossLateral_planShape_bindsHnswIndex_notSeqScan}: unchanged
- *       from before this rework — EXPLAINs {@code taxonomy_ann_query_1024}
- *       (the same nearest-centroid shape; {@code assign_from_chashes} is
- *       LANGUAGE plpgsql and opaque to a direct EXPLAIN) and asserts the HNSW
- *       index binds, not a Seq Scan.</li>
+ *   <li>{@link #crossLateral_planShape_bindsHnswIndex_notSeqScan_atRealisticScale}:
+ *       REWORKED again for nexus-swam7 (taxonomy-020) — EXPLAINs the EXACT
+ *       cross-branch statement text ({@code assign_from_chashes_1024} is
+ *       LANGUAGE plpgsql and opaque to a direct EXPLAIN of a call to it, so
+ *       this runs the same SQL text verbatim, not a proxy function anymore —
+ *       see this method's own javadoc for why the prior proxy-function
+ *       version could pass regardless of whether the fix under test existed)
+ *       against the CLASS's shared, now production-shaped fixture (43
+ *       collections, largest 67, ~1,000-2,000 centroids/dim — see
+ *       {@link #FILLER_COLLECTION_COUNT}'s javadoc), asserting the HNSW index
+ *       binds and no Seq Scan appears.</li>
  * </ol>
+ *
+ * <p><strong>nexus-swam7 rework (taxonomy-020, 2026-09-25).</strong> At
+ * ef_search=400 the planner's own cost model prefers a per-chunk Seq Scan +
+ * top-N Sort over taxonomy_centroids until roughly 8,000 centroids/dim (T2
+ * nexus/p02-hnsw-incremental-recall-2026-09-25) — well above both production's
+ * real count (799, 43 collections, largest 67) and, as it turned out, above
+ * the PRIOR round's own ~9,045-centroid fixture, which sat safely on the
+ * far side of that crossover and so proved nothing about whether a pin was
+ * needed at production's actual scale. taxonomy-020 adds a transaction-local
+ * {@code enable_seqscan}/{@code enable_sort} pin inside the cross branch,
+ * alongside the existing hnsw.* pins; this round shrinks the SHARED fixture
+ * to land INSIDE the bead's 1,000-2,000-centroid target band (below the
+ * crossover) so every test in this class -- recall, the mutation guard, the
+ * negative control, and the plan-shape assertion -- now exercises the SAME
+ * fixture shape that actually forces the choice this bead's pin makes.
  *
  * <p><strong>What changed from the previous round, and why.</strong> The
  * prior version of {@link #crossLateral_realHnsw_matchesExactNearest_underIncrementalInsertion}
@@ -122,15 +142,30 @@ class TaxonomyAssignCrossLateralHnswTest {
     private static final int DIM = 1024;
     /** >= 40: the benchmark's own no-row-hazard threshold at default ef_search. */
     private static final int OWN_CENTROID_COUNT = 45;
+    /** Five NAMED foreign collections at PRODUCTION's own measured sizes (bd
+     *  comment, nexus-swam7, conexus-b3 read-only measurement 2026-09-25: 43
+     *  collections, largest 67, then 64, 60, 49, 40). */
+    private static final int[] NAMED_COLLECTION_SIZES = {67, 64, 60, 49, 40};
     /** Many independently-clustered foreign collections, each inserted in its OWN
      *  transaction (production's actual accretion shape: one HDBSCAN discover run
-     *  writes one collection's batch, at unrelated times). Sized (~9000 filler
-     *  rows total, matching this dev's own prior-round plan-shape fixture) so the
-     *  planner's default cost model prefers the HNSW index over Seq Scan + Sort
-     *  for {@link #crossLateral_planShape_bindsHnswIndex_notSeqScan} -- measured:
-     *  525 total rows (24x20+45) left Seq Scan+Sort cheaper in absolute terms. */
-    private static final int FILLER_COLLECTION_COUNT = 360;
-    private static final int FILLER_CENTROIDS_PER_COLLECTION = 25;
+     *  writes one collection's batch, at unrelated times). Sized, together with
+     *  {@link #NAMED_COLLECTION_SIZES} and the {@link #OWN_CENTROID_COUNT}-row
+     *  dense collection, to land the WHOLE fixture inside nexus-swam7's own
+     *  1,000-2,000-centroids-per-dim target band across 43 total collections --
+     *  deliberately BELOW pgvector's natural ~8,000-centroid/dim HNSW/Seq-Scan
+     *  crossover (T2 nexus/p02-hnsw-incremental-recall-2026-09-25), unlike the
+     *  PRIOR round's ~9,045-row fixture that sat safely above it. That prior
+     *  sizing made the old {@code crossLateral_planShape_bindsHnswIndex_notSeqScan}
+     *  pass on raw cardinality alone, regardless of any planner pin -- exactly the
+     *  gap nexus-swam7 exists to close: production's real 799-centroid/dim count
+     *  is nowhere near either fixture's scale, so only a fixture BELOW the
+     *  crossover can prove the enable_seqscan/enable_sort pin (taxonomy-020) is
+     *  what makes the plan-shape assertion hold, not incidental cardinality. */
+    private static final int FILLER_COLLECTION_COUNT = 37;
+    /** Filler collection sizes span [20, 40] via {@code i % FILLER_CENTROID_SPREAD}
+     *  -- realistic per-collection variance, never a uniform count. */
+    private static final int FILLER_MIN_CENTROIDS = 20;
+    private static final int FILLER_CENTROID_SPREAD = 21;
     /** Test chunks: clustered around COL_DENSE's OWN cluster center (realistic --
      *  a chunk's embedding is naturally close to ITS OWN collection's centroids,
      *  which is exactly what makes the own-centroid crowding hazard real). 100,
@@ -253,10 +288,19 @@ class TaxonomyAssignCrossLateralHnswTest {
         // between relative to the 24 filler batches, exactly like unrelated
         // HDBSCAN discover runs landing at unrelated times in production.
         List<String> order = new ArrayList<>();
+        Map<String, Integer> centroidCountByCollection = new HashMap<>();
+        for (int i = 0; i < NAMED_COLLECTION_SIZES.length; i++) {
+            String name = "knowledge__afc_lateral_named_" + i;
+            order.add(name);
+            centroidCountByCollection.put(name, NAMED_COLLECTION_SIZES[i]);
+        }
         for (int i = 0; i < FILLER_COLLECTION_COUNT; i++) {
-            order.add("knowledge__afc_lateral_filler_" + i);
+            String name = "knowledge__afc_lateral_filler_" + i;
+            order.add(name);
+            centroidCountByCollection.put(name, FILLER_MIN_CENTROIDS + (i % FILLER_CENTROID_SPREAD));
         }
         order.add(COL_DENSE);
+        centroidCountByCollection.put(COL_DENSE, OWN_CENTROID_COUNT);
         java.util.Collections.shuffle(order, rnd);
 
         // Every collection (filler + dense) needs a catalog_collections row --
@@ -280,7 +324,7 @@ class TaxonomyAssignCrossLateralHnswTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String coll : order) {
                 boolean isDense = coll.equals(COL_DENSE);
-                int n = isDense ? OWN_CENTROID_COUNT : FILLER_CENTROIDS_PER_COLLECTION;
+                int n = centroidCountByCollection.get(coll);
                 double sigma = isDense ? OWN_CLUSTER_SIGMA : CLUSTER_SIGMA;
                 float[] center = clusterCenterByCollection.get(coll);
                 // Own transaction PER COLLECTION (autocommit, one statement):
@@ -324,6 +368,26 @@ class TaxonomyAssignCrossLateralHnswTest {
 
             PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
         }
+    }
+
+    /** Sum of {@link #NAMED_COLLECTION_SIZES}, the {@link #FILLER_COLLECTION_COUNT}
+     *  filler collections and the dense collection under test -- the realistic,
+     *  below-crossover total this fixture seeds per dim (nexus-swam7). Used only
+     *  for assertion-failure messages, so a future constant tweak keeps them
+     *  honest without a second hand-maintained total. */
+    private static int totalCentroidsSeeded() {
+        int total = OWN_CENTROID_COUNT;
+        for (int size : NAMED_COLLECTION_SIZES) {
+            total += size;
+        }
+        for (int i = 0; i < FILLER_COLLECTION_COUNT; i++) {
+            total += FILLER_MIN_CENTROIDS + (i % FILLER_CENTROID_SPREAD);
+        }
+        return total;
+    }
+
+    private static int totalCollectionsSeeded() {
+        return NAMED_COLLECTION_SIZES.length + FILLER_COLLECTION_COUNT + 1;
     }
 
     /** Exact nearest FOREIGN topic per test chunk, via a plain SQL query with
@@ -448,12 +512,25 @@ class TaxonomyAssignCrossLateralHnswTest {
                         + " SET clause: CREATE FUNCTION ... SET hnsw.* is refused for a"
                         + " non-superuser migration role while pgvector is not loaded in"
                         + " the session. Actual: %s", (Object) proconfig)
-                    .noneMatch(c -> c.startsWith("hnsw."));
+                    .noneMatch(c -> c.startsWith("hnsw."))
+                    .as("assign_from_chashes_" + dim + " must ALSO carry no enable_seqscan/"
+                        + "enable_sort function-level SET (nexus-swam7): legal for these two"
+                        + " core GUCs, but set_config is used for consistency with the hnsw.*"
+                        + " pair above -- see taxonomy-020's own header. Actual: %s",
+                        (Object) proconfig)
+                    .noneMatch(c -> c.startsWith("enable_seqscan") || c.startsWith("enable_sort"));
                 assertThat(prosrc)
-                    .as("assign_from_chashes_" + dim + "'s body must set both recall settings;"
+                    .as("assign_from_chashes_" + dim + "'s body must set both ANN recall settings;"
                         + " dropping either reopens the no-row hazard silently")
                     .contains("set_config('hnsw.iterative_scan', 'strict_order', true)")
                     .contains("set_config('hnsw.ef_search', '400', true)");
+                assertThat(prosrc)
+                    .as("assign_from_chashes_" + dim + "'s body must ALSO pin the access path"
+                        + " itself (nexus-swam7, taxonomy-020): without these, the planner"
+                        + " reopens the Seq-Scan-below-crossover regression this bead exists"
+                        + " to close, silently")
+                    .contains("set_config('enable_seqscan', 'off', true)")
+                    .contains("set_config('enable_sort', 'off', true)");
             }
         }
     }
@@ -504,28 +581,123 @@ class TaxonomyAssignCrossLateralHnswTest {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // (4) Plan shape: unchanged from before this rework.
+    // (4) Plan shape at REALISTIC scale, nexus-swam7 rework: THROUGH the exact
+    // cross-branch statement text (not a proxy function), at a fixture sized
+    // to production's own shape and BELOW pgvector's natural HNSW/Seq-Scan
+    // crossover, so this only passes because of taxonomy-020's
+    // enable_seqscan/enable_sort pin.
     // ════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Bead nexus-swam7: the PRIOR round of this test (see the class javadoc's
+     * "What changed" section and {@link #FILLER_COLLECTION_COUNT}'s own
+     * javadoc) ran a proxy SQL function ({@code taxonomy_ann_query_1024}) at a
+     * fixture cardinality (~9,045 centroids/dim) already ABOVE pgvector's
+     * natural ~8,000-centroid HNSW/Seq-Scan crossover -- so it passed on raw
+     * cardinality alone and would have passed identically whether or not
+     * taxonomy-018 (or this bead's taxonomy-020 follow-up) existed at all.
+     * Production carries only 799 centroids/dim (43 collections, largest 67;
+     * bd comment, conexus-b3, 2026-09-25), nowhere near either fixture's
+     * scale.
+     *
+     * <p>This version instead EXPLAINs the EXACT statement text embedded in
+     * {@code assign_from_chashes_1024}'s cross branch (taxonomy-020-3,
+     * verbatim minus the plpgsql parameter names, which become SQL literals),
+     * NOT a proxy function -- {@code assign_from_chashes_1024} is
+     * {@code LANGUAGE plpgsql} and opaque to a direct {@code EXPLAIN} of a
+     * call to it, and the only faithful way to see the REAL statement's plan
+     * is to run that statement's own text with the SAME four
+     * {@code set_config} calls applied in the SAME session (this bead's own
+     * verification method, documented in taxonomy-020's changelog header: a
+     * scratch pgvector/pg17 harness plus this exact class, both showing the
+     * plan flips to the HNSW index once the pins are applied). This runs
+     * against the class's SHARED fixture ({@link #startAll}), sized (see
+     * {@link #FILLER_COLLECTION_COUNT}'s javadoc) to land in nexus-swam7's own
+     * 1,000-2,000-centroids-per-dim target band across 43 total collections,
+     * largest 67 -- production-shaped, and below the crossover, so a Seq Scan
+     * here would be the taxonomy-018-without-taxonomy-020 regression
+     * reappearing, not a fixture artifact.
+     */
     @Test
-    void crossLateral_planShape_bindsHnswIndex_notSeqScan() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_1024.call(Vector.of(randomUnitVector(new Random(1), DIM)), COL_DENSE, true, 1);
+    void crossLateral_planShape_bindsHnswIndex_notSeqScan_atRealisticScale() {
+        String chashArrayLiteral = chunkChashes.stream()
+            .map(h -> "'" + h + "'")
+            .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
+        // Verbatim (parameters substituted as literals) copy of the `batch`/
+        // `nearest` CTEs inside assign_from_chashes_1024's cross branch
+        // (taxonomy-020-3). The `persisted` INSERT CTE is included too, so
+        // this is the FULL statement, not a read-only excerpt of it -- a bare
+        // EXPLAIN (no ANALYZE) never executes the query, so the INSERT never
+        // runs and the fixture is never mutated.
+        String sql =
+            "WITH batch AS ("
+            + "    SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb"
+            + "      FROM nexus.chunks c"
+            + "     WHERE c.collection = '" + COL_DENSE + "'"
+            + "       AND c.embedding_1024 IS NOT NULL"
+            + "       AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(" + chashArrayLiteral + ") x))"
+            + "), nearest AS ("
+            + "    SELECT encode(b.b_chash, 'hex') AS m_chash, b.b_chash AS m_chash_bytes,"
+            + "           n.n_topic_id AS m_topic_id, (1 - n.n_dist)::double precision AS m_sim"
+            + "      FROM batch b"
+            + "      CROSS JOIN LATERAL ("
+            + "          SELECT ct.topic_id AS n_topic_id,"
+            + "                 (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist"
+            + "            FROM nexus.taxonomy_centroids ct"
+            + "           WHERE ct.collection <> '" + COL_DENSE + "'"
+            + "             AND ct.embedding_1024 IS NOT NULL"
+            + "           ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
+            + "           LIMIT 1"
+            + "      ) n"
+            + "), persisted AS ("
+            + "    INSERT INTO nexus.topic_assignments AS ta"
+            + "        (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
+            + "    SELECT '" + TENANT + "', n.m_chash_bytes, n.m_topic_id,"
+            + "           'projection', n.m_sim, now(), '" + COL_DENSE + "'"
+            + "      FROM nearest n"
+            + "    ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET"
+            + "        similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),"
+            + "        assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)"
+            + "                            THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,"
+            + "        source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)"
+            + "                            THEN EXCLUDED.source_collection ELSE ta.source_collection END,"
+            + "        assigned_by = 'projection'"
+            + "    RETURNING 1"
+            + ") SELECT m_chash, m_topic_id, m_sim FROM nearest";
+
         String plan = tenantScope.withTenant(TENANT, ctx -> {
-            // Mirrors EXACTLY the function-level SET clauses
-            // assign_from_chashes_1024 itself now carries (taxonomy-018-1).
+            // Mirrors EXACTLY the FOUR transaction-local set_config calls
+            // assign_from_chashes_1024's cross branch now carries
+            // (taxonomy-020-3): the two ANN-recall pins from taxonomy-018,
+            // plus this bead's two access-path pins.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "strict_order");
             PgSession.setLocal(ctx, "hnsw.ef_search", "400");
-            return ctx.explain(ctx.selectFrom(fn)).plan();
+            PgSession.setLocal(ctx, "enable_seqscan", "off");
+            PgSession.setLocal(ctx, "enable_sort", "off");
+            StringBuilder sb = new StringBuilder();
+            for (var r : ctx.resultQuery("EXPLAIN " + sql).fetch()) {
+                sb.append(r.get(0, String.class)).append('\n');
+            }
+            return sb.toString();
         });
+
         assertThat(plan)
-            .as("the cross-collection nearest-centroid computation (same shape as"
-                + " assign_from_chashes_1024's rewritten LATERAL subquery) must bind"
-                + " to the FULL idx_taxonomy_centroids_embedding_1024 HNSW index."
-                + " Plan was:%n%s", plan)
+            .as("the REAL cross-branch statement text (taxonomy-020-3, not a proxy"
+                + " function) must bind to the FULL idx_taxonomy_centroids_embedding_1024"
+                + " HNSW index at this bead's realistic %d-centroid/dim, %d-collection"
+                + " fixture (largest %d) -- below pgvector's natural ~8,000-centroid"
+                + " crossover, so this only passes because of the enable_seqscan/"
+                + "enable_sort pin. Plan was:%n%s",
+                totalCentroidsSeeded(), totalCollectionsSeeded(), NAMED_COLLECTION_SIZES[0], plan)
             .contains("idx_taxonomy_centroids_embedding_1024");
         assertThat(plan)
-            .as("must not degrade to a sequential scan at this cardinality."
+            .as("must not degrade to a sequential scan on taxonomy_centroids at this"
+                + " cardinality -- that degradation IS the regression this bead closes."
                 + " Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on taxonomy_centroids");
+        assertThat(plan)
+            .as("must not use ANY sequential scan (chunks included) once the pin is"
+                + " applied. Plan was:%n%s", plan)
             .doesNotContain("Seq Scan");
     }
 

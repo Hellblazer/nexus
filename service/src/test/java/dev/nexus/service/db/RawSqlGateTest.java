@@ -1083,7 +1083,11 @@ class RawSqlGateTest {
         // recall/plan-shape helpers' vectorLiteral-driven PreparedStatement inserts
         // and role-bootstrap statements (5) -- same idiom as
         // TaxonomyCentroidAnnPlanShapeTest's own REALCALL-role bootstrap.
-        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 9),
+        // nexus-swam7: +1 (10) -- the realistic-scale plan-shape rework's
+        // EXPLAIN-the-exact-statement-text raw ctx.resultQuery(...).fetch()
+        // call, replacing the prior proxy-function ctx.explain(...) call
+        // (which was typed jOOQ, not raw SQL, and so carried no entry here).
+        Map.entry("dev/nexus/service/TaxonomyAssignCrossLateralHnswTest.java", 10),
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 2),
@@ -1497,7 +1501,10 @@ class RawSqlGateTest {
     // RepositoryTest.java 5 -> 10 (+5, manifest-exclusion + keyset-cursor + scale-test
     // fixtures/probes) and TaxonomyAssignSeparateTransactionsTest.java new at 1 (the
     // pg_locks lock-hold proof's raw JDBC probe, same idiom).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 950;
+    // nexus-swam7: 950 -> 951 (+1: TaxonomyAssignCrossLateralHnswTest.java 9 -> 10,
+    // the realistic-scale plan-shape test's raw EXPLAIN-the-exact-statement-text
+    // resultQuery call, see that entry's own comment above).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 951;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
