@@ -1958,7 +1958,16 @@ def _reap_superseded_note_chunks(
     )
 
     orphaned = orphaned_chashes(reader, catalog_doc_id, dropped, collection=collection)
+    shared = len(dropped) - len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: union guard cleared every candidate — every
+        # dropped chash is shared with another live document, nothing
+        # reaches the note lookup or a delete.
+        _log.info(
+            "superseded_sweep_kept", site="_reap_superseded_note_chunks",
+            collection=collection, doc_id=catalog_doc_id, dropped=len(dropped),
+            kept=shared, kept_notes=0,
+        )
         return
     try:
         documents = catalog_documents_for_collection(reader, collection)
@@ -1970,8 +1979,19 @@ def _reap_superseded_note_chunks(
             exc_info=True,
         )
         return
+    kept_notes = len(orphaned)
     orphaned = [h for h in orphaned if h not in notes]
+    kept_notes -= len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: note guard cleared every surviving candidate —
+        # each is itself a manifest-less note's own identity elsewhere in
+        # this collection. Same silence hazard as the union-guard return
+        # above.
+        _log.info(
+            "superseded_sweep_kept", site="_reap_superseded_note_chunks",
+            collection=collection, doc_id=catalog_doc_id, dropped=len(dropped),
+            kept=shared + kept_notes, kept_notes=kept_notes,
+        )
         return
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path

@@ -2671,6 +2671,14 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     orphaned = orphaned_chashes(reader, doc_id, dropped, collection=collection)
     shared = len(dropped) - len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: union guard cleared every candidate — every
+        # dropped chash is shared with another live document, nothing
+        # reaches the note lookup or a delete. Log the kept count so this
+        # is not indistinguishable, in the logs, from "nothing to do".
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors",
+            collection=collection, doc_id=doc_id, dropped=len(dropped),
+            kept=shared, kept_notes=0)
         return
     try:
         notes = notes_provider()
@@ -2685,6 +2693,14 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     orphaned = [h for h in orphaned if h not in notes]
     kept_notes -= len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: note guard cleared every surviving candidate —
+        # each is itself a manifest-less note's own identity elsewhere in
+        # this collection. Same silence hazard as the union-guard return
+        # above.
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors",
+            collection=collection, doc_id=doc_id, dropped=len(dropped),
+            kept=shared + kept_notes, kept_notes=kept_notes)
         return
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
@@ -2820,6 +2836,13 @@ def _sweep_superseded_vectors_many(
     orphaned = orphaned_chashes(reader, _batch_label, candidates, collection=collection)
     shared = len(candidates) - len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: batch sibling of the per-doc union-guard return
+        # above — every candidate in the whole batch is shared with
+        # another live document.
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors_many",
+            collection=collection, doc_id=_batch_label, dropped=len(candidates),
+            kept=shared, kept_notes=0)
         return
     try:
         notes = notes_provider()
@@ -2835,6 +2858,13 @@ def _sweep_superseded_vectors_many(
     orphaned = [h for h in orphaned if h not in notes]
     kept_notes -= len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: batch sibling of the per-doc note-guard return
+        # above — every candidate that survived the union guard is itself
+        # a manifest-less note's own identity.
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors_many",
+            collection=collection, doc_id=_batch_label, dropped=len(candidates),
+            kept=shared + kept_notes, kept_notes=kept_notes)
         return
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
