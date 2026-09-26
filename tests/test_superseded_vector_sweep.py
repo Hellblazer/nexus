@@ -542,8 +542,13 @@ def test_sweep_fires_through_the_real_write_only_proxy() -> None:
 
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
+        # nexus-4pj54: an immediate sweep now requires the producer's
+        # completeness claim (a file-atomic single-batch write, which is
+        # what this test's single call represents) — a streaming/
+        # incremental producer's partial-batch REPLACE must NOT sweep
+        # on the spot, see tests/test_nexus_4pj54_streaming_sweep_deferred.py.
         _manifest_write_loop(writer, {"doc-A": _metas("keep", "new1")}, "coll",
-                             reader=fake)
+                             reader=fake, manifest_complete={"doc-A": "a" * 64})
 
     assert fake.replaced, "the manifest replace must still happen"
     col.delete.assert_called_once()
@@ -587,8 +592,11 @@ def test_sweep_is_skipped_loudly_when_docs_for_chashes_raises() -> None:
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))), \
             capture_logs() as logs:
+        # nexus-4pj54: manifest_complete makes this an immediate-sweep
+        # attempt (file-atomic claim) so it actually reaches
+        # docs_for_chashes — see the comment on the sibling test above.
         _manifest_write_loop(fake, {"doc-A": _metas("keep", "new1")}, "coll",
-                             reader=fake)
+                             reader=fake, manifest_complete={"doc-A": "a" * 64})
 
     col.delete.assert_not_called()          # fail-open: nothing deleted
     events = [e["event"] for e in logs if e["log_level"] == "warning"]
@@ -680,7 +688,12 @@ def test_production_wiring_uses_list_by_collection_not_all_documents() -> None:
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
         from nexus.mcp_infra import _manifest_write_loop
-        _manifest_write_loop(fake, {"doc-A": _metas("new1")}, "coll", reader=fake)
+        # nexus-4pj54: manifest_complete makes this an immediate-sweep
+        # attempt (file-atomic claim), so it reaches the notes lookup this
+        # test asserts on — see tests/test_nexus_4pj54_streaming_sweep_deferred.py
+        # for the deferred (no claim) behavior this same function now has.
+        _manifest_write_loop(fake, {"doc-A": _metas("new1")}, "coll", reader=fake,
+                             manifest_complete={"doc-A": "a" * 64})
 
     assert fake.list_by_collection_calls == ["coll"]
     assert not hasattr(fake, "all_documents")
@@ -696,7 +709,8 @@ def test_production_wiring_protects_a_real_note_entry() -> None:
     col = MagicMock()
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
-        _manifest_write_loop(fake, {"doc-A": _metas("new1")}, "coll", reader=fake)
+        _manifest_write_loop(fake, {"doc-A": _metas("new1")}, "coll", reader=fake,
+                             manifest_complete={"doc-A": "a" * 64})
 
     col.delete.assert_called_once()
     assert col.delete.call_args.kwargs["ids"] == ["genuine-orphan"]
@@ -718,6 +732,8 @@ def test_collection_documents_fetched_at_most_once_per_batch_of_many_documents()
     col = MagicMock()
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
+        # nexus-4pj54: every doc claims completeness (file-atomic), so all
+        # three reach the immediate sweep this test asserts on.
         _manifest_write_loop(
             fake,
             {
@@ -726,6 +742,7 @@ def test_collection_documents_fetched_at_most_once_per_batch_of_many_documents()
                 "doc-C": _metas("new-c"),
             },
             "coll", reader=fake,
+            manifest_complete={"doc-A": "a" * 64, "doc-B": "b" * 64, "doc-C": "c" * 64},
         )
 
     # get_chunk_chashes returns the SAME `before` list for every doc_id in
@@ -752,10 +769,13 @@ def test_note_lookup_failure_is_cached_not_retried_per_document_in_the_batch() -
     col = MagicMock()
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))):
+        # nexus-4pj54: every doc claims completeness so all three reach
+        # (and fail identically at) the note-lookup this test exercises.
         _manifest_write_loop(
             fake,
             {"doc-A": _metas("new-a"), "doc-B": _metas("new-b"), "doc-C": _metas("new-c")},
             "coll", reader=fake,
+            manifest_complete={"doc-A": "a" * 64, "doc-B": "b" * 64, "doc-C": "c" * 64},
         )
 
     col.delete.assert_not_called()  # fail-open across every document

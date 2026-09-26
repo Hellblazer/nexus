@@ -2280,6 +2280,100 @@ def _apply_combined_write_response(
     return failed
 
 
+# nexus-4pj54: a REPLACE whose batch is not PROVABLY the whole document
+# (a streaming multi-batch upload's first batch legitimately carries
+# position 0 -- the position-0 gate above -- without being complete; see
+# doc_indexer.py's ``_index_pdf_incremental`` and pipeline_stages.py's
+# ``uploader_loop``, neither of which ever populates ``manifest_complete``
+# for the same reason) must not sweep its dropped chashes immediately --
+# they may be rows a LATER batch in the same run is about to re-append.
+# Measured (T2 nexus/swept-count-streaming-reindex-2026-09-25): a 66-chunk
+# PDF re-index reported "swept 64" against 2 truly superseded chashes; 62
+# live chunks were deleted from T3 and re-uploaded by later batches.
+#
+# Candidates are held here, keyed on doc_id, instead of swept on the spot;
+# ``sweep_deferred_superseded_vectors`` (called from
+# ``doc_indexer._fence_complete`` on a SUCCESSFUL completion stamp only)
+# pops the entry and sweeps it against the FINAL manifest. Process-lifetime
+# only, by design: an interrupted run loses its pending entry rather than
+# risking deletion of a row a later batch was about to re-append -- no
+# sweep beats a wrong sweep, and RDR-192's reaper is the backstop for
+# genuinely orphaned rows left unswept this way.
+_pending_sweep_lock = threading.Lock()
+_PENDING_SWEEP_CANDIDATES: dict[str, tuple[str, set[str]]] = {}
+
+
+def _stash_pending_sweep(doc_id: str, collection: str, dropped: set[str]) -> None:
+    """Hold *dropped* chashes for *doc_id* instead of sweeping now. Merges
+    with any candidates already held for this doc_id (a run should only
+    ever REPLACE a document's manifest once — at its first, position-0-
+    bearing batch — but merging keeps this safe if that ever changes)."""
+    if not dropped:
+        return
+    with _pending_sweep_lock:
+        _, prev = _PENDING_SWEEP_CANDIDATES.get(doc_id, (collection, set()))
+        _PENDING_SWEEP_CANDIDATES[doc_id] = (collection, prev | dropped)
+
+
+def sweep_deferred_superseded_vectors(doc_id: str) -> None:
+    """Sweep candidates :func:`_stash_pending_sweep` held for *doc_id*,
+    against the FINAL manifest, now that the document's index run is
+    confirmed complete (nexus-4pj54).
+
+    Called from ``doc_indexer._fence_complete`` immediately after a
+    SUCCESSFUL completion stamp — never on ``IndexRunVerifyRefused`` or a
+    transport failure, since the manifest is not confirmed complete there
+    and a future successful stamp will retry this. No-op when nothing is
+    pending for *doc_id*: the common case (a file-atomic single-batch
+    write) sweeps immediately in ``_manifest_write_loop`` and never
+    stashes anything here, so this call costs one dict lookup.
+    """
+    with _pending_sweep_lock:
+        entry = _PENDING_SWEEP_CANDIDATES.pop(doc_id, None)
+    if entry is None:
+        return
+    collection, candidates = entry
+    if not candidates or not collection:
+        return
+    try:
+        reader = get_catalog()
+    except Exception as exc:  # noqa: BLE001 — advisory: this is called from _fence_complete's success tail and must never raise there
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning(
+            "superseded_sweep_deferred_no_catalog", doc_id=doc_id, collection=collection,
+            error=str(exc),
+        )
+        _record_superseded_sweep_skip(doc_id, collection, "no_catalog")
+        return
+    if reader is None:
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning(
+            "superseded_sweep_deferred_no_catalog", doc_id=doc_id, collection=collection,
+        )
+        _record_superseded_sweep_skip(doc_id, collection, "no_catalog")
+        return
+    try:
+        try:
+            final_chashes = {h for h in (reader.get_chunk_chashes(doc_id) or []) if h}
+        except Exception as exc:  # noqa: BLE001 — no sweep beats a wrong sweep
+            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+            structlog.get_logger().warning(
+                "superseded_sweep_deferred_final_read_failed",
+                doc_id=doc_id, collection=collection, error=str(exc))
+            _record_superseded_sweep_skip(doc_id, collection, "before_read_failed")
+            return
+        from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+        _cache = CollectionDocumentsCache(reader, collection)
+        _sweep_superseded_vectors(
+            None, doc_id, candidates, [{"chash": h} for h in final_chashes], collection,
+            reader=reader, notes_provider=lambda: live_note_chashes(_cache.get()))
+    finally:
+        _close = getattr(reader, "close", None)
+        if callable(_close):
+            _close()
+
+
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
                               collection: str | None, *, reader, notes_provider) -> None:
     """Delete T3 rows this document's manifest no longer references (nexus-39upx).
@@ -2676,10 +2770,21 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             # POSITION-0 GATE (review Important #1): write_many is
             # REPLACE — a doc whose batch lacks position 0 is a
             # continuation slice, and replacing would DELETE its
-            # earlier rows (silent manifest corruption). Today's only
-            # flush-grain producer (ChunkBatcher) is file-atomic so
-            # position 0 is always present; this guard defends the
-            # invariant against any future producer.
+            # earlier rows (silent manifest corruption). The flush-grain
+            # producer (ChunkBatcher) is file-atomic so position 0 is
+            # always present there; the streaming PDF pipeline
+            # (pipeline_stages.uploader_loop) and doc_indexer's
+            # ``_index_pdf_incremental`` ALSO land here with position 0
+            # in their FIRST batch even though that batch is NOT the
+            # whole document (nexus-4pj54 correction — this comment
+            # previously assumed only a file-atomic producer could reach
+            # this branch). The CATALOG replace below is still correct
+            # for a partial-first-batch producer (later batches append
+            # onto it); what is NOT safe for one is treating the replace
+            # as proof of completeness for the T3 SWEEP, which is why that
+            # decision is gated on the producer's explicit
+            # ``manifest_complete`` claim, not on position-0 presence —
+            # see the dropped-set handling below.
             if not any(c["position"] == 0 for c in chunks):
                 continuation[doc_id] = indexed_metas
                 continue
@@ -2861,8 +2966,20 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                         continue  # unknown write outcome: no sweep beats a wrong sweep
                     _dropped = _before_by_doc.get(_d, set()) - _new_by_doc[_d]
                     _dropped -= _live_union
-                    if _dropped:
+                    if not _dropped:
+                        continue
+                    if _d in _complete_map:
                         _dropped_by_doc[_d] = _dropped
+                    else:
+                        # nexus-4pj54: this doc's batch carries position 0
+                        # (it is in `full_docs`/`_full_ids`) but the
+                        # producer did NOT assert it is the whole document
+                        # — a streaming multi-batch upload's first batch is
+                        # exactly this shape. Sweeping now could delete
+                        # rows a later batch in this same run is about to
+                        # re-append. Hold; the document's completion fence
+                        # sweeps against the FINAL manifest.
+                        _stash_pending_sweep(_d, collection, _dropped)
                 if _dropped_by_doc:
                     _sweep_superseded_vectors_many(
                         cat, _dropped_by_doc, collection,
@@ -2918,8 +3035,11 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             # between the purge and the new write cannot leave the catalog
             # with zero chunks for a doc the documents row still claims N.
             # Multi-batch writes never include position 0 in batches other
-            # than the first, so the atomic-replace path is safe for the
-            # streaming PDF / doc_indexer paths.
+            # than the first — but the FIRST batch of a streaming/incremental
+            # multi-batch upload DOES contain position 0 and lands here too,
+            # without being the whole document (nexus-4pj54; the sweep below
+            # is gated on `manifest_complete`, not on this branch, for
+            # exactly that reason — see its comment).
             if any(c["position"] == 0 for c in chunks):
                 # nexus-39upx: capture what the manifest referenced BEFORE the
                 # replace, so the vector rows that fall out of it can be swept.
@@ -2949,8 +3069,23 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                     _record_superseded_sweep_skip(doc_id, collection, "before_read_failed")
                 _manifest_write_with_retry(
                     cat.atomic_manifest_replace, doc_id, chunks, collection=collection)
-                _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
-                                          reader=reader, notes_provider=_notes_provider)
+                # nexus-4pj54: a position-0 batch is not provably the whole
+                # document — the producer's `manifest_complete` claim is
+                # the only proof of that (see the comment ~15 lines above).
+                # A doc lacking that claim has its dropped set HELD, not
+                # swept: a streaming/incremental multi-batch upload's first
+                # batch is exactly this shape, and sweeping here could
+                # delete rows a later batch in this same run is about to
+                # re-append (measured: 62 of 64 "swept" rows were live).
+                _claimed_hash = (manifest_complete or {}).get(doc_id)
+                if _claimed_hash:
+                    _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
+                                              reader=reader, notes_provider=_notes_provider)
+                else:
+                    _new = {c["chash"] for c in chunks if c.get("chash")}
+                    _dropped = {h for h in _before if h and h not in _new}
+                    if _dropped:
+                        _stash_pending_sweep(doc_id, collection, _dropped)
                 # chunk_count parity (critique Critical): the HTTP
                 # client's replace does NOT touch documents.chunk_count
                 # (only write_many folds it in); the local Catalog does
@@ -2969,7 +3104,6 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                 # the manifest this doc just wrote. Position-0 only — a
                 # continuation slice is not a whole document (handled in the
                 # else branch).
-                _claimed_hash = (manifest_complete or {}).get(doc_id)
                 if _claimed_hash:
                     _stamp_index_run_complete(
                         cat, doc_id, _claimed_hash, len(chunks))

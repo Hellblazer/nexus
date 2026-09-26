@@ -602,6 +602,18 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
             close()
     if result is None:
         _log.debug("index_run_complete_pre_fence_engine", doc_id=doc_id)
+    # nexus-4pj54: this point is reached ONLY on a successful (or
+    # pre-fence-engine, still successful from the client's own view)
+    # completion — the IndexRunVerifyRefused branch above re-raises before
+    # reaching here, and a transport failure returns early. That makes this
+    # the right place to run the sweep `_manifest_write_loop` deferred for a
+    # multi-batch document whose first batch could not prove it was the
+    # whole file: the manifest is now confirmed complete, so any candidate
+    # still held for doc_id can be diffed against the FINAL manifest and
+    # swept if truly superseded. No-op (one dict lookup) for the common
+    # file-atomic case, which never stashes anything.
+    from nexus.mcp_infra import sweep_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+    sweep_deferred_superseded_vectors(doc_id)
 
 
 def _repo_owner_document_for(reader, abs_path):
