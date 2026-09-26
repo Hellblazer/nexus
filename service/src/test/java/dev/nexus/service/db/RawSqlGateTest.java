@@ -1189,6 +1189,13 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFkTest.java", 1),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFromChashesTest.java", 2),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerImportRlsTest.java", 2),
+        // RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4): 3 raw-JDBC sites -- the
+        // generate_series bulk INSERT seed (no jOOQ codegen benefit for a one-off
+        // 5,000-row fixture load), the single-target-row INSERT, and the literal-
+        // spliced (deliberately NOT a PreparedStatement -- see the method's own
+        // javadoc) EXPLAIN probe proving idx_catalog_documents_live_note_doc_id
+        // serves the reverse notes-guard predicate for a literal-value run.
+        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
@@ -1547,7 +1554,10 @@ class RawSqlGateTest {
     // CrossPreviewRepositoryTest.java new at 4 and db/CrossPreviewDriftTest.java
     // new at 1, same raw-JDBC fixture/prosrc-probe idiom their siblings above
     // already carry entries for; see both entries' own comments).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 958;
+    // nexus-wbfpw.4 (RDR-192 Step 2 round-2 fix): 958 -> 961 (+3: one new test
+    // file, vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java new at
+    // 3 -- see that entry's own comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 961;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
