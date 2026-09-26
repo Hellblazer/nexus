@@ -812,10 +812,10 @@ def _allow_info_logs() -> None:
 
 
 def test_union_guard_clearing_every_candidate_logs_kept() -> None:
-    _allow_info_logs()
     """Per-doc sibling, union-guard return: every dropped chash is shared
     with another live document, so `orphaned` comes back empty before the
     note lookup ever runs."""
+    _allow_info_logs()
     import structlog
 
     cat = _cat({"a": ["other-doc-1"], "b": ["other-doc-2"]})
@@ -835,6 +835,24 @@ def test_union_guard_clearing_every_candidate_logs_kept() -> None:
     assert ev["dropped"] == 2
     assert ev["kept"] == 2
     assert ev["kept_notes"] == 0
+
+
+def test_genuine_orphan_deletes_and_logs_no_kept_event() -> None:
+    """Non-vacuity control for the kept events above: when a dropped chash
+    has no other live reference and is no note's identity, the sweep
+    deletes it and superseded_sweep_kept does not fire."""
+    _allow_info_logs()
+    import structlog
+
+    cat = _cat({})
+    col = MagicMock()
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"orphan"}, _chunks("new"),
+                                  "coll", reader=cat, notes_provider=_notes())
+    col.delete.assert_called_once()
+    assert [l for l in logs if l.get("event") == "superseded_sweep_kept"] == []
 
 
 def test_note_guard_clearing_every_candidate_logs_kept() -> None:
