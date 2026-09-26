@@ -266,6 +266,85 @@ class TestMineruRunViaServer:
                 f"span ending at {prev_end}; it would be extracted twice"
             )
 
+    def test_an_empty_page_list_makes_pdfium_import_every_page(self) -> None:
+        """The premise the range guard below rests on, measured, not assumed.
+
+        MinerU builds ``range(start_page_id, end_page_id + 1)`` and hands it
+        to ``PdfDocument.import_pages``. When the range is empty (an empty
+        half-open batch, or a start past the last page), pypdfium2 passes a
+        NULL page array with count 0 to ``FPDF_ImportPagesByIndex``, which
+        imports EVERY page. MinerU then extracts the whole document for a
+        request that meant nothing at all. If a pypdfium2 upgrade makes this
+        test fail, the guard is no longer needed for this reason.
+        """
+        import pypdfium2 as pdfium
+
+        src = pdfium.PdfDocument.new()
+        for _ in range(3):
+            src.new_page(100, 100)
+        out = pdfium.PdfDocument.new()
+        out.import_pages(src, [])
+        assert len(out) == 3
+
+    @pytest.mark.parametrize(("start", "end"), [(5, 5), (5, 4)])
+    def test_empty_range_is_refused_before_the_server_is_called(
+        self, extractor: PDFExtractor, dummy_pdf: Path, start: int, end: int,
+    ) -> None:
+        """[5, 5) becomes start_page_id=5, end_page_id=4, an empty MinerU
+        range, which the test above shows returns the whole document."""
+        with (
+            patch("nexus.pdf_extractor.httpx.post", return_value=_mock_post_ok()) as mock_post,
+            _patch_config(),
+            pytest.raises(ValueError, match="empty MinerU page range"),
+        ):
+            extractor._mineru_run_via_server(dummy_pdf, start, end)
+        mock_post.assert_not_called()
+
+    def test_start_past_the_last_page_is_refused_before_the_server_is_called(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """MinerU clamps end_page_id down to the last page, below an
+        out-of-range start, so the range is empty and every page comes back."""
+        extractor._mineru_run_total_pages = 17
+        with (
+            patch("nexus.pdf_extractor.httpx.post", return_value=_mock_post_ok()) as mock_post,
+            _patch_config(),
+            pytest.raises(ValueError, match="past the last page"),
+        ):
+            extractor._mineru_run_via_server(dummy_pdf, 17, 18)
+        mock_post.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("start", "end", "total"),
+        # (0, None, 0): a zero-page PDF becomes the single batch (0, None);
+        # only extractor="mineru" reaches here with one (auto finds no text,
+        # so no formulas), and it fails loudly rather than asking MinerU.
+        [(5, 5, None), (17, 18, 17), (0, None, 0)],
+    )
+    def test_the_subprocess_path_refuses_the_same_ranges(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+        start: int, end: int, total: int | None,
+    ) -> None:
+        extractor._mineru_run_total_pages = total
+        with (
+            patch("nexus.pdf_extractor.subprocess.Popen") as mock_popen,
+            pytest.raises(ValueError, match="MinerU page range|past the last page"),
+        ):
+            extractor._mineru_run_subprocess(dummy_pdf, start, end)
+        mock_popen.assert_not_called()
+
+    def test_the_last_page_and_an_open_end_are_still_admitted(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        extractor._mineru_run_total_pages = 17
+        with (
+            patch("nexus.pdf_extractor.httpx.post", return_value=_mock_post_ok()) as mock_post,
+            _patch_config(),
+        ):
+            extractor._mineru_run_via_server(dummy_pdf, 16, 17)
+            extractor._mineru_run_via_server(dummy_pdf, 0, None)
+        assert mock_post.call_count == 2
+
     def test_table_enable_true_sent_as_string(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
         cfg = {"pdf": {"mineru_server_url": "http://127.0.0.1:8010", "mineru_table_enable": True}}
         with (

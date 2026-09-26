@@ -607,14 +607,17 @@ class TestFormulaPreservationOnRealPdf:
     # extraction; this slow, deselected test was never rerun, so it failed on
     # the correct 17. Re-measured on MinerU 3.1.11: page_count 33 -> 17,
     # formula_count 44 -> 22, text 58843 -> 30198, $$ 8 -> 4, \frac 12 -> 6,
-    # markers 16 -> 8, "efficient" 27 -> 16 (not an exact half: a duplicated
-    # page is its successor's text, not a copy of itself). The pinned
+    # markers 16 -> 8, "efficient" 27 -> 16. Only page 0 was extracted once,
+    # so each old value is 2 x new - page 0's share. Page 0 alone, measured:
+    # 1562 chars, 5 "efficient", no formulas. That gives 27 = 2 x 16 - 5 and
+    # exact halves for every formula count; text predicts 2 x 30198 - 1562 =
+    # 58834 against 58843, 9 chars unaccounted for. The pinned
     # snippet is still present. _EXPECTED_QUICK_SCREEN is PyMuPDF-only and
     # did not move. The history comments above describe deltas measured on
     # the doubled text and are kept as the record of those changes.
     _EXPECTED_TEXT_LENGTH = 30198           # full extracted text
     _EXPECTED_EFFICIENT_COUNT = 16          # "efficient" occurrences; 0 under MinerU 3.4.5
-    _EXPECTED_PAGE_COUNT = 17               # PyMuPDF page count
+    _EXPECTED_PAGE_COUNT = 17               # MinerU pdf_info entries; PyMuPDF agrees
 
     # The canonical false-positive-rate formula from the paper, in the exact
     # form MinerU emits. Pinned verbatim so any change to formula rendering

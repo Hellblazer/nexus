@@ -255,9 +255,38 @@ def _mineru_end_page_id(end: int | None) -> int:
     """
     if end is None:
         return 99999
-    # A half-open range is empty or negative only if a caller built it wrong;
-    # clamp rather than emit -1, which MinerU would read as "whole document".
+    # Never emit -1, which MinerU reads as "to the last page". An empty range
+    # is refused earlier, by _mineru_check_range; this clamp is not the guard.
     return max(0, end - 1)
+
+
+def _mineru_check_range(start: int, end: int | None, total_pages: int | None) -> None:
+    """Refuse a page range MinerU would silently widen to the whole document.
+
+    MinerU builds ``range(start_page_id, end_page_id + 1)`` after clamping
+    ``end_page_id`` to the last page, and passes the result to pypdfium2's
+    ``import_pages``. An EMPTY list there imports every page (a NULL array
+    with count 0 to ``FPDF_ImportPagesByIndex``). So an empty half-open batch
+    such as ``[5, 5)``, or a ``start`` at or past the last page, does not
+    extract nothing: it extracts the entire PDF, and the caller appends that
+    as if it were one batch. ``ValueError`` rather than ``RuntimeError`` so
+    the bisect ladder in ``_extract_with_mineru`` does not treat it as an OOM
+    and retry. ``total_pages`` is ``None`` when the caller did not supply it;
+    the empty-range check still applies.
+    """
+    if start < 0:
+        raise ValueError(f"negative MinerU start page {start}")
+    if end is not None and end <= start:
+        raise ValueError(
+            f"empty MinerU page range [{start}, {end}); MinerU would extract "
+            f"the whole document for it"
+        )
+    if total_pages is not None and start >= total_pages:
+        raise ValueError(
+            f"MinerU start page {start} is past the last page of a "
+            f"{total_pages}-page document; MinerU would extract the whole "
+            f"document for it"
+        )
 
 
 def _count_formula_markers(text: str) -> int:
@@ -2110,6 +2139,7 @@ class PDFExtractor:
         self, pdf_path: Path, start: int, end: int | None,
     ) -> tuple[str, list[dict], list[dict]]:
         """Extract via MinerU HTTP server (POST /file_parse)."""
+        _mineru_check_range(start, end, self._mineru_run_total_pages)
         from nexus.config import get_mineru_server_url, get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         # nexus-eti1v code-review (substantive-critic, T2 critique-index-path
@@ -2324,6 +2354,7 @@ class PDFExtractor:
         loads MinerU models independently.  When the child exits, all
         GPU/model memory is reclaimed by the OS — no leaks across batches.
         """
+        _mineru_check_range(start, end, self._mineru_run_total_pages)
         result_dir = tempfile.mkdtemp()
         try:
             import os as _os  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
