@@ -994,8 +994,11 @@ elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   # same reason the --package-upgrade/--candidate-migration Dockerfiles
   # COPY lib/ (nexus-wo6sc). Directory-wide so a second lib file is not
   # repeated; staged unconditionally (not just under --grant) so the image
-  # is identical whether or not --grant is passed at run time.
+  # is identical whether or not --grant is passed at run time. The launcher
+  # itself lives in tests/e2e/lib, not in this directory's lib/, so it is
+  # copied in by name (its absence was measured in the first grant run).
   cp -R "$HERE/lib" "$STAGE/lib"
+  cp "$HERE/../lib/claude_mcp_grant.sh" "$STAGE/lib/"
 elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
   # the default/--shakeout path: the locally-built, now-stamped -Ob binary,

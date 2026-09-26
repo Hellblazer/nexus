@@ -21,6 +21,7 @@ this directory.
 """
 from __future__ import annotations
 
+import pathlib
 import re
 import subprocess
 from pathlib import Path
@@ -97,6 +98,26 @@ def test_fullstack_staging_copies_lib(script_text: str) -> None:
         f"the FULLSTACK/SHAKEOUT_E2E staging branch does not stage tests/e2e/lib "
         f"into $STAGE, unlike --package-upgrade:\n{block}"
     )
+
+
+def test_fullstack_staging_copies_the_grant_launcher_itself(script_text: str) -> None:
+    """The launcher lives in tests/e2e/lib, not migration-rehearsal/lib, so
+    copying $HERE/lib alone left it out of the image (measured 2026-09-26:
+    `claude_mcp_grant: command not found` in the grant run)."""
+    block = _fullstack_staging_block(script_text)
+    assert re.search(r'cp\s+"\$HERE/\.\./lib/claude_mcp_grant\.sh"\s+"\$STAGE/lib/"', block), block
+
+
+def test_every_lib_file_rehearse_fullstack_sources_exists_where_staging_takes_it() -> None:
+    """Each `$HOME/lib/<name>` the in-container script sources must be a file
+    the staging branch actually copies: migration-rehearsal/lib or the
+    explicitly staged launcher."""
+    here = pathlib.Path(__file__).resolve().parents[2] / "tests" / "e2e" / "migration-rehearsal"
+    script = (here / "rehearse_fullstack.sh").read_text()
+    staged = {p.name for p in (here / "lib").iterdir()} | {"claude_mcp_grant.sh"}
+    sourced = set(re.findall(r'source\s+"\$HOME/lib/([\w.\-]+)"', script))
+    assert sourced, "found no $HOME/lib sources; the regex no longer matches the script"
+    assert sourced <= staged, sourced - staged
 
 
 def test_dockerfile_fullstack_copies_lib(dockerfile_fullstack_text: str) -> None:
