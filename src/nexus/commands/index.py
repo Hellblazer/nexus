@@ -1617,10 +1617,11 @@ def index_repo_cmd(
                 # nexus-x3gig: discovery reads every embedding of a collection
                 # to the client (RDR-193 Gap 2), the heaviest cold read in the
                 # run, so it waits out the same window as assign. ONLY
-                # discovery: projection, topic links and the L1 context cache
-                # still run against the existing taxonomy (substantive
-                # critic: skipping the whole chain left L1 stale, the
-                # nexus-azss4 class). Nothing is lost: a zero-topic collection
+                # discovery: co-occurrence and topic links and the L1 context
+                # cache still refresh from the existing taxonomy (skipping the
+                # whole chain left L1 stale, the nexus-azss4 class); the
+                # projection pass waits because it follows new topics and
+                # re-reads every embedding. Nothing is lost: a zero-topic collection
                 # self-heals on the next run and the drain assigns new chunks
                 # to existing topics. Decided from the mechanism, not
                 # measured: measuring needs restarts of an engine other
@@ -2376,39 +2377,73 @@ def run_collection_postprocessing(
                     db.taxonomy, collections, getattr(t3, "_client", t3), _say,
                 )
 
-                # Co-occurrence topic links from projections (RDR-075 SC-5)
-                # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
-                try:
-                    cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
-                    if cooc:
-                        _log.info("cooccurrence_links_generated", count=cooc)
-                except Exception:  # noqa: BLE001 — best-effort co-occurrence link generation; failure logged and chain continues
-                    _log.debug("cooccurrence_links_failed", exc_info=True)
-
-                # Auto-populate topic links if catalog available
-                # compute_topic_links routes upsert_topic_links internally.
-                try:
-                    from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
-                    cat = _try_load_catalog()
-                    if cat:
-                        for col_name in collections:
-                            compute_topic_links(
-                                db.taxonomy, cat, collection=col_name, persist=True,
-                            )
-                except Exception:  # noqa: BLE001 — best-effort topic-link population; non-fatal trailing enrichment step in a guarded chain
-                    pass  # Non-fatal
-                # Refresh L1 context cache
-                if repo_path is not None:
-                    try:
-                        from nexus.context import generate_context_l1  # noqa: PLC0415 — deliberate function-local import (rare branch: L1 refresh only when repo_path supplied)
-                        generate_context_l1(db.taxonomy, repo_path=repo_path)
-                    except Exception:  # noqa: BLE001 — best-effort L1 context-cache refresh; non-fatal trailing enrichment step in a guarded chain
-                        # nexus-azss4: a bare `pass` here hid the service-mode
-                        # raw-handle break for weeks (SessionStart Knowledge
-                        # Map permanently stale). Still non-fatal — but LOUD.
-                        _log.warning("context_l1_refresh_failed", exc_info=True)
+            # The steps below derive from assignments, which change on every
+            # run that writes chunks (per-flush assign and the drain), so they
+            # run whenever these collections HAVE a taxonomy, not only when
+            # this run discovered one. Gating them on total_topics made them
+            # dead for every established collection once nexus-vgtff taught
+            # discovery to return 0 when topics exist: links and the L1
+            # cache went stale after a collection's first run. Projection
+            # stays above: it re-reads every embedding, and the engine's
+            # cross pass already projects each new chunk as it is written.
+            if total_topics or _any_collection_has_topics(db.taxonomy, collections):
+                _refresh_derived_taxonomy(db, collections, repo_path, t2_index_write)
     except Exception:  # noqa: BLE001 — boundary catch wrapping the whole post-processing chain; failure logged and never crashes the index command
         _log.debug("taxonomy_discover_failed", exc_info=True)
+
+
+def _any_collection_has_topics(taxonomy: Any, collections: list[str]) -> bool:
+    """True when any of *collections* already has topics.
+
+    A failed probe answers True: the derived steps are idempotent and
+    best-effort, so running them needlessly costs little, while skipping them
+    wrongly is the silent staleness this probe exists to end.
+    """
+    for col_name in collections:
+        try:
+            if taxonomy.get_topics_for_collection(col_name):
+                return True
+        except Exception:  # noqa: BLE001 — probe failure errs toward running the idempotent steps
+            _log.debug("taxonomy_topics_probe_failed", collection=col_name, exc_info=True)
+            return True
+    return False
+
+
+def _refresh_derived_taxonomy(
+    db: Any, collections: list[str], repo_path: Path | None, t2_index_write: Callable[..., Any],
+) -> None:
+    """Co-occurrence links, catalog topic links and the L1 context cache."""
+    # Co-occurrence topic links from projections (RDR-075 SC-5)
+    # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
+    try:
+        cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
+        if cooc:
+            _log.info("cooccurrence_links_generated", count=cooc)
+    except Exception:  # noqa: BLE001 — best-effort co-occurrence link generation; failure logged and chain continues
+        _log.debug("cooccurrence_links_failed", exc_info=True)
+
+    # Auto-populate topic links if catalog available
+    # compute_topic_links routes upsert_topic_links internally.
+    try:
+        from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+        cat = _try_load_catalog()
+        if cat:
+            for col_name in collections:
+                compute_topic_links(
+                    db.taxonomy, cat, collection=col_name, persist=True,
+                )
+    except Exception:  # noqa: BLE001 — best-effort topic-link population; non-fatal trailing enrichment step in a guarded chain
+        pass  # Non-fatal
+    # Refresh L1 context cache
+    if repo_path is not None:
+        try:
+            from nexus.context import generate_context_l1  # noqa: PLC0415 — deliberate function-local import (rare branch: L1 refresh only when repo_path supplied)
+            generate_context_l1(db.taxonomy, repo_path=repo_path)
+        except Exception:  # noqa: BLE001 — best-effort L1 context-cache refresh; non-fatal trailing enrichment step in a guarded chain
+            # nexus-azss4: a bare `pass` here hid the service-mode
+            # raw-handle break for weeks (SessionStart Knowledge
+            # Map permanently stale). Still non-fatal — but LOUD.
+            _log.warning("context_l1_refresh_failed", exc_info=True)
 
 
 def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str = "") -> str:
