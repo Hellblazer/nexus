@@ -328,7 +328,8 @@ The whole chain was reviewed end to end on 2026-09-26 (T2
   `head_repository` equals the repository, caches the answer per run, and
   fails closed on an API error. This needs a fine-grained, read-only
   Actions token. The repository setting "Require approval for all
-  outside collaborators" is recommended as a second layer.
+  outside collaborators" is the second layer, and it is on: `GET /repos/Hellblazer/nexus/actions/permissions/fork-pr-contributor-approval`
+  returned `{"approval_policy":"all_external_contributors"}` on 2026-09-26.
 - **Topic count.** With the fork check, only same-repository branches
   post. The adapter's branch allow-list defaults to `develop` and `main`,
   and an alarm reports dropped unmapped branches.
@@ -515,6 +516,14 @@ then `--check`.
 After the adapter's posts are confirmed on `board/ci/nexus-develop`,
 remove the in-workflow publisher and move `AGENTS.md` worktree rule 7 to
 the new topic.
+
+The two topics look alike but are different subspaces under different
+templates. `board/ci-develop` (two segments, `board/<topic>`) holds the
+in-workflow publisher's `ci-pending` and `ci-verdict` posts, one pair per
+run. `board/ci/nexus-develop` (three segments, `board/ci/<topic>`) holds
+the adapter's per-run and per-job posts. During the coexistence window a
+session subscribes to whichever it reads; nothing forwards one into the
+other.
 
 ### Day 2 Operations
 
