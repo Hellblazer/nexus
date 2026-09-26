@@ -1944,6 +1944,22 @@ def _no_engine_restart_taxonomy_deferral(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_rate_limit_brake():
+    """The shared ``RateLimitBrake`` is process-global and escalates on
+    every retried failure toward a 60s cap, so a test whose writes fail
+    against an unreachable endpoint leaves every later test in the same
+    process paying that escalation. Measured on CI shard 3 (runs
+    36250371264 onward): three ``nx memory promote`` tests at 180s, 180s
+    and 108s each, 14s for the first. A fresh brake per test keeps one
+    test's retries out of the next test's wall time."""
+    from nexus.rate_brake import reset_brake
+
+    reset_brake()
+    yield
+    reset_brake()
+
+
+@pytest.fixture(autouse=True)
 def _restore_structlog_after_test():
     """Save and restore structlog config around every test so any test
     that calls ``structlog.configure(...)`` (directly or via
