@@ -108,18 +108,21 @@ webhooks (option A of three considered; see Alternatives).
 
 ### Investigation
 
-To do before gate:
+Five questions were investigated; each result is a T2 research record.
 
-1. GitHub webhook payloads for `workflow_run` and `workflow_job`: the
-   `action` values, and the fields for workflow name, job name, run id,
-   run attempt, head sha, head branch, status, conclusion, and URLs.
-2. Delivery semantics: retries, ordering, the `X-GitHub-Delivery` id as
-   an idempotency key, and redelivery from the settings page.
-3. The edge: how a new unauthenticated-by-bearer route is admitted,
-   where HMAC verification belongs (edge or engine), and how a delivery
-   maps to a tenant.
-4. Event volume per develop push, to size writes and the board's live-row
-   cap (`max_live_rows: 500` on the board template).
+1. Edge admission for an in-engine receiver (`220-research-1`, conexus-4b
+   reading conexus `AuthFilter`, the install-ping handler and `waf.tf`).
+   The in-engine receiver was later rejected (Alternative 2); its ingress
+   shape rules carry over to the adapter.
+2. Adapter hosting (`220-research-2`): AWS Lambda behind a function URL
+   in the conexus account.
+3. Event volume against the board cap (`220-research-3`): measured from
+   real develop runs, about 72 posts per push against the general board's
+   500-row cap, which led to the `board/ci/<topic>` template.
+4. Webhook payload fields (`220-research-4`): GitHub's machine-readable
+   webhook schemas cross-checked against the adapter's field reads.
+5. End-to-end security review of the whole chain (`220-research-5`),
+   which found the fork job-event gap closed in conexus 5a0d3ad.
 
 #### Dependency Source Verification
 
@@ -443,11 +446,12 @@ entry is visible, and GitHub keeps the failed deliveries for redelivery.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified
-- [ ] nexus-r3ur5 (board-only token scope) shipped
-- [ ] Adapter job-event run-origin check (GitHub API, fail closed) merged and re-reviewed
-- [ ] Sam issues the read-only Actions token and decides the outside-collaborator approval setting
+- [x] All Critical Assumptions verified (see Critical Assumptions)
 - [x] conexus-4b agrees on the adapter's host and secret store (T2 `nexus_rdr/220-research-2`)
+- [x] Adapter job-event run-origin check (GitHub API, fail closed) merged and re-reviewed (conexus 5a0d3ad, re-review mutation-verified; follow-ups merged as ffe499f)
+- [x] Outside-collaborator approval policy set on Hellblazer/nexus (Sam: `all_external_contributors`, set and read back)
+- [ ] nexus-r3ur5 (`board-ci` scope) shipped in an engine tag and deployed (Sam decided the adapter waits for it; no interim tenant token)
+- [ ] Sam issues the fine-grained, read-only Actions token into 1Password
 
 ### Minimum Viable Validation
 
@@ -457,15 +461,45 @@ shows each job's final state matching GitHub's check runs for that sha.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: Adapter (conexus repository, conexus-jewq): ingress rules, signature check, mapping, post shape, retry contract
+#### Step 1: `board/ci/<topic>` template (engine, this repository)
 
-#### Step 2: Status fold script in `scripts/` (this repository)
+Done: 79a2386c7, shipped in engine-service-v0.1.133.
+
+#### Step 2: Board-only token scope (engine, this repository, nexus-r3ur5)
+
+A `board-ci` scope admitted only on `POST /v1/tuples/out` for subspaces
+whose template is `board/ci/<topic>`. Implemented and in review; ships in
+the engine tag after v0.1.133.
+
+#### Step 3: Adapter (conexus repository, conexus-jewq)
+
+Ingress rules, signature check, fork check, mapping, post shape, retry
+contract, self-check and alarms. Done: conexus PR #394 and #396, merged
+as ffe499f.
+
+#### Step 4: Status fold script in `scripts/` (this repository)
+
+Done: `scripts/ci_status.py`, c0a5cfef4.
 
 ### Phase 2: Operational Activation
 
-#### Activation Step 1: Terraform the Lambda, seed its secrets, add the repository webhook (conexus)
+#### Activation Step 1: Deploy the engine tags
 
-#### Activation Step 2: Retire the `ci.yml` board jobs
+v0.1.133 (the template) and the next tag (the `board-ci` scope) are
+deployed to the managed engine by conexus. Check: `tuple_registry` lists
+`board/ci/<topic>`.
+
+#### Activation Step 2: Seed and enable the adapter (conexus, each live step on Sam's go)
+
+`activate.sh` apply, then seed with a `board-ci` token and the
+fine-grained read-only GitHub token, then add the repository webhook,
+then `--check`.
+
+#### Activation Step 3: Retire the `ci.yml` board jobs
+
+After the adapter's posts are confirmed on `board/ci/nexus-develop`,
+remove the in-workflow publisher and move `AGENTS.md` worktree rule 7 to
+the new topic.
 
 ### Day 2 Operations
 
@@ -493,41 +527,84 @@ None. The adapter uses the Python standard library only.
 
 ### Testing Strategy
 
-To be completed during research.
+1. **Scenario**: the template resolves apart from `board/<topic>` and
+   carries its own cap and retention.
+   **Expected**: `TemplateRegistryTest.ciBoardResolvesApartFromTheGeneralBoard`
+   passes (engine suite).
+2. **Scenario**: a `board-ci` bearer writes to `board/ci/<topic>` and is
+   refused everywhere else.
+   **Expected**: `BoardCiTokenScopeTest` and the `TokenAdminHandler` tests
+   pass against a real engine.
+3. **Scenario**: the adapter's signature, fork check, typed fields,
+   retry contract and self-check.
+   **Expected**: the adapter's pytest and tftest suites pass (conexus),
+   with the fork gate mutation-checked.
+4. **Scenario**: the fold reads adapter-shaped posts across pages.
+   **Expected**: `tests/scripts/test_ci_status.py` passes against a real
+   engine.
+5. **Scenario**: the Minimum Viable Validation on the live system.
+   **Expected**: one post per job transition on `board/ci/nexus-develop`,
+   and `scripts/ci_status.py <sha>` matching GitHub's check runs.
 
 ### Performance Expectations
 
-N/A.
+N/A. Volume, not speed, was the constraint, and it is sized in
+`220-research-3`.
 
 ## Finalization Gate
 
 ### Contradiction Check
 
-To be completed before gate.
+No contradictions found between the research findings and the proposed
+solution. Two findings changed the design, and the design follows them:
+the board cap finding (`220-research-3`) produced the `board/ci/<topic>`
+template, and the security review (`220-research-5`) produced the fork
+check. The in-engine receiver analysed in `220-research-1` is recorded as
+a rejected alternative, not as the design.
 
 ### Assumption Verification
 
-To be completed before gate.
+All three Critical Assumptions are resolved: payload fields verified
+(`220-research-4`), hosting verified (`220-research-2`), and the volume
+assumption verified FALSE for `board/<topic>` and resolved by the new
+template (`220-research-3`). No assumption remains unverified.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| GitHub `workflow_job` webhook | GitHub | Docs Only (pending) |
+| GitHub `workflow_job` / `workflow_run` webhooks | GitHub | Source Search (octokit webhook schemas + adapter reads) |
+| GitHub `GET /repos/{repo}/actions/runs/{id}` (fork check) | GitHub | Source Search (adapter code, mutation-checked tests) |
+| Engine `POST /v1/tuples/out` | nexus engine | Source Search + real-engine tests |
 
 ### Scope Verification
 
-To be completed before gate.
+The Minimum Viable Validation is in scope: it runs at Activation Step 2,
+once the adapter is live, with `scripts/ci_status.py` compared against
+GitHub's check runs for the same sha. Everything it needs is built; only
+activation is outstanding.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: the engine ships one new template file in an engine tag (no engine code); nothing ships in the `nx` client. The adapter versions and deploys on its own; the fold is a repo script.
-- **Secret/credential lifecycle**: the adapter holds the webhook secret and a board-only token; generation, storage, and rotation to be designed with its host.
-- **Deployment model**: one adapter per site; it writes to whichever engine its config names. Local-only setups can keep the in-workflow publisher.
+- **Versioning**: the engine ships a template file (v0.1.133) and the
+  `board-ci` scope (next tag); nothing ships in the `nx` client beyond the
+  `--scope board-ci` choice. The adapter versions and deploys on its own;
+  the fold is a repo script.
+- **Secret/credential lifecycle**: one Secrets Manager secret with three
+  fields, re-read every 300 seconds; rotation by re-seed and
+  `activate.sh --revoke-previous`; the hourly self-check proves each field.
+- **Deployment model**: one adapter per site; it writes to whichever
+  engine its configuration names. Local-only setups keep the in-workflow
+  publisher.
+- **Incremental adoption**: the in-workflow publisher keeps running until
+  the adapter is confirmed, then retires.
 
 ### Proportionality
 
-To be assessed at gate.
+The document is larger than the code it describes, because the security
+review and the drift corrections are recorded in full. The Security
+section and the Technical Design carry the decisions; the research
+records carry the detail. No section needs trimming before acceptance.
 
 ## References
 
