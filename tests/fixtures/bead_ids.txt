@@ -349,6 +349,7 @@ nexus-1lfk8.1
 nexus-1ljk
 nexus-1lx7
 nexus-1m0cy
+nexus-1m9sb
 nexus-1n0t
 nexus-1nfsd
 nexus-1obui
@@ -936,6 +937,7 @@ nexus-4v5l
 nexus-4ven
 nexus-4vhk
 nexus-4viey
+nexus-4vsx8
 nexus-4whc5
 nexus-4whc5.1
 nexus-4wtnl
