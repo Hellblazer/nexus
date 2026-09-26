@@ -333,6 +333,14 @@ def _resolve_endpoint() -> tuple[str, str]:
             _log.debug(
                 "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
             )
+    if env_url is not None and token is None:
+        # nexus-xzeml: a mint-armed box needs no static bearer; the
+        # data token minted per request (see the bearer_for override
+        # below) authenticates every T3 call.
+        from nexus.db.service_endpoint import mint_armed  # noqa: PLC0415 — deferred to avoid circular import
+
+        if mint_armed():
+            token = ""
     if url is None or token is None:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
         # migration module; stranded pre-PG installs are redirected by the

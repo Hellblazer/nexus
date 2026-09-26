@@ -363,6 +363,12 @@ def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
         _, lease_token = discover_lease_with_wait(budget_s=wait_budget_s)
         token = lease_token or ""
     if not token:
+        from nexus.db.service_endpoint import mint_armed  # noqa: PLC0415 — deferred to avoid circular import
+
+        if mint_armed():
+            # nexus-xzeml: the data-token override supplies the bearer.
+            return ""
+    if not token:
         raise RuntimeError(
             "no service token is resolvable: base_url was supplied "
             "explicitly but no token was — set NX_SERVICE_TOKEN, run "

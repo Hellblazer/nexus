@@ -3252,6 +3252,88 @@ def _check_mint_token() -> list[HealthResult]:
     )]
 
 
+def _check_static_service_token() -> list[HealthResult]:
+    """nexus-xzeml: is the static ``service_token`` still accepted by the
+    configured ``service_url``?
+
+    An armed box (``mint_token`` set) talks to the managed endpoint with
+    minted data tokens, so a dead static token stays invisible until a
+    token-admin verb (``nx service token``, ``nx tenant``) sends it, since that
+    surface refuses data tokens by design. Measured 2026-09-26: a revoked
+    static token sat in config.yml and the first sign was a 401 traceback on
+    ``nx service token issue``.
+
+    Not applicable (a pass) when there is no ``service_url`` (local mode:
+    the bearer is the supervisor lease's or an ``NX_SERVICE_TOKEN`` override,
+    not probed here) or no static ``service_token``; that
+    keeps a virgin box clean. Otherwise one ``GET /v1/_whoami`` with the
+    static token: 200 passes; a refusal is a warning on an armed box (data
+    commands are unaffected) and a failure on an unarmed one (every command
+    sends it); a probe that cannot complete is a warning, never a pass.
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    label = "Static service_token"
+    url = (get_credential("service_url") or "").strip().rstrip("/")
+    if not url:
+        return [HealthResult(label=label, ok=True,
+                             detail="not applicable — no service_url configured")]
+    token = (get_credential("service_token") or "").strip()
+    if not token:
+        return [HealthResult(label=label, ok=True,
+                             detail="not applicable — no static service_token configured")]
+
+    import hashlib  # noqa: PLC0415 — branch-local
+    import urllib.parse  # noqa: PLC0415 — branch-local
+
+    import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
+
+    host = urllib.parse.urlsplit(url).netloc or url
+    fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
+    armed = bool((get_credential("mint_token") or "").strip())
+    try:
+        resp = httpx.get(f"{url}/v1/_whoami",
+                         headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
+    except httpx.HTTPError as exc:
+        return [HealthResult(label=label, ok=False, warn=True,
+                             detail=f"could not verify against {host}: {type(exc).__name__}")]
+    if resp.status_code == 200:
+        return [HealthResult(label=label, ok=True,
+                             detail=f"accepted by {host} (sha256 {fingerprint})")]
+    if resp.status_code not in (401, 403):
+        return [HealthResult(label=label, ok=False, warn=True,
+                             detail=f"could not verify against {host}: HTTP {resp.status_code}")]
+    if resp.status_code == 403:
+        # The engine's AuthFilter answers 403 on a data route ONLY for a live
+        # mint- or mint-locked-scoped bearer (a dead token is a 401), so this
+        # is a working mint credential, not a refused one.
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(f"sha256 {fingerprint} is a mint-scoped credential ({host} "
+                    "answers 403 on data routes by design); token-admin "
+                    "commands need a tenant or operator token"),
+        )]
+    refused = f"{host} refuses it (HTTP {resp.status_code}, sha256 {fingerprint})"
+    if armed:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"{refused}. Data commands are unaffected (they mint data "
+                    "tokens from mint_token); token-admin commands (nx service "
+                    "token, nx tenant) send this token and will fail."),
+            fix_suggestions=[
+                "Delete the service_token line from config.yml: this box mints "
+                "data tokens and needs no static token. Replace it instead "
+                "(nx config set service_token <bearer>) only if you administer "
+                "tokens from this box."
+            ],
+        )]
+    return [HealthResult(
+        label=label, ok=False,
+        detail=f"{refused}. Every command that reaches the service sends this token.",
+        fix_suggestions=["Replace it with a live token: nx config set service_token <bearer>"],
+    )]
+
+
 # ── RDR-152 / bead nexus-gmiaf.33: storage-service health checks ──────────────
 
 # Authoritative set of tenant tables that MUST have RLS enabled, forced, and at
@@ -8415,6 +8497,7 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_worktree_developer_agent())
     results.extend(_check_credential_persistence())
     results.extend(_check_mint_token())
+    results.extend(_check_static_service_token())  # nexus-xzeml
 
     _local = is_local_mode()
     if _local:
