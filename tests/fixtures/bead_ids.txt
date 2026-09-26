@@ -150,6 +150,7 @@ nexus-0rws
 nexus-0rwwv
 nexus-0rwwv.1
 nexus-0rxvg
+nexus-0rxvg.1
 nexus-0s0o1
 nexus-0s0o1.1
 nexus-0sauz
@@ -6010,6 +6011,7 @@ nexus-u2a.1
 nexus-u2kwq
 nexus-u2mlh
 nexus-u2mlh.1
+nexus-u2mlh.10
 nexus-u2mlh.2
 nexus-u2mlh.3
 nexus-u2mlh.4
@@ -6017,6 +6019,7 @@ nexus-u2mlh.5
 nexus-u2mlh.6
 nexus-u2mlh.7
 nexus-u2mlh.8
+nexus-u2mlh.9
 nexus-u2n9
 nexus-u2svi
 nexus-u2u0n
@@ -6415,6 +6418,7 @@ nexus-w84ho
 nexus-w8lg1
 nexus-w8lg1.1
 nexus-w94eo
+nexus-w94eo.1
 nexus-w953f
 nexus-w98c
 nexus-w9jxf
