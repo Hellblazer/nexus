@@ -2132,16 +2132,15 @@ def _run_check_mineru() -> None:
 #                                          | Voyage work and minutes of
 #                                          | wall time on a large tenant
 #                                          | (nexus-f9duo).
-#   --check-assignments           | NO        | no billed calls (reads a
-#                                          | stored vector + live foreign
-#                                          | centroids, never re-embeds), but
-#                                          | still opt-in: a full run fetches
-#                                          | EVERY foreign centroid tenant-
-#                                          | wide per collection audited
-#                                          | (get_foreign) plus the FULL topic
-#                                          | table once (for the eligibility-
-#                                          | cutoff timestamps) -- real work
-#                                          | at ~800-centroid scale, not the
+#   --check-assignments           | NO        | no billed calls (one route
+#                                          | call per sampled chunk plus one
+#                                          | live foreign-centroid fetch per
+#                                          | collection audited, never
+#                                          | re-embeds), but still opt-in: a
+#                                          | full run does real per-collection
+#                                          | network work (up to `sample`
+#                                          | cross-preview calls plus a
+#                                          | get_foreign fetch each), not the
 #                                          | O(1) round trip the promoted
 #                                          | checks above are. Also a NEW
 #                                          | audit surface (nexus-v4pj4,
@@ -2154,17 +2153,18 @@ def _run_check_mineru() -> None:
 #                                          | effect of adding the check. Not a
 #                                          | gate on the engine-service-
 #                                          | v0.1.132 LATERAL/HNSW rewrite it
-#                                          | audits — see doctor_assignments.py's
-#                                          | module docstring for the round-1
-#                                          | review finding (a stored pick
-#                                          | compared against TODAY's live
-#                                          | centroids false-alarms on healthy
-#                                          | taxonomy growth) and the read-only
-#                                          | eligibility-cutoff mitigation this
-#                                          | check applies instead of a full
-#                                          | same-moment engine recompute
-#                                          | (which needs engine work this
-#                                          | client-only bead could not add).
+#                                          | audits — compares the engine's
+#                                          | LIVE cross-preview ANN pick
+#                                          | (POST /v1/taxonomy/assignments/
+#                                          | cross-preview, taxonomy-021, a
+#                                          | read-only twin of the persisting
+#                                          | route built for this bead's
+#                                          | round-2 review) against an exact
+#                                          | Python recompute over the SAME
+#                                          | live foreign-centroid snapshot;
+#                                          | see doctor_assignments.py's
+#                                          | module docstring for the full
+#                                          | round-1/round-2 design history.
 #   --check-wal-retention         | NO        | explicitly "Always exit 0:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
@@ -2567,24 +2567,26 @@ def _run_supplementary_checks() -> None:
     "check_assignments",
     is_flag=True,
     default=False,
-    help="Sample chunks per collection that carry a cross-collection "
-         "('projection') topic assignment, recompute the exact nearest "
-         "ELIGIBLE foreign centroid (only topics that already existed at "
-         "or before that assignment's own decision time -- a topic "
-         "discovered afterward never counts against it), and compare with "
-         "the most-recently-decided stored pick (nexus-v4pj4: the "
-         "engine-service-v0.1.132 LATERAL/HNSW ANN rewrite measures equal "
-         "to exact, but a future recall drift would be silent). At the "
-         "default sample of 20, a systemic wrong-pick rate of 10% is "
-         "caught with ~88% probability, 20% with ~99%; a rare, isolated "
-         "bad pick under 1% of a collection's population may need a "
-         "larger --assignments-sample or a different --assignments-seed "
-         "to land in any one run's sample. Exits 1 when any sampled row "
+    help="Sample chunks per collection and compare the engine's LIVE "
+         "cross-collection ('projection') ANN pick (POST /v1/taxonomy/"
+         "assignments/cross-preview, never persisted) against an exact "
+         "Python recompute over the SAME live foreign-centroid snapshot, "
+         "fetched in the same run (nexus-v4pj4: the engine-service-"
+         "v0.1.132 LATERAL/HNSW ANN rewrite measures equal to exact, but "
+         "a future recall drift would be silent). A currently-stored "
+         "assignment, if any, is shown in the report as context only, "
+         "never consulted to decide pass or fail. At the default sample "
+         "of 20, a systemic wrong-pick rate of 10% is caught with ~88% "
+         "probability, 20% with ~99%; a rare, isolated bad pick under 1% "
+         "of a collection's population may need a larger "
+         "--assignments-sample or a different --assignments-seed to land "
+         "in any one run's sample. Exits 1 when any sampled chunk "
          "disagrees beyond a float-noise tolerance, any collection could "
          "not be probed, or nothing was compared. A collection with no "
-         "cross-collection projection population is not applicable; a "
-         "collection with a known population this sample failed to reach "
-         "is INCONCLUSIVE -- neither counts as a failure alone.",
+         "live foreign centroid to project onto is not applicable; a "
+         "sample that turned up no comparable chunk is INCONCLUSIVE; an "
+         "engine older than this route is not applicable (exit 0) -- none "
+         "of the three counts as a failure alone.",
 )
 @click.option(
     "--assignments-sample",
@@ -2599,8 +2601,9 @@ def _run_supplementary_checks() -> None:
     "assignments_collections",
     multiple=True,
     help="Restrict --check-assignments to this collection (repeatable). "
-         "Default: every collection with a cross-collection projection "
-         "assignment.",
+         "Default: every collection holding chunks (a collection with no "
+         "live foreign centroid to project onto is reported not "
+         "applicable, not skipped silently).",
 )
 @click.option(
     "--assignments-seed",
