@@ -1210,7 +1210,7 @@ class RawSqlGateTest {
         // public writer exists for a bare centroid row outside the real assignment
         // pipeline, and jOOQ's generated pgvector Binding is not reachable here
         // without hand-rolling the same literal that precedent already uses).
-        Map.entry("dev/nexus/service/vectors/RdrO192EngineLivenessMatrixIntegrationTest.java", 1)
+        Map.entry("dev/nexus/service/vectors/Rdr192EngineLivenessMatrixIntegrationTest.java", 1)
     );
 
     /**

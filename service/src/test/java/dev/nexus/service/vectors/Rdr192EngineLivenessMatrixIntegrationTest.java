@@ -34,9 +34,24 @@ import static org.assertj.core.api.Assertions.assertThat;
  * out of scope for this bead:
  *
  * <ul>
- *   <li><b>P1</b> — {@code PgVectorRepository.liveChunksCondition}, exercised
- *       through the public {@link PgVectorRepository#list} (search/get
- *       visibility family, Gap 1 item 1).</li>
+ *   <li><b>P1g</b> — {@code PgVectorRepository.liveChunksCondition}, exercised
+ *       through the public {@link PgVectorRepository#get} (get() itself;
+ *       {@link PgVectorRepository#list} shares the identical helper
+ *       (nexus-msz9i) and is asserted as a second call site of this same
+ *       column, Gap 1 item 1).</li>
+ *   <li><b>P1s</b> — the SAME Gap-1-item-1 visibility question, but through
+ *       the public {@link PgVectorRepository#search}, which does NOT call
+ *       {@code liveChunksCondition} — it dispatches to the schema function
+ *       {@code plain_search_<dim>} (vectors-009, collection-scoped by
+ *       vectors-017), an independently-maintained SQL anti-join. {@code
+ *       ConstantEmbedder} makes every stored and query embedding identical,
+ *       so {@code search} with a large enough limit returns exactly the
+ *       visible set of the collection, the same shape {@code get}/{@code
+ *       list} return. P1g and P1s are kept as separate table columns
+ *       precisely so a future divergence between the two anti-joins is
+ *       caught here rather than assumed away by a shared-helper argument;
+ *       today (verified by this bead) the two columns agree on every row —
+ *       see {@link #EXPECTED_VALUE_TABLE}.</li>
  *   <li><b>P2</b> — {@code nexus.live_chunks} (Gap 1 item 2), read directly
  *       via the generated {@code LIVE_CHUNKS} typed table.</li>
  *   <li><b>P3</b> — {@code purge_trash} Step 1 candidacy /
@@ -86,11 +101,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the RLS-subject pool a superuser connection would silently bypass), many
  * isolated tenants — one per destructive predicate (P3/P4/P6/P7) so that one
  * predicate's DELETE/quarantine/purge never corrupts another's fixture, plus
- * one shared read-only tenant for the three non-mutating predicates
- * (P1/P2/P9).
+ * one shared read-only tenant for the four non-mutating predicates
+ * (P1g/P1s/P2/P9). <strong>One sanctioned exception:</strong> {@link
+ * #seedCentroid384} (P9's fixture support only, never the predicate under
+ * test) writes the taxonomy centroid row via a superuser JDBC connection —
+ * no public writer exists for a bare centroid row outside the real
+ * assignment pipeline; registered in {@code RawSqlGateTest}'s ratchet
+ * (count=1) and commented SANCTIONED RAW at its own call site.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class RdrO192EngineLivenessMatrixIntegrationTest {
+class Rdr192EngineLivenessMatrixIntegrationTest {
 
     private static final String SVC_ROLE = "svc_wbfpw1_liveness";
     private static final String SVC_PASS = "svc_wbfpw1_liveness_pass";
@@ -149,6 +169,22 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
         List<String> allChashes() {
             return List.of(r1, r2, r3, r4, r5, r6, r7, r8);
         }
+    }
+
+    /** Maps a row name (R1..R8) to its chash in {@code fx}, the same mapping
+     *  {@link #EXPECTED_VALUE_TABLE}'s row keys index into. */
+    private static String chashForRow(Fixture fx, String row) {
+        return switch (row) {
+            case "R1" -> fx.r1();
+            case "R2" -> fx.r2();
+            case "R3" -> fx.r3();
+            case "R4" -> fx.r4();
+            case "R5" -> fx.r5();
+            case "R6" -> fx.r6();
+            case "R7" -> fx.r7();
+            case "R8" -> fx.r8();
+            default -> throw new IllegalArgumentException("unknown row " + row);
+        };
     }
 
     private void registerCollections(String tenant) throws Exception {
@@ -268,28 +304,85 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
                       .and(ChashHex.hex(CHUNKS.CHASH).eq(chashHex)))));
     }
 
-    // ── P1: search/get visibility (PgVectorRepository.liveChunksCondition) ──
+    // ── table-driven assertion helpers ───────────────────────────────────────
+
+    private static boolean expected(String row, String predicate) {
+        Boolean v = EXPECTED_VALUE_TABLE.get(row).get(predicate);
+        if (v == null) {
+            throw new IllegalArgumentException("no EXPECTED_VALUE_TABLE cell for " + row + "/" + predicate);
+        }
+        return v;
+    }
+
+    /**
+     * Asserts a visibility-style predicate (P1g/P1s/P2/P9: "true" means the
+     * row's chash is present in {@code haystack}) against every row's
+     * {@link #EXPECTED_VALUE_TABLE} cell for {@code predicate}.
+     */
+    private void assertVisibility(List<String> haystack, Fixture fx, String predicate) {
+        for (String row : ROWS) {
+            String chash = chashForRow(fx, row);
+            boolean visible = expected(row, predicate);
+            var assertion = assertThat(haystack)
+                .as("%s / %s: expected %s", row, predicate, visible ? "visible" : "hidden");
+            if (visible) {
+                assertion.contains(chash);
+            } else {
+                assertion.doesNotContain(chash);
+            }
+        }
+    }
+
+    /**
+     * Asserts an existence-style predicate (P3/P4/P6/P7: "true" means the
+     * row's chash was swept/deleted/quarantined out of {@code COLLECTION_A},
+     * i.e. it no longer physically exists there) against every row's {@link
+     * #EXPECTED_VALUE_TABLE} cell for {@code predicate}.
+     */
+    private void assertExistencePredicate(String tenant, Fixture fx, String predicate) {
+        for (String row : ROWS) {
+            String chash = chashForRow(fx, row);
+            boolean actedOn = expected(row, predicate);
+            boolean stillExists = chunkExistsInCollection(tenant, COLLECTION_A, chash);
+            assertThat(stillExists)
+                .as("%s / %s: expected %s", row, predicate, actedOn ? "removed" : "retained")
+                .isEqualTo(!actedOn);
+        }
+    }
+
+    // ── P1g: get()/list() visibility (PgVectorRepository.liveChunksCondition) ──
 
     @Test
-    void p1_searchGetVisibility() throws Exception {
+    void p1g_getVisibility() throws Exception {
         String tenant = "wbfpw1-ro";
         Fixture fx = seedLivenessFixture(tenant);
 
+        Map<String, Object> envelope = vecRepo.get(tenant, COLLECTION_A, fx.allChashes(), 300, 0);
+        @SuppressWarnings("unchecked")
+        List<String> gotIds = (List<String>) envelope.get("ids");
+        assertVisibility(gotIds, fx, "P1g");
+
+        // list() shares the identical liveChunksCondition helper with get() (nexus-msz9i)
+        // -- same predicate/column, a second call site rather than an independent check.
         var listing = vecRepo.list(tenant, COLLECTION_A, 300, 0);
         @SuppressWarnings("unchecked")
-        List<String> visible = (List<String>) listing.get("ids");
+        List<String> listedIds = (List<String>) listing.get("ids");
+        assertVisibility(listedIds, fx, "P1g");
+    }
 
-        assertThat(visible).as("R1: manifest-less -- vacuously visible").contains(fx.r1());
-        assertThat(visible).as("R2: own-collection manifest, live owner -- visible").contains(fx.r2());
-        assertThat(visible).as("R3: own-collection manifest, owner tombstoned ONLY -- HIDDEN")
-            .doesNotContain(fx.r3());
-        assertThat(visible).as("R4: no own-collection manifest (only B has one) -- vacuously visible")
-            .contains(fx.r4());
-        assertThat(visible).as("R5: own-collection manifest via D5A survives -- visible").contains(fx.r5());
-        assertThat(visible).as("R6: no own-collection manifest (only B has one) -- vacuously visible")
-            .contains(fx.r6());
-        assertThat(visible).as("R7: current note, own-collection manifest -- visible").contains(fx.r7());
-        assertThat(visible).as("R8: legacy note, manifest-less -- vacuously visible").contains(fx.r8());
+    // ── P1s: search() visibility (plain_search_<dim>'s own SQL anti-join) ────
+
+    @Test
+    void p1s_searchVisibility() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        // ConstantEmbedder: query and stored embeddings are all identical, so a
+        // limit >= the collection's chunk count returns its whole visible set.
+        List<Map<String, Object>> rows = vecRepo.search(tenant, "rdr-192 liveness probe",
+            List.of(COLLECTION_A), 300, null);
+        List<String> visible = rows.stream().map(r -> (String) r.get("id")).toList();
+        assertVisibility(visible, fx, "P1s");
     }
 
     // ── P2: nexus.live_chunks (tenant-wide, Gap 5) ───────────────────────────
@@ -304,17 +397,7 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
                .where(LIVE_CHUNKS.TENANT_ID.eq(tenant))
                .fetch(r -> java.util.HexFormat.of().formatHex(r.value1())));
 
-        assertThat(chashes).as("R1: no manifest anywhere -- visible").contains(fx.r1());
-        assertThat(chashes).as("R2: live owner -- visible").contains(fx.r2());
-        assertThat(chashes).as("R3: tombstoned-only owner, tenant-wide -- HIDDEN")
-            .doesNotContain(fx.r3());
-        assertThat(chashes).as("R4: Gap 5 leak -- live owner in B counts TENANT-WIDE, visible even for A's row")
-            .contains(fx.r4());
-        assertThat(chashes).as("R5: live owner via D5A -- visible").contains(fx.r5());
-        assertThat(chashes).as("R6: Gap 5 leak -- live owner in B counts TENANT-WIDE, visible even for A's row")
-            .contains(fx.r6());
-        assertThat(chashes).as("R7: live owner -- visible").contains(fx.r7());
-        assertThat(chashes).as("R8: manifest-less -- visible").contains(fx.r8());
+        assertVisibility(chashes, fx, "P2");
     }
 
     // ── P9: taxonomy_unassigned_chashes_384 ──────────────────────────────────
@@ -330,19 +413,7 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
         @SuppressWarnings("unchecked")
         List<String> unassigned = (List<String>) out.get("chashes");
 
-        assertThat(unassigned).as("R1: manifest-less -- INVISIBLE to taxonomy assignment")
-            .doesNotContain(fx.r1());
-        assertThat(unassigned).as("R2: own-collection manifest (any owner state) -- considered")
-            .contains(fx.r2());
-        assertThat(unassigned).as("R3: own-collection manifest, owner tombstoned -- STILL considered"
-            + " (no tombstone check at all)").contains(fx.r3());
-        assertThat(unassigned).as("R4: no own-collection manifest -- invisible")
-            .doesNotContain(fx.r4());
-        assertThat(unassigned).as("R5: own-collection manifest via D5A -- considered").contains(fx.r5());
-        assertThat(unassigned).as("R6: no own-collection manifest -- invisible")
-            .doesNotContain(fx.r6());
-        assertThat(unassigned).as("R7: own-collection manifest -- considered").contains(fx.r7());
-        assertThat(unassigned).as("R8: manifest-less -- invisible").doesNotContain(fx.r8());
+        assertVisibility(unassigned, fx, "P9");
     }
 
     private void seedCentroid384(String tenant, String collection, String label) throws Exception {
@@ -392,15 +463,7 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
 
         catalogRepo.purgeTrash(tenant, 0);
 
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r3()))
-            .as("R3 physically swept by purge_trash Step 1").isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r1())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r2())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r4())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r5())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r6())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r7())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r8())).isTrue();
+        assertExistencePredicate(tenant, fx, "P3");
     }
 
     // ── P4: engine superseded sweep (sweepChunksQuery, via writeManifestMany sweep=true) ──
@@ -443,26 +506,7 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
             assertThat(d.get("kept")).isEqualTo(7);
         });
 
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r1()))
-            .as("R1: swept -- no manifest anywhere, no note identity").isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r2()))
-            .as("R2: protected -- D2's manifest row still exists").isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r3()))
-            .as("R3: protected -- shared-chash union guard does not check tombstone status")
-            .isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r4()))
-            .as("R4: protected -- union guard is TENANT-WIDE, D4's manifest in B still counts")
-            .isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r5()))
-            .as("R5: protected -- D5A's manifest row still exists").isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r6()))
-            .as("R6: protected -- union guard is TENANT-WIDE, D6's manifest in B still counts")
-            .isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r7()))
-            .as("R7: protected -- D7's manifest row still exists").isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r8()))
-            .as("R8: protected -- the notes guard: D8's own metadata.doc_id names this chash")
-            .isTrue();
+        assertExistencePredicate(tenant, fx, "P4");
     }
 
     // ── P6: PgVectorRepository.delete's anti-join ───────────────────────────
@@ -476,24 +520,7 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
 
         assertThat(deleted).as("R1, R4, R6, R8 have no OWN-COLLECTION manifest row -- deletable;"
             + " R8's absence of a notes guard here is the Gap-1 divergence from P4").isEqualTo(4);
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r1())).isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r2()))
-            .as("R2: own-collection manifest, live owner -- BLOCKED").isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r3()))
-            .as("R3: own-collection manifest, tombstoned owner -- STILL BLOCKED (Tier 1, unconditional)")
-            .isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r4()))
-            .as("R4: no OWN-COLLECTION manifest (only B has one) -- deletable, unlike P4's tenant-wide guard")
-            .isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r5()))
-            .as("R5: D5A's own-collection manifest row -- BLOCKED").isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r6()))
-            .as("R6: no OWN-COLLECTION manifest (only B has one) -- deletable").isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r7()))
-            .as("R7: own-collection manifest -- BLOCKED").isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r8()))
-            .as("R8: manifest-less, and delete()'s anti-join has NO notes guard -- deletable")
-            .isFalse();
+        assertExistencePredicate(tenant, fx, "P6");
     }
 
     // ── P7: gc_quarantine_orphans (unbounded) ───────────────────────────────
@@ -510,7 +537,7 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
         assertThat(outcome.moved()).as("R1, R4, R6, R8: no own-collection manifest row, in any"
             + " owner state -- orphaned; P7 has NO tombstone check and NO notes guard")
             .isEqualTo(4);
-        assertOrphanSplit(tenant, fx);
+        assertExistencePredicate(tenant, fx, "P7");
     }
 
     // ── P7: gc_quarantine_orphans_bounded ────────────────────────────────────
@@ -527,20 +554,7 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
         assertThat(outcome.moved()).as("identical orphan predicate as the unbounded form")
             .isEqualTo(4);
         assertThat(outcome.remaining()).isZero();
-        assertOrphanSplit(tenant, fx);
-    }
-
-    private void assertOrphanSplit(String tenant, Fixture fx) {
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r1())).isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r2())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r3()))
-            .as("R3: own-collection manifest exists (owner state ignored) -- NOT an orphan").isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r4())).isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r5())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r6())).isFalse();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r7())).isTrue();
-        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, fx.r8()))
-            .as("R8: manifest-less, no notes guard -- IS an orphan, moved").isFalse();
+        assertExistencePredicate(tenant, fx, "P7");
     }
 
     // ── Expected-value table (row x predicate) + non-vacuity assert ────────
@@ -548,39 +562,52 @@ class RdrO192EngineLivenessMatrixIntegrationTest {
     private static final List<String> ROWS =
         List.of("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8");
     private static final List<String> PREDICATES =
-        List.of("P1", "P2", "P3", "P4", "P6", "P7", "P9");
+        List.of("P1g", "P1s", "P2", "P3", "P4", "P6", "P7", "P9");
 
     /**
-     * TODAY's verdict for every (row, predicate) pair, transcribed from the
-     * assertions above (each cell is proven by a real DB call in one of the
-     * {@code @Test} methods; this table is the human-readable summary the
-     * bead's acceptance criteria asks for, not an independent source of
-     * truth). "true" means: P1/P2 visible, P3 sweep candidate, P4 swept,
-     * P6 deletable, P7 orphaned/moved, P9 present in the unassigned list.
+     * TODAY's verdict for every (row, predicate) pair. This table is now the
+     * SOURCE the per-predicate {@code @Test} methods assert FROM (via {@link
+     * #assertVisibility}/{@link #assertExistencePredicate}), not a
+     * human-readable transcription of them, so the table cannot silently
+     * drift from the live checks. "true" means: P1g/P1s/P2/P9 visible, P3
+     * sweep candidate, P4 swept, P6 deletable, P7 orphaned/moved.
+     *
+     * <p>P1g and P1s agree on every row: {@code liveChunksCondition}
+     * (get/list) and {@code plain_search_<dim>}'s inlined anti-join
+     * (search) are collection-scoped, byte-identical-in-effect predicates
+     * as of GH #1546 (nexus-ky9ps, vectors-017) — verified here, not
+     * assumed; see this class's own javadoc P1s bullet. Had this bead run
+     * before that fix landed, R4/R6 could in principle have split the two
+     * columns (a chash live in a DIFFERENT collection could mask a
+     * same-collection tombstoned manifest row under the OLD unscoped
+     * anti-join) — this fixture doesn't manufacture that exact cross-
+     * collection-tombstone shape, so it wouldn't have caught that specific
+     * historical bug either, but it does now pin that both surfaces read
+     * identically going forward.
      */
     private static final Map<String, Map<String, Boolean>> EXPECTED_VALUE_TABLE = Map.ofEntries(
-        Map.entry("R1", Map.of("P1", true,  "P2", true,  "P3", false, "P4", true,  "P6", true,  "P7", true,  "P9", false)),
-        Map.entry("R2", Map.of("P1", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true)),
-        Map.entry("R3", Map.of("P1", false, "P2", false, "P3", true,  "P4", false, "P6", false, "P7", false, "P9", true)),
-        Map.entry("R4", Map.of("P1", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false)),
-        Map.entry("R5", Map.of("P1", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true)),
-        Map.entry("R6", Map.of("P1", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false)),
-        Map.entry("R7", Map.of("P1", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true)),
-        Map.entry("R8", Map.of("P1", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false))
+        Map.entry("R1", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", true,  "P6", true,  "P7", true,  "P9", false)),
+        Map.entry("R2", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true)),
+        Map.entry("R3", Map.of("P1g", false, "P1s", false, "P2", false, "P3", true,  "P4", false, "P6", false, "P7", false, "P9", true)),
+        Map.entry("R4", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false)),
+        Map.entry("R5", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true)),
+        Map.entry("R6", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false)),
+        Map.entry("R7", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true)),
+        Map.entry("R8", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false))
     );
 
     /**
      * Non-vacuity assert (acceptance criteria): every row of the expected-value
-     * table carries exactly the seven predicate columns this bead covers --
+     * table carries exactly the eight predicate columns this bead covers --
      * catches a row silently missing a predicate that a later Step edits.
      */
     @Test
-    void expectedValueTable_hasAllSevenPredicateColumns_forEveryRow() {
+    void expectedValueTable_hasAllEightPredicateColumns_forEveryRow() {
         assertThat(EXPECTED_VALUE_TABLE.keySet())
             .as("R1-R8, no more, no fewer").containsExactlyInAnyOrderElementsOf(ROWS);
         for (String row : ROWS) {
             assertThat(EXPECTED_VALUE_TABLE.get(row).keySet())
-                .as("row %s must carry a verdict for every predicate P1,P2,P3,P4,P6,P7,P9", row)
+                .as("row %s must carry a verdict for every predicate P1g,P1s,P2,P3,P4,P6,P7,P9", row)
                 .containsExactlyInAnyOrderElementsOf(PREDICATES);
         }
     }
