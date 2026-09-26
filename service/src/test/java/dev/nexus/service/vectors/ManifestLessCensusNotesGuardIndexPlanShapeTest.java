@@ -65,6 +65,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * by an index scan on {@code idx_catalog_documents_collection_live}, not a
  * sequential scan of {@code catalog_documents}.
  *
+ * <p>The index-scan outcome depends on selectivity, and the fixture manufactures
+ * it: {@code OTHER_COLLECTION_ROWS} makes the census collection about 9% of the
+ * tenant's catalog rows. No production collections-per-tenant cardinality has
+ * been measured. For a tenant whose notes are most of {@code catalog_documents},
+ * a sequential scan is the correct plan, and it is still one scan per statement.
+ * The regression this class guards is the per-row re-scan (loops above 1), which
+ * holds at any selectivity; the index-scan assertion only pins the planner's
+ * choice at the selectivity this fixture sets up.
+ *
  * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, PER_CLASS lifecycle.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
