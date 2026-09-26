@@ -1616,12 +1616,20 @@ def index_repo_cmd(
             if _deferred_at_start and (files_changed > 0 or no_topics):
                 # nexus-x3gig: discovery reads every embedding of a collection
                 # to the client (RDR-193 Gap 2), the heaviest cold read in the
-                # run, so it waits out the same window as assign. Nothing is
-                # lost: a zero-topic collection self-heals on the next run,
-                # the drain assigns new chunks to the existing topics, and
-                # only an existing taxonomy's refresh waits for the next run
-                # that changes files. Decided from the mechanism, not measured.
-                click.echo(f"  Taxonomy: discovery deferred ({_deferred_at_start})")
+                # run, so it waits out the same window as assign. ONLY
+                # discovery: projection, topic links and the L1 context cache
+                # still run against the existing taxonomy (substantive
+                # critic: skipping the whole chain left L1 stale, the
+                # nexus-azss4 class). Nothing is lost: a zero-topic collection
+                # self-heals on the next run and the drain assigns new chunks
+                # to existing topics. Decided from the mechanism, not
+                # measured: measuring needs restarts of an engine other
+                # sessions share.
+                run_collection_postprocessing(
+                    collections, repo_path=path, discover_collections=[],
+                    client=_t2_client,
+                    discover_skip_reason=f"deferred: {_deferred_at_start}",
+                )
             elif files_changed > 0 or no_topics:
                 # nexus-tevzq: collection-grain refinement of the qgc4b gate.
                 # Only collections whose own kind wrote files this run (plus
@@ -1916,12 +1924,24 @@ def _drain_repo_collections(collections: list[str], *, client=None) -> None:
         return
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
-    from nexus.mcp_infra import drain_unassigned_chunks  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+        TAXONOMY_ACK_PROJECT,
+        acknowledged_chashes,
+        drain_unassigned_chunks,
+    )
 
     try:
         with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only unassigned listing; assigns route through the hook's own retrying path
+            try:
+                ack_entries = db.memory.get_all(TAXONOMY_ACK_PROJECT)
+            except Exception as exc:  # noqa: BLE001 — fail safe: nothing acknowledged, losses count loudly
+                _log.warning("taxonomy_ack_read_failed", error=str(exc))
+                ack_entries = []
             for name in collections:
-                if _drain_one(name, drain_unassigned_chunks, taxonomy=db.taxonomy):
+                if _drain_one(
+                    name, drain_unassigned_chunks, taxonomy=db.taxonomy,
+                    acknowledged=acknowledged_chashes(ack_entries, name),
+                ):
                     # Engine below v0.1.132: every collection would skip for
                     # the same reason, so say it once and stop asking.
                     break
@@ -1929,13 +1949,13 @@ def _drain_repo_collections(collections: list[str], *, client=None) -> None:
         _log.warning("taxonomy_drain_t2_unavailable", error=str(exc))
 
 
-def _drain_one(name: str, drain, *, taxonomy) -> bool:
+def _drain_one(name: str, drain, *, taxonomy, acknowledged=None) -> bool:
     """One collection's drain and its report line (see :func:`_drain_repo_collections`).
 
     Returns True when the engine has no drain route, so the caller stops.
     """
     try:
-        r = drain(name, taxonomy=taxonomy)
+        r = drain(name, taxonomy=taxonomy, acknowledged=acknowledged)
     except Exception as exc:  # noqa: BLE001 — best-effort; the next run lists the same chunks
         _log.warning("taxonomy_drain_failed", collection=name, error=str(exc))
         click.echo(f"  Taxonomy drain: {name} failed ({type(exc).__name__}); next run retries")
@@ -2241,6 +2261,7 @@ def run_collection_postprocessing(
     quiet: bool = False,
     discover_collections: list[str] | None = None,
     client=None,
+    discover_skip_reason: str = "",
 ) -> None:
     """Run the post-index taxonomy + projection + topic-link chain
     against *collections* and refresh the L1 context cache.
@@ -2303,10 +2324,8 @@ def run_collection_postprocessing(
             _discover_targets = [c for c in collections if c in _allowed]
             _n_skipped = len(collections) - len(_discover_targets)
             if _n_skipped:
-                _say(
-                    f"  Taxonomy: {_n_skipped} unchanged collection(s) skipped "
-                    f"(no files written this run)"
-                )
+                _why = discover_skip_reason or "no files written this run"
+                _say(f"  Taxonomy: discovery skipped for {_n_skipped} collection(s) ({_why})")
         with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for _tax_i, col_name in enumerate(_discover_targets, start=1):
                 _say(f"  [{_tax_i}/{len(_discover_targets)}] Taxonomy: discovering {col_name}...")

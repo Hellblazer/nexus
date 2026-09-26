@@ -35,6 +35,7 @@ from tests._catalog_fixture_ops import ActiveCatalog
 
 _COLL = "knowledge__iygza-drain__bge-base-en-v15-768__v1"
 _BARE = "knowledge__iygza-bare__bge-base-en-v15-768__v1"
+_TWIN = "knowledge__iygza-twin__bge-base-en-v15-768__v1"
 #: topics.id is one global sequence in the substrate database, shared by every
 #: tenant a test mints, so each seeded topic needs its own id.
 _TOPIC_IDS = itertools.count(91001)
@@ -325,13 +326,13 @@ def test_an_acknowledged_stuck_chunk_is_skipped_and_counted(t2_service_env) -> N
     listed = CliRunner().invoke(main, ["taxonomy", "acknowledge", "--list"])
     assert stuck in listed.output and "engine refuses it" in listed.output
 
-    CliRunner().invoke(main, ["taxonomy", "acknowledge", stuck, "--remove"])
+    CliRunner().invoke(main, ["taxonomy", "acknowledge", stuck, "-c", _COLL, "--remove"])
     after = drain_unassigned_chunks(_COLL)
     assert after.acknowledged == 0 and after.assigned == 1
 
 
 def test_acknowledge_rejects_a_non_chash() -> None:
-    out = CliRunner().invoke(main, ["taxonomy", "acknowledge", "not-a-chash"])
+    out = CliRunner().invoke(main, ["taxonomy", "acknowledge", "not-a-chash", "-c", "docs__c"])
     assert out.exit_code == 2 and "not a 64-hex chunk chash" in out.output
 
 
@@ -342,3 +343,49 @@ def test_the_drain_line_names_acknowledged_skips(monkeypatch, capsys) -> None:
     )
     _drain_repo_collections(["docs__a"])
     assert "2 of 3 unassigned chunk(s) assigned, 0 lost, 1 acknowledged stuck (skipped)" in capsys.readouterr().out
+
+
+def test_an_acknowledgment_never_covers_identical_text_in_another_collection(t2_service_env) -> None:
+    """Code review, nexus-j7ae6: chash is the hash of the text alone, so the
+    same chunk text in two collections shares it. Acknowledging it in one
+    must not silence the undiagnosed twin in the other."""
+    ids, _ = _seed(_COLL, 2, topic=True)
+    twin_ids, _ = _seed(_TWIN, 2, topic=True)
+    assert ids == twin_ids, "precondition: same text, same chashes"
+
+    out = CliRunner().invoke(main, ["taxonomy", "acknowledge", ids[0], "-c", _COLL, "--note", "diagnosed in the test"])
+    assert out.exit_code == 0, out.output
+
+    here = drain_unassigned_chunks(_COLL)
+    assert here.acknowledged == 1 and here.assigned == 1
+    # Draining _COLL's cross pass may already have projected the twin's
+    # copies (assignments are keyed by chash); whatever the twin still
+    # lists, including the chash acknowledged in _COLL, is assigned, not
+    # skipped.
+    twin = drain_unassigned_chunks(_TWIN)
+    assert twin.found >= 1 and twin.acknowledged == 0 and twin.assigned == twin.found
+
+
+def test_acknowledge_requires_a_collection_and_list_takes_no_chashes() -> None:
+    no_coll = CliRunner().invoke(main, ["taxonomy", "acknowledge", "a" * 64])
+    assert no_coll.exit_code == 2 and "--collection is required" in no_coll.output
+    stray = CliRunner().invoke(main, ["taxonomy", "acknowledge", "--list", "a" * 64])
+    assert stray.exit_code == 2 and "--list takes no CHASHES" in stray.output
+
+
+def test_acknowledge_requires_a_note(t2_service_env) -> None:
+    out = CliRunner().invoke(main, ["taxonomy", "acknowledge", "a" * 64, "-c", _COLL])
+    assert out.exit_code == 2 and "--note is required" in out.output
+
+
+def test_acknowledgments_live_in_t2_so_every_box_sees_them(t2_service_env) -> None:
+    """Substantive critic: a per-box file made every other box and CI runner
+    fail until acknowledged there too. The record is a T2 memory entry."""
+    out = CliRunner().invoke(
+        main, ["taxonomy", "acknowledge", "b" * 64, "-c", _COLL, "--note", "shared"],
+    )
+    assert out.exit_code == 0, out.output
+    entries = mcp_infra.t2_index_write(lambda db: db.memory.get_all(mcp_infra.TAXONOMY_ACK_PROJECT))
+    assert [e["title"] for e in entries] == [f"{_COLL}/{'b' * 64}"]
+    assert mcp_infra.load_acknowledged_chashes(_COLL) == {"b" * 64}
+    assert mcp_infra.load_acknowledged_chashes(_TWIN) == set()

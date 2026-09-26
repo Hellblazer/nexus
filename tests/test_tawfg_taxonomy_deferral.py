@@ -320,10 +320,10 @@ def test_the_run_reports_how_many_chunks_it_deferred(tmp_path, monkeypatch, t2_s
 def test_discovery_waits_out_the_window_too(tmp_path, monkeypatch, t2_service_env) -> None:
     """nexus-x3gig: a run that changed files still skips discovery while
     deferred, and runs it when not."""
-    calls: list[str] = []
+    calls: list = []
     monkeypatch.setattr(
         "nexus.commands.index.run_collection_postprocessing",
-        lambda collections, **kw: calls.append("discover"),
+        lambda collections, **kw: calls.append(kw.get("discover_collections")),
     )
     monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", lambda name, **kw: DrainResult(name, True))
 
@@ -342,9 +342,11 @@ def test_discovery_waits_out_the_window_too(tmp_path, monkeypatch, t2_service_en
 
     out = _run(30)
     assert out.exit_code == 0, out.output
-    assert "discovery deferred (engine restarted 30 s ago)" in out.output, out.output
-    assert calls == []
+    # Deferred: postprocessing still runs (projection, links, L1) with an
+    # empty discovery list (substantive critic: skipping the whole chain
+    # left the L1 cache stale).
+    assert calls == [[]], calls
 
     out = _run(None)
     assert out.exit_code == 0, out.output
-    assert calls == ["discover"]
+    assert calls == [None] or (calls and calls[0] != []), calls

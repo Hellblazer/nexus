@@ -354,45 +354,59 @@ def _engine_file_key() -> str:
 
 # nexus-j7ae6 (Sam 2026-09-25: visible acknowledgment). A chunk the engine
 # permanently refuses to assign would fail every `nx index repo` forever,
-# because the drain lists the whole collection each run (unlike the flush
-# and PDF-gate failures, which are scoped to the git diff and stop
-# recurring). An operator who has diagnosed one records it here; the drain
-# then skips it instead of retrying, names the count on every run, and does
+# because the drain lists the whole collection each run. The other two
+# recurring exit checks already have an explicit escape: a flush failure
+# (nexus-4s1ww) through the index ignore patterns, a PDF quality-gate skip
+# (nexus-wi1uv) through --allow-degraded-extraction. An operator who has
+# diagnosed a stuck chunk acknowledges it; the drain then skips it in that
+# collection instead of retrying, names the count on every run, and does
 # not count it as a loss. Anything unacknowledged still fails the run.
+#
+# Stored in T2 memory, one entry per (collection, chash), so every box and
+# CI runner talking to the same tenant sees the same acknowledgments
+# (substantive critic: a per-box file relocated the failure from "every
+# run" to "every box"). Keyed by collection as well as chash because a
+# chash is the hash of the text alone, and identical text in another
+# collection must never be silenced by an acknowledgment made here (code
+# review).
 
-#: Prefix of the per-engine acknowledgment file under the nexus config dir.
-TAXONOMY_ACK_FILE = "taxonomy_stuck_acknowledged"
+#: T2 memory project holding the acknowledgments; titles are
+#: ``<collection>/<chash>``, content is the operator's note.
+TAXONOMY_ACK_PROJECT = "nexus_taxonomy_ack"
 
 
-def taxonomy_ack_path(config_dir: Any) -> Any:
-    """Acknowledged stuck chunks for the engine this process talks to."""
-    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
-
-    return Path(config_dir) / f"{TAXONOMY_ACK_FILE}.{_engine_file_key()}.json"
+def taxonomy_ack_title(collection: str, chash: str) -> str:
+    return f"{collection}/{chash}"
 
 
-def load_taxonomy_acks(path: Any) -> dict[str, dict[str, str]]:
-    """``{chash: {"collection", "note", "at"}}``; empty when absent or unreadable."""
-    import json  # noqa: PLC0415 — stdlib, only this helper needs it
-    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+def acknowledged_chashes(entries: Any, collection: str) -> set[str]:
+    """The chashes acknowledged for *collection*, and only that collection,
+    from T2 memory entries of :data:`TAXONOMY_ACK_PROJECT`."""
+    prefix = f"{collection}/"
+    out: set[str] = set()
+    for e in entries or []:
+        title = str((e or {}).get("title", ""))
+        if title.startswith(prefix):
+            out.add(title[len(prefix):])
+    return out
 
+
+def load_acknowledged_chashes(collection: str) -> set[str]:
+    """Acknowledged chashes for *collection* through the shared T2 slot.
+
+    A failed read is logged and treated as none acknowledged, which fails
+    safe: those chunks count as losses again, loudly.
+    """
     try:
-        data = json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+        entries = t2_index_write(
+            lambda db: db.memory.get_all(TAXONOMY_ACK_PROJECT), op="taxonomy_ack_read",
+        )
+    except Exception as exc:  # noqa: BLE001 — fail safe and say so
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning("taxonomy_ack_read_failed", error=str(exc))
+        return set()
+    return acknowledged_chashes(entries, collection)
 
-
-def save_taxonomy_acks(path: Any, acks: dict[str, dict[str, str]]) -> None:
-    """Write *acks* atomically (temp file, then rename)."""
-    import json  # noqa: PLC0415 — stdlib, only this helper needs it
-    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
-
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(acks, indent=1, sort_keys=True) + "\n")
-    os.replace(tmp, target)
 
 _taxonomy_deferral = ""
 _taxonomy_breaker_armed = False
@@ -1555,9 +1569,7 @@ def drain_unassigned_chunks(
     if reason:
         return DrainResult(collection, skipped_reason=f"deferred: {reason}")
     if acknowledged is None:
-        import nexus.config as _nx_config  # noqa: PLC0415 — deferred to avoid circular import; module attribute so a patched nexus_config_dir is seen
-
-        acknowledged = set(load_taxonomy_acks(taxonomy_ack_path(_nx_config.nexus_config_dir())))
+        acknowledged = load_acknowledged_chashes(collection)
     deadline = now_fn() + deadline_s
     after: str | None = None
     has_taxonomy = False
