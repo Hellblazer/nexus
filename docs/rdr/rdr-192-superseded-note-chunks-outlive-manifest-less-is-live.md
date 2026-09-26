@@ -2,13 +2,13 @@
 title: "Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition"
 id: RDR-192
 type: Bug Fix
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self (solo)
 created: 2026-08-12
 revised: 2026-09-26
-accepted_date:
+accepted_date: 2026-09-26
 related_issues: [nexus-39upx, nexus-b6enc, nexus-kgos1, nexus-g6k6b, nexus-bb6n2, nexus-2x9xa, nexus-iygza]
 ---
 
@@ -894,3 +894,6 @@ To be completed at gate (Layer 3 AI critique).
 - 2026-09-26: Gate round 1 — PASSED (0 Critical, 6 Significant, 0
   ship-blocker(s)); commit `1aff90d0c`; critique
   `nexus_rdr/192-gate-critique-2026-09-26-r1`.
+- 2026-09-26: All six gate-round-1 findings fixed in `503fabbb1`. CA3
+  acknowledged by Sam (T2 `nexus_rdr/192-research-7`); it stays a Phase 2
+  prerequisite. Accepted by Sam.
