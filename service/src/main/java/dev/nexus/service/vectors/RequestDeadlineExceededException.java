@@ -73,8 +73,11 @@ public final class RequestDeadlineExceededException extends RuntimeException {
         /** Refused before any embedding started: a retry costs one cheap request, and a
          *  queue that drains in the meantime can admit it. */
         REFUSED("refused"),
-        /** Aborted after work started: the batches already embedded are discarded, so a
-         *  retry embeds them again (and Voyage bills them again). */
+        /** Aborted after work was submitted, even if none of it had finished: batches
+         *  may have returned or still be in flight, and all of it is discarded. A retry
+         *  redoes that work, which Voyage bills again or, for a local embedder such as
+         *  bge768, spends as CPU again. The two refusal sites are the only places where
+         *  nothing was submitted; anything else is ABORTED. */
         ABORTED("aborted");
 
         private final String wire;

@@ -460,6 +460,17 @@ def _vector_with_retry(
     300s, worst case 7 x 300s = 2100s if every attempt reports a large one
     — the inner gateway retry never applies to a 429, which is not in
     ``_GATEWAY_RETRY_CODES``).
+
+    nexus-qajw7: an engine request-deadline 503 marked ``aborted``
+    (``X-Nexus-Deadline-Outcome``) does NOT widen and gets no inner gateway
+    resend, because each resend redoes the request's discarded embedding.
+    Its cost is dominated by the engine, not by these sleeps: every one of
+    the *max_attempts* (default 5) calls can run the full request deadline
+    before the 503 returns (540s on upsert-chunks in local mode, the
+    client's ``_UPSERT_CHUNKS_DEADLINE_MS``), plus 4 brake-floored sleeps:
+    about 5 x 540s + 4 x 60s = 2940s, some 49 minutes, for a page that
+    cannot finish inside its deadline even alone. Under 8 widened
+    attempts with 3 inner resends each it was up to 32 such runs.
     """
     brake = get_brake()
     delay = 2.0
