@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -256,6 +258,41 @@ class GcQuarantineOrphansBoundedTest {
         assertThat(sibling.get("owner_id")).isEqualTo("a6mon-refile-owner");
         assertThat(sibling.get("model_version")).isEqualTo("v3");
         assertThat(sibling.get("dimension")).isEqualTo(384);
+    }
+
+    @Test
+    void anUnregisteredOrigin_raisesLoud_andRegistersNothing() throws Exception {
+        // chunks_collection_fk normally makes an orphan in an unregistered origin
+        // unreachable, so the FK is dropped around a raw chunk insert (the
+        // unbounded twin's idiom, PgVectorRepositoryGcQuarantineTest
+        // .quarantineOrphans_unregisteredOrigin_raisesLoud_registersNothing) and
+        // the SQL function is called directly, past the Java dimForCollection
+        // precheck, so this pins the function's own RAISE.
+        String src = "knowledge__a6mon-unreg__minilm-l6-v2-384__v1";
+        String dst = "quarantine-knowledge__a6mon-unreg__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
+            ctx.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, metadata) "
+                + "VALUES (?, ?, sha256('a6mon unreg'::bytea), 'a6mon unreg', "
+                + "('[1' || repeat(',0', 383) || ']')::nexus.vector, '{}'::jsonb)", TENANT, src);
+            PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
+                CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(src))))
+                .as("precondition: the origin has a chunk but no catalog row").isFalse();
+
+            assertThatThrownBy(() -> ctx.fetch(
+                    "SELECT * FROM nexus.gc_quarantine_orphans_bounded(384, ?, ?, ?, '2026-09-26T00:00:00Z', 20, 10)",
+                    TENANT, src, dst))
+                .as("attributes come from the origin row, so an unregistered origin fails loud")
+                .hasMessageContaining("is not registered")
+                .hasMessageContaining(src);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(dst))))
+                .as("a failed call registers no sibling").isFalse();
+        }
     }
 
     private static String sqlState(Throwable t) {

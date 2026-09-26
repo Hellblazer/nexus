@@ -9,8 +9,12 @@
     quarantine-<ct>__owner__model__vN the sibling registered with
     content_type 'quarantine-<ct>' (outside the profile vocabulary) and a
     NULL dimension, and ON CONFLICT DO NOTHING meant a later call never
-    repaired it. The bounded form is the one the operator cleanups use
-    (owner-1.1, conexus-2e, 2026-09-16), so live siblings can carry it.
+    repaired it. The bounded form was built for large operator cleanups
+    after the 2026-09-16 owner-1.1 run (which itself used the unbounded,
+    already-fixed form); whether any tenant has called it since is not
+    recorded here. gc_audit rows with operation
+    'gc_quarantine_orphans_bounded' answer that, and hygiene-008-2 is a
+    no-op where the answer is none.
 
       - hygiene-008-1: CREATE OR REPLACE the bounded function with
         hygiene-005-1's registration: copy content_type / owner_id /
@@ -25,7 +29,10 @@
         misregistered, the same walk as hygiene-005-3's first two branches
         (that changeset ran before catalog-037-1 existed, so it could not
         see them). hygiene-005-3's third branch (dormant promotion) is not
-        repeated: this defect never demoted a row.
+        repeated: catalog-037-1 always inserted lifecycle_state 'quarantine',
+        and CatalogRepository.sweepGhostsAndMarkDormant holds every
+        'quarantine' row before its dormant check, so no sibling this defect
+        registered can have been demoted.
 
     RDR-192 S8 (nexus-wbfpw.16) later redefines this function again to
     select candidates with reapable(c); it builds on this body.
