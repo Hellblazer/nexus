@@ -132,7 +132,10 @@ from nexus.daemon.service_registry import ServiceRegistry, ttl_for_tier
 config_dir = nexus_config_dir()
 ensure_aspect_worker_daemon(config_dir=config_dir, tenant='default')
 registry = ServiceRegistry(dir=config_dir, tier=TIER, ttl=ttl_for_tier(TIER))
-for _ in range(15):
+# 60 s, not 15: in a cold container the worker's first lease publish was
+# measured later than 15 s (2026-09-26), while the same registry read after
+# the workload found it live.
+for _ in range(60):
     if registry.discover('default') is not None:
         print('LIVE')
         break
