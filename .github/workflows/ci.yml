@@ -1900,3 +1900,61 @@ jobs:
           # manifest-rewrite-visibility core tests actually ran+passed, and no
           # prereq-skip vacuously cleared the run.
           uv run python scripts/assert_write_seam_ran.py write-seam.xml
+
+  # nexus-dotwy: publish this run's state to the board/ci-develop tuple topic
+  # so sessions subscribe to CI instead of polling GitHub. On 2026-09-26
+  # several concurrent `gh run watch` loops on one token tripped GitHub's
+  # secondary rate limit (T2 nexus/github-api-usage-research-2026-09-26).
+  # develop pushes only: PRs carry no secret from forks, and the topic is
+  # develop's. Both jobs are advisory: scripts/ci_board_post.py warns and
+  # exits 0 on any post failure, so the board can never turn a green run red.
+  # Not `workflow_run`: that trigger fires only from the default branch's copy
+  # of a workflow (main), so it would sit dormant on develop (see
+  # ci-commit-coverage-audit.yml's header). Token: NX_BOARD_TOKEN (tenant
+  # nexus, label ci-board-writer); nexus-r3ur5 narrows it to board writes.
+  board-pending:
+    name: board ci-pending
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          sparse-checkout: scripts/ci_board_post.py
+          sparse-checkout-cone-mode: false
+      - name: Post ci-pending to board/ci-develop
+        shell: bash
+        env:
+          NX_SERVICE_URL: ${{ vars.NX_SERVICE_URL || 'https://api.conexus-nexus.com' }}
+          NX_BOARD_TOKEN: ${{ secrets.NX_BOARD_TOKEN }}
+        run: >-
+          python3 scripts/ci_board_post.py --kind ci-pending
+          --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  board-verdict:
+    name: board ci-verdict
+    # Every job a develop push runs (release-ledger-gate is PR-to-main only).
+    # always() so a failed or cancelled run still posts its verdict.
+    needs: [lint, changes, service-jar, test, test-lint, test-mode-census,
+            pytest-gate, ca3-pgvector-bundle, ca3-pgvector-bundle-macos,
+            engine-service-build, write-seam-gate]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          sparse-checkout: scripts/ci_board_post.py
+          sparse-checkout-cone-mode: false
+      - name: Post ci-verdict to board/ci-develop
+        shell: bash
+        env:
+          NX_SERVICE_URL: ${{ vars.NX_SERVICE_URL || 'https://api.conexus-nexus.com' }}
+          NX_BOARD_TOKEN: ${{ secrets.NX_BOARD_TOKEN }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: >-
+          python3 scripts/ci_board_post.py --kind ci-verdict
+          --sha "$GITHUB_SHA" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          --results "$RESULTS"
