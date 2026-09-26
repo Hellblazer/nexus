@@ -51,6 +51,8 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/assignments/assign_many batch upsert assignments
  *   POST  /v1/taxonomy/assignments/assign_from_chashes server-side compute+persist
  *         from just-upserted chashes (nexus-lns3o engine half)
+ *   POST  /v1/taxonomy/assignments/cross-preview READ-ONLY cross-pass pick,
+ *         never persists (nexus-v4pj4 engine half)
  *   POST  /v1/taxonomy/assignments/unassigned state-derived drain of chunks with
  *         no own-collection topic_assignments row (nexus-iygza engine half)
  *   GET   /v1/taxonomy/assignments/docs    doc_ids for topic_id=
@@ -148,6 +150,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/assignments/assign"        -> handleAssign(exchange, tenant, method);
                 case "/assignments/assign_many"   -> handleAssignMany(exchange, tenant, method);
                 case "/assignments/assign_from_chashes" -> handleAssignFromChashes(exchange, tenant, method);
+                case "/assignments/cross-preview"  -> handleCrossPreview(exchange, tenant, method);
                 case "/assignments/unassigned"     -> handleUnassignedChashes(exchange, tenant, method);
                 case "/assignments/docs"          -> handleGetDocIds(exchange, tenant, method);
                 case "/assignments/for_docs"      -> handleGetAssignmentsForDocs(exchange, tenant, method);
@@ -569,6 +572,43 @@ public final class TaxonomyHandler implements HttpHandler {
         // disables it.
         boolean crossCollection = !(body.get("cross_collection") instanceof Boolean b) || b;
         Map<String, Object> result = repo.assignFromChashes(tenant, collection, chashes, crossCollection);
+        HttpUtil.send(ex, 200, json(result));
+    }
+
+    /**
+     * POST /v1/taxonomy/assignments/cross-preview (nexus-v4pj4, round-2 review
+     * decision).
+     *
+     * <p>Body {@code {"collection": str, "chashes": [str, ...]}} (no
+     * {@code cross_collection} flag — this route IS the cross pass, always,
+     * and NEVER persists). Response 200: a JSON array of
+     * {@code {"chash": str, "topic_id": long, "similarity": double}}, one row
+     * per chash that resolved to a live chunk AND at least one foreign
+     * centroid — a chash with neither is simply absent, never an error. See
+     * {@link dev.nexus.service.db.TaxonomyRepository#crossPreview} for the
+     * full same-moment-comparison rationale and its relationship to {@link
+     * #handleAssignFromChashes}.
+     */
+    private void handleCrossPreview(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        Object raw = body.get("chashes");
+        if (!(raw instanceof List<?> rawList) || rawList.isEmpty()) {
+            throw new IllegalArgumentException("field 'chashes' must be a non-empty JSON array");
+        }
+        if (rawList.size() > TaxonomyRepository.MAX_CROSS_PREVIEW_CHASHES) {
+            throw new IllegalArgumentException("too many chashes (max "
+                + TaxonomyRepository.MAX_CROSS_PREVIEW_CHASHES + ")");
+        }
+        List<String> chashes = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (o == null || o.toString().isBlank()) {
+                throw new IllegalArgumentException("each element of 'chashes' must be a non-blank string");
+            }
+            chashes.add(o.toString());
+        }
+        List<Map<String, Object>> result = repo.crossPreview(tenant, collection, chashes);
         HttpUtil.send(ex, 200, json(result));
     }
 

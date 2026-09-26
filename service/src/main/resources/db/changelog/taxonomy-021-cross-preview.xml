@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-v4pj4 (round-2 review decision: build the read-only ANN
+    route now, in this bead, rather than filing it — it rides the same
+    engine cut as nexus-swam7/taxonomy-020, cherry-picked into this branch
+    ahead of it: feature/nexus-swam7-pin-cross-hnsw is NOT YET on develop,
+    so this changeset is authored AFTER taxonomy-020 in this branch's own
+    tree, and the two branches' commits will collide TEXTUALLY in
+    db.changelog-master.xml's include list when whichever merges second
+    lands — resolve by keeping BOTH includes in append order; there is no
+    SEMANTIC conflict, since each changeset is independently idempotent
+    and keyed by its own id/author, and taxonomy-020 already exists in
+    THIS branch's tree (cherry-picked) so taxonomy-021 below builds on it
+    directly.
+
+    PROBLEM THIS CLOSES: the doctor check-assignments mode's round-1 cut
+    compared a STORED projection pick against a Python exact recompute
+    over TODAY's live centroids — a comparison across two different
+    MOMENTS, so healthy taxonomy growth (or an existing centroid revised
+    via rebuild/merge) could read as ANN drift. The round-1 review
+    (nexus-v4pj4) demanded a SAME-MOMENT comparison: the engine's actual
+    ANN pick and an exact recompute, both against the IDENTICAL live
+    centroid snapshot. No client-reachable route did this: the one
+    read-only ANN route (`/v1/taxonomy/centroids/query` ->
+    `TaxonomyCentroidRepository.annQuery`) runs `hnsw.iterative_scan=
+    relaxed_order`/`hnsw.ef_search=n_results` — NOT the cross pass's
+    `strict_order`/`ef_search=400` (taxonomy-018) plus taxonomy-020's
+    `enable_seqscan=off`/`enable_sort=off` access-path pins — so it tests
+    a materially different, weaker recall configuration; and
+    `assign_from_chashes_<dim>` (taxonomy-018/020) has no dry-run form, it
+    always computes AND persists in one statement.
+
+    FIX: three new functions, `nexus.cross_preview_<dim>(p_collection
+    text, p_chashes text[])`, one per centroid dimension (384/768/1024) —
+    a READ-ONLY twin of `assign_from_chashes_<dim>`'s cross branch. Same
+    four transaction-local settings (the two ANN-recall pins from
+    taxonomy-018, the two access-path pins from taxonomy-020), same
+    `batch`/`nearest` CTE computing the SAME per-chunk nearest-FOREIGN-
+    centroid LATERAL over the SAME `nexus.taxonomy_centroids` table —
+    but NO `persisted` INSERT CTE, and NO registration guard (a read-only
+    preview over an unregistered/empty collection simply returns zero
+    rows via the `batch` CTE's own `WHERE c.collection = p_collection`,
+    never an error — there is nothing to protect by refusing early, since
+    nothing is written). The `batch`/`nearest` CTE text below is BYTE-
+    IDENTICAL, per dim, to `assign_from_chashes_<dim>`'s own cross branch
+    (taxonomy-020) — `CrossPreviewDriftTest` (service/src/test/java/dev/
+    nexus/service/db/) asserts a normalized-whitespace copy of that exact
+    shared span is a substring of BOTH functions' `prosrc`, so the two
+    cannot silently drift apart; never edit one without the other.
+
+    SECURITY INVOKER (matches every sibling taxonomy function in this
+    changelog tree) + tenant RLS on `nexus.chunks`/`nexus.
+    taxonomy_centroids` — a tenant's preview call can only ever see its
+    own chunks and centroids, the same isolation `assign_from_chashes_
+    <dim>` and `annQuery` already rely on.
+
+    A fourth changeset (taxonomy-021-4) grants nexus_svc EXECUTE on the
+    three functions, matching taxonomy-006-4's grant for
+    assign_from_chashes_&lt;dim&gt; — functions in this schema have
+    EXECUTE revoked from PUBLIC by default, so a new one is unusable by
+    the service role without an explicit grant. Rollback DROPs the three
+    functions outright (never persisted, so nothing downstream depends on
+    their existence across a rollback) and tolerantly REVOKEs the grant.
+
+    Placed after taxonomy-020-pin-cross-lateral-hnsw-plan.xml (this
+    branch's current tail, cherry-picked ahead of taxonomy-021) and
+    before the grants-nexus-svc.xml runAlways block, matching the
+    established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-021-1" author="nexus-v4pj4">
+        <comment>nexus.cross_preview_384: read-only twin of assign_from_chashes_384's cross branch -- same nearest-foreign-centroid LATERAL under the same HNSW/access-path pins, no persist.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.cross_preview_384(
+    p_collection text,
+    p_chashes    text[]
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    -- nexus-v4pj4: read-only twin of assign_from_chashes_384's cross
+    -- branch (taxonomy-020-1). Same four transaction-local settings;
+    -- see that changeset's header for the full reasoning. NEVER writes
+    -- to topic_assignments.
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_384 AS b_emb
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_384 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_384 OPERATOR(nexus.&lt;=&gt;) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.collection &lt;&gt; p_collection
+                 AND ct.embedding_384 IS NOT NULL
+               ORDER BY ct.embedding_384 OPERATOR(nexus.&lt;=&gt;) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DROP FUNCTION IF EXISTS nexus.cross_preview_384(text, text[]);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-021-2" author="nexus-v4pj4">
+        <comment>nexus.cross_preview_768: same read-only twin as taxonomy-021-1, dim 768.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.cross_preview_768(
+    p_collection text,
+    p_chashes    text[]
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_768 AS b_emb
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_768 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_768 OPERATOR(nexus.&lt;=&gt;) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.collection &lt;&gt; p_collection
+                 AND ct.embedding_768 IS NOT NULL
+               ORDER BY ct.embedding_768 OPERATOR(nexus.&lt;=&gt;) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DROP FUNCTION IF EXISTS nexus.cross_preview_768(text, text[]);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-021-3" author="nexus-v4pj4">
+        <comment>nexus.cross_preview_1024: same read-only twin as taxonomy-021-1, dim 1024.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.cross_preview_1024(
+    p_collection text,
+    p_chashes    text[]
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_1024 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_1024 OPERATOR(nexus.&lt;=&gt;) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.collection &lt;&gt; p_collection
+                 AND ct.embedding_1024 IS NOT NULL
+               ORDER BY ct.embedding_1024 OPERATOR(nexus.&lt;=&gt;) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DROP FUNCTION IF EXISTS nexus.cross_preview_1024(text, text[]);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-021-4" author="nexus-v4pj4">
+        <comment>GRANT EXECUTE on the three cross_preview functions to nexus_svc (matches taxonomy-006-4's pattern for assign_from_chashes -- functions in this schema have EXECUTE revoked from PUBLIC by default, so each new one needs an explicit grant).</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.cross_preview_384(text, text[])  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.cross_preview_768(text, text[])  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.cross_preview_1024(text, text[]) TO nexus_svc;
+        </sql>
+        <rollback>
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.cross_preview_1024(text, text[])') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.cross_preview_1024(text, text[]) FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.cross_preview_768(text, text[])') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.cross_preview_768(text, text[]) FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.cross_preview_384(text, text[])') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.cross_preview_384(text, text[]) FROM nexus_svc;
+    END IF;
+END
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

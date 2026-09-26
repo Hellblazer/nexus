@@ -902,6 +902,13 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 17),
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 21),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
+        // nexus-v4pj4 (round-2 review decision): 4 raw-JDBC fixture sites, the
+        // same idiom TaxonomyAssignFromChashesRepositoryTest uses above --
+        // seedChunk's chunks INSERT, seedCentroid's taxonomy_centroids INSERT,
+        // and startAll's two su.createStatement().execute(...) GRANT EXECUTE
+        // call sites (one per function family, each looped over the three
+        // dims) -- no jOOQ codegen for GRANT EXECUTE.
+        Map.entry("dev/nexus/service/CrossPreviewRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 7),
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
@@ -1140,6 +1147,11 @@ class RawSqlGateTest {
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 28 -> 30 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 27),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
+        // nexus-v4pj4 (round-2 review decision): 1 raw-JDBC site -- prosrc(...)'s
+        // su.prepareStatement(...) fetching pg_proc.prosrc (no jOOQ codegen for
+        // pg_catalog reads), same idiom TaxonomyAssignCrossLateralHnswTest's own
+        // prosrc drift check uses.
+        Map.entry("dev/nexus/service/db/CrossPreviewDriftTest.java", 1),
         // CollectionRegistryTest.java: RETIRED at nexus-ft04v.7 — the file's two raw-SQL
         // sites (HeldLock's UPDATE/INSERT probes for a lock-contention mechanism the
         // stub-insert retirement deleted) are gone; the file now seeds fixtures via
@@ -1512,7 +1524,11 @@ class RawSqlGateTest {
     // nexus-swam7 review round: 951 -> 953 (+2: TaxonomyAssignCrossLateralHnswTest.java
     // 10 -> 12, the negative-control EXPLAIN and the prosrc drift check's
     // prepareStatement, see that entry's own comment above).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 953;
+    // nexus-v4pj4 (round-2 review decision): 953 -> 958 (+5: two new test files,
+    // CrossPreviewRepositoryTest.java new at 4 and db/CrossPreviewDriftTest.java
+    // new at 1, same raw-JDBC fixture/prosrc-probe idiom their siblings above
+    // already carry entries for; see both entries' own comments).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 958;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

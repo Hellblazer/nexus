@@ -974,6 +974,105 @@ public final class TaxonomyRepository {
         return rows;
     }
 
+    /** Upper bound on {@code chashes} accepted by {@link #crossPreview} per call. */
+    public static final int MAX_CROSS_PREVIEW_CHASHES = 300;
+
+    /**
+     * POST /v1/taxonomy/assignments/cross-preview (nexus-v4pj4, round-2 review
+     * decision): READ-ONLY twin of {@link #assignFromChashes}'s cross branch —
+     * the SAME per-chunk nearest-FOREIGN-centroid pick, under the SAME four
+     * transaction-local HNSW/access-path settings (taxonomy-018 + taxonomy-020),
+     * but calls {@code nexus.cross_preview_<dim>()} (taxonomy-021) instead of
+     * {@code assign_from_chashes_<dim>()} — that function has NO {@code
+     * persisted} INSERT CTE at all, so this can NEVER write to
+     * {@code topic_assignments}, unlike {@link #assignFromChashes} which always
+     * does. Exists so {@code nx doctor --check-assignments} can compare the
+     * engine's LIVE ANN pick against an exact Python recompute over the SAME
+     * live foreign-centroid snapshot, in the same run, without persisting a
+     * probe's chunks.
+     *
+     * <p>A chash with no live chunk row at *collection*'s dim, or whose
+     * collection has no foreign centroid at all, is simply ABSENT from the
+     * result — never an error; the caller (the doctor probe) already knows
+     * which chashes it sampled and can treat a missing chash as "not
+     * comparable" itself, the same convention {@link #assignFromChashes}'s own
+     * {@code unmatched_chashes} half documents (this route reports no
+     * separate unmatched list — a preview has nothing it needs to reconcile
+     * against, unlike the persisting route's own existence probe).
+     *
+     * <p>NO registration guard (unlike {@link #assignFromChashesOnePass}'s
+     * cross branch): a read-only preview over an unregistered or empty
+     * collection simply returns zero rows via {@code cross_preview_<dim>}'s
+     * own {@code WHERE c.collection = p_collection} — there is nothing to
+     * protect by refusing early when nothing is ever written.
+     */
+    public List<Map<String, Object>> crossPreview(String tenant, String collection, List<String> rawChashes) {
+        if (rawChashes == null || rawChashes.isEmpty()) return List.of();
+        if (rawChashes.size() > MAX_CROSS_PREVIEW_CHASHES) {
+            throw new IllegalArgumentException(
+                "too many chashes (max " + MAX_CROSS_PREVIEW_CHASHES + ")");
+        }
+        // Same lowercase-hex normalization as assignFromChashes (nexus-lns3o
+        // review fix) — chunks.chash is decoded case-insensitively server-side,
+        // and normalizing here keeps this route's own casing behavior
+        // consistent with its persisting sibling even though this route has
+        // no existence-probe text comparison of its own to protect.
+        List<String> chashes = rawChashes.stream().map(String::toLowerCase).toList();
+        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
+        String[] chashArr = chashes.toArray(new String[0]);
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Same statement/lock bound as assignFromChashes's own pass and
+            // cross pass (nexus-g17tf) — this is the identical LATERAL-over-
+            // centroids shape, so an orphaned or pathological scan should
+            // cancel the same way. NOT setSearchStatementTimeout/
+            // setSearchPlanCacheMode (annQuery's own pair): those two pins
+            // matter for a Java-layer HNSW dispatch (hnsw.iterative_scan set
+            // via PgSession.setLocal alongside them); this route's HNSW/
+            // access-path settings all live INSIDE cross_preview_<dim>'s own
+            // body instead (matching assignFromChashesOnePass's identical
+            // architecture, needed for CrossPreviewDriftTest's byte-identical
+            // shared-span proof) — adding the search pair here with no
+            // matching Java-layer hnsw.iterative_scan/setHnswEfSearch call
+            // would break HnswServingGucParityTest's file-wide 4-way count
+            // parity for a pairing this route was never part of.
+            PgSession.setTaxonomyAssignBounds(ctx);
+            return crossPreviewOnePass(ctx, dim, collection, chashArr);
+        });
+    }
+
+    /**
+     * One call to {@code nexus.cross_preview_<dim>()} — factored out of
+     * {@link #crossPreview}'s {@code withTenant} block for the SAME reason
+     * {@link #assignFromChashesOnePass} is factored out of {@link
+     * #assignFromChashesRetryingDeadlocks}'s: {@code HnswServingGucParityTest}
+     * scans a {@code withTenant} block's OWN inline text for a
+     * {@code .selectFrom(fn)} fetch, and a fetch reached only through a
+     * separate helper method is (by that scan's own documented design,
+     * matching every other per-dim dispatch in this class) not a fetch it
+     * needs to see bound by {@code setSearchStatementTimeout}/
+     * {@code setSearchPlanCacheMode} — this call's actual bound is
+     * {@link #crossPreview}'s own {@code setTaxonomyAssignBounds}, set
+     * before this method runs.
+     */
+    private static List<Map<String, Object>> crossPreviewOnePass(
+            DSLContext ctx, int dim, String collection, String[] chashes) {
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> CROSS_PREVIEW_384.call(collection, chashes);
+            case 768  -> CROSS_PREVIEW_768.call(collection, chashes);
+            case 1024 -> CROSS_PREVIEW_1024.call(collection, chashes);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (var rec : ctx.selectFrom(fn).fetch()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("chash",      rec.get("chash", String.class));
+            row.put("topic_id",   rec.get("topic_id", Long.class));
+            row.put("similarity", rec.get("similarity", Double.class));
+            rows.add(row);
+        }
+        return rows;
+    }
+
     /** Upper bound on {@code limit} accepted by {@link #unassignedChashes} per call. */
     public static final int MAX_UNASSIGNED_CHASHES = 1000;
 

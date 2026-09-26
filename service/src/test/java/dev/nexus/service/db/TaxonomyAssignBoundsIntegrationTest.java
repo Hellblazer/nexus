@@ -235,10 +235,18 @@ class TaxonomyAssignBoundsIntegrationTest {
         // the cross pass now run in SEPARATE transactions, each bounding itself;
         // unassignedChashes reuses the same helper for its own (read-only)
         // transaction. Three legitimate sites, not the pre-rework one.
+        // nexus-v4pj4 (round-2 review decision): +1 (4) -- crossPreview (the
+        // read-only cross-preview route) is the identical LATERAL-over-
+        // centroids shape as the cross pass and bounds itself the same way,
+        // via crossPreviewOnePass (see that method's own javadoc for why the
+        // actual .selectFrom(fn) fetch is factored into a separate helper --
+        // HnswServingGucParityTest's unrelated file-wide GUC-pairing count
+        // would otherwise be broken by this route's Java-layer bound).
         assertThat(sites)
-            .as("three live call sites: assignFromChashes's own pass, its cross"
-                + " pass, and unassignedChashes -- each transaction bounds itself")
-            .hasSize(3);
+            .as("four live call sites: assignFromChashes's own pass, its cross"
+                + " pass, unassignedChashes, and crossPreview -- each transaction"
+                + " bounds itself")
+            .hasSize(4);
         for (int site : sites) {
             int open = lastIndexOfLineBefore(lines, site, "tenantScope.withTenant(tenant, ctx -> {");
             int firstCode = firstNonCommentCodeLineAfter(lines, open);
