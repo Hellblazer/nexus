@@ -167,7 +167,7 @@ def test_unlanded_batch_raises_and_commits_no_manifest_rows(tmp_path) -> None:
         # run) the memo's mechanism describes.
         return list(ids)
 
-    def _cannot_tell_update_chunks(collection_arg, ids, metadatas):
+    def _cannot_tell_update_chunks(collection_arg, ids, metadatas, **_kw):
         # Engine response omitted "missing" entirely.
         return None
 
@@ -259,7 +259,7 @@ def test_kill_control_reverting_the_raise_reproduces_the_damage(tmp_path) -> Non
     def _stale_positive_existing_ids(collection_arg, ids):
         return list(ids)
 
-    def _cannot_tell_update_chunks(collection_arg, ids, metadatas):
+    def _cannot_tell_update_chunks(collection_arg, ids, metadatas, **_kw):
         return None
 
     with patch("nexus.doc_indexer.PDFExtractor") as ME, \
@@ -327,7 +327,7 @@ def test_reindex_converges_after_abort(tmp_path) -> None:
     with patch("nexus.doc_indexer.PDFExtractor") as ME, \
          patch("nexus.doc_indexer.PDFChunker") as MC, \
          patch.object(t3_aborted, "existing_ids", side_effect=lambda c, ids: list(ids)), \
-         patch.object(t3_aborted, "update_chunks", side_effect=lambda c, ids, m: None):
+         patch.object(t3_aborted, "update_chunks", side_effect=lambda c, ids, m, **_kw: None):
         ME.return_value.extract.side_effect = _extract_side_effect(1, result)
         MC.return_value.chunk.return_value = fake_chunks
 
