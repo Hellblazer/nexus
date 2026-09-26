@@ -200,17 +200,19 @@ def test_index_repo_records_a_loss_for_the_next_run(tmp_path, monkeypatch, t2_se
     assert mcp_infra.taxonomy_failure_marker_path(nexus_config_dir()).exists()
 
 
-def test_the_marker_is_per_engine_and_tenant(tmp_path, monkeypatch) -> None:
+def test_the_marker_is_per_engine_and_survives_token_rotation(tmp_path, monkeypatch) -> None:
     """A loss against one engine must not defer indexing against another
-    engine on the same box (critic, round 1)."""
+    engine on the same box (critic, round 1); a rotated token must not
+    restart the backoff against the same, still-sick engine (round 2)."""
     monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://engine-a:1", "tok-a"))
     a = mcp_infra.taxonomy_failure_marker_path(tmp_path)
     monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://engine-b:1", "tok-a"))
     b = mcp_infra.taxonomy_failure_marker_path(tmp_path)
-    monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://engine-a:1", "tok-b"))
-    c = mcp_infra.taxonomy_failure_marker_path(tmp_path)
+    monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://engine-a:1/", "tok-rotated"))
+    a_rotated = mcp_infra.taxonomy_failure_marker_path(tmp_path)
 
-    assert len({a, b, c}) == 3
+    assert a != b
+    assert a == a_rotated
     assert "tok-a" not in a.name and "engine-a" not in a.name, "no raw endpoint or token on disk"
 
     record_taxonomy_failure(a, now=_NOW)

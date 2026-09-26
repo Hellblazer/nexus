@@ -284,7 +284,7 @@ TAXONOMY_DEFER_UPTIME_S = 600
 TAXONOMY_FAILURE_BACKOFF_S = 900
 #: Prefix of the file under the nexus config dir holding the wall-clock
 #: time of the last run that lost an assignment (seconds since the epoch).
-#: One file per (engine endpoint, tenant): see
+#: One file per engine endpoint: see
 #: :func:`taxonomy_failure_marker_path`.
 TAXONOMY_FAILURE_MARKER = "taxonomy_assign_failed_at"
 
@@ -321,12 +321,16 @@ def taxonomy_failure_backoff_s() -> int:
 
 
 def taxonomy_failure_marker_path(config_dir: Any) -> Any:
-    """The failure marker for the engine and tenant this process talks to.
+    """The failure marker for the engine this process talks to.
 
-    Keyed on a digest of the resolved service URL and token (the token is
-    tenant-bound, and only its digest is written), the way the data-token
-    lease files are keyed, so a loss against one engine never defers
-    indexing against another on the same box. An endpoint that cannot be
+    Keyed on a digest of the resolved service URL alone. What the backoff
+    tracks is the ENGINE's health, and a struggling engine is struggling for
+    every tenant on it, so neither tenant nor token belongs in the key: the
+    token would also restart the backoff on every rotation (substantive
+    critic, round 2), and ``_process_default_tenant()`` is the literal
+    ``"default"`` on every client, the real tenant being bound to the token
+    server-side. Different engines on one box get different files, so a loss
+    against one never defers another (round 1). An endpoint that cannot be
     resolved gets its own ``unresolved`` file.
     """
     import hashlib  # noqa: PLC0415 — stdlib, only this helper needs it
@@ -335,8 +339,8 @@ def taxonomy_failure_marker_path(config_dir: Any) -> Any:
     try:
         from nexus.db.http_vector_client import _resolve_endpoint  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
 
-        url, token = _resolve_endpoint()
-        key = hashlib.sha256(f"{url}\x00{token}".encode()).hexdigest()[:16]
+        url, _token = _resolve_endpoint()
+        key = hashlib.sha256(url.rstrip("/").encode()).hexdigest()[:16]
     except Exception:  # noqa: BLE001 — an unresolvable endpoint fails the index run elsewhere; here it only picks a file name
         key = "unresolved"
     return Path(config_dir) / f"{TAXONOMY_FAILURE_MARKER}.{key}"
