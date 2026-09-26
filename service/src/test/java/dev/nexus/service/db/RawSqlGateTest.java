@@ -282,6 +282,25 @@ class RawSqlGateTest {
         // nexus.taxonomy_ann_query_<dim> (vectors-013), a generated jOOQ function
         // table -- same conversion, same reasoning, and the same dead-entry-
         // avoidance discipline as the rawVectorFetch removal immediately above.
+        Map.entry("PgVectorRepository.java", Map.of(
+            // SANCTIONED RAW (nexus-wbfpw.4, round-1 fix, code-review Important):
+            // manifestLessCensus executes MANIFEST_LESS_CENSUS_SQL, the PUBLISHED
+            // statement scripts/sql/manifest_less_census.sql and
+            // ManifestLessCensusSqlIdentityTest pin byte-identical to it -- same
+            // precedent as ChashRepository#lookup/PROBE_SQL above. EMPTY statement
+            // multiset, for the identical reason lookup's is: the constant is
+            // passed BY NAME (`ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, ...)`),
+            // and RAW_EXECUTE's name-based heuristic only matches an argument
+            // starting with the literal text "sql"/"SQL" -- MANIFEST_LESS_CENSUS_SQL
+            // starts with "M", so this call never matches RAW_EXECUTE at all (a
+            // documented, pre-existing KNOWN RESIDUAL of the SAME shape as
+            // ChashRepository#lookup, not something this bead introduces or is
+            // asked to close -- see the round-1 fix's own report for why the
+            // RAW_EXECUTE regex is not widened to close the _SQL-suffix blind spot
+            // in this change). Registered here anyway so a future LITERAL raw call
+            // accidentally added to manifestLessCensus is caught immediately
+            // rather than silently inheriting a blanket excuse.
+            "manifestLessCensus", Map.of())),
         Map.entry("CatalogRepository.java", Map.of(
             // nexus-zrcj7: acquireIndexRunLock's entry (SANCTIONED RAW,
             // nexus-5xn3k.2 — pg_advisory_xact_lock over a hashtext'd
@@ -2936,6 +2955,18 @@ class RawSqlGateTest {
      * A new exemption is a deliberate, reviewed decision — bump this ceiling in the
      * SAME edit as the new {@link #EXEMPTION_REGISTRY} entry, never as a side effect of
      * an unrelated change. {@link #exemptionRegistry_sizeStaysAtOrBelowCeiling} pins it.
+     *
+     * <p>NOT bumped for nexus-wbfpw.4's round-1 fix (deliberate — see the fix's own
+     * report): {@code PgVectorRepository.java#manifestLessCensus} got a {@link
+     * #SANCTIONED_STATEMENTS} entry (the actual enforcement hook, matching
+     * ChashRepository.java#lookup's shape) but NOT an {@link #EXEMPTION_REGISTRY} entry,
+     * because {@link #checkExemptionEntry}'s file lookup is hardcoded to {@code
+     * dev.nexus.service.db} ({@code Path.of("src","main","java","dev","nexus","service",
+     * "db", e.file())}) — every existing entry lives in that one package.
+     * {@code PgVectorRepository.java} lives in {@code dev.nexus.service.vectors};
+     * making it resolvable would mean adding a package field to {@link ExemptionEntry}
+     * and updating that path construction, a change to this SHARED registry
+     * infrastructure broader than one route's fix round should make as a side effect.
      */
     private static final int EXEMPTION_REGISTRY_CEILING = 5;
 
