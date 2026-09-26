@@ -103,6 +103,7 @@ def test_snapshot_counters_extracts_the_named_embedder_including_active() -> Non
     "status",
     [None, {}, {"embedder_activity": None}, {"embedder_activity": {}}, {"embedder_activity": {"voyage-context-3": None}}],
 )
+@pytest.mark.usefixtures("cloud_mode")
 def test_snapshot_counters_is_fail_closed_to_zero_and_idle(status) -> None:
     assert admission_load.snapshot_counters(status, admission_load.DEFAULT_EMBEDDER) == admission_load.EmbedderCounters()
 
@@ -414,6 +415,7 @@ def test_fetch_status_is_fail_closed_to_none_on_a_transport_error() -> None:
         assert admission_load.fetch_status(client) is None
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_post_upsert_sends_the_documented_body_and_deadline_header() -> None:
     captured: dict[str, Any] = {}
 
@@ -514,6 +516,7 @@ class _FakeT3ForOrphanScan:
         raise AssertionError(f"find_orphan_collections must never delete anything (attempted delete of {name!r})")
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_find_orphan_collections_lists_only_the_gate_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     names = [
         "knowledge__u2mlh-load-abc123__voyage-context-3__v1",
@@ -526,6 +529,7 @@ def test_find_orphan_collections_lists_only_the_gate_prefix(monkeypatch: pytest.
     assert result == sorted(names[:2])
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_find_orphan_collections_excludes_the_current_runs_own_name(monkeypatch: pytest.MonkeyPatch) -> None:
     names = ["knowledge__u2mlh-load-abc123__voyage-context-3__v1", "knowledge__u2mlh-load-def456__voyage-context-3__v1"]
     monkeypatch.setattr(nexus_db_module, "make_t3", lambda: _FakeT3ForOrphanScan(names))
@@ -533,6 +537,7 @@ def test_find_orphan_collections_excludes_the_current_runs_own_name(monkeypatch:
     assert result == [names[1]]
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_find_orphan_collections_performs_no_delete_when_orphans_are_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fake's delete_collection raises unconditionally; a clean pass
     here IS the proof that no delete/purge path is reachable from
@@ -633,6 +638,7 @@ def test_run_gate_dry_run_touches_no_network_and_reports_a_plan(tmp_path: Path, 
     assert plan["collection_name"].startswith("knowledge__u2mlh-load-dryrunnonce__")
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_run_gate_passes_when_admission_moves_and_refused_is_observed(monkeypatch: pytest.MonkeyPatch) -> None:
     register_calls: list[str] = []
     delete_calls: list[str] = []
@@ -783,6 +789,7 @@ def test_run_gate_refuses_to_write_when_status_is_unreadable(monkeypatch: pytest
     assert register_calls == []
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_run_gate_runs_cleanup_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
     delete_calls: list[str] = []
     _patch_lifecycle(monkeypatch, delete_calls=delete_calls)
