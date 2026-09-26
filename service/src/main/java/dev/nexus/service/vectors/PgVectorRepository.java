@@ -3069,13 +3069,18 @@ public final class PgVectorRepository {
     private static org.jooq.Field<JSONB> mergeMetadata(org.jooq.Field<JSONB> current,
                                                         org.jooq.Field<JSONB> incoming,
                                                         List<String> deleteKeys) {
+        // jsonb_delete(jsonb, text) and jsonb_concat(jsonb, jsonb) are the pg_catalog
+        // functions behind the `-` and `||` operators: typed calls, no SQL template
+        // (RawSqlGateTest). The key is cast to text so the (jsonb, text) overload is
+        // chosen over (jsonb, VARIADIC text[]).
         org.jooq.Field<JSONB> base = current;
         if (deleteKeys != null) {
             for (String key : deleteKeys) {
-                base = DSL.field("({0} - CAST({1} AS text))", JSONB.class, base, DSL.val(key));
+                base = DSL.function("jsonb_delete", JSONB.class,
+                    base, DSL.cast(DSL.val(key), SQLDataType.CLOB));
             }
         }
-        return DSL.field("({0} || {1})", JSONB.class, base, incoming);
+        return DSL.function("jsonb_concat", JSONB.class, base, incoming);
     }
 
     /**

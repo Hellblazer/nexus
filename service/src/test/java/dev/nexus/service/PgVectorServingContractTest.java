@@ -607,19 +607,22 @@ class PgVectorServingContractTest {
             "metadatas", List.of(Map.of("lang", "py")),
             "delete_keys", List.of("quality_gate_overridden")));
 
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT jsonb_exists(metadata, 'quality_gate_overridden'), metadata->>'lang' FROM "
-                 + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
-            ps.setString(1, COL);
-            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
-            try (var rs = ps.executeQuery()) {
-                assertThat(rs.next()).isTrue();
-                assertThat(rs.getBoolean(1))
-                    .as("delete_keys on /upsert-chunks strips the stale key")
-                    .isFalse();
-                assertThat(rs.getString(2)).isEqualTo("py");
-            }
+        try (Connection su = pg.createConnection("")) {
+            var metadata = DSL.field(DSL.name("metadata"), org.jooq.JSONB.class);
+            org.jooq.JSONB stored = DSL.using(su, SQLDialect.POSTGRES)
+                .select(metadata)
+                .from(DSL.table(DSL.name("nexus", "chunks")))
+                .where(DSL.field(DSL.name("collection"), String.class).eq(COL))
+                .and(DSL.field(DSL.name("chash"), byte[].class)
+                    .eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetchOne(metadata);
+            assertThat(stored).isNotNull();
+            Map<String, Object> meta = new ObjectMapper().readValue(
+                stored.data(), new TypeReference<Map<String, Object>>() { });
+            assertThat(meta)
+                .as("delete_keys on /upsert-chunks strips the stale key")
+                .doesNotContainKey("quality_gate_overridden");
+            assertThat(meta.get("lang")).isEqualTo("py");
         }
     }
 
