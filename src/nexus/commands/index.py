@@ -1613,7 +1613,16 @@ def index_repo_cmd(
             # One topic-existence probe serves both the qgc4b self-heal gate
             # and the tevzq subset (review Medium-2: was two T2 opens).
             no_topics = _collections_without_topics(collections, client=_t2_client)
-            if files_changed > 0 or no_topics:
+            if _deferred_at_start and (files_changed > 0 or no_topics):
+                # nexus-x3gig: discovery reads every embedding of a collection
+                # to the client (RDR-193 Gap 2), the heaviest cold read in the
+                # run, so it waits out the same window as assign. Nothing is
+                # lost: a zero-topic collection self-heals on the next run,
+                # the drain assigns new chunks to the existing topics, and
+                # only an existing taxonomy's refresh waits for the next run
+                # that changes files. Decided from the mechanism, not measured.
+                click.echo(f"  Taxonomy: discovery deferred ({_deferred_at_start})")
+            elif files_changed > 0 or no_topics:
                 # nexus-tevzq: collection-grain refinement of the qgc4b gate.
                 # Only collections whose own kind wrote files this run (plus
                 # zero-topic self-heal candidates) re-discover; a collection
@@ -1937,9 +1946,10 @@ def _drain_one(name: str, drain, *, taxonomy) -> bool:
         return True
     if r.found:
         more = ", more remain" if r.truncated else ""
+        acked = f", {r.acknowledged} acknowledged stuck (skipped)" if r.acknowledged else ""
         click.echo(
             f"  Taxonomy drain: {name}: {r.assigned} of {r.found} unassigned chunk(s) "
-            f"assigned, {r.lost} lost{more}"
+            f"assigned, {r.lost} lost{acked}{more}"
         )
     return False
 

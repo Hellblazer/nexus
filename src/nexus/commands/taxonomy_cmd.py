@@ -1220,10 +1220,60 @@ def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: i
             click.echo(f"{name}: no taxonomy, nothing to assign to")
         else:
             more = "; more remain, run again" if r.truncated else ""
-            click.echo(f"{name}: {r.found} unassigned, {r.assigned} assigned, {r.lost} lost{more}")
+            acked = f", {r.acknowledged} acknowledged stuck (skipped)" if r.acknowledged else ""
+            click.echo(f"{name}: {r.found} unassigned, {r.assigned} assigned, {r.lost} lost{acked}{more}")
         any_lost = any_lost or r.lost > 0
     if any_lost:
         raise SystemExit(1)
+
+
+@taxonomy.command("acknowledge")
+@click.argument("chashes", nargs=-1)
+@click.option("--collection", "-c", default="", help="Collection the chunk belongs to (recorded with it).")
+@click.option("--note", default="", help="Why the chunk is stuck; shown with --list.")
+@click.option("--remove", is_flag=True, default=False, help="Withdraw the acknowledgment for CHASHES.")
+@click.option("--list", "list_acks", is_flag=True, default=False, help="Show every acknowledged chunk.")
+def acknowledge_cmd(chashes: tuple[str, ...], collection: str, note: str, remove: bool, list_acks: bool) -> None:
+    """Record chunks the engine permanently refuses to assign a topic.
+
+    A drain lists every unassigned chunk on every run, so one the engine
+    always refuses would fail every `nx index repo` (nexus-j7ae6). After
+    diagnosing it, acknowledge it here: the drain then skips it instead of
+    retrying, names how many it skipped on every run, and does not count it
+    as a loss. Stored per engine under the nexus config dir. `--remove`
+    withdraws an acknowledgment; `--list` shows them.
+    """
+    import datetime as _dt  # noqa: PLC0415 - stdlib, only this command needs it
+
+    import nexus.config as _nx_config  # noqa: PLC0415 - module attribute so a patched nexus_config_dir is seen
+    from nexus.mcp_infra import load_taxonomy_acks, save_taxonomy_acks, taxonomy_ack_path  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    path = taxonomy_ack_path(_nx_config.nexus_config_dir())
+    acks = load_taxonomy_acks(path)
+    if list_acks:
+        if not acks:
+            click.echo("No acknowledged stuck chunks.")
+        for chash, rec in sorted(acks.items()):
+            click.echo(f"{chash}  {rec.get('collection', '')}  {rec.get('at', '')}  {rec.get('note', '')}")
+        return
+    if not chashes:
+        raise click.UsageError("name at least one CHASH, or pass --list.")
+    bad = [c for c in chashes if not _DOC_ID_HEX_RE.match(c)]
+    if bad:
+        raise click.UsageError(f"not a 64-hex chunk chash: {', '.join(bad)}")
+    if remove:
+        gone = [c for c in chashes if acks.pop(c, None) is not None]
+        save_taxonomy_acks(path, acks)
+        click.echo(f"Withdrew {len(gone)} acknowledgment(s); those chunks count as losses again if they fail.")
+        return
+    at = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for c in chashes:
+        acks[c] = {"collection": collection, "note": note, "at": at}
+    save_taxonomy_acks(path, acks)
+    click.echo(
+        f"Acknowledged {len(chashes)} stuck chunk(s): the drain skips them and reports the count "
+        "every run. Withdraw with --remove once fixed."
+    )
 
 
 @taxonomy.command("rename")

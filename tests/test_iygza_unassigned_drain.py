@@ -301,3 +301,44 @@ def test_index_drain_says_once_that_the_engine_has_no_route(monkeypatch, capsys)
 def test_drain_of_an_unregistered_collection_is_a_quiet_no_op(t2_service_env) -> None:
     result = drain_unassigned_chunks("knowledge__iygza-never-registered__bge-base-en-v15-768__v1")
     assert result.found == 0 and result.skipped_reason == "" and not result.has_taxonomy
+
+
+def test_an_acknowledged_stuck_chunk_is_skipped_and_counted(t2_service_env) -> None:
+    """nexus-j7ae6: an acknowledged chunk is not retried and not a loss,
+    but the drain reports it every run; the rest still assign."""
+    ids, topic_id = _seed(_COLL, 4, topic=True)
+    stuck = ids[0]
+
+    out = CliRunner().invoke(
+        main, ["taxonomy", "acknowledge", stuck, "-c", _COLL, "--note", "engine refuses it"],
+    )
+    assert out.exit_code == 0, out.output
+
+    first = drain_unassigned_chunks(_COLL)
+    assert (first.found, first.assigned, first.lost, first.acknowledged) == (4, 3, 0, 1)
+    got = HttpTaxonomyStore().get_assignments_for_docs(ids)
+    assert stuck not in got and all(got[c] == topic_id for c in ids[1:])
+
+    again = drain_unassigned_chunks(_COLL)
+    assert (again.found, again.assigned, again.acknowledged) == (1, 0, 1), "reported every run"
+
+    listed = CliRunner().invoke(main, ["taxonomy", "acknowledge", "--list"])
+    assert stuck in listed.output and "engine refuses it" in listed.output
+
+    CliRunner().invoke(main, ["taxonomy", "acknowledge", stuck, "--remove"])
+    after = drain_unassigned_chunks(_COLL)
+    assert after.acknowledged == 0 and after.assigned == 1
+
+
+def test_acknowledge_rejects_a_non_chash() -> None:
+    out = CliRunner().invoke(main, ["taxonomy", "acknowledge", "not-a-chash"])
+    assert out.exit_code == 2 and "not a 64-hex chunk chash" in out.output
+
+
+def test_the_drain_line_names_acknowledged_skips(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        mcp_infra, "drain_unassigned_chunks",
+        lambda name, **kw: DrainResult(name, True, found=3, assigned=2, acknowledged=1),
+    )
+    _drain_repo_collections(["docs__a"])
+    assert "2 of 3 unassigned chunk(s) assigned, 0 lost, 1 acknowledged stuck (skipped)" in capsys.readouterr().out

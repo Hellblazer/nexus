@@ -315,3 +315,36 @@ def test_the_run_reports_how_many_chunks_it_deferred(tmp_path, monkeypatch, t2_s
 
     assert out.exit_code == 0, out.output
     assert "Taxonomy: 7 chunk(s) deferred" in out.output, out.output
+
+
+def test_discovery_waits_out_the_window_too(tmp_path, monkeypatch, t2_service_env) -> None:
+    """nexus-x3gig: a run that changed files still skips discovery while
+    deferred, and runs it when not."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "nexus.commands.index.run_collection_postprocessing",
+        lambda collections, **kw: calls.append("discover"),
+    )
+    monkeypatch.setattr(mcp_infra, "drain_unassigned_chunks", lambda name, **kw: DrainResult(name, True))
+
+    def _run(uptime):
+        calls.clear()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo = tmp_path / "myrepo"
+        repo.mkdir(exist_ok=True)
+        (repo / ".git").mkdir(exist_ok=True)
+        reg = MagicMock()
+        reg.get.return_value = {"collection": "code__myrepo", "docs_collection": "docs__myrepo"}
+        monkeypatch.setattr(mcp_infra, "engine_process_uptime_seconds", lambda: uptime)
+        with patch("nexus.commands.index._registry", return_value=reg), \
+                patch("nexus.indexer.index_repository", return_value={"files_changed": 3}):
+            return CliRunner().invoke(main, ["index", "repo", str(repo)])
+
+    out = _run(30)
+    assert out.exit_code == 0, out.output
+    assert "discovery deferred (engine restarted 30 s ago)" in out.output, out.output
+    assert calls == []
+
+    out = _run(None)
+    assert out.exit_code == 0, out.output
+    assert calls == ["discover"]

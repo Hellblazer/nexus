@@ -1822,6 +1822,7 @@ nx taxonomy review --auto --batch-size 20       # topics per claude_dispatch cal
 nx taxonomy label                               # batch-relabel with Claude haiku
 nx taxonomy assign doc-id "topic label"         # manually assign a doc (see below)
 nx taxonomy drain -c COLLECTION                 # assign chunks that have no topic (see below)
+nx taxonomy acknowledge CHASH -c COLL --note X  # mark a chunk the engine always refuses (see below)
 nx taxonomy rename "old label" "new label"      # rename a topic
 nx taxonomy merge "source" "target"             # merge topics
 nx taxonomy split "label" --k 3                 # split into sub-topics
@@ -1864,7 +1865,11 @@ Assign every chunk a collection holds with no topic from its own taxonomy: `nx t
 
 `nx index repo` runs the same drain for the repo's collections at the end of every run, including a run with no changed files, and prints a line only for a collection where it found something.
 
-`nx index repo` defers taxonomy assignment, both the per-flush assign and this drain, when the engine's `/version` reports `process_uptime_seconds` under 600 (restarted within ten minutes: cold cache, the nexus-mg8gx loss), or when a run against the same engine lost an assignment in the last 15 minutes (recorded in `~/.config/nexus/taxonomy_assign_failed_at.<digest>`, one file per engine endpoint; delete it to stop the backoff early). `NX_TAXONOMY_DEFER_UPTIME_S` and `NX_TAXONOMY_FAILURE_BACKOFF_S` override the two thresholds. It prints `Taxonomy deferred: <reason>` once. Deferred chunks are not losses and do not fail the run; a later run's drain assigns them. Within one run, a batch still lost after the retry stops further assign calls for the rest of that run. An engine or edge that omits the uptime field defers nothing (the field only ever excludes). `nx taxonomy drain` and the MCP `store_put` path never defer (nexus-tawfg).
+`nx index repo` defers taxonomy assignment, both the per-flush assign and this drain, when the engine's `/version` reports `process_uptime_seconds` under 600 (restarted within ten minutes: cold cache, the nexus-mg8gx loss), or when a run against the same engine lost an assignment in the last 15 minutes (recorded in `~/.config/nexus/taxonomy_assign_failed_at.<digest>`, one file per engine endpoint; delete it to stop the backoff early). `NX_TAXONOMY_DEFER_UPTIME_S` and `NX_TAXONOMY_FAILURE_BACKOFF_S` override the two thresholds. It prints `Taxonomy deferred: <reason>` once, and defers discovery in the same window (nexus-x3gig; a collection with no topics yet self-heals on the next run). Deferred chunks are not losses and do not fail the run; a later run's drain assigns them. Within one run, a batch still lost after the retry stops further assign calls for the rest of that run. An engine or edge that omits the uptime field defers nothing (the field only ever excludes). `nx taxonomy drain` and the MCP `store_put` path never defer (nexus-tawfg).
+
+### `nx taxonomy acknowledge`
+
+`nx taxonomy acknowledge CHASH [...] [-c COLLECTION] [--note TEXT]`, `--remove`, `--list`. The drain lists every unassigned chunk on every run, so a chunk the engine always refuses to assign would fail every `nx index repo` (the flush and PDF-gate failures are scoped to the git diff and stop recurring; the drain is not). After diagnosing such a chunk, acknowledge it: the drain skips it instead of retrying it, prints `N acknowledged stuck (skipped)` on every run, and does not count it as a loss. Unacknowledged failures still fail the run. Stored per engine in `~/.config/nexus/taxonomy_stuck_acknowledged.<digest>.json`. `--remove` withdraws the acknowledgment once the chunk is fixed (nexus-j7ae6).
 
 ### `nx taxonomy assign`
 

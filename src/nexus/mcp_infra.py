@@ -333,17 +333,66 @@ def taxonomy_failure_marker_path(config_dir: Any) -> Any:
     against one never defers another (round 1). An endpoint that cannot be
     resolved gets its own ``unresolved`` file.
     """
-    import hashlib  # noqa: PLC0415 — stdlib, only this helper needs it
     from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    return Path(config_dir) / f"{TAXONOMY_FAILURE_MARKER}.{_engine_file_key()}"
+
+
+def _engine_file_key() -> str:
+    """A filesystem-safe digest of the resolved engine URL, ``unresolved``
+    when there is none. Shared by the per-engine taxonomy state files."""
+    import hashlib  # noqa: PLC0415 — stdlib, only this helper needs it
 
     try:
         from nexus.db.http_vector_client import _resolve_endpoint  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client imports this module)
 
         url, _token = _resolve_endpoint()
-        key = hashlib.sha256(url.rstrip("/").encode()).hexdigest()[:16]
+        return hashlib.sha256(url.rstrip("/").encode()).hexdigest()[:16]
     except Exception:  # noqa: BLE001 — an unresolvable endpoint fails the index run elsewhere; here it only picks a file name
-        key = "unresolved"
-    return Path(config_dir) / f"{TAXONOMY_FAILURE_MARKER}.{key}"
+        return "unresolved"
+
+
+# nexus-j7ae6 (Sam 2026-09-25: visible acknowledgment). A chunk the engine
+# permanently refuses to assign would fail every `nx index repo` forever,
+# because the drain lists the whole collection each run (unlike the flush
+# and PDF-gate failures, which are scoped to the git diff and stop
+# recurring). An operator who has diagnosed one records it here; the drain
+# then skips it instead of retrying, names the count on every run, and does
+# not count it as a loss. Anything unacknowledged still fails the run.
+
+#: Prefix of the per-engine acknowledgment file under the nexus config dir.
+TAXONOMY_ACK_FILE = "taxonomy_stuck_acknowledged"
+
+
+def taxonomy_ack_path(config_dir: Any) -> Any:
+    """Acknowledged stuck chunks for the engine this process talks to."""
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    return Path(config_dir) / f"{TAXONOMY_ACK_FILE}.{_engine_file_key()}.json"
+
+
+def load_taxonomy_acks(path: Any) -> dict[str, dict[str, str]]:
+    """``{chash: {"collection", "note", "at"}}``; empty when absent or unreadable."""
+    import json  # noqa: PLC0415 — stdlib, only this helper needs it
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+
+
+def save_taxonomy_acks(path: Any, acks: dict[str, dict[str, str]]) -> None:
+    """Write *acks* atomically (temp file, then rename)."""
+    import json  # noqa: PLC0415 — stdlib, only this helper needs it
+    from pathlib import Path  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(acks, indent=1, sort_keys=True) + "\n")
+    os.replace(tmp, target)
 
 _taxonomy_deferral = ""
 _taxonomy_breaker_armed = False
@@ -1471,6 +1520,9 @@ class DrainResult:
     lost: int = 0
     truncated: bool = False
     skipped_reason: str = ""
+    #: Listed chunks skipped because an operator acknowledged them as stuck
+    #: (nexus-j7ae6); not assigned, not lost.
+    acknowledged: int = 0
 
 
 def drain_unassigned_chunks(
@@ -1481,6 +1533,7 @@ def drain_unassigned_chunks(
     deadline_s: float = _TAXONOMY_ASSIGN_MAX_RETRY_SECONDS,
     now_fn: Any = time.monotonic,
     taxonomy: Any = None,
+    acknowledged: Any = None,
 ) -> DrainResult:
     """Assign *collection*'s manifest-backed chunks that have no assignment
     to its own topics, page by page, up to *max_chunks* or *deadline_s*.
@@ -1501,14 +1554,18 @@ def drain_unassigned_chunks(
     reason = taxonomy_deferral()
     if reason:
         return DrainResult(collection, skipped_reason=f"deferred: {reason}")
+    if acknowledged is None:
+        import nexus.config as _nx_config  # noqa: PLC0415 — deferred to avoid circular import; module attribute so a patched nexus_config_dir is seen
+
+        acknowledged = set(load_taxonomy_acks(taxonomy_ack_path(_nx_config.nexus_config_dir())))
     deadline = now_fn() + deadline_s
     after: str | None = None
     has_taxonomy = False
-    found = assigned = lost = 0
+    found = assigned = lost = acked = 0
     while True:
         remaining = max_chunks - found
         if remaining <= 0 or now_fn() >= deadline:
-            return DrainResult(collection, has_taxonomy, found, assigned, lost, truncated=True)
+            return DrainResult(collection, has_taxonomy, found, assigned, lost, truncated=True, acknowledged=acked)
         try:
             n = min(page_size, remaining)
             if taxonomy is not None:
@@ -1534,8 +1591,18 @@ def drain_unassigned_chunks(
         has_taxonomy = bool(page.get("has_taxonomy"))
         chashes = list(page.get("chashes") or [])
         if not has_taxonomy or not chashes:
-            return DrainResult(collection, has_taxonomy, found, assigned, lost)
+            return DrainResult(collection, has_taxonomy, found, assigned, lost, acknowledged=acked)
         found += len(chashes)
+        cursor = page.get("next_after") or None
+        if acknowledged:
+            to_assign = [c for c in chashes if c not in acknowledged]
+            acked += len(chashes) - len(to_assign)
+            chashes = to_assign
+        if not chashes:
+            after = cursor
+            if after is None:
+                return DrainResult(collection, has_taxonomy, found, assigned, lost, acknowledged=acked)
+            continue
         _record_taxonomy_assign_attempt()
         _result, lost_ids, failures = _assign_from_chashes_with_retry(
             collection, chashes, deadline=deadline,
@@ -1550,9 +1617,9 @@ def drain_unassigned_chunks(
             _record_taxonomy_assign_batch_failure(len(lost_ids))
         assigned += len(chashes) - len(lost_ids)
         lost += len(lost_ids)
-        after = page.get("next_after") or None
+        after = cursor
         if after is None:
-            return DrainResult(collection, has_taxonomy, found, assigned, lost)
+            return DrainResult(collection, has_taxonomy, found, assigned, lost, acknowledged=acked)
 
 
 def taxonomy_assign_batch_hook(
