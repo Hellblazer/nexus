@@ -456,90 +456,17 @@ def test_manifest_hook_exception_when_self_heal_is_also_faulted(
     assert "--force" not in error_lines[0], error_lines[0]
 
 
-def test_heal_manifest_gaps_reports_which_documents_it_reconciled(
-    tmp_path: Path,
-) -> None:
-    """nexus-wbfpw.29 round 3: ``ManifestHealResult.reconciled`` was a
-    bare COUNT with no way to identify which documents it covered --
-    closing the self-heal/exit-check coordination gap needed the actual
-    doc_ids. Proves ``reconciled_doc_ids`` is populated (and agrees with
-    the count) against the same directly-seeded gap shape
-    ``test_reconcile_is_the_remedy_the_warning_actually_names`` uses,
-    calling ``heal_manifest_gaps`` directly rather than through the CLI.
-    """
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-    from nexus.catalog.http_catalog_client import HttpCatalogClient
-    from nexus.catalog.manifest_heal import heal_manifest_gaps
-    from nexus.db import make_t3
-    from nexus.db.http_vector_client import HttpVectorClient
-
-    collection = "docs__wbfpw29-heal-ids-gate__bge-base-en-v15-768__v1"
-    content_hash = "cc" * 32
-    chash = "dd" * 32
-
-    with HttpCatalogClient() as cat:
-        owner = cat.register_owner(
-            "wbfpw29-heal-ids-owner", "repo", repo_hash="wbfpw29-heal-ids-hash",
-        )
-        doc_id = str(cat.register(
-            owner, "Heal Ids Gate Doc",
-            content_type="pdf", physical_collection=collection,
-            chunk_count=1, meta={"content_hash": content_hash},
-        ))
-
-    HttpVectorClient().upsert_chunks_with_embeddings(
-        collection_name=collection,
-        ids=[chash],
-        documents=["nexus-wbfpw29 heal-ids gate content"],
-        embeddings=[[]],
-        metadatas=[{
-            "content_hash": content_hash,
-            "chunk_text_hash": chash,
-            "chunk_start_char": 0, "chunk_end_char": 10,
-            "line_start": 0, "line_end": 0,
-        }],
-    )
-
-    reader = make_catalog_reader()
-    entries = [e for e in reader.all_documents() if str(e.tumbler) == doc_id]
-    assert len(entries) == 1
-
-    result = heal_manifest_gaps(entries, reader, make_t3, make_catalog_writer)
-
-    assert result.reconciled == 1
-    assert result.reconciled_doc_ids == [doc_id]
-
-
 def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
     tmp_path: Path,
 ) -> None:
-    """nexus-wbfpw.29 round 5 (critique CRITICAL): a rebuilt manifest
-    SHORTER than the document's registered ``chunk_count`` used to be
-    treated identically to a complete rebuild for the exit-code decision
-    -- ``_heal_collections`` unconditionally appended to
-    ``reconciled_doc_ids`` regardless of whether the shortfall was benign
-    RDR-108 duplicate-content collapse or a genuinely partial rebuild,
-    and round 3/4 newly wired that ambiguous signal into ``nx index
-    repo``'s fail-loud exit-code check. This drives the REAL
-    ``heal_manifest_gaps`` against a document registered with
-    ``chunk_count=2`` while T3 genuinely holds only ONE matching chunk row
-    (not a duplicate-text collapse -- the one chunk's content is unique)
-    -- the exact "chunks are genuinely gone/never fully written" shape
-    ``manifest_heal.py``'s own ``lost``/``never_chunked`` classification
-    exists to distinguish from a healthy heal, proving the write still
-    happens (``reconciled``/``reconciled_doc_ids`` -- partial repair is
-    still real work) and the shortfall is tracked in ``dup_collapsed``
-    for the operator-facing count.
-
-    Round 6 dropped this function's own ``confirmed_doc_ids`` output
-    entirely (a per-entry "rebuilt count >= chunk_count" check that read
-    chunk_count==0, and so trivially passed, for any document whose
-    manifest hook raised) -- confirmation for the exit-code decision now
-    happens elsewhere, via a post-run catalog manifest read-back (see
-    ``commands._helpers.resolve_confirmed_write_failure_doc_ids`` and its
-    own dedicated tests). This test's job is narrower now: prove
-    ``heal_manifest_gaps`` itself still performs and accounts for a
-    genuinely partial rebuild correctly.
+    """nexus-wbfpw.29: drives the REAL ``heal_manifest_gaps`` against a
+    document registered with ``chunk_count=2`` while T3 holds only ONE
+    unique-content chunk for it (a genuine shortfall, not RDR-108
+    duplicate collapse). The partial manifest is still written and counted
+    in ``reconciled``, and the shortfall is tracked in ``dup_collapsed``.
+    Whether a write failure counts as repaired is decided elsewhere, by
+    reading the manifest back after the run
+    (``commands._helpers.resolve_confirmed_write_failure_doc_ids``).
     """
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
     from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -585,7 +512,6 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
 
     # The write happened -- self-heal did real, useful work.
     assert result.reconciled == 1
-    assert result.reconciled_doc_ids == [doc_id]
     # The shortfall against the registered chunk_count is tracked, not
     # hidden -- but this function no longer tries to render a verdict
     # ("confirmed" vs not) about it; that verdict is computed downstream

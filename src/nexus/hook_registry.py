@@ -700,18 +700,18 @@ def _record_manifest_hook_batch_exception(
         # (the same ``chunk_text_hash`` field ``manifest_write_batch_hook``
         # itself reads) — feeds the post-run verification that decides
         # whether self-heal actually closed the gap this exception left.
-        chash_by_doc: dict[str, set[str]] = {}
+        chash_by_doc: dict[str, list[str]] = {}
         for meta in (metadatas or []):
             doc_id = catalog_doc_id
             if not doc_id and isinstance(meta, dict):
                 doc_id = meta.get("doc_id", "")
             if not doc_id:
                 continue
-            bucket = chash_by_doc.setdefault(doc_id, set())
-            if isinstance(meta, dict):
-                chash = meta.get("chunk_text_hash", "")
-                if chash:
-                    bucket.add(chash)
+            # Unfiltered: a row with no chash makes the recorder mark the
+            # doc UNKNOWN rather than confirm against a partial expectation.
+            chash_by_doc.setdefault(doc_id, []).append(
+                meta.get("chunk_text_hash", "") if isinstance(meta, dict) else ""
+            )
         if not chash_by_doc:
             _record_manifest_identity_drop(collection, len(doc_ids))
             return

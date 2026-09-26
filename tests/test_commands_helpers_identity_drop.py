@@ -563,3 +563,24 @@ def test_resolve_confirmed_write_failure_doc_ids_reader_failure_confirms_nothing
     )
 
     assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_manifest_write_failure_with_a_blank_chash_records_unknown():
+    """A failing write whose rows include one with no chash only partly
+    knows what it was writing. Filtering the blank out would leave a
+    partial expectation that a partial repair could satisfy, so the doc
+    is recorded UNKNOWN, also when an earlier slice for the same doc
+    recorded a complete set."""
+    from nexus.mcp_infra import (
+        _record_manifest_write_failure,
+        get_manifest_write_failure_chashes,
+    )
+
+    _record_manifest_write_failure("1.2.7", ["a" * 64, ""])
+    _record_manifest_write_failure("1.2.8", ["b" * 64])
+    _record_manifest_write_failure("1.2.8", ["", "c" * 64])
+
+    expected = get_manifest_write_failure_chashes()
+    assert expected["1.2.7"] is None
+    assert expected["1.2.8"] is None
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()

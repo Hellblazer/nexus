@@ -17,6 +17,8 @@ from nexus.config import default_db_path
 from nexus.service_handles import SharedClientSlot, cached_endpoint_key
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     import httpx
 
 
@@ -1910,10 +1912,10 @@ def _record_manifest_write_failure(
     printed id list repeated the same doc_id — cosmetically wrong and
     proportionally weakened "names the documents to re-index".
 
-    *chashes* (nexus-wbfpw.29 round 6): the chash set THIS failing write
-    was trying to put in *doc_id*'s manifest, when the caller has the
-    batch rows in hand to compute it. ``None`` (the default) records the
-    doc as UNKNOWN-expectation — see ``_MANIFEST_WRITE_FAILURE_CHASHES``'s
+    *chashes* (nexus-wbfpw.29 round 6): the chashes THIS failing write
+    was trying to put in *doc_id*'s manifest, unfiltered, when the caller
+    has the batch rows in hand. ``None`` (the default), or any blank
+    entry, records the doc as UNKNOWN-expectation — see ``_MANIFEST_WRITE_FAILURE_CHASHES``'s
     module comment for why this is sticky and why unknown/empty never
     confirms.
     """
@@ -1923,10 +1925,14 @@ def _record_manifest_write_failure(
         if doc_id not in _MANIFEST_WRITE_FAILURES:
             _MANIFEST_WRITE_FAILURES.append(doc_id)
         existing = _MANIFEST_WRITE_FAILURE_CHASHES.get(doc_id, set())
-        if existing is None or chashes is None:
+        incoming = None if chashes is None else list(chashes)
+        # A row with no chash means this write's expectation is only
+        # partly known; a partial expectation could confirm a partial
+        # repair, so the doc becomes UNKNOWN (never confirmed).
+        if existing is None or incoming is None or not all(incoming):
             _MANIFEST_WRITE_FAILURE_CHASHES[doc_id] = None
         else:
-            existing |= set(chashes)
+            existing |= set(incoming)
             _MANIFEST_WRITE_FAILURE_CHASHES[doc_id] = existing
 
 
@@ -2302,7 +2308,7 @@ def manifest_write_batch_hook(
         for _doc_id in sorted(by_doc):
             _record_manifest_write_failure(
                 _doc_id,
-                {m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]} - {""},
+                [m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]],
             )
         return
     if _gate is None:
@@ -2317,7 +2323,7 @@ def manifest_write_batch_hook(
         for _doc_id in sorted(by_doc):
             _record_manifest_write_failure(
                 _doc_id,
-                {m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]} - {""},
+                [m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]],
             )
         return
     # (The local-mode read-handle cleanup that lived here — a lint-dodging
@@ -2358,7 +2364,7 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
 
 def _apply_combined_write_response(
     res: dict, complete_map: dict[str, str], collection: str | None,
-    chash_by_doc: "dict[str, set[str]] | None" = None,
+    chash_by_doc: "dict[str, list[str]] | None" = None,
 ) -> list[str]:
     """Record accounting from a nexus-kl2z6/nexus-wxjr6 combined write's
     response: failed docs, completion refusals, and — the flush-grain
@@ -3161,7 +3167,7 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                     # post-run verification can confirm whether self-heal
                     # actually closed the gap.
                     _failed_chashes = {
-                        _d: {c["chash"] for c in _chunks if c["chash"]}
+                        _d: [c["chash"] for c in _chunks]
                         for _d, _chunks in full_docs
                     }
                     for doc_id in failed:
@@ -3236,7 +3242,7 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                     )
                     for doc_id, _chunks in full_docs:
                         _record_manifest_write_failure(
-                            doc_id, {c["chash"] for c in _chunks if c["chash"]})
+                            doc_id, [c["chash"] for c in _chunks])
                     wrote_many = True
         if wrote_many:
             # per-doc loop handles ONLY the continuation remainder (may
@@ -3374,7 +3380,7 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
             _record_manifest_write_failure(
-                doc_id, {c["chash"] for c in chunks if c["chash"]})
+                doc_id, [c["chash"] for c in chunks])
 
 
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────

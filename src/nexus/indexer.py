@@ -5396,7 +5396,7 @@ def _run_index(
             _apply_combined_write_response(
                 res, complete_map, collection,
                 chash_by_doc={
-                    _d: {c["chash"] for c in _chunks if c["chash"]}
+                    _d: [c["chash"] for c in _chunks]
                     for _d, _chunks in full_docs
                 },
             )

@@ -59,37 +59,6 @@ class ManifestHealResult:
     #: ``never_chunked`` had chunk_count == 0 (expected — nothing to rebuild).
     lost: list = field(default_factory=list)
     never_chunked: list = field(default_factory=list)
-    #: nexus-wbfpw.29 round 3: the tumbler (str) of every entry actually
-    #: reconciled this pass -- ``reconciled`` was a bare count with no way
-    #: to identify WHICH documents it covered. len(reconciled_doc_ids) ==
-    #: reconciled always holds (both incremented together, same call site
-    #: below) -- but "reconciled" only means a manifest write happened,
-    #: NOT that the rebuilt manifest is complete: a shortfall against
-    #: entry.chunk_count can legitimately be RDR-108 duplicate-content
-    #: collapse (harmless, tracked in dup_collapsed/dup_old_total/
-    #: dup_new_total above), or it can be a genuinely partial rebuild --
-    #: this core has no way to tell the two apart from the shortfall
-    #: alone, so it does not guess and does not attempt to.
-    #:
-    #: nexus-wbfpw.29 round 5 ADDED a ``confirmed_doc_ids`` field here
-    #: (rebuilt count >= entry.chunk_count) so the indexer's own same-run
-    #: self-heal call (nexus-c21fk) could tell `nx index repo`'s exit-code
-    #: check which manifest-hook-exception documents it had fully
-    #: repaired. Round 6 REMOVED it: for a document whose manifest hook
-    #: RAISED (as opposed to detecting and reporting its own failure),
-    #: entry.chunk_count reads 0 AT THIS POINT (only a successful hook
-    #: write ever bumps it), so "rebuilt count >= 0" was true of ANY
-    #: rebuild -- including a genuinely partial one -- making the field a
-    #: false confirmation on the exact class of document this bead exists
-    #: to protect. The exit-code decision now verifies confirmation a
-    #: different way entirely: AFTER the whole run (self-heal included)
-    #: completes, by reading the catalog manifest back and checking that
-    #: every chash the failing write was trying to record is actually
-    #: present (``commands._helpers.resolve_confirmed_write_failure_doc_
-    #: ids``) -- a check this function's own per-entry, in-flight view
-    #: cannot perform, since it never sees what a DIFFERENT call (the
-    #: manifest-write hook, earlier in the same run) was trying to write.
-    reconciled_doc_ids: list = field(default_factory=list)
 
     @property
     def unmatched(self) -> list:
@@ -316,15 +285,12 @@ def _heal_collections(
                 # design, so a rebuilt manifest can legitimately have fewer
                 # rows than the document's stale chunk_count. Not an error —
                 # tracked so the summary reports it instead of hiding it.
-                # nexus-wbfpw.29 round 5/6: but a shortfall can EQUALLY be a
-                # genuinely partial rebuild (this core cannot distinguish
-                # the two from the count alone, and — round 6 — a document
-                # whose manifest hook RAISED reads chunk_count==0 here,
-                # which this comparison can never even flag as short). The
-                # exit-code decision does NOT rely on this function to tell
-                # the two apart; see the class docstring on
-                # ``reconciled_doc_ids`` for where that confirmation
-                # actually happens now.
+                # A shortfall can equally be a partial rebuild; this core
+                # cannot tell the two apart, and a document whose manifest
+                # hook raised reads chunk_count==0 here. nx index repo's
+                # exit code therefore does not rely on this accounting: it
+                # reads the manifest back after the run
+                # (commands._helpers.resolve_confirmed_write_failure_doc_ids).
                 result.dup_collapsed += 1
                 result.dup_old_total += entry.chunk_count
                 result.dup_new_total += len(chunks)
@@ -350,4 +316,3 @@ def _heal_collections(
                     result.write_failed += 1
                     continue
             result.reconciled += 1
-            result.reconciled_doc_ids.append(str(entry.tumbler))
