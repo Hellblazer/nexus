@@ -49,6 +49,15 @@ def test_a_late_queued_post_never_masks_completed_on_a_tie() -> None:
     assert s.verdict == "failed"
 
 
+def test_a_stale_redelivery_with_a_later_timestamp_never_masks_completed() -> None:
+    # A manual redelivery of an old queued event, after its tuple was purged,
+    # lands as a new row with a LATER created_at (RDR-220 gate round 2).
+    posts = [_p("2026-09-26T10:05:00Z", state="completed", conclusion="success"),
+             _p("2026-09-26T12:00:00Z", state="queued")]
+    [s] = cs.fold(posts, SHA)
+    assert (s.state, s.verdict) == ("completed", "green")
+
+
 def test_a_rerun_attempt_supersedes_the_failed_one() -> None:
     posts = [_p("2026-09-26T10:05:00Z", state="completed", conclusion="failure", attempt=1),
              _p("2026-09-26T10:09:00Z", state="in_progress", attempt=2)]

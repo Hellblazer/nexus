@@ -61,9 +61,12 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
 
     *posts* are ``(created_at, body, dims)``. Only the newest attempt of each
     (workflow, job) is kept, because a rerun supersedes the earlier attempt.
-    Within one attempt the newest post wins; on a timestamp tie the more
-    advanced state wins, so a late-arriving ``queued`` never masks
-    ``completed``.
+    Within one attempt a job's state only moves forward (queued, then
+    in_progress, then completed), so the most advanced state wins and the
+    newest post breaks a tie. Recency alone would let a stale delivery win:
+    GitHub's manual redelivery of an old ``queued`` event, after its tuple
+    expired and was purged, lands as a NEW row with a later ``created_at``
+    (RDR-220 gate round 2).
     """
     latest: dict[tuple[str, str, int], Status] = {}
     for created_at, body, dims in posts:
@@ -78,8 +81,8 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
                       str(body.get("conclusion") or ""), str(body.get("url", "")),
                       created_at)
         prev = latest.get(key)
-        if prev is None or (cand.updated_at, _STATE_RANK[cand.state]) >= (
-                prev.updated_at, _STATE_RANK[prev.state]):
+        if prev is None or (_STATE_RANK[cand.state], cand.updated_at) >= (
+                _STATE_RANK[prev.state], prev.updated_at):
             latest[key] = cand
     newest_attempt: dict[tuple[str, str], int] = {}
     for wf, job, attempt in latest:
