@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
+import httpx
 import structlog
 
 from nexus.db.t2.http_token_store import HttpTokenStore
@@ -203,6 +204,9 @@ def token_group() -> None:
 
 def _print_issued(result: dict[str, object]) -> None:
     click.echo(f"Tenant: {result['tenant']}")
+    scope = result.get("scope")
+    if scope:
+        click.echo(f"Scope: {scope}")
     click.echo("Token (shown once — store it now):")
     click.echo(str(result["token"]))
 
@@ -235,7 +239,14 @@ def issue(tenant: str, label: str | None, ttl_seconds: int | None, scope: str | 
 @click.option("--tenant", required=True, help="Tenant whose tokens to rotate.")
 @click.option("--grace", "grace_seconds", type=int, default=None,
               help="Overlap window in seconds before old tokens expire (service default: 300).")
-def rotate(tenant: str, grace_seconds: int | None) -> None:
+@click.option("--scope", type=click.Choice(["tenant", "mint", "mint-locked", "board-ci"]), default=None,
+              help="Rotate only tokens of this scope, leaving the tenant's other-scoped "
+                   "tokens untouched (nexus-r3ur5). Required when the tenant holds live "
+                   "tokens of more than one scope — the engine refuses (409) rather than "
+                   "silently collapsing a mixed set to one arbitrary scope. Omit when the "
+                   "tenant holds exactly one scope (or none yet); the rotated scope is "
+                   "then whatever that one scope is.")
+def rotate(tenant: str, grace_seconds: int | None, scope: str | None) -> None:
     """Rotate TENANT's tokens with zero downtime.
 
     Issues a new token and sets the previous live tokens to expire after the grace
@@ -244,8 +255,22 @@ def rotate(tenant: str, grace_seconds: int | None) -> None:
     a restart and will not see 401s during the window.
     """
     with HttpTokenStore() as store:
-        result = store.rotate_token(tenant, grace_seconds)
-    _log.info("service.token.rotate", tenant=tenant, grace_seconds=grace_seconds)
+        try:
+            result = store.rotate_token(tenant, grace_seconds, scope)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                try:
+                    body = exc.response.json()
+                except ValueError:
+                    body = {}
+                scopes = body.get("scopes")
+                scopes_str = ", ".join(scopes) if scopes else "multiple scopes"
+                raise click.ClickException(
+                    f"Tenant '{tenant}' holds live tokens of {scopes_str}; pass "
+                    "--scope to rotate one scope at a time. Nothing was rotated."
+                ) from exc
+            raise
+    _log.info("service.token.rotate", tenant=tenant, grace_seconds=grace_seconds, scope=scope)
     click.echo(f"Rotated tokens for tenant '{tenant}'. Old tokens remain valid through the grace window.")
     _print_issued(result)
 

@@ -121,6 +121,17 @@ class TokenAdminHandlerTest {
             .isEqualTo(400);
     }
 
+    @Test
+    void issue_responseNamesScope() throws Exception {
+        // The scope-collapse finding (nexus-r3ur5 critique) traced partly to the issue/
+        // rotate responses never surfacing which scope an operator actually got.
+        JsonNode defaulted = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-scope-resp\"}");
+        assertThat(defaulted.get("scope").asText()).isEqualTo("tenant");
+        JsonNode boardCi = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-scope-resp-2\",\"scope\":\"board-ci\"}");
+        assertThat(boardCi.get("scope").asText()).isEqualTo("board-ci");
+    }
+
     // ── tenant create ──────────────────────────────────────────────────────────
 
     @Test
@@ -155,6 +166,73 @@ class TokenAdminHandlerTest {
                     SERVICE_TOKENS.REVOKED_AT.isNull(), SERVICE_TOKENS.EXPIRES_AT.isNull())
                 .fetchOne(0, long.class);
             assertThat(fresh).as("exactly one fresh non-expiring token").isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void rotate_responseNamesScope() throws Exception {
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-rot-scope-resp\",\"scope\":\"mint\"}");
+        JsonNode r = postJson("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-rot-scope-resp\"}");
+        assertThat(r.get("scope").asText()).isEqualTo("mint");
+    }
+
+    @Test
+    void rotate_withExplicitScope_rotatesOnlyThatScopeOverHttp() throws Exception {
+        // nexus-r3ur5: a tenant holding BOTH a tenant-scope and a board-ci-scope token
+        // rotates only board-ci when scope is given; the tenant-scope token is untouched.
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-rot-mixed\"}");
+        JsonNode boardCi = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-rot-mixed\",\"scope\":\"board-ci\"}");
+        String boardCiHash = boardCi.get("token_hash").asText();
+
+        JsonNode rotated = postJson("/v1/service-tokens/rotate",
+            "{\"tenant\":\"tenant-rot-mixed\",\"scope\":\"board-ci\",\"grace_seconds\":300}");
+        assertThat(rotated.get("scope").asText()).isEqualTo("board-ci");
+
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            var boardCiRow = dsl.select(SERVICE_TOKENS.EXPIRES_AT)
+                .from(SERVICE_TOKENS).where(SERVICE_TOKENS.TOKEN_HASH.eq(boardCiHash)).fetchOne();
+            assertThat(boardCiRow).isNotNull();
+            assertThat(boardCiRow.value1())
+                .as("the rotated board-ci token must now be grace-expiring").isNotNull();
+            long tenantScopeUntouched = dsl.selectCount().from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TENANT_ID.eq("tenant-rot-mixed"),
+                    SERVICE_TOKENS.SCOPE.eq("tenant"), SERVICE_TOKENS.EXPIRES_AT.isNull(),
+                    SERVICE_TOKENS.REVOKED_AT.isNull())
+                .fetchOne(0, long.class);
+            assertThat(tenantScopeUntouched)
+                .as("the tenant-scope token must be untouched by a board-ci-scoped rotate")
+                .isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void rotate_mixedScopeWithNoScope_refuses409_andExpiresNothing() throws Exception {
+        // The nexus-r3ur5 critique's ship-blocker: a tenant holding tokens of more than
+        // one scope must not have rotate silently collapse to one scope. Refuse instead.
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-rot-refuse\"}");
+        JsonNode boardCi = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-rot-refuse\",\"scope\":\"board-ci\"}");
+        String boardCiHash = boardCi.get("token_hash").asText();
+
+        var resp = sendAs(BOOT, "/v1/service-tokens/rotate", "{\"tenant\":\"tenant-rot-refuse\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        JsonNode body = MAPPER.readTree(resp.body());
+        assertThat(body.get("error").asText())
+            .contains("multiple scopes").contains("scope");
+        java.util.List<String> scopes = new java.util.ArrayList<>();
+        body.get("scopes").forEach(n -> scopes.add(n.asText()));
+        assertThat(scopes).containsExactlyInAnyOrder("tenant", "board-ci");
+
+        // Nothing expired: the board-ci token is still live with no expiry set.
+        try (Connection su = pg.createConnection("")) {
+            var row = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
+                .from(SERVICE_TOKENS).where(SERVICE_TOKENS.TOKEN_HASH.eq(boardCiHash)).fetchOne();
+            assertThat(row).isNotNull();
+            assertThat(row.value1()).as("a refused rotate must not grace-expire anything").isNull();
+            assertThat(row.value2()).isNull();
         }
     }
 

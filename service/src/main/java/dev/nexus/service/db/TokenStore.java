@@ -454,9 +454,39 @@ public final class TokenStore {
      * @param tenant       the tenant to rotate (not {@code '*'})
      * @param graceSeconds overlap window before the old tokens expire
      */
-    /** A rotation outcome: the freshly issued token + the old hashes now grace-expiring. */
-    public record RotationResult(IssuedToken issued, List<String> expiredHashes) {
+    /** A rotation outcome: the freshly issued token, the old hashes now grace-expiring,
+     *  and the scope the replacement token carries. */
+    public record RotationResult(IssuedToken issued, List<String> expiredHashes, String scope) {
     }
+
+    /**
+     * Rotation refused: {@code tenant}'s live non-root token set spans MORE THAN ONE
+     * scope and no explicit {@code scope} was given to disambiguate which set to rotate
+     * (nexus-r3ur5 critique). The prior behavior silently collapsed a mixed-scope set to
+     * the OLDEST row's scope, expiring every other scope's tokens too — a tenant holding
+     * both a {@code tenant}-scope and a {@code board-ci}-scope token would have its
+     * board-ci credential grace-expired and replaced by a full tenant-scope token, with
+     * only a server-side {@code log.warn} to notice by. Carries the distinct scopes
+     * present so the caller can name them and ask for an explicit {@code scope}.
+     */
+    public static final class MixedScopeRotationRefused extends RuntimeException {
+        private final List<String> scopes;
+
+        public MixedScopeRotationRefused(List<String> scopes) {
+            super("tenant holds live tokens of multiple scopes: " + scopes);
+            this.scopes = scopes;
+        }
+
+        public List<String> scopes() {
+            return scopes;
+        }
+    }
+
+    /** Scopes {@link #rotateTokens(String, long, String)} accepts as an explicit
+     *  {@code scope} — mirrors {@code TokenAdminHandler}'s issuable-scope set: {@code data}
+     *  and {@code root} tokens are never minted through rotation. */
+    private static final java.util.Set<String> ROTATABLE_SCOPES =
+        java.util.Set.of(SCOPE_TENANT, SCOPE_MINT, SCOPE_MINT_LOCKED, SCOPE_BOARD_CI);
 
     /**
      * Zero-downtime rotation: set {@code expires_at = now + grace} on every currently-live
@@ -464,24 +494,56 @@ public final class TokenStore {
      * never leave the tenant with zero live tokens (Decision 3). Returns the new token plus
      * the grace-expired hashes so the caller can invalidate their cache entries.
      *
+     * <p>Equivalent to {@link #rotateTokens(String, long, String)} with a {@code null}
+     * scope — auto-detects the tenant's single live scope, or refuses on a mixed set.
+     *
      * @param tenant       the tenant to rotate (not {@code '*'})
      * @param graceSeconds overlap window before the old tokens expire (must be positive)
      */
     public RotationResult rotateTokens(String tenant, long graceSeconds) {
+        return rotateTokens(tenant, graceSeconds, null);
+    }
+
+    /**
+     * Zero-downtime rotation, optionally scoped to ONE of the tenant's live scopes
+     * (nexus-r3ur5). With {@code requestedScope} non-null, only live rows of THAT scope
+     * are grace-expired and the replacement carries that scope — a tenant holding both a
+     * {@code tenant}-scope and a {@code board-ci}-scope token can rotate one without
+     * touching the other. With {@code requestedScope} null: if the tenant's live
+     * non-root set spans exactly one scope, behaves as before (that scope, or
+     * {@code tenant} when there are no live rows at all); if it spans MORE than one,
+     * refuses with {@link MixedScopeRotationRefused} — nothing is expired or minted.
+     *
+     * @param tenant         the tenant to rotate (not {@code '*'})
+     * @param graceSeconds   overlap window before the old tokens expire (must be positive)
+     * @param requestedScope the single scope to rotate, or {@code null} to auto-detect
+     * @throws MixedScopeRotationRefused if {@code requestedScope} is {@code null} and the
+     *         tenant's live tokens span more than one scope
+     */
+    public RotationResult rotateTokens(String tenant, long graceSeconds, String requestedScope) {
         rejectWildcard(tenant);
         if (graceSeconds <= 0) {
             throw new IllegalArgumentException("grace_seconds must be positive");
+        }
+        if (requestedScope != null && !ROTATABLE_SCOPES.contains(requestedScope)) {
+            throw new IllegalArgumentException(
+                "scope must be one of " + ROTATABLE_SCOPES + " for rotation, got: "
+                    + requestedScope);
         }
         OffsetDateTime graceDeadline =
             OffsetDateTime.ofInstant(clock.instant().plusSeconds(graceSeconds), ZoneOffset.UTC);
         return dsl().transactionResult(cfg -> {
             DSLContext tx = DSL.using(cfg);
-            var liveRows = tx.select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.SCOPE)
-                .from(SERVICE_TOKENS)
-                .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
+            org.jooq.Condition condition = SERVICE_TOKENS.TENANT_ID.eq(tenant)
                 .and(SERVICE_TOKENS.REVOKED_AT.isNull())
                 .and(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL))
-                .and(SERVICE_TOKENS.EXPIRES_AT.isNull().or(SERVICE_TOKENS.EXPIRES_AT.gt(graceDeadline)))
+                .and(SERVICE_TOKENS.EXPIRES_AT.isNull().or(SERVICE_TOKENS.EXPIRES_AT.gt(graceDeadline)));
+            if (requestedScope != null) {
+                condition = condition.and(SERVICE_TOKENS.SCOPE.eq(requestedScope));
+            }
+            var liveRows = tx.select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.SCOPE)
+                .from(SERVICE_TOKENS)
+                .where(condition)
                 // Gate-A review: deterministic scope carry — oldest row first (the
                 // tenant's original credential). Without an ORDER BY the replacement
                 // row's scope under a MIXED-scope live set would be arbitrary.
@@ -489,28 +551,34 @@ public final class TokenStore {
                 // concurrent issuance and Postgres guarantees nothing for ties.
                 .orderBy(SERVICE_TOKENS.CREATED_AT, SERVICE_TOKENS.TOKEN_HASH)
                 .fetch();
+
+            String scope;
+            if (requestedScope != null) {
+                // Rows are already filtered to this scope; no ambiguity possible.
+                scope = requestedScope;
+            } else {
+                // nexus-r3ur5: REFUSE a mixed-scope tenant rather than silently
+                // collapsing to the oldest row's scope — the prior behavior could
+                // grace-expire a narrow-scope credential (e.g. board-ci) and replace
+                // it with a full tenant-scope token, with only a log line to notice.
+                List<String> distinctScopes = liveRows.stream()
+                    .map(r -> r.get(SERVICE_TOKENS.SCOPE)).distinct().sorted().toList();
+                if (distinctScopes.size() > 1) {
+                    throw new MixedScopeRotationRefused(distinctScopes);
+                }
+                // Scope-preserving (nexus-868dq Task 2.5): without this, rotating a
+                // mint-scoped credential would issue a replacement with the schema
+                // default 'tenant' — silently stripping the mint privilege. No live
+                // rows → the pre-scope default.
+                scope = liveRows.isEmpty() ? SCOPE_TENANT : liveRows.get(0).get(SERVICE_TOKENS.SCOPE);
+            }
+
             List<String> expired = liveRows.map(r -> r.get(SERVICE_TOKENS.TOKEN_HASH));
             if (!expired.isEmpty()) {
                 tx.update(SERVICE_TOKENS)
                     .set(SERVICE_TOKENS.EXPIRES_AT, graceDeadline)
                     .where(SERVICE_TOKENS.TOKEN_HASH.in(expired))
                     .execute();
-            }
-            // Scope-preserving (nexus-868dq Task 2.5): without this, rotating a
-            // mint-scoped credential would issue a replacement with the schema
-            // default 'tenant' — silently stripping the mint privilege. The carry is
-            // the OLDEST live row's scope (deterministic via the ORDER BY above);
-            // rotating a deliberately mixed-scope tenant collapses to that scope and
-            // logs it loudly below — one scope per tenant's credential set is the
-            // intended usage. No live rows → the pre-scope default.
-            String scope = liveRows.isEmpty()
-                ? SCOPE_TENANT
-                : liveRows.get(0).get(SERVICE_TOKENS.SCOPE);
-            long distinctScopes = liveRows.stream()
-                .map(r -> r.get(SERVICE_TOKENS.SCOPE)).distinct().count();
-            if (distinctScopes > 1) {
-                log.warn("event=service_token_rotate_mixed_scopes tenant={} scopes={} carried={}",
-                         tenant, distinctScopes, scope);
             }
             String raw = newRawToken();
             String hash = TokenHashing.sha256Hex(raw);
@@ -519,9 +587,9 @@ public final class TokenStore {
                          SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
                 .values(hash, tenant, "rotated", scope)
                 .execute();
-            log.info("event=service_token_rotated tenant={} expiring_old={} grace_s={} scope={}",
-                     tenant, expired.size(), graceSeconds, scope);
-            return new RotationResult(new IssuedToken(raw, hash), expired);
+            log.info("event=service_token_rotated tenant={} expiring_old={} grace_s={} scope={} "
+                     + "requested_scope={}", tenant, expired.size(), graceSeconds, scope, requestedScope);
+            return new RotationResult(new IssuedToken(raw, hash), expired, scope);
         });
     }
 
