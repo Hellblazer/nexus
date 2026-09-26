@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -61,8 +62,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * was fast; shape C was not measured while Voyage is slow, which is when the 2026-09-24
  * incident happened (1-5 chunks/s). The incident's fix is admission control and deadline
  * enforcement (nexus-u2mlh.2/.3), not this shape. Two costs grow with the batch: a retried
- * 5xx or 429 resends the whole batch's payload, and the request deadline is checked between
- * batches, so one slow batch hides up to {@code batchChunks} texts' worth of work from it.
+ * 5xx or 429 resends the whole batch's payload, and a deadline abort discards every batch of
+ * the request collected so far, since no partial result is returned; a client that retries
+ * the 503 re-embeds, and Voyage bills again, all of it.
  * The drift batching introduces (cosine 0.99995+) is below CCE's own call-to-call noise
  * (2.6e-4 to 3.7e-4 between identical calls, nexus-mcgnz), which is why nothing was
  * reindexed; nexus-u2mlh.7 checks recall after deploy. The pre-batching convention, kept here as the
@@ -522,9 +524,16 @@ public final class CceEmbedder implements Embedder {
      * fix 2).</strong> All batches are submitted eagerly, so batches past the failing one
      * may already be billed; {@code cancelFrom} stops only those not yet started.
      *
-     * <p><strong>Request deadline (nexus-8hdg9 phase 4).</strong> Checked before each
-     * collected batch; past it, not-yet-started batches are cancelled and a
-     * {@link RequestDeadlineExceededException} is thrown.
+     * <p><strong>Request deadline (nexus-8hdg9 phase 4, nexus-u2mlh.3).</strong> Checked
+     * before each collected batch, and the wait for a batch is bounded by it. Past it, every
+     * batch not yet collected is cancelled with interruption, which stops a Voyage call or
+     * retry sleep in progress and returns its permit at once, and a
+     * {@link RequestDeadlineExceededException} is thrown. A call already sent may still be
+     * billed by Voyage; the engine no longer waits for its answer. This applies to the last
+     * batch too: before nexus-u2mlh.3 a last batch that finished after the deadline still
+     * returned success, while an earlier one aborted. The deadline is the caller's declared
+     * budget, set below its own socket timeout so this 503 reaches it (nexus-8hdg9 phase 5),
+     * so it is enforced the same way for every batch.
      *
      * <p><strong>Admission (nexus-u2mlh.2).</strong> Before anything is submitted,
      * {@link #admit} refuses a request the queued batches make late, or reserves its
@@ -586,8 +595,15 @@ public final class CceEmbedder implements Embedder {
                     } finally {
                         // A call that failed after its retries held the permit just as
                         // long; leaving it out would keep the average optimistic through
-                        // a failure storm.
-                        recordCallNanos(System.nanoTime() - startedNanos);
+                        // a failure storm. A call the collector cancelled at the deadline
+                        // (nexus-u2mlh.3) is the exception: it was cut short, so its time
+                        // says nothing about how long a call takes. A cancel that lands in
+                        // the instant after a call succeeded also drops that call's sample;
+                        // that needs the call to finish exactly at the deadline, so it is
+                        // rare, and it loses a reading rather than recording a wrong one.
+                        if (!Thread.currentThread().isInterrupted()) {
+                            recordCallNanos(System.nanoTime() - startedNanos);
+                        }
                     }
                     long callNanos = System.nanoTime() - startedNanos;
                     long queuedNanos = startedNanos - submittedNanos;
@@ -614,7 +630,13 @@ public final class CceEmbedder implements Embedder {
             }
             BatchOutcome outcome;
             try {
-                outcome = futures.get(b).get();
+                outcome = await(futures.get(b), requestDeadlineNanos);
+            } catch (TimeoutException e) {
+                // nexus-u2mlh.3: batch b is still running at the deadline. cancel(true)
+                // interrupts its Voyage call or retry sleep, so its permit comes back now
+                // rather than when Voyage answers a caller who has already gone.
+                cancelFrom(futures, b);
+                throw deadlineAbort(chunksDone, n, callStartNanos, System.nanoTime(), requestDeadlineNanos);
             } catch (ExecutionException e) {
                 cancelFrom(futures, b + 1);
                 Throwable cause = e.getCause();
@@ -852,6 +874,17 @@ public final class CceEmbedder implements Embedder {
      * after a deadline abort, once the already-dispatched siblings drain. */
     int inFlightAvailablePermits() {
         return inFlight.availablePermits();
+    }
+
+    /** {@code future.get()}, bounded by the request deadline when there is one. Throws
+     *  {@link TimeoutException} once the deadline passes with the batch unfinished. */
+    private static BatchOutcome await(Future<BatchOutcome> future, long requestDeadlineNanos)
+            throws InterruptedException, ExecutionException, TimeoutException {
+        if (requestDeadlineNanos == RequestDeadlineProbe.NONE) {
+            return future.get();
+        }
+        long remaining = requestDeadlineNanos - System.nanoTime();
+        return future.get(Math.max(0L, remaining), TimeUnit.NANOSECONDS);
     }
 
     private static void cancelFrom(List<? extends Future<?>> futures, int fromIdx) {
