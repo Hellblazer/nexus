@@ -151,3 +151,145 @@ def test_manifest_hook_exception_via_locked_registry_still_records(monkeypatch):
     )
 
     assert mcp_infra.get_manifest_write_failures() == ["1.2.3"]
+
+
+# ── Fix round 1 (code-review Critical + critic Critical/Important/Significant) ──
+
+
+def test_malformed_metadata_entry_does_not_crash_fire_batch(monkeypatch):
+    """code-review Critical: _record_manifest_hook_batch_exception used to
+    call meta.get(...) unconditionally on every entry in metadatas -- a
+    malformed batch (metadatas=[None]) raised AttributeError OUT of
+    fire_batch's own except block, aborting the `for hook in self._batch`
+    dispatch loop entirely. A hook registered AFTER the manifest hook must
+    still fire for this batch, and fire_batch itself must not raise."""
+    def faulty_manifest(*args, **kwargs):
+        raise RuntimeError("nexus-wbfpw.29 fault injection")
+
+    monkeypatch.setattr(mcp_infra, "manifest_write_batch_hook", faulty_manifest)
+
+    second_hook_calls: list = []
+
+    def second_hook(doc_ids, collection, contents, embeddings=None, metadatas=None):
+        second_hook_calls.append(list(doc_ids))
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    reg.register_batch(second_hook)
+
+    # Must not raise -- this is the assertion under test.
+    reg.fire_batch(["chash-1"], "code__x", ["content"], metadatas=[None])
+
+    assert second_hook_calls == [["chash-1"]], (
+        "a hook registered after the manifest hook must still fire"
+    )
+    # A malformed batch with no recoverable identity is the identity-drop
+    # shape, not silently nothing.
+    assert mcp_infra.get_manifest_identity_drops() == [
+        {"collection": "code__x", "batch_size": 1}
+    ]
+
+
+def test_real_manifest_hook_get_catalog_raises_records_write_failure(monkeypatch):
+    """critic Critical: the REAL, unpatched manifest_write_batch_hook (not
+    a wholesale-replaced double) has its OWN internal
+    `try: get_catalog() except Exception: ... return` -- a silent return
+    that used to leave every document in this batch with no manifest and
+    no signal at all. Registers the production function directly."""
+    def raising_get_catalog():
+        raise RuntimeError("catalog unreachable")
+
+    monkeypatch.setattr(mcp_infra, "get_catalog", raising_get_catalog)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    reg.fire_batch(
+        ["chash-1"], "code__x", ["content"],
+        metadatas=[{"doc_id": "1.2.3", "chunk_text_hash": "chash-1"}],
+    )
+
+    assert mcp_infra.get_manifest_write_failures() == ["1.2.3"]
+
+
+def test_real_manifest_hook_get_catalog_none_records_write_failure(monkeypatch):
+    """critic Critical, sibling of the exception case above: `get_catalog()`
+    returning None (catalog configured but not yet initialised) is the
+    OTHER silent-return branch in the same function."""
+    monkeypatch.setattr(mcp_infra, "get_catalog", lambda: None)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+    reg.fire_batch(
+        ["chash-1"], "code__x", ["content"],
+        metadatas=[{"doc_id": "1.2.3", "chunk_text_hash": "chash-1"}],
+    )
+
+    assert mcp_infra.get_manifest_write_failures() == ["1.2.3"]
+
+
+def test_real_manifest_hook_get_catalog_writer_raises_does_not_crash_fire_batch(monkeypatch):
+    """code-review Important (test-coverage note): closes the
+    identity-check coverage gap directly -- proves `hook is
+    manifest_write_batch_hook` correctly matches the REAL, unpatched
+    production reference when the failure originates deep inside the
+    hook's own body (get_catalog_writer(), which is NOT wrapped in the
+    hook's own try/except and so propagates out to fire_batch) rather
+    than from a wholesale-replaced double standing in for the whole hook."""
+    fake_reader = object()  # truthy, non-None: enough to pass both catalog gates
+
+    monkeypatch.setattr(mcp_infra, "get_catalog", lambda: fake_reader)
+
+    def raising_get_catalog_writer():
+        raise RuntimeError("writer construction failed")
+
+    monkeypatch.setattr(mcp_infra, "get_catalog_writer", raising_get_catalog_writer)
+
+    reg = HookRegistry()
+    reg.register_batch(mcp_infra.manifest_write_batch_hook)
+
+    # Must not raise.
+    reg.fire_batch(
+        ["chash-1"], "code__x", ["content"],
+        metadatas=[{"doc_id": "1.2.3", "chunk_text_hash": "chash-1"}],
+    )
+
+    assert mcp_infra.get_manifest_write_failures() == ["1.2.3"]
+
+
+def test_collectors_inert_without_an_active_cli_index_run(monkeypatch):
+    """code-review Important: the long-lived MCP server's store_put path
+    fires the SAME manifest hook and never calls
+    reset_identity_drop_collectors() (only the four CLI nx index/nx dt
+    index entry points do). Recording must be a no-op until one of them
+    has reset the collectors at least once THIS process -- otherwise the
+    lists grow forever with zero consumer in a long-lived server."""
+    monkeypatch.setattr(mcp_infra, "_identity_drop_collectors_active", False)
+
+    mcp_infra._record_manifest_write_failure("1.2.3")
+    mcp_infra._record_manifest_identity_drop("code__x", 2)
+
+    assert mcp_infra.get_manifest_write_failures() == []
+    assert mcp_infra.get_manifest_identity_drops() == []
+
+    # An active CLI run (reset_identity_drop_collectors, or either half of
+    # it) arms recording for the rest of this (short-lived) process.
+    mcp_infra.reset_manifest_write_failures()
+    mcp_infra._record_manifest_write_failure("1.2.3")
+    assert mcp_infra.get_manifest_write_failures() == ["1.2.3"]
+
+
+def test_write_failures_dedup_stable_order(monkeypatch):
+    """code-review Important: _MANIFEST_WRITE_FAILURES had no dedup -- a
+    document that fails across multiple continuation-slice flushes
+    (documented normal shape for a multi-batch file) appended once per
+    flush, so the warning printed "3 document(s) (X, X, X)" for ONE
+    document. Recording the same doc_id repeatedly must collapse to one
+    entry, in first-seen order."""
+    mcp_infra.reset_manifest_write_failures()
+
+    mcp_infra._record_manifest_write_failure("1.9.1")
+    mcp_infra._record_manifest_write_failure("1.9.0")
+    mcp_infra._record_manifest_write_failure("1.9.1")
+    mcp_infra._record_manifest_write_failure("1.9.1")
+
+    assert mcp_infra.get_manifest_write_failures() == ["1.9.1", "1.9.0"]

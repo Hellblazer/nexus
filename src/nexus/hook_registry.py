@@ -668,27 +668,49 @@ def _record_manifest_hook_batch_exception(
     short-circuit closes, just reached via an exception instead of an
     early return), the batch is recorded as an identity drop instead of
     a write failure, so it is never silently lost either way.
+
+    nexus-wbfpw.29 round 2 (code-review Critical): this whole body is
+    wrapped in its own try/except. It runs INSIDE ``fire_batch``'s own
+    ``except Exception`` block, after the ORIGINAL hook already failed —
+    any exception escaping here (e.g. a malformed, non-dict metadata
+    entry such as ``metadatas=[None]``, which used to raise
+    ``AttributeError`` out of ``meta.get(...)``) would abort the
+    ``for hook in self._batch:`` loop and propagate out of
+    ``fire_batch`` entirely, breaking the class's own per-hook failure
+    isolation contract: every hook registered AFTER the manifest hook
+    would silently never fire for that batch. Best-effort by construction
+    — this helper only ever ADDS a signal on top of the hook's own
+    failure; it must never make that failure worse.
     """
     from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred to avoid circular import (mirrors install_default_hooks above)
 
     if hook is not manifest_write_batch_hook:
         return
 
-    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred, same reason
-        _record_manifest_identity_drop,
-        _record_manifest_write_failure,
-    )
+    try:
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred, same reason
+            _record_manifest_identity_drop,
+            _record_manifest_write_failure,
+        )
 
-    affected: set[str] = set()
-    for meta in (metadatas or []):
-        doc_id = catalog_doc_id or meta.get("doc_id", "")
-        if doc_id:
-            affected.add(doc_id)
-    if not affected:
-        _record_manifest_identity_drop(collection, len(doc_ids))
-        return
-    for doc_id in sorted(affected):
-        _record_manifest_write_failure(doc_id)
+        affected: set[str] = set()
+        for meta in (metadatas or []):
+            doc_id = catalog_doc_id
+            if not doc_id and isinstance(meta, dict):
+                doc_id = meta.get("doc_id", "")
+            if doc_id:
+                affected.add(doc_id)
+        if not affected:
+            _record_manifest_identity_drop(collection, len(doc_ids))
+            return
+        for doc_id in sorted(affected):
+            _record_manifest_write_failure(doc_id)
+    except Exception:  # noqa: BLE001 — this helper must never crash fire_batch's own exception handler (nexus-wbfpw.29 round 2)
+        _log.warning(
+            "manifest_hook_failure_routing_failed",
+            hook=getattr(hook, "__name__", "?"),
+            exc_info=True,
+        )
 
 
 def record_catalog_hook_failure(

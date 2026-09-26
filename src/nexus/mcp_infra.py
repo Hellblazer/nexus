@@ -1818,6 +1818,28 @@ taxonomy_assign_batch_hook.batch_grain = "flush"
 # their catalog_document_chunks manifest linkage this way. This collector
 # lets `nx index`'s end-of-run summary surface the gap directly, with the
 # remediation command (`nx catalog reconcile`).
+#
+# nexus-wbfpw.29 round 2 (code-review Important): both collectors below
+# (and the identity-drop one further down) exist SOLELY to feed
+# ``nx index``/``nx dt index``'s end-of-run exit-code check
+# (commands/_helpers.py's emit_identity_drop_summary /
+# raise_identity_drop_exception) — only those four CLI entry points ever
+# call reset_identity_drop_collectors() (which resets both). The MCP
+# server is a LONG-LIVED process whose store_put path fires the SAME
+# manifest hook on every store and never resets or reads either list, so
+# recording into them there was a pure, unbounded-for-process-lifetime
+# leak with zero consumer (widened, not introduced, by this bead's own
+# exception-routing — the hook's pre-existing internal write-failure
+# recording already fed the same lists from store_put). Gate recording
+# behind a flag that ONLY an active-CLI-run reset turns on: a CLI
+# invocation is a short-lived, one-shot process, so leaving the flag on
+# for its remaining lifetime after the first reset is harmless, while the
+# MCP server — which never calls reset — never turns it on at all. T2
+# ``hook_failures`` (the durable record ``nx taxonomy status``/triage
+# reads) is unaffected: it is written unconditionally, by a separate
+# function, earlier in the same HookRegistry.fire_batch except block.
+_identity_drop_collectors_active = False
+
 _manifest_write_failures_lock = threading.Lock()
 _MANIFEST_WRITE_FAILURES: list[str] = []
 
@@ -1834,14 +1856,33 @@ def get_manifest_write_failures() -> list[str]:
 def reset_manifest_write_failures() -> None:
     """Clear the collector. CLI callers invoke this at the start of an
     indexing run so the end-of-run summary reflects only that run's
-    failures (mirrors ``nexus.retry.reset_retry_stats``)."""
+    failures (mirrors ``nexus.retry.reset_retry_stats``). Also arms
+    ``_identity_drop_collectors_active`` (nexus-wbfpw.29 round 2) — see
+    the section comment above."""
+    global _identity_drop_collectors_active
+    _identity_drop_collectors_active = True
     with _manifest_write_failures_lock:
         _MANIFEST_WRITE_FAILURES.clear()
 
 
 def _record_manifest_write_failure(doc_id: str) -> None:
+    """Record *doc_id* as a manifest write failure this run.
+
+    No-op when no active CLI index run has reset the collector
+    (nexus-wbfpw.29 round 2 — see the section comment above): this is
+    what keeps a long-lived MCP server process's store_put path from
+    growing this list forever with no reader. Deduplicates by doc_id,
+    stable insertion order (nexus-wbfpw.29 round 2, Important): a
+    document that fails across multiple continuation-slice flushes
+    previously appended once per flush, so both the count and the
+    printed id list repeated the same doc_id — cosmetically wrong and
+    proportionally weakened "names the documents to re-index".
+    """
+    if not _identity_drop_collectors_active:
+        return
     with _manifest_write_failures_lock:
-        _MANIFEST_WRITE_FAILURES.append(doc_id)
+        if doc_id not in _MANIFEST_WRITE_FAILURES:
+            _MANIFEST_WRITE_FAILURES.append(doc_id)
 
 
 # nexus-gup3b: a multi-batch document's every flush AFTER the first lacks
@@ -1906,12 +1947,21 @@ def get_manifest_identity_drops() -> list[dict]:
 
 def reset_manifest_identity_drops() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing run,
-    mirroring ``reset_manifest_write_failures``)."""
+    mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active`` (nexus-wbfpw.29 round 2) — see the
+    section comment above ``_manifest_write_failures_lock``."""
+    global _identity_drop_collectors_active
+    _identity_drop_collectors_active = True
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.clear()
 
 
 def _record_manifest_identity_drop(collection: str, batch_size: int) -> None:
+    """No-op when no active CLI index run has reset the collector
+    (nexus-wbfpw.29 round 2) — see the section comment above
+    ``_manifest_write_failures_lock``."""
+    if not _identity_drop_collectors_active:
+        return
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.append(
             {"collection": collection, "batch_size": batch_size}
@@ -2192,15 +2242,32 @@ def manifest_write_batch_hook(
     # read locks and contribute to the very write starvation this RDR closes.
     try:
         _gate = get_catalog()
-    except Exception:  # noqa: BLE001 — no-catalog path best-effort; logged at debug, returns
+    except Exception:  # noqa: BLE001 — no-catalog path best-effort; must not propagate
+        # nexus-wbfpw.29 round 2 (critic Critical): this used to be a
+        # zero-signal return — by_doc's document identity WAS resolved
+        # (we are past the identity-drop return above), but the catalog
+        # is unreachable, so every one of these documents' manifests will
+        # NOT be written this batch. Previously debug-logged only, so a
+        # catalog outage during `nx index repo` voided manifest writes
+        # for the whole run while it still reported "Done." and exited 0.
+        # Record every doc in by_doc as a write failure so nx index's
+        # existing exit-code check (nexus-7lw6a) catches this too.
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
+        structlog.get_logger().warning("manifest_write_hook_no_catalog", collection=collection, exc_info=True)
+        for _doc_id in sorted(by_doc):
+            _record_manifest_write_failure(_doc_id)
         return
     if _gate is None:
+        # nexus-wbfpw.29 round 2 (critic Critical): same silent-loss shape
+        # as the exception path directly above — the catalog is configured
+        # but not yet initialised, so the manifest write below cannot
+        # happen for ANY of by_doc's documents this batch.
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug(
+        structlog.get_logger().warning(
             "manifest_write_hook_catalog_uninitialised", collection=collection,
         )
+        for _doc_id in sorted(by_doc):
+            _record_manifest_write_failure(_doc_id)
         return
     # (The local-mode read-handle cleanup that lived here — a lint-dodging
     # ``getattr(_gate, "_db", None)`` — died with the local catalog,

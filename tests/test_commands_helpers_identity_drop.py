@@ -120,6 +120,51 @@ def test_emit_identity_drop_summary_surfaces_write_failures(capsys):
     assert "nx catalog reconcile" in err
 
 
+def test_emit_identity_drop_summary_write_failures_include_resolved_path(monkeypatch, capsys):
+    """nexus-wbfpw.29 round 2 (critic Significant): a bare tumbler like
+    "1.2.3" needs an extra 'nx catalog show' lookup to be actionable --
+    the warning must include the resolved source path/URI when the
+    catalog can supply one."""
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")
+
+    class _FakeEntry:
+        file_path = "src/nexus/foo.py"
+
+    class _FakeCatalog:
+        def resolve_many(self, doc_ids):
+            return {"1.2.3": _FakeEntry()}
+
+    monkeypatch.setattr("nexus.mcp_infra.get_catalog", lambda: _FakeCatalog())
+
+    result = emit_identity_drop_summary(indexed_count=1)
+
+    assert result is True
+    err = capsys.readouterr().err
+    assert "1.2.3 (src/nexus/foo.py)" in err
+
+
+def test_emit_identity_drop_summary_write_failures_path_lookup_failure_is_non_fatal(monkeypatch, capsys):
+    """A catalog-unreachable path lookup (plausible: unreachable-catalog is
+    exactly one of the conditions the write-failure warning fires for)
+    must never crash the summary -- the bare tumbler still prints."""
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")
+
+    def _raise():
+        raise RuntimeError("catalog unreachable")
+
+    monkeypatch.setattr("nexus.mcp_infra.get_catalog", _raise)
+
+    result = emit_identity_drop_summary(indexed_count=1)
+
+    assert result is True
+    err = capsys.readouterr().err
+    assert "1.2.3" in err
+
+
 def test_emit_identity_drop_summary_surfaces_identity_drops(capsys):
     from nexus.mcp_infra import _record_manifest_identity_drop
 

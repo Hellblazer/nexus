@@ -265,6 +265,44 @@ def emit_retry_summary() -> None:
         )
 
 
+def _resolve_manifest_failure_display_paths(doc_ids: list[str]) -> dict[str, str]:
+    """Best-effort doc_id -> source path/URI lookup for the manifest
+    write-failure warning (nexus-wbfpw.29 round 2, critic Significant):
+    a bare catalog tumbler like ``"1.2.3"`` is not directly actionable —
+    an operator needs an extra ``nx catalog show <tumbler>`` lookup to
+    find the actual file to re-index. One batched ``resolve_many`` call
+    resolves every failed doc_id's ``CatalogEntry`` in a single round
+    trip (nexus-7lm3q's existing batch API).
+
+    Never raises: a lookup failure (the catalog being unreachable is
+    exactly one of the failure modes THIS warning fires for — see
+    ``manifest_write_hook_no_catalog`` in ``mcp_infra.py``) must still
+    let the bare-tumbler warning print rather than crash the run's
+    end-of-run summary. Doc ids with no resolvable path/URI are simply
+    absent from the returned mapping.
+    """
+    try:
+        from nexus.mcp_infra import get_catalog  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
+
+        cat = get_catalog()
+        if cat is None:
+            return {}
+        entries = cat.resolve_many(doc_ids)
+    except Exception:  # noqa: BLE001 — best-effort: the warning must still print bare ids if path lookup fails
+        import structlog  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached on lookup failure
+
+        structlog.get_logger(__name__).debug(
+            "manifest_write_failure_path_lookup_failed", exc_info=True,
+        )
+        return {}
+    paths: dict[str, str] = {}
+    for doc_id, entry in entries.items():
+        display = getattr(entry, "file_path", "") or getattr(entry, "source_uri", "")
+        if display:
+            paths[doc_id] = display
+    return paths
+
+
 def _emit_write_failed_warning() -> bool:
     """GH #1371: a persistent (retries-exhausted or non-retryable) catalog
     manifest-write failure previously surfaced only as a structlog
@@ -290,6 +328,11 @@ def _emit_write_failed_warning() -> bool:
     checks in ``test_index_cmd.py`` / ``test_commands_helpers_identity_
     drop.py`` (which assert on the prefix, not the full line) keep
     passing unchanged.
+
+    nexus-wbfpw.29 round 2 (critic Significant): each id also carries its
+    resolved source path/URI when the catalog can supply one (a bare
+    tumbler needs an extra ``nx catalog show`` lookup to be actionable) —
+    see :func:`_resolve_manifest_failure_display_paths`.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
@@ -298,7 +341,11 @@ def _emit_write_failed_warning() -> bool:
     failed = get_manifest_write_failures()
     if not failed:
         return False
-    ids_text = ", ".join(failed)
+    paths = _resolve_manifest_failure_display_paths(failed)
+    ids_text = ", ".join(
+        f"{doc_id} ({paths[doc_id]})" if doc_id in paths else doc_id
+        for doc_id in failed
+    )
     click.echo(
         f"  WARNING: catalog manifest write failed for {len(failed)} "
         f"document(s) ({ids_text}) — they will not appear in "

@@ -136,6 +136,100 @@ def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
     assert doc.chunk_count > 0
 
 
+def test_reconcile_is_the_remedy_the_warning_actually_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """critic Significant: the warning tells the operator to run
+    'nx catalog reconcile' -- prove that command is what actually repairs
+    the gap this bead's exit-code check reports, not merely a plausible-
+    sounding pointer.
+
+    DESIGN NOTE (investigated at length before landing this shape): the
+    obvious approach -- trigger the gap by actually firing a faulty
+    manifest_write_batch_hook through a live `nx index repo`/`nx index
+    pdf` run -- turns out NOT to reach a genuine, persisting gap for
+    either verb, for two DIFFERENT and unrelated reasons:
+      * `nx index repo`'s default ChunkBatcher path writes chunks +
+        manifest ATOMICALLY in one combined POST and explicitly EXCLUDES
+        manifest_write_batch_hook from firing at all there (indexer.py's
+        `_fire_flush_grain_hooks`, `skip_hooks={manifest_write_batch_hook}`)
+        -- a hook failure on that path is a no-op, not a gap.
+      * `nx index pdf`'s small-document path DOES fire the real hook, but
+        RUNFENCE's own `_fence_complete` (nexus-5xn3k, predates this bead)
+        already fails the run loudly with `IndexRunVerifyRefused` the
+        instant the manifest comes back empty -- a real gap there never
+        survives long enough to reconcile.
+    Both are good news for RDR-192 (fewer live-reachable gap scenarios
+    than assumed) but neither gives this test a real run to trigger from.
+    So this test constructs the gap the bead's own collector describes
+    DIRECTLY at the data layer -- a document registered with chunk_count
+    > 0, its chunk genuinely present in T3 with matching content_hash
+    metadata, and NO manifest row -- the exact shape
+    `catalog/manifest_heal.py`'s own gap-detection (`len(manifest) <
+    chunk_count`) is written against, and proves 'nx catalog reconcile'
+    (the literal command the warning prints) is what repairs it, end to
+    end through the real CLI.
+    """
+    from click.testing import CliRunner
+
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.cli import main
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    collection = "docs__wbfpw29-reconcile-gate__bge-base-en-v15-768__v1"
+    content_hash = "aa" * 32
+    chash = "bb" * 32
+
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner(
+            "wbfpw29-reconcile-owner", "repo", repo_hash="wbfpw29-reconcile-hash",
+        )
+        doc_id = str(cat.register(
+            owner, "Reconcile Gate Doc",
+            content_type="pdf", physical_collection=collection,
+            chunk_count=1, meta={"content_hash": content_hash},
+        ))
+
+    # The chunk genuinely lands in T3 -- this is what a manifest-hook
+    # failure alone would otherwise leave stranded: content present,
+    # searchable, but with no document_chunks row linking it back.
+    HttpVectorClient().upsert_chunks_with_embeddings(
+        collection_name=collection,
+        ids=[chash],
+        documents=["nexus-wbfpw29 reconcile gate content"],
+        embeddings=[[]],  # server-embeds
+        metadatas=[{
+            "content_hash": content_hash,
+            "chunk_text_hash": chash,
+            "chunk_start_char": 0, "chunk_end_char": 10,
+            "line_start": 0, "line_end": 0,
+        }],
+    )
+
+    reader = make_catalog_reader()
+    manifest_before = reader.get_manifest(doc_id)
+    assert manifest_before == [], (
+        f"the manifest gap must genuinely exist for this test to prove "
+        f"anything: got {len(manifest_before)} row(s)"
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runner = CliRunner()
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        reconcile_result = runner.invoke(main, ["catalog", "reconcile"])
+
+    assert reconcile_result.exit_code == 0, reconcile_result.output
+    assert "Reconciled 1 document(s)" in reconcile_result.output, reconcile_result.output
+
+    manifest_after = make_catalog_reader().get_manifest(doc_id)
+    assert len(manifest_after) == 1, (
+        f"expected 'nx catalog reconcile' to fully rebuild the manifest: "
+        f"manifest rows after={len(manifest_after)}"
+    )
+    assert manifest_after[0].chash == chash
+
+
 def test_non_manifest_hook_exception_does_not_change_exit_code(
     one_file_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
