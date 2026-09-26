@@ -634,6 +634,42 @@ def test_census_all_listing_failure_json_stdout_still_parses(
     assert payload["exit_code"] == _EXIT_ENGINE_ERROR
 
 
+def test_census_all_engine_error_wins_over_unclassified_but_it_is_still_reported(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """Round-3 critique: the precedence rule (an engine error, exit 5, wins
+    over unclassified > 0, exit 1, but the finding is never hidden) is
+    documented for both data conditions; this pins the unclassified half."""
+    unclassified_totals = {b: 0 for b in _CENSUS_BUCKETS}
+    unclassified_totals["unclassified"] = 1
+
+    def _census(collection, limit=100, offset=0):
+        if collection == "second":
+            raise VectorServiceError("HTTP 500: boom", code=500)
+        return {
+            "collection": collection, "returned": 0,
+            "chashes": {b: [] for b in _CENSUS_BUCKETS},
+            "owners": {}, "totals": unclassified_totals, "scope_chunk_total": 1,
+        }
+
+    stub_client = _StubT3Client(
+        list_response=[{"name": "first"}, {"name": "second"}],
+    )
+    stub_client.manifest_less_census = _census  # type: ignore[method-assign]
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+
+    result = runner.invoke(t3, ["census-manifest-less", "--all", "--json"])
+    assert result.exit_code == _EXIT_ENGINE_ERROR, result.output
+    payload = _json.loads(result.stdout)
+    assert payload["census_error"]["collection"] == "second"
+    assert payload["unclassified"] is True
+    assert payload["collections"][0]["totals"]["unclassified"] == 1
+
+    text_result = runner.invoke(t3, ["census-manifest-less", "--all"])
+    assert text_result.exit_code == _EXIT_ENGINE_ERROR, text_result.output
+    assert "unclassified: 1" in text_result.output
+
+
 def test_census_all_engine_error_wins_over_require_zero_but_violation_still_reported(
     monkeypatch, runner: CliRunner,
 ) -> None:

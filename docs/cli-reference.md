@@ -1819,7 +1819,7 @@ Exit codes:
 
 Exit-code precedence: 4 and 5 (the census is INCOMPLETE) always win over 1 and 2 (a gate condition computed from what WAS censused) — an incomplete census cannot pass a gate. Between 4 and 5: 4 is a whole-engine condition (the connected engine predates the route entirely) and is checked first, on the very first collection attempted, before a later per-collection 5 could ever fire. This never hides a finding: `unclassified`/`--require-zero` are always computed over whatever collections DID succeed, even when 4/5 also fires, and both are always present in the output (text and `--json`) alongside the incomplete-census report.
 
-With `--json`, human-readable diagnostics (the `--require-zero` violation notice, an engine-error line, the "no collections found" notice) always go to stderr, never stdout — stdout carries exactly one JSON document on every exit code above, parseable regardless of exit code. The document's fields:
+With `--json`, human-readable diagnostics (the `--require-zero` violation notice, an engine-error line, the "no collections found" notice) always go to stderr, never stdout — stdout carries exactly one JSON document on every exit code above, parseable regardless of exit code. One exception: an invalid invocation (for example both `--collection` and `--all`, or an unknown `--require-zero` bucket) is rejected by the argument parser with exit 2 and nothing on stdout, the same number as a `--require-zero` violation. A gate should read the document's `exit_code` field, or treat empty stdout under `--json` as a usage error. The document's fields:
 
 | Field | Meaning |
 |-------|---------|
