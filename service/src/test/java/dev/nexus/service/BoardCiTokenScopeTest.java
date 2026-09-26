@@ -16,7 +16,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -47,7 +46,7 @@ class BoardCiTokenScopeTest {
     HikariDataSource ds;
     NexusService service;
     int port;
-    final HttpClient http = HttpClient.newHttpClient();
+    final HttpClient http = TestHttp.client();
 
     String boardCiRaw;
 
@@ -206,7 +205,7 @@ class BoardCiTokenScopeTest {
 
     @Test
     void getOnTuplesOut_is403() throws Exception {
-        var req = HttpRequest.newBuilder(URI.create(base() + "/v1/tuples/out"))
+        var req = TestHttp.request(base() + "/v1/tuples/out")
             .header("Authorization", "Bearer " + boardCiRaw).GET().build();
         assertThat(http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode())
             .isEqualTo(403);
@@ -244,7 +243,7 @@ class BoardCiTokenScopeTest {
 
     private HttpResponse<String> sendAs(String bearer, String method, String path, Object body)
             throws Exception {
-        var req = HttpRequest.newBuilder(URI.create(base() + path))
+        var req = TestHttp.request(base() + path)
             .header("Authorization", "Bearer " + bearer)
             .header("Content-Type", "application/json")
             .method(method, HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
@@ -253,13 +252,13 @@ class BoardCiTokenScopeTest {
     }
 
     private HttpResponse<String> get(String bearer, String path) throws Exception {
-        var req = HttpRequest.newBuilder(URI.create(base() + path))
+        var req = TestHttp.request(base() + path)
             .header("Authorization", "Bearer " + bearer).GET().build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     private JsonNode postJsonAs(String bearer, String path, String body) throws Exception {
-        var req = HttpRequest.newBuilder(URI.create(base() + path))
+        var req = TestHttp.request(base() + path)
             .header("Authorization", "Bearer " + bearer)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body))
