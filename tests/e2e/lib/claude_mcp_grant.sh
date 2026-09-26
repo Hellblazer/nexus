@@ -69,9 +69,13 @@
 # NEVER prints the token, and NEVER enables xtrace (`set -x`) itself --
 # doing so here would put the token in this shell's own trace output. A
 # caller that already has `set -x` active before sourcing this file is
-# responsible for its own trace hygiene; this file does not touch that
-# setting either way.
-set -u
+# responsible for its own trace hygiene. Sourcing this file changes no
+# shell option in the caller (no `set -u` either); every expansion below
+# carries its own default.
+#
+# The function EXECs `claude` on success, so a caller's EXIT trap and any
+# cleanup after the call do not run in this shell: run it as the last
+# command of a subshell or a dedicated script.
 
 # The harness-side name the RDR-219 amendment maps into
 # CLAUDE_CODE_OAUTH_TOKEN, mirroring src/nexus/claude_child_env.py's
@@ -80,18 +84,20 @@ set -u
 # re-derived from the Python module.
 _CLAUDE_MCP_GRANT_ENV_VAR="NX_HARNESS_CLAUDE_OAUTH_TOKEN"
 
-# JSON-escapes a single string: backslash first, then double-quote (in
-# that order, so escaping the backslash never re-escapes the quote's own
-# inserted backslash). Sufficient for the shapes this file ever escapes a
-# command name or a CLI argument through this helper (never the token
-# itself, which is escaped inline with plain parameter substitution --
-# see claude_mcp_grant below); a fuller JSON string escaper is out of
-# proportion for a two-purpose harness helper.
+# JSON-escapes a command name or CLI argument: backslash first, then
+# double-quote, newline, carriage return and tab. Any other control
+# character is refused (return 1), so the piped config always parses.
 _claude_mcp_grant_json_escape() {
     local s=$1
     s=${s//\\/\\\\}
     s=${s//\"/\\\"}
-    printf '%s' "$s"
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    if [[ $s == *[[:cntrl:]]* ]]; then
+        return 1
+    fi
+    builtin printf '%s' "$s"
 }
 
 # `["a","b",...]` for a (possibly empty) argument list.
@@ -103,7 +109,9 @@ _claude_mcp_grant_json_array() {
         else
             out+=","
         fi
-        out+="\"$(_claude_mcp_grant_json_escape "$item")\""
+        local escaped
+        escaped=$(_claude_mcp_grant_json_escape "$item") || return 1
+        out+="\"$escaped\""
     done
     out+="]"
     printf '%s' "$out"
@@ -131,6 +139,15 @@ claude_mcp_grant() {
         echo "claude_mcp_grant: usage: claude_mcp_grant NEXUS_CMD [NEXUS_ARG...] [-- CLAUDE_ARG...]" >&2
         return 2
     fi
+    for a in "${claude_args[@]+"${claude_args[@]}"}"; do
+        case $a in
+            --plugin-dir|--plugin-dir=*)
+                echo "claude_mcp_grant: refusing --plugin-dir: harnesses that load the conexus" \
+                     "plugin are not supported by the grant yet (RDR-219, nexus-wauo1.37)" >&2
+                return 2
+                ;;
+        esac
+    done
     if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
         echo "claude_mcp_grant: CLAUDE_CODE_OAUTH_TOKEN is not set in this shell -- run this" \
              "harness through 'claude_credentials.py run -- ...' first (RDR-219)" >&2
@@ -144,8 +161,11 @@ claude_mcp_grant() {
     fi
 
     local nexus_cmd_json nexus_args_json extra_servers extra_suffix
-    nexus_cmd_json="\"$(_claude_mcp_grant_json_escape "$nexus_cmd")\""
-    nexus_args_json="$(_claude_mcp_grant_json_array "${nexus_rest[@]}")"
+    if ! nexus_cmd_json="\"$(_claude_mcp_grant_json_escape "$nexus_cmd")\"" \
+        || ! nexus_args_json="$(_claude_mcp_grant_json_array "${nexus_rest[@]+"${nexus_rest[@]}"}")"; then
+        echo "claude_mcp_grant: a nexus command or argument contains a control character" >&2
+        return 2
+    fi
     extra_servers="${CLAUDE_MCP_GRANT_EXTRA_SERVERS_JSON:-}"
     extra_suffix=""
     if [ -n "$extra_servers" ]; then
@@ -156,6 +176,11 @@ claude_mcp_grant() {
     # no subprocess, no command substitution -- so it never transits
     # anything that could show up as a separate process's argv.
     local token="$CLAUDE_CODE_OAUTH_TOKEN"
+    if [[ $token == *[[:cntrl:]]* ]]; then
+        echo "claude_mcp_grant: CLAUDE_CODE_OAUTH_TOKEN contains a control character;" \
+             "refusing to build an unparseable config" >&2
+        return 1
+    fi
     token=${token//\\/\\\\}
     token=${token//\"/\\\"}
 
@@ -166,5 +191,5 @@ claude_mcp_grant() {
     exec claude --strict-mcp-config --mcp-config <(builtin printf \
         '{"mcpServers":{"nexus":{"command":%s,"args":%s,"env":{"%s":"%s"}}%s}}' \
         "$nexus_cmd_json" "$nexus_args_json" "$_CLAUDE_MCP_GRANT_ENV_VAR" "$token" "$extra_suffix") \
-        "${claude_args[@]}"
+        "${claude_args[@]+"${claude_args[@]}"}"
 }

@@ -290,3 +290,66 @@ def test_launcher_fails_loudly_with_no_nexus_command(tmp_path) -> None:
     assert proc.returncode != 0
     assert not argv_file.exists()
     assert "usage" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Code review of 7d534f0cc: control characters, shell-option leak, and the
+# plugin-loading limit enforced rather than only documented.
+# ---------------------------------------------------------------------------
+
+
+def _run_driver(tmp_path, driver) -> "tuple[subprocess.CompletedProcess, pathlib.Path, pathlib.Path]":
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    argv_file = tmp_path / "claude_argv.txt"
+    config_file = tmp_path / "claude_config.json"
+    _write_fake_claude(bin_dir, argv_file, config_file, sleep_seconds=0.1)
+    proc = subprocess.run(
+        ["bash", str(driver)], env=_bin_env(bin_dir), capture_output=True, text=True, timeout=10,
+    )
+    return proc, argv_file, config_file
+
+
+def test_launcher_refuses_a_token_containing_a_control_character(tmp_path) -> None:
+    """A newline in the value would make the piped JSON invalid; refuse it
+    loudly instead of handing claude an unparseable config."""
+    driver = _write_driver(
+        tmp_path, token="sk-ant-oat01-fake\nsecond-line", nexus_argv=["nx-mcp"], claude_args=[],
+    )
+    proc, argv_file, _ = _run_driver(tmp_path, driver)
+    assert proc.returncode != 0
+    assert not argv_file.exists()
+    assert "control character" in proc.stderr
+
+
+def test_launcher_escapes_newline_and_tab_in_nexus_args(tmp_path) -> None:
+    driver = _write_driver(
+        tmp_path, token=FAKE_TOKEN, nexus_argv=["nx-mcp", "a\nb", "c\td"], claude_args=[],
+    )
+    proc, _, config_file = _run_driver(tmp_path, driver)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(config_file.read_text())["mcpServers"]["nexus"]["args"] == ["a\nb", "c\td"]
+
+
+def test_launcher_refuses_to_run_with_the_conexus_plugin_loaded(tmp_path) -> None:
+    """RDR-219: plugin-loaded harnesses are not supported by the grant yet
+    (nexus-wauo1.37), so the launcher enforces it rather than documenting it."""
+    for i, flag in enumerate((["--plugin-dir", "/x/conexus"], ["--plugin-dir=/x/conexus"])):
+        case = tmp_path / f"case{i}"
+        case.mkdir()
+        driver = _write_driver(case, token=FAKE_TOKEN, nexus_argv=["nx-mcp"], claude_args=flag)
+        proc, argv_file, _ = _run_driver(case, driver)
+        assert proc.returncode != 0, flag
+        assert not argv_file.exists(), flag
+        assert "plugin" in proc.stderr, flag
+
+
+def test_sourcing_the_launcher_does_not_turn_on_nounset_in_the_caller(tmp_path) -> None:
+    script = tmp_path / "caller.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"source {_bash_single_quote(str(LAUNCHER))}\n"
+        'case $- in *u*) echo NOUNSET_ON ;; *) echo NOUNSET_OFF ;; esac\n'
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=10)
+    assert proc.stdout.strip() == "NOUNSET_OFF", proc.stdout + proc.stderr
