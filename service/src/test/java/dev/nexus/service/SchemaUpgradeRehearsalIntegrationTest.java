@@ -528,6 +528,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   tuples-003-2 nexus-r7xao
                 //   tuples-004-1 nexus-8zoyp
                 //   pipeline-002-2 nexus-edjmu
+                //   hygiene-008-2 nexus-0rxvg
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1143,6 +1144,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
+                // ── nexus-0rxvg seed-coverage follow-up: hygiene-008-2 corrects
+                // quarantine siblings the catalog-037-1 bounded sweep registered
+                // by parsing the name (content_type 'quarantine-<ct>', dimension
+                // NULL). That shape only arises from a runtime call, never from a
+                // changeset, and hygiene-005-3 earlier in this same hop corrects
+                // any such row seeded at OLD_TAG, so the rows are seeded here,
+                // after hygiene-005-3 and just before hygiene-008-2 (this also
+                // applies pipeline-002-1 onward through hygiene-008-1), THEN the
+                // whole-hop migrate below runs hygiene-008-2. ─────────────────────
+                migrateUpTo(adminDs, "hygiene-008-2");
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    seedBoundedQuarantineMisregistrations(su);
+                }
+
                 // ── HEAD LEG over a populated database. This is the leg the
                 // v0.1.33 outage proved was untested: catalog-013-0's naked DML
                 // no-ops under RLS here exactly as it did in production; only
@@ -1154,6 +1170,34 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "row-DML changeset in the hop must actually take effect for the "
                         + "NOBYPASSRLS owner, not silently no-op into a failing backstop")
                     .doesNotThrowAnyException();
+
+                // ── hygiene-008-2's own effect (nexus-0rxvg): the prefix-shaped
+                // sibling with a registered origin is re-filed from it; the one
+                // with no origin has only its literal prefix stripped, and its
+                // lifecycle_state is left alone. ───────────────────────────────────
+                try (Connection su = pg.createConnection("")) {
+                    var h008 = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(h008.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("quarantine-code__rxvg1__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("code"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("rxvg1-origin-owner"))
+                            .and(CATALOG_COLLECTIONS.MODEL_VERSION.eq("v4"))
+                            .and(CATALOG_COLLECTIONS.DIMENSION.eq(768))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))))
+                        .as("hygiene-008-2 must re-file the misregistered prefix-shaped sibling "
+                            + "from its registered origin's row, under FORCE RLS for the "
+                            + "NOBYPASSRLS owner")
+                        .isEqualTo(1);
+                    assertThat(h008.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("quarantine-docs__rxvg2__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("docs"))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("disputed"))))
+                        .as("hygiene-008-2 with no registered origin strips only the literal "
+                            + "quarantine- prefix and never touches lifecycle_state")
+                        .isEqualTo(1);
+                }
 
                 // ── tuples-003-2's own effect, mirroring TuplesBaselineSchemaLiquibaseTest's
                 // dedicated Liquibase-level proof: the over-cap row is gone, the at-cap
@@ -2721,6 +2765,28 @@ class SchemaUpgradeRehearsalIntegrationTest {
     }
 
     // ── Helpers: seeding (data leg) ──────────────────────────────────────────
+
+    /**
+     * nexus-0rxvg: the catalog-037-1 bounded sweep's misregistration shape,
+     * seeded directly just before hygiene-008-2. The origin carries attributes
+     * its name does not imply (owner, model_version, dimension), so only a copy
+     * from the origin row, not a name parse, satisfies the effect asserts.
+     */
+    private static void seedBoundedQuarantineMisregistrations(Connection su) throws Exception {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .values("t1", "code__rxvg1__bge-base-en-v15-768__v1", "code", "rxvg1-origin-owner",
+                "bge-base-en-v15-768", "v4", 768, "live")
+            .values("t1", "quarantine-code__rxvg1__bge-base-en-v15-768__v1", "quarantine-code", "rxvg1",
+                "bge-base-en-v15-768", "v1", null, "quarantine")
+            .values("t1", "quarantine-docs__rxvg2__bge-base-en-v15-768__v1", "quarantine-docs", "rxvg2",
+                "bge-base-en-v15-768", "v1", null, "disputed")
+            .execute();
+    }
 
     private static void registerCollection(Connection c, String tenant, String name) throws Exception {
         // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection,
