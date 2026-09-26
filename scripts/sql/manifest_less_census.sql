@@ -13,32 +13,53 @@
 -- ("nl3fn NOTES GUARD", CatalogRepository.java sweepChunksQuery) and the
 -- client's live_note_chashes (src/nexus/indexer_utils.py) already use to
 -- recognize a live manifest-less note; this census must agree with them.
--- The reverse LATERAL deliberately has NO ORDER BY on its own candidate
--- rows (round-2 fix, code-review Important): idx_catalog_documents_live_
--- note_doc_id (catalog-038) serves this exact predicate; an ORDER BY
--- d2.tumbler LIMIT 1 tie-break defeated it for a LITERAL-value run of this
--- predicate (an operator hand-typing a chash in psql) by making the
--- planner prefer the pre-existing catalog_documents_pk (tenant_id,
--- tumbler) instead, whose natural tumbler order lets it assume an early
--- stop (measured: EXPLAIN cost 2.38 without the ORDER BY versus 40.83
--- with it, same seeded population). Determinism among candidate rows was
--- never load-bearing to remove anyway: at most one live note-shaped
--- document should ever carry a given chash as its own current identity in
--- one collection, and even in the vanishingly rare case of two
--- (byte-identical current content in two separate live notes), picking
--- either one via the reverse path is correct -- the disagreement this
--- census actually adjudicates is forward-vs-reverse, never
--- reverse-vs-reverse. KNOWN RESIDUAL (investigated, not fixed by the
--- ORDER BY removal, correctness unaffected): a BIND-PARAMETERIZED
--- execution of this same predicate -- e.g. exactly how
--- PgVectorRepository#manifestLessCensus issues it, or a psql
--- PREPARE/EXECUTE -- still does not bind to the new index; Postgres's
--- cost model for a parameterized jsonb ->> text equality falls back to a
--- generic default selectivity regardless of which index exists, unlike
--- its literal-value costing. See ManifestLessCensusNotesGuardIndexPlanShapeTest's
--- own class javadoc for the full investigation. The index still serves
--- the literal/hand-run shape this file exists for, and costs nothing
--- extra to maintain.
+-- REVERSE TIE-BREAK (round 3 fix, both reviews Significant): more than one
+-- live note-shaped document CAN reverse-match the same chash -- identical
+-- current content in two separate live notes is rare but real, since
+-- content-addressed storage collapses identical text to one T3 row
+-- regardless of which document currently claims it as its own identity.
+-- When that happens, the candidate with the FEWEST manifest rows across
+-- every collection wins first (a candidate with ZERO manifest rows anywhere
+-- yields the most conservative bucket, legacy-unmanifested -- the correct
+-- default when true ownership is genuinely ambiguous), and the lowest
+-- tumbler wins any further tie. See ManifestLessCensusIntegrationTest#
+-- reverseTieBreak_prefersTheMostConservativeBucket_deterministicallyAcrossLiteralAndBoundForms.
+--
+-- CORRECTED DIAGNOSIS (round 3, self-correcting a wrong round-2 finding):
+-- round 2 claimed a BIND-PARAMETERIZED execution of the reverse predicate
+-- does not use idx_catalog_documents_live_note_doc_id (catalog-038) because
+-- "Postgres's cost model for a parameterized jsonb ->> text equality falls
+-- back to a generic default selectivity." That was reached by measuring the
+-- predicate through a Testcontainers SUPERUSER connection -- which BYPASSES
+-- row-level security entirely -- and was WRONG. Reproduced instead as
+-- nexus_svc actually runs (NOSUPERUSER NOBYPASSRLS, subject to FORCE ROW
+-- LEVEL SECURITY on every table this statement joins), the index is used by
+-- NEITHER literal values nor bind parameters, while a superuser connection
+-- uses it even WITH bind parameters. The real cause is RLS security-barrier
+-- qual placement: for a non-bypass role querying a FORCE-RLS table,
+-- PostgreSQL treats that table's own policy qual as a security barrier and
+-- will not push a user-supplied qual on the SAME table down into an index
+-- scan ahead of it, regardless of whether that qual's value arrives as a
+-- literal or a bind parameter. This is a property of the table's RLS
+-- posture, not of parameterization. catalog-038's index was DROPPED as a
+-- result (nexus-wbfpw.4 round 3): see ManifestLessCensusNotesGuardIndexPlanShapeTest
+-- for the corrected measurement, and the rewrite below for why the index
+-- turned out unneeded independent of RLS.
+--
+-- REWRITE (round 3): the reverse lookup is no longer a per-row correlated
+-- LATERAL re-scanning nexus.catalog_documents once per outer chunk (the
+-- shape an RLS security barrier makes expensive regardless of any index).
+-- It is now a materialized candidate set (live_notes) computed ONCE per
+-- statement execution for this tenant+collection's live note-shaped
+-- documents, reduced to one deterministic candidate per chash
+-- (rev_candidates, via DISTINCT ON with the tie-break above), then joined
+-- into the per-chunk scan as an ordinary equality join against that small,
+-- already-materialized set -- cheap regardless of RLS, because live_notes
+-- now scans the live-notes population exactly once rather than once per
+-- manifest-less chunk. live_notes' own WHERE clause (tenant_id,
+-- physical_collection, deleted_at IS NULL) is served by the PRE-EXISTING
+-- idx_catalog_documents_collection_live (catalog-003-soft-delete.xml); it
+-- needs no index of its own.
 -- Precedence (round-2 fix): a LIVE owner by either path beats a dead or
 -- absent one. Forward wins over reverse ONLY when the forward-resolved
 -- owner is itself LIVE -- the forward pointer is stamped at write time
@@ -60,10 +81,12 @@
 -- until the rest of RDR-192 ships (Sam, 2026-09-26); until then, run this
 -- file directly against production (psql), substituting each positional
 -- placeholder below with its literal value in this exact order:
---   1. tenant_id   (text)
---   2. collection  (text)
---   3. limit       (integer, <= 300)
---   4. offset      (integer, >= 0)
+--   1. tenant_id   (text)                -- live_notes scope
+--   2. collection  (text)                -- live_notes scope (physical_collection)
+--   3. tenant_id   (text)                -- base scope (chunk tenant)
+--   4. collection  (text)                -- base scope (chunk collection)
+--   5. limit       (integer, <= 300)
+--   6. offset      (integer, >= 0)
 --
 -- HAND-RUN PREREQUISITES (code-review finding, round 1 fix):
 --   - Role: nexus_svc. nexus_diag is the only BYPASSRLS role in this
@@ -108,7 +131,8 @@
 --                         forward pointer is null or names a TOMBSTONED
 --                         document (the live reverse owner rescues the
 --                         classification -- see the precedence note
---                         above).
+--                         above; when several live reverse candidates
+--                         exist, the tie-break above picks among them).
 --   dead-owner            no live owner resolves by either path: the
 --                         forward pointer names a tombstoned document
 --                         AND no live reverse match rescues it, OR the
@@ -145,7 +169,28 @@
 --                         is the count of every chunk nexus.chunks holds
 --                         for this tenant+collection, any manifest state;
 --                         chash, bucket, and bucket_total are NULL.
-WITH base AS (
+WITH live_notes AS MATERIALIZED (
+    SELECT
+        d2.tumbler,
+        (d2.metadata ->> 'doc_id') AS doc_id_hex,
+        (SELECT count(*)
+           FROM nexus.catalog_document_chunks m2
+          WHERE m2.tenant_id = d2.tenant_id
+            AND m2.doc_id = d2.tumbler) AS total_count
+    FROM nexus.catalog_documents d2
+    WHERE d2.tenant_id = ?
+      AND d2.physical_collection = ?
+      AND d2.deleted_at IS NULL
+      AND (d2.file_path IS NULL OR d2.file_path = '')
+),
+rev_candidates AS MATERIALIZED (
+    SELECT DISTINCT ON (doc_id_hex)
+           doc_id_hex, tumbler, total_count
+    FROM live_notes
+    WHERE doc_id_hex IS NOT NULL
+    ORDER BY doc_id_hex, total_count ASC, tumbler ASC
+),
+base AS (
     SELECT
         encode(c.chash, 'hex') AS chash,
         (own_manifest.chash IS NULL) AS is_manifest_less,
@@ -167,27 +212,19 @@ WITH base AS (
           AND fwd_owner.tumbler = COALESCE(
                   NULLIF(c.metadata ->> 'catalog_doc_id', ''),
                   NULLIF(c.metadata ->> 'doc_id', ''))
-    LEFT JOIN LATERAL (
-           SELECT d2.tumbler
-           FROM nexus.catalog_documents d2
-           WHERE d2.tenant_id = c.tenant_id
-             AND d2.physical_collection = c.collection
-             AND d2.deleted_at IS NULL
-             AND (d2.file_path IS NULL OR d2.file_path = '')
-             AND (d2.metadata ->> 'doc_id') = encode(c.chash, 'hex')
-           LIMIT 1
-    ) rev_owner ON fwd_owner.tumbler IS NULL OR fwd_owner.deleted_at IS NOT NULL
+    LEFT JOIN rev_candidates rc
+           ON rc.doc_id_hex = encode(c.chash, 'hex')
     CROSS JOIN LATERAL (
            SELECT
                CASE WHEN fwd_owner.tumbler IS NOT NULL AND fwd_owner.deleted_at IS NULL
                     THEN fwd_owner.tumbler
-                    WHEN rev_owner.tumbler IS NOT NULL
-                    THEN rev_owner.tumbler
+                    WHEN rc.tumbler IS NOT NULL
+                    THEN rc.tumbler
                     ELSE fwd_owner.tumbler
                END AS tumbler,
                CASE WHEN fwd_owner.tumbler IS NOT NULL AND fwd_owner.deleted_at IS NULL
                     THEN NULL
-                    WHEN rev_owner.tumbler IS NOT NULL
+                    WHEN rc.tumbler IS NOT NULL
                     THEN NULL
                     ELSE fwd_owner.deleted_at
                END AS deleted_at

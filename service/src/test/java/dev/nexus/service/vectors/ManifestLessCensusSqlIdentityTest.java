@@ -52,7 +52,9 @@ class ManifestLessCensusSqlIdentityTest {
         assertThat(fileText).contains("'dead-owner'");
         assertThat(fileText).contains("'no-owner'");
         assertThat(fileText).contains("'unclassified'");
-        // Exactly four positional binds: tenant_id, collection, limit, offset.
-        assertThat(fileText.chars().filter(c -> c == '?').count()).isEqualTo(4);
+        // Exactly six positional binds (round 3, the live_notes/rev_candidates
+        // rewrite): tenant_id, collection (live_notes scope), tenant_id, collection
+        // (base scope), limit, offset.
+        assertThat(fileText.chars().filter(c -> c == '?').count()).isEqualTo(6);
     }
 }

@@ -1524,18 +1524,26 @@
     <include file="db/changelog/taxonomy-021-cross-preview.xml"/>
 
     <!--
-        RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4, code-review Important):
-        idx_catalog_documents_live_note_doc_id, a partial expression index on
-        nexus.catalog_documents (tenant_id, physical_collection, (metadata->>
-        'doc_id')) WHERE deleted_at IS NULL AND (file_path IS NULL OR
-        file_path = '') — serves CatalogRepository.sweepChunksQuery's "nl3fn
-        NOTES GUARD" and PgVectorRepository.MANIFEST_LESS_CENSUS_SQL's
-        reverse-owner LATERAL, previously unindexed anywhere in the schema.
-        Placed after taxonomy-021-cross-preview.xml (current tail at
-        authoring time) and before the grants-nexus-svc.xml runAlways block,
-        matching the established late-append convention.
+        RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4, code-review Important)
+        added idx_catalog_documents_live_note_doc_id here (catalog-038), a
+        partial expression index meant to serve PgVectorRepository
+        .MANIFEST_LESS_CENSUS_SQL's reverse-owner LATERAL and production's own
+        CatalogRepository.sweepChunksQuery "nl3fn NOTES GUARD". Round-2's
+        measurement was WRONG (see MANIFEST_LESS_CENSUS_SQL's own header,
+        "CORRECTED DIAGNOSIS"): it ran EXPLAIN through a Testcontainers
+        SUPERUSER connection, which bypasses row-level security entirely.
+        Reproduced under nexus_svc's actual RLS-subject posture, the index was
+        never used, by literal or bound values, because RLS's own
+        security-barrier qual placement blocks pushing this predicate into an
+        index scan for a non-bypass role regardless. Round 3 REWROTE the
+        reverse lookup as a materialized candidate set (live_notes,
+        rev_candidates) that no longer expresses this predicate as a per-row
+        WHERE-clause equality at all — the index is now categorically
+        unreachable by any query in this statement, confirmed by
+        ManifestLessCensusNotesGuardIndexPlanShapeTest with the index still
+        present. Removed here (nexus-wbfpw.4 round 3); the changeset was never
+        released, so no counter-migration is needed.
     -->
-    <include file="db/changelog/catalog-038-notes-guard-doc-id-index.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

@@ -90,6 +90,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       proving the reverse path is not simply preferred whenever it exists. See
  *       {@link #forwardResolution_winsWhenBothOwnersAreLive}.</li>
  * </ul>
+ *
+ * <p>Round-3 fix (both reviews, Significant): when MORE THAN ONE live
+ * note-shaped document reverse-matches the same chash, the pick must be
+ * deterministic and must prefer the candidate yielding the MOST CONSERVATIVE
+ * bucket — zero manifest rows anywhere, i.e. legacy-unmanifested — over one
+ * with fewer manifest rows purely by chance of tumbler ordering. Chash
+ * TIE_TARGET is reverse-matched by BOTH D_TIE_SOME (tumbler sorts FIRST
+ * alphabetically, but has a manifest row in collection B — total_count=1) and
+ * D_TIE_ZERO (tumbler sorts AFTER D_TIE_SOME's, but has zero manifest rows
+ * anywhere — total_count=0). D_TIE_ZERO must win despite its higher tumbler,
+ * proving the tie-break orders by total manifest count first and tumbler only
+ * as the FURTHER tie-break, never the reverse. See {@link
+ * #reverseTieBreak_prefersTheMostConservativeBucket_deterministicallyAcrossLiteralAndBoundForms}.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ManifestLessCensusIntegrationTest {
@@ -163,6 +176,8 @@ class ManifestLessCensusIntegrationTest {
     private static final String MANIFEST_B_ONLY  = ch("wbfpw4-manifest-b-only");
     private static final String NO_OWNER_EMPTY   = ch("wbfpw4-no-owner-empty");
     private static final String NO_OWNER_GHOST   = ch("wbfpw4-no-owner-ghost");
+    private static final String TIE_TARGET       = ch("wbfpw4-tie-target");
+    private static final String TIE_SOME_MANIFEST = ch("wbfpw4-tie-some-manifest");
 
     private static final String D1  = "wbfpw4-doc-superseded";
     private static final String D2  = "wbfpw4-doc-legacy";
@@ -174,10 +189,16 @@ class ManifestLessCensusIntegrationTest {
     private static final String D7  = "wbfpw4-doc-reverse-rescue";
     private static final String D8  = "wbfpw4-doc-forward-live-owner";
     private static final String D9  = "wbfpw4-doc-reverse-coincidence-live";
+    /** Tumbler sorts alphabetically BEFORE D_TIE_ZERO's, yet must LOSE the tie-break
+     *  (it has a manifest row elsewhere -> total_count=1, less conservative). */
+    private static final String D_TIE_SOME = "wbfpw4-doc-tie-some-manifest";
+    /** Tumbler sorts alphabetically AFTER D_TIE_SOME's, yet must WIN the tie-break
+     *  (zero manifest rows anywhere -> total_count=0, most conservative). */
+    private static final String D_TIE_ZERO = "wbfpw4-doc-tie-zero-manifest";
 
-    /** Every manifest-less chash seeded into COLLECTION_A (10 total; CURRENT and
+    /** Every manifest-less chash seeded into COLLECTION_A (11 total; CURRENT and
      *  FWD_LIVE_ANCHOR excluded — both carry their own own-collection manifest row). */
-    private static final int TOTAL_MANIFEST_LESS_IN_A = 10;
+    private static final int TOTAL_MANIFEST_LESS_IN_A = 11;
     /** Every physical chunk row seeded into COLLECTION_A, manifest-less or not. */
     private static final int TOTAL_CHUNKS_IN_A = TOTAL_MANIFEST_LESS_IN_A + 2; // + CURRENT, FWD_LIVE_ANCHOR
 
@@ -280,6 +301,22 @@ class ManifestLessCensusIntegrationTest {
             List.of(Map.of()));
         vecRepo.upsertChunks(TENANT, COLLECTION_A, List.of(NO_OWNER_GHOST), List.of("no owner ghost text"),
             List.of(Map.of("catalog_doc_id", "wbfpw4-doc-never-registered")));
+
+        // Round-3 fix: D_TIE_SOME and D_TIE_ZERO both reverse-match TIE_TARGET's
+        // chash. D_TIE_SOME's tumbler sorts FIRST alphabetically but has a manifest
+        // row in COLLECTION_B (total_count=1, would be dead-owner if picked alone);
+        // D_TIE_ZERO's tumbler sorts AFTER D_TIE_SOME's but has zero manifest rows
+        // anywhere (would be legacy-unmanifested if picked alone). The tie-break
+        // must prefer D_TIE_ZERO (fewest total manifest rows = most conservative
+        // bucket) despite its higher tumbler.
+        registerNoteDoc(D_TIE_SOME, COLLECTION_A, TIE_TARGET);
+        vecRepo.upsertChunks(TENANT, COLLECTION_B, List.of(TIE_SOME_MANIFEST), List.of("tie some manifest text"),
+            List.of(Map.of()));
+        catalogRepo.writeManifest(TENANT, D_TIE_SOME, COLLECTION_B,
+            List.of(Map.<String, Object>of("position", 0, "chash", TIE_SOME_MANIFEST, "chunk_index", 0)));
+        registerNoteDoc(D_TIE_ZERO, COLLECTION_A, TIE_TARGET);
+        vecRepo.upsertChunks(TENANT, COLLECTION_A, List.of(TIE_TARGET), List.of("tie target text"),
+            List.of(Map.of()));
     }
 
     // ── assertions ───────────────────────────────────────────────────────────
@@ -291,7 +328,7 @@ class ManifestLessCensusIntegrationTest {
         assertThat(result.returned()).isEqualTo(TOTAL_MANIFEST_LESS_IN_A);
         assertThat(result.chashes().get("superseded")).containsExactlyInAnyOrder(OLD, FWD_LIVE_VS_REV);
         assertThat(result.chashes().get("legacy-unmanifested"))
-            .containsExactlyInAnyOrder(LEGACY, LEGACY_FALLBACK, REV_ONLY, FWD_VS_REV);
+            .containsExactlyInAnyOrder(LEGACY, LEGACY_FALLBACK, REV_ONLY, FWD_VS_REV, TIE_TARGET);
         assertThat(result.chashes().get("dead-owner"))
             .containsExactlyInAnyOrder(TOMBSTONED, RENAME_COPY);
         assertThat(result.chashes().get("no-owner"))
@@ -299,7 +336,7 @@ class ManifestLessCensusIntegrationTest {
         assertThat(result.chashes().get("unclassified")).isEmpty();
 
         assertThat(result.totals().get("superseded")).isEqualTo(2L);
-        assertThat(result.totals().get("legacy-unmanifested")).isEqualTo(4L);
+        assertThat(result.totals().get("legacy-unmanifested")).isEqualTo(5L);
         assertThat(result.totals().get("dead-owner")).isEqualTo(2L);
         assertThat(result.totals().get("no-owner")).isEqualTo(2L);
         assertThat(result.totals().get("unclassified")).isEqualTo(0L);
@@ -370,6 +407,49 @@ class ManifestLessCensusIntegrationTest {
         assertThat(result.chashes().get("legacy-unmanifested")).doesNotContain(FWD_LIVE_VS_REV);
     }
 
+    /**
+     * Round-3 fix (both reviews, Significant): when multiple live note-shaped
+     * documents reverse-match the same chash, the tie-break must be
+     * deterministic AND must produce the SAME result whether the caller
+     * supplies its parameters via a genuine JDBC bind (the actual route, as
+     * {@link PgVectorRepository#manifestLessCensus} issues it) or via literal
+     * values spliced directly into {@link PgVectorRepository#MANIFEST_LESS_CENSUS_SQL}'s
+     * own text (the hand-run-in-psql shape that SQL's own header instructs an
+     * operator to use) -- proving the tie-break is a property of the statement
+     * text itself, not of how a caller happens to supply its parameters.
+     */
+    @Test
+    void reverseTieBreak_prefersTheMostConservativeBucket_deterministicallyAcrossLiteralAndBoundForms() {
+        var routed = vecRepo.manifestLessCensus(TENANT, COLLECTION_A, 300, 0);
+        assertThat(routed.chashes().get("legacy-unmanifested")).contains(TIE_TARGET);
+        assertThat(routed.chashes().get("dead-owner")).doesNotContain(TIE_TARGET);
+        assertThat(routed.chashes().get("superseded")).doesNotContain(TIE_TARGET);
+
+        String literalSql = PgVectorRepository.MANIFEST_LESS_CENSUS_SQL
+            .replaceFirst("\\?", "'" + TENANT + "'")
+            .replaceFirst("\\?", "'" + COLLECTION_A + "'")
+            .replaceFirst("\\?", "'" + TENANT + "'")
+            .replaceFirst("\\?", "'" + COLLECTION_A + "'")
+            .replaceFirst("\\?", "300")
+            .replaceFirst("\\?", "0");
+        assertThat(literalSql).doesNotContain("?");
+
+        Set<String> literalLegacyUnmanifested = new HashSet<>();
+        tenantScope.withTenant(TENANT, ctx -> {
+            ctx.fetch(literalSql).forEach(r -> {
+                if ("item".equals(r.get("row_kind", String.class))
+                        && "legacy-unmanifested".equals(r.get("bucket", String.class))) {
+                    literalLegacyUnmanifested.add(r.get("chash", String.class));
+                }
+            });
+            return null;
+        });
+        assertThat(literalLegacyUnmanifested)
+            .as("the literal-value form of the IDENTICAL statement text must classify TIE_TARGET"
+                + " the same way the bound-parameter route does")
+            .contains(TIE_TARGET);
+    }
+
     @Test
     void pagesWithoutLosingOrDuplicatingRows() {
         Set<String> paged = new HashSet<>();
@@ -409,7 +489,7 @@ class ManifestLessCensusIntegrationTest {
         assertThat(page1.totals()).isEqualTo(page2.totals());
         assertThat(page1.scopeChunkTotal()).isEqualTo(page2.scopeChunkTotal());
         assertThat(page1.totals().get("superseded")).isEqualTo(2L);
-        assertThat(page1.totals().get("legacy-unmanifested")).isEqualTo(4L);
+        assertThat(page1.totals().get("legacy-unmanifested")).isEqualTo(5L);
         assertThat(page1.totals().get("dead-owner")).isEqualTo(2L);
         assertThat(page1.totals().get("no-owner")).isEqualTo(2L);
         assertThat(page1.totals().get("unclassified")).isEqualTo(0L);
