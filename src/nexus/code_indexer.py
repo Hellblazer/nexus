@@ -694,6 +694,10 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     # file already fired above, right after the staleness check — no
     # second call needed here.
 
+    # nexus-w94eo: the engine merges metadata, so a writer-owned key this full
+    # rewrite dropped would survive on the stored row; name it for removal.
+    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+    _dk = rewrite_delete_keys(metadatas)
     with _stage("upload"):
         _log.debug("upserting", file=str(file_path), chunks=total_chunks)
         try:
@@ -704,6 +708,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
                 embeddings=embeddings,
                 metadatas=metadatas,
                 force_re_embed=ctx.force_re_embed,
+                **({"delete_keys": _dk} if _dk else {}),
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp

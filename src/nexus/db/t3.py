@@ -105,10 +105,9 @@ def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
 def _normalize_partial(metadata: dict, collection_name: str) -> dict:
     """Normalise a PARTIAL update without injecting defaults (nexus-w94eo).
 
-    Keeps a normalised key when the caller sent it, or when ``normalize``
-    produced it with a value other than its default for this content type.
-    Drops the defaults ``normalize`` fills in for keys the caller left out,
-    which a merging store would otherwise write over the stored values.
+    Keeps a normalised key only when the caller sent it, dropping the
+    defaults ``normalize`` fills in for keys the caller left out, which a
+    merging store would otherwise write over the stored values.
     A legacy ``store_type`` sent alone resolves to a ``content_type`` equal to
     that default and is therefore dropped; no live writer sends it
     (RDR-101 Phase 5c retired the key). A schema key the caller sent at its
@@ -116,9 +115,9 @@ def _normalize_partial(metadata: dict, collection_name: str) -> dict:
     """
     content_type = _infer_content_type(metadata, collection_name)
     out = normalize(metadata, content_type=content_type)
-    defaults = normalize({}, content_type=content_type)
-    kept = {k: v for k, v in out.items()
-            if k in metadata or k not in defaults or defaults[k] != v}
+    # normalize() adds no key the caller did not send except content_type,
+    # so keeping only sent keys drops exactly the injected defaults.
+    kept = {k: v for k, v in out.items() if k in metadata}
     # normalize() drops a sparse key sent at its empty default
     # (extraction_method="", quality_gate_overridden=False). A caller that
     # sends one on a partial update means to overwrite the stored value, and

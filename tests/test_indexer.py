@@ -115,7 +115,7 @@ def _tracking_db():
         if name not in cols:
             c = MagicMock(); c.get.return_value = {"metadatas": [], "ids": []}; cols[name] = c
         return cols[name]
-    def cap(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False):
+    def cap(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False, delete_keys=None):
         ups.setdefault(collection_name, []).extend(metadatas)
     db = MagicMock()
     db.get_or_create_collection.side_effect = goc
@@ -2539,6 +2539,40 @@ def _cap_prose(tmp_path, content, ext):
     _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
                       col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
     return metas, docs
+
+def _upload_kwargs(db):
+    assert db.upsert_chunks_with_embeddings.call_count == 1
+    return db.upsert_chunks_with_embeddings.call_args.kwargs
+
+
+def _assert_names_dropped_owned_keys(kw):
+    """nexus-w94eo: the engine merges metadata, so a full-rewrite upload names
+    the writer-owned keys its rows dropped, or a --force reindex cannot clear
+    a stale one (quality_gate_overridden, extraction_source, ...)."""
+    from nexus.metadata_schema import REWRITE_OWNED_KEYS
+    dk = kw.get("delete_keys")
+    assert dk, "full-rewrite fallback upload must send delete_keys"
+    assert set(dk) <= REWRITE_OWNED_KEYS and "content_type" not in dk
+    assert any(k not in m for m in kw["metadatas"] for k in dk)
+
+
+def test_prose_fallback_upload_sends_delete_keys(tmp_path):
+    from nexus.indexer import _index_prose_file
+    repo = tmp_path / "repo"; repo.mkdir(); f = repo / "notes.txt"; f.write_text("Line one\nLine two\n")
+    db, col = _mock_db()
+    _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
+                      col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+    _assert_names_dropped_owned_keys(_upload_kwargs(db))
+
+
+def test_code_fallback_upload_sends_delete_keys(tmp_path):
+    from nexus.indexer import _index_code_file
+    repo = tmp_path / "repo"; repo.mkdir(); (repo / "main.py").write_text("x = 1\ny = 2\n")
+    db, col = _mock_db(); ch = [_chunk()]
+    with patch("nexus.chunker.chunk_file", return_value=ch):
+        _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
+                         col, db, _voyage(len(ch)), git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+    _assert_names_dropped_owned_keys(_upload_kwargs(db))
 
 def test_prose_indexer_markdown_metadata(tmp_path):
     m, _ = _cap_prose(tmp_path, "# Abstract\n\nContent.\n\n# Methods\n\nMore.\n", ".md")
