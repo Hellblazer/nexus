@@ -35,45 +35,35 @@ import static org.assertj.core.api.Assertions.assertThat;
  * corrected plan-shape investigation for {@link PgVectorRepository#MANIFEST_LESS_CENSUS_SQL}'s
  * reverse-owner resolution.
  *
- * <p><strong>Round 2's diagnosis was WRONG (self-correction, stated plainly rather
- * than silently revised).</strong> Round 2 attributed the reverse LATERAL's failure
- * to bind {@code idx_catalog_documents_live_note_doc_id} (catalog-038) under a
- * bind-parameterized execution to "Postgres's cost model for a parameterized
- * jsonb {@code ->>} text equality falls back to a generic default selectivity."
- * That conclusion was reached by running {@code EXPLAIN} through {@code
- * pg.createConnection("")} — a Testcontainers SUPERUSER connection, which BYPASSES
- * row-level security entirely and represents NEITHER real consumer (nexus_svc's
- * hand-run psql session, nor the engine route's tenant-scoped pool). Reproduced
- * instead as nexus_svc actually runs — {@code svcDs}/{@code tenantScope} below,
- * created via {@link PgContainerHelper#bootstrapServiceRole} (NOSUPERUSER
- * NOBYPASSRLS, subject to FORCE ROW LEVEL SECURITY on every joined table) — the
- * index was used by NEITHER literal values nor bind parameters, while a superuser
- * connection used it even WITH bind parameters. The real cause is RLS
- * security-barrier qual placement: for a non-bypass role querying a FORCE-RLS
- * table, PostgreSQL treats that table's own policy qual as a security barrier and
- * will not push a user-supplied qual on the SAME table down into an index scan
- * ahead of it — a property of the table's RLS posture, not of parameterization.
+ * <p><strong>Why catalog-038's {@code metadata ->> 'doc_id'} index was dropped
+ * (round 3; mechanism corrected in round 4).</strong> Structurally: after the
+ * round-3 rewrite, the reverse predicate is not a per-row WHERE-clause equality
+ * against {@code catalog_documents} anywhere in the statement. {@code
+ * metadata ->> 'doc_id'} is computed once per live note in {@code live_notes}'
+ * SELECT list and joined to {@code rev_candidates} on that derived column, so no
+ * expression index on it can be chosen, under any role.
  *
- * <p><strong>Consequence (round 3): catalog-038's index was DROPPED,</strong> not
- * fixed. {@link PgVectorRepository#MANIFEST_LESS_CENSUS_SQL} no longer contains a
- * per-row correlated LATERAL that a {@code metadata ->> 'doc_id'} index could ever
- * have served under RLS — the reverse lookup is now a materialized candidate set
- * ({@code live_notes}, computed ONCE per statement execution) reduced to one
- * deterministic candidate per chash ({@code rev_candidates}) and joined into the
- * per-chunk scan as an ordinary equality join. {@code live_notes}' own WHERE
- * clause (tenant_id, physical_collection, deleted_at IS NULL) needs no index of
- * its own: the pre-existing {@code idx_catalog_documents_collection_live}
- * (catalog-003-soft-delete.xml) already serves it, RLS security barrier or not,
- * because that predicate names columns the barrier does not block index use on.
+ * <p>Why the index was not used even before the rewrite: round 2 blamed
+ * bind-parameter selectivity after measuring through {@code
+ * pg.createConnection("")}, a Testcontainers SUPERUSER connection that bypasses
+ * row-level security. That was wrong. Under a NOSUPERUSER NOBYPASSRLS role such
+ * as nexus_svc ({@code svcDs}/{@code tenantScope} below, created via {@link
+ * PgContainerHelper#bootstrapServiceRole}), FORCE ROW LEVEL SECURITY applies the
+ * policy qual as a security barrier, and a user qual is evaluated below it (so
+ * can become an index condition) only when every function it calls is
+ * LEAKPROOF. {@code texteq} is leakproof, so {@code live_notes}' tenant_id and
+ * physical_collection equalities still use {@code
+ * idx_catalog_documents_collection_live}; {@code jsonb_object_field_text} (the
+ * {@code ->>} operator) is not, so a {@code metadata ->> 'doc_id'} qual stays
+ * above the barrier whether its value is a literal or a bind. {@link
+ * #leakproofFlags_explainWhichQualsCanReachAnIndexUnderRls} pins both flags.
  *
- * <p>This class now measures the REWRITE's actual benefit: {@code live_notes} is
- * evaluated ONCE per statement execution regardless of how many manifest-less
- * chunks in the outer scan need reverse resolution ({@link
- * #liveNotesCte_isMaterializedOnce_regardlessOfHowManyOuterChunksProbeIt}), via
- * {@code EXPLAIN (ANALYZE)} run through the RLS-subject {@code svcDs}/{@code
- * tenantScope} pool — never a superuser connection — reading the executed plan's
- * own {@code loops=} count rather than asserting an index name that no longer
- * exists in this statement.
+ * <p>{@link #liveNotesCte_isMaterializedOnce_regardlessOfHowManyOuterChunksProbeIt}
+ * measures the rewrite through the RLS-subject pool (never a superuser
+ * connection) with {@code EXPLAIN (ANALYZE)}: {@code live_notes} and {@code
+ * rev_candidates} each run once per statement, and {@code live_notes} is served
+ * by an index scan on {@code idx_catalog_documents_collection_live}, not a
+ * sequential scan of {@code catalog_documents}.
  *
  * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, PER_CLASS lifecycle.
  */
@@ -91,6 +81,13 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
     // established "a few thousand rows" precedent (PgVectorRepositoryRawSqlPlanShapeTest
     // .CHUNKS_PER_DIM = 4_000).
     private static final int NOISE_NOTE_ROWS = 5_000;
+
+    // Live documents in OTHER collections of the same tenant. Production holds
+    // many collections per tenant, so live_notes' (tenant_id, physical_collection)
+    // predicate selects a small fraction of catalog_documents; without these rows
+    // it would select every row and a sequential scan would be the right plan.
+    private static final int OTHER_COLLECTION_ROWS = 50_000;
+    private static final String OTHER_COLLECTION = "knowledge__wbfpw4-idx-planshape-other__minilm-l6-v2-384__v1";
 
     // Multiple manifest-less outer chunks, each resolved only in reverse, so a
     // regression back to a per-row correlated LATERAL would show up as
@@ -167,6 +164,13 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
                 + "       'noise note ' || i, 'prose', 'knowledge', '" + COLLECTION + "', "
                 + "       jsonb_build_object('doc_id', md5('noise-a-' || i) || md5('noise-b-' || i)) "
                 + "FROM generate_series(1, " + NOISE_NOTE_ROWS + ") i");
+            st.execute(
+                "INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, content_type, corpus, physical_collection, metadata) "
+                + "SELECT '" + TENANT + "', 'wbfpw4-idx-planshape-other-' || i, "
+                + "       'other collection doc ' || i, 'prose', 'knowledge', '" + OTHER_COLLECTION + "', "
+                + "       jsonb_build_object('doc_id', md5('other-a-' || i) || md5('other-b-' || i)) "
+                + "FROM generate_series(1, " + OTHER_COLLECTION_ROWS + ") i");
             for (int i = 0; i < NUM_TARGETS; i++) {
                 st.execute(
                     "INSERT INTO nexus.catalog_documents "
@@ -255,6 +259,43 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
             .as("catalog-038's index was dropped at round 3 (see class javadoc) -- it must not"
                 + " appear in this statement's plan at all. Plan was:%n%s", plan)
             .doesNotContain("idx_catalog_documents_live_note_doc_id");
+
+        // Round 4 (critique observation): the cost claim is that live_notes' single
+        // scan is an index scan on idx_catalog_documents_collection_live, even under
+        // the RLS security barrier, because its quals are leakproof text equalities.
+        String liveNotesSubtree = plan.substring(
+            plan.indexOf("CTE live_notes"), plan.indexOf("CTE rev_candidates"));
+        assertThat(liveNotesSubtree)
+            .as("live_notes must reach catalog_documents through idx_catalog_documents_collection_live"
+                + " under the RLS-subject role. live_notes subtree was:%n%s", liveNotesSubtree)
+            .contains("idx_catalog_documents_collection_live")
+            .containsPattern("(Index|Bitmap Index) Scan")
+            .doesNotContain("Seq Scan on nexus.catalog_documents");
+    }
+
+    /**
+     * The leakproof flags the SQL header's mechanism rests on (round 4, critique
+     * Significant 1). Under FORCE RLS for a non-bypass role, only quals built from
+     * leakproof functions are evaluated below the policy's security barrier and
+     * can drive an index scan. {@code texteq} (text {@code =}) is leakproof;
+     * {@code jsonb_object_field_text} (jsonb {@code ->>} text) is not. If a future
+     * PostgreSQL release flips either flag, the header's explanation is stale and
+     * this fails.
+     */
+    @Test
+    void leakproofFlags_explainWhichQualsCanReachAnIndexUnderRls() {
+        Map<String, Boolean> flags = tenantScope.withTenant(TENANT, ctx -> {
+            Map<String, Boolean> out = new java.util.HashMap<>();
+            ctx.fetch("SELECT p.proname, p.proleakproof FROM pg_operator o "
+                    + "JOIN pg_proc p ON p.oid = o.oprcode "
+                    + "WHERE (o.oprname = '=' AND o.oprleft = 'text'::regtype AND o.oprright = 'text'::regtype) "
+                    + "   OR (o.oprname = '->>' AND o.oprleft = 'jsonb'::regtype AND o.oprright = 'text'::regtype)")
+               .forEach(r -> out.put(r.get(0, String.class), r.get(1, Boolean.class)));
+            return out;
+        });
+        assertThat(flags)
+            .containsEntry("texteq", true)
+            .containsEntry("jsonb_object_field_text", false);
     }
 
     /** Minimal {@link Embedder}: content of the vector is irrelevant — only chash/collection/metadata movement is under test. */

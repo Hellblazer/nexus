@@ -1528,21 +1528,21 @@
         added idx_catalog_documents_live_note_doc_id here (catalog-038), a
         partial expression index meant to serve PgVectorRepository
         .MANIFEST_LESS_CENSUS_SQL's reverse-owner LATERAL and production's own
-        CatalogRepository.sweepChunksQuery "nl3fn NOTES GUARD". Round-2's
-        measurement was WRONG (see MANIFEST_LESS_CENSUS_SQL's own header,
-        "CORRECTED DIAGNOSIS"): it ran EXPLAIN through a Testcontainers
-        SUPERUSER connection, which bypasses row-level security entirely.
-        Reproduced under nexus_svc's actual RLS-subject posture, the index was
-        never used, by literal or bound values, because RLS's own
-        security-barrier qual placement blocks pushing this predicate into an
-        index scan for a non-bypass role regardless. Round 3 REWROTE the
+        CatalogRepository.sweepChunksQuery "nl3fn NOTES GUARD". Removed here
+        (nexus-wbfpw.4 round 3) for a structural reason: round 3 rewrote the
         reverse lookup as a materialized candidate set (live_notes,
         rev_candidates) that no longer expresses this predicate as a per-row
-        WHERE-clause equality at all — the index is now categorically
-        unreachable by any query in this statement, confirmed by
+        WHERE-clause equality at all, so no index on metadata ->> 'doc_id' can
+        serve the statement, confirmed by
         ManifestLessCensusNotesGuardIndexPlanShapeTest with the index still
-        present. Removed here (nexus-wbfpw.4 round 3); the changeset was never
-        released, so no counter-migration is needed.
+        present. It was not used before the rewrite either: round 2 measured
+        through a Testcontainers SUPERUSER connection, which bypasses row-level
+        security. Under nexus_svc's FORCE RLS posture only quals built from
+        LEAKPROOF functions are evaluated below the policy's security barrier
+        and can drive an index scan; jsonb ->> text is not leakproof, text
+        equality is (see MANIFEST_LESS_CENSUS_SQL's header, "WHY THERE IS NO
+        metadata ->> 'doc_id' INDEX"). The changeset was never released, so no
+        counter-migration is needed.
     -->
 
     <!--

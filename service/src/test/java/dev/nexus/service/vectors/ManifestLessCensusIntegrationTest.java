@@ -17,6 +17,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -424,6 +425,11 @@ class ManifestLessCensusIntegrationTest {
         assertThat(routed.chashes().get("legacy-unmanifested")).contains(TIE_TARGET);
         assertThat(routed.chashes().get("dead-owner")).doesNotContain(TIE_TARGET);
         assertThat(routed.chashes().get("superseded")).doesNotContain(TIE_TARGET);
+        // Round 4 (critique Significant 3): the census names the tie-break winner.
+        assertThat(routed.owners().get(TIE_TARGET))
+            .as("TIE_TARGET's reported owner must be the tie-break winner D_TIE_ZERO, found in reverse")
+            .containsEntry("owner_tumbler", D_TIE_ZERO)
+            .containsEntry("owner_path", "reverse");
 
         String literalSql = PgVectorRepository.MANIFEST_LESS_CENSUS_SQL
             .replaceFirst("\\?", "'" + TENANT + "'")
@@ -435,11 +441,17 @@ class ManifestLessCensusIntegrationTest {
         assertThat(literalSql).doesNotContain("?");
 
         Set<String> literalLegacyUnmanifested = new HashSet<>();
+        Map<String, String> literalTieOwner = new HashMap<>();
         tenantScope.withTenant(TENANT, ctx -> {
             ctx.fetch(literalSql).forEach(r -> {
                 if ("item".equals(r.get("row_kind", String.class))
                         && "legacy-unmanifested".equals(r.get("bucket", String.class))) {
                     literalLegacyUnmanifested.add(r.get("chash", String.class));
+                }
+                if ("item".equals(r.get("row_kind", String.class))
+                        && TIE_TARGET.equals(r.get("chash", String.class))) {
+                    literalTieOwner.put("owner_tumbler", r.get("owner_tumbler", String.class));
+                    literalTieOwner.put("owner_path", r.get("owner_path", String.class));
                 }
             });
             return null;
@@ -448,6 +460,38 @@ class ManifestLessCensusIntegrationTest {
             .as("the literal-value form of the IDENTICAL statement text must classify TIE_TARGET"
                 + " the same way the bound-parameter route does")
             .contains(TIE_TARGET);
+        assertThat(literalTieOwner)
+            .as("the literal-value (psql) form must report the same tie-break winner as the route")
+            .containsEntry("owner_tumbler", D_TIE_ZERO)
+            .containsEntry("owner_path", "reverse");
+    }
+
+    /**
+     * Round 4 (critique Significant 3): every item row names the owner its bucket
+     * came from and the path that found it. One fixture per path shape: a live
+     * forward owner, a dead forward owner with no reverse rescue, a reverse-only
+     * owner, a reverse rescue over a dead forward owner, a live forward owner
+     * beating a coincidental reverse match, and both no-owner shapes.
+     */
+    @Test
+    void ownerTumblerAndPath_reportedForEveryPathShape() {
+        var owners = vecRepo.manifestLessCensus(TENANT, COLLECTION_A, 300, 0).owners();
+
+        assertThat(owners).hasSize(TOTAL_MANIFEST_LESS_IN_A);
+        assertThat(owners.get(LEGACY))
+            .containsEntry("owner_tumbler", D2).containsEntry("owner_path", "forward");
+        assertThat(owners.get(TOMBSTONED))
+            .containsEntry("owner_tumbler", D3).containsEntry("owner_path", "forward");
+        assertThat(owners.get(REV_ONLY))
+            .containsEntry("owner_tumbler", D5).containsEntry("owner_path", "reverse");
+        assertThat(owners.get(FWD_VS_REV))
+            .containsEntry("owner_tumbler", D7).containsEntry("owner_path", "reverse");
+        assertThat(owners.get(FWD_LIVE_VS_REV))
+            .containsEntry("owner_tumbler", D8).containsEntry("owner_path", "forward");
+        for (String noOwner : List.of(NO_OWNER_EMPTY, NO_OWNER_GHOST)) {
+            assertThat(owners.get(noOwner))
+                .containsEntry("owner_tumbler", null).containsEntry("owner_path", null);
+        }
     }
 
     @Test

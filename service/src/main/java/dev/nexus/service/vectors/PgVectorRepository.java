@@ -2571,8 +2571,9 @@ public final class PgVectorRepository {
      * one of five buckets. See {@code scripts/sql/manifest_less_census.sql}'s own
      * header comment (the SAME text, byte-for-byte, pinned by {@code
      * ManifestLessCensusSqlIdentityTest}) for the full bucket definitions and the
-     * bind-parameter order. Positional binds, in order: tenant_id, collection,
-     * limit, offset.
+     * bind-parameter order. Six positional binds, in order: tenant_id,
+     * collection (live_notes scope), tenant_id, collection (base scope), limit,
+     * offset.
      *
      * <p>SOLE COPY (Sam's ruling 2026-09-26): the standalone script is a
      * byte-identical courtesy copy for a hand-run in psql, never a second
@@ -2614,30 +2615,37 @@ public final class PgVectorRepository {
 -- tumbler wins any further tie. See ManifestLessCensusIntegrationTest#
 -- reverseTieBreak_prefersTheMostConservativeBucket_deterministicallyAcrossLiteralAndBoundForms.
 --
--- CORRECTED DIAGNOSIS (round 3, self-correcting a wrong round-2 finding):
--- round 2 claimed a BIND-PARAMETERIZED execution of the reverse predicate
--- does not use idx_catalog_documents_live_note_doc_id (catalog-038) because
--- "Postgres's cost model for a parameterized jsonb ->> text equality falls
--- back to a generic default selectivity." That was reached by measuring the
--- predicate through a Testcontainers SUPERUSER connection -- which BYPASSES
--- row-level security entirely -- and was WRONG. Reproduced instead as
--- nexus_svc actually runs (NOSUPERUSER NOBYPASSRLS, subject to FORCE ROW
--- LEVEL SECURITY on every table this statement joins), the index is used by
--- NEITHER literal values nor bind parameters, while a superuser connection
--- uses it even WITH bind parameters. The real cause is RLS security-barrier
--- qual placement: for a non-bypass role querying a FORCE-RLS table,
--- PostgreSQL treats that table's own policy qual as a security barrier and
--- will not push a user-supplied qual on the SAME table down into an index
--- scan ahead of it, regardless of whether that qual's value arrives as a
--- literal or a bind parameter. This is a property of the table's RLS
--- posture, not of parameterization. catalog-038's index was DROPPED as a
--- result (nexus-wbfpw.4 round 3): see ManifestLessCensusNotesGuardIndexPlanShapeTest
--- for the corrected measurement, and the rewrite below for why the index
--- turned out unneeded independent of RLS.
+-- WHY THERE IS NO metadata ->> 'doc_id' INDEX (catalog-038 dropped in
+-- round 3; mechanism corrected in round 4):
+-- Structural reason first, and it is sufficient on its own: after the
+-- round-3 rewrite below, the reverse predicate is not a per-row WHERE-clause
+-- equality against catalog_documents anywhere in this statement.
+-- metadata ->> 'doc_id' is computed once per live note in live_notes' SELECT
+-- list, and the join to rev_candidates is an equality on that DERIVED
+-- column, so no index on catalog_documents(metadata ->> 'doc_id') can be
+-- chosen for this statement under any role. That is why
+-- idx_catalog_documents_live_note_doc_id (catalog-038, never released) was
+-- dropped rather than kept.
+-- Why that index was not used even before the rewrite: round 2 blamed
+-- bind-parameter selectivity, measured through a Testcontainers SUPERUSER
+-- connection that bypasses row-level security. That was wrong. Every table
+-- this statement reads carries FORCE ROW LEVEL SECURITY, and for a
+-- NOSUPERUSER NOBYPASSRLS role such as nexus_svc PostgreSQL applies the
+-- policy qual as a security barrier: a user qual is evaluated below it, and
+-- so can become an index condition, only when every function it calls is
+-- LEAKPROOF. Text equality (texteq) is leakproof, so the tenant_id and
+-- physical_collection equalities in live_notes still reach
+-- idx_catalog_documents_collection_live. jsonb ->> text
+-- (jsonb_object_field_text) is not leakproof (pg_proc.proleakproof = false,
+-- checked on PG 17), so a qual on metadata ->> 'doc_id' stays above the
+-- barrier and cannot drive an expression-index scan, whether its value is a
+-- literal or a bind. A superuser skips the barrier entirely, which is why
+-- round 2 saw the index used. ManifestLessCensusNotesGuardIndexPlanShapeTest
+-- pins both proleakproof values and the plan shape this produces.
 --
 -- REWRITE (round 3): the reverse lookup is no longer a per-row correlated
--- LATERAL re-scanning nexus.catalog_documents once per outer chunk (the
--- shape an RLS security barrier makes expensive regardless of any index).
+-- LATERAL re-scanning nexus.catalog_documents once per outer chunk (a
+-- shape whose jsonb predicate cannot use an index under the barrier).
 -- It is now a materialized candidate set (live_notes) computed ONCE per
 -- statement execution for this tenant+collection's live note-shaped
 -- documents, reduced to one deterministic candidate per chash
@@ -2661,6 +2669,13 @@ public final class PgVectorRepository {
 -- When forward is null or dead AND reverse also fails to resolve, the
 -- dead/absent forward owner is reported as-is (dead-owner/no-owner) --
 -- see the bucket CASE below.
+-- OWNER REPORTING (round 4): every 'item' row names the owner the bucket
+-- was computed from (owner_tumbler) and how it was found (owner_path):
+--   forward  the chunk's own catalog_doc_id/doc_id names an existing
+--            catalog document (live, or dead with no live reverse match);
+--   reverse  the live note-shaped document whose metadata.doc_id names
+--            this chash; when several do, this is the tie-break winner;
+--   NULL     no owner by either path (bucket no-owner).
 --
 -- SOLE COPY of this statement (Sam's ruling 2026-09-26, nexus-wbfpw.4):
 -- the engine route (POST /v1/vectors/manifest-less-census,
@@ -2747,17 +2762,20 @@ public final class PgVectorRepository {
 -- clean" from "this page is empty because the scope itself is wrong or
 -- the RLS GUC was never set" (code-review + critic finding, round 1).
 --   row_kind = 'item'  -- one row per manifest-less chunk on THIS PAGE:
---                         chash and bucket are set; bucket_total and
+--                         chash, bucket, owner_tumbler and owner_path are
+--                         set (the last two NULL for no-owner, see OWNER
+--                         REPORTING above); bucket_total and
 --                         scope_chunk_total are NULL.
 --   row_kind = 'total' -- exactly 5 rows, one per bucket, ALWAYS present
 --                         regardless of paging: bucket and bucket_total
 --                         are set (bucket_total is the count over the
---                         WHOLE collection, not this page); chash and
---                         scope_chunk_total are NULL.
+--                         WHOLE collection, not this page); chash,
+--                         scope_chunk_total and both owner columns are NULL.
 --   row_kind = 'scope' -- exactly 1 row, ALWAYS present: scope_chunk_total
 --                         is the count of every chunk nexus.chunks holds
 --                         for this tenant+collection, any manifest state;
---                         chash, bucket, and bucket_total are NULL.
+--                         chash, bucket, bucket_total and both owner
+--                         columns are NULL.
 WITH live_notes AS MATERIALIZED (
     SELECT
         d2.tumbler,
@@ -2783,6 +2801,8 @@ base AS (
     SELECT
         encode(c.chash, 'hex') AS chash,
         (own_manifest.chash IS NULL) AS is_manifest_less,
+        owner.tumbler AS owner_tumbler,
+        owner.path AS owner_path,
         CASE
             WHEN owner.tumbler IS NULL THEN 'no-owner'
             WHEN owner.deleted_at IS NOT NULL THEN 'dead-owner'
@@ -2816,7 +2836,15 @@ base AS (
                     WHEN rc.tumbler IS NOT NULL
                     THEN NULL
                     ELSE fwd_owner.deleted_at
-               END AS deleted_at
+               END AS deleted_at,
+               CASE WHEN fwd_owner.tumbler IS NOT NULL AND fwd_owner.deleted_at IS NULL
+                    THEN 'forward'
+                    WHEN rc.tumbler IS NOT NULL
+                    THEN 'reverse'
+                    WHEN fwd_owner.tumbler IS NOT NULL
+                    THEN 'forward'
+                    ELSE NULL
+               END AS path
     ) owner
     LEFT JOIN LATERAL (
            SELECT
@@ -2833,7 +2861,7 @@ scope AS (
     SELECT count(*) AS scope_chunk_total FROM base
 ),
 candidates AS (
-    SELECT chash, bucket FROM base WHERE is_manifest_less
+    SELECT chash, bucket, owner_tumbler, owner_path FROM base WHERE is_manifest_less
 ),
 all_buckets AS (
     SELECT unnest(ARRAY['superseded', 'legacy-unmanifested', 'dead-owner',
@@ -2846,18 +2874,22 @@ bucket_totals AS (
            ON t.bucket = ab.bucket
 ),
 page AS (
-    SELECT chash, bucket FROM candidates ORDER BY chash LIMIT ? OFFSET ?
+    SELECT chash, bucket, owner_tumbler, owner_path
+    FROM candidates ORDER BY chash LIMIT ? OFFSET ?
 )
 SELECT 'item' AS row_kind, p.chash AS chash, p.bucket AS bucket,
-       NULL::bigint AS bucket_total, NULL::bigint AS scope_chunk_total
+       NULL::bigint AS bucket_total, NULL::bigint AS scope_chunk_total,
+       p.owner_tumbler AS owner_tumbler, p.owner_path AS owner_path
 FROM page p
 UNION ALL
 SELECT 'total' AS row_kind, NULL::text AS chash, bt.bucket AS bucket,
-       bt.bucket_total, NULL::bigint AS scope_chunk_total
+       bt.bucket_total, NULL::bigint AS scope_chunk_total,
+       NULL::text AS owner_tumbler, NULL::text AS owner_path
 FROM bucket_totals bt
 UNION ALL
 SELECT 'scope' AS row_kind, NULL::text AS chash, NULL::text AS bucket,
-       NULL::bigint AS bucket_total, s.scope_chunk_total AS scope_chunk_total
+       NULL::bigint AS bucket_total, s.scope_chunk_total AS scope_chunk_total,
+       NULL::text AS owner_tumbler, NULL::text AS owner_path
 FROM scope s
 """;
 
@@ -2878,10 +2910,17 @@ FROM scope s
      * tenant/collection or an unset RLS GUC now reads 0 here too, not just in
      * the buckets, since both would otherwise look identical to a genuinely
      * clean census).
+     *
+     * <p>{@code owners} (round 4, critique Significant 3) maps each chash on THIS
+     * PAGE to the owner its bucket was computed from: {@code owner_tumbler} and
+     * {@code owner_path} ({@code "forward"}, {@code "reverse"}, or null for
+     * no-owner). A reverse-owned chash names the reverse tie-break winner, so an
+     * operator can see which document a tie resolved to.
      */
     public record ManifestLessCensusResult(
         int returned,
         Map<String, List<String>> chashes,
+        Map<String, Map<String, String>> owners,
         Map<String, Long> totals,
         long scopeChunkTotal) {}
 
@@ -2910,6 +2949,7 @@ FROM scope s
                .fetch());
 
         Map<String, List<String>> chashes = new LinkedHashMap<>();
+        Map<String, Map<String, String>> owners = new LinkedHashMap<>();
         Map<String, Long> totals = new LinkedHashMap<>();
         for (String bucket : MANIFEST_LESS_CENSUS_BUCKETS) {
             chashes.put(bucket, new ArrayList<>());
@@ -2924,6 +2964,11 @@ FROM scope s
                     String chash = rec.get("chash", String.class);
                     String bucket = rec.get("bucket", String.class);
                     chashes.computeIfAbsent(bucket, b -> new ArrayList<>()).add(chash);
+                    // LinkedHashMap, not Map.of: both values are null for a no-owner chash.
+                    Map<String, String> owner = new LinkedHashMap<>();
+                    owner.put("owner_tumbler", rec.get("owner_tumbler", String.class));
+                    owner.put("owner_path", rec.get("owner_path", String.class));
+                    owners.put(chash, owner);
                     returned++;
                 }
                 case "total" -> {
@@ -2939,7 +2984,7 @@ FROM scope s
                         "manifestLessCensus: unexpected row_kind " + rowKind);
             }
         }
-        return new ManifestLessCensusResult(returned, chashes, totals, scopeChunkTotal);
+        return new ManifestLessCensusResult(returned, chashes, owners, totals, scopeChunkTotal);
     }
 
     /**

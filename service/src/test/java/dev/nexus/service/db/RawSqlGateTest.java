@@ -1189,13 +1189,16 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFkTest.java", 1),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFromChashesTest.java", 2),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerImportRlsTest.java", 2),
-        // RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4): 3 raw-JDBC sites -- the
-        // generate_series bulk INSERT seed (no jOOQ codegen benefit for a one-off
-        // 5,000-row fixture load), the single-target-row INSERT, and the literal-
-        // spliced (deliberately NOT a PreparedStatement -- see the method's own
-        // javadoc) EXPLAIN probe proving idx_catalog_documents_live_note_doc_id
-        // serves the reverse notes-guard predicate for a literal-value run.
-        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 3),
+        // RDR-192 Step 2 (bead nexus-wbfpw.4), as of round 4: 5 raw-JDBC sites --
+        // two generate_series bulk INSERT seeds (the in-collection live notes and
+        // the other-collection documents that make the collection predicate
+        // selective; no jOOQ codegen benefit for one-off fixture loads), the
+        // per-target-row INSERT, the bind-parameterized EXPLAIN (ANALYZE) of the
+        // exact MANIFEST_LESS_CENSUS_SQL text run through the RLS-subject pool
+        // (it asserts live_notes/rev_candidates materialize once and live_notes
+        // uses idx_catalog_documents_collection_live), and the pg_proc
+        // proleakproof probe for texteq and jsonb_object_field_text.
+        Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
@@ -1557,7 +1560,9 @@ class RawSqlGateTest {
     // nexus-wbfpw.4 (RDR-192 Step 2 round-2 fix): 958 -> 961 (+3: one new test
     // file, vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java new at
     // 3 -- see that entry's own comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 961;
+    // nexus-wbfpw.4 round 4: 961 -> 963 (+2: that file 3 -> 5, the other-
+    // collection seed INSERT and the proleakproof probe; see its entry).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 963;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

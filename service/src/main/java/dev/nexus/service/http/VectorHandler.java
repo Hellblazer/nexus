@@ -1197,8 +1197,12 @@ public final class VectorHandler implements HttpHandler {
      * <p>A {@code collection} starting {@code quarantine-} is refused with 400 —
      * quarantine rows are out of the census by construction (RDR-192 MVV (a)).
      * <p>Response 200: {@code {"collection": "...", "returned": N, "chashes":
-     * {bucket: [chash, ...], ...}, "totals": {bucket: count, ...},
-     * "scope_chunk_total": N}} (round 1 fix, critic + code-review Significant).
+     * {bucket: [chash, ...], ...}, "owners": {chash: {"owner_tumbler": str|null,
+     * "owner_path": "forward"|"reverse"|null}, ...}, "totals": {bucket: count,
+     * ...}, "scope_chunk_total": N}} (round 1 fix, critic + code-review
+     * Significant; {@code owners} added in round 4 so a reverse tie-break's
+     * winner is visible). {@code owners} carries one entry per chash on THIS
+     * page.
      * {@code returned}/{@code chashes} are THIS PAGE only — paged by chash
      * ascending; loop while {@code returned == limit} (offset += limit), exactly
      * like {@code /v1/vectors/store-list}. {@code totals}/{@code
@@ -1224,6 +1228,7 @@ public final class VectorHandler implements HttpHandler {
             "collection", collection,
             "returned", result.returned(),
             "chashes", result.chashes(),
+            "owners", result.owners(),
             "totals", result.totals(),
             "scope_chunk_total", result.scopeChunkTotal())));
     }
