@@ -365,7 +365,10 @@ shell, so a harness that exercises them grants the token to nx-mcp alone:
   census: the census reads a raw tee of nx-mcp's stdin, so a hook call that
   never reaches the server cannot appear in it, and the plain-`nexus` break
   was already observed as "not connected" in `debug.log`. The proof ran on
-  Claude Code 2.1.277, the version in the shakeout image; re-run it when a
+  Claude Code 2.1.277, the version in the shakeout image. The probe mode now
+  asserts the six itself (`hook_census.py --probe`, a non-zero exit when any is
+  missing) and refuses a token outside base64url before splicing it into the
+  override's JSON. Re-run it when a
   harness adopts this on a Claude Code version whose MCP configuration or
   plugin loading changed (see the version-drift Risk).
 - **The mapping.** nx-mcp never reads the harness name itself. The two places

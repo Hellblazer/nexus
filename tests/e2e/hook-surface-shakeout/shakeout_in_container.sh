@@ -141,7 +141,14 @@ if [ -n "${SHAKEOUT_MCP_OVERRIDE:-}" ]; then
     # exec'd directly, because this harness drives an interactive session.
     EXTRA_CLAUDE_FLAGS="--strict-mcp-config --mcp-config <(builtin printf '{\"mcpServers\":{\"plugin:conexus:nexus\":{\"command\":\"/home/nexus/mcp_tee.sh\",\"args\":[],\"env\":{\"NX_HARNESS_CLAUDE_OAUTH_TOKEN\":\"%s\"}}}}' \"\$CLAUDE_CODE_OAUTH_TOKEN\")"
 fi
-CMD="export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --debug-file $RUN/debug.log --dangerously-skip-permissions --plugin-dir $PLUGIN $EXTRA_CLAUDE_FLAGS"
+# The override splices the token into JSON unescaped, so refuse a token with
+# anything outside base64url first (OAuth tokens are base64url; this is the
+# escaping half of claude_mcp_grant.sh's contract, checked instead of done).
+TOKEN_GUARD=""
+if [ -n "${SHAKEOUT_MCP_OVERRIDE:-}" ]; then
+    TOKEN_GUARD="[[ \$CLAUDE_CODE_OAUTH_TOKEN =~ ^[A-Za-z0-9_-]+\$ ]] || { echo 'override: token has characters outside base64url; refusing'; exit 1; } && "
+fi
+CMD="${TOKEN_GUARD}export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --debug-file $RUN/debug.log --dangerously-skip-permissions --plugin-dir $PLUGIN $EXTRA_CLAUDE_FLAGS"
 T kill-server 2>/dev/null
 T new-session -d -s S -x 240 -y 50 || { echo "tmux failed"; exit 1; }
 T pipe-pane -t S -o "cat >> $RUN/pane.log"
@@ -228,8 +235,11 @@ if [ -n "${SHAKEOUT_HOOK_PROBE:-}" ]; then
     T send-keys -t S "/exit" Enter
     sleep 15
     collect
-    echo "HOOK PROBE COMPLETE (override=${SHAKEOUT_MCP_OVERRIDE:-0})"
-    exit 0
+    # The verdict is asserted here, not compared by hand across runs.
+    python3 "$HOME_DIR/hook_census.py" --probe "$RUN/mcp-stdin.jsonl"
+    PROBE_RC=$?
+    echo "HOOK PROBE COMPLETE (override=${SHAKEOUT_MCP_OVERRIDE:-0}, rc=$PROBE_RC)"
+    exit "$PROBE_RC"
 fi
 
 # --- the turns, each aimed at one event -----------------------------------
