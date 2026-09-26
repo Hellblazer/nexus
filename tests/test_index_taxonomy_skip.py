@@ -418,3 +418,40 @@ def test_postprocessing_default_discovers_all(monkeypatch) -> None:
         ["code__a__m__v1", "docs__a__m__v1"], quiet=True
     )
     assert discovered == ["code__a__m__v1", "docs__a__m__v1"]
+
+
+def test_a_precomputed_topics_probe_is_reused(monkeypatch, tmp_path: Path) -> None:
+    # Code review round 3: nx index repo already knows which collections lack
+    # topics; one with topics answers without a second T2 probe.
+    from nexus.commands import index as index_mod
+
+    fired = _record_derived_steps(monkeypatch, index_mod)
+    _patch_t2(monkeypatch, _FakeTaxonomy({}, raise_for="code__a__m__v1"))
+    probed: list[str] = []
+    original = _FakeTaxonomy.get_topics_for_collection
+    monkeypatch.setattr(
+        _FakeTaxonomy, "get_topics_for_collection",
+        lambda self, col: probed.append(col) or original(self, col),
+    )
+
+    index_mod.run_collection_postprocessing(
+        ["code__a__m__v1", "docs__a__m__v1"], repo_path=tmp_path, quiet=True,
+        discover_collections=[], collections_without_topics={"docs__a__m__v1"},
+    )
+    assert fired["l1"] == [tmp_path]
+    assert probed == []
+
+
+def test_all_without_topics_is_rechecked_not_trusted(monkeypatch, tmp_path: Path) -> None:
+    # The precomputed set also means "probe failed" (it returns every
+    # collection on error), so it never answers "no taxonomy" by itself.
+    from nexus.commands import index as index_mod
+
+    fired = _record_derived_steps(monkeypatch, index_mod)
+    _patch_t2(monkeypatch, _FakeTaxonomy({"code__a__m__v1": [{"id": 1}]}))
+
+    index_mod.run_collection_postprocessing(
+        ["code__a__m__v1"], repo_path=tmp_path, quiet=True,
+        discover_collections=[], collections_without_topics={"code__a__m__v1"},
+    )
+    assert fired["l1"] == [tmp_path]

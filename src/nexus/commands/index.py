@@ -1630,6 +1630,7 @@ def index_repo_cmd(
                     collections, repo_path=path, discover_collections=[],
                     client=_t2_client,
                     discover_skip_reason=f"deferred: {_deferred_at_start}",
+                    collections_without_topics=no_topics,
                 )
             elif files_changed > 0 or no_topics:
                 # nexus-tevzq: collection-grain refinement of the qgc4b gate.
@@ -1643,7 +1644,7 @@ def index_repo_cmd(
                 )
                 run_collection_postprocessing(
                     collections, repo_path=path, discover_collections=discover,
-                    client=_t2_client,
+                    client=_t2_client, collections_without_topics=no_topics,
                 )
             else:
                 click.echo("  Taxonomy: no files changed — skipping discovery")
@@ -2263,6 +2264,7 @@ def run_collection_postprocessing(
     discover_collections: list[str] | None = None,
     client=None,
     discover_skip_reason: str = "",
+    collections_without_topics: set[str] | None = None,
 ) -> None:
     """Run the post-index taxonomy + projection + topic-link chain
     against *collections* and refresh the L1 context cache.
@@ -2386,19 +2388,32 @@ def run_collection_postprocessing(
             # cache went stale after a collection's first run. Projection
             # stays above: it re-reads every embedding, and the engine's
             # cross pass already projects each new chunk as it is written.
-            if total_topics or _any_collection_has_topics(db.taxonomy, collections):
+            if total_topics or _any_collection_has_topics(
+                db.taxonomy, collections, collections_without_topics,
+            ):
                 _refresh_derived_taxonomy(db, collections, repo_path, t2_index_write)
     except Exception:  # noqa: BLE001 — boundary catch wrapping the whole post-processing chain; failure logged and never crashes the index command
         _log.debug("taxonomy_discover_failed", exc_info=True)
 
 
-def _any_collection_has_topics(taxonomy: Any, collections: list[str]) -> bool:
+def _any_collection_has_topics(
+    taxonomy: Any, collections: list[str], without_topics: set[str] | None = None,
+) -> bool:
     """True when any of *collections* already has topics.
+
+    *without_topics* is the caller's own _collections_without_topics result
+    for the same run, when it has one (code review round 3: nx index repo
+    probed moments earlier). A collection missing from it has topics, so the
+    answer needs no second probe. It cannot answer False, though: that
+    helper returns every collection on a probe error, so "all without
+    topics" is ambiguous and falls through to a fresh probe here.
 
     A failed probe answers True: the derived steps are idempotent and
     best-effort, so running them needlessly costs little, while skipping them
     wrongly is the silent staleness this probe exists to end.
     """
+    if without_topics is not None and any(c not in without_topics for c in collections):
+        return True
     for col_name in collections:
         try:
             if taxonomy.get_topics_for_collection(col_name):
