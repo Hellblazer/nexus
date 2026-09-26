@@ -744,7 +744,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes]
     if: success() && needs.changes.outputs.code == 'true'
-    timeout-minutes: 10
+    # 6.8 to 9.6 min measured on develop 2026-09-26; run 36268338775 hit 10.
+    timeout-minutes: 15
     env:
       # nexus-wixar (2026-08-18): this job provisions NO service jar (by
       # design — see the comment block above), which made every lint-marked

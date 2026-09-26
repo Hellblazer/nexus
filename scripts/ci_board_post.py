@@ -68,6 +68,9 @@ def verdict_from_results(results: dict[str, str], *,
     alone read as a real red (run 36267952110, 2026-09-26). The run is
     then ``cancelled``, and ``failed`` still names every job that did not
     end green, so nothing is hidden; the newer run carries the verdict.
+    A job that hits its ``timeout-minutes`` also leaves the run cancelled,
+    with no newer run behind it: a ``cancelled`` verdict with no newer
+    ``ci-pending`` needs a rerun, not a reading as green.
     """
     known = {"success", "skipped", "cancelled"}
     failed = sorted(j for j, r in results.items() if r not in known)
