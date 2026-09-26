@@ -13,10 +13,44 @@
 -- ("nl3fn NOTES GUARD", CatalogRepository.java sweepChunksQuery) and the
 -- client's live_note_chashes (src/nexus/indexer_utils.py) already use to
 -- recognize a live manifest-less note; this census must agree with them.
--- The forward lookup wins when both resolve (see the bucket CASE below):
--- the forward pointer is stamped at write time to name the chunk's TRUE
--- current owner, so a reverse match against a different, coincidentally
--- content-identical document must never override it.
+-- The reverse LATERAL deliberately has NO ORDER BY on its own candidate
+-- rows (round-2 fix, code-review Important): idx_catalog_documents_live_
+-- note_doc_id (catalog-038) serves this exact predicate; an ORDER BY
+-- d2.tumbler LIMIT 1 tie-break defeated it for a LITERAL-value run of this
+-- predicate (an operator hand-typing a chash in psql) by making the
+-- planner prefer the pre-existing catalog_documents_pk (tenant_id,
+-- tumbler) instead, whose natural tumbler order lets it assume an early
+-- stop (measured: EXPLAIN cost 2.38 without the ORDER BY versus 40.83
+-- with it, same seeded population). Determinism among candidate rows was
+-- never load-bearing to remove anyway: at most one live note-shaped
+-- document should ever carry a given chash as its own current identity in
+-- one collection, and even in the vanishingly rare case of two
+-- (byte-identical current content in two separate live notes), picking
+-- either one via the reverse path is correct -- the disagreement this
+-- census actually adjudicates is forward-vs-reverse, never
+-- reverse-vs-reverse. KNOWN RESIDUAL (investigated, not fixed by the
+-- ORDER BY removal, correctness unaffected): a BIND-PARAMETERIZED
+-- execution of this same predicate -- e.g. exactly how
+-- PgVectorRepository#manifestLessCensus issues it, or a psql
+-- PREPARE/EXECUTE -- still does not bind to the new index; Postgres's
+-- cost model for a parameterized jsonb ->> text equality falls back to a
+-- generic default selectivity regardless of which index exists, unlike
+-- its literal-value costing. See ManifestLessCensusNotesGuardIndexPlanShapeTest's
+-- own class javadoc for the full investigation. The index still serves
+-- the literal/hand-run shape this file exists for, and costs nothing
+-- extra to maintain.
+-- Precedence (round-2 fix): a LIVE owner by either path beats a dead or
+-- absent one. Forward wins over reverse ONLY when the forward-resolved
+-- owner is itself LIVE -- the forward pointer is stamped at write time
+-- to name the chunk's current owner, so it is trustworthy while that
+-- owner is alive. A forward pointer to a TOMBSTONED document is stale
+-- historical metadata, not evidence of true current ownership, and does
+-- NOT outrank a live reverse match: production's own notes-guard
+-- (sweepChunksQuery) protects that chunk today regardless of what its
+-- forward pointer says, so this census must classify it the same way.
+-- When forward is null or dead AND reverse also fails to resolve, the
+-- dead/absent forward owner is reported as-is (dead-owner/no-owner) --
+-- see the bucket CASE below.
 --
 -- SOLE COPY of this statement (Sam's ruling 2026-09-26, nexus-wbfpw.4):
 -- the engine route (POST /v1/vectors/manifest-less-census,
@@ -69,12 +103,18 @@
 --                         lost reap).
 --   legacy-unmanifested   owning document is live, has NO manifest row
 --                         in any collection (a note stored before
---                         nexus-b6enc), found by the forward pointer OR
---                         the reverse notes-guard match described above.
---   dead-owner            owning document is tombstoned, OR live but
---                         every manifest row it has is in another
---                         collection (the rename-COPY leftover,
---                         CatalogRepository.java ~8101-8125).
+--                         nexus-b6enc), found by a LIVE forward pointer,
+--                         OR by the reverse notes-guard match when the
+--                         forward pointer is null or names a TOMBSTONED
+--                         document (the live reverse owner rescues the
+--                         classification -- see the precedence note
+--                         above).
+--   dead-owner            no live owner resolves by either path: the
+--                         forward pointer names a tombstoned document
+--                         AND no live reverse match rescues it, OR the
+--                         owner is live but every manifest row it has is
+--                         in another collection (the rename-COPY
+--                         leftover, CatalogRepository.java ~8101-8125).
 --   no-owner              catalog_doc_id/doc_id is empty or names no
 --                         catalog document, AND no live note-shaped
 --                         document's own metadata.doc_id names this
@@ -135,15 +175,21 @@ WITH base AS (
              AND d2.deleted_at IS NULL
              AND (d2.file_path IS NULL OR d2.file_path = '')
              AND (d2.metadata ->> 'doc_id') = encode(c.chash, 'hex')
-           ORDER BY d2.tumbler
            LIMIT 1
-    ) rev_owner ON fwd_owner.tumbler IS NULL
+    ) rev_owner ON fwd_owner.tumbler IS NULL OR fwd_owner.deleted_at IS NOT NULL
     CROSS JOIN LATERAL (
            SELECT
-               COALESCE(fwd_owner.tumbler, rev_owner.tumbler) AS tumbler,
-               CASE WHEN fwd_owner.tumbler IS NOT NULL
-                    THEN fwd_owner.deleted_at
-                    ELSE NULL
+               CASE WHEN fwd_owner.tumbler IS NOT NULL AND fwd_owner.deleted_at IS NULL
+                    THEN fwd_owner.tumbler
+                    WHEN rev_owner.tumbler IS NOT NULL
+                    THEN rev_owner.tumbler
+                    ELSE fwd_owner.tumbler
+               END AS tumbler,
+               CASE WHEN fwd_owner.tumbler IS NOT NULL AND fwd_owner.deleted_at IS NULL
+                    THEN NULL
+                    WHEN rev_owner.tumbler IS NOT NULL
+                    THEN NULL
+                    ELSE fwd_owner.deleted_at
                END AS deleted_at
     ) owner
     LEFT JOIN LATERAL (

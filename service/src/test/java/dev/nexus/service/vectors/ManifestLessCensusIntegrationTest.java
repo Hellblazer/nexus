@@ -51,15 +51,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       key at all (empty chunk metadata) and is resolved purely via the REVERSE
  *       path against live note-shaped doc D5, whose own {@code metadata.doc_id}
  *       names REV_ONLY's chash.</li>
- *   <li><strong>dead-owner</strong> — three distinct producers: doc D3 is
+ *   <li><strong>dead-owner</strong> — two distinct producers: doc D3 is
  *       tombstoned (chash TOMBSTONED); doc D4 is live but its only manifest row is
  *       in collection B, not A (chash RENAME_COPY) — the rename-COPY leftover,
- *       {@code CatalogRepository.java} ~8101-8125; and chash FWD_VS_REV, whose
- *       chunk-level {@code catalog_doc_id} forward-resolves to TOMBSTONED doc D6,
- *       while a SEPARATE live note-shaped doc D7 ALSO (coincidentally) carries
- *       {@code metadata.doc_id} = FWD_VS_REV's chash — the forward resolution
- *       must win (see {@link #forwardResolution_winsOverACoincidentalReverseMatch}
- *       for why).</li>
+ *       {@code CatalogRepository.java} ~8101-8125.</li>
  *   <li><strong>no-owner</strong> — chash NO_OWNER_EMPTY carries no
  *       {@code catalog_doc_id}/{@code doc_id} at all AND no live note-shaped
  *       document's own {@code metadata.doc_id} names it either (a {@code .nxexp}
@@ -69,9 +64,31 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       schema (the CASE in {@code manifest_less_census.sql} is exhaustive over
  *       owner-found/tombstoned/live x total-manifest-count/own-manifest-count);
  *       this suite instead pins the NEGATIVE property the bucket exists to
- *       guarantee — every one of the 9 manifest-less rows gets a non-null bucket
+ *       guarantee — every one of the manifest-less rows gets a non-null bucket
  *       and the returned count equals the seeded population, so nothing is ever
  *       silently dropped.</li>
+ * </ul>
+ *
+ * <p>Round-2 fix (critic + code-review Critical): owner precedence is "a LIVE
+ * owner by either path beats a dead or absent one; forward wins over reverse only
+ * when the forward-resolved owner is ITSELF live." Round 1 shipped an
+ * unconditional "forward always wins" rule, which misclassified a chunk whose
+ * forward pointer names a TOMBSTONED document while a SEPARATE live note
+ * resolves the same chash via the reverse path as {@code dead-owner} instead of
+ * {@code legacy-unmanifested} — exactly the row shape production's own
+ * {@code sweepChunksQuery} notes-guard protects today. Two fixtures cover this:
+ * <ul>
+ *   <li>chash FWD_VS_REV — forward names TOMBSTONED doc D6; live note-shaped doc
+ *       D7 ALSO carries {@code metadata.doc_id} = FWD_VS_REV's chash. D7 (live)
+ *       RESCUES the classification: {@code legacy-unmanifested}, since D7 has no
+ *       manifest rows anywhere. See {@link
+ *       #forwardResolution_isRescuedByALiveReverseMatchWhenForwardOwnerIsDead}.</li>
+ *   <li>chash FWD_LIVE_VS_REV — forward names LIVE doc D8, which has a manifest
+ *       row in collection A for a DIFFERENT chash; a separate live note D9 ALSO
+ *       carries {@code metadata.doc_id} = FWD_LIVE_VS_REV's chash. Forward (D8,
+ *       live) wins here: {@code superseded}, not {@code legacy-unmanifested} —
+ *       proving the reverse path is not simply preferred whenever it exists. See
+ *       {@link #forwardResolution_winsWhenBothOwnersAreLive}.</li>
  * </ul>
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -141,6 +158,8 @@ class ManifestLessCensusIntegrationTest {
     private static final String TOMBSTONED       = ch("wbfpw4-tombstoned");
     private static final String RENAME_COPY      = ch("wbfpw4-rename-copy");
     private static final String FWD_VS_REV       = ch("wbfpw4-forward-wins");
+    private static final String FWD_LIVE_VS_REV  = ch("wbfpw4-forward-live-wins");
+    private static final String FWD_LIVE_ANCHOR  = ch("wbfpw4-forward-live-anchor");
     private static final String MANIFEST_B_ONLY  = ch("wbfpw4-manifest-b-only");
     private static final String NO_OWNER_EMPTY   = ch("wbfpw4-no-owner-empty");
     private static final String NO_OWNER_GHOST   = ch("wbfpw4-no-owner-ghost");
@@ -152,12 +171,15 @@ class ManifestLessCensusIntegrationTest {
     private static final String D4  = "wbfpw4-doc-rename-copy";
     private static final String D5  = "wbfpw4-doc-reverse-only-note";
     private static final String D6  = "wbfpw4-doc-forward-target-tombstoned";
-    private static final String D7  = "wbfpw4-doc-reverse-coincidence";
+    private static final String D7  = "wbfpw4-doc-reverse-rescue";
+    private static final String D8  = "wbfpw4-doc-forward-live-owner";
+    private static final String D9  = "wbfpw4-doc-reverse-coincidence-live";
 
-    /** Every manifest-less chash seeded into COLLECTION_A (9 total; CURRENT excluded). */
-    private static final int TOTAL_MANIFEST_LESS_IN_A = 9;
+    /** Every manifest-less chash seeded into COLLECTION_A (10 total; CURRENT and
+     *  FWD_LIVE_ANCHOR excluded — both carry their own own-collection manifest row). */
+    private static final int TOTAL_MANIFEST_LESS_IN_A = 10;
     /** Every physical chunk row seeded into COLLECTION_A, manifest-less or not. */
-    private static final int TOTAL_CHUNKS_IN_A = TOTAL_MANIFEST_LESS_IN_A + 1; // + CURRENT
+    private static final int TOTAL_CHUNKS_IN_A = TOTAL_MANIFEST_LESS_IN_A + 2; // + CURRENT, FWD_LIVE_ANCHOR
 
     private void registerDoc(String tumbler, String physicalCollection) {
         catalogRepo.upsertDocument(TENANT, Map.of(
@@ -229,14 +251,28 @@ class ManifestLessCensusIntegrationTest {
         vecRepo.upsertChunks(TENANT, COLLECTION_A, List.of(RENAME_COPY), List.of("rename copy leftover text"),
             List.of(Map.of("catalog_doc_id", D4)));
 
-        // D6 (tombstoned, the TRUE forward owner) vs D7 (live note-shaped, a COINCIDENTAL
-        // reverse match on the same chash) -- forward must win. See
-        // forwardResolution_winsOverACoincidentalReverseMatch.
+        // D6 (TOMBSTONED, the forward owner) vs D7 (live note-shaped, a COINCIDENTAL
+        // reverse match on the same chash) -- D7 (live) RESCUES the classification: a
+        // dead forward owner loses to a live reverse one. See
+        // forwardResolution_isRescuedByALiveReverseMatchWhenForwardOwnerIsDead.
         registerDoc(D6, COLLECTION_A);
         catalogRepo.deleteDocument(TENANT, D6);
         registerNoteDoc(D7, COLLECTION_A, FWD_VS_REV);
         vecRepo.upsertChunks(TENANT, COLLECTION_A, List.of(FWD_VS_REV), List.of("forward vs reverse text"),
             List.of(Map.of("catalog_doc_id", D6)));
+
+        // D8 (LIVE forward owner, with a manifest row in A for a DIFFERENT chash) vs D9
+        // (live note-shaped, a COINCIDENTAL reverse match on FWD_LIVE_VS_REV's chash) --
+        // forward (D8, live) wins: a live forward owner is never displaced by a reverse
+        // match. See forwardResolution_winsWhenBothOwnersAreLive.
+        registerDoc(D8, COLLECTION_A);
+        vecRepo.upsertChunks(TENANT, COLLECTION_A, List.of(FWD_LIVE_ANCHOR), List.of("forward live anchor text"),
+            List.of(Map.of()));
+        catalogRepo.writeManifest(TENANT, D8, COLLECTION_A,
+            List.of(Map.<String, Object>of("position", 0, "chash", FWD_LIVE_ANCHOR, "chunk_index", 0)));
+        registerNoteDoc(D9, COLLECTION_A, FWD_LIVE_VS_REV);
+        vecRepo.upsertChunks(TENANT, COLLECTION_A, List.of(FWD_LIVE_VS_REV), List.of("forward live vs reverse text"),
+            List.of(Map.of("catalog_doc_id", D8)));
 
         // no-owner: no catalog_doc_id/doc_id at all, and a catalog_doc_id naming a tumbler
         // that was never registered. Neither has a reverse match either.
@@ -253,18 +289,18 @@ class ManifestLessCensusIntegrationTest {
         var result = vecRepo.manifestLessCensus(TENANT, COLLECTION_A, 300, 0);
 
         assertThat(result.returned()).isEqualTo(TOTAL_MANIFEST_LESS_IN_A);
-        assertThat(result.chashes().get("superseded")).containsExactlyInAnyOrder(OLD);
+        assertThat(result.chashes().get("superseded")).containsExactlyInAnyOrder(OLD, FWD_LIVE_VS_REV);
         assertThat(result.chashes().get("legacy-unmanifested"))
-            .containsExactlyInAnyOrder(LEGACY, LEGACY_FALLBACK, REV_ONLY);
+            .containsExactlyInAnyOrder(LEGACY, LEGACY_FALLBACK, REV_ONLY, FWD_VS_REV);
         assertThat(result.chashes().get("dead-owner"))
-            .containsExactlyInAnyOrder(TOMBSTONED, RENAME_COPY, FWD_VS_REV);
+            .containsExactlyInAnyOrder(TOMBSTONED, RENAME_COPY);
         assertThat(result.chashes().get("no-owner"))
             .containsExactlyInAnyOrder(NO_OWNER_EMPTY, NO_OWNER_GHOST);
         assertThat(result.chashes().get("unclassified")).isEmpty();
 
-        assertThat(result.totals().get("superseded")).isEqualTo(1L);
-        assertThat(result.totals().get("legacy-unmanifested")).isEqualTo(3L);
-        assertThat(result.totals().get("dead-owner")).isEqualTo(3L);
+        assertThat(result.totals().get("superseded")).isEqualTo(2L);
+        assertThat(result.totals().get("legacy-unmanifested")).isEqualTo(4L);
+        assertThat(result.totals().get("dead-owner")).isEqualTo(2L);
         assertThat(result.totals().get("no-owner")).isEqualTo(2L);
         assertThat(result.totals().get("unclassified")).isEqualTo(0L);
         assertThat(result.scopeChunkTotal()).isEqualTo(TOTAL_CHUNKS_IN_A);
@@ -293,27 +329,45 @@ class ManifestLessCensusIntegrationTest {
     }
 
     /**
-     * Round-1 fix (critic Critical, "decide from the RDR and say why"): when a
-     * chunk's forward key resolves to one document AND a reverse note-identity
-     * match ALSO exists (by coincidence -- two independently live documents can
-     * carry the same current-content chash), the FORWARD resolution wins. The
-     * forward pointer is stamped into chunk metadata AT WRITE TIME to name that
-     * chunk's true current owner (RDR-108 Phase 3); the reverse notes-guard
-     * predates it and exists ONLY to protect chunks that never received a forward
-     * pointer. Treating a coincidental reverse match as authoritative when a
-     * forward pointer already resolves would let an unrelated document's identity
-     * silently override the chunk's own recorded owner.
+     * Round-2 fix (critic + code-review Critical): round 1 shipped "forward wins
+     * whenever it resolves, live or dead," which misclassified this EXACT fixture
+     * as {@code dead-owner}. The correct rule is "a LIVE owner by either path
+     * beats a dead or absent one" — a forward pointer to a TOMBSTONED document is
+     * stale historical metadata, not evidence of true current ownership, and must
+     * not silently outrank a live reverse match that protects the chunk in
+     * PRODUCTION today ({@code CatalogRepository.sweepChunksQuery}'s "nl3fn NOTES
+     * GUARD" never consults the forward pointer at all).
      *
-     * <p>FWD_VS_REV's forward key names TOMBSTONED doc D6 (-&gt; dead-owner); a
-     * SEPARATE live note D7 also carries {@code metadata.doc_id} = FWD_VS_REV's
-     * chash (-&gt; would be legacy-unmanifested if the reverse path won instead).
-     * Asserting dead-owner here proves forward wins.
+     * <p>FWD_VS_REV's forward key names TOMBSTONED doc D6; a SEPARATE live
+     * note-shaped doc D7 carries {@code metadata.doc_id} = FWD_VS_REV's chash and
+     * has zero manifest rows anywhere. D7 (live) RESCUES the classification:
+     * {@code legacy-unmanifested}, not {@code dead-owner} — a chunk misrouted to
+     * dead-owner is invisible to Step 3's legacy-unmanifested-only backfill gate
+     * and becomes unprotected reaper bait once Step 11 removes the notes-guard.
      */
     @Test
-    void forwardResolution_winsOverACoincidentalReverseMatch() {
+    void forwardResolution_isRescuedByALiveReverseMatchWhenForwardOwnerIsDead() {
         var result = vecRepo.manifestLessCensus(TENANT, COLLECTION_A, 300, 0);
-        assertThat(result.chashes().get("dead-owner")).contains(FWD_VS_REV);
-        assertThat(result.chashes().get("legacy-unmanifested")).doesNotContain(FWD_VS_REV);
+        assertThat(result.chashes().get("legacy-unmanifested")).contains(FWD_VS_REV);
+        assertThat(result.chashes().get("dead-owner")).doesNotContain(FWD_VS_REV);
+    }
+
+    /**
+     * Round-2 fix companion: a live forward owner is NEVER displaced by a
+     * coincidental live reverse match — the rescue above only fires when the
+     * forward-resolved owner is itself dead or absent. FWD_LIVE_VS_REV's forward
+     * key names LIVE doc D8 (which has a manifest row in collection A for a
+     * DIFFERENT chash, so this chash's own_count &gt; 0 -&gt; superseded); a
+     * SEPARATE live note D9 ALSO carries {@code metadata.doc_id} =
+     * FWD_LIVE_VS_REV's chash (-&gt; would be legacy-unmanifested if reverse were
+     * preferred whenever it exists). Asserting superseded here proves the live
+     * forward owner still wins.
+     */
+    @Test
+    void forwardResolution_winsWhenBothOwnersAreLive() {
+        var result = vecRepo.manifestLessCensus(TENANT, COLLECTION_A, 300, 0);
+        assertThat(result.chashes().get("superseded")).contains(FWD_LIVE_VS_REV);
+        assertThat(result.chashes().get("legacy-unmanifested")).doesNotContain(FWD_LIVE_VS_REV);
     }
 
     @Test
@@ -354,9 +408,9 @@ class ManifestLessCensusIntegrationTest {
 
         assertThat(page1.totals()).isEqualTo(page2.totals());
         assertThat(page1.scopeChunkTotal()).isEqualTo(page2.scopeChunkTotal());
-        assertThat(page1.totals().get("superseded")).isEqualTo(1L);
-        assertThat(page1.totals().get("legacy-unmanifested")).isEqualTo(3L);
-        assertThat(page1.totals().get("dead-owner")).isEqualTo(3L);
+        assertThat(page1.totals().get("superseded")).isEqualTo(2L);
+        assertThat(page1.totals().get("legacy-unmanifested")).isEqualTo(4L);
+        assertThat(page1.totals().get("dead-owner")).isEqualTo(2L);
         assertThat(page1.totals().get("no-owner")).isEqualTo(2L);
         assertThat(page1.totals().get("unclassified")).isEqualTo(0L);
         assertThat(page1.scopeChunkTotal()).isEqualTo(TOTAL_CHUNKS_IN_A);
