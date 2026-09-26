@@ -6117,8 +6117,11 @@ def _run_index(
         # Captured here, outside the try, so the exit-code check below
         # (via the return dict) sees an accurate empty list rather than an
         # undefined name if self-heal never runs or raises before
-        # assigning it.
-        _self_heal_reconciled_doc_ids: list[str] = []
+        # assigning it. Round 5: CONFIRMED only (see the return dict's own
+        # comment on "self_heal_confirmed_doc_ids") -- a merely
+        # RECONCILED-but-unconfirmed (genuinely partial) rebuild must not
+        # suppress the fail-loud exit.
+        _self_heal_confirmed_doc_ids: list[str] = []
         _phase("Catalog manifest self-heal…")
         _t = time.monotonic()
         try:
@@ -6150,7 +6153,7 @@ def _run_index(
                         _cat.by_owner(_heal_owner), _cat, _mk_t3,
                         _tracked_writer, yield_before_write=_yield_fair,
                     )
-                    _self_heal_reconciled_doc_ids = list(heal.reconciled_doc_ids)
+                    _self_heal_confirmed_doc_ids = list(heal.confirmed_doc_ids)
                     if heal.reconciled or heal.lost or heal.write_failed:
                         _phase(
                             f"Catalog manifest self-heal: "
@@ -6403,16 +6406,25 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
-        # nexus-wbfpw.29 round 3: tumblers of every document the SAME
-        # run's own manifest self-heal pass just reconciled (nexus-c21fk,
+        # nexus-wbfpw.29 round 3 (round 5: field renamed to say what it
+        # actually gates): tumblers of every document the SAME run's own
+        # manifest self-heal pass CONFIRMED reconciled (nexus-c21fk,
         # above) -- index_repo_cmd subtracts these from the manifest-
         # write-failure collector before deciding the exit code, so a
         # hook failure self-heal already repaired in this run is reported
         # as a "restored" WARNING, not a false "run nx catalog reconcile"
-        # failure. Always [] for every OTHER index verb (pdf/md/dt), which
-        # have no same-run self-heal pass -- they keep failing exactly as
-        # before this bead's round-3 fix.
-        "self_heal_reconciled_doc_ids": _self_heal_reconciled_doc_ids,
+        # failure. "Confirmed" (ManifestHealResult.confirmed_doc_ids, NOT
+        # its broader reconciled_doc_ids) means the rebuilt manifest holds
+        # at least as many rows as the document's own chunk_count -- a
+        # document self-heal touched but could only PARTIALLY rebuild
+        # (round 5 critique CRITICAL: a genuine T3 shortfall, previously
+        # indistinguishable here from benign RDR-108 duplicate-content
+        # collapse) is deliberately excluded, so it still fails loud with
+        # the reconcile remedy rather than a false "restored" claim.
+        # Always [] for every OTHER index verb (pdf/md/dt), which have no
+        # same-run self-heal pass -- they keep failing exactly as before
+        # this bead's round-3 fix.
+        "self_heal_confirmed_doc_ids": _self_heal_confirmed_doc_ids,
         # nexus-wi1uv round-2: count of PDFs that failed the post-extraction
         # quality gate this run (contained per-file, never aborted the run).
         # index_repo_cmd uses this to drive a non-zero exit after

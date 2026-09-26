@@ -717,9 +717,25 @@ def raise_identity_drop_exception(
     # recorded). The old single write-class remedy ("catalog show / re-index
     # with --force") contradicted both WARNINGs. It stays for completion
     # refusals, whose WARNING says "Re-index or --force to retry", and as
-    # the identity-drop fallback: reconcile cannot rebuild a document that
-    # never registered (no catalog row to repair) or whose chunks it
-    # cannot match (reported LOST).
+    # the identity-drop fallback.
+    #
+    # round 4 critique (narrowed round 5): "reconcile cannot rebuild a
+    # document that never registered" is NOT a blanket truth for every
+    # identity-drop producer. It holds for a REGISTRATION failure
+    # (indexer.py's preflight register call itself failed -- no catalog
+    # row, no tumbler, nothing for reconcile's ghost path to find). It
+    # does NOT hold for the OTHER identity-drop producer
+    # (mcp_infra.py's manifest_write_batch_hook, fired when a chunk
+    # batch's own catalog_doc_id/meta.doc_id never resolved): `nx index
+    # repo` registers catalog entries UPFRONT, independently of whether a
+    # later hook call correctly threads that id through, so a registered
+    # entry with a resolvable content_hash MAY already exist for that
+    # document -- reconcile's ghost-candidate match (content_hash +
+    # physical_collection, no chunk_count requirement) can genuinely
+    # repair that shape. --force stays as the fallback either way, since
+    # this function cannot tell which of the two producers a given run's
+    # drops came from and a document reconcile could not reach (never
+    # registered, or its chunks are reported LOST) still needs it.
     remedies = []
     if write_failed and not identity_dropped:
         remedies.append("Run 'nx catalog reconcile' to repair the manifests")

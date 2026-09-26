@@ -61,15 +61,29 @@ class ManifestHealResult:
     never_chunked: list = field(default_factory=list)
     #: nexus-wbfpw.29 round 3: the tumbler (str) of every entry actually
     #: reconciled this pass -- ``reconciled`` was a bare count with no way
-    #: to identify WHICH documents it covered. The indexer's own same-run
+    #: to identify WHICH documents it covered. len(reconciled_doc_ids) ==
+    #: reconciled always holds (both incremented together, same call site
+    #: below) -- but "reconciled" only means a manifest write happened,
+    #: NOT that the rebuilt manifest is complete (see confirmed_doc_ids).
+    reconciled_doc_ids: list = field(default_factory=list)
+    #: nexus-wbfpw.29 round 5 (critique CRITICAL): the SUBSET of
+    #: reconciled_doc_ids whose rebuilt manifest is provably COMPLETE --
+    #: the T3 fetch found at least as many rows as entry.chunk_count
+    #: expected (never fewer). A shortfall can legitimately be RDR-108
+    #: duplicate-content collapse (harmless), but it can equally be a
+    #: genuinely partial rebuild (a transient fetch failure, a partial T3
+    #: write) -- this core has no way to tell the two apart from the
+    #: shortfall alone, so it does NOT guess. The indexer's own same-run
     #: self-heal call (nexus-c21fk) can repair the exact gap a manifest-
     #: hook exception left moments earlier in the SAME `nx index repo` run
-    #: -- without this list, nx index's exit-code check had no way to tell
-    #: "already fixed by self-heal" apart from "still broken", so it
-    #: printed a stale "run nx catalog reconcile" remedy for a document
-    #: that no longer needed it. len(reconciled_doc_ids) == reconciled
-    #: always holds (both incremented together, same call site below).
-    reconciled_doc_ids: list = field(default_factory=list)
+    #: -- but ONLY a confirmed_doc_ids entry may be treated as "already
+    #: fixed by self-heal" for the exit-code decision (Sam's locked
+    #: decision: unconfirmed is not repaired). ``reconciled_doc_ids``
+    #: itself is unchanged and still drives `nx catalog reconcile`'s own
+    #: user-facing "Reconciled N document(s)" count -- a partial rebuild is
+    #: still real, useful work, just not provably COMPLETE work.
+    #: len(confirmed_doc_ids) <= len(reconciled_doc_ids) always holds.
+    confirmed_doc_ids: list = field(default_factory=list)
 
     @property
     def unmatched(self) -> list:
@@ -291,11 +305,17 @@ def _heal_collections(
             if not any(c["chash"] for c in chunks):
                 _classify_unmatched(entry)
                 continue
-            if len(chunks) < entry.chunk_count:
+            confirmed = len(chunks) >= entry.chunk_count
+            if not confirmed:
                 # RDR-108: duplicate chunk text collapses to one T3 row by
                 # design, so a rebuilt manifest can legitimately have fewer
                 # rows than the document's stale chunk_count. Not an error —
                 # tracked so the summary reports it instead of hiding it.
+                # nexus-wbfpw.29 round 5: but a shortfall can EQUALLY be a
+                # genuinely partial rebuild (this core cannot distinguish
+                # the two from the count alone) — confirmed_doc_ids is
+                # deliberately withheld below so the exit-code decision
+                # never treats an unconfirmed shortfall as fully repaired.
                 result.dup_collapsed += 1
                 result.dup_old_total += entry.chunk_count
                 result.dup_new_total += len(chunks)
@@ -322,3 +342,5 @@ def _heal_collections(
                     continue
             result.reconciled += 1
             result.reconciled_doc_ids.append(str(entry.tumbler))
+            if confirmed:
+                result.confirmed_doc_ids.append(str(entry.tumbler))

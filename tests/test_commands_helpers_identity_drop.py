@@ -473,6 +473,30 @@ def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
     assert "t3 gc -c COLLECTION" in msg
 
 
+def test_raise_identity_drop_exception_write_failed_and_identity_dropped_names_one_remedy():
+    """nexus-wbfpw.29 round 5 (critique observation): no prior test drove
+    ``write_failed`` AND ``identity_dropped`` simultaneously through the
+    remedy-list logic (``if write_failed and not identity_dropped:``).
+    The identity-drop remedy's own reconcile-then-force text is meant to
+    implicitly subsume the write-failed remedy when both causes fire in
+    the same run -- the reconcile instruction must appear exactly ONCE,
+    not once per cause.
+    """
+    from nexus.mcp_infra import _record_manifest_identity_drop, _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")
+    _record_manifest_identity_drop("docs__x", 4)
+
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception(subject="document")
+    msg = str(exc_info.value)
+
+    assert "manifest write failures" in msg
+    assert "identity drops" in msg
+    assert msg.count("Run 'nx catalog reconcile'") == 1, msg
+    assert "--force" in msg
+
+
 def test_raise_identity_drop_exception_for_file_names_file_and_remedy(tmp_path):
     target = tmp_path / "orphan.pdf"
     with pytest.raises(click.ClickException) as exc_info:

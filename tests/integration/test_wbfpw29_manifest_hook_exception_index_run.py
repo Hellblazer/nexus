@@ -118,7 +118,7 @@ def _channel3_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name: str
     return repo, fixture_path
 
 
-def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
+def test_manifest_hook_exception_self_heals_same_run_then_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The bead's acceptance scenario, driven through the REAL production
@@ -160,15 +160,24 @@ def test_manifest_hook_exception_fails_run_names_doc_then_recovers(
     plausible-looking double standing in for it.
 
     ROUND-3 REWRITE (critic Critical): ``nx index repo``'s own SAME-RUN
-    manifest self-heal pass (indexer.py, nexus-c21fk) reads the catalog
-    via its OWN ``make_catalog_reader()`` call -- a DIFFERENT import path
-    than ``mcp_infra.get_catalog()``, which is all this test faults -- so
-    self-heal is HEALTHY here and genuinely repairs the exact gap the
-    faulted hook just left, in the SAME run. Before round 3's fix, the
-    run still failed non-zero with a stale "run nx catalog reconcile"
-    remedy for a document that no longer needed it. Now: the run exits 0,
-    with an INFORMATIONAL "restored by self-heal" line naming the doc --
-    not a failure. The companion test below
+    manifest self-heal pass (indexer.py, nexus-c21fk) reaches the catalog
+    via its OWN ``make_catalog_reader()`` call site, not through
+    ``mcp_infra.get_catalog()`` -- the ONE call this test faults. This is
+    a different call SITE, not a different catalog: ``get_catalog()`` is
+    itself a one-line wrapper around ``make_catalog_reader()`` (round 4
+    critique review), so both resolve to the identical service-backed
+    handle over the same engine -- there is no separate cache or snapshot
+    for the two to disagree about. What this test actually proves is
+    narrower: a fault confined to the ONE round trip inside
+    ``get_catalog()``'s own call (a transient failure, or -- as here -- a
+    fault injected specifically there) leaves a separate, later round trip
+    through the same factory free to succeed moments later, so self-heal
+    is HEALTHY here and genuinely repairs the exact gap the faulted hook
+    just left, in the SAME run. Before round 3's fix, the run still
+    failed non-zero with a stale "run nx catalog reconcile" remedy for a
+    document that no longer needed it. Now: the run exits 0, with an
+    INFORMATIONAL "restored by self-heal" line naming the doc -- not a
+    failure. The companion test below
     (``test_manifest_hook_exception_when_self_heal_is_also_faulted``)
     covers the case where self-heal genuinely cannot repair the gap.
     """
@@ -248,12 +257,37 @@ def test_manifest_hook_exception_when_self_heal_is_also_faulted(
     reconcile" remedy -- because that remedy is now actually true. The
     remedy is proven to actually work by the separate
     ``test_reconcile_is_the_remedy_the_warning_actually_names`` test.
+
+    ROUND-5 REWRITE (critique Important): the previous version replaced
+    ``manifest_heal.heal_manifest_gaps`` -- the function under test --
+    wholesale with a no-op double, which proves only that the exit-code
+    wiring reads whatever the function returns, not that a genuine
+    internal self-heal failure produces that return. This version instead
+    faults ``make_catalog_writer`` (``nexus.catalog.factory``), one of
+    ``heal_manifest_gaps``'s own REAL dependencies (its lazy
+    ``writer_factory`` param, indexer.py's self-heal call site ~6125-6151)
+    -- letting the real function run its real gap detection and its real
+    T3 chunk fetch (proving self-heal genuinely FOUND the gap and
+    genuinely tried to rebuild it), and fail only at the write step, the
+    same way a transient catalog-write outage would in production.
+
+    The fault targets specifically self-heal's own lazy writer closure
+    (``_tracked_writer``, indexer.py ~6136) by inspecting the IMMEDIATE
+    caller's frame, rather than counting calls: `nx index repo` mints
+    several OTHER catalog writers first (the registration phase's own,
+    the unconditional migration-writer mint at ~4867), and their exact
+    count/order is an implementation detail this test should not need to
+    track -- a call-counting version broke the very first time an
+    intervening writer call was added elsewhere in the pipeline. Scoping
+    by caller name is exact regardless of how many other writers this run
+    mints before or after self-heal's own.
     """
+    import sys
+
     from click.testing import CliRunner
 
-    import nexus.catalog.manifest_heal as manifest_heal
+    import nexus.catalog.factory as catalog_factory
     import nexus.mcp_infra as mcp_infra
-    from nexus.catalog.manifest_heal import ManifestHealResult
     from nexus.cli import main
     from tests._catalog_fixture_ops import only_document
 
@@ -265,15 +299,33 @@ def test_manifest_hook_exception_when_self_heal_is_also_faulted(
     def faulting_get_catalog():
         raise RuntimeError("nexus-wbfpw.29 fault injection (channel 3)")
 
-    def noop_heal(*args, **kwargs):
-        # Genuinely finds/repairs nothing -- the gap survives.
-        return ManifestHealResult()
+    real_make_catalog_writer = catalog_factory.make_catalog_writer
+    self_heal_writer_faulted = [False]
+
+    def faulting_make_catalog_writer(*args, **kwargs):
+        caller_name = sys._getframe(1).f_code.co_name
+        if caller_name == "_tracked_writer":
+            # self-heal's own lazy writer closure, and only that one.
+            self_heal_writer_faulted[0] = True
+            raise RuntimeError(
+                "nexus-wbfpw.29 fault injection (self-heal catalog writer)"
+            )
+        return real_make_catalog_writer(*args, **kwargs)
 
     runner = CliRunner()
     with patch("nexus.config.get_credential", side_effect=fake_credentials()):
         monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
-        monkeypatch.setattr(manifest_heal, "heal_manifest_gaps", noop_heal)
+        monkeypatch.setattr(
+            catalog_factory, "make_catalog_writer", faulting_make_catalog_writer,
+        )
         result = runner.invoke(main, ["index", "repo", str(repo)])
+
+    assert self_heal_writer_faulted[0], (
+        "self-heal never reached its own writer-construction call -- "
+        "either the gap was never detected or the fault never fired "
+        "(check indexer.py's self-heal closure is still named "
+        "_tracked_writer)"
+    )
 
     doc = only_document()
 
@@ -352,6 +404,222 @@ def test_heal_manifest_gaps_reports_which_documents_it_reconciled(
 
     assert result.reconciled == 1
     assert result.reconciled_doc_ids == [doc_id]
+    # nexus-wbfpw.29 round 5: a COMPLETE rebuild (chunk count matches
+    # exactly) is also CONFIRMED -- the two lists agree when there is no
+    # shortfall.
+    assert result.confirmed_doc_ids == [doc_id]
+
+
+def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled_not_confirmed(
+    tmp_path: Path,
+) -> None:
+    """nexus-wbfpw.29 round 5 (critique CRITICAL): a rebuilt manifest
+    SHORTER than the document's registered ``chunk_count`` used to be
+    treated identically to a complete rebuild for the exit-code decision
+    -- ``_heal_collections`` unconditionally appended to
+    ``reconciled_doc_ids`` regardless of whether the shortfall was benign
+    RDR-108 duplicate-content collapse or a genuinely partial rebuild,
+    and round 3/4 newly wired that ambiguous signal into ``nx index
+    repo``'s fail-loud exit-code check. This drives the REAL
+    ``heal_manifest_gaps`` against a document registered with
+    ``chunk_count=2`` while T3 genuinely holds only ONE matching chunk row
+    (not a duplicate-text collapse -- the one chunk's content is unique)
+    -- the exact "chunks are genuinely gone/never fully written" shape
+    ``manifest_heal.py``'s own ``lost``/``never_chunked`` classification
+    exists to distinguish from a healthy heal, proving the write still
+    happens (``reconciled``/``reconciled_doc_ids`` -- partial repair is
+    still real work) but the document must NOT land in
+    ``confirmed_doc_ids`` (Sam's locked decision: unconfirmed is not
+    repaired).
+    """
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.catalog.manifest_heal import heal_manifest_gaps
+    from nexus.db import make_t3
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    collection = "docs__wbfpw29-short-heal-gate__bge-base-en-v15-768__v1"
+    content_hash = "ee" * 32
+    chash = "ff" * 32
+
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner(
+            "wbfpw29-short-heal-owner", "repo", repo_hash="wbfpw29-short-heal-hash",
+        )
+        # Registered chunk_count=2, but only ONE real, unique-content
+        # chunk will ever land in T3 for this content_hash -- a genuine
+        # shortfall, not RDR-108 duplicate-content collapse.
+        doc_id = str(cat.register(
+            owner, "Short Heal Gate Doc",
+            content_type="pdf", physical_collection=collection,
+            chunk_count=2, meta={"content_hash": content_hash},
+        ))
+
+    HttpVectorClient().upsert_chunks_with_embeddings(
+        collection_name=collection,
+        ids=[chash],
+        documents=["nexus-wbfpw29 short-heal gate content -- only one real chunk"],
+        embeddings=[[]],
+        metadatas=[{
+            "content_hash": content_hash,
+            "chunk_text_hash": chash,
+            "chunk_start_char": 0, "chunk_end_char": 10,
+            "line_start": 0, "line_end": 0,
+        }],
+    )
+
+    reader = make_catalog_reader()
+    entries = [e for e in reader.all_documents() if str(e.tumbler) == doc_id]
+    assert len(entries) == 1
+
+    result = heal_manifest_gaps(entries, reader, make_t3, make_catalog_writer)
+
+    # The write happened -- self-heal did real, useful work.
+    assert result.reconciled == 1
+    assert result.reconciled_doc_ids == [doc_id]
+    assert result.dup_collapsed == 1
+    # But it is NOT confirmed -- the rebuilt manifest holds fewer rows
+    # than the document's own chunk_count, so the exit-code decision must
+    # not treat this document as fully repaired.
+    assert result.confirmed_doc_ids == []
+
+    manifest_after = make_catalog_reader().get_manifest(doc_id)
+    assert len(manifest_after) == 1, (
+        f"the manifest write itself must still have happened: "
+        f"{len(manifest_after)} row(s)"
+    )
+
+
+def test_manifest_hook_exception_with_genuinely_short_self_heal_fails_with_reconcile_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-wbfpw.29 round 5 (critique CRITICAL), end-to-end companion to
+    the direct-core test above: drives ``nx index repo`` for real against a
+    genuinely-short-and-write-failed document under the SAME owner the run
+    processes, so the REAL owner-scoped ``heal_manifest_gaps`` call
+    (indexer.py, unstubbed) discovers and attempts to repair it.
+
+    Why not the channel-3 manifest-hook-EXCEPTION fixture directly (as the
+    sibling acceptance tests above use): measured directly (round 5), a
+    manifest-hook exception's own document reads ``chunk_count=0`` at
+    self-heal time (only a SUCCESSFUL hook ever bumps it), which is
+    trivially "at least met" by any nonzero self-heal result -- so that
+    exact shape can never exercise a genuine shortfall at all. And a
+    RE-index whose hook fails leaves the PRIOR manifest untouched, so
+    self-heal never even considers it gapped. The compound fault this
+    fix targets -- a document with a real prior chunk_count, a genuine
+    manifest shortfall, AND a write failure recorded this run -- is
+    reachable only via a pre-existing gap (the same shape `nx catalog
+    reconcile`'s own remedy targets) that also picks up a fresh write
+    failure, e.g. a second, independent fault during the same run. This
+    test constructs exactly that shape directly at the data layer (same
+    seeding idiom as ``test_reconcile_is_the_remedy_the_warning_actually_
+    names`` above), then records a REAL write failure for it via
+    ``_record_manifest_write_failure`` -- the identical function every
+    real manifest-write hook calls (already the established substitution
+    for this exact scenario in ``tests/test_commands_helpers_identity_
+    drop.py``) -- injected via a thin wrapper around
+    ``reset_identity_drop_collectors`` so it survives ``index_repo_cmd``'s
+    own per-run reset. Everything downstream (owner-scoped
+    ``heal_manifest_gaps``, its real T3 fetch, the real exit-code
+    decision) runs unstubbed.
+    """
+    from click.testing import CliRunner
+
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.cli import main
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.repo_identity import _repo_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+
+    repo = tmp_path / "shortheal-owner-repo"
+    repo.mkdir()
+    (repo / "only.py").write_text("def greet(name):\n    return f'hello {name}'\n")
+    _git_init(repo, "Initial commit")
+
+    runner = CliRunner()
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        first = runner.invoke(main, ["index", "repo", str(repo)])
+    assert first.exit_code == 0, first.output
+
+    _, repo_hash = _repo_identity(repo)
+    collection = "docs__wbfpw29-shortheal-e2e__bge-base-en-v15-768__v1"
+    content_hash = "12" * 32
+    chash = "34" * 32
+
+    with HttpCatalogClient() as cat:
+        owner = cat.owner_for_repo(repo_hash)
+        assert owner is not None, "pass 1 must have registered an owner for this repo"
+        seed_doc_id = str(cat.register(
+            owner, "Short Heal E2E Gate Doc",
+            content_type="pdf", physical_collection=collection,
+            chunk_count=2, meta={"content_hash": content_hash},
+        ))
+
+    HttpVectorClient().upsert_chunks_with_embeddings(
+        collection_name=collection,
+        ids=[chash],
+        documents=["nexus-wbfpw29 short-heal e2e gate content -- one real chunk"],
+        embeddings=[[]],
+        metadatas=[{
+            "content_hash": content_hash,
+            "chunk_text_hash": chash,
+            "chunk_start_char": 0, "chunk_end_char": 10,
+            "line_start": 0, "line_end": 0,
+        }],
+    )
+
+    from nexus.commands import _helpers as helpers_mod
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    real_reset = helpers_mod.reset_identity_drop_collectors
+
+    def reset_then_record_seed_failure():
+        real_reset()
+        # Injects the SAME record a real manifest-write hook makes for a
+        # persistent failure -- here for a document this run's own file
+        # set never touches, standing in for the compound "a genuinely
+        # short pre-existing gap ALSO picks up a fresh write failure this
+        # run" fault this fix targets.
+        _record_manifest_write_failure(seed_doc_id)
+
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        monkeypatch.setattr(
+            helpers_mod, "reset_identity_drop_collectors",
+            reset_then_record_seed_failure,
+        )
+        result = runner.invoke(main, ["index", "repo", str(repo)])
+
+    assert result.exit_code != 0, result.output
+    assert "catalog manifest write failed for 1 document(s)" in result.output
+    assert seed_doc_id in result.output, (
+        f"expected the still-failing seeded document's tumbler "
+        f"{seed_doc_id!r} to be named in the run's output:\n{result.output}"
+    )
+    assert "run 'nx catalog reconcile'" in result.output.lower(), (
+        "the self-heal rebuild genuinely was short this run -- the "
+        "reconcile remedy must still be printed"
+    )
+    assert "restored by self-heal" not in result.output, (
+        "an UNCONFIRMED (genuinely short) self-heal rebuild must never be "
+        "reported as a completed restoration"
+    )
+
+    error_lines = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert len(error_lines) == 1, result.output
+    assert "nx catalog reconcile" in error_lines[0], error_lines[0]
+    assert "--force" not in error_lines[0], error_lines[0]
+
+    # Self-heal DID write something for the seeded doc -- partial repair
+    # is still real work -- it is just genuinely short of chunk_count=2.
+    manifest = make_catalog_reader().get_manifest(seed_doc_id)
+    assert len(manifest) == 1, (
+        f"expected the genuinely partial manifest write to have happened: "
+        f"{len(manifest)} row(s)"
+    )
 
 
 def _prose_fixture_text(n_paragraphs: int) -> str:
@@ -364,7 +632,7 @@ def _prose_fixture_text(n_paragraphs: int) -> str:
     )
 
 
-def test_prose_indexer_channel3_manifest_hook_exception_fails_run(
+def test_prose_indexer_channel3_manifest_hook_exception_self_heals_same_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """critic Minor (round 3): mirrors the code_indexer channel-3
