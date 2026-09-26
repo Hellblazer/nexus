@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.62.0] - 2026-09-26
+
+Pairs with engine-service-v0.1.133, which is already deployed; its changes are additive for older clients. This release carries the client half of the metadata merge that engine ships.
+
+### Added
+
+- **Develop CI posts its status to the tuple space** (nexus-dotwy). Each push to `develop` writes a `ci-pending` post and then a `ci-verdict` post to `board/ci-develop`, so a subscribed session is told when a run starts and how it ended, without polling GitHub. A failed post is a warning and never fails CI.
+- **A `board/ci/<topic>` tuple template and `scripts/ci_status.py`** (RDR-220). The template holds per-job CI status posts at a volume `board/<topic>` cannot hold. The script folds them into green, pending and failed per job for one commit. The GitHub webhook adapter that writes these posts is not live yet.
+- **`nx doctor --check-embeddings`** (nexus-f9duo) re-embeds a sample of stored chunks and compares each to its stored vector, which finds vectors that no longer match their text.
+- **`nx doctor --check-assignments`** (nexus-v4pj4) samples cross-collection topic assignments and checks them against an exact search.
+- **`nx doctor` names PDF chunks still carrying upload placeholder metadata** (nexus-rte90).
+- **`nx enrich delete --all`** (nexus-3foc9) removes every aspect row of a collection in one call.
+- **`nx collection re-embed` accepts `voyage-context-3`** (nexus-tysei). This is the repair for stale CCE vectors. Upserts go in batches of 100 so each page finishes inside the edge deadline.
+- **`docs__` collections can opt in to general-prose aspect extraction** through `aspects.docs_collections` (nexus-kk4ut).
+- **Taxonomy drains unassigned chunks from engine state** (nexus-iygza), and discovery waits out the window after an engine restart (nexus-x3gig, nexus-tawfg). `nx index repo` refreshes taxonomy links for established collections (nexus-x3gig).
+
+### Changed
+
+- **Chunk metadata updates merge instead of replacing** (nexus-w94eo, nexus-y8xjh). A metadata update keeps keys it does not name. Writers remove a key by sending it in `delete_keys`, and the PDF upload stub no longer writes an unknown title or author, so a later real value is not overwritten by a placeholder.
+- **A request refused or aborted at its deadline returns a 503 that says which** (nexus-qajw7), from vector, catalog and embed routes. The client gives it the ordinary retry budget.
+- **Data tokens refresh before they expire** instead of after the first 401, which removes a wasted round trip and a warning per expiry.
+
+### Fixed
+
+- **A mint-armed box no longer needs a static `service_token`** (nexus-xzeml). A refused token-admin call names the credential it used and what that credential may do, instead of a bare 403.
+- **`store_put` rolls back its chunk when catalog registration or the manifest write fails** (nexus-wbfpw.28), so a failed put leaves nothing behind.
+- **An exception in a manifest hook fails `nx index`** (nexus-wbfpw.29) instead of being logged and ignored, and the error names the repair.
+- **Streaming and incremental indexing defer the stale-chunk sweep until the document is complete** (nexus-4pj54), so a run that fails midway no longer deletes chunks of the previous version.
+- **MinerU page ranges** (nexus-v4xg7): a range MinerU would widen to the whole document, or a batch that returns more pages than asked for, is refused.
+- **The CCE embed collector stops at the request deadline** and cancels calls still in flight; admission refuses a request that queued batches would make late (nexus-u2mlh.2, nexus-u2mlh.3).
+- **An aspect extraction hard failure reports the error envelope from stdout**, redacted (nexus-4vsx8).
+- **The channel waiter catches up on rows stamped while no waiter was running** (nexus-ymfak).
+
+### Security
+
+- **A PreToolUse guard denies printing a Claude Code credential** (nexus-wauo1.22, nexus-wauo1.39): keychain reads of the credential items, `.credentials.json`, a protected token variable, and other processes' environments. It does not run on native Windows yet.
+- **Test harnesses pass the automation token on a file descriptor or through the environment**, never on argv or in written files, and the release battery fails on any leftover credential-shaped file, process or tmux server (RDR-219, nexus-wauo1).
+
 ## [7.61.0] - 2026-09-24
 
 Pairs with engine-service-v0.1.131. The engine refuses a change old clients could make (below), so its deploy is armed with conexus and fires when this client tag is pushed. It is RDR-208's R4 release.
