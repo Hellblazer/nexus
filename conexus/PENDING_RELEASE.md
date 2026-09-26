@@ -74,6 +74,14 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/README.md` — cap accounting for the new rule (nexus-wauo1.22):
   updated cumulative-cap table; nx's own
   PreToolUse:Bash count reaches the RDR-121 cap of 4.
+- `conexus/hooks/scripts/routing/credential_print_guard.py` — amended (nexus-wauo1.39)
+  RDR-219's "nx-mcp dispatch grant" adds `NX_HARNESS_CLAUDE_OAUTH_TOKEN` to
+  `CREDENTIAL_ENV_VARS`, so the guard also denies a shell expansion
+  (`echo $NX_HARNESS_CLAUDE_OAUTH_TOKEN`) or `printenv` of the harness-side
+  automation-token name, the same as the protected `CLAUDE_CODE_OAUTH_TOKEN`
+  name already was. No new rule, no registry/README change — the pattern
+  set is built from the one tuple, so this is a data-only amendment to the
+  existing guard.
 
 ## Deferred to the next client release
 

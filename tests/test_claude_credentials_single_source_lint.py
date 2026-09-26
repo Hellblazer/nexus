@@ -128,6 +128,13 @@ _SHARED_TOOL = REPO_ROOT / "tests" / "e2e" / "lib" / "claude_credentials.py"
 #: This lint's own file — excluded from its own scan (see module docstring).
 _SELF = pathlib.Path(__file__).resolve()
 
+#: RDR-219 amendment ("The nx-mcp dispatch grant", Phase 3b Step 2,
+#: nexus-wauo1.39): the shared launcher and the module that maps the
+#: harness-side token name into the protected one, in a spawned `claude`
+#: child's own environment only.
+_LAUNCHER = REPO_ROOT / "tests" / "e2e" / "lib" / "claude_mcp_grant.sh"
+_CLAUDE_CHILD_ENV = REPO_ROOT / "src" / "nexus" / "claude_child_env.py"
+
 
 def _rel(path: pathlib.Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
@@ -157,6 +164,23 @@ FORBIDDEN_CREDENTIAL_NAMES: dict[str, frozenset[str]] = {
     #: a LITERAL assignment anywhere, not even in the shared tool (which
     #: sets it from a variable, never a literal).
     "CLAUDE_CODE_OAUTH_TOKEN": frozenset(),
+    #: The harness-side name RDR-219's amendment maps into
+    #: `CLAUDE_CODE_OAUTH_TOKEN` inside nx-mcp's own dispatched children
+    #: (nexus-wauo1.35/.39). A LITERAL assignment (`NAME=<token>`, never
+    #: `NAME=$VAR`) is legitimate only in the shared launcher and the one
+    #: module that performs the mapping, their own unit tests, and the
+    #: janitor's own process-sweep tests (which construct FAKE `ps`
+    #: OUTPUT LINES containing `NAME=whatever` as test data, exactly the
+    #: shapes `scan_processes` is meant to detect — never a real secret)
+    #: — every other site is a copy of a live secret, exactly the shape
+    #: rule 2 forbids for the protected name above.
+    "NX_HARNESS_CLAUDE_OAUTH_TOKEN": frozenset({
+        _rel(_LAUNCHER),
+        _rel(_CLAUDE_CHILD_ENV),
+        "tests/test_claude_mcp_grant_launcher.py",
+        "tests/test_claude_child_env.py",
+        "tests/test_credential_janitor.py",
+    }),
 }
 
 #: A non-comment line invoking `find-generic-password` and naming a
@@ -200,19 +224,28 @@ _WRITE_VERB_RE = re.compile(
 #: or quote) into a `.credentials.json` path.
 _CREDENTIALS_JSON_REDIRECT_RE = re.compile(r""">{1,2}\s*['"]?[^\s'"]*\.credentials\.json""")
 
-#: `CLAUDE_CODE_OAUTH_TOKEN=<literal>` — a quoted or bare NON-EMPTY literal,
-#: never a `$VAR`/backtick expansion and never an empty "value" (the shape a
+#: `NAME=<literal>` — a quoted or bare NON-EMPTY literal, never a
+#: `$VAR`/backtick expansion and never an empty "value" (the shape a
 #: Python string like `"CLAUDE_CODE_OAUTH_TOKEN=" not in x` would otherwise
 #: look like). Two alternatives: a quoted literal whose first character
 #: (immediately after the opening quote) is neither `$` nor the SAME quote
 #: character again (which would mean an empty string); or a bare literal
-#: whose first character is none of whitespace/quote/`$`/backtick.
-_TOKEN_LITERAL_ASSIGN_RE = re.compile(
-    r"\bCLAUDE_CODE_OAUTH_TOKEN\s*=\s*(?:"
-    r"""(["'])(?!\$)(?!\1)\S"""
-    r"""|(?![\s"'$`])\S"""
-    r")"
-)
+#: whose first character is none of whitespace/quote/`$`/backtick. Built
+#: once per protected NAME (`CLAUDE_CODE_OAUTH_TOKEN` and, RDR-219's
+#: amendment, `NX_HARNESS_CLAUDE_OAUTH_TOKEN`) — never retyped per name.
+def _token_literal_assign_re(name: str) -> re.Pattern[str]:
+    return re.compile(
+        r"\b" + re.escape(name) + r"\s*=\s*(?:"
+        r"""(["'])(?!\$)(?!\1)\S"""
+        r"""|(?![\s"'$`])\S"""
+        r")"
+    )
+
+
+_TOKEN_LITERAL_ASSIGN_RES: dict[str, re.Pattern[str]] = {
+    name: _token_literal_assign_re(name)
+    for name in ("CLAUDE_CODE_OAUTH_TOKEN", "NX_HARNESS_CLAUDE_OAUTH_TOKEN")
+}
 
 
 def _normalize(line: str) -> str:
@@ -257,12 +290,12 @@ def _violations(text: str, rel_path: str = "synthetic.sh", suffix: str = ".sh") 
                 hits.append(line.strip())
                 continue
 
-        # 3. Assigning CLAUDE_CODE_OAUTH_TOKEN a literal.
-        if _TOKEN_LITERAL_ASSIGN_RE.search(scan_line):
-            if rel_path not in FORBIDDEN_CREDENTIAL_NAMES.get(
-                "CLAUDE_CODE_OAUTH_TOKEN", frozenset()
-            ):
-                hits.append(line.strip())
+        # 3. Assigning a protected token env var name a literal.
+        for var_name, pattern in _TOKEN_LITERAL_ASSIGN_RES.items():
+            if pattern.search(scan_line):
+                if rel_path not in FORBIDDEN_CREDENTIAL_NAMES.get(var_name, frozenset()):
+                    hits.append(line.strip())
+                break
     return hits
 
 
@@ -574,6 +607,44 @@ def test_detector_ignores_token_mentioned_only_inside_backticks() -> None:
         "`-e CLAUDE_CODE_OAUTH_TOKEN=...`.\n"
     )
     assert _violations(synthetic, rel_path="tests/example.py", suffix=".py") == []
+
+
+# ---------------------------------------------------------------------------
+# Category 3b: assigning NX_HARNESS_CLAUDE_OAUTH_TOKEN a literal (RDR-219
+# amendment "The nx-mcp dispatch grant", nexus-wauo1.39) -- the same shape
+# as category 3, generalized to the harness-side name.
+# ---------------------------------------------------------------------------
+
+
+def test_detector_flags_harness_token_literal_assignment_outside_allowed_sites() -> None:
+    synthetic = 'NX_HARNESS_CLAUDE_OAUTH_TOKEN="sk-ant-oat01-not-a-real-token" claude\n'
+    hits = _violations(synthetic, rel_path="tests/e2e/example.sh", suffix=".sh")
+    assert len(hits) == 1, f"expected 1 flagged line, got {hits}"
+
+
+def test_detector_ignores_harness_token_literal_assignment_at_the_launchers_own_path() -> None:
+    """The launcher itself never assigns a literal this way today (the value
+    always flows from `$CLAUDE_CODE_OAUTH_TOKEN` via a `printf` format
+    argument, never a bareword literal) -- this control proves the
+    ALLOWED-SITE exemption works at all, independent of whether the real
+    file currently exercises it."""
+    synthetic = "NX_HARNESS_CLAUDE_OAUTH_TOKEN=sk-ant-oat01-fake-for-the-control\n"
+    hits = _violations(synthetic, rel_path=_rel(_LAUNCHER), suffix=".sh")
+    assert hits == []
+
+
+def test_detector_ignores_harness_token_literal_assignment_at_claude_child_env_py() -> None:
+    synthetic = 'NX_HARNESS_CLAUDE_OAUTH_TOKEN = "sk-ant-oat01-fake-for-the-control"\n'
+    hits = _violations(synthetic, rel_path=_rel(_CLAUDE_CHILD_ENV), suffix=".py")
+    assert hits == []
+
+
+def test_detector_ignores_harness_token_variable_expansion() -> None:
+    synthetic = (
+        "NX_HARNESS_CLAUDE_OAUTH_TOKEN=$TOKEN claude\n"
+        'docker run --rm -e NX_HARNESS_CLAUDE_OAUTH_TOKEN image\n'
+    )
+    assert _violations(synthetic, rel_path="tests/e2e/example.sh", suffix=".sh") == []
 
 
 # ---------------------------------------------------------------------------

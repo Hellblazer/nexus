@@ -138,10 +138,18 @@ import _lib  # noqa: E402
 RULE_NAME = "credential_print_guard"
 
 #: RDR-219: the credential environment-variable names this guard protects.
-#: ONE constant so a pending amendment (nexus-wauo1.35, probably adding
-#: ``NX_HARNESS_CLAUDE_OAUTH_TOKEN``) is a one-line change -- every
-#: pattern below is built from this tuple, never a hardcoded name.
-CREDENTIAL_ENV_VARS: tuple[str, ...] = ("CLAUDE_CODE_OAUTH_TOKEN",)
+#: ONE constant, so the amendment adding ``NX_HARNESS_CLAUDE_OAUTH_TOKEN``
+#: (nexus-wauo1.35/.39 -- "The nx-mcp dispatch grant") is a one-line
+#: change -- every pattern below is built from this tuple, never a
+#: hardcoded name. ``NX_HARNESS_CLAUDE_OAUTH_TOKEN`` is the harness-side
+#: name ``src/nexus/claude_child_env.py`` maps into
+#: ``CLAUDE_CODE_OAUTH_TOKEN`` inside nx-mcp's own dispatched children; it
+#: never legitimately appears expanded on a Bash-tool command line either,
+#: for the same reason the protected name above does not.
+CREDENTIAL_ENV_VARS: tuple[str, ...] = (
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "NX_HARNESS_CLAUDE_OAUTH_TOKEN",
+)
 
 #: The two keychain items RDR-219 names: the retired interactive-login
 #: item (nothing in this repo should read it again) and the harness's own

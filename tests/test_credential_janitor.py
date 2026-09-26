@@ -274,6 +274,131 @@ def test_content_scan_does_not_flood_from_filename_match(tmp_path, cj):
 
 
 # ===========================================================================
+# Bounded content roots (RDR-219 amendment, nexus-wauo1.39): `~/.config/
+# nexus/logs` gets BOTH sweeps, like `content_roots`, but bounded to
+# `max_depth` like `tmpdir`/the scratchpad roots.
+# ===========================================================================
+
+
+def test_token_pattern_in_bounded_content_root_is_flagged(tmp_path, cj):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    logs = tmp_path / "nexus-logs"
+    logs.mkdir()
+    leaked = logs / "session.log"
+    leaked.write_text("token was sk-ant-oat01-REALLOOKINGBUTFAKE0000000000000000\n")
+    result = cj.scan(
+        repo_root=repo, tmpdir=tmpdir, scratchpad_roots=[], content_roots=[],
+        bounded_content_roots=[logs], max_depth=4,
+    )
+    assert leaked in result.findings
+
+
+def test_credentials_json_filename_in_bounded_content_root_is_flagged(tmp_path, cj):
+    """The filename sweep runs there too, same as the unbounded content
+    roots -- only the DEPTH differs."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    logs = tmp_path / "nexus-logs"
+    bad = logs / ".credentials.json"
+    bad.parent.mkdir(parents=True)
+    bad.write_text('{"accessToken": "x"}')
+    result = cj.scan(
+        repo_root=repo, tmpdir=tmpdir, scratchpad_roots=[], content_roots=[],
+        bounded_content_roots=[logs], max_depth=4,
+    )
+    assert bad in result.findings
+
+
+def test_token_pattern_past_max_depth_in_bounded_content_root_is_not_flagged(tmp_path, cj):
+    """The depth bound is real, not decorative: a file past `max_depth`
+    inside the bounded root is not found, exactly like the existing
+    `tmpdir`/scratchpad bound."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    logs = tmp_path / "nexus-logs"
+    deep = logs / "a" / "b" / "c" / "d" / "e"
+    deep.mkdir(parents=True)
+    leaked = deep / "session.log"
+    leaked.write_text("token was sk-ant-oat01-REALLOOKINGBUTFAKE0000000000000000\n")
+    result = cj.scan(
+        repo_root=repo, tmpdir=tmpdir, scratchpad_roots=[], content_roots=[],
+        bounded_content_roots=[logs], max_depth=2,
+    )
+    assert leaked not in result.findings
+    assert result.findings == []
+
+
+def test_missing_bounded_content_root_is_not_an_error(tmp_path, cj):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    never_created = tmp_path / "nexus-logs-nonexistent"
+    result = cj.scan(
+        repo_root=repo, tmpdir=tmpdir, scratchpad_roots=[], content_roots=[],
+        bounded_content_roots=[never_created], max_depth=4,
+    )
+    assert result.error is None
+    assert result.findings == []
+
+
+def test_omitting_bounded_content_roots_is_unchanged_behavior(tmp_path, cj):
+    """Every existing caller that omits `bounded_content_roots` gets
+    exactly the prior behavior -- the parameter defaults to `None`, not a
+    required argument."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    result = cj.scan(repo_root=repo, tmpdir=tmpdir, scratchpad_roots=[], content_roots=[], max_depth=4)
+    assert result.error is None
+    assert result.findings == []
+
+
+def test_main_flags_token_in_config_nexus_logs_under_home(tmp_path, cj, capsys):
+    """CLI wiring: `main()` derives `<home>/.config/nexus/logs` itself and
+    passes it through as a bounded content root."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / "README.md").write_text("hi\n")
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    home = tmp_path / "home"
+    logs = home / ".config" / "nexus" / "logs"
+    logs.mkdir(parents=True)
+    leaked = logs / "session.log"
+    leaked.write_text("token was sk-ant-oat01-REALLOOKINGBUTFAKE0000000000000000\n")
+    fake_cred_tool = tmp_path / "fake_claude_credentials.py"
+    fake_cred_tool.write_text("import sys\nsys.exit(1)\n")
+    rc = cj.main(
+        [
+            "--repo-root", str(repo),
+            "--tmpdir", str(tmpdir),
+            "--home", str(home),
+            "--scratchpad-parent", str(tmp_path / "no-scratchpad-parent"),
+            "--cred-tool", str(fake_cred_tool),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "CREDENTIAL JANITOR FAILED" in out
+    assert str(leaked) in out
+
+
+# ===========================================================================
 # Non-vacuity: a required root that does not exist is a FAILURE, not a
 # silent clean pass.
 # ===========================================================================

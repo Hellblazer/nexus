@@ -167,6 +167,14 @@ DENIED_SHAPES = [
         id="printenv-named-inside-sh-c-wrapper",
     ),
     pytest.param(
+        "echo $NX_HARNESS_CLAUDE_OAUTH_TOKEN",
+        id="echo-dollar-expansion-harness-name",
+    ),
+    pytest.param(
+        "printenv NX_HARNESS_CLAUDE_OAUTH_TOKEN",
+        id="printenv-named-harness-name",
+    ),
+    pytest.param(
         """python3 -c "import os; print(os.environ['CLAUDE_CODE_OAUTH_TOKEN'])\"""",
         id="python-dash-c-os-environ-bracket",
     ),
@@ -360,6 +368,10 @@ ALLOWED_SHAPES = [
     pytest.param(
         'python3 "$CRED_TOOL" run -- docker run --rm "${DOCKER_ARGS[@]}" "$IMAGE"',
         id="cred-tool-run-docker-args-array-hook-surface-shakeout",
+    ),
+    pytest.param(
+        'docker run --rm -e NX_HARNESS_CLAUDE_OAUTH_TOKEN "$IMAGE"',
+        id="docker-dash-e-bare-name-harness-token",
     ),
     pytest.param(
         "grep -rlE 'sk-ant-o(a|r)t' /tmp",
@@ -584,7 +596,7 @@ def test_forced_error_allows_a_command_with_no_marker() -> None:
     assert rc == 0
 
 
-@pytest.mark.parametrize("var", ["CLAUDE_CODE_OAUTH_TOKEN"])
+@pytest.mark.parametrize("var", ["CLAUDE_CODE_OAUTH_TOKEN", "NX_HARNESS_CLAUDE_OAUTH_TOKEN"])
 def test_forced_error_denies_on_each_failsafe_marker(var: str) -> None:
     """One control per marker the module docstring pins
     (:data:`credential_print_guard._FAILSAFE_MARKERS`), so the failure-mode

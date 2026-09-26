@@ -53,6 +53,15 @@ distinction that matters is not "agent-owned vs. harness-owned" but
 only the latter (``content_roots``: the ``*.artifacts``/``rdr208-mvv.*``
 folders and ``~/nexus-sandbox``) gets the unbounded content sweep.
 
+``~/.config/nexus/logs`` (RDR-219 amendment, "The nx-mcp dispatch grant",
+nexus-wauo1.39) is a THIRD shape: small today, but a log directory, not
+bounded harness output with a natural size ceiling the way an
+``.artifacts`` staging tree is. It gets BOTH sweeps (``bounded_content_
+roots``), same as ``content_roots``, but bounded to ``--max-depth`` the
+same way ``$TMPDIR``/the scratchpad roots are -- insurance against it
+growing the way those two already have, not a response to it having done
+so yet.
+
 NON-VACUITY. ``repo_root`` and ``tmpdir`` are REQUIRED roots: if either
 does not exist, the scan is a FAILURE (``ScanResult.error`` set), never a
 silent clean pass. The dynamic roots (scratchpad dirs, artifact folders,
@@ -274,11 +283,15 @@ def _find_by_filename(root: pathlib.Path, max_depth: "int | None" = None) -> lis
     return sorted(pathlib.Path(n) for n in names)
 
 
-def _find_by_content_python(root: pathlib.Path) -> list[pathlib.Path]:
+def _find_by_content_python(
+    root: pathlib.Path, max_depth: "int | None" = None
+) -> list[pathlib.Path]:
     """Pure-Python content sweep -- the fallback when `grep` is not on
-    PATH. Correct but slow at scale (measured: see `_find_by_content`)."""
+    PATH, and the ONLY path for a depth-bounded content sweep (`grep -r`
+    has no `-maxdepth`; see `_find_by_content`). Correct but slow at scale
+    (measured: see `_find_by_content`)."""
     hits = []
-    for path in _walk(root):
+    for path in _walk(root, max_depth=max_depth):
         if _is_binary(path):
             continue
         try:
@@ -290,22 +303,36 @@ def _find_by_content_python(root: pathlib.Path) -> list[pathlib.Path]:
     return hits
 
 
-def _find_by_content(root: pathlib.Path) -> list[pathlib.Path]:
+def _find_by_content(root: pathlib.Path, max_depth: "int | None" = None) -> list[pathlib.Path]:
     """Content sweep for the token pattern, restricted to text files.
-    Shells out to `grep -rlIE` when available: one process per root
-    instead of tens of thousands of individual Python `open()`/`read()`
-    calls, measured necessary rather than a style preference -- a single
-    harness-owned root here (a hook-cli-skew rehearsal's `.artifacts`
-    staging tree) can itself hold ~8000 files (54000+ summed across the 26
-    such roots present on this box at scan time), and the pure-Python
-    per-file walker at that scale did not finish inside two minutes.
-    `grep -I` skips binary files -- verified equivalent to this module's
-    own NUL-byte sniff (`_is_binary`) on both BSD grep (macOS's system
-    grep) and GNU grep: a file containing the token bytes alongside a NUL
-    byte is excluded by `-I` exactly as `_find_by_content_python` excludes
-    it. The pattern is `TOKEN_RE.pattern` itself -- one source, never
-    retyped as a shell string. Falls back to the pure-Python walker when
-    `grep` is not on PATH."""
+
+    `max_depth=None` (the default -- every existing caller): shells out to
+    `grep -rlIE` when available, one process per root instead of tens of
+    thousands of individual Python `open()`/`read()` calls, measured
+    necessary rather than a style preference -- a single harness-owned
+    root here (a hook-cli-skew rehearsal's `.artifacts` staging tree) can
+    itself hold ~8000 files (54000+ summed across the 26 such roots
+    present on this box at scan time), and the pure-Python per-file
+    walker at that scale did not finish inside two minutes. `grep -I`
+    skips binary files -- verified equivalent to this module's own
+    NUL-byte sniff (`_is_binary`) on both BSD grep (macOS's system grep)
+    and GNU grep: a file containing the token bytes alongside a NUL byte
+    is excluded by `-I` exactly as `_find_by_content_python` excludes it.
+    The pattern is `TOKEN_RE.pattern` itself -- one source, never retyped
+    as a shell string. Falls back to the pure-Python walker when `grep` is
+    not on PATH.
+
+    `max_depth` given (RDR-219 amendment, nexus-wauo1.39: `~/.config/
+    nexus/logs` -- a directory that is small today but, unlike the
+    `.artifacts`/`nexus-sandbox` roots above, is not bounded harness
+    OUTPUT with a natural lifetime; depth-bounding it the same way
+    `tmpdir`/the scratchpad roots are bounded is cheap insurance against
+    it growing the way `$TMPDIR` and a session scratchpad already have):
+    `grep -r` has no depth flag, so this always takes the pure-Python
+    walker, scoped to the same `_walk` depth bound the filename sweep
+    uses."""
+    if max_depth is not None:
+        return _find_by_content_python(root, max_depth=max_depth)
     grep_bin = shutil.which("grep")
     if grep_bin is None:
         return _find_by_content_python(root)
@@ -613,6 +640,7 @@ def scan(
     tmpdir: pathlib.Path,
     scratchpad_roots: "list[pathlib.Path]",
     content_roots: "list[pathlib.Path]",
+    bounded_content_roots: "list[pathlib.Path] | None" = None,
     max_depth: int = 4,
     process_findings: "list[ProcessFinding] | None" = None,
     tmux_findings: "list[TmuxFinding] | None" = None,
@@ -641,7 +669,14 @@ def scan(
     ARE the "harness-owned roots" the bead's scope-addition comment means
     by that phrase -- small, self-contained, bounded harness OUTPUT
     (largest measured on this box: ~8000 files, ~670 MB, ~3s to grep),
-    never a live, indefinitely-growing session directory."""
+    never a live, indefinitely-growing session directory.
+
+    `bounded_content_roots` (RDR-219 amendment, nexus-wauo1.39:
+    `~/.config/nexus/logs`) get BOTH sweeps too, but bounded to `max_depth`
+    the same as `tmpdir`/the scratchpad roots -- this root is small today
+    but, unlike `content_roots`, is not bounded harness OUTPUT with a
+    natural size ceiling; a log directory can grow, so it gets the same
+    depth-bound insurance as the two roots that already have."""
     if not repo_root.is_dir():
         return ScanResult(error=f"required root does not exist: {repo_root}")
     if not tmpdir.is_dir():
@@ -659,6 +694,11 @@ def scan(
         if root.is_dir():
             findings.update(_find_by_filename(root, max_depth=None))
             findings.update(_find_by_content(root))
+
+    for root in bounded_content_roots or []:
+        if root.is_dir():
+            findings.update(_find_by_filename(root, max_depth=max_depth))
+            findings.update(_find_by_content(root, max_depth=max_depth))
 
     return ScanResult(
         findings=sorted(findings),
@@ -754,6 +794,14 @@ def main(argv: "list[str] | None" = None) -> int:
     if sandbox.is_dir():
         content_roots.append(sandbox)
 
+    # RDR-219 amendment (nexus-wauo1.39): a live-and-growing directory, not
+    # bounded harness output -- depth-bounded like `tmpdir`/the scratchpad
+    # roots, never given the unbounded sweep `content_roots` gets.
+    bounded_content_roots: list[pathlib.Path] = []
+    nexus_logs = home / ".config" / "nexus" / "logs"
+    if nexus_logs.is_dir():
+        bounded_content_roots.append(nexus_logs)
+
     if args.tmux_socket_root:
         tmux_roots = [pathlib.Path(p) for p in args.tmux_socket_root]
     else:
@@ -772,6 +820,7 @@ def main(argv: "list[str] | None" = None) -> int:
         tmpdir=tmpdir,
         scratchpad_roots=scratchpad_roots,
         content_roots=content_roots,
+        bounded_content_roots=bounded_content_roots,
         max_depth=args.max_depth,
         process_findings=process_findings,
         tmux_findings=tmux_findings,
