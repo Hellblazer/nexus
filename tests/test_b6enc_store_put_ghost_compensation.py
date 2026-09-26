@@ -2028,3 +2028,179 @@ class TestK54nkRollbackLiveNoteGuard:
             "cannot prove orphanhood, same fail-safe direction as "
             "orphaned_chashes' own no-reverse-lookup fail-open path"
         )
+
+    def test_case_a_content_changing_repute_self_collision_is_fixed(
+        self, catalog_env: Path, local_t3: T3Database,
+    ) -> None:
+        """Case A (fix-round 1 ship-blocker, T2 ``nexus/critique-k54nk``
+        Critical 1, SETTLED against T2 ``nexus/review-k54nk-code`` by a
+        direct-call diagnostic run at f12d998bd: the by_source_uri
+        reconcile branch (store_hook.py ~957-969) stamps the NEW chash on
+        an EXISTING, already-manifested document BEFORE that new
+        content's manifest write is even attempted, and does so for ANY
+        re-put of an existing title, not only byte-identical content).
+
+        A manifested note owning OLD is re-put with different content
+        NEW; NEW's manifest write is then confirmed to have failed. NEW
+        must be deleted (nothing protects a chunk this call's own
+        rollback is being asked to clean up); OLD -- and its manifest --
+        must be completely untouched.
+
+        RED at f12d998bd: ``catalog_store_hook_tracked`` had no
+        ``pre_call_doc_id_out`` and ``rollback_uncataloged_chunk_write``
+        had no self-exclusion, so the freshly-stamped NEW looked note-
+        shaped for its own document and survived deletion."""
+        from nexus.aspect_readers import uri_for
+        from nexus.catalog.store_hook import (
+            catalog_store_hook_tracked,
+            rollback_uncataloged_chunk_write,
+        )
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        collection = self._COLLECTION
+        title = "k54nk-case-a-fixed"
+        old_content = "k54nk case A fixed -- original content"
+        new_content = "k54nk case A fixed -- unrelated replacement content"
+        old_chash = hashlib.sha256(old_content.encode()).hexdigest()
+        new_chash = hashlib.sha256(new_content.encode()).hexdigest()
+        source_uri = uri_for(collection, title)
+
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        tumbler = cat.register(
+            owner, title, content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": old_chash},
+            source_uri=source_uri or "",
+        )
+        # A genuinely MANIFESTED note: real T3 chunk + real manifest row.
+        local_t3.put(collection=collection, content=old_content, title=title)
+        seed_manifest_chunks(collection, [old_chash])
+        cat.append_manifest_chunks(
+            str(tumbler), [{"chash": old_chash, "position": 0}],
+            collection=collection,
+        )
+
+        # Mirrors what a real re-put's put_note_pieces already wrote
+        # BEFORE its own manifest write is attempted: NEW's chunk exists
+        # in T3, with no manifest row for it anywhere yet.
+        local_t3.put(collection=collection, content=new_content, title=title)
+
+        pre_call_doc_id_out: dict[str, str] = {}
+        result_tumbler, created = catalog_store_hook_tracked(
+            title, new_chash, collection,
+            pre_call_doc_id_out=pre_call_doc_id_out,
+        )
+        assert result_tumbler == str(tumbler)
+        assert created is False
+        pre_call_doc_id = pre_call_doc_id_out.get("doc_id", "")
+        assert pre_call_doc_id == old_chash, (
+            "catalog_store_hook_tracked must capture the document's "
+            "PRE-call meta.doc_id before its own writer.update stamps "
+            "NEW onto it"
+        )
+
+        # This call's own re-stamp has already landed (mirrors what
+        # store_put's real flow does before attempting the manifest
+        # write) -- the document now shows NEW, not OLD.
+        stamped_before_rollback = (documents_by_title(title)[0].meta or {}).get("doc_id")
+        assert stamped_before_rollback == new_chash
+
+        # Simulate a confirmed-failed manifest write for NEW.
+        rollback_uncataloged_chunk_write(
+            local_t3, [new_chash], collection=collection,
+            catalog_doc_id=result_tumbler, pre_call_doc_id=pre_call_doc_id,
+        )
+
+        assert local_t3.get_by_id(collection, new_chash) is None, (
+            "NEW must be deleted -- nothing legitimately protects a "
+            "chunk this call's own rollback is cleaning up"
+        )
+        assert local_t3.get_by_id(collection, old_chash) is not None, (
+            "OLD must be completely untouched"
+        )
+        assert _manifest_rows(catalog_env, str(tumbler)) == [(old_chash,)]
+
+    def test_case_e_minted_row_survives_delete_but_chunk_is_still_deleted(
+        self, catalog_env: Path, local_t3: T3Database,
+    ) -> None:
+        """Case E (coordinator addition, fix-round 1): a brand-new note
+        (``created=True``) whose own ``rollback_minted_catalog_entry``
+        delete itself fails (best-effort, swallows and returns False,
+        per T2 ``nexus/review-k54nk-code``'s narrow residual) -- the row
+        survives, still note-shaped (no file_path, truthy meta.doc_id).
+        Under the new self-exclusion rule this row is STILL excluded from
+        notes-protection (``pre_call_doc_id`` is empty -- a brand-new
+        mint has no prior identity to protect), so the chunk is deleted
+        same as if the row-delete had succeeded.
+
+        Surviving-row state after this: the catalog document lives on
+        with ``meta.doc_id`` naming a chash that no longer exists ANYWHERE
+        in T3 (no chunk, no manifest row) -- a dangling ghost stamp. This
+        is a narrowing of the PRE-EXISTING, undocumented residual the
+        reviewer named (rollback_minted_catalog_entry's delete_document
+        can itself fail) -- this fix does not create that residual, it
+        only changes its outcome: pre-fix the surviving row's own
+        note-shape protected the chunk (self-consistent ghost, chunk
+        retained); post-fix the chunk is correctly deleted (matching
+        every OTHER confirmed-failed-write outcome) and the row is left
+        with a dangling reference instead. Not tested for repair here --
+        that catalog-hygiene residual is out of this bead's scope; a
+        later re-put of the same title reconciles onto this row via
+        by_source_uri regardless of the dangling stamp."""
+        from nexus.catalog.store_hook import (
+            catalog_store_hook_tracked,
+            rollback_uncataloged_chunk_write,
+        )
+
+        collection = self._COLLECTION
+        title = "k54nk-case-e-minted-delete-fails"
+        content = "k54nk case E -- brand new note, row-delete fails"
+        new_chash = hashlib.sha256(content.encode()).hexdigest()
+
+        # A brand-new mint: no pre-existing row by this title/source_uri.
+        pre_call_doc_id_out: dict[str, str] = {}
+        tumbler, created = catalog_store_hook_tracked(
+            title, new_chash, collection,
+            pre_call_doc_id_out=pre_call_doc_id_out,
+        )
+        assert created is True, "must be a genuine mint for this scenario"
+        assert pre_call_doc_id_out.get("doc_id", "") == "", (
+            "a brand-new mint must leave pre_call_doc_id_out untouched -- "
+            "there is no prior identity to protect"
+        )
+
+        # The chunk this call is about to roll back: a real T3 write,
+        # mirroring what put_note_pieces already did; no manifest row for
+        # it anywhere (the manifest write is what confirmed-failed).
+        local_t3.put(collection=collection, content=content, title=title)
+
+        # rollback_minted_catalog_entry's own delete_document call FAILED
+        # (best-effort, swallowed) -- the row survives, still note-shaped.
+        # Simulated here by simply not calling rollback_minted_catalog_
+        # entry at all (its own failure mode is exercised elsewhere; this
+        # test is scoped to what the NOTES GUARD does with the survivor).
+        before = documents_by_title(title)
+        assert len(before) == 1, before
+        assert before[0].file_path == ""
+        assert (before[0].meta or {}).get("doc_id") == new_chash
+
+        rollback_uncataloged_chunk_write(
+            local_t3, [new_chash], collection=collection,
+            catalog_doc_id=tumbler,
+            pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
+        )
+
+        assert local_t3.get_by_id(collection, new_chash) is None, (
+            "the stamp was written by THIS call -- pre_call_doc_id is "
+            "empty, so the surviving minted row must not protect its "
+            "own confirmed-failed chunk"
+        )
+
+        # Surviving-row state: the row is still there (its own delete
+        # failed, out of scope here), still stamped with new_chash, which
+        # is now a dangling reference -- no chunk, no manifest row.
+        after = documents_by_title(title)
+        assert len(after) == 1, after
+        assert (after[0].meta or {}).get("doc_id") == new_chash
+        assert after[0].chunk_count == 0
+        assert _manifest_rows(catalog_env, tumbler) == []

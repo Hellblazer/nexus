@@ -588,10 +588,15 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # metadatas the direct write below needs — same pairing as the two
         # store_put producers.
         chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(entry["content"])
+        # nexus-k54nk fix-round 1: captures the document's pre-call
+        # meta.doc_id when the hook reconciles this call onto an existing
+        # row — see rollback_uncataloged_chunk_write's SELF-EXCLUSION guard.
+        pre_call_doc_id_out: dict[str, str] = {}
         catalog_doc_id, catalog_row_minted = catalog_store_hook_tracked(
             title=entry["title"],
             doc_id=chunk_chroma_id,
             collection_name=collection,
+            pre_call_doc_id_out=pre_call_doc_id_out,
         )
 
         # nexus-cotmr / nexus-tafjk: second CLI producer with the same
@@ -732,6 +737,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                 )
             outcome = rollback_uncataloged_chunk_write(
                 t3, [doc_id], collection=collection, catalog_doc_id=catalog_doc_id,
+                pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
             )
             raise click.ClickException(
                 f"could not catalog promoted entry in {collection}: "

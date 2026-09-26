@@ -432,8 +432,13 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     # no per-record catch-and-continue today, so this propagates like any
     # other _default_import_doc failure.
     raise_if_oversized(content, doc_id=chunk_id, collection=col_name)
+    # nexus-k54nk fix-round 1: captures the document's pre-call
+    # meta.doc_id when the hook reconciles this call onto an existing
+    # row — see rollback_uncataloged_chunk_write's SELF-EXCLUSION guard.
+    pre_call_doc_id_out: dict[str, str] = {}
     catalog_doc_id, minted = catalog_store_hook_tracked(
         title=rec["title"], doc_id=chunk_id, collection_name=col_name,
+        pre_call_doc_id_out=pre_call_doc_id_out,
     )
     from nexus.catalog.store_hook import note_content_hash  # noqa: PLC0415 — deferred, sibling module
 
@@ -465,6 +470,7 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     if not catalog_doc_id:
         outcome = rollback_uncataloged_chunk_write(
             t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+            pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
         )
         raise RuntimeError(
             f"could not catalog {rec.get('title', '')!r} in {col_name}: "
@@ -520,6 +526,7 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
             rollback_minted_catalog_entry(catalog_doc_id, original_error=str(manifest_exc))
         outcome = rollback_uncataloged_chunk_write(
             t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+            pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
         )
         raise RuntimeError(
             f"could not catalog {rec.get('title', '')!r} in {col_name}: "

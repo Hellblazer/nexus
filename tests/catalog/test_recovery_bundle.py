@@ -458,7 +458,7 @@ def test_default_import_doc_drives_the_real_store_put_chain(monkeypatch, tmp_pat
     monkeypatch.setattr("nexus.hook_registry.install_default_hooks", lambda h: None)
     monkeypatch.setattr(
         "nexus.catalog.store_hook.catalog_store_hook_tracked",
-        lambda title, doc_id, collection_name: (
+        lambda title, doc_id, collection_name, **_kw: (
             calls.append(("hook", title, doc_id, collection_name)) or ("1.7.7", True)
         ),
     )
@@ -564,7 +564,7 @@ def test_import_rederives_collection_under_changed_embedding_mode(monkeypatch):
     )
     monkeypatch.setattr(
         "nexus.catalog.store_hook.catalog_store_hook_tracked",
-        lambda title, doc_id, collection_name: ("1.7.9", False),
+        lambda title, doc_id, collection_name, **_kw: ("1.7.9", False),
     )
     monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
     monkeypatch.setattr(

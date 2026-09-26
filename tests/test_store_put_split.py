@@ -311,7 +311,8 @@ def test_recovery_import_of_a_split_note_extracts_aspects_once_from_the_whole_no
     )
     monkeypatch.setattr(store_hook, "note_pieces", lambda content, collection: ["ab", "cd"])
     monkeypatch.setattr(
-        store_hook, "catalog_store_hook_tracked", lambda title, doc_id, collection_name: ("1.2.3", True),
+        store_hook, "catalog_store_hook_tracked",
+        lambda title, doc_id, collection_name, **_kw: ("1.2.3", True),
     )
     monkeypatch.setattr(store_hook, "store_put_manifest_direct", lambda doc_id, metadatas, collection: None)
     monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)

@@ -778,7 +778,8 @@ def catalog_store_hook(
 
 
 def catalog_store_hook_tracked(
-    title: str, doc_id: str, collection_name: str,
+    title: str, doc_id: str, collection_name: str, *,
+    pre_call_doc_id_out: dict[str, str] | None = None,
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
@@ -843,6 +844,24 @@ def catalog_store_hook_tracked(
     unlimited-duplicate behavior for that one case — so it is left
     exactly as before (nexus-39upx: legacy-duplicate collapse is a
     separate, out-of-scope backfill).
+
+    Args:
+        pre_call_doc_id_out: nexus-k54nk fix-round 1 (T2
+            ``nexus/critique-k54nk`` Critical 1). Optional out-parameter
+            (never a return-shape change, so every existing 2-tuple
+            caller/mock is untouched). When any of the three RECONCILE
+            branches below (chash dedup, ``by_source_uri``, ghost-by-
+            title) reconciles onto a pre-existing row, this call sets
+            ``pre_call_doc_id_out["doc_id"]`` to that row's
+            ``meta.doc_id`` AS IT STOOD BEFORE this call's own
+            ``writer.update`` overwrites it — the value the caller needs
+            to tell :func:`rollback_uncataloged_chunk_write` "this is
+            what the document legitimately owned before I touched it",
+            distinct from what it owns NOW (which may be this call's
+            own not-yet-landed, and possibly about-to-fail, content).
+            Left untouched (absent) on the brand-new-mint leg
+            (``writer.register``, ``created=True``): a freshly minted
+            document has no prior identity to protect by construction.
     """
     # RDR-146 P1.2: this hook fires on every store_put / memory promote,
     # including the long-lived MCP server process. It MUST NOT open a
@@ -905,6 +924,14 @@ def catalog_store_hook_tracked(
             collection=collection_name,
         )
         if existing is not None:
+            # nexus-k54nk fix-round 1: capture the row's meta.doc_id AS IT
+            # STOOD before this call's own writer.update below overwrites
+            # it — see catalog_store_hook_tracked's own docstring for
+            # pre_call_doc_id_out.
+            if pre_call_doc_id_out is not None:
+                pre_call_doc_id_out["doc_id"] = (
+                    existing.meta or {}
+                ).get("doc_id", "")
             # Scoped to collection_name above, so physical_collection
             # already matches — this stamps meta.doc_id at the new
             # content's chash and, defensively, source_uri (a legacy row
@@ -957,6 +984,19 @@ def catalog_store_hook_tracked(
         if source_uri is not None:
             existing_by_uri = reader.by_source_uri(source_uri)
             if existing_by_uri is not None:
+                # nexus-k54nk fix-round 1 (T2 nexus/critique-k54nk Critical
+                # 1, SETTLED against T2 nexus/review-k54nk-code by direct
+                # test: TestK54nkRollbackLiveNoteGuard::
+                # test_case_a_content_changing_repute_self_collision_is_fixed):
+                # THIS branch is the mainline note-edit path and fires on
+                # ANY re-put of an existing title, regardless of whether
+                # content changed — capture the row's meta.doc_id AS IT
+                # STOOD before the writer.update below overwrites it to
+                # doc_id (this call's NEW, not-yet-manifested chash).
+                if pre_call_doc_id_out is not None:
+                    pre_call_doc_id_out["doc_id"] = (
+                        existing_by_uri.meta or {}
+                    ).get("doc_id", "")
                 writer.update(
                     existing_by_uri.tumbler,
                     physical_collection=collection_name,
@@ -986,6 +1026,14 @@ def catalog_store_hook_tracked(
         # this document via the by_source_uri lookup above instead.
         ghost = _find_ghost_by_title(reader, owner, title)
         if ghost is not None:
+            # nexus-k54nk fix-round 1: same capture as the two reconcile
+            # branches above, for symmetry — a ghost's meta.doc_id is
+            # normally empty (chunk_count == 0), but capture whatever it
+            # actually held before this call's own writer.update below.
+            if pre_call_doc_id_out is not None:
+                pre_call_doc_id_out["doc_id"] = (
+                    ghost.meta or {}
+                ).get("doc_id", "")
             writer.update(
                 ghost.tumbler,
                 physical_collection=collection_name,
@@ -1560,6 +1608,7 @@ def describe_rollback_outcome(outcome: ChunkRollbackOutcome) -> str:
 
 def rollback_uncataloged_chunk_write(
     t3: Any, doc_ids: list[str], *, collection: str, catalog_doc_id: str = "",
+    pre_call_doc_id: str = "",
 ) -> ChunkRollbackOutcome:
     """Delete the T3 chunk rows a store_put-shaped write just wrote, when
     catalog registration failed or the direct manifest write is CONFIRMED
@@ -1611,6 +1660,31 @@ def rollback_uncataloged_chunk_write(
     a notes-lookup failure keeps everything (cannot prove note-safety),
     never narrows the keep set.
 
+    SELF-EXCLUSION (nexus-k54nk fix-round 1, T2 ``nexus/critique-k54nk``
+    Critical 1): the document identified by *catalog_doc_id* is THIS
+    call's own — when :func:`catalog_store_hook_tracked` reconciled a
+    re-put onto a pre-existing row, it stamps that row's ``meta.doc_id``
+    to THIS call's new (not-yet-manifested, possibly about-to-fail)
+    chash BEFORE the manifest write is even attempted. Composing the
+    notes guard over ALL documents unfiltered — the naive form this
+    function shipped with before this fix-round — makes a confirmed-
+    failed re-put of an EXISTING, already-manifested note look note-
+    shaped for its OWN just-written, never-landed chash and protects
+    exactly the chunk this call is supposed to delete: a ship-blocker,
+    since re-putting an existing title is the mainline note-edit path,
+    not an edge case. This function now excludes *catalog_doc_id*'s own
+    document from the set passed to :func:`live_note_chashes`, then adds
+    back *pre_call_doc_id* (the SAME document's ``meta.doc_id`` as it
+    stood BEFORE this call touched it) as a single extra protected
+    chash — so a candidate is protected by this document only when it
+    was ALREADY that document's identity going into this call, never
+    when this call itself just assigned it. This keeps the pre-existing,
+    already-covered collision (a fresh store_put of byte-identical
+    content colliding with an unrelated legacy note's own untouched
+    chash) working exactly as before — that document is never
+    *catalog_doc_id* and is never excluded — while closing the self-
+    collision gap.
+
     Before fix-round 2, this guard was the ONLY thing standing between a
     write-call exception and deleting a chunk whose manifest write had
     actually landed (the ack-lost race): ``store_put_manifest_direct``
@@ -1650,8 +1724,16 @@ def rollback_uncataloged_chunk_write(
         collection: the T3 collection *doc_ids* were written into.
         catalog_doc_id: the tumbler :func:`catalog_store_hook_tracked`
             returned for this call, or ``""`` when registration itself
-            failed. Logging context only now — see the race-guard note
-            above for why it is no longer passed to the union guard.
+            failed. No longer passed to the union guard (see the race-
+            guard note above) — now used ONLY by the SELF-EXCLUSION guard
+            above, to identify and exclude this call's own document from
+            the notes-protection set.
+        pre_call_doc_id: nexus-k54nk fix-round 1. The SAME document's
+            (*catalog_doc_id*'s) ``meta.doc_id`` as it stood BEFORE this
+            call's own ``catalog_store_hook_tracked`` stamp — from
+            that function's ``pre_call_doc_id_out`` out-parameter, or
+            ``""`` when this call minted a brand-new row (no prior
+            identity to protect) or registration failed outright.
 
     Returns:
         A :class:`ChunkRollbackOutcome` describing exactly what happened;
@@ -1674,7 +1756,19 @@ def rollback_uncataloged_chunk_write(
         if orphaned:
             try:
                 documents = catalog_documents_for_collection(reader, collection)
+                # nexus-k54nk fix-round 1 SELF-EXCLUSION (see the docstring's
+                # NOTES GUARD section): this call's own document must not
+                # protect its own not-yet-landed, now-failed chash via a
+                # stamp THIS call just wrote. Excluded from the general
+                # note-set unconditionally; pre_call_doc_id below is the
+                # one exception readmitted per-candidate.
+                if catalog_doc_id:
+                    documents = [
+                        d for d in documents if str(d.tumbler) != catalog_doc_id
+                    ]
                 notes = live_note_chashes(documents)
+                if pre_call_doc_id:
+                    notes.add(pre_call_doc_id)
             except Exception:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
                 _log.warning(
                     "store_put_rollback_skipped_note_lookup_failed",
