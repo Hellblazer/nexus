@@ -1022,11 +1022,18 @@ def store_put_manifest_direct(
     Critical 1) — callers must tell these apart, not treat every raise the
     same:
 
-    1. **Confirmed not landed.** The write call itself
-       (``atomic_manifest_replace``/``resync_chunk_count_cache``) raised —
-       nothing committed — or the verify READ SUCCEEDED and proved the
-       expected chashes missing. Both raise a plain ``RuntimeError``. Safe
-       to roll back the chunk (:func:`rollback_uncataloged_chunk_write`).
+    1. **Confirmed not landed.** ``atomic_manifest_replace`` itself
+       raised — nothing committed — or the verify READ SUCCEEDED and
+       proved the expected chashes missing. Both raise a plain
+       ``RuntimeError``. Safe to roll back the chunk
+       (:func:`rollback_uncataloged_chunk_write`). NOTE:
+       ``resync_chunk_count_cache`` raising is deliberately NOT in this
+       list — by the time it runs, ``atomic_manifest_replace`` already
+       committed, so a resync failure means only that
+       ``documents.chunk_count`` is stale (recoverable via ``nx catalog
+       reconcile``), never that the write failed to land; it is logged
+       and swallowed below, and the verify step remains the real
+       arbiter.
     2. **Outcome unknown.** The verify step's OWN infrastructure failed —
        no catalog reader available, or the verify read itself raised —
        so we cannot tell whether the write landed. Raises
