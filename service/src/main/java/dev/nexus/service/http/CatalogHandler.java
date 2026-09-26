@@ -356,6 +356,14 @@ public final class CatalogHandler implements HttpHandler {
             exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
             HttpUtil.send(exchange, 429, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage())
                 + ",\"retry_after_seconds\":" + e.retryAfterSeconds() + "}");
+        } catch (dev.nexus.service.vectors.RequestDeadlineExceededException e) {
+            // nexus-qajw7: the combined write embeds through the same embedders
+            // as /v1/vectors, so its deadline refusal or abort takes the same
+            // 503 + Retry-After + outcome shape. It fell to the generic arm below
+            // as an opaque 500 that the client never retried.
+            log.warn("event=catalog_request_deadline_exceeded op={} tenant={} outcome={} retry_after_s={} error={}",
+                     op, tenant, e.outcome().wire(), e.retryAfterSeconds(), e.getMessage());
+            HttpUtil.sendRequestDeadlineExceeded(exchange, e);
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.

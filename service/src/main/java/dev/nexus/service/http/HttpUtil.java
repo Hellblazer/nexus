@@ -24,6 +24,28 @@ public final class HttpUtil {
         }
     }
 
+    /** Response header on a request-deadline 503: {@code refused} or {@code aborted}
+     *  (nexus-qajw7). Additive: a client that does not read it keeps its old retries. */
+    public static final String DEADLINE_OUTCOME_HEADER = "X-Nexus-Deadline-Outcome";
+
+    /**
+     * The one wire shape for a {@link dev.nexus.service.vectors.RequestDeadlineExceededException}
+     * on every route that embeds (nexus-8hdg9, nexus-qajw7): 503, inside the client's gateway
+     * retry codes, with {@code Retry-After}, and the outcome as a header and a body field so
+     * the client widens its retries for a refusal (nothing embedded) and not for an abort
+     * (embedded work discarded). Shared so the vector and catalog handlers cannot drift.
+     */
+    public static void sendRequestDeadlineExceeded(
+            HttpExchange exchange, dev.nexus.service.vectors.RequestDeadlineExceededException e)
+            throws IOException {
+        String outcome = e.outcome().wire();
+        exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
+        exchange.getResponseHeaders().set(DEADLINE_OUTCOME_HEADER, outcome);
+        send(exchange, 503, "{\"error\":" + jsonString(e.getMessage())
+                + ",\"retry_after_seconds\":" + e.retryAfterSeconds()
+                + ",\"deadline_outcome\":" + jsonString(outcome) + "}");
+    }
+
     /**
      * Minimal JSON string escaping (backslash, double-quote, control chars).
      * For structured responses use Jackson; this is for error detail strings only.
