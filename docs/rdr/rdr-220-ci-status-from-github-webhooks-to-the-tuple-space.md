@@ -234,8 +234,11 @@ fold the posts with a repo script. No workflow file changes.
 - **Per-post lifetime**: the adapter sets `ttl_seconds` per state as a
   second guard: about 6 hours for `queued` and `in_progress`, the template
   retention for `completed`.
-- **Mapping**: adapter configuration maps repository full name to engine
-  URL, board token, and topic `board/ci/<repo>-<branch>`. `<repo>` is the
+- **Mapping**: the adapter configuration holds one engine URL, one
+  board-only token and an allow-list of repositories; a delivery from a
+  repository outside the list is refused before any write. Only the topic
+  varies, per repository and branch: `board/ci/<repo>-<branch>`.
+  Routing different repositories to different engines is deferred. `<repo>` is the
   lowercase repository name without the owner. `<branch>` replaces every
   character outside `[A-Za-z0-9._-]` with `-`, collapses runs of `-`, and
   strips leading characters until `[A-Za-z0-9]`
@@ -421,8 +424,8 @@ the engine, so it has no reason to live in it.
 - Positive: per-job status for every workflow with no workflow edits.
 - Positive: zero GitHub API calls from readers for CI status.
 - Positive: no engine or edge change; the engine never sees GitHub.
-- Negative: one more small service to host, with two secrets (webhook
-  secret, board token).
+- Negative: one more small service to host, with one secret of three
+  fields (webhook secret, board token, read-only GitHub token).
 
 ### Risks and Mitigations
 
@@ -441,6 +444,18 @@ A dropped or refused delivery leaves a job's state stale on the board;
 GitHub's delivery log shows the failure and allows redelivery. A down
 adapter means no posts; the fold reports the age of each state, so a stale
 entry is visible, and GitHub keeps the failed deliveries for redelivery.
+
+The fork gate adds a GitHub-API dependency to every job event. For each
+`workflow_job` delivery the adapter reads the run from GitHub
+(`GET /repos/{repo}/actions/runs/{id}`, 2-second timeout) to confirm the
+run's head is in the repository itself. Only definite answers are cached,
+per warm container. When that read fails (a rate limit, an expired or
+revoked token, a timeout), the adapter fails closed: it answers the
+delivery `502 origin_unverified` and posts nothing, so that job's state is
+missing from the board. GitHub does not redeliver on its own. Detection is
+the `origin_unverified` alarm (and the hourly self-check for a token that
+lost access); recovery is a manual redelivery from the webhook's delivery
+log once GitHub answers again.
 
 ## Implementation Plan
 
