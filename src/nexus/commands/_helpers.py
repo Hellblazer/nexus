@@ -280,6 +280,16 @@ def _emit_write_failed_warning() -> bool:
     a per-caller parameter, which would have silently changed ``dt.py``'s
     output; keeping it hardcoded is what makes this a behavior-preserving
     refactor rather than a wording change).
+
+    nexus-wbfpw.29 (RDR-192 S3b): the parenthetical doc-id list is new —
+    a run failing this way must NAME the document(s) to re-index, not
+    just count them (a manifest-hook EXCEPTION now lands here too, via
+    ``HookRegistry.fire_batch``'s ``_record_manifest_hook_batch_exception``,
+    alongside the pre-existing detected-write-failure path). Appended
+    after the existing "N document(s)" phrase so the pinned substring
+    checks in ``test_index_cmd.py`` / ``test_commands_helpers_identity_
+    drop.py`` (which assert on the prefix, not the full line) keep
+    passing unchanged.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
@@ -288,10 +298,11 @@ def _emit_write_failed_warning() -> bool:
     failed = get_manifest_write_failures()
     if not failed:
         return False
+    ids_text = ", ".join(failed)
     click.echo(
         f"  WARNING: catalog manifest write failed for {len(failed)} "
-        f"document(s) — they will not appear in catalog-aware "
-        f"queries. Run 'nx catalog reconcile' to repair.",
+        f"document(s) ({ids_text}) — they will not appear in "
+        f"catalog-aware queries. Run 'nx catalog reconcile' to repair.",
         err=True,
     )
     return True
