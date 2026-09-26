@@ -3663,6 +3663,44 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
 
+    def manifest_less_census(
+        self, collection: str, limit: int = 100, offset: int = 0,
+    ) -> dict:
+        """POST /v1/vectors/manifest-less-census (RDR-192 S2, bead nexus-wbfpw.4).
+
+        Classifies every chunk in ``collection`` carrying no own-collection
+        ``catalog_document_chunks`` manifest row into exactly one of five
+        buckets: ``superseded``, ``legacy-unmanifested``, ``dead-owner``,
+        ``no-owner``, ``unclassified``. Returns ``{"collection": str,
+        "returned": int, "chashes": {bucket: [chash, ...], ...}, "owners":
+        {chash: {"owner_tumbler": str|None, "owner_path":
+        "forward"|"reverse"|None}, ...}, "totals": {bucket: int, ...},
+        "scope_chunk_total": int}`` — see ``scripts/sql/manifest_less_census
+        .sql``'s header for the full bucket definitions and precedence
+        rules (byte-identical text; ``ManifestLessCensusSqlIdentityTest``
+        pins the two equal).
+
+        ``returned``/``chashes``/``owners`` are THIS PAGE only, paged by
+        chash ascending — loop while ``returned == limit`` (``offset +=
+        limit``), same convention as :meth:`list_collections`'s callers.
+        ``totals``/``scope_chunk_total`` are collection-wide (computed
+        before LIMIT/OFFSET) and identical on every page, including an
+        empty one. ``limit`` is clamped server-side to 300
+        (``VectorHandler.MAX_CENSUS_LIMIT``).
+
+        Raises :class:`VectorServiceError` — ``code=404`` on an engine that
+        predates the route (no engine tag carries it yet as of the
+        2026-09-26 Sam ruling recorded on bead nexus-wbfpw.4/.5; callers
+        surface this as a distinct, non-crashing outcome, never a
+        traceback), ``code=400`` on a ``quarantine-*`` collection name (out
+        of the census by construction), a real error otherwise.
+        """
+        return _post(
+            "/v1/vectors/manifest-less-census",
+            {"collection": collection, "limit": limit, "offset": offset},
+            tenant=self._tenant,
+        )
+
     #: Catalog attribute keys the RDR-204 Phase 2 engine joins into
     #: ``/v1/vectors/stats`` rows (``PgVectorRepository`` joins
     #: ``catalog_collections`` by name). Carried through by

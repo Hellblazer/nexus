@@ -1798,6 +1798,28 @@ Because those two classes are caught per-document and never raise, a collection 
 
 ---
 
+### nx t3 census-manifest-less
+
+```
+nx t3 census-manifest-less (--collection NAME | --all) [--json] [--require-zero BUCKET]
+```
+
+Client half of RDR-192 Step 2 (bead nexus-wbfpw.5), wrapping the engine's read-only `POST /v1/vectors/manifest-less-census` route (bead nexus-wbfpw.4). Classifies every chunk carrying no own-collection manifest row into one of five buckets — `superseded`, `legacy-unmanifested`, `dead-owner`, `no-owner`, `unclassified` — and prints, per collection, the count in each bucket, the owning document (tumbler + how it was found: `forward`, `reverse`, or `none`) for each item, and a total (`scope_chunk_total`, every chunk the collection holds in any manifest state). `--all` iterates every T3 collection except `quarantine-*` ones — `live(c)` applies to every collection, not only `knowledge__*`. `--json` emits the same counts plus the route's `owners` map (`owner_tumbler`/`owner_path` per chash). See `scripts/sql/manifest_less_census.sql`'s header — the identical text the engine route runs — for the full bucket definitions and the forward/reverse precedence rule (a live forward pointer wins; a live reverse note-guard match rescues a chunk whose forward pointer is null or names a tombstoned document; ties break on fewest manifest rows anywhere, then lowest tumbler).
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Clean. |
+| 1 | `unclassified` > 0 — a census that cannot classify a row has failed. |
+| 2 | `--require-zero` names a bucket whose count is above zero. |
+| 3 | `--all` finds no collection (excluding `quarantine-*`). |
+| 4 | The connected engine does not carry the `manifest-less-census` route yet — deploy at least the engine tag carrying bead nexus-wbfpw.4 (pending as of 2026-09-26; no engine tag carries it yet). Never a traceback. |
+
+**Sam's 2026-09-26 ruling on nexus-wbfpw.5**: this verb no longer gates the production census — that runs as direct SQL (`scripts/sql/manifest_less_census.sql`) against production until the rest of RDR-192 ships. This verb ships anyway, built and tested against a dev jar, for the client release paired with the eventual RDR-192 engine tag.
+
+---
+
 ## nx taxonomy
 
 Topic taxonomy — HDBSCAN clustering of T3 collection embeddings into topics for navigation, search grouping, and relevance boosting.

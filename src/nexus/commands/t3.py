@@ -1382,3 +1382,239 @@ def reidentify_cmd(
 
     if errors:
         raise SystemExit(1)
+
+
+# ── RDR-192 Step 2, client half (bead nexus-wbfpw.5) ────────────────────────
+#
+# `nx t3 census-manifest-less` wraps the engine's read-only
+# `POST /v1/vectors/manifest-less-census` route (bead nexus-wbfpw.4,
+# `HttpVectorClient.manifest_less_census`). Sam's 2026-09-26 ruling on
+# nexus-wbfpw.5: this verb no longer gates the production census (that
+# runs as direct SQL, `scripts/sql/manifest_less_census.sql`) -- it still
+# ships, built and tested against a dev jar, in the client release paired
+# with the eventual RDR-192 engine tag.
+
+#: Bucket names the manifest-less-census route returns (RDR-192 S2, bead
+#: nexus-wbfpw.4's response contract -- see that route's docstring and
+#: `scripts/sql/manifest_less_census.sql`'s header for the full
+#: definitions). The bead that requested this verb predates the route and
+#: names the same five buckets; no reconciliation was needed. Order here
+#: drives both text rendering and `--require-zero` validation.
+_CENSUS_BUCKETS = (
+    "superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified",
+)
+
+#: Page size `_census_one_collection` requests per call (AGENTS.md paging
+#: convention, N <= 300; the engine clamps to this anyway --
+#: `VectorHandler.MAX_CENSUS_LIMIT`). A module-level constant so a test can
+#: force multi-page pagination without seeding 300+ real rows.
+_CENSUS_PAGE_LIMIT = 300
+
+#: Distinct exit code for "the connected engine does not carry the
+#: manifest-less-census route yet" (RDR-192 S2, bead nexus-wbfpw.5's
+#: EXECUTION note): the route ships in a not-yet-tagged engine (Sam's
+#: 2026-09-26 ruling on nexus-wbfpw.4 -- no engine tag carries it as of
+#: this writing), so a 404 here is an EXPECTED pre-route condition on
+#: develop, never a traceback. Distinct from exit 1 (unclassified > 0), 2
+#: (--require-zero violated), 3 (--all found no collection).
+_EXIT_NO_ROUTE = 4
+
+
+def _census_one_collection(client, collection: str) -> dict:
+    """Page through :meth:`HttpVectorClient.manifest_less_census` for one
+    collection, merging every page's ``chashes``/``owners`` (RDR-192 S2,
+    bead nexus-wbfpw.5). ``totals``/``scope_chunk_total`` are read off the
+    FIRST page only -- the route reports them collection-wide and
+    identical on every page (see that method's docstring), so re-reading
+    them per page would be redundant, never a correction.
+
+    Raises whatever :meth:`~HttpVectorClient.manifest_less_census` raises
+    (notably :class:`~nexus.db.http_vector_client.VectorServiceError`,
+    ``code=404`` on a pre-route engine) -- the caller decides how to
+    surface that.
+    """
+    offset = 0
+    chashes: dict[str, list[str]] = {bucket: [] for bucket in _CENSUS_BUCKETS}
+    owners: dict[str, dict] = {}
+    totals: dict[str, int] = {}
+    scope_chunk_total = 0
+    first_page = True
+    while True:
+        page = client.manifest_less_census(
+            collection, limit=_CENSUS_PAGE_LIMIT, offset=offset,
+        )
+        if first_page:
+            totals = dict(page.get("totals") or {})
+            scope_chunk_total = int(page.get("scope_chunk_total", 0))
+            first_page = False
+        for bucket, page_chashes in (page.get("chashes") or {}).items():
+            chashes.setdefault(bucket, []).extend(page_chashes)
+        owners.update(page.get("owners") or {})
+        returned = int(page.get("returned", 0))
+        if returned < _CENSUS_PAGE_LIMIT:
+            break
+        offset += _CENSUS_PAGE_LIMIT
+    return {
+        "collection": collection,
+        "chashes": chashes,
+        "owners": owners,
+        "totals": totals,
+        "scope_chunk_total": scope_chunk_total,
+    }
+
+
+def _render_census_text(result: dict) -> None:
+    """Print one collection's census in text form, naming each item's
+    owner tumbler and path (forward, reverse, or none) so an operator can
+    see which document keeps a chunk live and whether the reverse
+    tie-break chose it (nexus-wbfpw.5 acceptance criteria)."""
+    click.echo(f"{result['collection']}:")
+    owners = result["owners"]
+    for bucket in _CENSUS_BUCKETS:
+        bucket_chashes = result["chashes"].get(bucket, [])
+        click.echo(f"  {bucket}: {result['totals'].get(bucket, 0)}")
+        for chash in sorted(bucket_chashes):
+            owner = owners.get(chash) or {}
+            tumbler = owner.get("owner_tumbler") or "-"
+            path = owner.get("owner_path") or "none"
+            click.echo(f"    {chash}  owner={tumbler} ({path})")
+    click.echo(f"  total: {result['scope_chunk_total']}")
+
+
+@t3.command("census-manifest-less")
+@click.option(
+    "--collection", "-c", default=None,
+    help="Collection to census. Exactly one of --collection/--all is required.",
+)
+@click.option(
+    "--all", "all_collections", is_flag=True, default=False,
+    help="Census every T3 collection except quarantine-* ones (live(c) "
+    "applies to every collection, not only knowledge__*).",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit JSON instead of text.",
+)
+@click.option(
+    "--require-zero", "require_zero", multiple=True, metavar="BUCKET",
+    help="Bucket that must be zero across every censused collection "
+    f"(one of {', '.join(_CENSUS_BUCKETS)}); repeatable. Exit 2 if any "
+    "named bucket's total is above zero.",
+)
+def census_manifest_less_cmd(
+    collection: str | None,
+    all_collections: bool,
+    as_json: bool,
+    require_zero: tuple[str, ...],
+) -> None:
+    """Census manifest-less T3 chunks via the engine's read-only census
+    route (RDR-192 Step 2 MVV (a), bead nexus-wbfpw.5).
+
+    \b
+    Classifies every chunk carrying no own-collection manifest row into
+    one of five buckets -- superseded, legacy-unmanifested, dead-owner,
+    no-owner, unclassified -- and prints, per collection, the count in
+    each bucket, the owning document (tumbler + how it was found: forward,
+    reverse, or none) for each item, and a total. See
+    ``scripts/sql/manifest_less_census.sql``'s header (the SAME text the
+    engine route runs) for the full bucket definitions and the
+    forward/reverse precedence rule.
+
+    \b
+    Exit codes:
+      0  clean.
+      1  unclassified > 0 -- a census that cannot classify a row has failed.
+      2  --require-zero names a bucket whose count is above zero.
+      3  --all finds no collection (excluding quarantine-*).
+      4  the connected engine does not carry the manifest-less-census
+         route yet (deploy at least the engine tag carrying bead
+         nexus-wbfpw.4 -- pending as of 2026-09-26, no tag carries it yet).
+
+    \b
+    This verb no longer gates the production census (Sam's 2026-09-26
+    ruling on nexus-wbfpw.5): that runs as direct SQL
+    (``scripts/sql/manifest_less_census.sql``) against production until
+    the rest of RDR-192 ships. This verb ships anyway, built and tested
+    against a dev jar, for the client release paired with the eventual
+    RDR-192 engine tag.
+    """
+    if bool(collection) == bool(all_collections):
+        raise click.UsageError(
+            "Specify exactly one of --collection NAME or --all."
+        )
+    for bucket in require_zero:
+        if bucket not in _CENSUS_BUCKETS:
+            raise click.BadParameter(
+                f"unknown bucket {bucket!r}; must be one of "
+                f"{', '.join(_CENSUS_BUCKETS)}",
+                param_hint="--require-zero",
+            )
+
+    from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.http_vector_client)
+
+    t3_db = make_t3()
+
+    if all_collections:
+        # RDR-204: exclude quarantine siblings via the catalog-authoritative
+        # lifecycle_state field, never a raw "quarantine-" name-prefix parse
+        # (tests/test_collection_name_parse_census.py's parse-site census
+        # guards against exactly that regression). Absent means the engine
+        # could not join a catalog row for this collection -- unregistered,
+        # not quarantine, so it stays IN, matching
+        # http_vector_client.is_live_collection_row's own "absent means
+        # included" reading.
+        names = [
+            c["name"] for c in t3_db.list_collections()
+            if c.get("lifecycle_state") != "quarantine"
+        ]
+        if not names:
+            click.echo(
+                "No T3 collections found (excluding quarantine-*); nothing to census."
+            )
+            sys.exit(3)
+    else:
+        names = [collection]
+
+    # nexus.db.make_t3() with no injected _client (every production call,
+    # local and cloud alike) returns the HttpVectorClient itself, not a
+    # T3Database facade -- the facade wrap is test-injection-only (see
+    # that function's docstring). manifest_less_census lives directly on
+    # HttpVectorClient, so t3_db already IS the right object to call it on.
+    client = t3_db
+
+    results: list[dict] = []
+    try:
+        for name in names:
+            results.append(_census_one_collection(client, name))
+    except VectorServiceError as exc:
+        if exc.code == 404:
+            click.echo(
+                "This engine does not carry the manifest-less-census route "
+                "(RDR-192 S2, bead nexus-wbfpw.4) -- deploy at least the "
+                "engine tag carrying that route to run this census "
+                "(pending as of 2026-09-26; no engine tag carries it yet)."
+            )
+            sys.exit(_EXIT_NO_ROUTE)
+        raise
+
+    if as_json:
+        click.echo(json.dumps({"collections": results}, indent=2))
+    else:
+        for result in results:
+            _render_census_text(result)
+
+    any_unclassified = any(
+        result["totals"].get("unclassified", 0) > 0 for result in results
+    )
+    zero_violations = [
+        bucket for bucket in require_zero
+        if sum(result["totals"].get(bucket, 0) for result in results) > 0
+    ]
+
+    if any_unclassified:
+        sys.exit(1)
+    if zero_violations:
+        click.echo(f"--require-zero violated: {', '.join(zero_violations)}")
+        sys.exit(2)
+    sys.exit(0)
