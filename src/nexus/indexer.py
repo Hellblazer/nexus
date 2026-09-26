@@ -5389,7 +5389,17 @@ def _run_index(
                 if callable(_close):
                     _close()
 
-            _apply_combined_write_response(res, complete_map, collection)
+            # nexus-wbfpw.29 round 6: hand the batch's own doc_id -> chash
+            # map through so a failed doc's write-failure record carries
+            # what this write was trying to put in its manifest (post-run
+            # verification reads this back against the manifest).
+            _apply_combined_write_response(
+                res, complete_map, collection,
+                chash_by_doc={
+                    _d: {c["chash"] for c in _chunks if c["chash"]}
+                    for _d, _chunks in full_docs
+                },
+            )
 
         # nexus-duoak follow-up: split "file" into its 3 constituent calls
         # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook
@@ -6114,14 +6124,17 @@ def _run_index(
         # manifest-hook exception left moments earlier in THIS SAME run
         # (see the placement comment above -- "gaps created by THIS run's
         # own manifest-write hook are healed too" is not hypothetical).
-        # Captured here, outside the try, so the exit-code check below
-        # (via the return dict) sees an accurate empty list rather than an
-        # undefined name if self-heal never runs or raises before
-        # assigning it. Round 5: CONFIRMED only (see the return dict's own
-        # comment on "self_heal_confirmed_doc_ids") -- a merely
-        # RECONCILED-but-unconfirmed (genuinely partial) rebuild must not
-        # suppress the fail-loud exit.
-        _self_heal_confirmed_doc_ids: list[str] = []
+        # Round 5 threaded a "confirmed" subset of this pass's OWN result
+        # through the return dict for the exit-code check to consume;
+        # round 6 REMOVED that (see ``ManifestHealResult.reconciled_doc_
+        # ids``'s class docstring) -- a document whose manifest hook
+        # RAISED reads chunk_count==0 here, so this pass cannot tell a
+        # genuinely partial same-run rebuild from a complete one for
+        # EXACTLY the document shape this bead exists to protect. The
+        # exit-code check now verifies confirmation itself, after this
+        # whole run (this pass included) completes, by reading the
+        # catalog manifest back (``commands._helpers.resolve_confirmed_
+        # write_failure_doc_ids``) -- nothing here needs to feed it.
         _phase("Catalog manifest self-heal…")
         _t = time.monotonic()
         try:
@@ -6153,7 +6166,6 @@ def _run_index(
                         _cat.by_owner(_heal_owner), _cat, _mk_t3,
                         _tracked_writer, yield_before_write=_yield_fair,
                     )
-                    _self_heal_confirmed_doc_ids = list(heal.confirmed_doc_ids)
                     if heal.reconciled or heal.lost or heal.write_failed:
                         _phase(
                             f"Catalog manifest self-heal: "
@@ -6406,25 +6418,21 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
-        # nexus-wbfpw.29 round 3 (round 5: field renamed to say what it
-        # actually gates): tumblers of every document the SAME run's own
-        # manifest self-heal pass CONFIRMED reconciled (nexus-c21fk,
-        # above) -- index_repo_cmd subtracts these from the manifest-
-        # write-failure collector before deciding the exit code, so a
-        # hook failure self-heal already repaired in this run is reported
-        # as a "restored" WARNING, not a false "run nx catalog reconcile"
-        # failure. "Confirmed" (ManifestHealResult.confirmed_doc_ids, NOT
-        # its broader reconciled_doc_ids) means the rebuilt manifest holds
-        # at least as many rows as the document's own chunk_count -- a
-        # document self-heal touched but could only PARTIALLY rebuild
-        # (round 5 critique CRITICAL: a genuine T3 shortfall, previously
-        # indistinguishable here from benign RDR-108 duplicate-content
-        # collapse) is deliberately excluded, so it still fails loud with
-        # the reconcile remedy rather than a false "restored" claim.
-        # Always [] for every OTHER index verb (pdf/md/dt), which have no
-        # same-run self-heal pass -- they keep failing exactly as before
-        # this bead's round-3 fix.
-        "self_heal_confirmed_doc_ids": _self_heal_confirmed_doc_ids,
+        # nexus-wbfpw.29 round 3 through round 5 carried a
+        # "self_heal_confirmed_doc_ids" stat here (tumblers this run's own
+        # self-heal pass provably fully repaired, per ManifestHealResult.
+        # confirmed_doc_ids) for index_repo_cmd to subtract from the
+        # manifest-write-failure collector before deciding the exit code.
+        # Round 6 REMOVED it: that comparison read the document's
+        # chunk_count AT SELF-HEAL TIME, which is 0 for any document whose
+        # manifest hook RAISED (only a successful hook write ever bumps
+        # it) -- so it trivially "confirmed" ANY rebuild, including a
+        # genuinely partial one, for exactly the document shape this bead
+        # exists to protect. index_repo_cmd now verifies confirmation
+        # itself, AFTER this whole run (self-heal included) completes, by
+        # reading the catalog manifest back
+        # (``commands._helpers.resolve_confirmed_write_failure_doc_ids``)
+        # -- nothing in this return dict needs to feed it.
         # nexus-wi1uv round-2: count of PDFs that failed the post-extraction
         # quality gate this run (contained per-file, never aborted the run).
         # index_repo_cmd uses this to drive a non-zero exit after

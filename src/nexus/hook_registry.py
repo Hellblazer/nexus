@@ -695,18 +695,28 @@ def _record_manifest_hook_batch_exception(
         if hook is not manifest_write_batch_hook:
             return
 
-        affected: set[str] = set()
+        # nexus-wbfpw.29 round 6: group by doc_id AND collect the chash
+        # this failing write was trying to put in each doc's manifest
+        # (the same ``chunk_text_hash`` field ``manifest_write_batch_hook``
+        # itself reads) — feeds the post-run verification that decides
+        # whether self-heal actually closed the gap this exception left.
+        chash_by_doc: dict[str, set[str]] = {}
         for meta in (metadatas or []):
             doc_id = catalog_doc_id
             if not doc_id and isinstance(meta, dict):
                 doc_id = meta.get("doc_id", "")
-            if doc_id:
-                affected.add(doc_id)
-        if not affected:
+            if not doc_id:
+                continue
+            bucket = chash_by_doc.setdefault(doc_id, set())
+            if isinstance(meta, dict):
+                chash = meta.get("chunk_text_hash", "")
+                if chash:
+                    bucket.add(chash)
+        if not chash_by_doc:
             _record_manifest_identity_drop(collection, len(doc_ids))
             return
-        for doc_id in sorted(affected):
-            _record_manifest_write_failure(doc_id)
+        for doc_id in sorted(chash_by_doc):
+            _record_manifest_write_failure(doc_id, chash_by_doc[doc_id])
     except Exception:  # noqa: BLE001 — this helper must never crash fire_batch's own exception handler (nexus-wbfpw.29 round 2)
         _log.warning(
             "manifest_hook_failure_routing_failed",

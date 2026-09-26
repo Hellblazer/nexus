@@ -245,6 +245,110 @@ def test_manifest_hook_exception_self_heals_same_run_then_recovers(
     assert second.exit_code == 0, second.output
 
 
+def test_manifest_hook_exception_with_partial_t3_write_fails_with_reconcile_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-wbfpw.29 round 6 (round-5's own documented gap, T2
+    critique-wbfpw29-r4 CRITICAL): channel 3's manifest-hook EXCEPTION
+    leaves the document's catalog row at ``chunk_count == 0`` (only a
+    SUCCESSFUL hook write ever bumps it) -- so round 5's confirmation
+    check (``len(rebuilt_chunks) >= entry.chunk_count``) compared against
+    zero and trivially passed for ANY rebuild, including one built from a
+    T3 write that itself only PARTIALLY landed this same run. This test
+    reproduces exactly that compound fault: the manifest hook raises
+    (the same ``get_catalog`` fault channel 3's sibling test above uses),
+    AND the file's own chunk upload silently drops its LAST chunk before
+    it ever reaches T3 (a truncating wrapper around
+    ``HttpVectorClient.upsert_chunks_with_embeddings``, independent of
+    the hook fault) -- so self-heal's own T3 fetch by content_hash finds
+    only the truncated subset and rebuilds a manifest that is genuinely
+    short of what this run's own manifest-write attempt was trying to
+    record. The run must fail with the reconcile remedy, not report a
+    false "restored by self-heal".
+
+    FAILS AT HEAD 0b1022eec (round 5): the run exits 0, because
+    ``ManifestHealResult.confirmed_doc_ids``'s ``len(chunks) >=
+    entry.chunk_count`` reads ``entry.chunk_count == 0`` for this exact
+    document shape and confirms unconditionally.
+    """
+    from click.testing import CliRunner
+
+    import nexus.db.http_vector_client as http_vector_client
+    import nexus.mcp_infra as mcp_infra
+    from nexus.cli import main
+    from tests._catalog_fixture_ops import only_document
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+
+    repo, _fixture_path = _channel3_repo(tmp_path, monkeypatch, name="channel3-partial-t3")
+
+    real_upsert = http_vector_client.HttpVectorClient.upsert_chunks_with_embeddings
+
+    def truncating_upsert(
+        self, collection_name, ids, documents, embeddings,
+        metadatas=None, *, force_re_embed=False,
+    ):
+        # Drop the LAST chunk before it ever reaches T3 -- genuinely
+        # short, not a duplicate-content collapse (RDR-108's OTHER benign
+        # explanation for a manifest shortfall).
+        if collection_name.startswith("code__") and len(ids) > 1:
+            keep = len(ids) - 1
+            ids = ids[:keep]
+            documents = documents[:keep]
+            embeddings = embeddings[:keep]
+            metadatas = (metadatas or [])[:keep]
+        return real_upsert(
+            self, collection_name, ids, documents, embeddings,
+            metadatas=metadatas, force_re_embed=force_re_embed,
+        )
+
+    call_log: list[str] = []
+
+    def faulting_get_catalog():
+        call_log.append("get_catalog")
+        raise RuntimeError("nexus-wbfpw.29 fault injection (channel 3, partial T3)")
+
+    runner = CliRunner()
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+        monkeypatch.setattr(
+            http_vector_client.HttpVectorClient,
+            "upsert_chunks_with_embeddings",
+            truncating_upsert,
+        )
+        result = runner.invoke(main, ["index", "repo", str(repo)])
+
+    assert call_log, (
+        "get_catalog() was never called -- the real manifest_write_batch_hook "
+        "never fired this run (check the chunk-cap monkeypatch and the "
+        "fixture's chunk count)"
+    )
+
+    doc = only_document()
+
+    assert result.exit_code != 0, result.output
+    assert "catalog manifest write failed for 1 document(s)" in result.output
+    assert str(doc.tumbler) in result.output, (
+        f"expected the still-failing document's tumbler {doc.tumbler!r} "
+        f"to be named in the run's output:\n{result.output}"
+    )
+    assert "run 'nx catalog reconcile'" in result.output.lower(), (
+        "self-heal's own rebuild was genuinely short this run (one chunk "
+        "never reached T3 at all) -- the reconcile remedy must still be "
+        "printed, not a false restoration claim"
+    )
+    assert "restored by self-heal" not in result.output, (
+        "the rebuilt manifest is missing at least one chash this run's "
+        "own manifest-write attempt was trying to record -- it must "
+        "never be reported as a completed restoration"
+    )
+
+    error_lines = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert len(error_lines) == 1, result.output
+    assert "nx catalog reconcile" in error_lines[0], error_lines[0]
+
+
 def test_manifest_hook_exception_when_self_heal_is_also_faulted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -404,13 +508,9 @@ def test_heal_manifest_gaps_reports_which_documents_it_reconciled(
 
     assert result.reconciled == 1
     assert result.reconciled_doc_ids == [doc_id]
-    # nexus-wbfpw.29 round 5: a COMPLETE rebuild (chunk count matches
-    # exactly) is also CONFIRMED -- the two lists agree when there is no
-    # shortfall.
-    assert result.confirmed_doc_ids == [doc_id]
 
 
-def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled_not_confirmed(
+def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
     tmp_path: Path,
 ) -> None:
     """nexus-wbfpw.29 round 5 (critique CRITICAL): a rebuilt manifest
@@ -428,9 +528,18 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled_not_confirmed(
     ``manifest_heal.py``'s own ``lost``/``never_chunked`` classification
     exists to distinguish from a healthy heal, proving the write still
     happens (``reconciled``/``reconciled_doc_ids`` -- partial repair is
-    still real work) but the document must NOT land in
-    ``confirmed_doc_ids`` (Sam's locked decision: unconfirmed is not
-    repaired).
+    still real work) and the shortfall is tracked in ``dup_collapsed``
+    for the operator-facing count.
+
+    Round 6 dropped this function's own ``confirmed_doc_ids`` output
+    entirely (a per-entry "rebuilt count >= chunk_count" check that read
+    chunk_count==0, and so trivially passed, for any document whose
+    manifest hook raised) -- confirmation for the exit-code decision now
+    happens elsewhere, via a post-run catalog manifest read-back (see
+    ``commands._helpers.resolve_confirmed_write_failure_doc_ids`` and its
+    own dedicated tests). This test's job is narrower now: prove
+    ``heal_manifest_gaps`` itself still performs and accounts for a
+    genuinely partial rebuild correctly.
     """
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
     from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -477,11 +586,11 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled_not_confirmed(
     # The write happened -- self-heal did real, useful work.
     assert result.reconciled == 1
     assert result.reconciled_doc_ids == [doc_id]
+    # The shortfall against the registered chunk_count is tracked, not
+    # hidden -- but this function no longer tries to render a verdict
+    # ("confirmed" vs not) about it; that verdict is computed downstream
+    # by reading the manifest back after the whole run.
     assert result.dup_collapsed == 1
-    # But it is NOT confirmed -- the rebuilt manifest holds fewer rows
-    # than the document's own chunk_count, so the exit-code decision must
-    # not treat this document as fully repaired.
-    assert result.confirmed_doc_ids == []
 
     manifest_after = make_catalog_reader().get_manifest(doc_id)
     assert len(manifest_after) == 1, (

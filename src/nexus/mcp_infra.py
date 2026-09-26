@@ -1842,6 +1842,23 @@ _identity_drop_collectors_active = False
 
 _manifest_write_failures_lock = threading.Lock()
 _MANIFEST_WRITE_FAILURES: list[str] = []
+#: nexus-wbfpw.29 round 6: per-doc_id set of chashes the FAILING write was
+#: trying to put in that document's manifest, unioned across calls for the
+#: same doc (a document spanning multiple continuation-slice flushes can
+#: fail more than once, at different flushes, each carrying a different
+#: slice of the whole file's chunks). ``None`` is the sticky UNKNOWN
+#: marker: a producer that cannot determine what it was trying to write
+#: (the default for any call to :func:`_record_manifest_write_failure`
+#: that omits *chashes* — the safe fallback for a call site nobody has
+#: updated yet) sets it, and once a doc_id is unknown it STAYS unknown
+#: even if a later call for the same doc_id supplies a real set — a
+#: verifier can never reconstruct confidence a prior call already threw
+#: away. See :func:`get_manifest_write_failure_chashes` and
+#: ``commands._helpers.resolve_confirmed_write_failure_doc_ids``, the
+#: post-run verification this collector exists to feed: an unknown or
+#: empty expected set is NEVER treated as confirmed-repaired, because
+#: an empty set is trivially a subset of anything.
+_MANIFEST_WRITE_FAILURE_CHASHES: "dict[str, set[str] | None]" = {}
 
 
 def get_manifest_write_failures() -> list[str]:
@@ -1851,6 +1868,18 @@ def get_manifest_write_failures() -> list[str]:
     """
     with _manifest_write_failures_lock:
         return list(_MANIFEST_WRITE_FAILURES)
+
+
+def get_manifest_write_failure_chashes() -> "dict[str, frozenset[str] | None]":
+    """Return, per failed doc_id, the chash set its failing write was
+    trying to put in the manifest — ``None`` means UNKNOWN (see the
+    module comment on ``_MANIFEST_WRITE_FAILURE_CHASHES``). Snapshot copy.
+    """
+    with _manifest_write_failures_lock:
+        return {
+            doc_id: (None if chashes is None else frozenset(chashes))
+            for doc_id, chashes in _MANIFEST_WRITE_FAILURE_CHASHES.items()
+        }
 
 
 def reset_manifest_write_failures() -> None:
@@ -1863,9 +1892,12 @@ def reset_manifest_write_failures() -> None:
     _identity_drop_collectors_active = True
     with _manifest_write_failures_lock:
         _MANIFEST_WRITE_FAILURES.clear()
+        _MANIFEST_WRITE_FAILURE_CHASHES.clear()
 
 
-def _record_manifest_write_failure(doc_id: str) -> None:
+def _record_manifest_write_failure(
+    doc_id: str, chashes: "Iterable[str] | None" = None,
+) -> None:
     """Record *doc_id* as a manifest write failure this run.
 
     No-op when no active CLI index run has reset the collector
@@ -1877,12 +1909,25 @@ def _record_manifest_write_failure(doc_id: str) -> None:
     previously appended once per flush, so both the count and the
     printed id list repeated the same doc_id — cosmetically wrong and
     proportionally weakened "names the documents to re-index".
+
+    *chashes* (nexus-wbfpw.29 round 6): the chash set THIS failing write
+    was trying to put in *doc_id*'s manifest, when the caller has the
+    batch rows in hand to compute it. ``None`` (the default) records the
+    doc as UNKNOWN-expectation — see ``_MANIFEST_WRITE_FAILURE_CHASHES``'s
+    module comment for why this is sticky and why unknown/empty never
+    confirms.
     """
     if not _identity_drop_collectors_active:
         return
     with _manifest_write_failures_lock:
         if doc_id not in _MANIFEST_WRITE_FAILURES:
             _MANIFEST_WRITE_FAILURES.append(doc_id)
+        existing = _MANIFEST_WRITE_FAILURE_CHASHES.get(doc_id, set())
+        if existing is None or chashes is None:
+            _MANIFEST_WRITE_FAILURE_CHASHES[doc_id] = None
+        else:
+            existing |= set(chashes)
+            _MANIFEST_WRITE_FAILURE_CHASHES[doc_id] = existing
 
 
 # nexus-gup3b: a multi-batch document's every flush AFTER the first lacks
@@ -2255,7 +2300,10 @@ def manifest_write_batch_hook(
         import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
         structlog.get_logger().warning("manifest_write_hook_no_catalog", collection=collection, exc_info=True)
         for _doc_id in sorted(by_doc):
-            _record_manifest_write_failure(_doc_id)
+            _record_manifest_write_failure(
+                _doc_id,
+                {m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]} - {""},
+            )
         return
     if _gate is None:
         # nexus-wbfpw.29 round 2 (critic Critical): same silent-loss shape
@@ -2267,7 +2315,10 @@ def manifest_write_batch_hook(
             "manifest_write_hook_catalog_uninitialised", collection=collection,
         )
         for _doc_id in sorted(by_doc):
-            _record_manifest_write_failure(_doc_id)
+            _record_manifest_write_failure(
+                _doc_id,
+                {m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]} - {""},
+            )
         return
     # (The local-mode read-handle cleanup that lived here — a lint-dodging
     # ``getattr(_gate, "_db", None)`` — died with the local catalog,
@@ -2307,10 +2358,19 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
 
 def _apply_combined_write_response(
     res: dict, complete_map: dict[str, str], collection: str | None,
+    chash_by_doc: "dict[str, set[str]] | None" = None,
 ) -> list[str]:
     """Record accounting from a nexus-kl2z6/nexus-wxjr6 combined write's
     response: failed docs, completion refusals, and — the flush-grain
     path's whole reason for existing — the ENGINE's own sweep accounting.
+
+    *chash_by_doc* (nexus-wbfpw.29 round 6): the caller's own doc_id ->
+    chash-set map for the batch it submitted (``full_docs`` at the one
+    real call site, ``indexer.py``'s flush closure) — threaded into
+    :func:`_record_manifest_write_failure` for every doc_id this response
+    reports failed, so the post-run verification step can confirm exactly
+    what this write was trying to put in the manifest. ``None`` (the
+    default) records every failure as UNKNOWN-expectation.
 
     Deliberately NOT a reuse of :func:`_manifest_write_loop`'s write_many
     branch parsing: that block ALSO computes a local before/after chash
@@ -2344,7 +2404,7 @@ def _apply_combined_write_response(
 
     failed = list(res.get("failed_doc_ids") or [])
     for doc_id in failed:
-        _record_manifest_write_failure(doc_id)
+        _record_manifest_write_failure(doc_id, (chash_by_doc or {}).get(doc_id))
     refused = res.get("complete_refused") or []
     refused_count = int(res.get("complete_refused_count") or 0)
     if refused_count != len(refused):
@@ -3096,8 +3156,17 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                     structlog.get_logger().warning(
                         "manifest_write_many_partial", failed_doc_ids=failed,
                     )
+                    # nexus-wbfpw.29 round 6: record what THIS write was
+                    # trying to put in each failed doc's manifest, so the
+                    # post-run verification can confirm whether self-heal
+                    # actually closed the gap.
+                    _failed_chashes = {
+                        _d: {c["chash"] for c in _chunks if c["chash"]}
+                        for _d, _chunks in full_docs
+                    }
                     for doc_id in failed:
-                        _record_manifest_write_failure(doc_id)
+                        _record_manifest_write_failure(
+                            doc_id, _failed_chashes.get(doc_id))
                 # nexus-tgrgs/jk88j (2026-08-08): the 39upx sweep, folded
                 # into the fast branch. Runs only here — after the POST has
                 # returned — because every doc's write has now committed
@@ -3165,8 +3234,9 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                         error=str(exc),
                         exc_info=True,
                     )
-                    for doc_id, _ in full_docs:
-                        _record_manifest_write_failure(doc_id)
+                    for doc_id, _chunks in full_docs:
+                        _record_manifest_write_failure(
+                            doc_id, {c["chash"] for c in _chunks if c["chash"]})
                     wrote_many = True
         if wrote_many:
             # per-doc loop handles ONLY the continuation remainder (may
@@ -3303,7 +3373,8 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             structlog.get_logger().warning(
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
-            _record_manifest_write_failure(doc_id)
+            _record_manifest_write_failure(
+                doc_id, {c["chash"] for c in chunks if c["chash"]})
 
 
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────

@@ -1377,6 +1377,12 @@ def index_repo_cmd(
         # _emit_manifest_write_failure_summary below; checked at the tail
         # of this command to fail the run loudly (see CHANGELOG).
         manifest_problems_detected = False
+        # nexus-wbfpw.29 round 6: computed once, inside the summary closure
+        # below (right after `stats` is set), and reused by the fail-loud
+        # raise further down -- both must see the SAME verified set, and
+        # the verification itself does a real catalog round trip so it
+        # must not run twice per invocation.
+        _confirmed_write_failure_doc_ids: frozenset[str] = frozenset()
 
         def _emit_manifest_write_failure_summary() -> None:
             # GH #1371 + GH #1397 + nexus-5xn3k.6: silent on zero problems
@@ -1394,21 +1400,30 @@ def index_repo_cmd(
             # restructured, the chunks are real. What was missing is
             # stating that overlap out loud instead of leaving two
             # unconnected numbers for the operator to reconcile by hand.
-            from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
-            nonlocal manifest_problems_detected
+            from nexus.commands._helpers import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
+                emit_identity_drop_summary,
+                resolve_confirmed_write_failure_doc_ids,
+            )
+            nonlocal manifest_problems_detected, _confirmed_write_failure_doc_ids
             indexed_files = n - skipped_files
-            # nexus-wbfpw.29 round 3 (round 5: CONFIRMED only -- see
-            # ManifestHealResult.confirmed_doc_ids): docs this run's OWN
-            # same-run manifest self-heal pass (indexer.py, nexus-c21fk)
-            # provably fully restored -- a write failure in this set gets
-            # a "restored, no action needed" note instead of a false "run
-            # nx catalog reconcile" failure. A merely PARTIALLY-healed doc
-            # (rebuilt manifest shorter than chunk_count) is deliberately
+            # nexus-wbfpw.29 round 3 (round 6: verified by reading the
+            # catalog manifest back after the WHOLE run, self-heal
+            # included, instead of trusting self-heal's own AT-HEAL-TIME
+            # chunk_count comparison -- round 5's ManifestHealResult.
+            # confirmed_doc_ids read chunk_count=0 for any document whose
+            # manifest hook RAISED, which trivially "confirmed" even a
+            # genuinely partial same-run rebuild. See
+            # resolve_confirmed_write_failure_doc_ids's own docstring.
+            # A write failure in this set gets a "restored, no action
+            # needed" note instead of a false "run nx catalog reconcile"
+            # failure. A merely PARTIALLY-healed doc is deliberately
             # excluded, per Sam's locked decision: unconfirmed is not
-            # repaired. `stats` (closed over from this function's
-            # enclosing scope) is set by the time this runs.
-            _healed = set((stats or {}).get("self_heal_confirmed_doc_ids") or [])
-            if emit_identity_drop_summary(indexed_count=indexed_files, healed_doc_ids=_healed):
+            # repaired.
+            _confirmed_write_failure_doc_ids = resolve_confirmed_write_failure_doc_ids()
+            if emit_identity_drop_summary(
+                indexed_count=indexed_files,
+                healed_doc_ids=_confirmed_write_failure_doc_ids,
+            ):
                 manifest_problems_detected = True
 
         def _emit_ephemeral_skip_summary() -> None:
@@ -1783,11 +1798,16 @@ def index_repo_cmd(
             )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
-            # nexus-wbfpw.29 round 3: same healed-set exclusion as the
-            # emit_identity_drop_summary call above, so a self-healed
-            # write failure never appears in the "causes" list either.
-            _healed = set((stats or {}).get("self_heal_confirmed_doc_ids") or [])
-            raise_identity_drop_exception(subject="document", healed_doc_ids=_healed)
+            # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the
+            # emit_identity_drop_summary call above computed -- see
+            # resolve_confirmed_write_failure_doc_ids -- reused rather
+            # than recomputed, since verification does a real catalog
+            # round trip), so a self-healed write failure never appears
+            # in the "causes" list either.
+            raise_identity_drop_exception(
+                subject="document",
+                healed_doc_ids=_confirmed_write_failure_doc_ids,
+            )
         if pdf_quality_gate_failed:
             raise click.ClickException(
                 f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "

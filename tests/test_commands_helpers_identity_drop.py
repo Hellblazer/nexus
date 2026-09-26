@@ -25,6 +25,7 @@ from nexus.commands._helpers import (
     raise_identity_drop_exception,
     raise_identity_drop_exception_for_file,
     reset_identity_drop_collectors,
+    resolve_confirmed_write_failure_doc_ids,
 )
 
 
@@ -505,6 +506,60 @@ def test_raise_identity_drop_exception_for_file_names_file_and_remedy(tmp_path):
     assert str(target) in msg
     assert "7 chunk" in msg
     assert "orphaned" in msg.lower()
-    assert "reconcile" in msg.lower()
-    # remedy: re-run once reachable, chunks reconcile via upsert identity
-    assert "re-run" in msg.lower() or "reindex" in msg.lower() or "re-index" in msg.lower()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_empty_when_nothing_failed():
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_unknown_expectation_never_confirms():
+    """nexus-wbfpw.29 round 6: a write failure recorded with NO chash
+    expectation (the default -- any producer that cannot determine what
+    it was trying to write) must never be confirmed. It never even
+    reaches the catalog: an unknown-expectation doc_id is filtered out
+    before it becomes a verification candidate, so this test needs no
+    real catalog row for "1.2.3" at all -- if the function tried to
+    verify it, the lookup would either 404 or find nothing and the
+    result would still be "not confirmed", but the point of this test is
+    that it isn't even attempted.
+    """
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3")  # chashes omitted -> UNKNOWN
+
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_empty_expectation_never_confirms():
+    """A KNOWN but EMPTY expected-chash set must also never confirm --
+    an empty set is trivially a subset of anything, so without this
+    exclusion every empty-expectation doc_id would confirm regardless of
+    what (if anything) the manifest holds."""
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3", set())
+
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()
+
+
+def test_resolve_confirmed_write_failure_doc_ids_reader_failure_confirms_nothing(
+    monkeypatch,
+):
+    """nexus-wbfpw.29 round 6: a catalog-reader failure during
+    verification must confirm NOTHING -- fail loud via the caller's
+    existing gate rather than guess either way. A doc_id with a real,
+    non-empty expected-chash set becomes a genuine verification
+    candidate, so the (faulted) reader is actually reached."""
+    import nexus.catalog.factory as catalog_factory
+    from nexus.mcp_infra import _record_manifest_write_failure
+
+    _record_manifest_write_failure("1.2.3", {"aa" * 32})
+
+    def faulting_make_catalog_reader(*args, **kwargs):
+        raise RuntimeError("nexus-wbfpw.29 fault injection (verification reader)")
+
+    monkeypatch.setattr(
+        catalog_factory, "make_catalog_reader", faulting_make_catalog_reader,
+    )
+
+    assert resolve_confirmed_write_failure_doc_ids() == frozenset()

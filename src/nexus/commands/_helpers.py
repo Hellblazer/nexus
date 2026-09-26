@@ -31,6 +31,7 @@ __all__ = [
     "raise_identity_drop_exception",
     "raise_identity_drop_exception_for_file",
     "reset_identity_drop_collectors",
+    "resolve_confirmed_write_failure_doc_ids",
     "t2_handle",
     "t2_shared_client_from_context",
 ]
@@ -263,6 +264,75 @@ def emit_retry_summary() -> None:
             f"{retry_stats['brake_seconds']:.1f}s",
             err=True,
         )
+
+
+def resolve_confirmed_write_failure_doc_ids() -> frozenset[str]:
+    """nexus-wbfpw.29 round 6: which of this run's manifest-write-failed
+    documents are ACTUALLY repaired, verified by reading the catalog
+    manifest back AFTER the whole run (same-run self-heal included) has
+    completed.
+
+    Round 5's ``ManifestHealResult.confirmed_doc_ids`` compared the
+    rebuilt chunk count against the document's ``chunk_count`` AT
+    SELF-HEAL TIME — but a document whose manifest hook RAISED (as
+    opposed to detecting and reporting its own failure) never has its
+    ``chunk_count`` bumped at all, so that comparison read 0 and
+    confirmed ANY rebuild, including one built from a T3 write that
+    itself only partially landed this same run (round 5's own documented
+    gap). This checks the only claim that actually means "this run's
+    damage is undone": every chash the failing write was TRYING to put
+    in the document's manifest (recorded per doc_id by
+    ``mcp_infra._record_manifest_write_failure``, unioned across
+    continuation-slice flushes — see
+    ``mcp_infra.get_manifest_write_failure_chashes``) is present in the
+    manifest now, after self-heal has had its chance.
+
+    A doc_id with no recorded expected-chash set, an explicitly UNKNOWN
+    one, or an empty one is never confirmed — a claim we cannot verify is
+    a claim we do not make (Sam's locked decision: unconfirmed is not
+    repaired).
+
+    A catalog-reader failure during verification confirms NOTHING — fail
+    loud rather than guess either way. The caller's existing fail-loud
+    plumbing (``raise_identity_drop_exception``) then treats every write
+    failure as still-failed, which is the correct outcome when the
+    verification itself could not run.
+    """
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when a write failure was recorded
+        get_manifest_write_failure_chashes,
+        get_manifest_write_failures,
+    )
+
+    failed = get_manifest_write_failures()
+    if not failed:
+        return frozenset()
+
+    expected = get_manifest_write_failure_chashes()
+    candidates = {
+        doc_id: chashes
+        for doc_id in failed
+        if (chashes := expected.get(doc_id)) is not None and chashes
+    }
+    if not candidates:
+        return frozenset()
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-local import: heavy catalog dep, rare branch
+
+        manifests = make_catalog_reader().get_manifests(list(candidates))
+    except Exception:  # noqa: BLE001 — fail loud via the caller's existing gate: nothing is confirmed here, never a guess
+        import structlog  # noqa: PLC0415 — deliberate function-local import: rare branch
+
+        structlog.get_logger(__name__).warning(
+            "manifest_write_failure_verification_read_failed", exc_info=True,
+        )
+        return frozenset()
+
+    return frozenset(
+        doc_id
+        for doc_id, chashes in candidates.items()
+        if chashes <= {row.chash for row in manifests.get(doc_id, []) if row.chash}
+    )
 
 
 def _resolve_manifest_failure_display_paths(doc_ids: list[str]) -> dict[str, str]:
