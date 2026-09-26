@@ -183,12 +183,18 @@ fold the posts with a repo script. No workflow file changes.
   route, `POST /github`, accepting GitHub's headers and raw body.
 - **Host** (conexus-4b, T2 `nexus_rdr/220-research-2`): an AWS Lambda
   behind a function URL in the conexus account (us-east-1),
-  terraform-managed. Python 3.12 with the standard library only
+  terraform-managed. Runtime python3.13 with the standard library only
   (`hmac.compare_digest`, `json`, `urllib.request`): no dependencies, no
-  lock file, one file zipped by terraform. Secrets Manager holds the
-  webhook secret and the board token, read by an IAM role scoped to those
-  two ARNs. Logs go to CloudWatch with 30-day retention. Reserved
-  concurrency (about 5) is the rate cap. The code, its tests, the
+  lock file, one file zipped by terraform. One Secrets Manager secret
+  (`conexus/dev/ci-board-adapter`) holds three fields: `webhook_secret`,
+  `board_token`, and `github_token` (fine-grained, Actions read-only, for
+  the fork check below). The IAM role is scoped to that one ARN and the
+  function's log group. The adapter re-reads the secret every 300 seconds,
+  so a re-seed needs no redeploy. Logs go to CloudWatch with 30-day
+  retention. There is no reserved concurrency: the account Lambda quota is
+  10 and AWS keeps 10 unreserved, so the shared account limit is the rate
+  cap for now, with a throttles alarm (conexus-lgr8 raises the quota).
+  The code, its tests, the
   terraform, and the GitHub-side webhook configuration live in the conexus
   repository (bead conexus-jewq). The terraform-pinned source hash is the
   provenance record; AWS code signing is deferred.
@@ -230,7 +236,7 @@ fold the posts with a repo script. No workflow file changes.
   lowercase repository name without the owner. `<branch>` replaces every
   character outside `[A-Za-z0-9._-]` with `-`, collapses runs of `-`, and
   strips leading characters until `[A-Za-z0-9]`
-  (`TemplateRegistry.ADDRESS_SEGMENT_PATTERN`); the topic is capped at 200
+  (`TemplateRegistry.ADDRESS_SEGMENT_PATTERN`); the topic is capped at 80
   characters. So `develop` gives `board/ci/nexus-develop` and
   `feature/foo` gives `board/ci/nexus-feature-foo`. Only configured
   repositories and the allow-listed event types are accepted.
@@ -240,24 +246,44 @@ fold the posts with a repo script. No workflow file changes.
   in the body. The nonce is `X-GitHub-Delivery`, so a redelivered event is
   one post. The body is compact JSON: `state`
   (`queued|in_progress|completed`), workflow, job (for job events), sha,
-  run id, attempt, conclusion, URL, within the board's 1024-byte cap.
+  run id, attempt, conclusion, URL, within the template's 1024-byte cap.
+  Every field is typed or restricted before it is written, because the
+  text comes from GitHub (the prompt-injection boundary): sha is 40 hex
+  or blank; run and attempt are integers or null; conclusion is GitHub's
+  enum or null; URL matches only
+  `https://github.com/<repo>/actions/runs/N[/job/N][/attempts/N]` or is
+  blank; workflow and job names are cut to 64 characters of
+  `[A-Za-z0-9 ._()/:#+-]`, anything else becoming `?`.
   Adding `state` to the board template later is an additive engine
   change; the adapter would then set both.
 - **Retry**: GitHub does NOT redeliver a failed delivery on its own
   ("Handling failed webhook deliveries", docs.github.com), and a delivery
   not answered within 10 seconds fails. So the adapter retries the tuple
-  write itself (three attempts, short backoff, inside a 9-second budget),
+  write itself (three attempts, short backoff), inside a 9-second Lambda
+  timeout split as a 2-second origin lookup plus a 6-second write budget,
   answers 2xx only after a write succeeds, and otherwise answers 5xx so
   the delivery shows red in GitHub's delivery log, and logs the delivery
   id. A manual or API redelivery keeps the same delivery id, so the nonce
   still makes it one post. Automatic recovery (a scheduled sweeper that
-  lists failed deliveries and redelivers them) needs a third secret, a
-  GitHub token with webhook administration, and is deferred; the fold
+  lists failed deliveries and redelivers them) needs a fourth, broader
+  secret, a GitHub token with webhook administration (the third field is
+  already the read-only fork-check token), and is deferred; the fold
   shows the age of each state, so a gap is visible.
 - **Replay**: GitHub signs no timestamp, so a captured delivery can be
   replayed. The delivery-id nonce makes an exact replay land on the same
-  tuple while that tuple lives (seven days, the board retention). A replay
+  tuple while that tuple lives (three days, the `board/ci` retention;
+  queued and in-progress posts expire after 6 hours). A replay
   after that writes a stale post the fold ranks below newer states.
+- **Branches**: the allow-list defaults to `develop` and `main` and may not
+  be empty (terraform refuses it), so the topic count stays bounded.
+- **Observability** (conexus side): an hourly self-check proves the secret
+  loads, the board token passes the edge, and the GitHub token reads runs
+  (a 403 counts as healthy only with `SELF_CHECK_ACCEPT_403`, for the
+  board-only token). Alarms go to `conexus-security-alerts`: post failed,
+  origin unverified, signature refused, errors, throttles, slow (over 8
+  seconds), self-check missing (heartbeat), and a branch-dropped burst. A
+  dashboard and saved queries sit beside them. `activate.sh` is dry-run by
+  default.
 - **Engine and edge**: unchanged. The adapter's writes are ordinary
   bearer-authenticated `POST /v1/tuples/out` calls through existing
   pass-through, metered like any client.
@@ -300,7 +326,8 @@ The whole chain was reviewed end to end on 2026-09-26 (T2
 - **Topic count.** With the fork check, only same-repository branches
   post. The adapter's branch allow-list defaults to `develop` and `main`,
   and an alarm reports dropped unmapped branches.
-- **Tokens.** The adapter's engine token is the board-only scope
+- **Tokens.** The adapter secret holds three fields (webhook secret,
+  board token, read-only GitHub token). The adapter's engine token is the board-only scope
   (nexus-r3ur5), a precondition for activation. The in-workflow
   `NX_BOARD_TOKEN` is readable only by push-to-develop jobs whose one
   third-party action is pinned by SHA; fork pull requests cannot reach it.
@@ -444,8 +471,8 @@ shows each job's final state matching GitHub's check runs for that sha.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Webhook secret | In scope | In scope | In scope | In scope | N/A |
-| Adapter board token | In scope | In scope | In scope | In scope | N/A |
+| Adapter secret (`webhook_secret`, `board_token`, `github_token`) | In scope | In scope | In scope | In scope (`activate.sh --check`, hourly self-check) | N/A |
+| Previous board token after a re-seed | In scope | In scope | In scope (`activate.sh --revoke-previous`) | In scope | N/A |
 | Repository-to-topic mapping | In scope | In scope | In scope | In scope | N/A |
 
 ### New Dependencies
