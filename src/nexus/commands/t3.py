@@ -1410,14 +1410,44 @@ _CENSUS_BUCKETS = (
 #: force multi-page pagination without seeding 300+ real rows.
 _CENSUS_PAGE_LIMIT = 300
 
-#: Distinct exit code for "the connected engine does not carry the
-#: manifest-less-census route yet" (RDR-192 S2, bead nexus-wbfpw.5's
-#: EXECUTION note): the route ships in a not-yet-tagged engine (Sam's
-#: 2026-09-26 ruling on nexus-wbfpw.4 -- no engine tag carries it as of
-#: this writing), so a 404 here is an EXPECTED pre-route condition on
-#: develop, never a traceback. Distinct from exit 1 (unclassified > 0), 2
-#: (--require-zero violated), 3 (--all found no collection).
+#: Distinct exit code for "the connected engine predates the
+#: manifest-less-census route" (RDR-192 S2, bead nexus-wbfpw.5's
+#: EXECUTION note): a 404 here means the CONNECTED engine's build is
+#: older than the one that shipped bead nexus-wbfpw.4's route -- an
+#: EXPECTED, never-a-traceback outcome. This is a MECHANISM, not a dated
+#: snapshot of which tag carries the route (review round 1 Significant-3
+#: finding): which engine tags carry it changes over time (e.g.
+#: engine-service-v0.1.133), so callers should check the connected
+#: engine's own version / `REQUIRED_ENGINE_VERSION`
+#: (`src/nexus/engine_version.py`), never a frozen "no tag carries it
+#: yet" claim. Distinct from exit 1 (unclassified > 0), 2 (--require-zero
+#: violated), 3 (--all found no collection), 5 (a real engine error).
 _EXIT_NO_ROUTE = 4
+
+#: Distinct exit code for a real engine error that is NOT "predates the
+#: route" (review round 1 Important-1/Important-2 findings): a
+#: `VectorServiceError` with any code other than 404 -- an explicitly
+#: named `quarantine-*` --collection's 400
+#: (`VectorHandler.requireNotQuarantineCollection`), a transient 5xx, or
+#: a failed --all collection listing (`list_collections(strict=True)`).
+#: Printed as one clear line naming the collection/listing and the
+#: error, on stderr, never a traceback -- matching the rest of t3.py's
+#: "except Exception: click.echo(..., err=True); exit non-zero"
+#: convention. In --all, collections already censused before the
+#: failure are still rendered (text, or a still-parseable --json document
+#: carrying a "census_error" key) before this exit fires.
+_EXIT_ENGINE_ERROR = 5
+
+#: Human-readable message for the exit-4 (no-route) case. A module
+#: constant so the wording lives in exactly one place (the runtime
+#: message and the help text below both name the mechanism, not a date).
+_NO_ROUTE_MESSAGE = (
+    "This engine does not carry the manifest-less-census route "
+    "(RDR-192 S2, bead nexus-wbfpw.4) -- the connected engine predates "
+    "that route. Upgrade to an engine tag that carries it (compare the "
+    "deployed engine's own version against REQUIRED_ENGINE_VERSION in "
+    "src/nexus/engine_version.py)."
+)
 
 
 def _census_one_collection(client, collection: str) -> dict:
@@ -1525,10 +1555,22 @@ def census_manifest_less_cmd(
       0  clean.
       1  unclassified > 0 -- a census that cannot classify a row has failed.
       2  --require-zero names a bucket whose count is above zero.
-      3  --all finds no collection (excluding quarantine-*).
-      4  the connected engine does not carry the manifest-less-census
-         route yet (deploy at least the engine tag carrying bead
-         nexus-wbfpw.4 -- pending as of 2026-09-26, no tag carries it yet).
+      3  --all finds no collection (excluding quarantine-*) -- the listing
+         itself SUCCEEDED and is genuinely empty; a failed listing is exit 5.
+      4  the connected engine predates the manifest-less-census route --
+         upgrade the engine (compare its version against
+         REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py).
+      5  a real engine error other than "predates the route": a
+         quarantine-* --collection's 400, a transient 5xx, or a failed
+         --all collection listing. In --all, collections already censused
+         before the failure are still printed (or, under --json, still
+         emitted as a parseable document naming the failed collection).
+
+    \b
+    Human-readable diagnostics (the --require-zero violation notice, an
+    engine-error line) always go to stderr, never stdout -- with --json,
+    stdout carries only the JSON document, parseable regardless of exit
+    code.
 
     \b
     This verb no longer gates the production census (Sam's 2026-09-26
@@ -1564,10 +1606,20 @@ def census_manifest_less_cmd(
         # not quarantine, so it stays IN, matching
         # http_vector_client.is_live_collection_row's own "absent means
         # included" reading.
-        names = [
-            c["name"] for c in t3_db.list_collections()
-            if c.get("lifecycle_state") != "quarantine"
-        ]
+        try:
+            # strict=True (nexus-wbfpw.5 review round 1, Significant-2):
+            # list_collections's default swallows a non-404 failure and
+            # returns [] -- the shared contract every OTHER caller relies
+            # on, which this verb must not change. strict=True re-raises
+            # instead, so exit 3 below can mean "listed zero collections",
+            # never "the listing itself failed".
+            names = [
+                c["name"] for c in t3_db.list_collections(strict=True)
+                if c.get("lifecycle_state") != "quarantine"
+            ]
+        except VectorServiceError as exc:
+            click.echo(f"Failed to list T3 collections: {exc}", err=True)
+            sys.exit(_EXIT_ENGINE_ERROR)
         if not names:
             click.echo(
                 "No T3 collections found (excluding quarantine-*); nothing to census."
@@ -1584,25 +1636,34 @@ def census_manifest_less_cmd(
     client = t3_db
 
     results: list[dict] = []
-    try:
-        for name in names:
+    census_error: dict[str, str] | None = None
+    for name in names:
+        try:
             results.append(_census_one_collection(client, name))
-    except VectorServiceError as exc:
-        if exc.code == 404:
-            click.echo(
-                "This engine does not carry the manifest-less-census route "
-                "(RDR-192 S2, bead nexus-wbfpw.4) -- deploy at least the "
-                "engine tag carrying that route to run this census "
-                "(pending as of 2026-09-26; no engine tag carries it yet)."
-            )
-            sys.exit(_EXIT_NO_ROUTE)
-        raise
+        except VectorServiceError as exc:
+            if exc.code == 404:
+                click.echo(_NO_ROUTE_MESSAGE, err=True)
+                sys.exit(_EXIT_NO_ROUTE)
+            # Any other engine error (a quarantine-* collection's 400, a
+            # transient 5xx, ...) -- review round 1 Important-1: this used
+            # to fall through to a bare `raise` and surface as a raw
+            # traceback. Stop censusing further collections but keep
+            # what already succeeded (review round 1's --all decision).
+            click.echo(f"Census failed on collection {name!r}: {exc}", err=True)
+            census_error = {"collection": name, "error": str(exc)}
+            break
 
     if as_json:
-        click.echo(json.dumps({"collections": results}, indent=2))
+        payload: dict = {"collections": results}
+        if census_error is not None:
+            payload["census_error"] = census_error
+        click.echo(json.dumps(payload, indent=2))
     else:
         for result in results:
             _render_census_text(result)
+
+    if census_error is not None:
+        sys.exit(_EXIT_ENGINE_ERROR)
 
     any_unclassified = any(
         result["totals"].get("unclassified", 0) > 0 for result in results
@@ -1615,6 +1676,10 @@ def census_manifest_less_cmd(
     if any_unclassified:
         sys.exit(1)
     if zero_violations:
-        click.echo(f"--require-zero violated: {', '.join(zero_violations)}")
+        # Always stderr (review round 1 CRITICAL finding): this line used
+        # to go to the SAME stdout stream as the --json payload above,
+        # corrupting it for the one combination (--json + a violated
+        # --require-zero) the exit-code contract exists to support.
+        click.echo(f"--require-zero violated: {', '.join(zero_violations)}", err=True)
         sys.exit(2)
     sys.exit(0)

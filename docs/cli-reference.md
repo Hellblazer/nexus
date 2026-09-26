@@ -1813,8 +1813,11 @@ Exit codes:
 | 0 | Clean. |
 | 1 | `unclassified` > 0 — a census that cannot classify a row has failed. |
 | 2 | `--require-zero` names a bucket whose count is above zero. |
-| 3 | `--all` finds no collection (excluding `quarantine-*`). |
-| 4 | The connected engine does not carry the `manifest-less-census` route yet — deploy at least the engine tag carrying bead nexus-wbfpw.4 (pending as of 2026-09-26; no engine tag carries it yet). Never a traceback. |
+| 3 | `--all` finds no collection (excluding `quarantine-*`) — the listing itself SUCCEEDED and is genuinely empty; a failed listing is exit 5, never this code. |
+| 4 | The connected engine predates the `manifest-less-census` route (bead nexus-wbfpw.4) — upgrade the engine (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`; which tags carry the route changes over time, so check the version, not a fixed date). Never a traceback. |
+| 5 | A real engine error other than "predates the route": a `quarantine-*` `--collection`'s 400 (`VectorHandler.requireNotQuarantineCollection`), a transient 5xx, or a failed `--all` collection listing. In `--all`, collections already censused before the failure are still printed (or, under `--json`, still emitted as a parseable document naming the failed collection under a `census_error` key). Never a traceback. |
+
+With `--json`, human-readable diagnostics (the `--require-zero` violation notice, an engine-error line) always go to stderr, never stdout — stdout carries only the JSON document, parseable regardless of exit code.
 
 **Sam's 2026-09-26 ruling on nexus-wbfpw.5**: this verb no longer gates the production census — that runs as direct SQL (`scripts/sql/manifest_less_census.sql`) against production until the rest of RDR-192 ships. This verb ships anyway, built and tested against a dev jar, for the client release paired with the eventual RDR-192 engine tag.
 

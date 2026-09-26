@@ -36,6 +36,7 @@ from click.testing import CliRunner
 
 from nexus.commands.t3 import (
     _CENSUS_BUCKETS,
+    _EXIT_ENGINE_ERROR,
     _EXIT_NO_ROUTE,
     t3,
 )
@@ -235,6 +236,64 @@ def test_census_require_zero_violation_exits_2(
 
 
 @pytest.mark.integration
+def test_census_json_with_require_zero_violation_stdout_still_parses(
+    runner: CliRunner, t2_service_env,
+) -> None:
+    """Review round 1 CRITICAL finding: with --json, a violated
+    --require-zero used to append a plain-text ``--require-zero
+    violated: ...`` line to the SAME stdout stream as the JSON payload,
+    so a consumer doing ``json.loads(stdout)`` -- the exact machine-gate
+    use case the exit-code contract exists for -- got a JSONDecodeError
+    instead of the payload plus a clean exit code. The violation line now
+    goes to stderr unconditionally; ``result.stdout`` (click 8.2+ keeps
+    stdout/stderr separate, unlike the combined ``result.output``) must
+    stay pure JSON."""
+    tenant = t2_service_env
+    coll = "knowledge__wbfpw5census-reqzero-json__bge-base-en-v15-768__v1"
+    _seed_all_reachable_buckets(tenant, coll)
+
+    result = runner.invoke(
+        t3,
+        ["census-manifest-less", "--collection", coll, "--json", "--require-zero", "no-owner"],
+    )
+    assert result.exit_code == 2, result.output
+
+    payload = _json.loads(result.stdout)
+    row = payload["collections"][0]
+    assert row["totals"]["no-owner"] == 1
+
+    # The violation notice is a human diagnostic, not part of the JSON
+    # document -- it belongs on stderr, never mixed into stdout (the
+    # bucket name "no-owner" legitimately appears IN the JSON payload
+    # itself, so the discriminating check is the "violated" sentence,
+    # not the bucket name).
+    assert "violated" in result.stderr.lower()
+    assert "violated" not in result.stdout.lower()
+
+
+@pytest.mark.integration
+def test_census_quarantine_collection_exits_engine_error_never_traceback(
+    runner: CliRunner, t2_service_env,
+) -> None:
+    """Review round 1 Important-1 finding: an explicitly-named
+    ``quarantine-*`` --collection is not filtered client-side (only
+    --all's catalog-driven listing excludes quarantine collections), so
+    the engine's 400 refusal (VectorHandler.requireNotQuarantineCollection)
+    used to fall through the bare ``raise`` in the 404-only except clause
+    and surface as a raw traceback. It must now print one clear line
+    naming the collection and error, and exit non-zero with a documented
+    code -- never a traceback."""
+    result = runner.invoke(
+        t3, ["census-manifest-less", "--collection", "quarantine-wbfpw5-census-probe"],
+    )
+    assert result.exit_code == _EXIT_ENGINE_ERROR, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        f"a non-404 engine error must never surface as a traceback: {result.exception!r}"
+    )
+    assert "quarantine-wbfpw5-census-probe" in result.output
+
+
+@pytest.mark.integration
 def test_census_all_on_a_tenant_with_no_collections_exits_3(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -273,9 +332,20 @@ class _StubT3Client:
     itself, not a ``T3Database`` facade (see that factory's docstring) --
     ``manifest_less_census``/``list_collections`` live directly on it."""
 
-    def __init__(self, page_response=None, raise_error: VectorServiceError | None = None):
+    def __init__(
+        self,
+        page_response=None,
+        raise_error: VectorServiceError | None = None,
+        list_response: list[dict] | None = None,
+        list_raise_error: VectorServiceError | None = None,
+    ):
         self._page_response = page_response
         self._raise_error = raise_error
+        self._list_response = (
+            list_response if list_response is not None
+            else [{"name": "knowledge__stub__bge-base-en-v15-768__v1"}]
+        )
+        self._list_raise_error = list_raise_error
         self.calls: list[tuple[str, int, int]] = []
 
     def manifest_less_census(self, collection: str, limit: int = 100, offset: int = 0) -> dict:
@@ -284,8 +354,17 @@ class _StubT3Client:
             raise self._raise_error
         return self._page_response
 
-    def list_collections(self):
-        return [{"name": "knowledge__stub__bge-base-en-v15-768__v1"}]
+    def list_collections(self, lifecycle_state=None, *, strict: bool = False) -> list[dict]:
+        # Mirrors HttpVectorClient.list_collections's real contract
+        # (nexus-wbfpw.5 review round 1, Significant-2): strict=False
+        # swallows a listing failure to [], strict=True re-raises it --
+        # the census verb's --all path always passes strict=True so exit
+        # 3 can mean "genuinely zero collections", never "listing failed".
+        if self._list_raise_error is not None:
+            if strict:
+                raise self._list_raise_error
+            return []
+        return self._list_response
 
 
 def test_census_unclassified_bucket_exits_1(monkeypatch, runner: CliRunner) -> None:
@@ -322,46 +401,60 @@ def test_census_no_route_engine_exits_distinct_code_never_a_traceback(
         f"a pre-route engine must never surface as a traceback: {result.exception!r}"
     )
     assert "nexus-wbfpw.4" in result.output or "census route" in result.output.lower()
-    assert "pending" in result.output.lower()
+    # Wording describes the MECHANISM (upgrade the engine past its version
+    # floor), never a dated snapshot of which tag carries the route --
+    # review round 1 Significant-3 finding: engine-service-v0.1.133 makes
+    # a frozen "no tag carries it yet" claim false the day it is cut.
+    assert "upgrade" in result.output.lower() or "required_engine_version" in result.output.lower()
+    assert "2026-09-26" not in result.output
 
 
 def test_census_paging_merges_multiple_pages(monkeypatch, runner: CliRunner) -> None:
     """The client method pages internally (limit clamped, loop while
     returned == limit) — this is pure CLI-side loop logic, tested here
-    without needing 300+ real seeded rows."""
-    chash1, chash2 = "a" * 64, "b" * 64
+    without needing 300+ real seeded rows.
+
+    Page size is patched to 2, with THREE items across a full page 0
+    (returned == limit == 2) and a PARTIAL page 1 (returned == 1 < limit
+    == 2) so the loop boundary is `returned < limit`, not merely
+    `returned > 0` — a `> 0` implementation would treat page 1's nonzero
+    `returned` as "keep going" and request a fourth, undefined page,
+    failing loud with a ``KeyError`` rather than silently passing (review
+    round 1 Suggestion-1). Page 0 and page 1 also carry DELIBERATELY
+    DIFFERENT totals/scope_chunk_total sentinels (2 vs 99) — the real
+    route never does this (they are collection-wide and identical on
+    every page), but a stub that kept them equal could not tell "read
+    totals from page 0 only" apart from "last page's totals win"; the
+    final result must equal page 0's values, never page 1's.
+    """
+    chash1, chash2, chash3 = "a" * 64, "b" * 64, "c" * 64
 
     def _totals(no_owner: int) -> dict:
         return {"superseded": 0, "legacy-unmanifested": 0, "dead-owner": 0,
                  "no-owner": no_owner, "unclassified": 0}
 
     def _paged_response(collection, limit=100, offset=0):
-        # limit is patched to 1 (one chash per page), so two real items
-        # need a full page each, THEN an empty page to signal the end
-        # (returned < limit) -- exactly the real route's own convention.
-        # A FOURTH call (offset=3) would mean the loop never terminated;
-        # there is deliberately no branch for it, so a regression here
-        # fails loud (KeyError) rather than looping forever.
+        # A THIRD call (offset=4) would mean the loop never terminated on
+        # page 1's partial return; there is deliberately no branch for
+        # it, so a regression here fails loud (KeyError) rather than
+        # looping forever.
         pages = {
             0: {
-                "collection": collection, "returned": 1,
+                "collection": collection, "returned": 2,
                 "chashes": {"superseded": [], "legacy-unmanifested": [],
-                            "dead-owner": [], "no-owner": [chash1], "unclassified": []},
-                "owners": {chash1: {"owner_tumbler": None, "owner_path": None}},
-                "totals": _totals(2), "scope_chunk_total": 2,
-            },
-            1: {
-                "collection": collection, "returned": 1,
-                "chashes": {"superseded": [], "legacy-unmanifested": [],
-                            "dead-owner": [], "no-owner": [chash2], "unclassified": []},
-                "owners": {chash2: {"owner_tumbler": None, "owner_path": None}},
+                            "dead-owner": [], "no-owner": [chash1, chash2], "unclassified": []},
+                "owners": {
+                    chash1: {"owner_tumbler": None, "owner_path": None},
+                    chash2: {"owner_tumbler": None, "owner_path": None},
+                },
                 "totals": _totals(2), "scope_chunk_total": 2,
             },
             2: {
-                "collection": collection, "returned": 0,
+                "collection": collection, "returned": 1,
                 "chashes": {"superseded": [], "legacy-unmanifested": [],
-                            "dead-owner": [], "no-owner": [], "unclassified": []},
-                "owners": {}, "totals": _totals(2), "scope_chunk_total": 2,
+                            "dead-owner": [], "no-owner": [chash3], "unclassified": []},
+                "owners": {chash3: {"owner_tumbler": None, "owner_path": None}},
+                "totals": _totals(99), "scope_chunk_total": 99,
             },
         }
         return pages[offset]
@@ -369,12 +462,92 @@ def test_census_paging_merges_multiple_pages(monkeypatch, runner: CliRunner) -> 
     stub_client = _StubT3Client()
     stub_client.manifest_less_census = _paged_response  # type: ignore[method-assign]
     monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
-    # Force a tiny page size so two pages are needed even for two rows —
+    # Force a tiny page size so two pages are needed even for three rows —
     # by patching the module-level page size the CLI passes internally.
-    monkeypatch.setattr("nexus.commands.t3._CENSUS_PAGE_LIMIT", 1)
+    monkeypatch.setattr("nexus.commands.t3._CENSUS_PAGE_LIMIT", 2)
     result = runner.invoke(t3, ["census-manifest-less", "--collection", "c", "--json"])
     assert result.exit_code == 0, result.output
     payload = _json.loads(result.output)
     row = payload["collections"][0]
-    assert sorted(row["chashes"]["no-owner"]) == sorted([chash1, chash2])
-    assert len(row["owners"]) == 2
+    assert sorted(row["chashes"]["no-owner"]) == sorted([chash1, chash2, chash3])
+    assert len(row["owners"]) == 3
+    assert row["totals"]["no-owner"] == 2, "totals must be read from page 0 only"
+    assert row["scope_chunk_total"] == 2, "scope_chunk_total must be read from page 0 only"
+
+
+def test_census_all_stub_success_uses_the_default_list_collections(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """The dead `_StubT3Client.list_collections()` default (review round 1
+    Suggestion-2) is exercised here: a clean --all pass through a single
+    stub-listed collection, otherwise untested through the stub path."""
+    stub_client = _StubT3Client(page_response={
+        "collection": "knowledge__stub__bge-base-en-v15-768__v1", "returned": 0,
+        "chashes": {b: [] for b in _CENSUS_BUCKETS},
+        "owners": {}, "totals": {b: 0 for b in _CENSUS_BUCKETS}, "scope_chunk_total": 0,
+    })
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+    result = runner.invoke(t3, ["census-manifest-less", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "knowledge__stub__bge-base-en-v15-768__v1" in result.output
+    assert stub_client.calls == [
+        ("knowledge__stub__bge-base-en-v15-768__v1", 300, 0),
+    ]
+
+
+def test_census_all_mid_loop_engine_error_reports_completed_and_fails(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """Review round 1 Important-1/Important-2 finding, --all half: a
+    non-404 VectorServiceError mid-loop (the SECOND of three collections)
+    must not discard the first collection's already-computed census --
+    --json still emits a parseable document naming which collection
+    failed, censusing stops there (the third collection is never
+    attempted), and the exit code reports the failure distinctly from a
+    clean run."""
+    empty_totals = {b: 0 for b in _CENSUS_BUCKETS}
+
+    def _census(collection, limit=100, offset=0):
+        if collection == "second":
+            raise VectorServiceError("HTTP 500: boom", code=500)
+        return {
+            "collection": collection, "returned": 0,
+            "chashes": {b: [] for b in _CENSUS_BUCKETS},
+            "owners": {}, "totals": dict(empty_totals), "scope_chunk_total": 0,
+        }
+
+    stub_client = _StubT3Client(
+        list_response=[{"name": "first"}, {"name": "second"}, {"name": "third"}],
+    )
+    stub_client.manifest_less_census = _census  # type: ignore[method-assign]
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+    result = runner.invoke(t3, ["census-manifest-less", "--all", "--json"])
+    assert result.exit_code == _EXIT_ENGINE_ERROR, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    payload = _json.loads(result.stdout)
+    assert [row["collection"] for row in payload["collections"]] == ["first"]
+    assert payload["census_error"]["collection"] == "second"
+    assert "500" in payload["census_error"]["error"] or "boom" in payload["census_error"]["error"]
+    # censusing stopped at the failure -- "third" was never attempted.
+    assert "third" not in result.stdout
+
+
+def test_census_all_listing_failure_is_not_reported_as_exit_3(
+    monkeypatch, runner: CliRunner,
+) -> None:
+    """Review round 1 Significant-2 finding: HttpVectorClient.list_collections
+    swallows a non-404 failure and returns [] by default (a contract many
+    other callers rely on and this bead must not change) -- exit 3 must
+    mean "the listing succeeded and found no collections", never "the
+    listing itself failed". The stub's `strict=True` path re-raises,
+    matching the real client's new `strict` keyword."""
+    stub_client = _StubT3Client(
+        list_raise_error=VectorServiceError("HTTP 503: service unavailable", code=503),
+    )
+    monkeypatch.setattr("nexus.db.make_t3", lambda: stub_client)
+    result = runner.invoke(t3, ["census-manifest-less", "--all"])
+    assert result.exit_code != 3, result.output
+    assert result.exit_code == _EXIT_ENGINE_ERROR, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "503" in result.output or "service unavailable" in result.output.lower()

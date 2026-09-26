@@ -3688,12 +3688,14 @@ class HttpVectorClient:
         empty one. ``limit`` is clamped server-side to 300
         (``VectorHandler.MAX_CENSUS_LIMIT``).
 
-        Raises :class:`VectorServiceError` — ``code=404`` on an engine that
-        predates the route (no engine tag carries it yet as of the
-        2026-09-26 Sam ruling recorded on bead nexus-wbfpw.4/.5; callers
+        Raises :class:`VectorServiceError` — ``code=404`` when the
+        CONNECTED engine predates the route (bead nexus-wbfpw.4; callers
         surface this as a distinct, non-crashing outcome, never a
-        traceback), ``code=400`` on a ``quarantine-*`` collection name (out
-        of the census by construction), a real error otherwise.
+        traceback — the mechanism is the connected engine's own age, not
+        a fixed date: which engine tags carry the route changes over
+        time), ``code=400`` on a ``quarantine-*`` collection name (out of
+        the census by construction, ``VectorHandler
+        .requireNotQuarantineCollection``), a real error otherwise.
         """
         return _post(
             "/v1/vectors/manifest-less-census",
@@ -3711,7 +3713,9 @@ class HttpVectorClient:
     #: (not present as a key) when no catalog row backs that collection.
     _STATS_CATALOG_ATTR_KEYS = ("content_type", "owner_id", "embedding_model", "lifecycle_state")
 
-    def list_collections(self, lifecycle_state: str | None = None) -> list[dict]:
+    def list_collections(
+        self, lifecycle_state: str | None = None, *, strict: bool = False,
+    ) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.
 
         ``lifecycle_state`` (nexus-bc7ps): ``None`` is the full inventory, the
@@ -3746,11 +3750,25 @@ class HttpVectorClient:
         the first row's catalog attributes win (a genuinely registered
         collection has exactly one row, so this only matters for the
         cross-dim residue case, which predates catalog attribution anyway).
+
+        ``strict`` (nexus-wbfpw.5 review round 1, Significant-2): ``False``
+        (default, every caller before this one) swallows a non-404
+        ``VectorServiceError`` with a WARNING log and returns ``[]`` — the
+        shared "listing degrades to empty" contract every existing caller
+        relies on and this keyword must not change. ``True`` re-raises the
+        ``VectorServiceError`` instead, so a caller with its own
+        genuinely-empty exit path (``nx t3 census-manifest-less --all``)
+        can tell a real outage from a clean tenant. The 404
+        deployment-skew fallback below is unaffected by ``strict`` either
+        way — that branch is a known pre-catalog-005 accommodation, not a
+        failure.
         """
         try:
             stats = self.collection_stats(lifecycle_state)
         except VectorServiceError as e:
             if e.code != 404:
+                if strict:
+                    raise
                 _log.warning("http_vector_list_collections_failed", error=str(e))
                 return []
             _log.info("http_vector_stats_unavailable_fallback", error=str(e))
