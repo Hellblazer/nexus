@@ -300,3 +300,15 @@ def test_model_reply_notes_are_redacted(rehearse_fullstack_text: str) -> None:
     )
     out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, check=True).stdout
     assert out == "a [REDACTED] b"
+
+
+def test_every_grant_launcher_call_runs_in_a_subshell(rehearse_fullstack_text: str) -> None:
+    """claude_mcp_grant ends in exec: a bare call replaces the harness's own
+    shell and every check after it silently never runs (grant run 4,
+    2026-09-26, ended right after the workload with rc 0)."""
+    calls = [l for l in rehearse_fullstack_text.splitlines()
+             if "claude_mcp_grant nx-mcp" in l and not l.lstrip().startswith("#")]
+    assert len(calls) >= 2, calls
+    for line in calls:
+        before = line.split("claude_mcp_grant nx-mcp", 1)[0]
+        assert before.rstrip().endswith(("$(", "(")), line

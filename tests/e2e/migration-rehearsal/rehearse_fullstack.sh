@@ -230,9 +230,11 @@ if [ "$GRANT_MODE" = 1 ]; then
   # themselves: a marker line in the reply proves nothing, since the model
   # could write it without calling the tool.
   WL_STREAM="$(mktemp)"; WL_RESULT="$(mktemp)"
-  claude_mcp_grant nx-mcp -- -p "$prompt" --dangerously-skip-permissions \
+  # A subshell, always: claude_mcp_grant ends in exec, so a bare call
+  # replaces THIS script's shell and every check below silently never runs.
+  ( claude_mcp_grant nx-mcp -- -p "$prompt" --dangerously-skip-permissions \
     --output-format stream-json --verbose \
-    --allowedTools "${allowed_tools[@]}" > "$WL_STREAM" 2>&1
+    --allowedTools "${allowed_tools[@]}" ) > "$WL_STREAM" 2>&1
   tool_status="$(python3 "$HOME/lib/stream_tool_calls.py" --result "$WL_RESULT" \
     mcp__nexus__operator_summarize mcp__nexus__nx_enrich_beads < "$WL_STREAM")"
   wlout="$(cat "$WL_RESULT")"
