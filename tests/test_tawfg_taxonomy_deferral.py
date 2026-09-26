@@ -37,7 +37,9 @@ _NOW = 1_800_000_000.0
 
 
 @pytest.fixture(autouse=True)
-def _clear_deferral():
+def _clear_deferral(monkeypatch):
+    # conftest zeroes the uptime threshold suite-wide; these tests exercise it.
+    monkeypatch.delenv("NX_TAXONOMY_DEFER_UPTIME_S", raising=False)
     mcp_infra.set_taxonomy_deferral("")
     yield
     mcp_infra.set_taxonomy_deferral("")

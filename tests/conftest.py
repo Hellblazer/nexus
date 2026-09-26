@@ -1921,6 +1921,19 @@ def _check_mandatory_pin_non_vacuity(session) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_engine_restart_taxonomy_deferral(monkeypatch):
+    """nexus-tawfg: ``nx index repo`` defers taxonomy work while the engine's
+    /version reports ``process_uptime_seconds`` under a threshold. The
+    per-process substrate engine starts minutes before the tests that index,
+    so without this a test's taxonomy behaviour depends on wall-clock time
+    since boot: green on a warm local box, red on a fresh CI shard (the
+    shared-client fanout test, run 36203715158). A zero threshold means no
+    uptime ever defers. tests/test_tawfg_taxonomy_deferral.py deletes this
+    to exercise the real threshold."""
+    monkeypatch.setenv("NX_TAXONOMY_DEFER_UPTIME_S", "0")
+
+
+@pytest.fixture(autouse=True)
 def _restore_structlog_after_test():
     """Save and restore structlog config around every test so any test
     that calls ``structlog.configure(...)`` (directly or via
