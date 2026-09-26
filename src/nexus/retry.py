@@ -467,10 +467,12 @@ def _vector_with_retry(
     Its cost is dominated by the engine, not by these sleeps: every one of
     the *max_attempts* (default 5) calls can run the full request deadline
     before the 503 returns (540s on upsert-chunks in local mode, the
-    client's ``_UPSERT_CHUNKS_DEADLINE_MS``), plus 4 brake-floored sleeps:
-    about 5 x 540s + 4 x 60s = 2940s, some 49 minutes, for a page that
-    cannot finish inside its deadline even alone. Under 8 widened
-    attempts with 3 inner resends each it was up to 32 such runs.
+    client's ``_UPSERT_CHUNKS_DEADLINE_MS``). The 4 sleeps between them are
+    short: every deadline 503 carries ``Retry-After: 5``, so the brake
+    trips for 5s, and each sleep is max(the local 2/4/8/16s backoff, 5s),
+    about 39s in all. About 5 x 540s + 39s = 2739s, some 46 minutes, for a
+    page that cannot finish inside its deadline even alone. Under 8
+    widened attempts with 3 inner resends each it was up to 32 such runs.
     """
     brake = get_brake()
     delay = 2.0
