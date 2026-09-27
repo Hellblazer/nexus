@@ -297,6 +297,23 @@ VERB_TABLE: dict[str, str] = {
     # finds alive, having previously been alive. A session that never
     # connected stays silent -- that is mcp-connect-wait's own job.
     "mcp-connect-check": "nexus.hooks.mcp_connect_check",
+    # The RDR-205 ledger's two PROJECTORS (bead nexus-egm7p), moved for the
+    # SAME reason as the RDR-184 writers above: an mcp_tool hook's
+    # invocation depends on this session's plugin:conexus:nexus MCP
+    # connection, and the SubagentStart/SubagentStop event it observes
+    # fires whether or not that connection exists. See
+    # nexus.hooks.subagent_start_tuple's own docstring for the full
+    # analysis, including why this calls tuple_ledger_project.project()
+    # directly rather than reusing tuple_projection.run_start/run_stop's
+    # daemon-thread detachment (that trick is for a long-lived nx-mcp
+    # server process; a command-tier verb's process IS the unit of work,
+    # and "async": true in hooks.json is what makes it non-blocking here).
+    #
+    # They keep their tool-tier registrations (nexus.mcp.hooks.HOOK_TOOLS),
+    # useful for diagnosis; only which tier hooks.json WIRES moved. Not
+    # added to DECIDING_HOOKS: neither emits a verdict.
+    "subagent-start-tuple": "nexus.hooks.subagent_start_tuple",
+    "subagent-stop-tuple": "nexus.hooks.subagent_stop_tuple",
 }
 
 #: Verbs whose exit code nx-hook must propagate from ``run()`` instead of

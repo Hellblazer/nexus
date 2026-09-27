@@ -58,7 +58,14 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 #: an MCP-server outage, root-caused from session 81d1d28b's transcript).
 #: Same reading as the paragraph above: a second deliberate migration off
 #: the tier, not the extractor going blind a second time.
-_MIN_MCP_TOOL_ENTRIES = 7
+#:
+#: 7 -> 5 at bead nexus-egm7p: `subagent_start_tuple` and
+#: `subagent_stop_tuple` (the RDR-205 ledger's two PROJECTORS) move for
+#: the SAME reason nexus-5l8i8 moved -- an `mcp_tool` hook's invocation
+#: depends on this session's MCP connection, and the SubagentStart/
+#: SubagentStop event it observes fires whether or not that connection
+#: exists. Third deliberate migration off the tier.
+_MIN_MCP_TOOL_ENTRIES = 5
 #: 3 -> 6 at bead nexus-q02nx.22, which converted the last four shell-form
 #: entries (`nx upgrade --auto ... || echo ...`, `nx self gc ... || true`,
 #: `nx hook session-start`, `nx-session-end-launcher`) to exec form. Three of
@@ -71,7 +78,10 @@ _MIN_MCP_TOOL_ENTRIES = 7
 #: 12 -> 14 at nexus-5l8i8: agent-dispatch-expect and subagent-start-stamp
 #: arrive here through the same shim, for the reason _MIN_MCP_TOOL_ENTRIES'
 #: own comment names.
-_MIN_NX_HOOK_ENTRIES = 14
+#: 14 -> 16 at nexus-egm7p: subagent-start-tuple and subagent-stop-tuple
+#: arrive here through the same shim, for the reason _MIN_MCP_TOOL_ENTRIES'
+#: own comment names.
+_MIN_NX_HOOK_ENTRIES = 16
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:

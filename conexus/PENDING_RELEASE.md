@@ -95,6 +95,41 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   content, so both derivations ship together at the next client release --
   until then the hook's own fallback and the wheel's fallback must keep
   agreeing on the same hardcoded set.
+- nexus-egm7p: `conexus/hooks/hooks.json` rewires the RDR-205 ledger's two
+  projectors (`hook_subagent_start_tuple`, `hook_subagent_stop_tuple`) from
+  `mcp_tool` to the command tier (`"async": true`, the pre-9b1081514 shape,
+  through two new `nx-hook` verbs — `subagent-start-tuple`,
+  `subagent-stop-tuple` — added to `src/nexus/_hook_runtime/entry.py`'s
+  `VERB_TABLE`), for the same MCP-disconnect hazard nexus-5l8i8 fixed for the
+  RDR-184 ledger's writers: an `mcp_tool` hook's invocation depends on this
+  session's own MCP server being connected, and the SubagentStart/
+  SubagentStop event it observes fires regardless. Deferred because the
+  verbs are wheel content (`src/nexus/_hook_runtime/entry.py`,
+  `src/nexus/hooks/subagent_start_tuple.py`,
+  `src/nexus/hooks/subagent_stop_tuple.py`, `src/nexus/mcp/hooks.py` keeps
+  its registrations for diagnosis) — an installed CLI predating this
+  release would exit 2 on a direct `nx-hook` call naming either verb, which
+  is exactly what the shim-routed form in hooks.json avoids. This move also
+  fixes the RDR-205 ledger's `verify` dim transport: the retired `mcp_tool`
+  registration never forwarded `agent_transcript_path`, so every REPORT row
+  reached `_extract_verify_dims("")` and read `verify=absent`; the command
+  tier receives the full SubagentStop payload, which already carries that
+  field. A second, independent bug found verifying this against real
+  transcripts is fixed in `src/nexus/hooks/tuple_ledger_project.py` proper
+  (not a hooks.json/wiring change, so not itself a deferred entry): its
+  `_last_send_message_text` read a SendMessage report under the wrong input
+  field name (`"content"`, a truncated preview the harness also stores,
+  instead of `"message"`, the real one), which independently zeroed out
+  `verify=present` for every SendMessage-shaped report regardless of tier.
+- nexus-egm7p: `conexus/skills/orchestration/SKILL.md` "Waiting for One
+  Agent's Report" section gains a bounded-loop rule: cap the parked
+  `tuple_rd(kind="report")` wait at ~10 rounds (~250s) and fall back to the
+  harness's own task-completion notification rather than looping
+  indefinitely, since the RDR-205 projection this waits on is a
+  best-effort write that can be silently lost (an engine outage at the
+  exact moment the agent's SubagentStop hook fires). Deferred alongside the
+  hooks.json bullet above because it documents behaviour of the same
+  wheel-content projectors.
 
 _The four RDR-215 straddling beads deferred here by nexus-2x3qy
 (nexus-t9klx, nexus-z9cz2, nexus-silj0, nexus-veh77) shipped with the 7.58.0

@@ -116,6 +116,25 @@ SN_SCRIPT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/"
 #: Everything before the script path, in order. See the module docstring.
 SN_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
 
+#: The ONLY two nx-hook verbs permitted to carry hooks.json's own
+#: `"async": true` key (bead nexus-egm7p) -- a narrow, named exception to
+#: the blanket "no manifest async key" rule bead .20 established, not a
+#: reopened door. That rule held while the RDR-205 ledger's two
+#: projections ran on the `mcp_tool` tier, where an in-process daemon
+#: thread (`nexus.hooks.tuple_projection.run_start`/`run_stop`) already
+#: made the tool call return immediately -- no manifest key needed.
+#: nexus-egm7p moved both to the command tier (an `mcp_tool` hook's
+#: invocation depends on this session's own MCP connection, and that
+#: dependency was silently dropping rows during a disconnect -- see
+#: `nexus.hooks.subagent_start_tuple`'s own docstring), where there is no
+#: daemon thread: the verb calls `tuple_ledger_project.project()` directly
+#: and SYNCHRONOUSLY inside the `nx-hook` process itself, so hooks.json's
+#: own `"async": true` (the pre-9b1081514 shape, restored here for exactly
+#: this reason) is what keeps its network POST from lengthening the
+#: SubagentStart/SubagentStop dispatch. Any OTHER entry carrying `"async"`
+#: -- including a shim entry naming a DIFFERENT verb -- is still rejected.
+ASYNC_ALLOWED_SHIM_VERBS = frozenset({"subagent-start-tuple", "subagent-stop-tuple"})
+
 REGISTERED_TOOLS = frozenset(f"hook_{spec.name}" for spec in HOOK_TOOLS)
 
 
@@ -152,12 +171,26 @@ def reject_conexus(event: str, entry: dict) -> str | None:
     implementation proves that implementation, not the guard.
     """
     if "async" in entry:
-        return (
-            "carries an `async` key. Bead .20 resolved the two async tuple "
-            "projections into daemon threads inside the server, so no "
-            "manifest key is needed and an unlinted key is how the shape "
-            "drifts back."
+        args = entry.get("args") or []
+        is_allowed_async_shim = (
+            entry.get("async") is True
+            and entry.get("type") == "command"
+            and entry.get("command") == "python3"
+            and isinstance(args, list)
+            and len(args) == 2
+            and args[0] == NX_HOOK_SHIM
+            and args[1] in ASYNC_ALLOWED_SHIM_VERBS
         )
+        if not is_allowed_async_shim:
+            return (
+                "carries an `async` key it is not allowed. Bead .20 resolved "
+                "most async tuple projections into daemon threads inside the "
+                "server, so no manifest key is needed there and an unlinted "
+                "key is how the shape drifts back. The narrow exception "
+                f"(bead nexus-egm7p) is {sorted(ASYNC_ALLOWED_SHIM_VERBS)} "
+                "run through the nx-hook shim with `async: true` set — "
+                "anything else carrying the key is rejected."
+            )
 
     bad = _forbidden_token(entry)
     if bad is not None:
@@ -308,6 +341,24 @@ def test_every_conexus_entry_has_a_permitted_shape(event: str, entry: dict) -> N
     assert reason is None, f"conexus hooks.json [{event}] {reason}"
 
 
+@pytest.mark.parametrize("verb", sorted(ASYNC_ALLOWED_SHIM_VERBS))
+def test_async_true_is_accepted_for_the_two_tuple_projector_verbs(verb: str) -> None:
+    """Positive proof for the nexus-egm7p exception, synthesised rather
+    than read off the live manifest: this must hold regardless of which
+    event the real file wires the verb on."""
+    entry = {
+        "type": "command",
+        "command": "python3",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", verb],
+        "timeout": 10,
+        "async": True,
+    }
+    assert reject_conexus("SubagentStart", entry) is None, (
+        f"{verb} with async: true was rejected; the nexus-egm7p allowlist "
+        "should accept it"
+    )
+
+
 @pytest.mark.parametrize(
     "event,entry",
     _walk(SN_HOOKS),
@@ -376,6 +427,32 @@ CONEXUS_REJECTS = [
             "async": True,
         },
         id="async-key",
+    ),
+    pytest.param(
+        "SubagentStop",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": [
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+                "subagent-stop",
+            ],
+            "async": True,
+        },
+        id="async-key-on-a-shim-verb-outside-the-nexus-egm7p-allowlist",
+    ),
+    pytest.param(
+        "SubagentStart",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": [
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+                "subagent-start-tuple",
+            ],
+            "async": False,
+        },
+        id="async-key-false-on-an-allowlisted-verb-is-still-rejected",
     ),
     pytest.param(
         "SessionStart",

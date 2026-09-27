@@ -211,9 +211,13 @@ def test_no_wired_hook_outlasts_the_budget_hooks_json_gives_it() -> None:
     dropped a decision at bead nexus-17i1n, and the command tier does not
     depend on this session's MCP server being connected. A deliberate
     migration off the tier, same reading as that bead's own floor move.
+
+    7 -> 5 at bead nexus-egm7p, same reason and same reading: the RDR-205
+    ledger's two projectors (``subagent_start_tuple``, ``subagent_stop_tuple``)
+    move off the ``mcp_tool`` tier for the identical MCP-disconnect hazard.
     """
     wired = _wired_mcp_tool_timeouts()
-    assert len(wired) >= 7, (
+    assert len(wired) >= 5, (
         f"hooks.json yielded {len(wired)} mcp_tool entries; the parse has lost "
         "its grip on the file rather than the entries having gone"
     )
@@ -232,4 +236,4 @@ def test_no_wired_hook_outlasts_the_budget_hooks_json_gives_it() -> None:
             "tears the transport down (nexus-dgvsz). It has to land inside."
         )
         checked += 1
-    assert checked >= 7, f"only {checked} wired hooks compared"
+    assert checked >= 5, f"only {checked} wired hooks compared"

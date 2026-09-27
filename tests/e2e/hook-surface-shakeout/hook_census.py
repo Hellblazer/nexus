@@ -191,10 +191,14 @@ def transcript_trouble(paths: list[pathlib.Path]) -> list[str]:
 #: called as an MCP tool by an ordinary dispatch turn any more, so they
 #: would never appear in ``mcp-stdin.jsonl`` and this probe would report
 #: them PROBE FAILED forever, correctly and uselessly.
+#:
+#: ``hook_subagent_start_tuple`` and ``hook_subagent_stop_tuple`` -- the
+#: RDR-205 ledger's two projectors -- were removed the same way at bead
+#: nexus-egm7p, for the identical MCP-disconnect hazard nexus-5l8i8 fixed
+#: for the RDR-184 writers. What remains: ``hook_subagent_start`` (still
+#: mcp_tool) and the turn's own ``hook_stop_verification``.
 PROBE_HOOKS: tuple[str, ...] = (
     "hook_subagent_start",
-    "hook_subagent_start_tuple",
-    "hook_subagent_stop_tuple",
     "hook_stop_verification",
 )
 

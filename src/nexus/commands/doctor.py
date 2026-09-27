@@ -3287,6 +3287,25 @@ def _run_check_tuple_projection() -> None:
     check cannot tell "transient" from "the whole session was dead"
     without re-deriving the post-publish-dispatch-check's STOP/START
     correlation -- that correlation stays the e2e gate's job (leg (c)).
+
+    **"no SKIPs recorded" means "no failure logged," not "the projector
+    definitely ran" (bead nexus-egm7p).** Before this bead, an
+    ``mcp_tool``-wired ``SubagentStart``/``SubagentStop`` entry whose
+    ``plugin:conexus:nexus`` MCP server was disconnected never reached
+    ``project()`` at all -- a silent drop this check could not see,
+    because nothing ever wrote a line to log. Moving both entries to the
+    command tier (``nx-hook subagent-start-tuple`` / ``subagent-stop-tuple``,
+    via ``nx_hook_shim.py``) closes exactly that hole: the command tier
+    has no MCP-connection dependency, so ``project()`` is reached
+    regardless of this session's own MCP state. What this check still
+    cannot rule out is the SAME class of gap at a different address --
+    an installed ``nx`` CLI that predates these two verbs makes
+    ``nx_hook_shim.py`` skip the call with a stderr notice and exit 0,
+    writing no log line either (see that shim's own module docstring).
+    That gap has always existed for every ``nx-hook``-wired hook and is
+    not specific to tuple projection; it is named here only so "no SKIPs"
+    is read as "nothing went wrong that reached project()," not as
+    "the hook definitely fired."
     """
     from nexus.hooks.tuple_ledger_project import _default_state_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps

@@ -540,6 +540,13 @@ _COMMIT_VALUE_RE = re.compile(r"^commit=([0-9a-fA-F]{7,40})$", re.IGNORECASE)
 #: case-insensitive, same reasoning as ``_COMMIT_VALUE_RE``.
 _T2_REF_VALUE_RE = re.compile(r"^t2=(\S.*)$", re.IGNORECASE)
 
+#: The two tool_use names :func:`_last_send_message_text` treats as a
+#: stopping agent's own report. Both carry the report text in the SAME
+#: input field, ``"message"`` -- see that function's own docstring (bead
+#: nexus-egm7p) for why this used to be a per-tool field lookup and was
+#: wrong for one of the two.
+_SEND_REPORT_TOOLS = frozenset({"SendMessage", "SubagentHandback"})
+
 
 def _content_blocks(entry: dict[str, Any]) -> list[dict[str, Any]]:
     msg = entry.get("message")
@@ -583,8 +590,29 @@ def _final_assistant_text(path: Path) -> str:
 
 def _last_send_message_text(path: Path) -> str:
     """Text of the LAST assistant report tool_use anywhere in the
-    transcript: a SendMessage's ``"content"`` input field or a
-    SubagentHandback's ``"message"`` field (bead nexus-4xo3k)."""
+    transcript: a SendMessage's or a SubagentHandback's own ``"message"``
+    input field (bead nexus-4xo3k).
+
+    **Fixed by bead nexus-egm7p** (found while verifying VERIFY-dims
+    extraction end to end against real transcripts, per the task's own
+    instruction to check the whole pipeline rather than trust the unit
+    tests). The field-name map used to read ``{"SendMessage": "content",
+    "SubagentHandback": "message"}`` -- but the real ``SendMessage`` tool's
+    input field has always been ``"message"``, never ``"content"``; a live
+    ``SendMessage`` tool_use block's own ``input`` carries
+    ``{"to": ..., "summary": ..., "message": ...}``. So on every real
+    transcript containing a SendMessage report (confirmed against several
+    sessions under ``~/.claude/projects/.../subagents/*.jsonl``), this
+    function silently read nothing -- ``tool_input.get("content")`` is
+    always ``None`` on that shape, `isinstance(None, str)` is false, and
+    ``last`` stayed ``""`` -- while :func:`_final_assistant_text` also
+    typically returns a short trailing acknowledgement ("Sent.") rather
+    than the report itself, since the report text lives in the SendMessage
+    call's own argument, not in a later plain-text block. Both dispatch
+    shapes use the SAME field name, so there is no longer anything to look
+    up per tool name -- ``_SEND_REPORT_TOOLS`` below just says which two
+    tool_use names count as a report at all.
+    """
     last = ""
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -600,12 +628,11 @@ def _last_send_message_text(path: Path) -> str:
             for block in _content_blocks(entry):
                 if not (isinstance(block, dict) and block.get("type") == "tool_use"):
                     continue
-                field = {"SendMessage": "content", "SubagentHandback": "message"}.get(block.get("name"))
-                if field is None:
+                if block.get("name") not in _SEND_REPORT_TOOLS:
                     continue
                 tool_input = block.get("input")
-                if isinstance(tool_input, dict) and isinstance(tool_input.get(field), str):
-                    last = tool_input[field]
+                if isinstance(tool_input, dict) and isinstance(tool_input.get("message"), str):
+                    last = tool_input["message"]
     return last
 
 

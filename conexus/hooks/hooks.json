@@ -158,16 +158,14 @@
             "timeout": 10
           },
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_subagent_start_tuple",
-            "input": {
-              "session_id": "${session_id}",
-              "agent_id": "${agent_id}",
-              "agent_type": "${agent_type}",
-              "task": "${task}"
-            },
-            "timeout": 10
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+              "subagent-start-tuple"
+            ],
+            "timeout": 10,
+            "async": true
           }
         ]
       }
@@ -186,15 +184,14 @@
             "timeout": 10
           },
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_subagent_stop_tuple",
-            "input": {
-              "session_id": "${session_id}",
-              "agent_id": "${agent_id}",
-              "agent_type": "${agent_type}"
-            },
-            "timeout": 10
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+              "subagent-stop-tuple"
+            ],
+            "timeout": 10,
+            "async": true
           }
         ]
       }

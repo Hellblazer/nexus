@@ -132,24 +132,27 @@ The remaining 12 of the 64 registered tools are `hook_*` entries
 conexus plugin `hooks.json` entry — `PreToolUse`, `PermissionRequest`,
 `SubagentStart`, `SubagentStop`, `Stop`, `PreCompact` — to a `hook_*` MCP
 tool. Most of the twelve are also what `hooks.json` WIRES that event
-through (an `mcp_tool` call instead of a bash script); five are not.
+through (an `mcp_tool` call instead of a bash script); seven are not.
 `hook_auto_approve`, `hook_subagent_stop`, and
 `hook_pre_close_verification` moved to the command tier at bead
 nexus-17i1n — an `mcp_tool` hook cannot return a permission/stop
 decision, so all three shipped inert as `mcp_tool` entries in conexus
 7.55.0. `hook_agent_dispatch_expect` and `hook_subagent_start_stamp`
-moved at bead nexus-5l8i8, for a different reason: neither returns a
-decision, but an `mcp_tool` hook's very invocation depends on this
-session's own MCP connection, and a disconnect was silently dropping the
-RDR-184 ledger rows they write while the event they observe fired
-regardless. All five stay registered here for diagnosis — hooks.json
-instead runs the equivalent `nx-hook` verb (directly, or through
-`nx_hook_shim.py`) on the command tier. The table's "Fires on" column
-still names the real event either way; there is no reason to call any of
-these twelve by hand, and their own tool descriptions say so ("not meant
-to be invoked directly"). Listed here only so the 64-tool count
-reconciles with the tables above, which cover the 52 tools an agent calls
-directly:
+moved at bead nexus-5l8i8, and `hook_subagent_start_tuple` and
+`hook_subagent_stop_tuple` moved at bead nexus-egm7p, for the same
+reason as each other and a different one than the first three: none of
+these four returns a decision, but an `mcp_tool` hook's very invocation
+depends on this session's own MCP connection, and a disconnect was
+silently dropping the RDR-184/RDR-205 ledger rows they write while the
+event they observe fired regardless. All seven stay registered here for
+diagnosis — hooks.json instead runs the equivalent `nx-hook` verb
+(directly, or through `nx_hook_shim.py`, with `"async": true` for the two
+RDR-205 projectors so dispatch latency is unchanged) on the command tier.
+The table's "Fires on" column still names the real event either way;
+there is no reason to call any of these twelve by hand, and their own
+tool descriptions say so ("not meant to be invoked directly"). Listed
+here only so the 64-tool count reconciles with the tables above, which
+cover the 52 tools an agent calls directly:
 
 | Tool | Fires on |
 |---|---|

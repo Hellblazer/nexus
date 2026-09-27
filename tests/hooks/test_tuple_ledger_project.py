@@ -1117,8 +1117,18 @@ def test_oversized_session_id_subspace_skips_before_any_post(tmp_path: Path, moc
 # Real-shaped transcript fixtures -- the same convention
 # test_subagent_stop_hook.py and test_subagent_stop_writes_scan.py use:
 # genuine Claude Code transcript entry shapes (assistant/message/content
-# blocks; a SendMessage tool_use's "content" input field, not a
+# blocks; a SendMessage tool_use's own "message" input field, not a
 # simplified stand-in string), never a copied literal.
+#
+# nexus-egm7p FIX: this fixture used to put the report text under a
+# "content" input key, matching what _last_send_message_text's own
+# field-name map (wrongly) read. Verifying end to end against real
+# transcripts (~/.claude/projects/.../subagents/*.jsonl) found the real
+# SendMessage tool's input field is "message" -- confirmed against this
+# session's own live tool schema and against multiple real reports --
+# and "content" is a SEPARATE, truncated preview field the harness also
+# stores alongside it (~50 chars, always ending in an ellipsis). Fixed
+# here to the real shape rather than the shape the bug expected.
 
 
 def _assistant_text_entry(text: str) -> dict:
@@ -1128,7 +1138,7 @@ def _assistant_text_entry(text: str) -> dict:
     }
 
 
-def _sendmessage_entry(content_text: str, *, to: str = "main") -> dict:
+def _sendmessage_entry(message_text: str, *, to: str = "main") -> dict:
     return {
         "type": "assistant",
         "message": {
@@ -1138,7 +1148,18 @@ def _sendmessage_entry(content_text: str, *, to: str = "main") -> dict:
                     "type": "tool_use",
                     "id": "sm1",
                     "name": "SendMessage",
-                    "input": {"to": to, "content": content_text},
+                    # "content" here is the harness's own truncated preview
+                    # field (real transcripts carry both) -- kept, and
+                    # deliberately shorter than message_text whenever the
+                    # latter is long, so a regression back to reading
+                    # "content" fails LOUDLY on a truncated/mismatched
+                    # value rather than by coincidentally matching.
+                    "input": {
+                        "to": to,
+                        "summary": "test summary",
+                        "content": message_text[:50] + ("…" if len(message_text) > 50 else ""),
+                        "message": message_text,
+                    },
                 }
             ],
         },
@@ -1242,8 +1263,11 @@ def test_report_kind_extracts_verify_dims_from_sendmessage_content(
     tmp_path: Path, mock_engine,
 ) -> None:
     """The background-teammate shape: the final assistant turn carries no
-    text at all, but an earlier SendMessage tool_use's "content" field is
-    the agent's real report and carries the VERIFY lines."""
+    text at all, but an earlier SendMessage tool_use's "message" field is
+    the agent's real report and carries the VERIFY lines. The fixture
+    also carries a truncated "content" preview field, matching a real
+    transcript, so this fails loudly if extraction regresses to reading
+    that field instead (nexus-egm7p)."""
     engine = mock_engine(status=200)
     config_dir = tmp_path / "config"
     _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
