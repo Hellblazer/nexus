@@ -224,7 +224,10 @@ class JooqRecordReflectionFeatureTest {
     // feature/nexus-swam7-pin-cross-hnsw ahead of this bead) is likewise
     // CREATE OR REPLACE on the pre-existing assign_from_chashes_<dim>
     // functions, contributing zero.
-    private static final int EXPECTED_RECORD_TYPES = 104;
+    // 104 -> 105: nexus-wbfpw.9, vectors-018-chunk-live-owners-function.xml
+    // added nexus.chunk_live_owners, a RETURNS TABLE(doc_id text) function,
+    // one generated Record type (ChunkLiveOwnersRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 105;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
