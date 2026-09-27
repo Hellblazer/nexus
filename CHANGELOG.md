@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx doc render` and `nx doc validate` resolve `nx://catalog/<tumbler>` links** (nexus-sevlu, refs #896). Render appends a Catalog References footnote block with each linked document's title, content type, owner and a link; a merged duplicate resolves to the surviving document; a machine-local `file://` source or an absolute path is never emitted. Validate fails on every line citing a tumbler that no longer resolves, and exits 2 when the catalog is unreachable. The in-place footnote converter #896 also asks for is nexus-sxiay.
+
 ### Fixed
 
 - **A board subscription starts at now and folds a wait's posts into one notification** (nexus-zxthy). A fresh `tuple_subscribe` to a busy topic replayed every retained post as its own notification, 282 in 80 seconds on 2026-09-27, because the engine's per-subscriber stamp had no start position and the waiter asked for one row per wait. The subscription set now records the subscribe time per topic and restores it on `/resume`; the waiter asks for up to 100 rows per wait, drops rows created before the subscribe time (with a 30 second margin for clock skew between the engine and the client), and sends one notification per topic per wait naming the count, the first and last tuple id and the `tuple_rd` call that reads them; after board activity it settles 3 seconds so a cluster lands in one wait. The notification content stays identifiers only; the batch's ids, kinds and senders ride in the notification meta. `tuple_subscriptions` shows each board entry's `since`, and the channel status carries `board_batches` and `board_backlog_dropped`. Posts older than the subscription are read with `tuple_rd`, never pushed; a subscription persisted before this release has no start position and keeps delivering everything. A resumed session keeps its original start position, so a long absence comes back as folded batches of at most 100 posts each, the way a durable consumer replays its own gap.
