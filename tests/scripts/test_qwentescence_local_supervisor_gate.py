@@ -20,7 +20,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -944,6 +946,82 @@ def test_cleanup_orphan_sessions_swallows_runner_exceptions():
     assert gate.cleanup_orphan_sessions(_raising_runner, gate.Options()) == []
 
 
+def test_cleanup_orphan_sessions_reports_clean_failed_loudly_and_excludes_it():
+    """Round-3 critic finding: a socket the sweep could NOT confirm has no
+    server (some OTHER kill-server failure reason) must be reported LOUDLY
+    -- never silently dropped -- and must NEVER appear in the `cleaned`
+    list, since it was deliberately left untouched (it may still be a live
+    server)."""
+    runner = ScriptedRunner(
+        {
+            "orphan-sweep": [
+                _ok(
+                    "ORPHAN_CLEAN_FAILED /tmp/tmux-1000/nx-u0mcx-live "
+                    "error connecting to /tmp/tmux-1000/nx-u0mcx-live (Permission denied)\n"
+                )
+            ]
+        }
+    )
+    logs: list[str] = []
+    cleaned = gate.cleanup_orphan_sessions(runner, gate.Options(), log=logs.append)
+    assert cleaned == []  # never counted as cleaned -- left untouched
+    assert any(
+        "nx-u0mcx-live" in line and "Permission denied" in line and "ORPHAN CLEANUP FAILED" in line
+        for line in logs
+    )
+
+
+# ---------------------------------------------------------------------------
+# _ORPHAN_SWEEP_SCRIPT_TEMPLATE (round-3 critic finding: `rm -f` must be
+# gated on tmux's OWN "no server here" wording, never run on any
+# kill-server failure)
+# ---------------------------------------------------------------------------
+
+
+def _rendered_orphan_sweep_script() -> str:
+    return gate._ORPHAN_SWEEP_SCRIPT_TEMPLATE.format(prefix=gate._TMUX_NAME_PREFIX)
+
+
+def test_orphan_sweep_script_is_valid_bash():
+    script = _rendered_orphan_sweep_script()
+    proc = subprocess.run(
+        ["bash", "-n"], input=script, text=True, capture_output=True
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_orphan_sweep_script_captures_kill_server_stderr():
+    script = _rendered_orphan_sweep_script()
+    # stderr swapped onto stdout for the command substitution, stdout
+    # discarded -- the classic `2>&1 1>/dev/null` idiom.
+    assert "kill-server 2>&1 1>/dev/null" in script
+
+
+def test_orphan_sweep_script_gates_rm_on_safe_no_server_patterns():
+    """The `rm -f` branch must be reached only through the safe-pattern
+    `grep`, never unconditionally on a bare kill-server failure."""
+    script = _rendered_orphan_sweep_script()
+    grep_idx = script.index("no server running on")
+    assert "error connecting to" in script
+    assert "no such file or directory" in script.lower()
+    rm_idx = script.index("rm -f")
+    assert grep_idx < rm_idx
+
+
+def test_orphan_sweep_script_unsafe_failure_reports_reason_and_never_removes():
+    """The `else` branch (an unmatched kill-server failure) must emit
+    `ORPHAN_CLEAN_FAILED <sock> <reason>` and must NOT be reachable through
+    any `rm -f` call -- the socket is left exactly as it was."""
+    script = _rendered_orphan_sweep_script()
+    assert 'echo "ORPHAN_CLEAN_FAILED $sock $_orphan_err"' in script
+    else_idx = script.rindex("else\n")
+    rm_idx = script.index("rm -f")
+    # The bare `else` (the unsafe-failure branch) comes AFTER the `rm -f`
+    # call in the rendered text, i.e. it is a SEPARATE branch from the one
+    # that removes the file, not a fallthrough from it.
+    assert rm_idx < else_idx
+
+
 # ---------------------------------------------------------------------------
 # fetch_current_published_version
 # ---------------------------------------------------------------------------
@@ -1237,3 +1315,91 @@ def test_main_uses_pypi_version_when_omitted(monkeypatch):
     code = gate.main([])
     assert code == 0
     assert captured["version"] == "7.63.0"
+
+
+# ---------------------------------------------------------------------------
+# main()'s own exception handling (round-3 code-review finding): the
+# default invocation (no VERSION argument) previously left a network
+# failure or malformed PyPI response from fetch_current_published_version
+# UNCAUGHT, exiting with Python's bare default 1 -- colliding with
+# VERDICT_LEDGER_MISS's own exit 1 even though nothing was ever checked.
+# A second, separate finding: run_gate itself raising anything other than
+# a checked failure must never surface as a bare traceback either.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        urllib.error.URLError("network unreachable"),
+        OSError("connection refused"),
+        json.JSONDecodeError("bad json", "doc", 0),
+        TimeoutError("timed out"),
+    ],
+)
+def test_main_maps_pypi_fetch_failures_to_prerequisite_absent(monkeypatch, capsys, exc):
+    def _boom():
+        raise exc
+
+    monkeypatch.setattr(gate, "fetch_current_published_version", _boom)
+    code = gate.main([])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert gate.VERDICT_PREREQUISITE_ABSENT in captured.err
+
+
+def test_main_pypi_fetch_failure_never_reaches_run_gate(monkeypatch):
+    def _boom():
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(gate, "fetch_current_published_version", _boom)
+    called = []
+    monkeypatch.setattr(gate, "run_gate", lambda *a, **k: called.append(1) or (0, "ok"))
+    gate.main([])
+    assert called == []
+
+
+def test_main_catch_all_on_unexpected_run_gate_exception(monkeypatch, capsys):
+    """A `run_gate` exception that is NEITHER a checked failure NOR
+    handled anywhere else (a genuine bug) must exit 3 with its OWN named
+    verdict, never a bare traceback exit 1 that could be mistaken for
+    VERDICT_LEDGER_MISS's exit 1."""
+
+    def _boom(*a, **k):
+        raise RuntimeError("simulated bug in run_gate")
+
+    monkeypatch.setattr(gate, "run_gate", _boom)
+    code = gate.main(["7.60.0"])
+    assert code == 3
+    captured = capsys.readouterr()
+    assert gate.VERDICT_UNEXPECTED_ERROR in captured.err
+    assert "RuntimeError" in captured.err
+    assert "simulated bug in run_gate" in captured.err
+
+
+def test_run_gate_finally_runs_and_reraises_on_unexpected_exception():
+    """An exception that is NEITHER `GateFailure` NOR `GateError` (a
+    genuine bug, not a checked failure) must still trigger the `finally`
+    cleanup (hold.stop(), and -- once the box was reached --
+    _cleanup_staged) before propagating; main()'s own catch-all above
+    relies on this ordering."""
+    responses = _full_pass_responses()
+    inner = ScriptedRunner(responses)
+
+    def _boom_on_systemd(argv, **kwargs):
+        if _kind_of(argv, kwargs.get("input")) == "systemd-state":
+            raise RuntimeError("boom - simulated bug")
+        return inner(argv, **kwargs)
+
+    hold = gate.DistroHold(popen_factory=FakePopen)
+    with pytest.raises(RuntimeError, match="boom"):
+        gate.run_gate(
+            gate.Options(),
+            "7.60.0",
+            runner=_boom_on_systemd,
+            hold=hold,
+            sleep_fn=lambda s: None,
+            session_id_factory=_sid_factory(),
+        )
+    assert FakePopen.instances[0].terminated is True
+    assert inner.count("cleanup") == 1

@@ -271,6 +271,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass, replace
@@ -311,6 +312,22 @@ VERDICT_DRIVER_FAILURE = (
 VERDICT_PREREQUISITE_ABSENT = (
     "QWENTESCENCE LOCAL-SUPERVISOR 11d GATE FAILED -- PREREQUISITE ABSENT "
     "(nothing was checkable; this is not evidence either way)"
+)
+#: `main()`'s own last-resort catch-all around `run_gate` (round 3, code-
+#: review finding): an exception that is NEITHER `GateFailure` NOR
+#: `GateError` is a bug in this script itself, not a checked failure --
+#: `run_gate`'s own `finally` (hold.stop(), and `_cleanup_staged` once the
+#: box was reached) still runs before it propagates (Python's `finally`
+#: semantics), so by the time `main()` catches it, cleanup has already
+#: happened. Shares exit code 3 with `VERDICT_DRIVER_FAILURE` deliberately
+#: -- both mean "something in OUR OWN tooling broke, not a real ledger
+#: finding" -- but carries its own distinct verdict TEXT, since "the
+#: interactive session never went idle" would misdescribe an arbitrary
+#: crash.
+VERDICT_UNEXPECTED_ERROR = (
+    "QWENTESCENCE LOCAL-SUPERVISOR 11d GATE FAILED -- UNEXPECTED ERROR "
+    "(a bug in this script itself, not a checked failure; rerun once, "
+    "then investigate the traceback if it recurs)"
 )
 
 # ---------------------------------------------------------------------------
@@ -1063,6 +1080,22 @@ def _stage_interactive_driver(
 # still-running `claude`.
 # ---------------------------------------------------------------------------
 
+#: Round-3 CRITIC finding: the previous version's `rm -f` fallback ran on
+#: ANY `kill-server` failure -- including one against a socket whose
+#: server is genuinely alive but merely refused the connection for some
+#: OTHER reason (permission, a transient error), which would delete that
+#: LIVE server's socket file and make it invisible to every future sweep
+#: (and to a human trying to find it) while the process itself keeps
+#: running, unmanaged, forever. The fix gates the `rm -f` path on tmux's
+#: OWN stderr wording for "there is genuinely no server here": either
+#: "no server running on ..." (the exact message observed live, tmux 3.6,
+#: against the stale-socket-file case this fallback exists for) or
+#: "error connecting to ... (No such file or directory)" (the same "no
+#: server" case, phrased differently when the socket itself vanished
+#: between the existence check and the connection attempt -- a narrow
+#: TOCTOU window, not a live-server case either). Any OTHER failure
+#: reason is reported as `ORPHAN_CLEAN_FAILED <sock> <reason>` and the
+#: socket is left UNTOUCHED.
 _ORPHAN_SWEEP_SCRIPT_TEMPLATE = """
 found=0
 for sockdir in /tmp/tmux-*; do
@@ -1070,20 +1103,27 @@ for sockdir in /tmp/tmux-*; do
     for sock in "$sockdir"/{prefix}*; do
         [ -e "$sock" ] || continue
         found=1
-        if tmux -S "$sock" kill-server 2>/dev/null; then
+        _orphan_err="$(tmux -S "$sock" kill-server 2>&1 1>/dev/null)"
+        _orphan_rc=$?
+        _orphan_err="$(printf '%s' "$_orphan_err" | tr '\\n' ' ')"
+        if [ "$_orphan_rc" = 0 ]; then
             echo "ORPHAN_CLEANED $sock"
-        elif rm -f "$sock" 2>/dev/null; then
+        elif printf '%s' "$_orphan_err" | grep -qiE "no server running on|error connecting to .*\\(no such file or directory\\)"; then
             # Live finding, qwentescence, nexus-u0mcx round 3: tmux 3.6
             # leaves the socket special-file on disk even after a clean
             # `kill-server` terminates the server process -- a later sweep
             # sees `-e "$sock"` still true but `kill-server` itself then
-            # (correctly) reports "no server running" and fails. That is
-            # not a session still running; it is a stale file, and the fix
-            # is to remove the file directly rather than re-report it as a
-            # cleanup failure forever.
-            echo "ORPHAN_STALE_REMOVED $sock"
+            # (correctly) reports one of the two messages matched above.
+            # That is not a session still running; it is a stale file, and
+            # the fix is to remove the file directly rather than
+            # re-reporting it as a cleanup failure forever.
+            if rm -f "$sock" 2>/dev/null; then
+                echo "ORPHAN_STALE_REMOVED $sock"
+            else
+                echo "ORPHAN_CLEAN_FAILED $sock could-not-remove-stale-socket-file"
+            fi
         else
-            echo "ORPHAN_CLEAN_FAILED $sock"
+            echo "ORPHAN_CLEAN_FAILED $sock $_orphan_err"
         fi
     done
 done
@@ -1093,23 +1133,38 @@ fi
 """
 
 
-def cleanup_orphan_sessions(runner: Runner, opts: Options) -> list[str]:
+def cleanup_orphan_sessions(
+    runner: Runner, opts: Options, *, log: Callable[[str], None] = lambda _: None
+) -> list[str]:
     """Finds and kills any remote tmux session/socket THIS GATE could have
     started in a prior run and never cleaned up, keyed strictly by
     `_TMUX_NAME_PREFIX` -- never anything else on the box. Returns the
     socket paths actually cleaned (for the caller to log); best-effort,
-    never raises, since a sweep failure must not mask the real verdict."""
+    never raises, since a sweep failure must not mask the real verdict.
+    A socket the sweep could NOT clean (a reason other than "no server
+    running") is reported LOUDLY through `log` and left OUT of the
+    returned list -- it was deliberately left untouched, not silently
+    dropped."""
     try:
         script = _ORPHAN_SWEEP_SCRIPT_TEMPLATE.format(prefix=_TMUX_NAME_PREFIX)
         result = run_remote_script(runner, opts, script, timeout=20.0)
     except Exception:
         return []
-    cleaned = []
+    cleaned: list[str] = []
     for line in result.stdout.splitlines():
+        matched = False
         for prefix in ("ORPHAN_CLEANED ", "ORPHAN_STALE_REMOVED "):
             if line.startswith(prefix):
                 cleaned.append(line[len(prefix) :])
+                matched = True
                 break
+        if matched:
+            continue
+        if line.startswith("ORPHAN_CLEAN_FAILED "):
+            log(
+                "ORPHAN CLEANUP FAILED (left untouched -- may still be a live "
+                f"server): {line[len('ORPHAN_CLEAN_FAILED '):]}"
+            )
     return cleaned
 
 
@@ -1121,7 +1176,7 @@ def dispatch_via_interactive_session(
     log: Callable[[str], None] = lambda _: None,
 ) -> CommandResult:
     _validate_token("session_id", session_id, _SESSION_ID_RE)
-    cleaned = cleanup_orphan_sessions(runner, opts)
+    cleaned = cleanup_orphan_sessions(runner, opts, log=log)
     if cleaned:
         log(f"orphan cleanup (start): killed {len(cleaned)} stray tmux socket(s): {cleaned}")
     harness_dir = _stage_harness_files(runner, opts)
@@ -1220,7 +1275,7 @@ def _cleanup_staged(
     Never raises -- a cleanup failure must not mask the real verdict, and
     a staged artifact left behind after a genuine cleanup failure is
     harmless (each is overwritten wholesale on the next run)."""
-    cleaned = cleanup_orphan_sessions(runner, opts)
+    cleaned = cleanup_orphan_sessions(runner, opts, log=log)
     if cleaned:
         log(f"orphan cleanup (finally): killed {len(cleaned)} stray tmux socket(s): {cleaned}")
     try:
@@ -1430,11 +1485,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     if version is None:
         try:
             version = fetch_current_published_version()
-        except GateError as exc:
-            print(f"PREREQUISITE ABSENT: {exc}", file=sys.stderr)
+        except (GateError, urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            # Round-3 code-review finding: this is the DEFAULT invocation
+            # (no VERSION argument), and `fetch_current_published_version`
+            # only ever raises `GateError` itself -- a real network failure
+            # (URLError, a timeout, any other OSError) or a malformed PyPI
+            # response (JSONDecodeError) was previously UNCAUGHT here,
+            # exiting with Python's bare default 1, which collides with
+            # `VERDICT_LEDGER_MISS`'s own exit 1 (a real finding) even
+            # though nothing was actually checked.
+            print(
+                f"PREREQUISITE ABSENT: could not determine the currently "
+                f"published conexus version from PyPI ({exc.__class__.__name__}): {exc}",
+                file=sys.stderr,
+            )
             print(VERDICT_PREREQUISITE_ABSENT, file=sys.stderr)
             return 2
-    exit_code, report = run_gate(opts, version)
+    try:
+        exit_code, report = run_gate(opts, version)
+    except Exception as exc:  # noqa: BLE001 -- last-resort catch-all, see VERDICT_UNEXPECTED_ERROR
+        # Round-3 code-review finding: `run_gate` only ever raises for a
+        # genuine programming error (its own docstring's promise); this
+        # never masks that bug -- `run_gate`'s own `finally` (hold.stop(),
+        # and _cleanup_staged once the box was reached) has ALREADY run by
+        # the time this executes, since Python's `finally` runs before an
+        # exception propagates out of the function that raised it.
+        print(f"UNEXPECTED ERROR: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        print(VERDICT_UNEXPECTED_ERROR, file=sys.stderr)
+        return 3
     print(report)
     return exit_code
 
