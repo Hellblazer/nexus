@@ -6,7 +6,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -35,68 +34,84 @@ import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * RDR-192 Step 4 (bead nexus-wbfpw.9): the EXPLAIN + recall + latency evidence
- * the bead's acceptance criteria requires for {@code nexus.chunk_is_live}, on a
- * moderate-scale (default 500-chunk, one-collection) fixture in the same style
- * as {@code HybridSearchFunctionParityIntegrationTest}'s own corpus (a sibling
- * fixture, per the bead's own instruction, rather than reusing that class's
- * private setup methods directly).
+ * the bead's acceptance criteria requires for {@code nexus.chunk_live_owners},
+ * on a moderate-scale (default 500-chunk, one-collection) fixture in the same
+ * style as {@code HybridSearchFunctionParityIntegrationTest}'s own corpus (a
+ * sibling fixture, per the bead's own instruction, rather than reusing that
+ * class's private setup methods directly).
+ *
+ * <p><b>Round 2 (code-review-expert Critical, T2 nexus/review-wbfpw9-code):
+ * the round-1 function, {@code nexus.chunk_is_live(...) RETURNS boolean}, is
+ * a SCALAR function whose body is {@code SELECT EXISTS(SELECT 1 FROM ... JOIN
+ * ...)}. PostgreSQL's scalar-function inliner ({@code inline_function})
+ * requires an EMPTY range table and no SubLink in the function's own body; an
+ * EXISTS(...) subquery in the target list is exactly a SubLink, so that shape
+ * can never be inlined, no matter how LANGUAGE sql/STABLE/SECURITY
+ * INVOKER/no-SET are set. The round-1 EXPLAIN evidence proved this directly:
+ * the literal function name appeared in the plan's Filter clause, an opaque
+ * per-row call, which is what actually caused the measured ~9x latency
+ * regression -- see T2 nexus/review-wbfpw9-code for the full plan text and
+ * derivation. Round 2 replaces the function with {@code
+ * nexus.chunk_live_owners(...) RETURNS TABLE(doc_id text)} -- a SET-RETURNING
+ * function, which PostgreSQL's OTHER inliner ({@code
+ * inline_set_returning_function}) DOES tolerate a join/subquery body for,
+ * exactly like {@code plain_search_384}'s own inlined anti-join. Callers write
+ * {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(...))}; the tests below
+ * verify (not assume) that this shape genuinely inlines, by asserting the
+ * function's OWN NAME is ABSENT from the EXPLAIN plan (proof the FuncExpr was
+ * substituted away) and that {@code catalog_document_chunks} is read directly
+ * (proof of a real semi-join, not an opaque call).</b>
  *
  * <p><b>Fixture design.</b> {@link #LIVE_COUNT} live chunks (own-collection
  * manifest row, live document) plus one manifest-less "noise" chunk PER QUERY
  * (no manifest row anywhere -- R1's shape), each noise chunk's text set to the
  * EXACT query string it targets so its embedding is (near-)identical to the
  * query vector and it wins rank 1 in a plain nearest-neighbor search --
- * exactly the class of chunk {@code nexus.chunk_is_live} exists to exclude.
+ * exactly the class of chunk {@code nexus.chunk_live_owners} exists to
+ * exclude.
  *
  * <p><b>Recall methodology (avoids needing an independent raw-SQL oracle
- * query, so this file's raw-SQL footprint stays at 2 call sites, the
- * chunk_is_live-filtered KNN and its EXPLAIN twin):</b> {@code
+ * query, so this file's raw-SQL footprint stays small):</b> {@code
  * nexus.plain_search_384} (today's shipped predicate) at {@code LIMIT
- * K+1=11} on the FULL corpus (live + noise) gives the noise chunk plus the
- * true top-10 live chunks in one call -- the noise chunk is guaranteed
- * present (plain_search's own anti-join has no manifest-less guard, Gap 1
- * item 1) and guaranteed closest (exact text match), so removing it from the
- * 11 leaves exactly the live-only oracle top-10. {@code plain_search_384} at
- * {@code LIMIT K=10} (today's actual production shape) is "before"; the raw
- * {@code nexus.chunk_is_live}-filtered KNN at {@code LIMIT K=10} is "after".
- * Recall@10 is measured against that oracle for both.
+ * K+noise_count} on the FULL corpus (live + noise) gives every noise chunk
+ * plus the true top-K live chunks in one call -- every noise chunk is
+ * guaranteed present (plain_search's own anti-join has no manifest-less
+ * guard, Gap 1 item 1) and guaranteed close (exact text match), so removing
+ * ALL known noise chashes from that superset leaves exactly the live-only
+ * oracle top-K. {@code plain_search_384} at {@code LIMIT K=10} (today's
+ * actual production shape) is "before"; the raw {@code EXISTS(SELECT 1 FROM
+ * nexus.chunk_live_owners(...))}-filtered KNN at {@code LIMIT K=10} is
+ * "after". Recall@10 is measured against that oracle for both.
+ *
+ * <p><b>What this file does NOT cover (see the sibling
+ * ChunkLiveOwnersMsz9iScaleIntegrationTest):</b> this fixture is small (510
+ * chunks) and has no tombstoned documents, so it cannot exercise cost that
+ * scales with manifest size or tombstone fraction -- exactly the axis
+ * nexus-msz9i's own investigation needed a dedicated 76k-chunk/57k-manifest-
+ * row/1k-document fixture with a tombstone-fraction sweep (3/10/30/60%) to
+ * characterize. That fixture, the controlled (same-harness, same-binding)
+ * before/after latency comparison, and the filtered-HNSW recall-under-
+ * selectivity measurement all live in the sibling class.
  */
 @Tag("integration")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class ChunkIsLiveHnswExplainRecallIntegrationTest {
+class ChunkLiveOwnersInlineRecallIntegrationTest {
 
-    private static final String TENANT = "chunkislive-explain";
-    private static final String COLLECTION = "knowledge__chunkislive__minilm-l6-v2-384__v1";
-    private static final int DIM = 384;
+    private static final String TENANT = "chunkliveowners-explain";
+    private static final String COLLECTION = "knowledge__chunkliveowners__minilm-l6-v2-384__v1";
 
     private static final int LIVE_COUNT =
-        Integer.getInteger("nx.chunkislive.explain.size", 500);
+        Integer.getInteger("nx.chunkliveowners.explain.size", 500);
     private static final int QUERY_COUNT =
-        Integer.getInteger("nx.chunkislive.explain.queries", 10);
+        Integer.getInteger("nx.chunkliveowners.explain.queries", 10);
     private static final int K = 10;
     private static final int LATENCY_ROUNDS =
-        Integer.getInteger("nx.chunkislive.explain.rounds", 5);
-
-    /** Separate, larger, random-vector fixture used ONLY by {@link
-     *  #explain_chunkIsLivePredicate_usesHnswIndexScan}. At {@link #LIVE_COUNT}'s modest
-     *  scale, PostgreSQL correctly prefers an Index Scan on {@code chunks_pk} (tenant_id +
-     *  collection equality) followed by an in-memory Top-N sort over probing the HNSW
-     *  graph -- sorting a few hundred already-materialized rows is cheaper than an ANN
-     *  traversal, the SAME reason {@code HybridSearchFunctionParityIntegrationTest}'s own
-     *  {@code explain_hybridSearchInlines_selectiveGateExactPlanNoHnsw} (amended 2026-08-18)
-     *  no longer requires HNSW reachability at ITS fixture scale either. Seeded via {@link
-     *  PgVectorRepository#upsertChunksWithVectors} (precomputed random unit vectors, no
-     *  ONNX call) so a realistic row count is affordable in CI. */
-    private static final int SCALE_COUNT =
-        Integer.getInteger("nx.chunkislive.explain.scale", 5_000);
-    private static final String COLLECTION_SCALE =
-        "knowledge__chunkislive-scale__minilm-l6-v2-384__v1";
+        Integer.getInteger("nx.chunkliveowners.explain.rounds", 5);
 
     private static final List<String> WORD_BANK = List.of(
         "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
@@ -139,7 +154,6 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
         pgRepo = new PgVectorRepository(tenantScope, docRouter, queryRouter);
 
         seedCorpus();
-        seedScaleFixture();
     }
 
     @AfterAll
@@ -163,7 +177,7 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
             int len = 8 + rnd.nextInt(5);
             Set<String> words = new LinkedHashSet<>();
             while (words.size() < len) words.add(WORD_BANK.get(rnd.nextInt(WORD_BANK.size())));
-            corpus.put(String.format("cil-doc-%05d", d), String.join(" ", words) + " doc" + d);
+            corpus.put(String.format("clo-doc-%05d", d), String.join(" ", words) + " doc" + d);
         }
         List<String> docTexts = new ArrayList<>(corpus.values());
         for (int q = 0; q < QUERY_COUNT; q++) {
@@ -211,88 +225,13 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
         List<String> noiseTexts = new ArrayList<>();
         List<Map<String, Object>> noiseMetas = new ArrayList<>();
         for (String q : queries) {
-            String chash = Chash.ofText("cil-noise-" + q).toHex();
+            String chash = Chash.ofText("clo-noise-" + q).toHex();
             noiseChashHex.add(chash);
             noiseChashes.add(chash);
             noiseTexts.add(q);
             noiseMetas.add(Map.of());
         }
         pgRepo.upsertChunks(TENANT, COLLECTION, noiseChashes, noiseTexts, noiseMetas);
-    }
-
-    /** {@link #SCALE_COUNT} chunks with precomputed random unit vectors (no ONNX call),
-     *  every one live (own-collection manifest row, live document) -- purely a plan-shape
-     *  fixture, so semantic content of the text/vectors is irrelevant. */
-    private void seedScaleFixture() throws Exception {
-        try (Connection reg = pg.createConnection("")) {
-            reg.setAutoCommit(true);
-            PgContainerHelper.insertCollection(DSL.using(reg, SQLDialect.POSTGRES), TENANT, COLLECTION_SCALE);
-        }
-
-        Random rnd = new Random(20260927002L);
-        List<String> ids = new ArrayList<>(SCALE_COUNT);
-        List<String> texts = new ArrayList<>(SCALE_COUNT);
-        List<float[]> vectors = new ArrayList<>(SCALE_COUNT);
-        List<Map<String, Object>> metas = new ArrayList<>(SCALE_COUNT);
-        List<String> chashes = new ArrayList<>(SCALE_COUNT);
-        for (int i = 0; i < SCALE_COUNT; i++) {
-            String id = "cil-scale-" + i;
-            ids.add(id);
-            texts.add("scale fixture chunk " + i);
-            vectors.add(randomUnitVector(rnd, DIM));
-            metas.add(Map.of());
-            chashes.add(Chash.ofText(id).toHex());
-        }
-
-        int batch = 500;
-        for (int start = 0; start < SCALE_COUNT; start += batch) {
-            int end = Math.min(start + batch, SCALE_COUNT);
-            pgRepo.upsertChunksWithVectors(TENANT, COLLECTION_SCALE,
-                chashes.subList(start, end), texts.subList(start, end),
-                vectors.subList(start, end), metas.subList(start, end));
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(false);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            List<Query> docQueries = new ArrayList<>(SCALE_COUNT);
-            List<Query> chunkQueries = new ArrayList<>(SCALE_COUNT);
-            for (int i = 0; i < SCALE_COUNT; i++) {
-                docQueries.add(ctx.insertInto(CATALOG_DOCUMENTS,
-                        CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
-                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                    .values(TENANT, ids.get(i), "Doc", "prose", COLLECTION_SCALE));
-                chunkQueries.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(TENANT, ids.get(i), 0, HexFormat.of().parseHex(chashes.get(i)), COLLECTION_SCALE));
-            }
-            ctx.batch(docQueries).execute();
-            ctx.batch(chunkQueries).execute();
-            su.commit();
-        }
-
-        // The planner's own row-count estimate for the (tenant_id, collection) equality
-        // on nexus.chunks is stale until ANALYZE runs (default/pre-insert statistics,
-        // NOT this fixture's real cardinality) -- without this, the cost-based choice
-        // between the chunks_pk-then-sort plan and the HNSW plan is uninformed and
-        // never reflects true row count regardless of how large SCALE_COUNT is.
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.analyzeTable(su, CHUNKS);
-        }
-    }
-
-    private static float[] randomUnitVector(Random rnd, int dim) {
-        float[] v = new float[dim];
-        double sumSq = 0;
-        for (int i = 0; i < dim; i++) {
-            v[i] = (float) rnd.nextGaussian();
-            sumSq += v[i] * v[i];
-        }
-        float norm = (float) Math.sqrt(sumSq);
-        for (int i = 0; i < dim; i++) v[i] /= norm;
-        return v;
     }
 
     private float[] embedQuery(String text) {
@@ -309,29 +248,30 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
     }
 
     /** "before": today's shipped predicate, {@code nexus.plain_search_384}, via the
-     *  generated typed table function -- not raw SQL. */
+     *  generated typed table function -- not raw SQL, native Vector binding. */
     private List<String> plainSearch384(float[] vec, int n) {
-        Table<?> fn = PLAIN_SEARCH_384.call(Vector.of(vec),
-            new String[] {COLLECTION}, null, null, n);
+        Table<?> fn = PLAIN_SEARCH_384.call(Vector.of(vec), new String[] {COLLECTION}, null, null, n);
         return tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(fn)
             .fetch(r -> r.get("id", String.class)));
     }
 
     /**
-     * "after": a raw KNN query with {@code nexus.chunk_is_live(tenant, collection,
-     * chash)} in the WHERE clause -- Step 5's not-yet-wired shape, gathered here
-     * purely as evidence (this bead does not migrate any production call site).
-     * SANCTIONED RAW (nexus-wbfpw.9, TEST-TREE RATCHET): no typed-DSL vector KNN
-     * form exists in this codebase's test conventions (every sibling KNN plan-
-     * shape test -- GraphHopParityTest, TaxonomyAssignCrossLateralHnswTest --
-     * uses the identical raw-literal-SQL idiom for the same reason: the {@code
-     * OPERATOR(nexus.<=>)} vector-distance ORDER BY has no jOOQ DSL operator).
+     * "after": a raw KNN query with {@code EXISTS (SELECT 1 FROM
+     * nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))} in the
+     * WHERE clause -- Step 5's not-yet-wired shape, gathered here purely as
+     * evidence (this bead does not migrate any production call site).
+     * SANCTIONED RAW (nexus-wbfpw.9, TEST-TREE RATCHET): no typed-DSL vector
+     * KNN form exists in this codebase's test conventions (every sibling KNN
+     * plan-shape test -- GraphHopParityTest, TaxonomyAssignCrossLateralHnswTest
+     * -- uses the identical raw-literal-SQL idiom for the same reason: the
+     * {@code OPERATOR(nexus.<=>)} vector-distance ORDER BY has no jOOQ DSL
+     * operator).
      */
-    private List<String> chunkIsLiveFilteredKnn(String collection, float[] vec, int n) {
+    private List<String> chunkLiveOwnersFilteredKnn(String collection, float[] vec, int n) {
         Result<Record> rows = tenantScope.withTenant(TENANT, ctx -> ctx.fetch(
             "SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
             + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-            + " AND nexus.chunk_is_live(c.tenant_id, c.collection, c.chash)"
+            + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
             + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
             + " LIMIT ?",
             collection, vectorLiteral(vec), n));
@@ -340,17 +280,15 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
         return ids;
     }
 
-    /** EXPLAIN (ANALYZE, BUFFERS) twin of {@link #chunkIsLiveFilteredKnn} -- same
-     *  statement body, ANALYZE-prefixed, {@code enable_seqscan=off} so index access
-     *  paths are chosen at this fixture's scale (HybridSearchFunctionParityIntegrationTest's
-     *  {@code explain()} precedent). SANCTIONED RAW (nexus-wbfpw.9, TEST-TREE RATCHET). */
-    private String explainChunkIsLiveFilteredKnn(String collection, float[] vec, int n) {
+    /** EXPLAIN (ANALYZE, BUFFERS) twin of {@link #chunkLiveOwnersFilteredKnn} --
+     *  same statement body, ANALYZE-prefixed. SANCTIONED RAW (nexus-wbfpw.9,
+     *  TEST-TREE RATCHET). */
+    private String explainChunkLiveOwnersFilteredKnn(String collection, float[] vec, int n) {
         return tenantScope.withTenant(TENANT, ctx -> {
-            PgSession.setLocal(ctx, "enable_seqscan", "off");
             Result<Record> rows = ctx.fetch(
                 "EXPLAIN (ANALYZE, BUFFERS) SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
                 + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-                + " AND nexus.chunk_is_live(c.tenant_id, c.collection, c.chash)"
+                + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
                 + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
                 + " LIMIT ?",
                 collection, vectorLiteral(vec), n);
@@ -361,12 +299,10 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
     }
 
     /** The live-only oracle top-{@link #K}: {@code plain_search_384} at LIMIT K + the
-     *  full noise population's headroom, minus EVERY known noise chash (not only the
-     *  query's own -- a query's text can be semantically close enough to ANOTHER
-     *  query's noise chunk, drawn from the same shared word bank, to also intrude on
-     *  its top-K window; excluding only "its own" noise chash undercounts recall_after
-     *  by treating a correctly-excluded foreign noise chunk as a missed oracle member),
-     *  truncated back to K. */
+     *  full noise population's headroom, minus EVERY known noise chash (not only a
+     *  single query's own -- a query's text can be semantically close enough to
+     *  ANOTHER query's noise chunk, drawn from the same shared word bank, to also
+     *  intrude on its top-K window), truncated back to K. */
     private List<String> oracleTop10(float[] vec) {
         List<String> candidates = plainSearch384(vec, K + noiseChashHex.size());
         List<String> oracle = new ArrayList<>(candidates);
@@ -393,85 +329,53 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
         assertThat(noiseChashHex).hasSize(QUERY_COUNT);
     }
 
-    // ── EXPLAIN: on the small, realistic-shape fixture, the predicate inlines ────
-    // ── on the large fixture, the HNSW index itself is reached ───────────────
+    // ── EXPLAIN: chunk_live_owners actually inlines as a semi-join ──────────
 
     /**
-     * At {@link #LIVE_COUNT}'s modest, realistic-collection scale (500 chunks),
-     * {@code chunk_is_live} inlines as a plain {@code Filter} on the SAME
-     * {@code chunks_pk} index-scan node PostgreSQL already chooses for the
-     * {@code tenant_id}/{@code collection} equality -- exactly the "not a view
-     * join" structural claim the RDR's Technical Design worries about ("Risk:
-     * live(c) as a view join breaks HNSW binds"): a view join would show as a
-     * SEPARATE join node forcing a materialization boundary between {@code
-     * nexus.chunks} and the predicate; here the predicate rides along on the
-     * base table's own scan. PostgreSQL correctly prefers this Top-N-sort shape
-     * over an HNSW probe at this row count -- sorting ~500 already-selected
-     * rows is cheaper than an ANN traversal, the identical reasoning behind
-     * {@code HybridSearchFunctionParityIntegrationTest}'s own {@code
-     * explain_hybridSearchInlines_selectiveGateExactPlanNoHnsw} (amended
-     * 2026-08-18) no longer requiring HNSW reachability at ITS fixture scale.
+     * Round-2 pin (replaces round-1's non-falsifiable version, T2
+     * nexus/review-wbfpw9-code): a genuinely inlined {@code
+     * EXISTS(SELECT 1 FROM nexus.chunk_live_owners(...))} must NOT show the
+     * function's own name anywhere in the plan -- inlining substitutes the
+     * FuncExpr with the function body's query tree, so the deparser has no
+     * function name left to print. It MUST show {@code
+     * catalog_document_chunks} being read directly (the join the function
+     * body performs), proof of a real semi-join against the base tables, not
+     * an opaque per-row call.
+     *
+     * <p>Verified falsifiable: temporarily marking the function {@code
+     * SECURITY DEFINER} (which PostgreSQL's inliner explicitly refuses to
+     * inline) reproduces round 1's defect exactly -- the function name
+     * reappears in the plan's Filter clause and {@code catalog_document_chunks}
+     * disappears from it. See T2 nexus/wbfpw9-impl for the mutation run.
      */
     @Test
-    void explain_chunkIsLivePredicate_inlinesAsAFilter_onTheRealisticFixture() throws Exception {
+    void explain_chunkLiveOwnersPredicate_inlinesAsASemiJoin() throws Exception {
         float[] vec = embedQuery(queries.get(0));
-        String plan = explainChunkIsLiveFilteredKnn(COLLECTION, vec, K);
+        String plan = explainChunkLiveOwnersFilteredKnn(COLLECTION, vec, K);
 
         System.out.println("[nexus-wbfpw.9 EXPLAIN, " + (LIVE_COUNT + QUERY_COUNT)
-            + " chunks] chunk_is_live-filtered KNN plan:\n" + plan);
+            + " chunks] chunk_live_owners-filtered KNN plan:\n" + plan);
 
         assertThat(plan)
-            .as("chunk_is_live must INLINE as a Filter on the base table's own scan node --"
-                + " NOT a separate join/materialization boundary (the view-join risk RDR-192's"
-                + " Technical Design names). Plan was:%n%s", plan)
-            .contains("Filter:")
-            .contains("chunk_is_live")
-            .doesNotContain("Function Scan");
+            .as("a genuinely inlined EXISTS(chunk_live_owners(...)) must not show the"
+                + " function's own name anywhere in the plan -- its presence is direct"
+                + " proof the call stayed opaque (round-1's defect). Plan was:%n%s", plan)
+            .doesNotContain("chunk_live_owners");
+        assertThat(plan)
+            .as("the inlined body must read catalog_document_chunks directly -- proof of"
+                + " a real semi-join against the base manifest table, not an opaque"
+                + " function call. Plan was:%n%s", plan)
+            .contains("catalog_document_chunks");
         assertThat(plan)
             .as("the base table scan must be an index scan, not an unqualified sequential"
                 + " scan of nexus.chunks. Plan was:%n%s", plan)
             .contains("Index Scan");
     }
 
-    /**
-     * At {@link #SCALE_COUNT}'s larger scale (default 5,000 chunks, one
-     * collection), the SAME query -- {@code enable_seqscan=off} still set, per
-     * this suite's established convention -- is expensive enough for
-     * PostgreSQL's own cost model to choose the {@code idx_chunks_embedding_384}
-     * HNSW index directly, satisfying the bead's acceptance criterion literally:
-     * the predicate does not defeat the HNSW index bind at the scale where HNSW
-     * actually matters.
-     */
-    @Test
-    void explain_chunkIsLivePredicate_usesHnswIndexScan_onTheLargeFixture() throws Exception {
-        float[] vec = randomUnitVector(new Random(20260927003L), DIM);
-        String plan = explainChunkIsLiveFilteredKnn(COLLECTION_SCALE, vec, K);
-
-        System.out.println("[nexus-wbfpw.9 EXPLAIN, " + SCALE_COUNT
-            + " chunks] chunk_is_live-filtered KNN plan:\n" + plan);
-
-        assertThat(plan)
-            .as("HNSW index scan must survive the chunk_is_live predicate at a scale where"
-                + " HNSW actually matters (RDR-192 Technical Design 'Risk: live(c) as a view"
-                + " join breaks HNSW binds' -- this is a function, not a view, precisely to"
-                + " avoid that). Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_384");
-        assertThat(plan)
-            .as("no sequential scan of nexus.chunks (enable_seqscan=off forces index access"
-                + " paths). Plan was:%n%s", plan)
-            .doesNotContain("Seq Scan on chunks")
-            .doesNotContain("Seq Scan on nexus.chunks");
-        assertThat(plan)
-            .as("chunk_is_live must INLINE -- no opaque Function Scan node boundary"
-                + " (vectors-009's own precedent: 'no Function Scan, HNSW index survives')."
-                + " Plan was:%n%s", plan)
-            .doesNotContain("Function Scan");
-    }
-
-    // ── recall@10: before (plain_search_384, today's shipped shape) vs after (chunk_is_live) ──
+    // ── recall@10: before (plain_search_384, today's shipped shape) vs after (chunk_live_owners) ──
 
     @Test
-    void recall_chunkIsLiveExcludesManifestLessNoise_plainSearchDoesNot() throws Exception {
+    void recall_chunkLiveOwnersExcludesManifestLessNoise_plainSearchDoesNot() throws Exception {
         List<Double> recallBefore = new ArrayList<>();
         List<Double> recallAfter = new ArrayList<>();
 
@@ -479,7 +383,7 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
             float[] vec = embedQuery(queries.get(q));
             List<String> oracle = oracleTop10(vec);
             List<String> before = plainSearch384(vec, K);
-            List<String> after = chunkIsLiveFilteredKnn(COLLECTION, vec, K);
+            List<String> after = chunkLiveOwnersFilteredKnn(COLLECTION, vec, K);
 
             assertThat(before)
                 .as("query %d: plain_search_384 (today's shipped predicate) has no"
@@ -487,7 +391,7 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
                     + " present", q)
                 .contains(noiseChashHex.get(q));
             assertThat(after)
-                .as("query %d: nexus.chunk_is_live must exclude the manifest-less noise chunk", q)
+                .as("query %d: nexus.chunk_live_owners must exclude the manifest-less noise chunk", q)
                 .doesNotContain(noiseChashHex.get(q));
 
             recallBefore.add(recallAt10(before, oracle));
@@ -497,27 +401,37 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
         double avgBefore = recallBefore.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
         double avgAfter = recallAfter.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
 
-        System.out.println("[nexus-wbfpw.9 RECALL@10] before(plain_search_384)=" + avgBefore
-            + " after(chunk_is_live)=" + avgAfter + " over " + queries.size() + " queries");
+        System.out.println("[nexus-wbfpw.9 RECALL@10, small fixture] before(plain_search_384)=" + avgBefore
+            + " after(chunk_live_owners)=" + avgAfter + " over " + queries.size() + " queries");
 
         assertThat(avgBefore)
             .as("sanity: the noise fixture must actually degrade plain_search_384's recall"
                 + " against the live-only oracle, or this test proves nothing")
             .isLessThan(1.0);
         assertThat(avgAfter)
-            .as("nexus.chunk_is_live must recover full recall@10 against the live-only oracle")
+            .as("nexus.chunk_live_owners must recover full recall@10 against the live-only oracle")
             .isEqualTo(1.0);
     }
 
-    // ── p50 latency: before vs after ─────────────────────────────────────────
+    // ── p50 latency, small fixture: NOT the controlled comparison (see the msz9i sibling) ──
 
+    /**
+     * Reported for completeness on this fixture, but this is NOT the controlled
+     * before/after comparison the bead's acceptance criteria asks for: {@link
+     * #plainSearch384} uses the typed jOOQ table-function call (native {@code
+     * Vector} binding) while {@link #chunkLiveOwnersFilteredKnn} is raw SQL
+     * with a text-literal vector cast -- two different serialization paths, an
+     * uncontrolled confound (T2 nexus/review-wbfpw9-code, Important-1). The
+     * genuinely controlled comparison (same raw-SQL harness, same text-literal
+     * binding, only the predicate differs) is
+     * ChunkLiveOwnersMsz9iScaleIntegrationTest's own latency sweep.
+     */
     @Test
-    void latency_p50_beforeAndAfter_reported() throws Exception {
-        // Warm-up, excluded from measurement.
+    void latency_p50_beforeAndAfter_reported_uncontrolledBindingCaveat() throws Exception {
         for (String q : queries) {
             float[] vec = embedQuery(q);
             plainSearch384(vec, K);
-            chunkIsLiveFilteredKnn(COLLECTION, vec, K);
+            chunkLiveOwnersFilteredKnn(COLLECTION, vec, K);
         }
 
         List<Long> beforeMs = new ArrayList<>();
@@ -531,7 +445,7 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
                 beforeMs.add((System.nanoTime() - t0) / 1_000_000L);
 
                 long t1 = System.nanoTime();
-                chunkIsLiveFilteredKnn(COLLECTION, vec, K);
+                chunkLiveOwnersFilteredKnn(COLLECTION, vec, K);
                 afterMs.add((System.nanoTime() - t1) / 1_000_000L);
             }
         }
@@ -539,13 +453,13 @@ class ChunkIsLiveHnswExplainRecallIntegrationTest {
         long p50Before = p50(beforeMs);
         long p50After = p50(afterMs);
 
-        System.out.println("[nexus-wbfpw.9 LATENCY] samples=" + beforeMs.size()
-            + " plain_search_384.p50=" + p50Before + "ms chunk_is_live_knn.p50=" + p50After + "ms"
+        System.out.println("[nexus-wbfpw.9 LATENCY, small fixture, UNCONTROLLED BINDING] samples="
+            + beforeMs.size() + " plain_search_384(native-binding).p50=" + p50Before
+            + "ms chunk_live_owners(text-literal-binding).p50=" + p50After + "ms"
             + " (fixture: " + (LIVE_COUNT + QUERY_COUNT) + " chunks, one collection)");
 
-        // No hard bound asserted here -- this is evidence for the close note (any recall
-        // drop or latency increase is reported to Sam before S5/nexus-wbfpw.10 merges,
-        // per the bead's acceptance criteria), not a regression gate.
+        // No hard bound asserted here -- evidence for the close note, not a regression
+        // gate. The confound-free number is the msz9i sibling's own sweep.
         assertThat(p50Before).isGreaterThanOrEqualTo(0);
         assertThat(p50After).isGreaterThanOrEqualTo(0);
     }
