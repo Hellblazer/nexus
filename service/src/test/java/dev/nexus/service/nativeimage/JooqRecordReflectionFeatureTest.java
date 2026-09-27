@@ -227,7 +227,11 @@ class JooqRecordReflectionFeatureTest {
     // 104 -> 105: nexus-wbfpw.9, vectors-018-chunk-live-owners-function.xml
     // added nexus.chunk_live_owners, a RETURNS TABLE(doc_id text) function,
     // one generated Record type (ChunkLiveOwnersRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 105;
+    // 105 -> 106: nexus-e8h5x, catalog-042-gc-restore-rereferenced-bounded.xml
+    // added nexus.gc_restore_rereferenced_bounded, a RETURNS TABLE(restored,
+    // remaining) function, one generated Record type
+    // (GcRestoreRereferencedBoundedRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 106;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
