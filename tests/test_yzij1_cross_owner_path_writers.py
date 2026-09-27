@@ -532,7 +532,7 @@ class TestTheMintSitesActuallyCallIt:
         assert announced[0][1]["created"] is True
 
     def test_every_mint_site_is_wired(self) -> None:
-        """The wiring arm. Deleting any of the four call statements reds this.
+        """The wiring arm. Deleting any of the call statements below reds this.
 
         Each entry names the function whose mint must be preceded by a
         conflict CHECK and followed by an ANNOUNCE (nexus-r1tnx: the check
@@ -541,6 +541,27 @@ class TestTheMintSitesActuallyCallIt:
         it can see register()'s own ``created`` signal). Asserting POSITION
         is what makes this more than a grep for the strings somewhere in
         the file.
+
+        Every site shares one call shape (``find_cross_owner_conflict(`` +
+        ``.register(``) EXCEPT ``indexer._catalog_hook``, which carries TWO
+        independent mint call sites in one function body (nexus-1vc0n):
+        the batched ``register_many()`` fast path, fed by the bulk owner-
+        agnostic twin ``find_all_by_file_paths()`` (via the nested
+        ``_page_conflicts`` helper) instead of the per-doc
+        ``find_cross_owner_conflict()`` that per-doc cost would have made
+        an N+1; and the per-file ``.register()`` fallback below it (reached
+        only when ``register_many()`` itself raised), which uses the same
+        shape every other site above uses. A single whole-function
+        first-occurrence scan conflates the two: both sites call
+        ``announce_cross_owner_mint(`` under the SAME literal name, so a
+        plain ``src.find(...)`` for that marker always lands on the
+        batched site's own (earlier) call and reports the fallback's
+        later, but correctly-ordered, call as an inversion. Each entry
+        below instead names its OWN conflict/register marker pair; the
+        register marker's position anchors a bounded search — the nearest
+        conflict check AT OR BEFORE it, the nearest announce AT OR AFTER
+        it — so two call sites sharing one function, and one substring,
+        are checked independently rather than smeared into one another.
         """
         import inspect
 
@@ -548,19 +569,23 @@ class TestTheMintSitesActuallyCallIt:
         from nexus import pipeline_stages as ps
         from nexus.commands import catalog as cat_cmd
 
+        announce_marker = "announce_cross_owner_mint("
+        # (module, function name, this site's conflict-check marker, this
+        # site's register-call marker)
         sites = [
-            (ps, "_catalog_pdf_hook"),
-            (di, "_register_or_lookup_doc_id"),
-            (di, "_catalog_markdown_hook"),
-            (cat_cmd, "_backfill_per_file_from_t3"),
-            # nexus-r1tnx round 2 (code-review sweep): indexer.py's
-            # register_many per-file FALLBACK loop (not the batched fast
-            # path above it, which deliberately skips the conflict check —
-            # see the comment at its call site for why).
-            (indexer_mod, "_catalog_hook"),
+            (ps, "_catalog_pdf_hook", "find_cross_owner_conflict(", ".register("),
+            (di, "_register_or_lookup_doc_id", "find_cross_owner_conflict(", ".register("),
+            (di, "_catalog_markdown_hook", "find_cross_owner_conflict(", ".register("),
+            (cat_cmd, "_backfill_per_file_from_t3", "find_cross_owner_conflict(", ".register("),
+            # nexus-1vc0n: the batched register_many() fast path -- proves
+            # the batched site itself announces, not just its fallback.
+            (indexer_mod, "_catalog_hook", "find_all_by_file_paths(", "register_many("),
+            # the per-file register() fallback below it, on register_many()
+            # failure -- same shape every other site above uses.
+            (indexer_mod, "_catalog_hook", "find_cross_owner_conflict(", ".register("),
         ]
         missing = []
-        for mod, fname in sites:
+        for mod, fname, conflict_marker, register_marker in sites:
             raw = inspect.getsource(getattr(mod, fname))
             # Comments in these functions discuss ``cat.register()`` in prose;
             # a naive search finds the PROSE first and reports a correctly
@@ -568,21 +593,21 @@ class TestTheMintSitesActuallyCallIt:
             src = "\n".join(
                 line.split("#", 1)[0] for line in raw.splitlines()
             )
-            c = src.find("find_cross_owner_conflict(")
-            a = src.find("announce_cross_owner_mint(")
-            r = src.find(".register(")
+            label = f"{mod.__name__}.{fname} [{register_marker!r}]"
+            r = src.find(register_marker)
+            if r == -1:
+                missing.append(f"{label}: no register call ({register_marker!r}) found at all")
+                continue
+            c = src.rfind(conflict_marker, 0, r)
             if c == -1:
-                missing.append(f"{mod.__name__}.{fname}: no conflict check at all")
-            elif r != -1 and c > r:
                 missing.append(
-                    f"{mod.__name__}.{fname}: conflict check comes AFTER the register",
+                    f"{label}: no conflict check ({conflict_marker!r}) before the register",
                 )
+            a = src.find(announce_marker, r)
             if a == -1:
-                missing.append(f"{mod.__name__}.{fname}: no announce at all")
-            elif r != -1 and a < r:
                 missing.append(
-                    f"{mod.__name__}.{fname}: announce comes BEFORE the register "
-                    "(it needs register()'s created signal)",
+                    f"{label}: announce ({announce_marker!r}) missing, or comes BEFORE "
+                    "the register (it needs register()'s created signal)",
                 )
         assert not missing, (
             "every path-keyed mint must check before, and announce after, "

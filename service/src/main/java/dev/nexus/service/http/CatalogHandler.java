@@ -1882,7 +1882,7 @@ public final class CatalogHandler implements HttpHandler {
         if (!"docs".equals(contentType)) {
             HttpUtil.send(exchange, 400,
                 "{\"error\":" + MAPPER.writeValueAsString(
-                    "aspects_enabled only applies to docs__ collections; '" + name
+                    "aspects_enabled only applies to content_type=docs collections; '" + name
                     + "' has content_type '" + contentType + "'") + "}"); return;
         }
         int updated = repo.setCollectionAspectsEnabled(tenant, name, enabled);

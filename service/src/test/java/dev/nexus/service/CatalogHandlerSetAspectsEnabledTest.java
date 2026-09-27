@@ -153,7 +153,7 @@ class CatalogHandlerSetAspectsEnabledTest {
         var resp = post("/v1/catalog/collections/set_aspects_enabled",
             "{\"name\":\"hasp__code\",\"aspects_enabled\":true}");
         assertThat(resp.statusCode()).isEqualTo(400);
-        assertThat(resp.body()).contains("only applies to docs__ collections");
+        assertThat(resp.body()).contains("only applies to content_type=docs collections");
     }
 
     @Test

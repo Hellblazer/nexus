@@ -316,6 +316,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/collections/upsert", "handleCollectionUpsert"),
         collectionExempt("/collections/list", "handleCollectionList", ADMIN_SCALE),
         neither("/collections/get", "handleCollectionGet"),
+        // nexus-l46pu: response is a flat scalar map ({"updated": N}) -- no JSON
+        // array of items (not collectionReturning) -- and the request body
+        // carries a single name + a boolean, no id list (not idListAccepting).
+        // Same shape as /owners/deactivate (nexus-cw262) and /collections/rehome
+        // (nexus-wsx4l) above.
+        neither("/collections/set_aspects_enabled", "handleCollectionSetAspectsEnabled"),
         // RDR-204 Phase 2 (nexus-ft04v.33): one row per profiled content type,
         // bounded by the content-type vocabulary; emits count.
         collectionOk("/embedding_profile", "handleEmbeddingProfile"),
