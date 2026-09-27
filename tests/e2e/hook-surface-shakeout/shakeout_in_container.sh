@@ -219,11 +219,14 @@ fi
 
 # HOOK PROBE MODE (nexus-wauo1.37): one turn, chosen because it is the
 # cheapest single turn that provokes the largest slice of the mcp_tool
-# roster -- dispatching a subagent fires PreToolUse's hook_agent_dispatch_
-# expect, all three SubagentStart entries (hook_subagent_start,
-# hook_subagent_start_stamp, hook_subagent_start_tuple), SubagentStop's
+# roster -- dispatching a subagent fires two of three SubagentStart entries
+# (hook_subagent_start, hook_subagent_start_tuple), SubagentStop's
 # hook_subagent_stop_tuple, and the turn's own Stop fires hook_stop_
-# verification -- six of the nine mcp_tool handlers in one billed turn.
+# verification -- four of the seven mcp_tool handlers in one billed turn.
+# (Bead nexus-5l8i8 moved PreToolUse's hook_agent_dispatch_expect and
+# SubagentStart's hook_subagent_start_stamp off the mcp_tool tier onto the
+# command tier, so this turn no longer provokes either as an MCP call; the
+# nine/six figures this comment used to carry are nine/six no longer.)
 # No warmup turn: the Agent tool is a Claude Code built-in, not a deferred
 # MCP tool, so nothing here needs ToolSearch discovery first. Evidence is
 # read from $RUN/mcp-stdin.jsonl (the tee'd JSON-RPC stream into nx-mcp,

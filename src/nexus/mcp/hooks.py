@@ -284,10 +284,10 @@ class HookToolSpec:
 HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     HookToolSpec(
         name="agent_dispatch_expect",
-        # PreToolUse wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
+        # No timeout_s override (nexus-5l8i8): hooks.json no longer wires
+        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
+        # bound below is what a direct tool call gets, and there is no
+        # wired hooks.json budget left to sit a second under.
         run=_run_agent_dispatch_expect,
         fields=("session_id", "tool_name", "tool_use_id", "tool_input"),
         structured_fields=frozenset({"tool_input"}),
@@ -337,10 +337,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_start_stamp",
-        # SubagentStart wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
+        # No timeout_s override (nexus-5l8i8): hooks.json no longer wires
+        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
+        # bound below is what a direct tool call gets, and there is no
+        # wired hooks.json budget left to sit a second under.
         run=_run_subagent_start_stamp,
         fields=("session_id", "agent_id", "agent_type"),
         field_docs={

@@ -50,7 +50,15 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 #: nexus.mcp.hooks.DECIDING_HOOKS names the three, and
 #: tests/test_deciding_hooks_are_command_tier.py refuses a hooks.json
 #: that puts any of them back.
-_MIN_MCP_TOOL_ENTRIES = 9
+#:
+#: 9 -> 7 at bead nexus-5l8i8, which moved `agent_dispatch_expect` and
+#: `subagent_start_stamp` to the command tier too -- for a different
+#: reason than nexus-17i1n's three (neither returns a verdict; an
+#: `mcp_tool` hook was instead dropping RDR-184 EXPECT/START rows during
+#: an MCP-server outage, root-caused from session 81d1d28b's transcript).
+#: Same reading as the paragraph above: a second deliberate migration off
+#: the tier, not the extractor going blind a second time.
+_MIN_MCP_TOOL_ENTRIES = 7
 #: 3 -> 6 at bead nexus-q02nx.22, which converted the last four shell-form
 #: entries (`nx upgrade --auto ... || echo ...`, `nx self gc ... || true`,
 #: `nx hook session-start`, `nx-session-end-launcher`) to exec form. Three of
@@ -60,7 +68,10 @@ _MIN_MCP_TOOL_ENTRIES = 9
 #: 6 -> 10 at bead nexus-17i1n: the four entries the line above moved off
 #: the tool tier arrive here. 12 at nexus-rcoze: verbs wired through the
 #: nx-hook shim count too (four moved there, two veh77 entries added).
-_MIN_NX_HOOK_ENTRIES = 12
+#: 12 -> 14 at nexus-5l8i8: agent-dispatch-expect and subagent-start-stamp
+#: arrive here through the same shim, for the reason _MIN_MCP_TOOL_ENTRIES'
+#: own comment names.
+_MIN_NX_HOOK_ENTRIES = 14
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:

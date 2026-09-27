@@ -47,6 +47,22 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
+- nexus-5l8i8: `conexus/hooks/hooks.json` rewires the RDR-184 ledger's two
+  writers (`agent_dispatch_expect`, `subagent_start_stamp`) from `mcp_tool`
+  to the command tier, through two new `nx-hook` verbs
+  (`agent-dispatch-expect`, `subagent-start-stamp`) added to
+  `src/nexus/_hook_runtime/entry.py`'s `VERB_TABLE`. An `mcp_tool` hook
+  depends on this session's own MCP server being connected, and root cause
+  (session 81d1d28b's transcript, 2026-09-27) showed an MCP outage
+  dropping EXPECT rows while the matching SubagentStart still wrote a
+  START row after reconnect — read by the retro audit as an undeclared
+  dispatch. Deferred because the verbs are wheel content
+  (`src/nexus/_hook_runtime/entry.py`, `src/nexus/hooks/agent_dispatch_expect.py`,
+  `src/nexus/hooks/subagent_start_stamp.py`, `src/nexus/mcp/hooks.py`), so
+  the hooks.json rewiring ships with the client release that makes the
+  verbs resolve — an installed CLI predating this release would exit 2 on
+  a direct `nx-hook` call naming either verb, which is exactly what the
+  shim-routed form in hooks.json avoids.
 - `conexus/skills/orchestration/SKILL.md` — nexus-xxvv3: new "Resuming a
   Worktree Agent After a /clear" section. A SendMessage-resumed agent runs in
   the primary checkout, so the subagent git guard refuses its commits and its

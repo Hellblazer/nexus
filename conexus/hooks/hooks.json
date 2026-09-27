@@ -149,14 +149,12 @@
             "timeout": 10
           },
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_subagent_start_stamp",
-            "input": {
-              "session_id": "${session_id}",
-              "agent_id": "${agent_id}",
-              "agent_type": "${agent_type}"
-            },
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+              "subagent-start-stamp"
+            ],
             "timeout": 10
           },
           {
@@ -260,15 +258,12 @@
         "matcher": "Agent|Task",
         "hooks": [
           {
-            "type": "mcp_tool",
-            "server": "plugin:conexus:nexus",
-            "tool": "hook_agent_dispatch_expect",
-            "input": {
-              "session_id": "${session_id}",
-              "tool_name": "${tool_name}",
-              "tool_use_id": "${tool_use_id}",
-              "tool_input": "${tool_input}"
-            },
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+              "agent-dispatch-expect"
+            ],
             "timeout": 10
           }
         ]
