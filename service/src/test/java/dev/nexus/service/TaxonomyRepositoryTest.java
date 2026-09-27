@@ -593,6 +593,40 @@ class TaxonomyRepositoryTest {
         assertThat(rowsB.get(0).get("last_discover_at")).isEqualTo("2026-02-02T00:00:00Z");
     }
 
+    /**
+     * code-review-expert significant finding (nexus-l3dg2 review round 1): a
+     * taxonomy_meta row can exist with a NULL last_discover_at — the column is
+     * nullable, and {@link TaxonomyRepository#importTaxonomyMeta} preserves a
+     * source record's null verbatim (fidelity ETL, never synthesizes a
+     * timestamp) — so "has a row" and "has a row with a real stamp" are
+     * different conditions. Before the fix, such a row surfaced as
+     * {@code last_discover_at: null}, breaking the javadoc's own claim
+     * ("mirroring detectHubsData's absent-means-never-discovered convention")
+     * and reopening exactly the false-warning failure mode nexus-l3dg2 exists
+     * to close: an engine-side null read as "the engine has an opinion" when
+     * it does not.
+     */
+    @Test @Order(33)
+    void getLastDiscoverStamps_omitsRowWithNullStamp() {
+        String colNullStamp = "knowledge__l3dg2-null-stamp-" + System.nanoTime();
+        String colRealStamp = "knowledge__l3dg2-real-stamp-" + System.nanoTime();
+        registerReal(TENANT_A, colNullStamp);
+        registerReal(TENANT_A, colRealStamp);
+        // importTaxonomyMeta with a null lastDiscoverAt: a taxonomy_meta row
+        // EXISTS for colNullStamp (doc_count=3), but its stamp is NULL --
+        // the exact shape a fidelity ETL import of a never-discovered source
+        // record produces.
+        repo.importTaxonomyMeta(TENANT_A, colNullStamp, 3, null);
+        repo.recordDiscoverCount(TENANT_A, colRealStamp, 8, "2026-09-22T00:00:00Z");
+
+        List<Map<String, Object>> rows = repo.getLastDiscoverStamps(
+            TENANT_A, List.of(colNullStamp, colRealStamp));
+
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("collection")).isEqualTo(colRealStamp);
+        assertThat(rows.get(0).get("last_discover_at")).isEqualTo("2026-09-22T00:00:00Z");
+    }
+
     // ── Links ──────────────────────────────────────────────────────────────────
 
     @Test @Order(191)

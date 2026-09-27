@@ -8535,7 +8535,8 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
     client-recorded outcome. ``TaxonomyRepository.getLastDiscoverStamps``
     / ``POST /meta/last_discover_batch`` (engine, Sam's decision) now
     give a batched ``taxonomy_meta.last_discover_at`` read for the exact
-    set of FAILED collections in ONE round trip — see
+    set of FAILED collections in ONE round trip per <=300-collection page
+    (the engine's ``MAX_LAST_DISCOVER_BATCH`` cap) — see
     :meth:`nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore.get_last_discover_stamps`.
     A collection whose engine stamp is newer than its recorded failure
     is RECONCILED (dropped from the warning): the engine's own success
@@ -8633,8 +8634,10 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
         return f"{collection} (failed {when}, {err})"
 
     # nexus-l3dg2 (du6d0 residual, item 3): reconcile against the engine's own
-    # taxonomy_meta.last_discover_at, ONE round trip for every failed
-    # collection, before warning. A best-effort T2 write failure right after
+    # taxonomy_meta.last_discover_at, ONE round trip per <=300-collection page
+    # (paged transparently by get_last_discover_stamps at the engine's cap)
+    # for every failed collection, before warning. A best-effort T2 write
+    # failure right after
     # a REAL engine-side discover success (that followed a recorded failure)
     # must not keep this row warning indefinitely — the engine's own success
     # stamp is authoritative over the client-recorded outcome it exists to
@@ -8663,6 +8666,20 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
             # TaxonomyRepository.utcIso and mcp_infra.record_taxonomy_discover_attempt
             # use the identical format, deliberately (avoids the
             # elided-zero-seconds trap nexus-onjvy documents elsewhere).
+            #
+            # Strict ">" is deliberate (review round 1, nexus-l3dg2): an
+            # engine stamp equal to the recorded failure's timestamp, to
+            # the SECOND (this format's own resolution), is NOT proof the
+            # engine's discover ran AFTER the recorded failure -- it is
+            # equally consistent with the engine attempt that FAILED
+            # having itself advanced last_discover_at moments earlier in
+            # the same wall-clock second, or with the two clocks simply
+            # agreeing on a shared second. Treating an exact tie as
+            # "reconciled" would let a same-second failure silently clear
+            # its own warning; keeping it unreconciled is the conservative
+            # (never-silently-clear) reading a health check must default
+            # to. A newer engine stamp with SUB-second resolution would
+            # make this moot, but the wire format has none.
             if engine_at and (not failure_at or engine_at > failure_at):
                 reconciled.add(collection)
     except Exception as exc:  # noqa: BLE001 — best-effort reconcile; must not crash `nx doctor`

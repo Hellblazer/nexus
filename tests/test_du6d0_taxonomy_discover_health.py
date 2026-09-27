@@ -519,11 +519,17 @@ class TestEngineReconcile:
         assert "engine reconcile unavailable" in r.detail
 
     def test_mixed_reconciled_and_still_failed_names_only_the_latter(self, monkeypatch) -> None:
-        bad_recent = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
-        bad_older_stamp = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        """nits fix round (nexus-l3dg2): the two recorded-failure timestamps
+        are genuinely different, and each local's name matches what it is --
+        ``old_failure_then_engine_caught_up`` had its LAST recorded failure
+        BEFORE the engine's stamp (reconciled); ``recent_failure_engine_
+        still_behind`` had its LAST recorded failure AFTER the engine's
+        stamp (still warns)."""
+        old_failure_then_engine_caught_up = self._content(outcome="failure", at="2026-09-15T00:00:00Z")
+        recent_failure_engine_still_behind = self._content(outcome="failure", at="2026-09-22T00:00:00Z")
         store = self._store([
-            {"title": "code__reconciled", "content": bad_recent},
-            {"title": "code__still_bad", "content": bad_older_stamp},
+            {"title": "code__reconciled", "content": old_failure_then_engine_caught_up},
+            {"title": "code__still_bad", "content": recent_failure_engine_still_behind},
         ])
         tax = _FakeTaxonomyStore({
             "code__reconciled": {"last_discover_at": "2026-09-21T00:00:00Z", "last_discover_doc_count": 1},
@@ -534,6 +540,35 @@ class TestEngineReconcile:
         assert "code__still_bad" in r.detail
         assert "code__reconciled" not in r.detail
         assert "1 other collection(s) reconciled" in r.detail
+
+    def test_tie_between_engine_stamp_and_recorded_failure_still_warns(self, monkeypatch) -> None:
+        """health.py review round 1 (nexus-l3dg2): the compare is a STRICT
+        ``>``, deliberately -- an engine stamp equal to the recorded
+        failure's timestamp to the second is not proof the engine's
+        discover ran after the recorded failure, so an exact tie must not
+        silently reconcile."""
+        tie_at = "2026-09-20T00:00:00Z"
+        content = self._content(outcome="failure", at=tie_at)
+        store = self._store([{"title": "code__nexus", "content": content}])
+        tax = _FakeTaxonomyStore({
+            "code__nexus": {"last_discover_at": tie_at, "last_discover_doc_count": 5},
+        })
+        r = self._run(monkeypatch, store, tax)
+        assert r.ok is False and r.warn is True
+        assert "code__nexus" in r.detail
+
+    def test_close_runs_even_when_get_last_discover_stamps_raises(self, monkeypatch) -> None:
+        """nits fix round (nexus-l3dg2): the reconcile step's ``finally``
+        must close the taxonomy store even on the exception path (a
+        transport error mid-call, not just the construction-time failure
+        the default fake already covers)."""
+        content = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([{"title": "code__nexus", "content": content}])
+        tax = _FakeTaxonomyStore(exc=RuntimeError("transport dropped mid-call"))
+        r = self._run(monkeypatch, store, tax)
+        assert r.ok is False and r.warn is True
+        assert "engine reconcile unavailable" in r.detail
+        assert tax.closed is True
 
 
 # ── 4: the "no files changed — skipping discovery" line ─────────────────────

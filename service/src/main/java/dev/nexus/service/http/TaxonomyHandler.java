@@ -65,7 +65,8 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/meta/record         record discover count
  *   GET   /v1/taxonomy/meta/last_count     last discover doc_count for collection=
  *   POST  /v1/taxonomy/meta/last_discover_batch batched discover stamps for a
- *         list of collections, one round trip (nexus-l3dg2)
+ *         list of collections, one round trip per <=300-collection page
+ *         (nexus-l3dg2)
  *   POST  /v1/taxonomy/links/upsert        upsert topic link
  *   POST  /v1/taxonomy/links/pairs         get link pairs for topic_id list
  *   GET   /v1/taxonomy/icf/source_count    count distinct source collections
@@ -792,10 +793,12 @@ public final class TaxonomyHandler implements HttpHandler {
     /**
      * POST /v1/taxonomy/meta/last_discover_batch (nexus-l3dg2, du6d0
      * residual): batched {@code taxonomy_meta} discover-stamp read for a LIST
-     * of collections in ONE round trip — replaces the per-collection N+1
-     * {@code /meta/last_count} would otherwise force on a caller reconciling
-     * several collections at once (the {@code nx doctor}
-     * {@code taxonomy.discover health} row). Body
+     * of collections in ONE round trip per request (up to the
+     * {@value TaxonomyRepository#MAX_LAST_DISCOVER_BATCH}-collection cap
+     * below; a caller with more pages across several requests) — replaces
+     * the per-collection N+1 {@code /meta/last_count} would otherwise force
+     * on a caller reconciling several collections at once (the
+     * {@code nx doctor} {@code taxonomy.discover health} row). Body
      * {@code {"collections": [str, ...]}}, cap
      * {@value TaxonomyRepository#MAX_LAST_DISCOVER_BATCH}. Response 200: a
      * JSON array, one row per collection that HAS a {@code taxonomy_meta}
