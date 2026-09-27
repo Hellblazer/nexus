@@ -8,20 +8,33 @@ Covers:
   _stat_obsidian_uri() — via stat_source: BLOCKED_ROOTS guard, traversal, absent vs error
   _stat_scratch_uri()  — via stat_source: canonical session URI parsing, absent vs error
   _stat_chroma_uri()   — always-fresh content-addressed scheme
-  _stat_https_uri()    — Phase A: always StatOk(None) → fresh (not dangling)
+  _parse_http_date_to_mtime() — pure HTTP-date parser (nexus-oqenh leg 1)
+  _stat_https_uri()    — nexus-oqenh leg 1: real HEAD + Last-Modified via the
+                         injectable http_client seam (Last-Modified, ETag-only,
+                         neither, 404, 5xx, unparseable date, timeout)
 
-All tests use deterministic fixed mtimes or tmp_path; no network calls.
+All tests use deterministic fixed mtimes or tmp_path, or a real local loopback
+HTTP server for the https:// cases (never a mocked httpx); no calls to any
+real external host.
 """
 
+import datetime
+import http.server
 import os
+import threading
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
+from nexus import aspect_readers as ar_mod
 from nexus.aspect_readers import (
     StalenessSignal,
     StatFail,
     StatOk,
+    _parse_http_date_to_mtime,
+    _stat_https_uri,
     staleness_signal,
     stat_source,
 )
@@ -393,27 +406,257 @@ class TestStatChromaUri:
         assert signal == "fresh"
 
 
-# ── https:// tests ────────────────────────────────────────────────────────────
+# ── https:// tests (nexus-oqenh leg 1: real HEAD + Last-Modified) ────────────
+
+
+class TestParseHttpDateToMtime:
+    """Pure-function tests for the RFC 7231 HTTP-date -> POSIX mtime parser."""
+
+    def test_parses_standard_rfc7231_date(self) -> None:
+        result = _parse_http_date_to_mtime("Wed, 21 Oct 2015 07:28:00 GMT")
+        expected = datetime.datetime(2015, 10, 21, 7, 28, 0, tzinfo=datetime.UTC).timestamp()
+        assert result == pytest.approx(expected)
+
+    def test_returns_none_for_unparseable_value(self) -> None:
+        assert _parse_http_date_to_mtime("not-a-date") is None
+
+    def test_returns_none_for_empty_string(self) -> None:
+        assert _parse_http_date_to_mtime("") is None
+
+
+class _StatHandler(http.server.BaseHTTPRequestHandler):
+    """Configurable HEAD-only handler for https:// stat tests.
+
+    Class attributes are set per-test before a request is made; ``do_HEAD``
+    replies with them.  Every test below sends a REAL HEAD request across a
+    real loopback socket to this handler — httpx itself is never mocked.
+    """
+
+    response_status: int = 200
+    response_headers: dict[str, str] = {}
+    delay: float = 0.0
+
+    def do_HEAD(self) -> None:  # noqa: N802 — stdlib handler method name
+        if self.delay:
+            import time as _time  # noqa: PLC0415 — test-local, avoids a module-level time import collision
+            _time.sleep(self.delay)
+        self.send_response(self.response_status)
+        for key, value in self.response_headers.items():
+            self.send_header(key, value)
+        self.end_headers()
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+class _StatHTTPServer(http.server.ThreadingHTTPServer):
+    """Threaded so a slow (timeout-path) request never blocks the accept
+    loop, and daemonized so a lingering slow-handler thread never blocks
+    process/test-session exit."""
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A client that gave up on a slow/aborted request closes its socket
+        # under the still-sleeping handler; the resulting BrokenPipeError
+        # is expected in the timeout test and would otherwise print a scary
+        # (but harmless) traceback to stderr on every run.
+        pass
+
+
+@pytest.fixture
+def https_stat_server():
+    """Real local HTTP server for https:// stat tests. Yields
+    ``(base_url, handler_class)``; each test sets the handler's
+    response_status / response_headers / delay before building its own
+    ``httpx.Client(base_url=base_url, ...)`` — the injectable-client seam
+    ``_stat_https_uri`` exposes for tests.
+    """
+    _StatHandler.response_status = 200
+    _StatHandler.response_headers = {}
+    _StatHandler.delay = 0.0
+    srv = _StatHTTPServer(("127.0.0.1", 0), _StatHandler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}", _StatHandler
+    finally:
+        srv.shutdown()
+        thread.join(timeout=5)
 
 
 class TestStatHttpsUri:
-    """https:// stat is Phase A — StatOk(None) → fresh (check deferred to Phase B)."""
+    """nexus-oqenh leg 1: real HEAD request via the injectable http_client
+    seam.  Every case hits the real local server from ``https_stat_server``
+    over loopback — no mocked httpx, no calls to any real external host.
+    """
 
-    def test_https_returns_statok_none_mtime(self) -> None:
-        """Phase A: https:// can't check → StatOk(None) like chroma/scratch.
-        Phase B will replace this with a real HEAD + Last-Modified call.
-        """
-        result = stat_source("https://example.com/paper.pdf")
+    def test_last_modified_returns_real_mtime(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
         assert isinstance(result, StatOk)
-        assert result.current_mtime is None
+        expected = datetime.datetime(2015, 10, 21, 7, 28, 0, tzinfo=datetime.UTC).timestamp()
+        assert result.current_mtime == pytest.approx(expected)
 
-    def test_https_produces_fresh_signal_in_phase_a(self) -> None:
-        """https:// in Phase A returns 'fresh' — NOT 'dangling'.
+    def test_last_modified_drives_staleness_signal(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        mtime = datetime.datetime(2015, 10, 21, 7, 28, 0, tzinfo=datetime.UTC).timestamp()
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
 
-        "Can't check yet" is indeterminate, not "confirmed absent."
-        Returning StatFail here would abort sweeps over https references
-        with the default allow_dangling=False — a false-dangling/abort trap.
-        """
-        result = stat_source("https://example.com/paper.pdf")
-        signal = staleness_signal(1_000_000.0, result)
-        assert signal == "fresh"
+        assert staleness_signal(mtime + 10, result) == "fresh"
+        assert staleness_signal(mtime - 10, result) == "stale"
+
+    def test_etag_only_returns_statfail_naming_no_last_modified(self, https_stat_server) -> None:
+        """ETag with no Last-Modified: nexus records no stored ETag at index
+        time to compare a fresh one against, so this is a named StatFail,
+        not a best-effort ETag comparison (RDR-169 G6 residual decision)."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": '"abc123"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "Last-Modified" in result.detail
+        assert "abc123" in result.detail
+
+    def test_neither_header_returns_statfail(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "no Last-Modified" in result.detail
+
+    def test_unparseable_last_modified_returns_statfail(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "not-a-date"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "could not be parsed" in result.detail
+
+    def test_404_returns_statfail_absent(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 404
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/gone.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "absent"
+        assert "404" in result.detail
+
+    def test_404_produces_dangling_signal_when_allowed(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 404
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/gone.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert staleness_signal(0.0, result, allow_dangling=True) == "dangling"
+
+    def test_404_raises_without_allow_dangling(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 404
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/gone.pdf", http_client=client)
+        finally:
+            client.close()
+
+        with pytest.raises(ValueError, match="dangling reference"):
+            staleness_signal(0.0, result)
+
+    def test_5xx_returns_statfail_error_after_bounded_retry(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 503
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/broken.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "503" in result.detail
+
+    def test_5xx_produces_unknown_signal_never_raises(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 503
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/broken.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert staleness_signal(1_000_000.0, result) == "unknown"
+
+    def test_slow_handler_times_out_and_returns_statfail(self, https_stat_server) -> None:
+        """The handler sleeps far longer than the client's own read timeout,
+        so every bounded-retry attempt times out client-side; this must
+        return promptly (bounded retry, never hang) with an indeterminate
+        StatFail rather than raising."""
+        base_url, handler = https_stat_server
+        handler.delay = 1.0
+        client = httpx.Client(base_url=base_url, timeout=0.1)
+        try:
+            result = _stat_https_uri("/slow.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert staleness_signal(1_000_000.0, result) == "unknown"
+
+
+class TestStatSourceHttpsForwarding:
+    """stat_source threads http_client through to whichever handler is
+    registered for the https:// scheme.  Verified via the internal
+    dispatch registry — no network here; the real HEAD round-trip is
+    covered by TestStatHttpsUri above against a real local server."""
+
+    def test_forwards_http_client_kwarg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _recorder(uri: str, *, http_client: Any = None, **_kw: Any) -> StatOk:
+            captured["uri"] = uri
+            captured["http_client"] = http_client
+            return StatOk(current_mtime=123.0)
+
+        monkeypatch.setitem(ar_mod._STAT_HANDLERS, "https", _recorder)
+        sentinel = object()
+
+        result = stat_source("https://example.com/doc", http_client=sentinel)
+
+        assert result == StatOk(current_mtime=123.0)
+        assert captured["uri"] == "https://example.com/doc"
+        assert captured["http_client"] is sentinel

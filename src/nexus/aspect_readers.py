@@ -29,9 +29,12 @@ verified empirically in research-4, id 1011).
 """
 from __future__ import annotations
 
+import datetime
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -1176,7 +1179,7 @@ def read_source(
 # against the resolver's CURRENT view of the source.  Four outcomes:
 #
 #   fresh    — recorded mtime >= current source mtime (no change since indexing),
-#              OR scheme has no meaningful mtime (chroma, nx-scratch, https Phase A)
+#              OR scheme has no meaningful mtime (chroma, nx-scratch)
 #   stale    — recorded mtime < current source mtime  (source newer than record)
 #   dangling — source is CONFIRMED absent (FileNotFoundError on a known path)
 #   unknown  — check was indeterminate (transient error, deferred scheme, etc.)
@@ -1196,11 +1199,23 @@ def read_source(
 #     nx-scratch://       — scratch.get() existence check (no mtime on scratch)
 #     chroma://           — content-addressed; chash IS identity → staleness N/A
 #                          (always returns StatOk(current_mtime=None))
-#     https://            — HEAD + Last-Modified; DEFERRED, owned by nexus-oqenh
-#                          (returns StatFail so staleness_signal returns 'dangling'
-#                          and callers know to defer the check)
-#   Java-side: deferred, owned by nexus-oqenh.  The UriSchemeHandler interface
-#     has a comment-only seam; no stat/head capability is implemented yet.
+#     https://            — HEAD + Last-Modified, DONE (nexus-oqenh leg 1):
+#                          a real HEAD request reads Last-Modified and parses
+#                          it to a POSIX mtime; a 404 is reason='absent'
+#                          (confirmed gone), a non-404 4xx/5xx or an
+#                          unparseable/missing Last-Modified is reason='error'
+#                          (indeterminate — 'unknown', never 'dangling'), and
+#                          a timeout/connection failure retries a bounded
+#                          number of times before falling into the same
+#                          reason='error' bucket.  No ETag-based comparison:
+#                          nexus records no stored ETag at index time to
+#                          compare a fresh response against, so an ETag-only
+#                          response (no Last-Modified) is reason='error'
+#                          naming that gap explicitly.  See _stat_https_uri.
+#   Java-side: still DEFERRED, owned by nexus-oqenh (leg 2).  The
+#     UriSchemeHandler interface has a comment-only seam; no stat/head
+#     capability is implemented yet, so POST /v1/vectors/resolve cannot
+#     surface a staleness field to callers.
 
 
 @dataclass(frozen=True)
@@ -1234,7 +1249,10 @@ StalenessSignal = Literal["fresh", "stale", "dangling", "unknown"]
 #   "error"        — indeterminate: PermissionError, transient OSError, resolver
 #                    failure, missing context, etc.  staleness_signal returns
 #                    "unknown" and NEVER raises — absence was not confirmed.
-#   "deferred"     — scheme has no stat capability in Phase A (https://).
+#   "deferred"     — scheme has no stat capability yet (no Python-side handler
+#                    currently emits this; https:// used to and no longer does,
+#                    see nexus-oqenh leg 1 — kept as a reserved reason value
+#                    for a future scheme that genuinely has none).
 #                    staleness_signal returns "unknown".
 #   "scheme_unknown" — no handler registered.  staleness_signal returns "unknown".
 #   "unreachable"  — legacy / generic failure; treated as "error" (indeterminate).
@@ -1438,22 +1456,159 @@ def _stat_chroma_uri(uri: str, **_kw: Any) -> StatResult:
     return StatOk(current_mtime=None)
 
 
-def _stat_https_uri(uri: str, **_kw: Any) -> StatResult:
-    """Stat an ``https://`` URI.
+#: Bounded timeout for the https:// stat HEAD request (RDR-169 G6,
+#: nexus-oqenh).  Short because this runs on read-time / sweep paths, not a
+#: user-facing request hot-path — a genuinely slow upstream should fail
+#: fast rather than block a sweep over many references.
+_HTTPS_STAT_TIMEOUT_S: float = 10.0
 
-    A full implementation would issue a HEAD request and parse the
-    ``Last-Modified`` header.  This is DEFERRED, owned by nexus-oqenh (RDR-169 closed 2026-09-16 with this residual disclosed):
-    HEAD + Last-Modified adds a network round-trip to the serving hot-path
-    and requires timeout / retry plumbing that belongs in the Phase B
-    reference-only serving milestone, not Phase A.
+#: Bounded local retry count for a HEAD stat call: 1 initial attempt + 2
+#: retries.  This is deliberately NOT routed through one of
+#: ``nexus.retry``'s wrappers (``_vector_with_retry`` / ``_voyage_with_retry``
+#: / ``_etl_with_retry`` / ``_manifest_write_with_retry``): every one of
+#: those trips the shared process-wide ``RateLimitBrake``
+#: (``nexus.rate_brake``), which paces nexus's OWN external service quotas
+#: (Voyage, the T3 vector service, the catalog manifest write path).  An
+#: ``https://`` reference here is an arbitrary third-party URL (a
+#: Confluence page, an RFC archive, a research page) wholly unrelated to
+#: those quotas; tripping the shared brake for a slow or flaky third-party
+#: site would throttle unrelated Voyage/vector calls process-wide.  This
+#: handler retries locally and boundedly instead, with no shared state.
+_HTTPS_STAT_MAX_ATTEMPTS: int = 3
 
-    In Phase A this returns ``StatOk(current_mtime=None)`` — same semantics
-    as ``chroma://`` and ``nx-scratch://``: "can't check yet → treat as fresh."
-    Phase B replaces this body with a live HEAD call that either returns a
-    real mtime (enabling stale detection) or a confirmed-absent signal.
+#: Delay (seconds) before retry attempts 2 and 3 respectively.
+_HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
+
+
+def _parse_http_date_to_mtime(value: str) -> float | None:
+    """Parse an RFC 7231 HTTP-date (a ``Last-Modified`` header value) into a
+    POSIX float mtime.  Returns ``None`` when *value* cannot be parsed as a
+    date (malformed header).
+
+    ``email.utils.parsedate_to_datetime`` already recognises the standard
+    ``Last-Modified`` shape (e.g. ``"Wed, 21 Oct 2015 07:28:00 GMT"``) and
+    returns a tz-aware datetime for it; the obsolete asctime-without-zone
+    form it also accepts comes back naive, so a missing tzinfo is coerced to
+    UTC (HTTP-dates are always GMT per RFC 7231 §7.1.1.1) before taking the
+    POSIX timestamp.
     """
-    # Phase A: can't check → fresh (not "dangling" — absence not confirmed).
-    return StatOk(current_mtime=None)
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return dt.timestamp()
+
+
+def _stat_https_uri(
+    uri: str,
+    *,
+    http_client: Any = None,
+    **_kw: Any,
+) -> StatResult:
+    """Stat an ``https://`` URI via a HEAD request, reading ``Last-Modified``.
+
+    nexus-oqenh (RDR-169 G6 residual, leg 1 — the client-side https:// stat;
+    the Java engine-side resolver stat is leg 2, still deferred): a real
+    network HEAD request replaces the Phase A ``StatOk(current_mtime=None)``
+    placeholder.
+
+    **Last-Modified only, no ETag comparison.**  ``ETag`` is an opaque
+    validator, not a timestamp: staleness detection by ETag would require
+    comparing the CURRENT ETag against a RECORDED one, and nexus records no
+    ETag at index time (``catalog_documents`` carries ``source_mtime``, a
+    POSIX float, and nothing ETag-shaped) — there is nothing here to compare
+    a fresh ETag against.  So an ``ETag``-only response (no
+    ``Last-Modified``) is a ``StatFail`` naming that gap explicitly, not a
+    best-effort ETag comparison against a value this reader never stored.
+
+    Outcomes:
+
+    * ``StatOk(current_mtime=<mtime>)`` — 2xx/3xx response with a parseable
+      ``Last-Modified`` header.
+    * ``StatFail(reason='absent', ...)`` — HTTP 404: the resource is
+      confirmed gone at this URL, mirroring the ``file://`` handler's
+      ``FileNotFoundError`` → ``'absent'`` semantics.  ``staleness_signal``
+      then raises (default) or returns ``'dangling'`` (``allow_dangling=True``).
+    * ``StatFail(reason='error', ...)`` — every other outcome: a non-404
+      4xx/5xx status, a request timeout or connection failure (after
+      exhausting the bounded retry), a missing ``Last-Modified`` header, or
+      an unparseable one.  Indeterminate, not confirmed-absent —
+      ``staleness_signal`` returns ``'unknown'`` and never raises for this
+      reason.
+
+    ``http_client`` is injected for tests (a real ``httpx.Client`` pointed at
+    a local test server — never mocked); production calls construct a
+    short-timeout ``httpx.Client`` of their own and close it afterward.
+    """
+    own_client = False
+    if http_client is None:
+        import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
+
+        http_client = httpx.Client(timeout=_HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+        own_client = True
+
+    response: Any = None
+    last_detail = ""
+    try:
+        for attempt in range(_HTTPS_STAT_MAX_ATTEMPTS):
+            try:
+                response = http_client.head(uri)
+            except Exception as e:  # noqa: BLE001 — boundary catch; classified below
+                last_detail = f"{type(e).__name__}: {e}"
+                response = None
+            else:
+                if response.status_code < 500:
+                    break
+            if attempt < _HTTPS_STAT_MAX_ATTEMPTS - 1:
+                time.sleep(_HTTPS_STAT_RETRY_DELAYS_S[attempt])
+    finally:
+        if own_client:
+            http_client.close()
+
+    if response is None:
+        return StatFail(
+            reason="error",
+            detail=(
+                f"HEAD {uri!r} failed after {_HTTPS_STAT_MAX_ATTEMPTS} "
+                f"attempt(s): {last_detail}"
+            ),
+        )
+
+    status = response.status_code
+    if status == 404:
+        return StatFail(reason="absent", detail=f"HTTP 404 from {uri!r}")
+    if status >= 400:
+        return StatFail(reason="error", detail=f"HTTP {status} from {uri!r}")
+
+    last_modified = response.headers.get("last-modified")
+    if last_modified:
+        mtime = _parse_http_date_to_mtime(last_modified)
+        if mtime is not None:
+            return StatOk(current_mtime=mtime)
+        return StatFail(
+            reason="error",
+            detail=(
+                f"HTTP {status} from {uri!r}: Last-Modified header "
+                f"{last_modified!r} could not be parsed as an HTTP-date"
+            ),
+        )
+
+    etag = response.headers.get("etag")
+    return StatFail(
+        reason="error",
+        detail=(
+            f"HTTP {status} from {uri!r}: no Last-Modified header"
+            + (
+                f" (ETag {etag!r} present but unusable — nexus records no "
+                "stored ETag at index time to compare a fresh one against; "
+                "only Last-Modified drives https:// staleness, nexus-oqenh)"
+                if etag
+                else " (no Last-Modified or ETag header either)"
+            )
+        ),
+    )
 
 
 # ── Stat registry ─────────────────────────────────────────────────────────────
@@ -1475,6 +1630,7 @@ def stat_source(
     scratch: Any = None,
     tenant: dict[str, Any] | None = None,
     dt_resolver: Callable[[str], tuple[str | None, str]] | None = None,
+    http_client: Any = None,
 ) -> StatResult:
     """Dispatch ``uri`` to its registered stat handler by scheme.
 
@@ -1491,11 +1647,17 @@ def stat_source(
     ``dt_resolver`` is a test-injection hook for the ``x-devonthink-item://``
     handler; production callers leave it ``None``.
 
+    ``http_client`` is a test-injection hook for the ``https://`` handler (a
+    real ``httpx.Client``, e.g. pointed at a local test server); production
+    callers leave it ``None`` and the handler builds and closes its own
+    short-timeout client per call.
+
     RDR-169 G6 split (inherits G3):
     - Python-side handlers: ``file``, ``obsidian``, ``x-devonthink-item``,
       ``nx-scratch``, ``chroma`` (content-addressed → always fresh),
-      ``https`` (deferred Phase A → StatOk(None) → fresh; Phase B adds HEAD).
-    - Java-side stat: deferred, owned by nexus-oqenh.
+      ``https`` (nexus-oqenh leg 1, DONE: real HEAD + Last-Modified stat —
+      see ``_stat_https_uri``).
+    - Java-side stat: still deferred, owned by nexus-oqenh (leg 2).
     """
     if not uri:
         return StatFail(reason="error", detail="empty uri")
@@ -1515,6 +1677,7 @@ def stat_source(
         scratch=scratch,
         vault_root=vault_root,
         dt_resolver=dt_resolver,
+        http_client=http_client,
     )
 
 
@@ -1534,8 +1697,7 @@ def staleness_signal(
     Four outcomes (``StalenessSignal = Literal['fresh', 'stale', 'dangling', 'unknown']``):
 
     * ``'fresh'``    — ``StatOk`` and ``current_mtime is None`` (scheme has no
-                        meaningful mtime, e.g. ``chroma://``, ``nx-scratch://``,
-                        or ``https://`` in Phase A)
+                        meaningful mtime, e.g. ``chroma://``, ``nx-scratch://``)
                         OR ``StatOk`` and ``recorded_mtime >= current_mtime``
                         (source has not changed since the reference was recorded).
     * ``'stale'``    — ``StatOk`` and ``recorded_mtime < current_mtime``
