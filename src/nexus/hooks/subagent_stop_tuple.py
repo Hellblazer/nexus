@@ -48,6 +48,28 @@ the text this hook searched. Fixed in that module directly (see its own
 docstring); this module carries no code for it, but the fix is why THIS
 move actually reaches ``verify=present`` end to end rather than trading one
 missing-field bug for another.
+
+**ACCEPTED RESIDUAL, not reopened by this bead (review round, nexus-egm7p):
+``claude -p`` kills a still-running ``"async": true`` command hook at
+session teardown, no grace** -- see
+:mod:`nexus.hooks.subagent_start_tuple`'s own docstring for the full
+citation (RDR-205, ``docs/rdr/rdr-205-linda-tuple-space-over-postgres.md``
+line 231 and lines 1136-1137) and why this is a restored, already-researched
+shape rather than a newly-introduced one. It matters MORE on this side
+than on the start side: a SubagentStop firing as the last act of a
+short-lived ``claude -p`` invocation is an ordinary shape for this
+project's own automation (CCR, GitHub Actions, owned-mode subprocess
+dispatch -- see this repo's ``AGENTS.md``), not an edge case, so this
+REPORT projection is the one more likely to race the teardown kill. The
+RDR-184 ``.expectations`` TSV ledger -- written synchronously by a
+different hook (``nexus.hooks.subagent_stop``) on the same event -- stays
+the authoritative record of whether an agent reported; this projection is
+a best-effort secondary view for the RDR-205 tuple space, never the thing
+anything correctness-sensitive (including ``scripts/check_agent_verify_claims.py``,
+whose own docstring names this) reads as ground truth for "did the agent
+report at all." Nothing in ``hooks.json`` bounds this entry's own runtime
+with a manifest ``"timeout"`` -- see the sibling module's docstring for
+why the key is absent rather than vestigial.
 """
 from __future__ import annotations
 

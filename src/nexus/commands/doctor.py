@@ -3306,6 +3306,24 @@ def _run_check_tuple_projection() -> None:
     not specific to tuple projection; it is named here only so "no SKIPs"
     is read as "nothing went wrong that reached project()," not as
     "the hook definitely fired."
+
+    **A THIRD gap this check cannot see, accepted rather than closed
+    (review round, nexus-egm7p): a ``claude -p`` teardown kill.** Both
+    command-tier entries are wired ``"async": true``, and Claude Code
+    kills a still-running async command hook at session teardown in
+    non-interactive mode with no grace (its own hooks docs, "Run hooks in
+    the background > Configure an async hook"). A SubagentStart/
+    SubagentStop firing as the last act of a short-lived ``-p`` invocation
+    can have its projection killed mid-POST -- no SKIP line, because
+    ``project()`` never got to write one. This is not new: RDR-205
+    researched and priced in exactly this loss mode for these two
+    projections (``docs/rdr/rdr-205-linda-tuple-space-over-postgres.md``
+    line 231 and lines 1136-1137, "Silent, recorded"), and this bead
+    restores the pre-9b1081514 shape the RDR's own research already
+    covered. The RDR-184 ``.expectations`` TSV ledger stays the
+    authoritative record of whether an agent reported; nothing reads this
+    check, or the RDR-205 tuple space it reports on, as ground truth for
+    that question.
     """
     from nexus.hooks.tuple_ledger_project import _default_state_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps

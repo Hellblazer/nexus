@@ -46,6 +46,34 @@ directly, MCP session or none.
 Keeps the ``hook_subagent_start_tuple`` MCP tool registration in
 ``nexus.mcp.hooks.HOOK_TOOLS`` for diagnosis; only which tier ``hooks.json``
 WIRES moved.
+
+**ACCEPTED RESIDUAL, not reopened by this bead (review round, nexus-egm7p):
+``claude -p`` kills a still-running ``"async": true`` command hook at
+session teardown, no grace.** Claude Code's own hooks docs, "Run hooks in
+the background > Configure an async hook", state this explicitly for
+non-interactive mode. So a SubagentStart that fires as the LAST act of a
+short-lived ``-p`` invocation can have its START projection killed
+mid-flight, same as any other async hook. This is not new to this move:
+RDR-205 already researched and priced in exactly this loss mode for
+these two projections specifically (``docs/rdr/rdr-205-linda-tuple-space-
+over-postgres.md`` line 231, "``async: true`` hooks are never read, never
+timed out, and killed without grace at session end", and lines 1136-1137,
+"Silent, recorded: an async projection hook is killed without trace at
+session end, so the space can be behind the TSV") -- this bead restores
+the SAME shape the RDR's own research covered (the pre-9b1081514 async
+wiring), not a new one. The RDR-184 ``.expectations`` TSV ledger, written
+synchronously by a different hook on a different event, stays the
+authoritative record either way; this projection is a best-effort
+secondary view, never the thing anything correctness-sensitive reads.
+
+``project()``'s own ``_POST_TIMEOUT_S = 5`` bound is the number that
+actually matters here. This entry's ``hooks.json`` shape carries no
+``"timeout"`` key at all (dropped from the mcp_tool-tier entry's carried-
+over value, review round, nexus-egm7p): Claude Code does not enforce a
+timeout on an ``"async": true`` command hook (same docs section as
+above), so the key would have bounded nothing while reading as if it
+did. Nothing in ``tests/test_hooks_json_shape_lint.py`` requires one
+either.
 """
 from __future__ import annotations
 

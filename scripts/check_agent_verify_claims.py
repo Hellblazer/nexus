@@ -41,6 +41,32 @@ reports UNVERIFIABLE and exits 3 — no findings, because there is nothing
 here to distrust; the absence is structural, not evidence of a bad
 report.
 
+PRE-nexus-egm7p ROWS READ AS 100% FALSE FINDINGS TOO, for a THIRD,
+now-fixed reason distinct from the UNVERIFIABLE-engine case above: not
+structural absence, a transport/extraction bug. Before that bead, every
+``kind=report`` tuple projected through the retired ``hook_subagent_stop_tuple``
+mcp_tool registration carried ``verify=absent`` regardless of whether the
+stopping agent actually wrote a VERIFY block, because (1) that
+registration's ``fields`` never forwarded ``agent_transcript_path`` to
+``project()``, so ``_extract_verify_dims`` always ran on an empty path,
+and (2) even where the path DID reach extraction (the plugin-resident
+bash era, before RDR-215),
+``tuple_ledger_project._last_send_message_text`` read a SendMessage
+report under the wrong input field (``"content"``, a truncated ~50-char
+preview, instead of the real ``"message"`` field) — so a SendMessage-shaped
+report (the more common background-teammate hand-back) still lost its
+VERIFY lines even with the transcript path present. Measured live: zero
+``verify=present`` rows out of 15,595 sampled REPORT rows, spanning both
+eras. Both bugs are fixed as of nexus-egm7p (command tier now delivers
+the full SubagentStop payload; the field-name map reads ``"message"`` for
+both SendMessage and SubagentHandback). **A finding this script reports
+against a session predating that fix is reading the bug, not the agent**
+— do not treat a pre-fix session's ``verify=absent`` findings as evidence
+of anything about the reports themselves. A session running against a
+fixed engine/CLI generation is expected to start producing genuine,
+nonzero findings where it previously produced none (or produced 100%
+noise) — that is the checker beginning to work, not a regression.
+
 Non-vacuity (nexus-moht0 doctrine, ``AGENTS.md`` "Gates fail loud on
 absent dependencies"): a run that examines ZERO report rows for the
 named session — a mistyped session id, or a check run before any report
