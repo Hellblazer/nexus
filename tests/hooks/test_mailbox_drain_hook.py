@@ -67,14 +67,54 @@ def _env(tmp_path: Path, env_overrides: dict[str, str] | None = None) -> dict[st
     return env
 
 
+def _code_under_test() -> tuple[Path, ...]:
+    """The source files a drain subprocess executes, resolved the way the
+    subprocess resolves them (same interpreter, same ``sys.path``)."""
+    from importlib.util import find_spec  # noqa: PLC0415 -- only _run needs it
+
+    modules = (
+        "nexus.hooks.mailbox_drain",
+        "nexus.hooks.tuple_ledger_project",
+        "nexus._hook_runtime.entry",
+        "nexus._hook_runtime._io",
+    )
+    return tuple(Path(find_spec(m).origin) for m in modules) + (_PLUGIN_SCRIPT,)
+
+
+def _stamps(paths: tuple[Path, ...]) -> dict[Path, tuple[int, int] | None]:
+    out: dict[Path, tuple[int, int] | None] = {}
+    for p in paths:
+        try:
+            st = p.stat()
+            out[p] = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            out[p] = None
+    return out
+
+
 def _run(
     *,
     tmp_path: Path,
     stdin: str | None = None,
     env_overrides: dict[str, str] | None = None,
     argv: list[str] | None = None,
+    watched: tuple[Path, ...] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    """Run the hook once, and refuse the result if its code changed meanwhile.
+
+    nexus-3lc5s. Two tests in one full-suite run saw exit 0 with stdout and
+    stderr both empty. The cause was the code on disk, not the hook: commit
+    1f3f57f5a was mutation-checked by restoring the 404/non-404 conflation in
+    the script, in the checkout a concurrent full suite was running from, and
+    that mutation fails exactly those two tests with exactly that signature
+    (reproduced 2/30 against that commit's tests). The red named the hook.
+    Any edit that lands while a subprocess runs means the result describes
+    no single tree, so it fails here, naming the files, instead of as
+    whatever assertion happens to come next.
+    """
+    paths = watched if watched is not None else _code_under_test()
+    before = _stamps(paths)
+    res = subprocess.run(
         argv if argv is not None else _VERB_ARGV,
         input=stdin if stdin is not None else _payload(),
         capture_output=True,
@@ -87,6 +127,16 @@ def _run(
         # wrong, and the red then names the hook rather than the contention.
         timeout=300,
     )
+    after = _stamps(paths)
+    changed = [str(p) for p in paths if before[p] != after[p]]
+    if changed:
+        pytest.fail(
+            "the code under test changed on disk while the hook subprocess ran, so "
+            "this result is not evidence about any one tree (nexus-3lc5s): "
+            f"{changed}. rc={res.returncode} stdout={res.stdout!r} "
+            f"stderr={res.stderr!r}"
+        )
+    return res
 
 
 def _hook_log(tmp_path: Path) -> str:
@@ -181,6 +231,9 @@ class _MockEngine:
         #: were already acked.
         self.park_in_call: int | None = None
         self.release = threading.Event()
+        #: Called with the route on every request, before it is answered, so a
+        #: test can act at a point the hook subprocess is known to be running.
+        self.on_request = None
         self._route_counts: dict[str, int] = {}
         #: Serializes the claim decision (read-eligible, then mutate) and the
         #: ack decision (read-matched, then mutate) across concurrent handler
@@ -206,6 +259,8 @@ class _MockEngine:
                 engine.calls.append((self.path, body))
                 engine.auth.append(self.headers.get("Authorization"))
                 engine._route_counts[self.path] = engine._route_counts.get(self.path, 0) + 1
+                if engine.on_request is not None:
+                    engine.on_request(self.path)
                 if self.path in engine.status_for:
                     self._json(engine.status_for[self.path], {"error": "forced"})
                     return
@@ -1092,7 +1147,9 @@ class TestPartialFailureNeverLosesDeliveredMail:
         # full-suite run this hook produced empty stdout AND empty stderr at exit 0,
         # which is the signature of an EMPTY MAILBOX, not of the status handling below.
         # Asserting on stderr first reported "expected SKIP, got ''", which names the
-        # wrong thing. If the hook never reached this mock, say so.
+        # wrong thing. If the hook never reached this mock, say so. The cause turned
+        # out to be a mutation check editing the script under a running suite
+        # (nexus-3lc5s); _run now refuses a result whose code changed mid-run.
         assert eng.calls, (
             f"the hook never reached the mock engine, so this test never exercised "
             f"status handling at all. rc={res.returncode} "
@@ -1128,7 +1185,9 @@ class TestPartialFailureNeverLosesDeliveredMail:
         # full-suite run this hook produced empty stdout AND empty stderr at exit 0,
         # which is the signature of an EMPTY MAILBOX, not of the status handling below.
         # Asserting on stderr first reported "expected SKIP, got ''", which names the
-        # wrong thing. If the hook never reached this mock, say so.
+        # wrong thing. If the hook never reached this mock, say so. The cause turned
+        # out to be a mutation check editing the script under a running suite
+        # (nexus-3lc5s); _run now refuses a result whose code changed mid-run.
         assert eng.calls, (
             f"the hook never reached the mock engine, so this test never exercised "
             f"status handling at all. rc={res.returncode} "
@@ -1854,4 +1913,104 @@ def test_a_long_address_pending_file_round_trips(tmp_path, engine) -> None:
     assert ending == "empty"
     assert "long address recovery" in delivered, "the recovered row must actually be delivered"
     assert not pending_path.exists(), "the recovered entry must be cleared, not left behind"
+
+
+# ── nexus-3lc5s: the code on disk, and the one silent budget stop ───────────
+
+
+def test_run_refuses_a_result_whose_code_changed_while_the_hook_ran(tmp_path, engine) -> None:
+    """The reproduction of nexus-3lc5s's trigger, made deterministic.
+
+    The flake was an edit landing while a hook subprocess ran: a mutation check
+    (edit, run, revert) in the checkout a full suite was executing from. The
+    edit here is made from the mock engine's request handler, which runs while
+    the subprocess is blocked on that request, so it lands inside the run on
+    every execution. It is reverted in the same breath, as a mutation check
+    reverts, so content alone would not show it; the stamp does.
+
+    The first run is the control: the same watched file, untouched, is
+    accepted, so the guard is not simply refusing everything.
+    """
+    watched = tmp_path / "watched_code.py"
+    watched.write_text("CONFLATE = False\n")
+    # A fixed old mtime, so the in-run write moves it on any filesystem
+    # timestamp granularity.
+    os.utime(watched, ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))
+
+    eng = engine()
+    _wired(tmp_path, eng)
+    res = _run(tmp_path=tmp_path, watched=(watched,))
+    assert res.returncode == 0, res.stderr
+    assert eng.calls, "control run never reached the engine, so it controls nothing"
+
+    def _mutation_check(_route: str) -> None:
+        watched.write_text("CONFLATE = True\n")   # the mutation
+        watched.write_text("CONFLATE = False\n")  # and its revert
+
+    eng.on_request = _mutation_check
+    with pytest.raises(pytest.fail.Exception, match="changed on disk while the hook subprocess ran"):
+        _run(tmp_path=tmp_path, watched=(watched,))
+    assert watched.read_text() == "CONFLATE = False\n"
+
+
+_BUDGET_DRIVER = r"""
+import importlib.util, json, sys, time
+from pathlib import Path
+
+kind, script, config_dir, address = sys.argv[1:5]
+if kind == "wheel":
+    from nexus.hooks import mailbox_drain as m
+else:
+    spec = importlib.util.spec_from_file_location("plugin_mailbox_drain", script)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+
+skips = []
+m._log_skip = skips.append
+row = json.loads(sys.stdin.read())
+m._probe_page = lambda *a, **k: [row]
+
+def _no_post(*_a, **_k):
+    raise AssertionError("claimed from the engine after the drain budget was spent")
+
+m._post = _no_post
+ending = m._drain_address(
+    "http://engine.invalid", "token", address, is_local=True,
+    config_dir=Path(config_dir), deadline=time.monotonic() - 1.0, out=m._Out(),
+)
+print(json.dumps({"ending": ending, "skips": skips}))
+"""
+
+
+@pytest.mark.parametrize("kind", ["wheel", "plugin"])
+def test_a_budget_spent_before_the_first_claim_says_so(tmp_path, kind) -> None:
+    """``_drain_address``'s claim loop returned ``"budget"`` without a word,
+    in both copies. Every other budget stop in the hook logs a SKIP; this one
+    left "a live row was seen and not claimed" looking exactly like an empty
+    mailbox: exit 0, stdout and stderr both empty. It was a candidate cause of
+    nexus-3lc5s's 500-on-ack failure under load, and whatever that run hit, it
+    is the one path left where that signature hides queued mail.
+
+    Deterministic: the deadline is already past when the drain starts, the
+    probe is stubbed to return one live row, and ``_post`` refuses to be
+    called, so the only way to pass is to stop before claiming and say so.
+    Run in a subprocess for both copies because the plugin script re-execs and
+    edits ``sys.path`` at import, which must not happen inside the test process.
+    """
+    res = subprocess.run(
+        [sys.executable, "-c", _BUDGET_DRIVER, kind, str(_PLUGIN_SCRIPT),
+         str(tmp_path), SESSION_ID],
+        input=json.dumps(_row("queued-1", body="seen, not yet claimed")),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "NX_HOOK_INTERPRETER_REEXEC": "1",
+             "NEXUS_CONFIG_DIR": str(tmp_path / "config")},
+        timeout=300,
+    )
+    assert res.returncode == 0, res.stderr
+    verdict = json.loads(res.stdout.strip().splitlines()[-1])
+    assert verdict["ending"] == "budget"
+    assert len(verdict["skips"]) == 1, verdict["skips"]
+    assert "drain budget" in verdict["skips"][0]
+    assert f"mailbox/{SESSION_ID}" in verdict["skips"][0]
 
