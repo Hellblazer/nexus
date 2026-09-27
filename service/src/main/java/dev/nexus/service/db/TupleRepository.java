@@ -72,7 +72,16 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * stamps ({@code tuples.announced_at}, {@code tuple_deliveries.announced_at}) are
  * the exception and are written with the database clock (bead nexus-4h7fo): they
  * exist only to be compared with {@code now()} at intervals as small as zero, where
- * any offset between the two clocks changes the answer.
+ * any offset between the two clocks changes the answer. Two other JVM-written
+ * timestamps stay on the JVM clock, for different reasons. {@code
+ * tuple_tenants.last_seen} ({@code maintainTenant}) is compared only with the JVM
+ * clock, never with {@code now()}, so it cannot see a host/database offset at all.
+ * {@code tuples.lease_until} ({@code claimOnce}, {@code renew}) has the same
+ * JVM-write/{@code now()}-compare shape {@code announced_at} had; it escapes only
+ * because {@code leaseSeconds} is validated positive (seconds to minutes in
+ * practice) against a measured host/container drift of 0.3 to 7 ms. That is
+ * margin, not immunity: a sub-second lease or a host with larger drift would
+ * expose it.
  */
 public final class TupleRepository {
 
