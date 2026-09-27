@@ -146,6 +146,7 @@ nexus-0ocy
 nexus-0ovk0
 nexus-0qc4b
 nexus-0qi9
+nexus-0qqcu
 nexus-0rh10
 nexus-0rws
 nexus-0rwwv
@@ -636,6 +637,7 @@ nexus-3hc9z
 nexus-3ihdg
 nexus-3ihdg.1
 nexus-3ioz2
+nexus-3ioz2.1
 nexus-3j6b
 nexus-3jntg
 nexus-3k43p
@@ -4330,6 +4332,7 @@ nexus-ltix8.1
 nexus-ltjws
 nexus-ltjws.1
 nexus-ltp3k
+nexus-ltrjf
 nexus-ltt88
 nexus-ltwu4
 nexus-lub
@@ -5754,6 +5757,7 @@ nexus-svpq
 nexus-swam7
 nexus-swam7.1
 nexus-sxiay
+nexus-sxiay.1
 nexus-sybbh
 nexus-sybbh.1
 nexus-syfes
@@ -6023,6 +6027,7 @@ nexus-tzosw.1
 nexus-tzqiu
 nexus-tztf
 nexus-u0mcx
+nexus-u0mcx.1
 nexus-u0u8a
 nexus-u1f64
 nexus-u1hpu
@@ -6446,6 +6451,7 @@ nexus-w6hj
 nexus-w6txl
 nexus-w6wp0
 nexus-w715w
+nexus-w715w.1
 nexus-w771r
 nexus-w771r.1
 nexus-w7sg
