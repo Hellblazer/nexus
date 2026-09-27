@@ -879,3 +879,49 @@ class TestStrictUtf8AndAtomicWrite:
         assert result.exit_code == 0, result.output
         assert not doc.with_suffix(".tmp").exists()
         assert "Atomic Write Doc" in doc.read_text()
+
+    def test_write_preserves_the_original_file_mode(self, tmp_path: Path) -> None:
+        """Re-review round: the tmp file is created fresh (umask
+        defaults, typically 0644) -- ``Path.replace()`` renames that
+        inode into place, so without an explicit mode copy a 0600
+        source file would silently become 0644 after conversion. Calls
+        ``_atomic_write_text`` directly (a pure filesystem operation,
+        no catalog/engine needed) against a real 0600 file."""
+        import stat
+
+        from nexus.commands.catalog_cmds.footnotes import _atomic_write_text
+
+        doc = tmp_path / "secret.md"
+        doc.write_text("original content\n")
+        doc.chmod(0o600)
+        assert stat.S_IMODE(doc.stat().st_mode) == 0o600
+
+        _atomic_write_text(doc, "new content\n")
+
+        assert doc.read_text() == "new content\n"
+        assert stat.S_IMODE(doc.stat().st_mode) == 0o600, (
+            "file mode was not preserved across the atomic replace"
+        )
+
+    def test_failed_write_cleans_up_tmp_and_leaves_target_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failure between creating the tmp file and the replace
+        succeeding must never leave a stray ``.tmp`` file, and must
+        never touch the real target at all."""
+        from nexus.commands.catalog_cmds.footnotes import _atomic_write_text
+
+        doc = tmp_path / "src.md"
+        original = "original content, untouched\n"
+        doc.write_text(original)
+
+        def _boom(self: Path, target) -> None:  # noqa: ANN001 — matches Path.replace's signature
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(Path, "replace", _boom)
+
+        with pytest.raises(OSError, match="simulated replace failure"):
+            _atomic_write_text(doc, "would-be new content\n")
+
+        assert not doc.with_suffix(".tmp").exists()
+        assert doc.read_text() == original  # byte-identical, untouched

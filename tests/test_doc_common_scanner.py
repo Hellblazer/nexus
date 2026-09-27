@@ -91,6 +91,106 @@ class TestIndentedCodeBlockSkipped:
         assert links == []
 
 
+class TestListItemContinuationNotTreatedAsCode:
+    """nexus-3ioz2 REGRESSION fix: a blank-line-preceded indented line
+    that is actually a LIST ITEM's own continuation (a further
+    paragraph, a table, a nested bullet) must still be scanned -- the
+    naive "blank + indented" heuristic wrongly classified it as an
+    indented code block. Three real cases from this repo's own docs,
+    reproduced exactly."""
+
+    def test_ordered_list_nested_bullet_shape(self) -> None:
+        """docs/exploration/taxonomy-projection-tuning.md:118 -- a
+        nested bullet (4-space indent) under a numbered step whose own
+        continuation line established a 3-space content indent."""
+        text = (
+            "3. **Pick the inflection.** Start with p75 as a first-pass threshold.\n"
+            "   Re-project with that value. Examine:\n"
+            "\n"
+            "    - **Too few matches** (novel chunks dominate): lower by 0.05.\n"
+            "    - **Too many hub matches**: enable --use-icf before lowering.\n"
+            "    - **Ranking feels right**: stop.\n"
+        )
+        lines = dict(iter_plain_lines(text))
+        assert "Too few matches" in lines[4]
+        assert "Too many hub matches" in lines[5]
+        assert "Ranking feels right" in lines[6]
+
+    def test_checkbox_item_multi_paragraph_body(self) -> None:
+        """docs/rdr/rdr-094-*.md:233-279, 965 -- a checkbox list item's
+        own body spans multiple 6-space-indented paragraphs, separated
+        by blank lines (an ordinary CommonMark "loose list")."""
+        text = (
+            "- [x] Some checklist item that spans\n"
+            "      multiple lines of its own paragraph.\n"
+            "\n"
+            "      A SECOND paragraph inside the same\n"
+            "      checklist item, separated by a blank line.\n"
+            "\n"
+            "      A third paragraph too.\n"
+            "- [x] A sibling checklist item.\n"
+        )
+        lines = dict(iter_plain_lines(text))
+        assert "SECOND paragraph" in lines[4]
+        assert "third paragraph" in lines[7]
+        assert "sibling checklist item" in lines[8]
+
+    def test_nested_bullet_with_table_and_trailing_prose(self) -> None:
+        """docs/rdr/rdr-196-*.md:162, 169 -- a nested bullet's content
+        includes a markdown TABLE (indented to the item's content
+        column) and further prose after it, both blank-line-separated
+        from the item's opening paragraph."""
+        text = (
+            "- Four research records, summarized:\n"
+            "  - **R1 (verified)** -- first bullet text here\n"
+            "    continues on this indented line.\n"
+            "  - **R2 (verified)** -- cost of one dispatch:\n"
+            "\n"
+            "    | dispatch shape | cost |\n"
+            "    | --- | --- |\n"
+            "    | a | 1 |\n"
+            "\n"
+            "    trailing prose after the table.\n"
+            "  - **R3** -- another item.\n"
+        )
+        lines = dict(iter_plain_lines(text))
+        assert "dispatch shape" in lines[6]
+        assert "trailing prose after" in lines[10]
+        assert "another item" in lines[11]
+
+    def test_list_closes_on_a_lower_indent_non_list_line(self) -> None:
+        """Once a line's indent falls below every open list level (and
+        it isn't itself a new marker), the list context closes and the
+        plain indented-code heuristic resumes."""
+        text = (
+            "- an item\n"
+            "  continuation text\n"
+            "\n"
+            "not part of the list at all\n"
+            "\n"
+            "    this IS genuine indented code\n"
+        )
+        lines = dict(iter_plain_lines(text))
+        assert 6 not in lines  # the genuine code line is correctly skipped
+        assert "not part of the list" in lines[4]
+
+    def test_genuine_indented_code_unrelated_to_any_list_is_still_skipped(self) -> None:
+        """The fix must not regress the ORIGINAL indented-code
+        detection for a block with no list context at all."""
+        text = (
+            "Some prose.\n"
+            "\n"
+            "    a genuinely indented code line\n"
+            "    another code line\n"
+            "\n"
+            "more prose\n"
+        )
+        lines = dict(iter_plain_lines(text))
+        assert 3 not in lines
+        assert 4 not in lines
+        assert "more prose" in lines[6]
+
+
 class TestGh896WorkedExampleInline:
     """The issue's own worked-example 'Before' text, embedded INLINE
     (not inside a triple-fenced block) -- a pipe table row with inline

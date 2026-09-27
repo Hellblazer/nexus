@@ -43,6 +43,7 @@ Exit contract (mirrors ``nx doc validate``'s convention,
 from __future__ import annotations
 
 import difflib
+import shutil
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -82,10 +83,31 @@ def _atomic_write_text(path: Path, content: str) -> None:
     """Write *content* to *path* atomically: a sibling ``.tmp`` file,
     then ``Path.replace()`` (rename, atomic on POSIX) — mirrors
     ``nexus.commands.t3._save_backfill_state``'s tmp+rename pattern, so
-    a crash mid-write never leaves *path* half-written."""
+    a crash mid-write never leaves *path* half-written.
+
+    Two follow-up fixes (re-review round):
+
+    * ``Path.replace()`` renames the tmp file's OWN inode into place —
+      the tmp file was just created with umask defaults (typically
+      0644), so replacing an existing 0600 file silently loosened its
+      mode. The original's mode is copied onto the tmp file (when
+      *path* already exists) BEFORE the replace, so the replace's
+      result carries it forward.
+    * Any failure between creating the tmp file and the replace
+      succeeding (a write error, a permissions error on the replace
+      itself) is caught, the tmp file is removed, and the exception is
+      re-raised — a half-finished attempt must never leave a stray
+      ``.tmp`` file behind, and must never leave *path* itself touched.
+    """
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        if path.exists():
+            shutil.copymode(path, tmp)
+        tmp.replace(path)
+    except Exception:  # noqa: BLE001 — cleanup-then-reraise, never swallowed
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 @click.command("footnotes")

@@ -28,12 +28,47 @@ consumer of :func:`iter_plain_lines` benefits without its own fix:
 * **4-space-indented code blocks** — a CommonMark indented code block:
   a line indented >= 4 columns (or a tab), starting only after a blank
   line (or the document start) and continuing through any number of
-  further indented-or-blank lines. This is a HEURISTIC, not a full
-  CommonMark implementation (it does not special-case list-item
-  continuation indentation), but it is deliberately conservative in
-  the direction that matters here: it can suppress the odd equally-
-  indented paragraph line, never leak a genuine indented-code line's
-  content into a scan.
+  further indented-or-blank lines.
+
+nexus-3ioz2 REGRESSION (follow-up review): the first cut of the
+indented-code heuristic treated ANY blank-line-preceded indented line
+as code, including a line that is actually a LIST ITEM's own
+continuation — a further paragraph, a table, or nested content, all
+indented to match the item's content column, separated from the
+item's first paragraph by a blank line (CommonMark allows blank lines
+between a list item's paragraphs; this is an ordinary "loose list").
+Real cases this silently dropped from every scan: a nested bullet
+under a numbered step whose own continuation line established a
+3-space content indent (the nested bullet needs 4, still "just
+indented text" to the naive heuristic); a checkbox item's own
+multi-paragraph body, each paragraph indented to match `- [x] `'s
+6-column content indent; a markdown TABLE inside a nested bullet's
+content, indented to match ITS content column. `nx doc render`/
+`validate` — sharing this same scanner — silently stopped resolving
+citations and tokens inside any of these shapes.
+
+Fixed by tracking OPEN LIST CONTEXT, not just blank-line adjacency:
+*list_stack* holds the content-indent (the column where an item's own
+text starts, i.e. past the marker and its trailing space) of every
+currently-open list level, outermost first. A line's indent closes any
+open level whose content-indent it no longer reaches (``indent <
+list_stack[-1]``); once closed, deeper levels are gone, but a
+shallower or exactly-matching one can still be open. A line that
+itself opens a new marker (``- ``, ``* ``, ``+ ``, or ``N.``/``N)``)
+pushes a new level and is never code. Any OTHER line whose indent
+still reaches the deepest remaining open level is that item's content
+— a continuation paragraph, nested prose, a table — and is likewise
+never code, regardless of a preceding blank line. Only once indent
+falls below every open level (or none is open) does the plain 4-space/
+blank-line-preceded heuristic apply. This is still not a full
+CommonMark parser (nested code blocks genuinely INSIDE a list item's
+own content, which need indent beyond the item's own content column,
+are not modeled — real docs essentially never do this, and getting it
+wrong there would only fail to skip a rare additional-indent code
+block, never wrongly skip real prose, which is the class of bug this
+fix exists for) but it resolves every case found in this repo's own
+docs by a full non-vacuous corpus diff (see the fix's own commit
+message for the walked file list and counts).
 
 Single-line only: an inline code span or indented block spanning
 multiple markdown constructs each still resolves per physical line, so
@@ -65,6 +100,14 @@ _INLINE_CODE_SPAN_RE = re.compile(r"(`+)(.*?)\1(?!`)")
 #: never re-match as a link/token/citation/footnote-marker shape.
 _MASK_CHAR = "\x00"
 
+#: A list-item marker at the very start of the post-indent content:
+#: bullet (``-``/``*``/``+``) or ordinal (``N.``/``N)``), followed by
+#: whitespace or end-of-line (an empty item). Deliberately excludes a
+#: thematic break (``---``, ``***``): those require a SECOND marker
+#: character immediately after the first, which fails the
+#: whitespace-or-end requirement here.
+_LIST_MARKER_RE = re.compile(r"^([-*+]|\d{1,9}[.)])(\s+|$)")
+
 
 def _mask_inline_code_spans(line: str) -> str:
     """Return *line* with every inline code span replaced by
@@ -73,6 +116,24 @@ def _mask_inline_code_spans(line: str) -> str:
     still index correctly into the ORIGINAL (unmasked) line.
     """
     return _INLINE_CODE_SPAN_RE.sub(lambda m: _MASK_CHAR * len(m.group(0)), line)
+
+
+def _leading_indent_and_rest(line: str) -> tuple[int, str]:
+    """``(indent, line-with-that-indent-stripped)``. Indent counts
+    columns, not characters — a tab advances to the next multiple of 4,
+    same as a 4-space indented code block's own convention."""
+    indent = 0
+    i = 0
+    for ch in line:
+        if ch == " ":
+            indent += 1
+            i += 1
+        elif ch == "\t":
+            indent += 4 - (indent % 4)
+            i += 1
+        else:
+            break
+    return indent, line[i:]
 
 
 def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
@@ -97,6 +158,10 @@ def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
     fence_marker: str | None = None
     in_indented_code = False
     prev_line_blank = True  # document start counts as "preceded by blank"
+    #: Open list levels' content-indent (column where the item's own
+    #: text starts), outermost first. See the module docstring's
+    #: "nexus-3ioz2 REGRESSION" section.
+    list_stack: list[int] = []
     for lineno, line in enumerate(text.splitlines(), 1):
         m = FENCE_RE.match(line)
         if m:
@@ -113,18 +178,59 @@ def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
 
         stripped = line.strip()
         is_blank = stripped == ""
-        is_indented = (not is_blank) and (line.startswith("    ") or line.startswith("\t"))
+        if is_blank:
+            # A blank line never closes an open list level (CommonMark
+            # allows blank lines between/within a list item's own
+            # paragraphs — an ordinary "loose list") and never itself
+            # starts an indented-code block; it only ends a RUN of
+            # already-open indented-code lines, same as before.
+            if in_indented_code:
+                continue
+            prev_line_blank = True
+            yield lineno, _mask_inline_code_spans(line)
+            continue
 
+        indent, rest = _leading_indent_and_rest(line)
+
+        # Close any list levels this line's indent no longer reaches —
+        # deeper levels only; a level whose content-indent this line
+        # still meets or exceeds stays open.
+        while list_stack and indent < list_stack[-1]:
+            list_stack.pop()
+
+        marker_m = _LIST_MARKER_RE.match(rest)
+        if marker_m:
+            trailing_ws = marker_m.group(2)
+            marker_width = (
+                len(marker_m.group(0)) if trailing_ws else len(marker_m.group(1)) + 1
+            )
+            list_stack.append(indent + marker_width)
+            in_indented_code = False
+            prev_line_blank = False
+            yield lineno, _mask_inline_code_spans(line)
+            continue
+
+        if list_stack and indent >= list_stack[-1]:
+            # This item's own continuation: a further paragraph, a
+            # table, nested prose — real content, not code, regardless
+            # of a preceding blank line.
+            in_indented_code = False
+            prev_line_blank = False
+            yield lineno, _mask_inline_code_spans(line)
+            continue
+
+        # Outside any open list's content zone — the plain heuristic.
+        is_indented = line.startswith("    ") or line.startswith("\t")
         if in_indented_code:
-            if is_blank:
-                continue  # a blank line inside the block is still part of it
             if is_indented:
+                prev_line_blank = False
                 continue  # still inside the block
             in_indented_code = False
             # falls through: this line starts fresh, ordinary content
         elif is_indented and prev_line_blank:
             in_indented_code = True
+            prev_line_blank = False
             continue
 
-        prev_line_blank = is_blank
+        prev_line_blank = False
         yield lineno, _mask_inline_code_spans(line)
