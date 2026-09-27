@@ -2387,6 +2387,43 @@ class TestBoardStartAtNowAndFold:
         assert later_board_spec.since is None, "since is never sent again for the rest of this waiter's life"
 
     @pytest.mark.asyncio
+    async def test_a_row_level_since_refusal_reraises_rather_than_flipping_the_flag(self) -> None:
+        """Code-review round, bead nexus-n36sw: `_is_old_engine_since_refusal`
+        requires every `since`-carrying spec in the FAILED batch to be
+        per-subscriber (`ChannelWaiter._build_specs`'s own invariant: a
+        mailbox spec never sets `since`). If that invariant were ever
+        violated -- a hypothetical future bug putting `since` on a
+        row-level (mailbox) spec -- the resulting `SchemaViolationError`
+        must propagate, never be swallowed as "an old engine" and used to
+        flip `_board_since_supported`, which would silently disable the
+        engine-owned watermark for every future board spec too."""
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)  # mailbox only -- no board subscription needed
+        fake = _FakeTupleStore()
+        fake.refuse_since_with_announce = True
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=_FakeSender())
+
+        def _bad_build_specs(self: "channel.ChannelWaiter", entries=None):  # noqa: ARG001
+            # The hypothetical bug: since on a ROW-LEVEL (no subscriber)
+            # announce spec -- never something real code sends.
+            return [WaitSpec(
+                subspace=self.subs.session_mailbox, n=1, since=("2026-01-01T00:00:00+00:00", ""),
+                announce=Announce(interval_s=0, max=5),
+            )]
+
+        original = channel.ChannelWaiter._build_specs  # noqa: SLF001
+        channel.ChannelWaiter._build_specs = _bad_build_specs  # type: ignore[method-assign]
+        try:
+            with pytest.raises(SchemaViolationError):
+                await waiter.tick()
+        finally:
+            channel.ChannelWaiter._build_specs = original  # type: ignore[method-assign]
+
+        assert waiter._board_since_supported is True, (  # noqa: SLF001
+            "the flag must not flip on a refusal outside the per-subscriber invariant"
+        )
+
+    @pytest.mark.asyncio
     async def test_backlog_older_than_the_subscribe_time_is_dropped_not_pushed(self) -> None:
         """The 2026-09-27 incident: 282 backlog posts pushed one by one to
         a fresh subscriber. Rows created before the topic's subscribe

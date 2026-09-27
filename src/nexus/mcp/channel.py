@@ -181,6 +181,23 @@ DEFAULT_BOARD_COALESCE_S: float = 3.0
 #: margin is now subtracted from the watermark BEFORE it is sent
 #: (`_build_specs`), not applied to a client-side compare after the fact --
 #: same margin, same reason, moved to where the compare now runs.
+#:
+#: SECOND THING THIS MARGIN COVERS (critic finding, bead nexus-n36sw round
+#: 2): a writer's `created_at` is Postgres's `now()`/`transaction_timestamp()`
+#: -- fixed at the WRITER's transaction start, not its commit
+#: (`TupleRepository.writeOut`) -- so a post whose transaction began just
+#: before this margin's floor but committed after it would otherwise be
+#: excluded, permanently, by the engine's own `created_at > since` compare
+#: (`TupleRepository.queryOnceAnnounceSubscriber`'s own javadoc names this
+#: the identical way; `TupleAnnounceTest
+#: .subscriberAnnounce_sinceWatermarkExclusion_isACommitVisibilityRace_
+#: boundedByTheWriterTransactionsOwnDuration` is the pin). `TupleRepository
+#: .out()`'s own production transaction is one bounded sequence of
+#: synchronous round trips with nothing in it that can block on anything
+#: external, so BEGIN-to-COMMIT is single-digit milliseconds in practice --
+#: this margin's 30 seconds is several orders of magnitude wider than that,
+#: not a coincidence: it is sized to make this race unreachable by a real
+#: writer, the same way it already absorbed clock skew above.
 DEFAULT_BOARD_START_SKEW_S: float = 30.0
 #: Seconds `run()` sleeps after a tick fails for a reason other than
 #: "engine without wait" (a transient HTTP or store error) before the next
@@ -475,6 +492,37 @@ def _mint_waiter_token() -> str:
     return f"{now}-{uuid.uuid4().hex}"
 
 
+def _is_old_engine_since_refusal(exc: "SchemaViolationError", specs: list[WaitSpec]) -> bool:
+    """Bead nexus-n36sw (code-review round): is *exc* the SPECIFIC refusal an
+    engine predating this bead raises for ANY ``since`` alongside ``announce``,
+    regardless of ``subscriber``? Two checks, both required, since either
+    alone is too loose:
+
+    1. The message names BOTH ``since`` and ``announce`` -- not just
+       ``since`` (the field name alone also appears in `TupleRepository
+       .MAX_WAIT_SUBSPACES`-adjacent or other unrelated `SchemaViolation`
+       messages a future engine could add; anchoring on the pair is the
+       same shape the engine's own two refusal messages share: "must not
+       be set together with announce" (old, unconditional) and "must not
+       be set together with a row-level announce" (new, narrower) both
+       contain both words).
+    2. Every spec in THIS batch that carries `since` is per-subscriber
+       (`announce.subscriber` set) -- `ChannelWaiter._build_specs` never
+       sends `since` on a mailbox spec (see its own invariant comment), so
+       a `since`-carrying spec that is NOT per-subscriber here would mean
+       OUR OWN code sent a `since` it should not have: a bug to surface by
+       re-raising, never a shape this fallback should silently swallow and
+       misattribute to engine age.
+    """
+    msg = str(exc)
+    if "since" not in msg or "announce" not in msg:
+        return False
+    return all(
+        spec.since is None or (spec.announce is not None and spec.announce.subscriber is not None)
+        for spec in specs
+    )
+
+
 def _probe_serving_engine_version() -> tuple[int, int, int] | None:
     """Best-effort ``GET /version`` ``release_version`` for the engine THIS
     session is actually talking to (local or cloud, whichever
@@ -650,6 +698,18 @@ class ChannelWaiter:
         #: back to today's behaviour: no `since` on the wire, the client-side
         #: drop in `_deliver_board_rows` does the filtering instead, exactly
         #: as it did before this bead.
+        #:
+        #: REMOVAL BOUND (critic finding, bead nexus-n36sw): this flag, the
+        #: `SchemaViolationError` catch in `tick()` that flips it, and the
+        #: client-side drop it falls back to (`_deliver_board_rows`'s
+        #: `since_by_topic` branch in `_process_results`) exist ONLY for an
+        #: engine below the floor this bead needs. Once `REQUIRED_ENGINE_VERSION`
+        #: (`nexus.engine_version`) passes `(0, 1, 135)` -- the floor every
+        #: local install enforces, per AGENTS.md's "ONE engine identity per
+        #: release" rule -- no supported engine can ever raise this refusal
+        #: again, and this flag, that catch, and that fallback branch should
+        #: all be deleted together: always send `since`, never catch, never
+        #: fall back.
         self._board_since_supported = True
         #: Consecutive ticks in `run()`'s loop faster than
         #: `min_tick_interval_s` -- the floor's own bookkeeping, not the
@@ -1023,7 +1083,7 @@ class ChannelWaiter:
                 return
             raise  # any other status is a transient fault: `run()` logs, backs off and ticks again
         except SchemaViolationError as exc:
-            if not (self._board_since_supported and "since" in str(exc)):
+            if not (self._board_since_supported and _is_old_engine_since_refusal(exc, specs)):
                 raise  # a schema violation this bead does not explain: a real request defect
             self._board_since_supported = False
             _log.warning(
@@ -1165,6 +1225,12 @@ class ChannelWaiter:
                     ),
                 ))
             else:
+                # INVARIANT (code-review round, bead nexus-n36sw): a mailbox
+                # spec never sets `since`. `_is_old_engine_since_refusal`
+                # relies on this to tell "an old engine refusing our own
+                # correctly-shaped per-subscriber since" from "a bug that
+                # put since on a row-level spec" -- the latter must re-raise,
+                # never flip `_board_since_supported` and swallow it.
                 specs.append(WaitSpec(
                     subspace=subspace, n=1,
                     announce=Announce(
