@@ -65,10 +65,12 @@ __all__ = [
     "expectations_census",
     "expectations_expect",
     "expectations_file",
+    "expectations_find_resume_origin",
     "expectations_last_terminal",
     "expectations_mark_blocked",
     "expectations_owes_report",
     "expectations_reconcile",
+    "expectations_resume",
     "expectations_start",
     "expectations_sweep",
     "expectations_undeclared",
@@ -130,9 +132,13 @@ def _test_delay(name: str) -> None:
     if delay >= 0:
         time.sleep(delay)
 
-#: Verb vocabulary of the append-only TSV. Reproduced exactly; a reader in
-#: the bash library, the e2e twin, or a test fixture may carry any of them.
-VERBS = ("EXPECT", "START", "BLOCKED", "CONSUMED", "REPORTED", "WOULDBLOCK")
+#: Verb vocabulary of the append-only TSV. The first six are reproduced
+#: exactly from the bash original; a reader in the bash library, the e2e
+#: twin, or a test fixture may carry any of them. ``RESUMED`` has no bash
+#: counterpart -- the bash library was deleted at nexus-q02nx.22, before
+#: this bead (nexus-xxvv3) existed, so there is no twin left to keep in
+#: step with it.
+VERBS = ("EXPECT", "START", "BLOCKED", "CONSUMED", "REPORTED", "WOULDBLOCK", "RESUMED")
 
 #: ``session_id`` is interpolated into a filesystem path, so it gets the
 #: same defensive charset the bash port applies: a traversal-bearing id
@@ -308,6 +314,200 @@ def expectations_start(session_id: str, agent_id: str, agent_type: str) -> None:
 
     file = expectations_file(session_id)
     _append(file, f"{_ts()}\tSTART\t{agent_id}\t{agent_type}")
+
+
+#: Bounds the cross-ledger resume scan's per-directory file count
+#: (nexus-xxvv3), so a SendMessage resume's added SubagentStart cost stays
+#: flat as ``~/.local/state/nexus/orchestration`` grows instead of scaling
+#: with the box's whole session history.
+#:
+#: MEASURED, not assumed (2026-09-27, code review's IMPORTANT-2 finding
+#: that the original docstring here overclaimed): a read-only `rsync` copy
+#: of this dev box's live ``~/.local/state/nexus/orchestration{,-archive}``
+#: (40 live ``.expectations`` files / ~169 KB, 236 archived / ~1.6 MB) was
+#: pointed at via ``XDG_STATE_HOME``, and ``expectations_find_resume_origin``
+#: was called 200 times in a tight Python loop with an agent_id guaranteed
+#: to match nothing (the worst case: a full scan of both directories every
+#: call, no early return). Result: 11.8 ms total, 0.059 ms/call. A second,
+#: synthetic run against 3000 live ledgers (well past this cap) measured
+#: 0.067 ms/call, confirming the cap keeps the cost flat rather than
+#: growing with the directory. This was a standalone `python3 -c` timing
+#: script, NOT a committed benchmark or pytest assertion -- nothing in this
+#: repo re-runs it, so treat the numbers as one measurement on one box, one
+#: day, not a regression gate. What IS committed and re-run every suite
+#: pass is a DETERMINISTIC bound on the mechanism, not the clock:
+#: ``tests/hooks/test_expectations_module.py::TestResumeOrigin::test_the_scan_is_bounded_by_file_count``
+#: proves a match outside the capped mtime window is missed, and
+#: ``test_the_scan_examines_at_most_the_capped_file_count`` counts actual
+#: file reads against the cap directly. Headroom against years of
+#: accumulated sessions, not a rescue for today's population, which sits
+#: well under it in the live dir (the archive dir already exceeds it,
+#: which is exactly the case the cap is for).
+_RESUME_SCAN_MAX_FILES = 200
+
+
+def expectations_find_resume_origin(
+    session_id: str, agent_id: str
+) -> tuple[str, str] | None:
+    """Did *agent_id* START under a DIFFERENT, earlier session (nexus-xxvv3)?
+
+    THE GAP THIS CLOSES: after a ``/clear``, a background worktree agent
+    resumed by SendMessage re-fires SubagentStart under the NEW session id,
+    with ``agent_type`` collapsed to ``general-purpose`` -- the harness
+    drops the original type on a resume, and no PreToolUse Agent dispatch
+    precedes the re-fire, so the new session's ledger never gets an EXPECT
+    row for it. Left alone, ``expectations_undeclared`` and
+    ``expectations_census`` both read that as an undeclared dispatch, even
+    though it was declared once already, under its own real dispatch, in a
+    session that still exists on disk.
+
+    Looks for the ORIGINAL dispatch's own ``START`` row specifically --
+    never a ``RESUMED`` row -- so a chain of resumes (session A dispatches,
+    session B resumes it, session C resumes B's resume) always resolves
+    back to the one true origin (A), not the most recent hop. Returns
+    ``(origin_session_id, original_agent_type)`` on a hit, else ``None``.
+
+    Bounded to the :data:`_RESUME_SCAN_MAX_FILES` most-recently-modified
+    ledgers in each of the live state dir and the archive dir, newest
+    first: a genuine resume is almost always recent, and the cost of a
+    MISS -- the common case, since most STARTs are not resumes -- is what
+    has to stay flat as this box's lifetime session count grows.
+
+    *session_id*'s own ledger is excluded from the scan, deliberately: an
+    agent_id that appears ONLY in the CURRENT session's own file is an
+    ordinary same-dispatch repeat call of this hook -- ``_already_stamped``'s
+    job, in ``subagent_start_stamp.py`` -- never a resume. Skipping this
+    exclusion would make the very first START of every fresh session read
+    as if it had a prior life the instant the hook fired twice.
+
+    Fails open like every other consult helper in this module: an
+    unreadable directory or ledger file is skipped rather than raised, and
+    a blank *agent_id* returns ``None`` immediately without touching disk.
+
+    **Two failure windows, neither a regression (substantive review,
+    nexus-xxvv3), both silent**: (1) :func:`expectations_sweep` reaps
+    ledgers -- and their credit slots -- past ``_REAP_DAYS`` (7 days). A
+    background agent resumed more than a week after its ORIGINAL dispatch
+    finds no trace of it in either the live state dir or the archive dir
+    (the archive copy ages out the same way, on the same floor), so this
+    function returns ``None`` and the caller falls back to writing a plain
+    ``START`` -- reproducing the exact bug this bead fixes, silently and
+    with no diagnostic, for that one agent. (2) the
+    :data:`_RESUME_SCAN_MAX_FILES` cap can miss an origin under heavy
+    concurrent session churn (many sessions created between the origin
+    dispatch and the resume). Both degrade to "the original bug", never to
+    something worse -- there is no false positive, only a false negative --
+    but a future "why did this resumed agent read UNDECLARED again"
+    investigation should start here, not from zero.
+
+    Called from ``subagent_start_stamp.py`` ONLY when the reporting
+    ``agent_type`` is exactly ``general-purpose`` (the harness's own
+    collapsed type for a resume) -- not on every first-time START -- so an
+    ordinary dispatch with a real declared type never pays this scan at
+    all. This is an approximation, not a certainty: an ordinary FRESH
+    dispatch with no specific subagent_type also reports as
+    ``general-purpose``, so this function still runs (and, correctly,
+    finds nothing) for that common case too.
+    """
+    if not agent_id:
+        return None
+    for directory in (_state_dir(), _archive_dir()):
+        try:
+            candidates = sorted(
+                (p for p in directory.glob("*.expectations") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:  # pragma: no cover — best effort, never fail the caller
+            continue
+        for path in candidates[:_RESUME_SCAN_MAX_FILES]:
+            if path.stem == session_id:
+                continue
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            for line in text.split("\n"):
+                if not line:
+                    continue
+                row = line.split("\t")
+                if len(row) > 2 and row[1] == "START" and row[2] == agent_id:
+                    return path.stem, row[3] if len(row) > 3 else ""
+    return None
+
+
+def expectations_resume(
+    session_id: str,
+    agent_id: str,
+    agent_type: str,
+    origin_session_id: str,
+    original_agent_type: str,
+) -> None:
+    """Record a SendMessage-resumed START (nexus-xxvv3).
+
+    Written by ``subagent_start_stamp.py`` INSTEAD OF a plain ``START`` row
+    when :func:`expectations_find_resume_origin` finds this agent_id's real
+    dispatch elsewhere -- never both; a ``RESUMED`` row is itself
+    sufficient for ``_already_stamped``'s stamp-at-most-once check, which
+    treats ``START`` and ``RESUMED`` as the same "already handled this
+    agent_id" fact.
+
+    Read by :func:`expectations_undeclared` and :func:`expectations_census`,
+    which BOTH count it toward the number of dispatches examined (unlike
+    :data:`WORKFLOW_SUBAGENT_TYPE`, whose STARTs are pulled out of that
+    count entirely -- see each function's own docstring for why the two
+    buckets differ), but neither ever marks it UNDECLARED nor lets it spend
+    a unit of THIS session's EXPECT credit for ``agent_type`` -- crediting
+    it here would mask a genuinely undeclared start of the same type
+    freshly dispatched in this session. :func:`expectations_owes_report`
+    also short-circuits on it, for the identical reason on the live
+    stop-block side: it must never be able to claim a same-type EXPECT
+    credit slot a genuinely fresh dispatch still needs.
+
+    ``agent_type`` is what THIS session's SubagentStart payload reports
+    (typically ``general-purpose`` -- the harness drops the original type
+    on a SendMessage resume). ``original_agent_type``/``origin_session_id``
+    are the ORIGIN dispatch's own values, carried for operator forensics
+    only -- no reader keys off them, so a caller with neither in hand may
+    pass empty strings and every consumer still classifies the row
+    correctly.
+
+    **Rejected alternative (substantive review, nexus-xxvv3): a
+    PreToolUse-on-SendMessage EXPECT write, symmetric to
+    ``hook_agent_dispatch_expect``'s write-before-dispatch for the Agent
+    tool.** That design writes the EXPECT row in the CURRENT (resuming)
+    session before the SendMessage reaches the agent, exactly like a fresh
+    dispatch, with no directory scan, no reap-floor interaction and no
+    file-count cap -- structurally cleaner than this module's cross-session
+    scan. It was not taken because a SendMessage to a LIVE agent does not
+    RE-START it: the agent's own SubagentStart never fires again, so
+    nothing here corresponds to the "dispatch" half of "write-before-
+    dispatch". Writing an EXPECT anyway, keyed on the belief that a
+    SendMessage always precedes a resume, would add PHANTOM credit for a
+    ``general-purpose`` type that no genuine new dispatch is coming to
+    consume -- and that phantom credit could then mask an actual, separate,
+    undeclared ``general-purpose`` START in the same session, which is
+    precisely the failure :func:`expectations_undeclared`'s own duplicate-
+    dispatch-id guard exists to prevent for ordinary EXPECT rows. The scan
+    this module uses instead reads existing, already-true history (a real
+    START happened somewhere) rather than asserting a new expectation that
+    might not resolve to one.
+    """
+    if not agent_id or not agent_type:
+        raise ExpectationsUsageError(
+            "expectations_resume: session_id, agent_id and agent_type are required"
+        )
+    for value in (agent_id, agent_type, origin_session_id, original_agent_type):
+        if "\t" in value or "\n" in value:
+            raise ExpectationsUsageError(
+                "expectations_resume: tab/newline in a field"
+            )
+
+    file = expectations_file(session_id)
+    _append(
+        file,
+        f"{_ts()}\tRESUMED\t{agent_id}\t{agent_type}\t{original_agent_type}\t{origin_session_id}",
+    )
 
 
 def _claim_credit(
@@ -564,6 +764,28 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     with SUMMARY or BLINDSPOT" contract (asserted in
     ``TestTheEmptyShapeIsNotNarrowerThanThePopulatedOne``) is unchanged.
 
+    A ``RESUMED`` row (nexus-xxvv3: a SendMessage-resumed background
+    worktree agent, re-STARTed under a new session id as
+    ``general-purpose`` with no PreToolUse EXPECT row to match) gets a
+    DIFFERENT treatment from ``WORKFLOW_SUBAGENT_TYPE``, deliberately: it
+    DOES count toward ``checked`` -- it was genuinely examined, just
+    credited to a dispatch elsewhere -- but it can never become UNDECLARED
+    and never spends this session's EXPECT credit for whatever type it
+    re-STARTed as. The distinction matters for exit code 1 (BLINDSPOT):
+    excluding it from ``checked`` entirely (the first cut of this fix, bead
+    nexus-xxvv3, caught in code review) produced a FALSE BLINDSPOT whenever
+    a session held one pending, not-yet-started EXPECT alongside one
+    RESUMED row -- ``checked`` read 0 despite the SubagentStart stamp hook
+    demonstrably having just run (it wrote the RESUMED row), so the
+    BLINDSPOT text's "check the SubagentStart stamp is registered" advice
+    was actively wrong. It is still reported on its own
+    ``RESUMED\tchecked=<n>`` line (``n > 0`` only, immediately before
+    ``SUMMARY``) as a convenience rollup. See :func:`expectations_resume`
+    for how the row gets written and :func:`expectations_find_resume_origin`
+    for how a resume is told apart from an ordinary same-session repeat --
+    including the 7-day reap-floor window past which detection silently
+    stops working and this function's original bug (UNDECLARED) returns.
+
     Exit codes, quoted in AGENTS.md: 0 clean, 1 BLINDSPOT, 2 undeclared>0,
     3 no ledger. **3 is not a pass** -- absence of a ledger is not evidence
     of cleanliness, which is why it carries a note naming the two
@@ -595,6 +817,8 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     expect_total = 0
     workflow_order: list[str] = []
     workflow_seen: set[str] = set()
+    resumed_order: list[str] = []
+    resumed_seen: set[str] = set()
 
     for row in rows:
         verb = row[1] if len(row) > 1 else ""
@@ -620,6 +844,22 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
             if agent_id not in stype:
                 order.append(agent_id)
                 stype[agent_id] = agent_type
+        elif verb == "RESUMED" and len(row) > 2:
+            # UNLIKE WORKFLOW: this DOES enter order/stype, so it counts
+            # toward `checked` below (nexus-xxvv3 CRITICAL fix -- see the
+            # docstring's BLINDSPOT paragraph). `resumed_seen` marks it so
+            # the credit loop below can still skip it: a resumed agent was
+            # declared once already, under its OWN dispatch elsewhere, so
+            # crediting it against THIS session's EXPECT rows would spend
+            # credit nobody meant for it.
+            agent_id = row[2]
+            agent_type = row[3] if len(row) > 3 else ""
+            if agent_id not in resumed_seen:
+                resumed_seen.add(agent_id)
+                resumed_order.append(agent_id)
+            if agent_id not in stype:
+                order.append(agent_id)
+                stype[agent_id] = agent_type
         elif verb == "EXPECT" and len(row) > 2:
             # Dedupe by dispatch_id. The writing hook takes a BOUNDED lock,
             # so a double registration that outlasts the budget can append
@@ -642,6 +882,14 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
     undeclared = 0
     for agent_id in order:
         agent_type = stype[agent_id]
+        if agent_id in resumed_seen:
+            # Examined (contributes to `checked` above) but never
+            # UNDECLARED and never a credit consumer -- see the docstring.
+            # Deliberately not tallied into `recognized` either: no EXPECT
+            # row in THIS session was ever meant for it, so "recognized"
+            # (which tallies STARTs whose type had a matching EXPECT row
+            # anywhere) staying silent about it is accurate, not a gap.
+            continue
         # `recognized` is a TALLY, not a gate (nexus-houpu): it records how
         # many STARTs had an EXPECT row of their type anywhere in the
         # ledger, which distinguishes an inert dispatch hook from a
@@ -657,6 +905,8 @@ def expectations_undeclared(session_id: str) -> LedgerReport:
 
     if workflow_order:
         lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
+    if resumed_order:
+        lines.append(f"RESUMED\tchecked={len(resumed_order)}")
 
     lines.append(
         f"SUMMARY\tchecked={checked} recognized={recognized} "
@@ -764,6 +1014,23 @@ def expectations_owes_report(
     role is the exhaustion path, which blocks with a disclosed cause rather
     than consulting credit -- over-blocking is explicable, and a silent miss
     is the failure this subsystem exists to prevent.
+
+    A RESUMED ``agent_id`` (nexus-xxvv3) NEVER owes, and short-circuits
+    before the lock or the credit consult even run. Its background-ness was
+    never established in THIS session -- no PreToolUse EXPECT preceded its
+    re-START -- so there is no genuine obligation to verify, and the credit
+    ledger here is keyed on ``(session_id, agent_type)`` alone, with no
+    per-agent-identity check beyond a CONSUMED row's own self-re-entry
+    case: letting a resumed agent through to :func:`_read_type_credit` at
+    all would let it claim a same-type EXPECT credit SLOT that a genuinely
+    fresh dispatch of the same type still needs, silently masking that real
+    dispatch's own report obligation when it later stops and finds the slot
+    already spent. This is not a behaviour change for the common case --
+    a resumed ``general-purpose`` re-START never matched any EXPECT row's
+    type either, before this bead existed -- only a guarantee that now
+    holds even when a coincidental same-type EXPECT row exists in the same
+    session (see ``TestOwesReportResumedAgents`` for the composed
+    reproduction).
     """
     if not session_id or not agent_id or not agent_type:
         return OwesVerdict(False)
@@ -772,7 +1039,12 @@ def expectations_owes_report(
     if "\t" in agent_id or "\n" in agent_id:
         return OwesVerdict(False)
 
-    if _readable_rows(session_id) is None:
+    rows_precheck = _readable_rows(session_id)
+    if rows_precheck is None:
+        return OwesVerdict(False)
+    if any(
+        len(r) > 2 and r[1] == "RESUMED" and r[2] == agent_id for r in rows_precheck
+    ):
         return OwesVerdict(False)
     file = expectations_file(session_id)
     enc = _type_enc(agent_type)
@@ -1203,6 +1475,35 @@ def expectations_census(session_id: str) -> LedgerReport:
     before ``ROWS`` so a Workflow-tool-heavy session does not read as "the
     walk found nothing" merely because its agents are bucketed elsewhere.
 
+    A ``RESUMED`` row (nexus-xxvv3) gets a NARROWER exclusion than
+    ``WORKFLOW_SUBAGENT_TYPE``, deliberately: it DOES get an ``AGENT`` line
+    and DOES enter ``all_start``/``order`` (so it counts toward ``checked``)
+    and DOES get its terminal state classified (``REPORTED``/
+    ``NO_TERMINAL``/etc, same as any other agent) -- only its ``declared``
+    field differs, reading ``resumed`` instead of ``declared``/
+    ``undeclared``, and it never touches ``credit`` (so it cannot spend a
+    unit meant for a genuinely fresh dispatch of the same type). This
+    replaced a first cut (full exclusion, no ``AGENT`` line at all) that
+    code review caught on two counts: it produced a FALSE ``checked=0``
+    BLINDSPOT alongside a pending EXPECT (see :func:`expectations_undeclared`'s
+    docstring for the identical bug on that side), and it threw away the
+    one signal an operator running ``nx-hook expectations_census`` needs to
+    tell a resumed-but-reported agent from a resumed-and-stuck one --
+    substantive review's finding, since AGENTS.md tells operators to use
+    this exact tool and never hand-count.
+
+    It is STILL excluded from ``start_count``, and this half is unchanged
+    from the first cut: a workflow-subagent's count needs to satisfy an
+    ``EXPECTED_NO_START`` check if that type is ever hand-declared, but a
+    resumed agent's re-STARTed type (typically ``general-purpose``) is not
+    its own dispatch, and letting it satisfy some other, genuinely
+    undeclared general-purpose dispatch's missing-start check would mask
+    exactly the deficit that check exists to catch
+    (``test_a_resumed_start_does_not_satisfy_expected_no_start_for_the_same_type``
+    pins this). It still gets its own ``RESUMED\tchecked=<n>`` rollup line
+    (n > 0 only), placed alongside ``WORKFLOW``, as a convenience count
+    alongside the per-agent ``AGENT`` lines.
+
     Exit codes are 0 and 1 ONLY -- never 2. That vocabulary belongs to
     ``undeclared`` alone, and conflating them is how a census gets read as
     an audit. 1 means the walk examined nothing while the ledger declared
@@ -1247,6 +1548,8 @@ def expectations_census(session_id: str) -> LedgerReport:
     res_immediate = res_later = 0
     workflow_order: list[str] = []
     workflow_seen: set[str] = set()
+    resumed_order: list[str] = []
+    resumed_seen: set[str] = set()
 
     for row in rows:
         exact = "\t".join(row)
@@ -1290,12 +1593,36 @@ def expectations_census(session_id: str) -> LedgerReport:
                 if who not in listed:
                     order.append(who)
                     listed.add(who)
+        elif verb == "RESUMED":
+            # nexus-xxvv3: UNLIKE WORKFLOW, this DOES enter
+            # all_start/order/stype below, so it gets an AGENT line and
+            # counts toward `checked` -- see the docstring's BLINDSPOT
+            # paragraph. `resumed_seen` marks it so the classification loop
+            # can still give it "resumed" instead of "declared"/"undeclared"
+            # and skip touching `credit` for it. Deliberately NOT tallied
+            # into start_count (see the docstring): a resumed re-START must
+            # not be able to satisfy some other, genuinely undeclared
+            # dispatch's EXPECTED_NO_START check for the same re-STARTed
+            # type.
+            agent_type = row[3] if len(row) > 3 else ""
+            if who not in resumed_seen:
+                resumed_seen.add(who)
+                resumed_order.append(who)
+            if who not in all_start:
+                all_start.add(who)
+                stype[who] = agent_type
+                if who not in listed:
+                    order.append(who)
+                    listed.add(who)
         elif verb in ("REPORTED", "BLOCKED", "WOULDBLOCK"):
             if who in workflow_seen:
                 # A terminal for a workflow agent: not part of the
                 # declaration audit's population, and must not fall into
                 # the "no-start ghost" branch below for lack of a stype
-                # entry.
+                # entry. A RESUMED agent's own terminal, unlike a workflow
+                # agent's, IS wanted here -- it is what lets the
+                # classification loop tell a reported resumed agent from a
+                # stuck one, so it is deliberately NOT skipped.
                 continue
             if who not in listed:
                 order.append(who)
@@ -1325,6 +1652,13 @@ def expectations_census(session_id: str) -> LedgerReport:
         if not agent_type:
             lines.append(f"AGENT\t{agent_id}\t-\t{terminal}\tno-start")
             nostart += 1
+        elif agent_id in resumed_seen:
+            # nexus-xxvv3: classified like any other agent (terminal is
+            # real -- REPORTED/NO_TERMINAL/etc), but never "declared" or
+            # "undeclared", and `credit` is never touched, so it can never
+            # spend a unit a genuinely fresh dispatch of the same type
+            # still needs.
+            lines.append(f"AGENT\t{agent_id}\t{agent_type}\t{terminal}\tresumed")
         else:
             if agent_type in expect_names:
                 recognized += 1
@@ -1339,6 +1673,8 @@ def expectations_census(session_id: str) -> LedgerReport:
 
     if workflow_order:
         lines.append(f"WORKFLOW\tchecked={len(workflow_order)}")
+    if resumed_order:
+        lines.append(f"RESUMED\tchecked={len(resumed_order)}")
 
     expected_no_start = 0
     # FIRST-APPEARANCE order, not alphabetical. bash iterates an awk
@@ -1527,6 +1863,20 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     own ``WORKFLOW\tchecked=<n>`` line instead, matching :func:`expectations_undeclared`
     and :func:`expectations_census`.
 
+    A ``RESUMED`` row (nexus-xxvv3) is, deliberately, NOT given that same
+    exclusion here -- it is treated exactly like an ordinary ``START`` for
+    THIS function only. Reconcile's whole job is catching a silent death
+    the ledger alone cannot see, and a resumed agent's harness-visible
+    identity is a real background task of THIS session (it was, after all,
+    just resumed into it by SendMessage): if the harness's own
+    ``background_tasks`` still lists it, it is correctly read as not
+    stranded; if the harness has quietly dropped it, that is exactly the
+    silent death this check exists to catch, and excluding resumed agents
+    the way :func:`expectations_undeclared`/:func:`expectations_census` do
+    would throw that detection away for no reason -- unlike the workflow
+    exclusion, there is no ambiguity here between "healthy mid-flight" and
+    "dead" for this class.
+
     MEASURED AGAINST THE REAL TRANSCRIPT, not assumed (nexus-silj0
     follow-up round 2): session ``2109cc46-2876-4409-b4f1-ac730d1cc5ed``'s
     own persisted Workflow state,
@@ -1624,7 +1974,7 @@ def expectations_reconcile(session_id: str, payload: str) -> LedgerReport:
     for row in rows:
         verb = row[1] if len(row) > 1 else ""
         who = row[2] if len(row) > 2 else ""
-        if verb == "START" and who not in stype and who not in workflow_seen:
+        if verb in ("START", "RESUMED") and who not in stype and who not in workflow_seen:
             agent_type = row[3] if len(row) > 3 else ""
             if agent_type == WORKFLOW_SUBAGENT_TYPE:
                 # Its own bucket (nexus-silj0): never checked for STRANDED,
