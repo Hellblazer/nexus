@@ -789,6 +789,14 @@ instead. Steps 3a and 3b ship in a client release before the engine tag
 carrying Step 5 is deployed, and the census covers every collection except
 `quarantine-*`, not only `knowledge__*`.
 
+The two steps leave different traces. After 3a, a confirmed write
+failure through `store_put`, `nx store put`, `nx memory promote` or a
+recovery-bundle import removes its chunk, so a new manifest-less chunk
+in `knowledge__*` is an anomaly to investigate. After 3b, a failed
+`nx index` run leaves its chunks manifest-less and exits non-zero, so a
+manifest-less chunk in `docs__*`, `code__*` or `rdr__*` can be the
+residue of a failed run that the next successful run manifests.
+
 #### Phase 1 result (2026-09-27)
 
 Census on the live tenant, all 95 non-quarantine collections (not only
