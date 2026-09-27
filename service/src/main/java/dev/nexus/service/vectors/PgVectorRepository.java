@@ -1588,27 +1588,36 @@ public final class PgVectorRepository {
     }
 
     /**
-     * The subset of {@code ids} physically stored in {@code collection}, in chash
-     * order, ignoring liveness. RDR-192 Step 5 amendment (nexus-wbfpw.10, Sam
-     * 2026-09-27: split inventory from liveness): every read that returns content
-     * uses live(c) ({@link #liveChunksCondition}), but a caller whose question is
-     * "is this chunk already stored here" (existing_ids: catalog verify, the
-     * migration ETL, skip-existing, the put_note_pieces delete guard) must see a
-     * stored chunk whether or not it has a live owner. Returns ids only, never
-     * content, so it exposes nothing live(c) hides beyond existence.
+     * The rows among {@code ids} physically stored in {@code collection}, in chash
+     * order, ignoring liveness: {@code {ids, metadatas}}, never content. RDR-192
+     * Step 5 amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory from
+     * liveness): every read that returns content uses live(c) ({@link
+     * #liveChunksCondition}), but a caller whose question is "is this chunk stored
+     * here, and what does its metadata say" (existing_ids: catalog verify, the
+     * migration ETL, skip-existing, the put_note_pieces delete guard; the manifest
+     * backfill's reverse lookup) must see a stored chunk whether or not it has a
+     * live owner. The where-scan reads offer the same with {@code includeNonLive}.
      */
-    public List<String> presentIds(String tenant, String collection, List<String> ids) {
+    public Map<String, Object> presentRows(String tenant, String collection, List<String> ids) {
         if (ids == null || ids.isEmpty()) {
-            return List.of();
+            return Map.of("ids", List.of(), "metadatas", List.of());
         }
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash())
+        var rows = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
                .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
                .orderBy(ch.chash().asc())
-               .fetch(org.jooq.Record1::value1));
+               .fetch());
+        List<String> outIds = new ArrayList<>(rows.size());
+        List<Map<String, Object>> outMetas = new ArrayList<>(rows.size());
+        for (var rec : rows) {
+            outIds.add(rec.value1());
+            JSONB meta = rec.value2();
+            outMetas.add(fromJson(meta != null ? meta.data() : null));
+        }
+        return Map.of("ids", outIds, "metadatas", outMetas);
     }
 
     /** Backward-compat 5-arg overload of {@link #get} (source_uri not included). */
@@ -1730,6 +1739,30 @@ public final class PgVectorRepository {
                                         Map<String, Object> where,
                                         int limit, int offset,
                                         boolean includeSourceUri) {
+        return getWhere(tenant, collection, where, limit, offset, includeSourceUri, false);
+    }
+
+    /**
+     * {@link #getWhere(String, String, Map, int, int, boolean)} with the RDR-192
+     * Step 5 amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory from
+     * liveness) physical-scan mode. {@code includeNonLive=true} answers "what is
+     * physically stored matching {@code where}", ignoring {@link
+     * #liveChunksCondition} entirely — the maintenance shape ({@code nx catalog
+     * reconcile} / {@code nx index}'s manifest self-heal, the legacy
+     * doc_id-keyed misclassified-chunk prune) that must see a chunk with no live
+     * own-collection manifest owner, exactly the population it exists to find.
+     *
+     * <p>Envelope under {@code includeNonLive=true} is {@code {ids, metadatas}}
+     * ONLY — never {@code documents} or embeddings, so a physical scan cannot be
+     * used to read content live(c) would otherwise hide. Enforced at the HTTP
+     * boundary ({@code VectorHandler}), not here: this method simply never
+     * selects {@code chunk_text} on that branch.
+     */
+    public Map<String, Object> getWhere(String tenant, String collection,
+                                        Map<String, Object> where,
+                                        int limit, int offset,
+                                        boolean includeSourceUri,
+                                        boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         org.jooq.Condition cond = ch.collection().eq(collection);
@@ -1739,6 +1772,25 @@ public final class PgVectorRepository {
             }
         }
         org.jooq.Condition finalCond = cond;
+
+        if (includeNonLive) {
+            var nonLiveResult = tenantScope.withTenant(tenant, ctx ->
+                ctx.select(ch.chash(), ch.metadata())
+                   .from(ch.table())
+                   .where(finalCond)
+                   .orderBy(ch.chash().asc())
+                   .limit(limit).offset(offset)
+                   .fetch());
+            List<String> nonLiveIds = new ArrayList<>(nonLiveResult.size());
+            List<Map<String, Object>> nonLiveMetas = new ArrayList<>(nonLiveResult.size());
+            for (var rec : nonLiveResult) {
+                nonLiveIds.add(rec.value1());
+                JSONB meta = rec.value2();
+                nonLiveMetas.add(fromJson(meta != null ? meta.data() : null));
+            }
+            return new LinkedHashMap<>(Map.of("ids", nonLiveIds, "metadatas", nonLiveMetas));
+        }
+
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
                .from(ch.table())
@@ -1816,6 +1868,23 @@ public final class PgVectorRepository {
      */
     public Map<String, Object> getAllMetadata(String tenant, String collection,
                                               Map<String, Object> where) {
+        return getAllMetadata(tenant, collection, where, false);
+    }
+
+    /**
+     * {@link #getAllMetadata(String, String, Map)} with the RDR-192 Step 5
+     * amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory from liveness)
+     * physical-scan mode. {@code includeNonLive=true} skips {@link
+     * #liveChunksCondition} — the {@code nx t3 gc} orphan-candidate listing and
+     * {@code --force}'s T3 orphan cleanup (RDR-192 amendment call sites) must
+     * enumerate every physically stored chunk matching {@code where}, owned or
+     * not; a manifest owner living elsewhere is exactly the "orphan" shape both
+     * exist to find. Ids + metadata only, unchanged either way — this method
+     * never returns {@code documents}.
+     */
+    public Map<String, Object> getAllMetadata(String tenant, String collection,
+                                              Map<String, Object> where,
+                                              boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
@@ -1826,16 +1895,22 @@ public final class PgVectorRepository {
             }
         }
         org.jooq.Condition finalCond = cond;
-        var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash(), ch.metadata())
+        var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
+            // this staleness-cache-build read was structurally invisible to the
+            // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
+            // includeNonLive (nexus-wbfpw.10) deliberately skips this predicate —
+            // see the method javadoc.
+            org.jooq.Condition scanCond = includeNonLive
+                ? finalCond
+                : finalCond.and(liveChunksCondition(ctx, ch));
+            return ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
-               // this staleness-cache-build read was structurally invisible to the
-               // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
-               .where(finalCond.and(liveChunksCondition(ctx, ch)))
+               .where(scanCond)
                .orderBy(ch.chash().asc())
                .limit(cap + 1)
-               .fetch());
+               .fetch();
+        });
 
         if (result.size() > cap) {
             throw new IllegalStateException(

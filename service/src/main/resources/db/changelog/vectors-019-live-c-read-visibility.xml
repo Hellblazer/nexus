@@ -29,7 +29,7 @@
     collection that physically holds chunks, with a live(c) count that may be
     0; it no longer reads nexus.live_chunks. Callers whose question is
     physical presence rather than visibility use
-    PgVectorRepository#presentIds (store-get with include_non_live).
+    PgVectorRepository#presentRows (store-get with include_non_live).
 
     Non-destructive: this changes what reads return and deletes nothing. The
     manifest-less chunks it hides are Phase 3's reaper's input (RDR-192 Step

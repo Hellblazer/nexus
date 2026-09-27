@@ -927,7 +927,13 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     reflects reality rather than the requested count.
     """
     col = t3.get_or_create_collection(collection)
-    orphan_meta = col.get_all_metadata(where={"content_hash": content_hash})
+    # nexus-wbfpw.10 (RDR-192 Step 5 amendment): an "orphan" chunk this
+    # cleanup exists to find is, by definition, one with no live
+    # own-collection manifest owner -- live(c) would hide exactly the
+    # population being cleaned up.
+    orphan_meta = col.get_all_metadata(
+        where={"content_hash": content_hash}, include_non_live=True,
+    )
     orphan_ids = orphan_meta.get("ids", []) or []
     if not orphan_ids:
         _log.info(

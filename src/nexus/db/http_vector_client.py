@@ -1919,6 +1919,7 @@ class _ServiceCollectionStub:
         offset: int = 0,
         *,
         include_source_uri: bool = False,
+        include_non_live: bool = False,
     ) -> dict:
         """Query chunks from the service. Returns Chroma-style result dict.
 
@@ -2009,6 +2010,15 @@ class _ServiceCollectionStub:
           that need this: omit ``limit`` (resolves to each page's own
           batch size), or pre-chunk ``ids`` into ``<= page_size``
           batches themselves.
+
+        nexus-wbfpw.10 (RDR-192 Step 5 amendment): ``include_non_live=True``
+        reads stored rows ignoring live(c), for maintenance code that must
+        see a chunk with no live own-collection owner (manifest heal and
+        ``nx catalog reconcile``, the misclassified-chunk prune, the manifest
+        backfill). The engine returns ids and metadata only, never documents;
+        this stub does not fabricate them. An engine older than the amendment
+        ignores the field and answers from its own read filter, which already
+        returned unowned chunks.
         """
         if ids is not None:
             from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
@@ -2048,6 +2058,8 @@ class _ServiceCollectionStub:
                 }
                 if include_source_uri:
                     body["include_source_uri"] = True
+                if include_non_live:
+                    body["include_non_live"] = True
                 page = _post("/v1/vectors/store-get", body, tenant=self._tenant)
                 page_ids = page.get("ids", []) or []
                 # nexus-hdx2u E4 (fix-round): engine-side count (E3, now a
@@ -2061,7 +2073,11 @@ class _ServiceCollectionStub:
                 # (pre-E3 engine, or a rolling deploy window) is the ONLY
                 # case that falls back to the heuristic and logs the once-
                 # per-process count-unreported notice.
-                if "count" in page:
+                if include_non_live:
+                    # The physical probe answers every stored id in the batch
+                    # and carries no count; there is nothing to reconcile.
+                    pass
+                elif "count" in page:
                     reported_count = page["count"]
                     if reported_count > len(page_ids):
                         # A real truncation the engine itself measured (not a
@@ -2107,10 +2123,15 @@ class _ServiceCollectionStub:
                 body["include"] = include
             if include_source_uri:
                 body["include_source_uri"] = True
+            if include_non_live:
+                body["include_non_live"] = True
             result = _post("/v1/vectors/get", body, tenant=self._tenant)
             # Normalise to Chroma shape: {ids, documents, metadatas}.
             # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
             # source_uris present only when include_source_uri=True was forwarded.
+            # include_non_live (nexus-wbfpw.10): the engine omits "documents"
+            # under this flag -- .get("documents", []) below degrades to an
+            # empty list rather than raising, which is correct (never content).
             out = {
                 "ids":       result.get("ids", []),
                 "documents": result.get("documents", []),
@@ -2147,7 +2168,7 @@ class _ServiceCollectionStub:
         )
         return int(result.get("count", 0))
 
-    def get_all_metadata(self, where: dict | None = None) -> dict:
+    def get_all_metadata(self, where: dict | None = None, *, include_non_live: bool = False) -> dict:
         """ids + metadata for EVERY chunk in this collection in ONE round trip
         (nexus-duoak follow-up: collapses the indexer's staleness-cache-build
         paginated ``/get`` loop -- measured ~113s of a ~116s phase on this
@@ -2162,15 +2183,51 @@ class _ServiceCollectionStub:
         :class:`VectorServiceError` on any failure, including the server's
         422 "too many rows for one call" cap -- callers should catch and
         fall back to the paginated :meth:`get` loop.
+
+        ``include_non_live`` (RDR-192 Step 5 amendment, nexus-wbfpw.10):
+        physical scan, ignoring live(c) -- ``pipeline_stages.
+        _force_t3_orphan_cleanup``'s whole job is finding a chunk with no
+        live own-collection manifest owner, so it must set this.
         """
         body: dict[str, Any] = {"collection": self._name}
         if where:
             body["where"] = where
+        if include_non_live:
+            body["include_non_live"] = True
         result = _post("/v1/vectors/get-all-metadata", body, tenant=self._tenant)
         return {
             "ids": result.get("ids", []),
             "metadatas": result.get("metadatas", []),
         }
+
+    def existing_ids(self, ids: list[str]) -> set[str]:
+        """The subset of *ids* physically stored in this collection, ignoring
+        liveness (RDR-192 Step 5 amendment, nexus-wbfpw.10) -- the
+        collection-handle mirror of :meth:`HttpVectorClient.existing_ids`,
+        scoped to this stub's own collection/tenant, for a maintenance caller
+        holding a collection handle rather than the client
+        (``indexer._prune_misclassified_in_collection``'s manifest-chash
+        presence probe). Pages at 300 ids per request, same as the top-level
+        method.
+        """
+        if not ids:
+            return set()
+        found: set[str] = set()
+        page = 300
+        for start in range(0, len(ids), page):
+            batch = ids[start : start + page]
+            result = _post(
+                "/v1/vectors/store-get",
+                {
+                    "collection": self._name,
+                    "ids": batch,
+                    "limit": len(batch),
+                    "include_non_live": True,
+                },
+                tenant=self._tenant,
+            )
+            found.update(result.get("ids") or [])
+        return found
 
     def update(self, ids: list[str], metadatas: list[dict]) -> dict:
         """Metadata-only update of existing chunks, Chroma-collection shape.
@@ -4491,6 +4548,13 @@ class HttpVectorClient:
         skipped every collection in service mode. T3Database parity:
         ``metadata_subset`` contains only the requested ``fields`` with
         empty strings for missing keys; missing collection yields nothing.
+
+        nexus-wbfpw.10 (RDR-192 Step 5 amendment): ``include_non_live=True``
+        on every page -- the orphan-candidate set ``nx t3 gc`` builds from
+        this listing is, by definition, chunks whose manifest owner lives
+        elsewhere (or nowhere); a live(c)-filtered listing structurally
+        cannot see them (an owned chunk is never a candidate; an unowned one
+        is exactly what live(c) hides).
         """
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
@@ -4505,6 +4569,7 @@ class HttpVectorClient:
                         "include": ["metadatas"],
                         "limit": page_limit,
                         "offset": offset,
+                        "include_non_live": True,
                     },
                     tenant=self._tenant,
                 )
@@ -4624,6 +4689,14 @@ class HttpVectorClient:
         Returns the total number of chunks ACTUALLY deleted (may be less
         than the number of TTL-lapsed rows found, in the rare case one
         genuinely shares content with another still-live document).
+
+        nexus-wbfpw.10 (RDR-192 Step 5 amendment, Sam's ruling): the where-scan
+        below sets ``include_non_live=True`` -- expiry removes a TTL-lapsed
+        stored note whether or not it currently has a live manifest owner. A
+        live(c)-filtered scan would leave an unowned TTL-lapsed chunk
+        permanently un-swept (no later GC pass reclaims it either, per this
+        method's own docstring above), the exact silent-leak shape this
+        method exists to close.
         """
         from nexus.catalog.store_hook import reap_catalog_manifest_for_chashes  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
@@ -4660,6 +4733,7 @@ class HttpVectorClient:
                         "include": ["metadatas"],
                         "limit": page_limit,
                         "offset": offset,
+                        "include_non_live": True,
                     },
                     tenant=self._tenant,
                 )

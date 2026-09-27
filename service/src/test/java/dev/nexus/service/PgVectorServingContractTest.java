@@ -387,7 +387,9 @@ class PgVectorServingContractTest {
             assertThat((List<Object>) present.get("ids"))
                 .as("include_non_live reports every stored id, owned or not, and omits an unstored one")
                 .containsExactlyInAnyOrder(C1, C2);
-            assertThat(present).as("ids only, never content").containsOnlyKeys("ids");
+            assertThat(present).as("ids and metadata, never content").containsOnlyKeys("ids", "metadatas");
+            assertThat((List<Object>) present.get("metadatas"))
+                .as("one metadata map per stored id, aligned with ids").hasSize(2);
 
             var noIds = post("/v1/vectors/store-get", TOKEN_A, Map.of(
                 "collection", COL, "include_non_live", true));
@@ -409,6 +411,77 @@ class PgVectorServingContractTest {
             .as("plain-equality where filter (the incremental-sync staleness "
                 + "check's shape) returns exactly the matching chunk")
             .containsExactly(C2);
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code /v1/vectors/get}'s
+     * {@code include_non_live} answers a physical where-scan, ignoring live(c).
+     * With C2's owner removed, a plain {@code /get} hides it and the
+     * include_non_live probe still reports it, ids+metadata only. C2 is
+     * re-owned after, so later steps see the fixture unchanged.
+     */
+    @Test
+    @Order(5)
+    void get_includeNonLive_reportsPhysicalRowsIgnoringLiveness() throws Exception {
+        unown(C2);
+        try {
+            Map<String, Object> plain = postOk("/v1/vectors/get", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py"), "limit", 10));
+            assertThat((List<Object>) plain.get("ids"))
+                .as("a plain /get hides the unowned C2 (live(c))")
+                .isEmpty();
+
+            Map<String, Object> nonLive = postOk("/v1/vectors/get", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py"), "limit", 10,
+                "include_non_live", true));
+            assertThat((List<Object>) nonLive.get("ids"))
+                .as("include_non_live reports the physically stored, unowned chunk")
+                .containsExactly(C2);
+            assertThat(nonLive)
+                .as("ids and metadatas only, never documents")
+                .containsOnlyKeys("ids", "metadatas");
+
+            var rejected = post("/v1/vectors/get", TOKEN_A, Map.of(
+                "collection", COL, "include_non_live", true, "include", List.of("documents")));
+            assertThat(rejected.statusCode())
+                .as("include_non_live cannot be combined with an include of documents")
+                .isEqualTo(400);
+        } finally {
+            own(C2);
+        }
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code /v1/vectors/get-all-metadata}
+     * gets the same {@code include_non_live} probe as {@code /get} above — the
+     * {@code nx t3 gc} orphan-candidate listing's actual route.
+     */
+    @Test
+    @Order(5)
+    void getAllMetadata_includeNonLive_reportsPhysicalRowsIgnoringLiveness() throws Exception {
+        unown(C2);
+        try {
+            Map<String, Object> plain = postOk("/v1/vectors/get-all-metadata", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py")));
+            assertThat((List<Object>) plain.get("ids"))
+                .as("a plain get-all-metadata hides the unowned C2 (live(c))")
+                .isEmpty();
+
+            Map<String, Object> nonLive = postOk("/v1/vectors/get-all-metadata", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py"), "include_non_live", true));
+            assertThat((List<Object>) nonLive.get("ids"))
+                .as("include_non_live reports the physically stored, unowned chunk")
+                .containsExactly(C2);
+            assertThat(nonLive).doesNotContainKey("documents");
+
+            var rejected = post("/v1/vectors/get-all-metadata", TOKEN_A, Map.of(
+                "collection", COL, "include_non_live", true, "include", List.of("embeddings")));
+            assertThat(rejected.statusCode())
+                .as("include_non_live cannot be combined with an include of embeddings")
+                .isEqualTo(400);
+        } finally {
+            own(C2);
+        }
     }
 
     @Test

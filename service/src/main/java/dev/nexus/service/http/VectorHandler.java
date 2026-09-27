@@ -39,10 +39,13 @@ import java.util.Map;
  *   POST /v1/vectors/search-graph-hop        combined graph-hop query (catalog BFS + rank) — RDR-156 P4
  *   POST /v1/vectors/search-aspect-scoped    combined aspect-filtered query (vector rank + document_aspects predicate) — RDR-156 D5
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
- *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check)
- *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak)
+ *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check);
+ *                                    include_non_live=true returns ids+metadata physically stored, ignoring
+ *                                    live(c) (RDR-192 Step 5 amendment, nexus-wbfpw.10)
+ *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak);
+ *                                    include_non_live=true per the same RDR-192 amendment as /get above
  *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many);
- *                                    include_non_live=true returns only the ids physically stored
+ *                                    include_non_live=true returns ids+metadatas of the rows physically stored
  *   POST /v1/vectors/get-embeddings  fetch stored vectors by IDs (migration/audit)
  *   POST /v1/vectors/store-list      list collection (MCP store_list)
  *   POST /v1/vectors/store-delete    delete by IDs (MCP store_delete)
@@ -760,14 +763,22 @@ public final class VectorHandler implements HttpHandler {
      * {
      *   "collection": "...",
      *   "where":      {"source_key": "..."},  // optional plain-equality metadata filter
-     *   "include":    ["metadatas"],    // optional, ignored — always returns ids+docs+metadatas
-     *                                   // (P4a.2 decision, recorded on nexus-1k8s1)
+     *   "include":    ["metadatas"],    // optional, ignored for content shape — always
+     *                                   // returns ids+docs+metadatas (P4a.2 decision,
+     *                                   // recorded on nexus-1k8s1); still checked against
+     *                                   // include_non_live (see below)
      *   "limit":      10,              // optional, default 10
-     *   "offset":     0               // optional, default 0
+     *   "offset":     0,              // optional, default 0
+     *   "include_non_live": false     // RDR-192 Step 5 amendment (nexus-wbfpw.10):
+     *                                   // physical where-scan, ignoring live(c) — envelope
+     *                                   // becomes {"ids":[...], "metadatas":[...]} ONLY,
+     *                                   // never documents. 400 if "include" names
+     *                                   // "documents"/"embeddings" alongside it.
      * }
      * </pre>
      *
-     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}
+     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}, or, under
+     * {@code include_non_live=true}, {"ids":[...], "metadatas":[...]} only.
      */
     private void handleGet(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -782,9 +793,43 @@ public final class VectorHandler implements HttpHandler {
         int limit                      = optInt(body, "limit", 10);
         int offset                     = optInt(body, "offset", 0);
         boolean includeSourceUri       = optBool(body, "include_source_uri", false);
+        boolean includeNonLive         = optBool(body, "include_non_live", false);
 
-        var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri);
+        if (rejectContentWithNonLive(ex, body, includeNonLive)) {
+            return;
+        }
+
+        var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri, includeNonLive);
         HttpUtil.send(ex, 200, json(result));
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code include_non_live} answers
+     * physical presence/inventory, never content — refuse a request that asks for
+     * both. Shared by {@link #handleGet} and {@link #handleGetAllMetadata}
+     * (get-all-metadata never returns documents/embeddings either way, but a
+     * caller naming them alongside {@code include_non_live} is a request this
+     * handler cannot satisfy honestly, so it is refused the same way rather than
+     * silently ignored).
+     *
+     * @return true if a 400 was sent (caller must return immediately)
+     */
+    private static boolean rejectContentWithNonLive(HttpExchange ex, Map<String, Object> body,
+                                                      boolean includeNonLive) throws IOException {
+        if (!includeNonLive) {
+            return false;
+        }
+        Object includeRaw = body.get("include");
+        if (includeRaw instanceof List<?> includeList) {
+            for (Object item : includeList) {
+                if ("documents".equals(item) || "embeddings".equals(item)) {
+                    HttpUtil.send(ex, 400, "{\"error\":\"include_non_live cannot be combined "
+                        + "with include of documents/embeddings\"}");
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -797,7 +842,10 @@ public final class VectorHandler implements HttpHandler {
      * only needs metadata) and no pagination — see
      * {@link PgVectorRepository#getAllMetadata}.
      *
-     * <p>Request: {"collection": "...", "where": {...}}  (where optional)
+     * <p>Request: {"collection": "...", "where": {...}, "include_non_live": false}
+     *   (where optional; include_non_live per the RDR-192 Step 5 amendment,
+     *   nexus-wbfpw.10 — physical scan ignoring live(c), same envelope shape
+     *   either way since this route never returns documents)
      * <p>Response 200: {"ids": [...], "metadatas": [...]}
      * <p>Response 422: row count exceeds {@link PgVectorRepository#GET_ALL_METADATA_MAX_ROWS}
      *   — caller falls back to paginated {@code /get}.
@@ -809,8 +857,13 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection         = requireString(body, "collection");
         Map<String, Object> where = optMap(body, "where");
+        boolean includeNonLive    = optBool(body, "include_non_live", false);
 
-        var result = repo.getAllMetadata(tenant, collection, where);
+        if (rejectContentWithNonLive(ex, body, includeNonLive)) {
+            return;
+        }
+
+        var result = repo.getAllMetadata(tenant, collection, where, includeNonLive);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -859,14 +912,14 @@ public final class VectorHandler implements HttpHandler {
         }
 
         // RDR-192 Step 5 amendment (nexus-wbfpw.10): include_non_live asks which ids
-        // are physically stored, ignoring live(c). Ids only, never content, and only
-        // for an explicit ids list.
+        // are physically stored, ignoring live(c). Ids and metadata, never content,
+        // and only for an explicit ids list.
         if (optBool(body, "include_non_live", false)) {
             if (ids == null) {
                 HttpUtil.send(ex, 400, "{\"error\":\"include_non_live requires ids\"}");
                 return;
             }
-            HttpUtil.send(ex, 200, json(Map.of("ids", repo.presentIds(tenant, collection, ids))));
+            HttpUtil.send(ex, 200, json(repo.presentRows(tenant, collection, ids)));
             return;
         }
 

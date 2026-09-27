@@ -137,8 +137,10 @@ def gather_titled_chunks(
     by_title: dict[str, list[ChunkRef]] = defaultdict(list)
     offset = 0
     while offset < n:
+        # Stored rows, owned or not: an orphan is by definition a chunk no
+        # manifest owns, and a live read hides it (RDR-192 Step 5, nexus-wbfpw.10).
         batch = col.get(
-            limit=_PAGE, offset=offset, include=["metadatas"],
+            limit=_PAGE, offset=offset, include=["metadatas"], include_non_live=True,
         )
         cids = batch.get("ids") or []
         metas = batch.get("metadatas") or []
@@ -685,7 +687,9 @@ def link_by_content_hash(
     unmatched = 0
     offset = 0
     while offset < n:
-        batch = col.get(limit=_PAGE, offset=offset, include=["metadatas"])
+        batch = col.get(
+            limit=_PAGE, offset=offset, include=["metadatas"], include_non_live=True,
+        )
         cids = batch.get("ids") or []
         metas = batch.get("metadatas") or []
         for cid, meta in zip(cids, metas):

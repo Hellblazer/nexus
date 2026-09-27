@@ -367,13 +367,20 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     for row, cols in observed.items():
         assert set(cols) == set(_PREDICATES), f"{row} is missing a predicate column: {set(_PREDICATES) - set(cols)}"
 
-    # TODAY's verdict, pinned by a real run against the dev jar
-    # (2026-09-26). Rationale per row, matching the RDR-192 predicate
-    # families (T2 nexus/rdr-192-reverification-2026-09-26):
+    # TODAY's verdict, pinned by a real run against the dev jar. Rationale
+    # per row, matching the RDR-192 predicate families (T2 nexus/rdr-192-
+    # reverification-2026-09-26).
     #
-    # R1 manifest-less -> visible under predicate 1 (own-collection join
-    #    finds no manifest row at all, so nothing hides it); orphaned by
-    #    both client guards and t3 gc (nothing protects it anywhere).
+    # RDR-192 Step 5 (nexus-wbfpw.10, migrated onto live(c)): search/get now
+    # AGREE with orphaned_chashes on every manifest-less-in-this-collection
+    # row (R1/R4/R6/R8) -- live(c) requires a live own-collection manifest
+    # owner, so a chunk with none is HIDDEN from content reads too, not just
+    # flagged deletable by the union guard. Only R3 (a tombstoned owner)
+    # still disagrees across predicates -- see its own rationale below.
+    #
+    # R1 manifest-less -> HIDDEN under predicate 1/live(c) (no live
+    #    own-collection manifest owner at all); orphaned by both client
+    #    guards and t3 gc (nothing protects it anywhere).
     # R2 a live own-collection owner -> visible, protected everywhere.
     # R3 own-collection manifest row(s) all point at a TOMBSTONED owner ->
     #    HIDDEN under predicate 1 (search/get correctly treat it as dead),
@@ -402,12 +409,13 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     # R8 the legacy shape: no manifest row anywhere, but a live document's
     #    meta.doc_id names this chash -> live_note_chashes protects it
     #    (True) even though it is otherwise indistinguishable from R1/R4/R6
-    #    to every OTHER predicate; search/get and orphaned_chashes read it
-    #    exactly like R1 (manifest-less-is-vacuously-live / no protective
-    #    reference respectively) since neither of those consult
-    #    live_note_chashes on its own -- t3 gc DOES consult it (t3.py
-    #    unions referenced with live_note_chashes before deciding
-    #    candidacy), so R8 is the one row where live_note_chashes=True
+    #    to every OTHER predicate; search/get and orphaned_chashes now read
+    #    it exactly like R1 (HIDDEN by live(c) / no protective reference
+    #    respectively) since neither of those consult live_note_chashes on
+    #    its own -- t3 gc DOES consult it (t3.py unions referenced with
+    #    live_note_chashes before deciding candidacy, and its own listing
+    #    is now the physical, non-live-filtered scan per the RDR-192
+    #    amendment), so R8 is the one row where live_note_chashes=True
     #    changes t3_gc_candidate from what R1/R4/R6's shape would
     #    otherwise produce.
     #
@@ -431,14 +439,14 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     #      the ONE row where the two guards disagree and the notes guard's
     #      own composition, not the union guard alone, decides the outcome.
     EXPECTED = {
-        "R1": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
+        "R1": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
         "R2": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "protect"},
         "R3": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "delete"},
-        "R4": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
+        "R4": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
         "R5": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "protect"},
-        "R6": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
+        "R6": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
         "R7": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": True, "t3_gc_candidate": False, "rollback": "protect"},
-        "R8": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": True, "t3_gc_candidate": False, "rollback": "protect"},
+        "R8": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": True, "t3_gc_candidate": False, "rollback": "protect"},
     }
     assert observed == EXPECTED, f"today's verdict changed:\n  observed={observed}\n  expected={EXPECTED}"
 

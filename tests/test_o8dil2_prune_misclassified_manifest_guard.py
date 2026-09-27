@@ -58,7 +58,11 @@ class _FakeCol:
         self.deleted: list[str] = []
         self.delete_raises: Exception | None = None
 
-    def get(self, ids=None, include=None, where=None, limit=None, offset=None):
+    def get(self, ids=None, include=None, where=None, limit=None, offset=None,
+            include_non_live=False):
+        # include_non_live (nexus-wbfpw.10, RDR-192 Step 5 amendment): a
+        # no-op here -- this fake models physical storage only, with no
+        # liveness concept to ignore.
         if ids is not None:
             return {"ids": [i for i in ids if i in self.ids]}
         if where is not None:

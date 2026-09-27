@@ -854,9 +854,16 @@ a stored shared chunk as absent. So:
   `stored_count` counts every stored chunk. Inventory readers decide
   emptiness on `stored_count`, routing readers use the live count, and the
   ghost sweep still marks a collection dormant only when it has no row.
-- `store-get` with `include_non_live` returns the ids physically stored,
-  ids only. `existing_ids` sends it, and `put_note_pieces` uses
-  `existing_ids`.
+- `store-get` with `include_non_live` returns the rows physically stored,
+  ids and metadata, never content. `existing_ids` sends it, and
+  `put_note_pieces` uses `existing_ids`.
+- Maintenance paths enumerate stored chunks the same way (found after the
+  first push by the integration-marked tests): `/v1/vectors/get` and
+  `get-all-metadata` accept `include_non_live`, returning ids and metadata
+  over every stored row. Manifest heal and `nx catalog reconcile`,
+  `nx t3 gc`'s candidate listing, the misclassified prune, `expire`, the
+  forced orphan cleanup and the manifest backfill use it, because each
+  exists to handle chunks that have no live owner.
 
 An old client against this engine loses the presence probe and the
 emptiness check, so the pairing is not additive: the client release carrying

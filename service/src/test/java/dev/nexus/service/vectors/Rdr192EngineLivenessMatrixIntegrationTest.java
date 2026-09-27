@@ -455,11 +455,11 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertThat(inB).as("R9 / live_chunks in B").contains(fx.r9());
     }
 
-    // ── presentIds: physical presence, deliberately NOT live(c) ─────────────
+    // ── presentRows: physical presence, deliberately NOT live(c) ────────────
 
     /**
      * RDR-192 Step 5 amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory
-     * from liveness): {@link PgVectorRepository#presentIds} answers "which of these
+     * from liveness): {@link PgVectorRepository#presentRows} answers "which of these
      * chashes are physically stored in this collection", ignoring ownership, for
      * callers whose question is existence, not visibility (existing_ids: catalog
      * verify, migration ETL, skip-existing, the put_note_pieces delete guard). Every
@@ -467,7 +467,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * live(c) hides; a chash stored only in B does not.
      */
     @Test
-    void presentIds_reportsPhysicalPresence_regardlessOfLiveness() throws Exception {
+    void presentRows_reportsPhysicalPresence_regardlessOfLiveness() throws Exception {
         String tenant = "wbfpw1-ro";
         Fixture fx = seedLivenessFixture(tenant);
         String onlyInB = ch(tenant + "-only-in-b");
@@ -475,12 +475,13 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
 
         List<String> asked = new java.util.ArrayList<>(fx.allChashes());
         asked.add(onlyInB);
-        List<String> present = vecRepo.presentIds(tenant, COLLECTION_A, asked);
+        @SuppressWarnings("unchecked")
+        List<String> present = (List<String>) vecRepo.presentRows(tenant, COLLECTION_A, asked).get("ids");
 
         assertThat(present).as("every fixture chash is physically in A, live or not")
             .containsExactlyInAnyOrderElementsOf(fx.allChashes());
         assertThat(present).as("a chash stored only in B is not present in A").doesNotContain(onlyInB);
-        assertThat(vecRepo.presentIds(tenant, COLLECTION_A, List.of())).isEmpty();
+        assertThat((List<?>) vecRepo.presentRows(tenant, COLLECTION_A, List.of()).get("ids")).isEmpty();
     }
 
     // ── P1h: hybridSearch() visibility (text_gated_search_*_<dim>) ───────────

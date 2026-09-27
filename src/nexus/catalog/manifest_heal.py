@@ -227,9 +227,15 @@ def _heal_collections(
         for i in range(0, len(hashes), IN_BATCH):
             batch = hashes[i:i + IN_BATCH]
             try:
+                # nexus-wbfpw.10 (RDR-192 Step 5 amendment): a manifest-less
+                # chunk (the unmanifested-gap shape this heal exists to
+                # rebuild) has no live own-collection manifest owner --
+                # live(c) hides exactly the population being healed unless
+                # this asks for the physical scan.
                 fetched = _paginated_get(
                     col, include=["metadatas"],
                     where={"content_hash": {"$in": batch}},
+                    include_non_live=True,
                 )
             except Exception as exc:  # noqa: BLE001 — boundary catch; parity with the old per-doc failure semantics
                 _log.warning(

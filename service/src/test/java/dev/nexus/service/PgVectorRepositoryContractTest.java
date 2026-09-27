@@ -142,9 +142,11 @@ class PgVectorRepositoryContractTest {
                 "code__exactvec__voyage-code-3__v1", "code__existsk__voyage-code-3__v1",
                 "code__getallmeta__voyage-code-3__v1", "code__getallmetaempty__voyage-code-3__v1",
                 "code__getallmetatenant__voyage-code-3__v1", "code__getallmetawhere__voyage-code-3__v1",
+                "code__getallmetanonlive__voyage-code-3__v1",
                 "code__getbyids__voyage-code-3__v1", "code__getoffset__voyage-code-3__v1",
                 "code__getrls__voyage-code-3__v1", "code__getwheregte__voyage-code-3__v1",
-                "code__getwherene__voyage-code-3__v1", "code__listpage__voyage-code-3__v1",
+                "code__getwherene__voyage-code-3__v1", "code__getwherenonlive__voyage-code-3__v1",
+                "code__listpage__voyage-code-3__v1",
                 "code__listrls__voyage-code-3__v1", "code__manifest__voyage-code-3__v1",
                 "code__manifestbroken__voyage-code-3__v1", "code__manifestrls__voyage-code-3__v1",
                 "code__manifestshared__voyage-code-3__v1",
@@ -875,6 +877,76 @@ class PgVectorRepositoryContractTest {
         assertThat(ids)
             .as("getWhere {kind:{$ne:b}} returns only the kind=a chunk")
             .containsExactly("6064e40df1d4cc70c0a6a080696aa20b39ec6a2a59055c01759c40a00efdefb4");
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code includeNonLive=true}
+     * answers "what is physically stored", ignoring {@code liveChunksCondition}
+     * entirely -- a plain getWhere (includeNonLive=false) hides the unowned
+     * chunk (live(c)), the physical scan reports it, and the envelope carries
+     * ids+metadata ONLY (never documents).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void getWhere_includeNonLive_returnsUnownedChunk_idsAndMetadataOnly() {
+        String col = "code__getwherenonlive__voyage-code-3__v1";
+        embedder1024.register("gwnl a", 1.0f, 0.0f);
+        embedder1024.register("gwnl b", 0.8f, 0.6f);
+        String ownedId = "6a" + "0".repeat(62);
+        String unownedId = "7a" + "0".repeat(62);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(ownedId, unownedId),
+            List.of("gwnl a", "gwnl b"),
+            List.of(Map.of("kind", "a"), Map.of("kind", "a")));
+        own(TENANT_A, col, ownedId);
+        // unownedId deliberately left with no manifest owner.
+
+        Map<String, Object> plain = repo1024.getWhere(
+            TENANT_A, col, Map.of("kind", "a"), 100, 0);
+        assertThat((List<String>) plain.get("ids"))
+            .as("a plain getWhere hides the unowned chunk (live(c))")
+            .containsExactly(ownedId);
+
+        Map<String, Object> nonLive = repo1024.getWhere(
+            TENANT_A, col, Map.of("kind", "a"), 100, 0, false, true);
+        assertThat((List<String>) nonLive.get("ids"))
+            .as("includeNonLive reports both chunks, owned or not")
+            .containsExactlyInAnyOrder(ownedId, unownedId);
+        assertThat(nonLive)
+            .as("ids and metadatas only, never documents")
+            .containsOnlyKeys("ids", "metadatas");
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10), {@code getAllMetadata} sibling
+     * of the {@code getWhere} case above: {@code nx t3 gc}'s orphan-candidate
+     * listing and {@code --force}'s T3 orphan cleanup both read through this
+     * method and must see a chunk with no live own-collection manifest owner.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void getAllMetadata_includeNonLive_returnsUnownedChunk() {
+        String col = "code__getallmetanonlive__voyage-code-3__v1";
+        embedder1024.register("gamnl a", 1.0f, 0.0f);
+        embedder1024.register("gamnl b", 0.8f, 0.6f);
+        String ownedId = "8a" + "0".repeat(62);
+        String unownedId = "9a" + "0".repeat(62);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(ownedId, unownedId),
+            List.of("gamnl a", "gamnl b"),
+            List.of(Map.of("chunk_text_hash", ownedId), Map.of("chunk_text_hash", unownedId)));
+        own(TENANT_A, col, ownedId);
+
+        Map<String, Object> plain = repo1024.getAllMetadata(TENANT_A, col, null);
+        assertThat((List<String>) plain.get("ids"))
+            .as("a plain getAllMetadata hides the unowned chunk (live(c))")
+            .containsExactly(ownedId);
+
+        Map<String, Object> nonLive = repo1024.getAllMetadata(TENANT_A, col, null, true);
+        assertThat((List<String>) nonLive.get("ids"))
+            .as("includeNonLive reports both chunks, owned or not")
+            .containsExactlyInAnyOrder(ownedId, unownedId);
+        assertThat(nonLive).doesNotContainKey("documents");
     }
 
     @Test

@@ -410,11 +410,16 @@ def _fetch_chunks_by_key(
     chunks: list[dict] = []
     offset = 0
     while True:
+        # nexus-wbfpw.10 (RDR-192 Step 5 amendment): the whole point of this
+        # backfill is manifesting a chunk that has none yet -- by definition
+        # it has no live own-collection manifest owner, so live(c) hides it
+        # unless this asks for the physical scan.
         result = col.get(
             where={where_key: doc_id},
             limit=_PAGE_SIZE,
             offset=offset,
             include=["metadatas"],
+            include_non_live=True,
         )
         page_ids: list[str] = result.get("ids") or []
         page_metas: list[dict] = result.get("metadatas") or []
@@ -462,6 +467,10 @@ def _fetch_chunk_by_id(
 ) -> dict | None:
     """Fetch ONE T3 chunk by its own id (nexus-wbfpw.7 REVERSE path).
 
+    Reads stored rows whether or not they have a live owner
+    (``include_non_live``, RDR-192 Step 5 amendment, nexus-wbfpw.10): a
+    reverse candidate is by definition a chunk no manifest owns yet.
+
     Unlike :func:`_fetch_chunks_by_key`, this never filters by a forward
     metadata key -- a reverse-owned chunk by definition carries no forward
     pointer to *doc_id* (that absence, or a forward pointer to a tombstoned
@@ -495,7 +504,7 @@ def _fetch_chunk_by_id(
         cid = chash
         meta = cached_meta
     else:
-        result = col.get(ids=[chash], include=["metadatas"])
+        result = col.get(ids=[chash], include=["metadatas"], include_non_live=True)
         ids: list[str] = result.get("ids") or []
         if not ids:
             return None
@@ -532,6 +541,9 @@ def _forward_hints_for_chashes(
     fix-round-1, T2 nexus/review-wbfpw7-code Important -- replaces an O(N)
     per-chash ``col.get`` loop with one call).
 
+    Reads stored rows whether or not they have a live owner, like
+    :func:`_fetch_chunk_by_id`.
+
     Returns ``(forward_hint_by_chash, raw_meta_by_chash)``:
       - ``forward_hint_by_chash``: the RAW forward-pointer value
         (``catalog_doc_id``, falling back to ``doc_id``) stamped on each
@@ -554,9 +566,16 @@ def _forward_hints_for_chashes(
     """
     if not chashes:
         return {}, {}
-    result = col.get(ids=list(chashes), include=["metadatas"])
+    result = col.get(ids=list(chashes), include=["metadatas"], include_non_live=True)
     ids: list[str] = result.get("ids") or []
     metas: list[dict] = result.get("metadatas") or []
+    if len(metas) != len(ids):
+        # zip would truncate silently and drop every reverse candidate.
+        raise RuntimeError(
+            f"manifest backfill: the engine returned {len(ids)} ids but "
+            f"{len(metas)} metadatas for a physical read of {len(chashes)} "
+            "chashes; refusing to guess which candidates are missing"
+        )
     forward_hints: dict[str, str] = {}
     raw_meta_by_chash: dict[str, dict] = {}
     for cid, meta in zip(ids, metas):

@@ -3234,6 +3234,7 @@ def _paginated_get(
     where: dict | None = None,
     *,
     on_page: Callable[[int, int], None] | None = None,
+    include_non_live: bool = False,
 ) -> dict:
     """Fetch all matching chunks from *col* by paginating in _CHROMA_PAGE_SIZE batches.
 
@@ -3245,6 +3246,15 @@ def _paginated_get(
     was previously a black hole (427.5s unbroken on a 96-page collection,
     nexus-vatx) with no way for a caller to surface real progress.
     ``page_num`` is 1-based; ``scanned_so_far`` is the cumulative id count.
+
+    ``include_non_live`` (RDR-192 Step 5 amendment, nexus-wbfpw.10): forwarded
+    to ``col.get(...)`` ONLY when true, so a caller that never asks for it
+    (every content read) sees zero change and a backend whose ``get()`` has
+    no such parameter is never handed an unexpected keyword. The two
+    maintenance callers that need it (the manifest self-heal / catalog
+    reconcile fetch, the legacy doc_id-keyed misclassified-chunk prune) pass
+    it explicitly because a live(c)-filtered scan structurally cannot see
+    the manifest-less/wrong-owner chunks they exist to find.
 
     Returns a dict with ``"ids"`` and, when ``"metadatas"`` is in *include*,
     a ``"metadatas"`` key — matching the shape returned by col.get().
@@ -3260,6 +3270,8 @@ def _paginated_get(
         kwargs: dict = {"include": include, "limit": _CHROMA_PAGE_SIZE, "offset": offset}
         if where is not None:
             kwargs["where"] = where
+        if include_non_live:
+            kwargs["include_non_live"] = True
         batch = _vector_with_retry(col.get, **kwargs)
         batch_ids: list[str] = batch["ids"] or []
         all_ids.extend(batch_ids)
@@ -3283,6 +3295,31 @@ def _paginated_get(
 # the full rationale. _paginated_get (above) stays — it has other,
 # unrelated callers.
 
+
+def _present_ids(col: object, ids: list[str]) -> set[str]:
+    """The subset of *ids* physically present in *col*, ignoring liveness
+    where the backend distinguishes it (RDR-192 Step 5 amendment,
+    nexus-wbfpw.10): the service-mode collection stub's live(c)-filtered
+    ``get()`` hides a chunk with no live own-collection manifest owner —
+    exactly the misclassified-copy shape ``_prune_misclassified_in_collection``
+    exists to find in the WRONG collection. ``existing_ids``, when the
+    backend is the real service-mode stub, answers physical presence
+    regardless of ownership; every other backend (the in-memory test
+    double, a ``MagicMock``, or any other duck-typed fake with no liveness
+    concept at all) falls back to the historical ``get(ids=..., include=[])``
+    presence probe unchanged.
+
+    Deliberately an ``isinstance`` check, not ``hasattr``/``getattr``:
+    ``MagicMock()`` auto-creates ANY attribute access (including
+    ``existing_ids``) as a truthy child mock, so a duck-typed presence
+    check would silently route every MagicMock-backed test onto a branch
+    that then fails trying to ``set()`` an un-iterable mock return value.
+    """
+    from nexus.db.http_vector_client import _ServiceCollectionStub  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+
+    if isinstance(col, _ServiceCollectionStub):
+        return set(col.existing_ids(ids))
+    return set(col.get(ids=ids, include=[]).get("ids") or [])
 
 
 def _batched_delete(col: object, ids: list[str]) -> int:
@@ -3606,14 +3643,24 @@ def _prune_misclassified_in_collection(
                     if row.chash:
                         chash_to_docs.setdefault(row.chash, set()).add(did)
         all_natural_ids: list[str] = list(chash_to_docs.keys())
-        # Batched ``col.get`` to fetch the present subset, then batched
-        # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
+        # Batched presence probe, then batched delete. _CHROMA_PAGE_SIZE
+        # caps the ids list per call.
         for i in range(0, len(all_natural_ids), _CHROMA_PAGE_SIZE):
             batch_ids = all_natural_ids[i : i + _CHROMA_PAGE_SIZE]
             if not batch_ids:
                 continue
             try:
-                present = col.get(ids=batch_ids, include=[])
+                # nexus-wbfpw.10 (RDR-192 Step 5 amendment): the whole point
+                # of this manifest-chash path is finding a chash physically
+                # present in the WRONG collection, which by definition has
+                # no live own-collection manifest owner there -- a
+                # live(c)-filtered col.get(ids=...) can never see it.
+                # existing_ids(), when the backend supports it, answers
+                # physical presence regardless of ownership; a backend with
+                # no liveness concept (the in-memory test double) has no
+                # such method and falls back to the historical
+                # col.get(ids=..., include=[]) presence probe unchanged.
+                present_ids = list(_present_ids(col, batch_ids))
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # nexus-8g79.4: same class — log so a recurring chroma
                 # outage during prune doesn't hide silently behind a
@@ -3626,7 +3673,6 @@ def _prune_misclassified_in_collection(
                     exc_info=True,
                 )
                 continue
-            present_ids = present.get("ids") or []
             if present_ids:
                 n = _guarded_delete(list(present_ids))
                 pruned += n
@@ -3652,8 +3698,13 @@ def _prune_misclassified_in_collection(
             if not batch:
                 continue
             try:
+                # nexus-wbfpw.10 (RDR-192 Step 5 amendment): this legacy
+                # doc_id-keyed copy, like the manifest-chash path above, is
+                # by definition a chunk with no live own-collection manifest
+                # owner in the WRONG collection -- live(c) hides it.
                 existing = _paginated_get(
                     col, include=[], where={"doc_id": {"$in": batch}},
+                    include_non_live=True,
                 )
             except VectorServiceError as exc:
                 # nexus-ou4tb walk: a degraded service is NOT "no
