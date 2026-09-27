@@ -199,22 +199,94 @@ class TokenScopeResolutionTest {
     }
 
     @Test
-    void rotate_mixedScopes_carriesOldestDeterministically() throws Exception {
-        // Gate-A review: a tenant holding live tokens of DIFFERENT scopes must
-        // rotate deterministically — the replacement carries the OLDEST live
-        // row's scope (the tenant's original credential), never an arbitrary one.
+    void rotate_mixedScopes_withNoExplicitScope_refuses() throws Exception {
+        // nexus-r3ur5 critique: silently collapsing a mixed-scope tenant to the
+        // oldest row's scope could grace-expire a narrow-scope credential (e.g.
+        // board-ci) and replace it with a full tenant-scope token. Refuse instead,
+        // naming both scopes, and touch NOTHING — no expiry, no new token.
         TokenStore.IssuedToken first =
             store.issueToken("rotate-mixed-tenant", "original", null, TokenStore.SCOPE_MINT);
-        // Ensure a strictly later created_at for the second row.
-        Thread.sleep(5);
         TokenStore.IssuedToken second =
             store.issueToken("rotate-mixed-tenant", "later", null, TokenStore.SCOPE_TENANT);
-        TokenStore.RotationResult rotated = store.rotateTokens("rotate-mixed-tenant", 60);
-        assertThat(rotated.expiredHashes())
-            .containsExactlyInAnyOrder(first.tokenHash(), second.tokenHash());
-        assertThat(scopeOfHash(rotated.issued().tokenHash()))
-            .as("mixed-scope rotate carries the OLDEST live row's scope")
-            .isEqualTo("mint");
+        assertThatThrownBy(() -> store.rotateTokens("rotate-mixed-tenant", 60))
+            .isInstanceOf(TokenStore.MixedScopeRotationRefused.class)
+            .satisfies(e -> assertThat(((TokenStore.MixedScopeRotationRefused) e).scopes())
+                .containsExactlyInAnyOrder("mint", "tenant"));
+        // Nothing expired, nothing minted.
+        assertThat(scopeOfHash(first.tokenHash())).isEqualTo("mint");
+        assertThat(scopeOfHash(second.tokenHash())).isEqualTo("tenant");
+        try (Connection su = pg.createConnection("")) {
+            var stillLive = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.EXPIRES_AT)
+                .from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.in(first.tokenHash(), second.tokenHash()))
+                .fetch(SERVICE_TOKENS.EXPIRES_AT);
+            assertThat(stillLive).as("a refused rotate must not grace-expire anything")
+                .allMatch(exp -> exp == null);
+        }
+    }
+
+    @Test
+    void rotate_withExplicitScope_rotatesOnlyThatScope() throws Exception {
+        // nexus-r3ur5: a tenant holding BOTH a tenant-scope and a board-ci-scope
+        // token can rotate one without touching the other.
+        TokenStore.IssuedToken tenantTok =
+            store.issueToken("rotate-scoped-tenant", "t", null, TokenStore.SCOPE_TENANT);
+        TokenStore.IssuedToken boardCiTok =
+            store.issueToken("rotate-scoped-tenant", "b", null, TokenStore.SCOPE_BOARD_CI);
+
+        TokenStore.RotationResult rotated =
+            store.rotateTokens("rotate-scoped-tenant", 60, TokenStore.SCOPE_BOARD_CI);
+
+        assertThat(rotated.scope()).isEqualTo("board-ci");
+        assertThat(rotated.expiredHashes()).containsExactly(boardCiTok.tokenHash());
+        assertThat(scopeOfHash(rotated.issued().tokenHash())).isEqualTo("board-ci");
+        // The tenant-scope token is untouched: still live, no expiry set.
+        try (Connection su = pg.createConnection("")) {
+            var row = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
+                .from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(tenantTok.tokenHash()))
+                .fetchOne();
+            assertThat(row).isNotNull();
+            assertThat(row.value1()).as("tenant-scope token must not be grace-expired").isNull();
+            assertThat(row.value2()).as("tenant-scope token must not be revoked").isNull();
+        }
+    }
+
+    @Test
+    void rotate_withExplicitScope_noLiveRowsOfThatScope_mintsFresh() throws Exception {
+        // A scope the tenant holds no live rows of yet: nothing to expire, but the
+        // rotation still mints a fresh token of the requested scope.
+        TokenStore.RotationResult rotated =
+            store.rotateTokens("rotate-scope-cold-start", 60, TokenStore.SCOPE_BOARD_CI);
+        assertThat(rotated.expiredHashes()).isEmpty();
+        assertThat(rotated.scope()).isEqualTo("board-ci");
+        assertThat(scopeOfHash(rotated.issued().tokenHash())).isEqualTo("board-ci");
+    }
+
+    @Test
+    void rotate_rejectsNonRotatableScope() {
+        // 'data' and 'root' are never minted through rotation, same vocabulary as
+        // the handler's issuable-scope gate.
+        assertThatThrownBy(() -> store.rotateTokens("rotate-bad-scope", 60, TokenStore.SCOPE_DATA))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scope");
+        assertThatThrownBy(() -> store.rotateTokens("rotate-bad-scope", 60, TokenStore.SCOPE_ROOT))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scope");
+    }
+
+    @Test
+    void rotate_singleScopeTenant_unaffectedByExplicitScopeSupport() throws Exception {
+        // Existing single-scope behavior stays green with no 'scope' argument at all
+        // (the two-arg overload), even though rotation now supports one.
+        TokenStore.IssuedToken original =
+            store.issueToken("rotate-single-scope-tenant", "edge-cred", null, TokenStore.SCOPE_MINT);
+        TokenStore.RotationResult rotated = store.rotateTokens("rotate-single-scope-tenant", 60);
+        assertThat(rotated.scope()).isEqualTo("mint");
+        assertThat(rotated.expiredHashes()).containsExactly(original.tokenHash());
+        assertThat(scopeOfHash(rotated.issued().tokenHash())).isEqualTo("mint");
     }
 
     // ── listTokens carries scope ─────────────────────────────────────────────

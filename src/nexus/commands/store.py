@@ -127,8 +127,13 @@ def put_cmd(
         _raise_if_oversized(content, doc_id=chunk_chroma_id, collection=col_name)
     except PutOversizedError as exc:
         raise click.ClickException(str(exc)) from exc
+    # nexus-k54nk fix-round 1: captures the document's pre-call
+    # meta.doc_id when the hook reconciles this call onto an existing
+    # row — see rollback_uncataloged_chunk_write's SELF-EXCLUSION guard.
+    pre_call_doc_id_out: dict[str, str] = {}
     catalog_doc_id, catalog_row_minted = _catalog_store_hook_tracked(
         title=title, doc_id=chunk_chroma_id, collection_name=col_name,
+        pre_call_doc_id_out=pre_call_doc_id_out,
     )
 
     # nexus-cotmr / nexus-tafjk: producer coverage gap — CLI `nx store
@@ -323,6 +328,7 @@ def put_cmd(
             )
         outcome = _rollback_uncataloged_chunk_write(
             db, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+            pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
         )
         raise click.ClickException(
             f"could not catalog {source} in {col_name}: {reason}. "

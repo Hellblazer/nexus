@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.63.0] - 2026-09-26
+
+Pairs with engine-service-v0.1.134, already deployed. That engine refuses a change old clients could make: rotating a tenant that holds tokens of more than one scope, without naming a scope, now returns 409 instead of silently collapsing them. Its deploy was armed with conexus.
+
+### Added
+
+- **A `board-ci` token scope** (nexus-r3ur5). `nx service token issue --scope board-ci` issues a credential that can only post to the `board/ci/<topic>` tuple topic, for CI jobs and the RDR-220 webhook adapter. Every other route refuses it.
+- **`nx t3 census-manifest-less`** (RDR-192 Step 2, nexus-wbfpw.5) counts T3 chunks that no catalog manifest references, per collection, as one JSON document.
+
+### Changed
+
+- **`nx service token rotate --scope`** rotates only that scope's tokens. Without `--scope`, rotating a tenant whose live tokens span more than one scope is refused with a message naming the scopes; before, the replacement silently took the oldest token's scope. Issue and rotate now print the token's scope.
+- **A develop CI run that a newer push cancelled posts `cancelled` on `board/ci-develop`**, not `failure` (nexus-dotwy).
+- **`scripts/ci_status.py` ranks a job's state before its timestamp** within one attempt, so a late redelivered `queued` event never hides a completed job (RDR-220).
+
+### Fixed
+
+- **`nx collection rewrite-metadata` removes legacy keys again** (nexus-w94eo). Under the engine's metadata merge it could no longer drop a key, so it reported rows as updated on every run. It now names the keys to drop, and never drops `bib_*` fields or `content_type`.
+- **A `--force` reindex through the prose and code fallback upload clears stale metadata keys** (nexus-w94eo), as the main indexing path already did.
+- **A failed `store_put` rollback keeps chunks a live note still references and restores the chunk's previous document stamp** (nexus-k54nk), instead of deleting shared content or leaving the failed call's stamp behind.
+
 ## [7.62.0] - 2026-09-26
 
 Pairs with engine-service-v0.1.133, which is already deployed; its changes are additive for older clients. This release carries the client half of the metadata merge that engine ships.

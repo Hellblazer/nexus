@@ -30,7 +30,9 @@ import java.util.Map;
  * <ul>
  *   <li>{@code /v1/tenants/create}        {name}                     → mint a tenant's first token</li>
  *   <li>{@code /v1/service-tokens/issue}  {tenant,label?,ttl_seconds?} → issue a bound token</li>
- *   <li>{@code /v1/service-tokens/rotate} {tenant,grace_seconds?}     → zero-downtime overlap rotate</li>
+ *   <li>{@code /v1/service-tokens/rotate} {tenant,grace_seconds?,scope?} → zero-downtime overlap rotate
+ *       (nexus-r3ur5: {@code scope} rotates only that scope; omitted, refuses 409 on a
+ *       mixed-scope tenant instead of silently collapsing to one scope)</li>
  *   <li>{@code /v1/service-tokens/revoke} {selector}                  → revoke + invalidate cache</li>
  *   <li>{@code /v1/service-tokens/list}   {tenant?}                   → list rows (never plaintext)</li>
  * </ul>
@@ -98,10 +100,13 @@ public final class TokenAdminHandler implements HttpHandler {
         // first; this handler-level guard is defense-in-depth layer 2 AND the
         // primary enforcement for data tokens (which legitimately pass the filter
         // for data routes but must never administer credentials — a leaked data
-        // token stays "one tenant's data, one TTL window").
+        // token stays "one tenant's data, one TTL window"). nexus-r3ur5 extends
+        // this to board-ci: a board-ci token must not ISSUE anything, including
+        // another board-ci token — its AuthFilter choke point already fires first
+        // here too, same defense-in-depth shape as mint.
         String callerScope = RequestContext.scope();
         if (TokenStore.SCOPE_MINT.equals(callerScope) || TokenStore.SCOPE_MINT_LOCKED.equals(callerScope)
-                || TokenStore.SCOPE_DATA.equals(callerScope)) {
+                || TokenStore.SCOPE_DATA.equals(callerScope) || TokenStore.SCOPE_BOARD_CI.equals(callerScope)) {
             log.debug("event=token_admin_denied reason=scope_forbidden_on_admin_surface scope={}",
                       callerScope);
             HttpUtil.send(exchange, 403, json(Map.of(
@@ -153,28 +158,26 @@ public final class TokenAdminHandler implements HttpHandler {
         }
         String label = optString(body, "label");
         Long ttl = optLong(body, "ttl_seconds");
-        // nexus-868dq: optional scope. Only 'tenant' (the default) and 'mint' are
-        // issuable here — 'data' tokens are minted exclusively by
-        // /v1/data-tokens/mint and 'root' is never issuable. Mint issuance is
-        // privilege escalation (the credential can mint data tokens for ANY
-        // tenant), so it is OPERATOR-ONLY even for the caller's own tenant.
+        // nexus-868dq: optional scope. 'tenant' (the default), 'mint', 'mint-locked'
+        // and 'board-ci' (nexus-r3ur5) are issuable here — 'data' tokens are minted
+        // exclusively by /v1/data-tokens/mint and 'root' is never issuable. Mint
+        // issuance is privilege escalation (the credential can mint data tokens for
+        // ANY tenant), so it is OPERATOR-ONLY even for the caller's own tenant.
+        // board-ci carries NO such escalation — it is confined to writing one
+        // template — so it follows the plain 'tenant' authorization model instead:
+        // the authorizedForTenant() check above already narrows a non-operator to
+        // issuing for its OWN tenant, same as issuing an ordinary tenant token.
         String scope = optString(body, "scope");
         if (scope == null || scope.isBlank()) {
             scope = TokenStore.SCOPE_TENANT;
         }
-        if (!TokenStore.SCOPE_TENANT.equals(scope) && !TokenStore.SCOPE_MINT.equals(scope)
-                && !TokenStore.SCOPE_MINT_LOCKED.equals(scope)) {
-            throw new IllegalArgumentException(
-                "invalid scope for issue: '" + scope
-                    + "' (only 'tenant', 'mint', and 'mint-locked' are issuable)");
-        }
-        if ((TokenStore.SCOPE_MINT.equals(scope) || TokenStore.SCOPE_MINT_LOCKED.equals(scope))
-                && !requireOperator(ex)) {
+        if (!validateIssuableScope(ex, scope)) {
             return;
         }
         TokenStore.IssuedToken issued = store.issueToken(tenant, label, ttl, scope);
         HttpUtil.send(ex, 200, json(new LinkedHashMap<>(Map.of(
-            "tenant", tenant, "token", issued.rawToken(), "token_hash", issued.tokenHash()))));
+            "tenant", tenant, "token", issued.rawToken(), "token_hash", issued.tokenHash(),
+            "scope", scope))));
     }
 
     private void handleRotate(HttpExchange ex) throws IOException {
@@ -184,14 +187,53 @@ public final class TokenAdminHandler implements HttpHandler {
             return;
         }
         Long grace = optLong(body, "grace_seconds");
-        TokenStore.RotationResult result =
-            store.rotateTokens(tenant, grace == null ? DEFAULT_GRACE_SECONDS : grace);
+        // nexus-r3ur5: optional scope, same issuable vocabulary and operator gate as
+        // issue. NULL means auto-detect — the store rotates the tenant's single live
+        // scope, or REFUSES (409) a mixed-scope tenant instead of silently collapsing
+        // to one row's scope (the nexus-r3ur5 critique this closes).
+        String scope = optString(body, "scope");
+        if (scope != null && !validateIssuableScope(ex, scope)) {
+            return;
+        }
+        TokenStore.RotationResult result;
+        try {
+            result = store.rotateTokens(tenant, grace == null ? DEFAULT_GRACE_SECONDS : grace, scope);
+        } catch (TokenStore.MixedScopeRotationRefused e) {
+            HttpUtil.send(ex, 409, json(Map.of(
+                "error", "tenant '" + tenant + "' holds live tokens of multiple scopes "
+                    + e.scopes() + "; pass 'scope' to rotate one scope at a time",
+                "scopes", e.scopes())));
+            return;
+        }
         // Invalidate the grace-expiring tokens so their cache entries re-read the new
         // deadline: they stay valid through the grace window then expire precisely at it.
         result.expiredHashes().forEach(cache::invalidate);
         TokenStore.IssuedToken issued = result.issued();
         HttpUtil.send(ex, 200, json(new LinkedHashMap<>(Map.of(
-            "tenant", tenant, "token", issued.rawToken(), "token_hash", issued.tokenHash()))));
+            "tenant", tenant, "token", issued.rawToken(), "token_hash", issued.tokenHash(),
+            "scope", result.scope()))));
+    }
+
+    /**
+     * Validate {@code scope} against the issuable vocabulary ('tenant', 'mint',
+     * 'mint-locked', 'board-ci' — never 'data' or 'root'), and gate the
+     * privilege-escalating scopes ('mint', 'mint-locked') to the operator. Shared by
+     * issue and rotate (nexus-r3ur5) so the two surfaces cannot drift. Sends 403 and
+     * returns {@code false} when a non-operator requests an operator-only scope;
+     * throws {@link IllegalArgumentException} (400) on an unrecognized scope.
+     */
+    private boolean validateIssuableScope(HttpExchange ex, String scope) throws IOException {
+        if (!TokenStore.SCOPE_TENANT.equals(scope) && !TokenStore.SCOPE_MINT.equals(scope)
+                && !TokenStore.SCOPE_MINT_LOCKED.equals(scope) && !TokenStore.SCOPE_BOARD_CI.equals(scope)) {
+            throw new IllegalArgumentException(
+                "invalid scope: '" + scope
+                    + "' (only 'tenant', 'mint', 'mint-locked', and 'board-ci' are issuable)");
+        }
+        if ((TokenStore.SCOPE_MINT.equals(scope) || TokenStore.SCOPE_MINT_LOCKED.equals(scope))
+                && !requireOperator(ex)) {
+            return false;
+        }
+        return true;
     }
 
     private void handleRevoke(HttpExchange ex) throws IOException {

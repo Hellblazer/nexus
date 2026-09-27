@@ -501,6 +501,17 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # the parentless family is gone, content_hash is no longer a column
         # of either WAL table).
         ("pipeline-002-2", "nexus-edjmu"),
+        # nexus-0rxvg: hygiene-008-2's one-off correction of quarantine
+        # siblings the catalog-037-1 bounded sweep registered by parsing the
+        # name. That shape arises only from a runtime call, and hygiene-005-3
+        # earlier in the hop would correct any row seeded at OLD_TAG, so the
+        # data leg seeds it after migrateUpTo("hygiene-008-2"): a
+        # prefix-shaped sibling with a registered origin whose owner,
+        # model_version and dimension differ from what its name implies, and
+        # one with no origin. Effect-asserted (the first re-filed from the
+        # origin row, the second prefix-stripped with lifecycle_state
+        # untouched).
+        ("hygiene-008-2", "nexus-0rxvg"),
     }
 )
 

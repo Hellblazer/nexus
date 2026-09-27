@@ -360,11 +360,22 @@ class HttpTokenStore:
             body["scope"] = scope
         return self._post("/v1/service-tokens/issue", body)
 
-    def rotate_token(self, tenant: str, grace_seconds: int | None = None) -> dict[str, Any]:
-        """Zero-downtime rotate: issue a new token, grace-expire the old. Returns the new token."""
+    def rotate_token(
+        self, tenant: str, grace_seconds: int | None = None, scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Zero-downtime rotate: issue a new token, grace-expire the old. Returns the new
+        token (now including its ``scope``).
+
+        ``scope`` (nexus-r3ur5): ``None`` auto-detects the tenant's single live scope,
+        or raises ``httpx.HTTPStatusError`` (409) if the tenant holds live tokens of MORE
+        THAN ONE scope -- pass an explicit scope to rotate just that one, leaving the
+        tenant's other-scoped tokens untouched.
+        """
         body: dict[str, Any] = {"tenant": tenant}
         if grace_seconds is not None:
             body["grace_seconds"] = grace_seconds
+        if scope is not None:
+            body["scope"] = scope
         return self._post("/v1/service-tokens/rotate", body)
 
     def revoke_token(self, selector: str) -> dict[str, Any]:

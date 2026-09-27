@@ -1203,7 +1203,14 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDimGuardTest.java", 2),
-        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 11)
+        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 11),
+        // RDR-192 Step 1 (bead nexus-wbfpw.1): 1 raw-JDBC site -- seedCentroid384's
+        // taxonomy_centroids INSERT, the identical shape
+        // TaxonomyUnassignedChashesRepositoryTest#seedCentroid already carries (no
+        // public writer exists for a bare centroid row outside the real assignment
+        // pipeline, and jOOQ's generated pgvector Binding is not reachable here
+        // without hand-rolling the same literal that precedent already uses).
+        Map.entry("dev/nexus/service/vectors/Rdr192EngineLivenessMatrixIntegrationTest.java", 1)
     );
 
     /**

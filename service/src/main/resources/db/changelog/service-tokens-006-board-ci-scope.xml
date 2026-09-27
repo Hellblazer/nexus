@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-r3ur5 — board-ci writer credential. Adds 'board-ci' to the scope CHECK
+    constraint service-tokens-004 last extended (root|tenant|mint|mint-locked|data).
+
+    Security rationale: replaces a tenant-scope token (full corpus read/write/
+    delete) sitting in a public repo's CI and in a public Lambda with a
+    credential that can ONLY write CI board posts (AuthFilter/TupleHandler
+    confine it to POST /v1/tuples/out against the board/ci/<topic> template;
+    TokenAdminHandler refuses it on the entire admin surface and DataTokenHandler
+    already refuses any non-mint/mint-locked scope). A leaked board-ci token's
+    blast radius is "post CI status to one subspace", not "the whole tenant".
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="service-tokens-006-1" author="nexus-r3ur5">
+        <comment>
+            Add 'board-ci' to the service_tokens scope vocabulary — a credential
+            confined to writing board/ci/&lt;topic&gt; CI status posts
+            (POST /v1/tuples/out only), nothing else. Constraint change only;
+            no existing row's scope value is touched.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.service_tokens DROP CONSTRAINT IF EXISTS chk_service_tokens_scope;
+ALTER TABLE nexus.service_tokens ADD CONSTRAINT chk_service_tokens_scope
+    CHECK (scope IN ('root','tenant','mint','data','mint-locked','board-ci'));
+        </sql>
+        <rollback>
+ALTER TABLE nexus.service_tokens DROP CONSTRAINT IF EXISTS chk_service_tokens_scope;
+ALTER TABLE nexus.service_tokens ADD CONSTRAINT chk_service_tokens_scope
+    CHECK (scope IN ('root','tenant','mint','data','mint-locked'));
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

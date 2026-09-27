@@ -2263,6 +2263,20 @@ public final class TupleRepository {
         return registry.registry();
     }
 
+    /**
+     * Resolve {@code subspace} to its matching template's declared name, or
+     * {@code null} if nothing matches (nexus-r3ur5: {@link
+     * dev.nexus.service.http.TupleHandler}'s board-ci scope guard needs to know
+     * WHICH template a subspace resolves to, without duplicating {@link
+     * TemplateRegistry}'s own resolution logic in the handler layer). Read-only
+     * classification — unlike {@link #resolveOrThrow}, never throws on a miss, so
+     * the guard can 403 a wrong-template board-ci write before ever attempting one.
+     */
+    public String resolveTemplateName(String subspace) {
+        TemplateSchema t = registry.resolve(subspace);
+        return t == null ? null : t.name();
+    }
+
     // ── subspace_list / subspace_stats ──────────────────────────────────────
 
     /**

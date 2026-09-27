@@ -54,6 +54,14 @@ class TokenAdminHandlerScopeGuardTest {
         assertScopeRejected("mint-locked");
     }
 
+    @Test
+    void boardCiScope_directDispatch_403OnEveryRoute() throws Exception {
+        // nexus-r3ur5: a board-ci token must not issue anything, including
+        // another board-ci token — refused on the entire admin surface, same
+        // shape as mint/mint-locked/data.
+        assertScopeRejected("board-ci");
+    }
+
     private void assertScopeRejected(String scope) throws Exception {
         var handler = new TokenAdminHandler(null, null, Clock.systemUTC());
         for (String route : ROUTES) {

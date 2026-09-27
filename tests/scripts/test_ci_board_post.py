@@ -210,3 +210,22 @@ def test_a_lower_engine_cap_still_lands_a_minimal_verdict(monkeypatch, capsys) -
     assert "::warning" not in capsys.readouterr().out
     assert sent[1] == {"sha": _SHA, "run": "9", "attempt": "1",
                        "conclusion": "failure", "truncated": True}
+
+
+def test_a_superseded_run_is_cancelled_when_only_the_aggregator_failed() -> None:
+    # Run 36271319947: a newer push cancelled every job; pytest-gate failed on
+    # the missing shards. That is a cancelled run, not a red one.
+    results = {"lint": "success", "test": "cancelled", "test-lint": "cancelled",
+               "ca3-pgvector-bundle": "cancelled", "pytest-gate": "failure"}
+    assert cbp.verdict_from_results(results) == (
+        "cancelled", ["ca3-pgvector-bundle", "pytest-gate", "test", "test-lint"])
+
+
+def test_a_real_failure_beside_a_cancelled_job_is_still_failure() -> None:
+    results = {"lint": "failure", "test": "cancelled", "pytest-gate": "failure"}
+    assert cbp.verdict_from_results(results)[0] == "failure"
+
+
+def test_an_aggregator_failing_alone_is_failure() -> None:
+    assert cbp.verdict_from_results({"test": "success", "pytest-gate": "failure"}) == (
+        "failure", ["pytest-gate"])

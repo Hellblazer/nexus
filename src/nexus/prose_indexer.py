@@ -333,6 +333,10 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     # this path; it is now the early one's redundant-but-harmless idempotent
     # re-affirmation, so removed to avoid a duplicate round trip).
 
+    # nexus-w94eo: the engine merges metadata, so a writer-owned key this full
+    # rewrite dropped would survive on the stored row; name it for removal.
+    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+    _dk = rewrite_delete_keys(metadatas)
     with _stage("upload"):
         try:
             ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
@@ -344,6 +348,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 # nexus-4jj40: --force alone re-sends without re-embedding;
                 # only the explicit --re-embed opt-in forces a re-embed.
                 force_re_embed=ctx.force_re_embed,
+                **({"delete_keys": _dk} if _dk else {}),
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp

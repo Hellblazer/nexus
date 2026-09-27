@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.SchemaViolationException;
+import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.db.TooLargeException;
 import dev.nexus.service.db.TupleException;
 import dev.nexus.service.db.TupleLimits;
@@ -116,6 +117,14 @@ public final class TupleHandler implements HttpHandler {
     };
     private static final HexFormat HEX = HexFormat.of();
 
+    /**
+     * nexus-r3ur5: the ONLY template a board-ci-scoped credential may write to
+     * via {@code /out}. Matched against {@link TupleRepository#resolveTemplateName}'s
+     * result, never the raw subspace string (the template pins the shape, the
+     * subspace's own {@code <topic>} segment varies per caller).
+     */
+    private static final String BOARD_CI_TEMPLATE_NAME = "board/ci/<topic>";
+
     private final TupleRepository repo;
 
     public TupleHandler(TupleRepository repo) {
@@ -133,6 +142,20 @@ public final class TupleHandler implements HttpHandler {
         String path = exchange.getRequestURI().getPath();
         String op = path.replaceFirst("^/v1/tuples", "");
         String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
+
+        // nexus-r3ur5 (defense in depth; AuthFilter's exact-path-and-method choke
+        // point is the primary enforcement, and on every deployed route it fires
+        // first so this branch is normally unreachable over HTTP — same posture as
+        // TokenAdminHandler's mint/data guard). A board-ci-scoped credential may
+        // call ONLY /out; every other tuples op (rd, in, ack, registry, ...) is
+        // refused here too, so a future route wired ahead of the filter, or a
+        // direct-dispatch test, still holds.
+        if (TokenStore.SCOPE_BOARD_CI.equals(RequestContext.scope()) && !"/out".equals(op)) {
+            log.debug("event=tuples_handler_denied op={} reason=board_ci_scope_op_forbidden", op);
+            HttpUtil.send(exchange, 403,
+                    "{\"error\":\"forbidden: a 'board-ci'-scoped credential may only call out\"}");
+            return;
+        }
 
         try {
             switch (op) {
@@ -177,6 +200,19 @@ public final class TupleHandler implements HttpHandler {
         }
         Map<String, Object> body = readBody(ex);
         String subspace = requireString(body, "subspace");
+        // nexus-r3ur5: a board-ci-scoped credential may write ONLY the
+        // board/ci/<topic> template — the security-critical narrowing this scope
+        // exists for. Checked by the RESOLVED template name, not the raw subspace
+        // string, so e.g. board/nexus-dev (the two-segment board/<topic> template)
+        // is refused exactly like an unrelated subspace such as mailbox/<addr>.
+        if (TokenStore.SCOPE_BOARD_CI.equals(RequestContext.scope())
+                && !BOARD_CI_TEMPLATE_NAME.equals(repo.resolveTemplateName(subspace))) {
+            log.debug("event=tuples_out_denied subspace={} reason=board_ci_scope_template_forbidden",
+                    subspace);
+            HttpUtil.send(ex, 403, "{\"error\":\"forbidden: a 'board-ci'-scoped credential may only "
+                    + "write the board/ci/<topic> template\"}");
+            return;
+        }
         Map<String, String> keys = stringMap((Map<String, Object>) body.get("keys"));
         Map<String, String> dims = stringMap((Map<String, Object>) body.get("dims"));
         String tupleBody = (String) body.get("body");

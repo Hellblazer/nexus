@@ -23,6 +23,7 @@ import java.sql.Connection;
 
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-152 bead nexus-gmiaf.32.3 — token lifecycle admin endpoints, end-to-end through the
@@ -120,6 +121,17 @@ class TokenAdminHandlerTest {
             .isEqualTo(400);
     }
 
+    @Test
+    void issue_responseNamesScope() throws Exception {
+        // The scope-collapse finding (nexus-r3ur5 critique) traced partly to the issue/
+        // rotate responses never surfacing which scope an operator actually got.
+        JsonNode defaulted = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-scope-resp\"}");
+        assertThat(defaulted.get("scope").asText()).isEqualTo("tenant");
+        JsonNode boardCi = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-scope-resp-2\",\"scope\":\"board-ci\"}");
+        assertThat(boardCi.get("scope").asText()).isEqualTo("board-ci");
+    }
+
     // ── tenant create ──────────────────────────────────────────────────────────
 
     @Test
@@ -154,6 +166,73 @@ class TokenAdminHandlerTest {
                     SERVICE_TOKENS.REVOKED_AT.isNull(), SERVICE_TOKENS.EXPIRES_AT.isNull())
                 .fetchOne(0, long.class);
             assertThat(fresh).as("exactly one fresh non-expiring token").isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void rotate_responseNamesScope() throws Exception {
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-rot-scope-resp\",\"scope\":\"mint\"}");
+        JsonNode r = postJson("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-rot-scope-resp\"}");
+        assertThat(r.get("scope").asText()).isEqualTo("mint");
+    }
+
+    @Test
+    void rotate_withExplicitScope_rotatesOnlyThatScopeOverHttp() throws Exception {
+        // nexus-r3ur5: a tenant holding BOTH a tenant-scope and a board-ci-scope token
+        // rotates only board-ci when scope is given; the tenant-scope token is untouched.
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-rot-mixed\"}");
+        JsonNode boardCi = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-rot-mixed\",\"scope\":\"board-ci\"}");
+        String boardCiHash = boardCi.get("token_hash").asText();
+
+        JsonNode rotated = postJson("/v1/service-tokens/rotate",
+            "{\"tenant\":\"tenant-rot-mixed\",\"scope\":\"board-ci\",\"grace_seconds\":300}");
+        assertThat(rotated.get("scope").asText()).isEqualTo("board-ci");
+
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            var boardCiRow = dsl.select(SERVICE_TOKENS.EXPIRES_AT)
+                .from(SERVICE_TOKENS).where(SERVICE_TOKENS.TOKEN_HASH.eq(boardCiHash)).fetchOne();
+            assertThat(boardCiRow).isNotNull();
+            assertThat(boardCiRow.value1())
+                .as("the rotated board-ci token must now be grace-expiring").isNotNull();
+            long tenantScopeUntouched = dsl.selectCount().from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TENANT_ID.eq("tenant-rot-mixed"),
+                    SERVICE_TOKENS.SCOPE.eq("tenant"), SERVICE_TOKENS.EXPIRES_AT.isNull(),
+                    SERVICE_TOKENS.REVOKED_AT.isNull())
+                .fetchOne(0, long.class);
+            assertThat(tenantScopeUntouched)
+                .as("the tenant-scope token must be untouched by a board-ci-scoped rotate")
+                .isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void rotate_mixedScopeWithNoScope_refuses409_andExpiresNothing() throws Exception {
+        // The nexus-r3ur5 critique's ship-blocker: a tenant holding tokens of more than
+        // one scope must not have rotate silently collapse to one scope. Refuse instead.
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-rot-refuse\"}");
+        JsonNode boardCi = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-rot-refuse\",\"scope\":\"board-ci\"}");
+        String boardCiHash = boardCi.get("token_hash").asText();
+
+        var resp = sendAs(BOOT, "/v1/service-tokens/rotate", "{\"tenant\":\"tenant-rot-refuse\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        JsonNode body = MAPPER.readTree(resp.body());
+        assertThat(body.get("error").asText())
+            .contains("multiple scopes").contains("scope");
+        java.util.List<String> scopes = new java.util.ArrayList<>();
+        body.get("scopes").forEach(n -> scopes.add(n.asText()));
+        assertThat(scopes).containsExactlyInAnyOrder("tenant", "board-ci");
+
+        // Nothing expired: the board-ci token is still live with no expiry set.
+        try (Connection su = pg.createConnection("")) {
+            var row = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
+                .from(SERVICE_TOKENS).where(SERVICE_TOKENS.TOKEN_HASH.eq(boardCiHash)).fetchOne();
+            assertThat(row).isNotNull();
+            assertThat(row.value1()).as("a refused rotate must not grace-expire anything").isNull();
+            assertThat(row.value2()).isNull();
         }
     }
 
@@ -460,6 +539,107 @@ class TokenAdminHandlerTest {
         assertThat(resp.statusCode())
             .as("non-operator mint-locked-scope issuance must be 403: %s", resp.body())
             .isEqualTo(403);
+    }
+
+    // ── nexus-r3ur5: board-ci writer credential ─────────────────────────────
+
+    @Test
+    void issueScope_boardCi_operatorMayIssueForAnyTenant() throws Exception {
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"ci-board-writer\",\"label\":\"ci-board\",\"scope\":\"board-ci\"}");
+        assertThat(scopeOf(r.get("token_hash").asText())).isEqualTo("board-ci");
+    }
+
+    @Test
+    void issueScope_boardCi_tenantMayIssueForItsOwnTenant() throws Exception {
+        // Unlike mint/mint-locked, board-ci carries no privilege escalation, so it
+        // follows the plain 'tenant' authorization model: a non-operator may issue
+        // it for its OWN tenant (authorizedForTenant, not requireOperator).
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"board-ci-self-a\"}")
+            .get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-self-a\",\"scope\":\"board-ci\"}");
+        assertThat(resp.statusCode()).as("self-tenant board-ci issuance: %s", resp.body())
+            .isEqualTo(200);
+        JsonNode r = MAPPER.readTree(resp.body());
+        assertThat(scopeOf(r.get("token_hash").asText())).isEqualTo("board-ci");
+    }
+
+    @Test
+    void issueScope_boardCi_crossTenantIsRefused() throws Exception {
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"board-ci-cross-a\"}")
+            .get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-cross-b\",\"scope\":\"board-ci\"}");
+        assertThat(resp.statusCode())
+            .as("cross-tenant board-ci issuance must be 403: %s", resp.body())
+            .isEqualTo(403);
+    }
+
+    @Test
+    void boardCiScopedBearer_rejectedOnEveryAdminRoute() throws Exception {
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-lockout\",\"scope\":\"board-ci\"}");
+        String boardCiRaw = r.get("token").asText();
+        // A board-ci token must not issue anything, including another board-ci
+        // token — rejected on every admin route, same shape as mint/mint-locked/data.
+        for (String route : new String[] {"/v1/tenants/create", "/v1/service-tokens/issue",
+                                          "/v1/service-tokens/rotate", "/v1/service-tokens/revoke",
+                                          "/v1/service-tokens/list"}) {
+            var resp = sendAs(boardCiRaw, route, "{}");
+            assertThat(resp.statusCode())
+                .as("board-ci-scoped bearer on %s must be 403: %s", route, resp.body())
+                .isEqualTo(403);
+        }
+    }
+
+    @Test
+    void dataTokenMint_byBoardCiBearer_is403() throws Exception {
+        // DataTokenHandler already requires mint/mint-locked scope, and the
+        // AuthFilter board-ci choke point refuses everything but
+        // POST /v1/tuples/out anyway — either layer alone would 403 this.
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"board-ci-no-mint\",\"scope\":\"board-ci\"}");
+        String boardCiRaw = r.get("token").asText();
+        var resp = sendAs(boardCiRaw, "/v1/data-tokens/mint", "{\"tenant\":\"board-ci-no-mint\"}");
+        assertThat(resp.statusCode())
+            .as("board-ci bearer must not mint data tokens: %s", resp.body())
+            .isEqualTo(403);
+    }
+
+    @Test
+    void chkServiceTokensScope_acceptsBoardCi_stillRejectsUnknown() throws Exception {
+        // Bypasses the application-layer scope validation entirely (a raw insert
+        // via seedServiceToken, the same helper the other tests in this suite use
+        // to seed rows) — this proves the DB CHECK constraint itself (service-
+        // tokens-006), not the handler's own guard tested elsewhere in this class.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES),
+                "raw-chk-board-ci-accept", "chk-board-ci-tenant", "chk-probe", "board-ci", null, null);
+        }
+        assertThat(scopeOfRawToken("raw-chk-board-ci-accept")).isEqualTo("board-ci");
+
+        assertThatThrownBy(() -> {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES),
+                    "raw-chk-unknown-scope", "chk-unknown-tenant", "chk-probe",
+                    "not-a-real-scope", null, null);
+            }
+        }).as("an unrecognized scope must still violate chk_service_tokens_scope")
+            .isInstanceOf(org.jooq.exception.DataAccessException.class);
+    }
+
+    private String scopeOfRawToken(String raw) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.SCOPE).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(TokenHashing.sha256Hex(raw)))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(rows).hasSize(1);
+            return rows.get(0);
+        }
     }
 
     @Test

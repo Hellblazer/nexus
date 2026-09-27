@@ -1,0 +1,570 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-0rxvg: nexus.gc_quarantine_orphans_bounded (catalog-037-1,
+    nexus-a6mon) self-registered its quarantine sibling by parsing the
+    sibling's own name with string_to_array(p_quarantine_collection, '__').
+    That is the hygiene-002-2 defect hygiene-005-1 retired in the unbounded
+    gc_quarantine_orphans. catalog-037-1 was written after hygiene-005 and
+    copied the pre-fix body: for the production shape
+    quarantine-<ct>__owner__model__vN the sibling registered with
+    content_type 'quarantine-<ct>' (outside the profile vocabulary) and a
+    NULL dimension, and ON CONFLICT DO NOTHING meant a later call never
+    repaired it. The bounded form was built for large operator cleanups
+    after the 2026-09-16 owner-1.1 run (which itself used the unbounded,
+    already-fixed form); whether any tenant has called it since is not
+    recorded here. gc_audit rows with operation
+    'gc_quarantine_orphans_bounded' answer that, and hygiene-008-2 is a
+    no-op where the answer is none.
+
+      - hygiene-008-1: CREATE OR REPLACE the bounded function with
+        hygiene-005-1's registration: copy content_type / owner_id /
+        embedding_model / model_version / dimension from the ORIGIN's
+        registered row, fail loud on an unregistered origin, and ON CONFLICT
+        re-file an existing sibling row. Every other line of catalog-037-1's
+        body (bound, sweep gate, victim set, collision guard, created_at
+        carry-through, remaining count, gc_audit row, GRANT) is carried
+        forward byte-identical; only the DECLARE block (v_seg retired, five
+        v_origin_* locals added) and the registration block changed.
+      - hygiene-008-2: the one-off correction for rows catalog-037-1 already
+        misregistered, the same walk as hygiene-005-3's first two branches
+        (that changeset ran before catalog-037-1 existed, so it could not
+        see them). hygiene-005-3's third branch (dormant promotion) is not
+        repeated: catalog-037-1 always inserted lifecycle_state 'quarantine',
+        and CatalogRepository.sweepGhostsAndMarkDormant holds every
+        'quarantine' row before its dormant check, so no sibling this defect
+        registered can have been demoted.
+
+    RDR-192 S8 (nexus-wbfpw.16) later redefines this function again to
+    select candidates with reapable(c); it builds on this body.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hygiene-008-1" author="nexus-0rxvg">
+        <comment>
+            nexus-0rxvg: gc_quarantine_orphans_bounded registers its
+            quarantine sibling from the origin's registered row (as
+            hygiene-005-1 does for the unbounded form), not by parsing the
+            sibling's name. An unregistered origin raises. Everything else
+            in catalog-037-1's body is unchanged.
+        </comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans_bounded(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int,
+    p_row_limit              int
+)
+RETURNS TABLE(moved bigint, sample jsonb, remaining bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_moved            bigint;
+    v_sample           jsonb;
+    v_remaining        bigint;
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+    v_collision_count  bigint;
+    v_collision_sample text[];
+    v_sample_limit     int;
+    v_row_limit        int;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- A non-positive bound is a caller error, not "unbounded". The whole point
+    -- of this function is the bound; silently removing it would hand back the
+    -- 58-second transaction this exists to prevent.
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: p_row_limit must be positive, got %. Use nexus.gc_quarantine_orphans for the unbounded sweep.',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
+    v_row_limit    := LEAST(p_row_limit, 100000);
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            -- nexus-a6mon requirement 4: name the caller's OWN in-flight call as
+            -- a possibility. The unbounded form advised "retry", which cannot
+            -- succeed while the holder IS the caller's previous, still-committing
+            -- call -- the exact state a cut-then-resubmit loop produces.
+            RAISE EXCEPTION
+                'gc_quarantine_orphans_bounded: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it, OR your own previous bounded call is still committing after the edge cut you. Poll pg_stat_activity for an active sweep on this collection before retrying; a fixed sleep builds a lock convoy.',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE VICTIM SET, chosen ONCE and ordered for deterministic progress.
+    CREATE TEMP TABLE IF NOT EXISTS _a6mon_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _a6mon_victim;
+    INSERT INTO _a6mon_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = c.collection
+                AND m.chash      = c.chash
+           )
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    IF NOT EXISTS (SELECT 1 FROM _a6mon_victim) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- Cross-dim collision guard, same contract as the unbounded form
+    -- (vectors-004's N7 guard, T2 22454) but scoped to this batch.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _a6mon_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_quarantine_collection
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- nexus-0rxvg: the quarantine sibling's attributes are copied from the
+    -- ORIGIN's registered row, never parsed from the sibling's own name. The
+    -- catalog-037-1 body split p_quarantine_collection on '__', so for the
+    -- production shape quarantine-<ct>__owner__model__vN the first segment
+    -- carried the prefix and the sibling registered with content_type
+    -- 'quarantine-<ct>' and no dimension -- the defect hygiene-005-1 retired
+    -- in the unbounded twin. PgVectorRepository.quarantineOrphansBounded
+    -- resolves dim from the origin before reaching this function, so an
+    -- unregistered origin is a fail-loud precondition here, as there.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from the quarantine sibling name (nexus-0rxvg, as hygiene-005-1); register the origin before quarantining orphans',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension;
+
+    -- created_at CARRIED THROUGH (nexus-a6mon's second finding): the unbounded
+    -- form omits it, so the default restamps every moved row to quarantine time
+    -- and the collection's generation history is destroyed.
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024,
+                               metadata, created_at)
+    SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           COALESCE(c.metadata, '{}'::jsonb)
+             || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                    'origin_collection', p_collection),
+           c.created_at
+      FROM nexus.chunks c
+      JOIN _a6mon_victim v ON v.chash = c.chash
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+      SET chunk_text     = EXCLUDED.chunk_text,
+          embedding_384  = EXCLUDED.embedding_384,
+          embedding_768  = EXCLUDED.embedding_768,
+          embedding_1024 = EXCLUDED.embedding_1024,
+          metadata       = EXCLUDED.metadata,
+          created_at     = EXCLUDED.created_at;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _a6mon_victim v
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = v.chash
+        RETURNING c.chash, c.metadata->>'title' AS title
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+          FROM (SELECT chash, title FROM del LIMIT v_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- What is LEFT after this commit, so the caller has a terminator it does not
+    -- have to invent from a stalling count.
+    SELECT count(*) INTO v_remaining
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = c.collection
+                AND m.chash      = c.chash
+           );
+
+    -- nexus-a6mon requirement 5: instrument it. The unbounded form logged only
+    -- the edge's 499 -- no completion line, no timing, nothing between the cut
+    -- and the eventual commit.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans_bounded', p_collection, 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'row_limit', v_row_limit,
+            'remaining_after', v_remaining,
+            'chashes_is_sample', true));
+
+    RETURN QUERY SELECT v_moved, v_sample, v_remaining;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans_bounded(int, text, text, text, text, int, int) TO nexus_svc;
+]]>
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans_bounded(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int,
+    p_row_limit              int
+)
+RETURNS TABLE(moved bigint, sample jsonb, remaining bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_moved            bigint;
+    v_sample           jsonb;
+    v_remaining        bigint;
+    v_seg              text[];
+    v_collision_count  bigint;
+    v_collision_sample text[];
+    v_sample_limit     int;
+    v_row_limit        int;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- A non-positive bound is a caller error, not "unbounded". The whole point
+    -- of this function is the bound; silently removing it would hand back the
+    -- 58-second transaction this exists to prevent.
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: p_row_limit must be positive, got %. Use nexus.gc_quarantine_orphans for the unbounded sweep.',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
+    v_row_limit    := LEAST(p_row_limit, 100000);
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            -- nexus-a6mon requirement 4: name the caller's OWN in-flight call as
+            -- a possibility. The unbounded form advised "retry", which cannot
+            -- succeed while the holder IS the caller's previous, still-committing
+            -- call -- the exact state a cut-then-resubmit loop produces.
+            RAISE EXCEPTION
+                'gc_quarantine_orphans_bounded: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it, OR your own previous bounded call is still committing after the edge cut you. Poll pg_stat_activity for an active sweep on this collection before retrying; a fixed sleep builds a lock convoy.',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE VICTIM SET, chosen ONCE and ordered for deterministic progress.
+    CREATE TEMP TABLE IF NOT EXISTS _a6mon_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _a6mon_victim;
+    INSERT INTO _a6mon_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = c.collection
+                AND m.chash      = c.chash
+           )
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    IF NOT EXISTS (SELECT 1 FROM _a6mon_victim) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- Cross-dim collision guard, same contract as the unbounded form
+    -- (vectors-004's N7 guard, T2 22454) but scoped to this batch.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _a6mon_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_quarantine_collection
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    v_seg := string_to_array(p_quarantine_collection, '__');
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE 'unknown' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE p_tenant_id END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE 'bge-base-en-v15-768' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END,
+        'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) DO NOTHING;
+
+    -- created_at CARRIED THROUGH (nexus-a6mon's second finding): the unbounded
+    -- form omits it, so the default restamps every moved row to quarantine time
+    -- and the collection's generation history is destroyed.
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024,
+                               metadata, created_at)
+    SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           COALESCE(c.metadata, '{}'::jsonb)
+             || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                    'origin_collection', p_collection),
+           c.created_at
+      FROM nexus.chunks c
+      JOIN _a6mon_victim v ON v.chash = c.chash
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+      SET chunk_text     = EXCLUDED.chunk_text,
+          embedding_384  = EXCLUDED.embedding_384,
+          embedding_768  = EXCLUDED.embedding_768,
+          embedding_1024 = EXCLUDED.embedding_1024,
+          metadata       = EXCLUDED.metadata,
+          created_at     = EXCLUDED.created_at;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _a6mon_victim v
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = v.chash
+        RETURNING c.chash, c.metadata->>'title' AS title
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+          FROM (SELECT chash, title FROM del LIMIT v_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- What is LEFT after this commit, so the caller has a terminator it does not
+    -- have to invent from a stalling count.
+    SELECT count(*) INTO v_remaining
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = c.collection
+                AND m.chash      = c.chash
+           );
+
+    -- nexus-a6mon requirement 5: instrument it. The unbounded form logged only
+    -- the edge's 499 -- no completion line, no timing, nothing between the cut
+    -- and the eventual commit.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans_bounded', p_collection, 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'row_limit', v_row_limit,
+            'remaining_after', v_remaining,
+            'chashes_is_sample', true));
+
+    RETURN QUERY SELECT v_moved, v_sample, v_remaining;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans_bounded(int, text, text, text, text, int, int) TO nexus_svc;
+]]>
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="hygiene-008-2" author="nexus-0rxvg">
+        <comment>
+            nexus-0rxvg: one-off data correction for nexus.catalog_collections
+            rows the catalog-037-1 body misregistered -- a quarantine-shaped
+            row (prefix "quarantine-" or suffix "__quarantine") whose
+            content_type carries a literal "quarantine-" prefix or the
+            'unknown' fallback. With a registered origin sibling every
+            attribute is copied from it and lifecycle_state set to
+            'quarantine'; otherwise only the literal prefix is stripped.
+            Same walk, same never-wedge shape (no RAISE path) and same RLS
+            toggle as hygiene-005-3, which ran before catalog-037-1 existed.
+            Idempotent: a corrected row no longer matches the walk.
+            DATA EFFECT: UPDATEs catalog_collections.content_type / owner_id /
+            embedding_model / model_version / dimension / lifecycle_state for
+            quarantine-shaped rows the catalog-037-1 bounded sweep misregistered;
+            irreversible, no rollback SQL (the corrected values are copied from a real sibling
+            row or a deterministic prefix strip, not something to undo).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_collections IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_corrected_from_origin   bigint;
+    v_corrected_content_only  bigint;
+    BEGIN
+    -- Candidates: quarantine-shaped name (prefix "quarantine-" or suffix
+    -- "__quarantine") whose content_type still shows the shipped defect's
+    -- signature -- a literal "quarantine-" prefix, or the 'unknown'
+    -- fallback a genuinely unparseable name would have produced under the
+    -- SAME buggy string_to_array logic (array_length &lt;&gt; 4).
+    CREATE TEMP TABLE _h008_walk ON COMMIT DROP AS
+    SELECT
+        c.tenant_id,
+        c.name,
+        CASE WHEN c.name LIKE 'quarantine-%' THEN regexp_replace(c.name, '^quarantine-', '')
+             WHEN c.name ~ '__quarantine$'   THEN regexp_replace(c.name, '__quarantine$', '')
+        END AS origin_name
+      FROM nexus.catalog_collections c
+     WHERE (c.name LIKE 'quarantine-%' OR c.name ~ '__quarantine$')
+       AND (c.content_type LIKE 'quarantine-%' OR c.content_type = 'unknown');
+
+    -- Branch 1: the derived origin sibling IS registered -- copy every
+    -- attribute verbatim and stamp lifecycle_state = 'quarantine'
+    -- (correcting content_type is the only thing in question here; the
+    -- row's own quarantine identity, by name shape, is never in doubt).
+    UPDATE nexus.catalog_collections c
+       SET content_type    = o.content_type,
+           owner_id        = o.owner_id,
+           embedding_model = o.embedding_model,
+           model_version   = o.model_version,
+           dimension       = o.dimension,
+           lifecycle_state = 'quarantine'
+      FROM _h008_walk w
+      JOIN nexus.catalog_collections o
+        ON o.tenant_id = w.tenant_id AND o.name = w.origin_name
+     WHERE c.tenant_id = w.tenant_id AND c.name = w.name;
+    GET DIAGNOSTICS v_corrected_from_origin = ROW_COUNT;
+    RAISE NOTICE 'hygiene-008-2: % quarantine-shaped row(s) corrected from a registered origin sibling', v_corrected_from_origin;
+
+    -- Branch 2: no registered origin sibling to copy from -- strip a
+    -- literal "quarantine-" prefix from content_type when that leaves a
+    -- non-empty value (the best correction available without a real
+    -- sibling to copy from); a bare 'unknown' content_type has no such
+    -- prefix and is left exactly as it is. lifecycle_state is NEVER
+    -- touched here -- there is no known-good sibling attesting this row's
+    -- true state.
+    UPDATE nexus.catalog_collections c
+       SET content_type = regexp_replace(c.content_type, '^quarantine-', '')
+      FROM _h008_walk w
+     WHERE c.tenant_id = w.tenant_id AND c.name = w.name
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_collections o
+              WHERE o.tenant_id = w.tenant_id AND o.name = w.origin_name
+           )
+       AND regexp_replace(c.content_type, '^quarantine-', '') &lt;&gt; '';
+    GET DIAGNOSTICS v_corrected_content_only = ROW_COUNT;
+    RAISE NOTICE 'hygiene-008-2: % quarantine-shaped row(s) with no registered origin sibling had a literal quarantine- content_type prefix stripped', v_corrected_content_only;
+
+END $$;
+
+ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- No schema object is added; the corrected values are facts
+                 copied from a real sibling row or a prefix strip, so there is
+                 nothing to restore (hygiene-005-3's rollback discipline). -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

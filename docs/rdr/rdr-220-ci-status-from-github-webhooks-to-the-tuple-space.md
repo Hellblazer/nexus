@@ -234,8 +234,11 @@ fold the posts with a repo script. No workflow file changes.
 - **Per-post lifetime**: the adapter sets `ttl_seconds` per state as a
   second guard: about 6 hours for `queued` and `in_progress`, the template
   retention for `completed`.
-- **Mapping**: adapter configuration maps repository full name to engine
-  URL, board token, and topic `board/ci/<repo>-<branch>`. `<repo>` is the
+- **Mapping**: the adapter configuration holds one engine URL, one
+  board-only token and an allow-list of repositories; a delivery from a
+  repository outside the list is refused before any write. Only the topic
+  varies, per repository and branch: `board/ci/<repo>-<branch>`.
+  Routing different repositories to different engines is deferred. `<repo>` is the
   lowercase repository name without the owner. `<branch>` replaces every
   character outside `[A-Za-z0-9._-]` with `-`, collapses runs of `-`, and
   strips leading characters until `[A-Za-z0-9]`
@@ -325,7 +328,8 @@ The whole chain was reviewed end to end on 2026-09-26 (T2
   `head_repository` equals the repository, caches the answer per run, and
   fails closed on an API error. This needs a fine-grained, read-only
   Actions token. The repository setting "Require approval for all
-  outside collaborators" is recommended as a second layer.
+  outside collaborators" is the second layer, and it is on: `GET /repos/Hellblazer/nexus/actions/permissions/fork-pr-contributor-approval`
+  returned `{"approval_policy":"all_external_contributors"}` on 2026-09-26.
 - **Topic count.** With the fork check, only same-repository branches
   post. The adapter's branch allow-list defaults to `develop` and `main`,
   and an alarm reports dropped unmapped branches.
@@ -421,8 +425,8 @@ the engine, so it has no reason to live in it.
 - Positive: per-job status for every workflow with no workflow edits.
 - Positive: zero GitHub API calls from readers for CI status.
 - Positive: no engine or edge change; the engine never sees GitHub.
-- Negative: one more small service to host, with two secrets (webhook
-  secret, board token).
+- Negative: one more small service to host, with one secret of three
+  fields (webhook secret, board token, read-only GitHub token).
 
 ### Risks and Mitigations
 
@@ -441,6 +445,18 @@ A dropped or refused delivery leaves a job's state stale on the board;
 GitHub's delivery log shows the failure and allows redelivery. A down
 adapter means no posts; the fold reports the age of each state, so a stale
 entry is visible, and GitHub keeps the failed deliveries for redelivery.
+
+The fork gate adds a GitHub-API dependency to every job event. For each
+`workflow_job` delivery the adapter reads the run from GitHub
+(`GET /repos/{repo}/actions/runs/{id}`, 2-second timeout) to confirm the
+run's head is in the repository itself. Only definite answers are cached,
+per warm container. When that read fails (a rate limit, an expired or
+revoked token, a timeout), the adapter fails closed: it answers the
+delivery `502 origin_unverified` and posts nothing, so that job's state is
+missing from the board. GitHub does not redeliver on its own. Detection is
+the `origin_unverified` alarm (and the hourly self-check for a token that
+lost access); recovery is a manual redelivery from the webhook's delivery
+log once GitHub answers again.
 
 ## Implementation Plan
 
@@ -500,6 +516,14 @@ then `--check`.
 After the adapter's posts are confirmed on `board/ci/nexus-develop`,
 remove the in-workflow publisher and move `AGENTS.md` worktree rule 7 to
 the new topic.
+
+The two topics look alike but are different subspaces under different
+templates. `board/ci-develop` (two segments, `board/<topic>`) holds the
+in-workflow publisher's `ci-pending` and `ci-verdict` posts, one pair per
+run. `board/ci/nexus-develop` (three segments, `board/ci/<topic>`) holds
+the adapter's per-run and per-job posts. During the coexistence window a
+session subscribes to whichever it reads; nothing forwards one into the
+other.
 
 ### Day 2 Operations
 
@@ -615,3 +639,5 @@ records carry the detail. No section needs trimming before acceptance.
 ## Revision History
 
 - 2026-09-26: Gate round 1 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `3059b5110`; critique `nexus_rdr/220-gate-critique-2026-09-26-r1`.
+- 2026-09-26: Gate round 2 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `0538478bc`; critique `nexus_rdr/220-gate-critique-2026-09-26-r2`.
+- 2026-09-26: Gate round 3 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `e575f38d8`; critique `nexus_rdr/220-gate-critique-2026-09-26-r3`.

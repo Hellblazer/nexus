@@ -1798,6 +1798,43 @@ Because those two classes are caught per-document and never raise, a collection 
 
 ---
 
+### nx t3 census-manifest-less
+
+```
+nx t3 census-manifest-less (--collection NAME | --all) [--json] [--require-zero BUCKET]
+```
+
+Client half of RDR-192 Step 2 (bead nexus-wbfpw.5), wrapping the engine's read-only `POST /v1/vectors/manifest-less-census` route (bead nexus-wbfpw.4). Classifies every chunk carrying no own-collection manifest row into one of five buckets — `superseded`, `legacy-unmanifested`, `dead-owner`, `no-owner`, `unclassified` — and prints, per collection, the count in each bucket, the owning document (tumbler + how it was found: `forward`, `reverse`, or `none`) for each item, and a total (`scope_chunk_total`, every chunk the collection holds in any manifest state). `--all` iterates every T3 collection except `quarantine-*` ones — `live(c)` applies to every collection, not only `knowledge__*`. `--json` emits the same counts plus the route's `owners` map (`owner_tumbler`/`owner_path` per chash). See `scripts/sql/manifest_less_census.sql`'s header — the identical text the engine route runs — for the full bucket definitions and the forward/reverse precedence rule (a live forward pointer wins; a live reverse note-guard match rescues a chunk whose forward pointer is null or names a tombstoned document; ties break on fewest manifest rows anywhere, then lowest tumbler).
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Clean. |
+| 1 | `unclassified` > 0 — a census that cannot classify a row has failed. |
+| 2 | `--require-zero` names a bucket whose count is above zero. |
+| 3 | `--all` finds no collection (excluding `quarantine-*`) — the listing itself SUCCEEDED and is genuinely empty; a failed listing is exit 5, never this code. |
+| 4 | The connected engine predates the `manifest-less-census` route (bead nexus-wbfpw.4) — upgrade the engine (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`; which tags carry the route changes over time, so check the version, not a fixed date). Never a traceback. |
+| 5 | A real engine error other than "predates the route": a `quarantine-*` `--collection`'s 400 (`VectorHandler.requireNotQuarantineCollection`), a transient 5xx, or a failed `--all` collection listing. In `--all`, collections already censused before the failure are still printed (or, under `--json`, still emitted as a parseable document naming the failed collection under a `census_error` key). Never a traceback. |
+
+Exit-code precedence: 4 and 5 (the census is INCOMPLETE) always win over 1 and 2 (a gate condition computed from what WAS censused) — an incomplete census cannot pass a gate. Between 4 and 5: 4 is a whole-engine condition (the connected engine predates the route entirely) and is checked first, on the very first collection attempted, before a later per-collection 5 could ever fire. This never hides a finding: `unclassified`/`--require-zero` are always computed over whatever collections DID succeed, even when 4/5 also fires, and both are always present in the output (text and `--json`) alongside the incomplete-census report.
+
+With `--json`, human-readable diagnostics (the `--require-zero` violation notice, an engine-error line, the "no collections found" notice) always go to stderr, never stdout — stdout carries exactly one JSON document on every exit code above, parseable regardless of exit code. One exception: an invalid invocation (for example both `--collection` and `--all`, or an unknown `--require-zero` bucket) is rejected by the argument parser with exit 2 and nothing on stdout, the same number as a `--require-zero` violation. A gate should read the document's `exit_code` field, or treat empty stdout under `--json` as a usage error. The document's fields:
+
+| Field | Meaning |
+|-------|---------|
+| `collections` | Per-collection census results (possibly partial, if a later collection failed). |
+| `collections_discovered` | How many collections were found to census; `null` when discovery itself failed (the listing-failure flavor of exit 5). |
+| `collections_censused` | How many collections actually completed — compare against `collections_discovered` to tell "stopped after 1 of 50" from "stopped after 1 of 2". |
+| `census_error` | `null`, or `{"collection", "error", "kind"}` naming which collection failed and why (`kind` is `"no_route"`, `"engine_error"`, or `"listing_failed"`). |
+| `unclassified` | `true` if any censused collection reports `unclassified` > 0. |
+| `require_zero_violations` | List of `--require-zero` bucket names found above zero across the censused collections. |
+| `exit_code` | The process exit code, mirrored into the document. |
+
+**Sam's 2026-09-26 ruling on nexus-wbfpw.5**: this verb no longer gates the production census — that runs as direct SQL (`scripts/sql/manifest_less_census.sql`) against production until the rest of RDR-192 ships. This verb ships anyway, built and tested against a dev jar, for the client release paired with the eventual RDR-192 engine tag.
+
+---
+
 ## nx taxonomy
 
 Topic taxonomy — HDBSCAN clustering of T3 collection embeddings into topics for navigation, search grouping, and relevance boosting.
@@ -4183,20 +4220,24 @@ Record `TAG` (`engine-service-vX.Y.Z`, `vX.Y.Z`, or `X.Y.Z`) as the cloud-deploy
 ### nx service token issue
 
 ```
-nx service token issue --tenant TENANT [--label LABEL] [--ttl SECONDS] [--scope tenant|mint|mint-locked]
+nx service token issue --tenant TENANT [--label LABEL] [--ttl SECONDS] [--scope tenant|mint|mint-locked|board-ci]
 ```
 
 Issue a new bearer token bound to `TENANT`. Printed once; only the hash is stored. `--ttl` sets an optional lifetime in seconds (default: no expiry). A token bound to a tenant ignores the client `X-Nexus-Tenant` header; the tenant comes from the token.
 
-`--scope` (nexus-868dq / conexus RDR-005): default `tenant` (ordinary bearer). `mint` issues a **data-token mint credential** — it may ONLY call `POST /v1/data-tokens/mint` (minting short-TTL per-tenant data tokens, cross-tenant allowed, rate-limited) and is rejected on every admin and data route. `mint-locked` (nexus-xidcq / RDR-005 2a; requires engine-service ≥ 0.1.36) is the tenant-locked variant: identical surface confinement, but it may mint ONLY for its own bound tenant — a cross-tenant mint attempt gets a 403 (and does not consume rate-limit budget). Prefer `mint-locked` when a tenant self-custodies its mint credential; `mint` (cross-tenant) is the control-plane/edge shape. Issuing either mint scope requires the operator (root) bearer. `data` tokens are never issued here — only minted by the endpoint; `root` is never issuable. Revoking a mint credential (`nx service token revoke`) stops its mints immediately; outstanding data tokens drain on their own TTL (≤ 3600s ceiling, `NX_DATA_TOKEN_TTL_CEILING_SECONDS`).
+`--scope` (nexus-868dq / conexus RDR-005): default `tenant` (ordinary bearer). `mint` issues a **data-token mint credential** — it may ONLY call `POST /v1/data-tokens/mint` (minting short-TTL per-tenant data tokens, cross-tenant allowed, rate-limited) and is rejected on every admin and data route. `mint-locked` (nexus-xidcq / RDR-005 2a; requires engine-service ≥ 0.1.36) is the tenant-locked variant: identical surface confinement, but it may mint ONLY for its own bound tenant — a cross-tenant mint attempt gets a 403 (and does not consume rate-limit budget). Prefer `mint-locked` when a tenant self-custodies its mint credential; `mint` (cross-tenant) is the control-plane/edge shape. Issuing either mint scope requires the operator (root) bearer. `board-ci` (nexus-r3ur5; requires engine-service ≥ 0.1.134) is a **CI board-post-only credential**: it may ONLY call `POST /v1/tuples/out`, and only to write the `board/ci/<topic>` template — every other route, method, and tuples op (including `rd`/`in`/`registry`) gets a 403. It replaces a tenant-scope token (full corpus read/write/delete) sitting in a public repo's CI or a public Lambda: a leaked board-ci token's blast radius is "post CI status to one subspace", not the whole tenant. Issuing it does NOT require the operator bearer — like a plain `tenant` token, the operator may issue it for any tenant, and a tenant token may issue it for its OWN tenant only; it may not issue anything itself (rejected on the entire admin surface, same as `mint`/`mint-locked`/`data`) and cannot mint data tokens. `data` tokens are never issued here — only minted by the endpoint; `root` is never issuable. Revoking a mint credential (`nx service token revoke`) stops its mints immediately; outstanding data tokens drain on their own TTL (≤ 3600s ceiling, `NX_DATA_TOKEN_TTL_CEILING_SECONDS`).
+
+The issue response (and the CLI output, a `Scope: <scope>` line above the printed token) now names the scope the minted token actually carries — the `board-ci`-scope-collapse finding (below) traced partly to no surface saying which scope an operator got.
 
 ### nx service token rotate
 
 ```
-nx service token rotate --tenant TENANT [--grace SECONDS]
+nx service token rotate --tenant TENANT [--grace SECONDS] [--scope tenant|mint|mint-locked|board-ci]
 ```
 
-Rotate `TENANT`'s tokens with zero downtime: issue a new token and set the previous live tokens to expire after the grace window (`--grace`, service default 300s), so both are valid during the overlap. Running clients pick up the new token by rediscovering the lease the storage-service supervisor publishes; no restart and no 401s during the window.
+Rotate `TENANT`'s tokens with zero downtime: issue a new token and set the previous live tokens to expire after the grace window (`--grace`, service default 300s), so both are valid during the overlap. Running clients pick up the new token by rediscovering the lease the storage-service supervisor publishes; no restart and no 401s during the window. The rotate response (and the CLI output) now names the replacement token's `Scope:`.
+
+**`--scope`** (nexus-r3ur5 rotate-scope-collapse fix, requires an engine-service tag carrying it — see `docs/wire-contract-pending.md`): rotate only the tenant's tokens of THAT scope, leaving its other-scoped tokens untouched — a tenant holding both a `tenant`-scope and a `board-ci`-scope token can rotate the `board-ci` one alone with `--scope board-ci`. Without `--scope`: if the tenant's live tokens span exactly one scope (the common case), rotation behaves as before, carrying that scope. If the tenant holds live tokens of **more than one scope**, rotation is **refused with a clean error naming the scopes present** and asking for an explicit `--scope` — nothing is expired or minted. This replaces an earlier behavior (fixed as a ship-blocker before nexus-r3ur5's board-ci scope reached any tenant) that silently collapsed a mixed-scope tenant's rotation to its OLDEST token's scope: rotating a tenant holding both a `board-ci` token and an older `tenant`-scope token would grace-expire the `board-ci` credential and hand back a full tenant-scope replacement, with only a server-side log line to notice by.
 
 ### nx service token revoke
 

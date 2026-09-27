@@ -10,16 +10,27 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
 from nexus.commands import service_cmd
 
 
+def _http_status_error(status_code: int, body: dict[str, Any]) -> httpx.HTTPStatusError:
+    """Build a real ``httpx.HTTPStatusError`` (nexus-r3ur5): the CLI's rotate error
+    handling matches on ``.response.status_code``/``.json()``, so the fake store must
+    raise the real exception type, not a stand-in."""
+    request = httpx.Request("POST", "http://fake.invalid/v1/service-tokens/rotate")
+    response = httpx.Response(status_code, request=request, json=body)
+    return httpx.HTTPStatusError(f"{status_code}", request=request, response=response)
+
+
 class _FakeStore:
     calls: list[tuple[str, tuple[Any, ...]]] = []
     revoke_result: dict[str, Any] = {"revoked": True, "token_hash": "abc123def456"}
     list_result: list[dict[str, Any]] = []
+    rotate_raises: httpx.HTTPStatusError | None = None
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass
@@ -33,11 +44,16 @@ class _FakeStore:
     def issue_token(self, tenant: str, label: str | None = None, ttl_seconds: int | None = None,
                     scope: str | None = None) -> dict[str, Any]:
         _FakeStore.calls.append(("issue_token", (tenant, label, ttl_seconds, scope)))
-        return {"tenant": tenant, "token": "RAW-ISSUE-xyz", "token_hash": "h1"}
+        return {"tenant": tenant, "token": "RAW-ISSUE-xyz", "token_hash": "h1",
+                "scope": scope or "tenant"}
 
-    def rotate_token(self, tenant: str, grace_seconds: int | None = None) -> dict[str, Any]:
-        _FakeStore.calls.append(("rotate_token", (tenant, grace_seconds)))
-        return {"tenant": tenant, "token": "RAW-ROTATE-xyz", "token_hash": "h2"}
+    def rotate_token(self, tenant: str, grace_seconds: int | None = None,
+                      scope: str | None = None) -> dict[str, Any]:
+        _FakeStore.calls.append(("rotate_token", (tenant, grace_seconds, scope)))
+        if _FakeStore.rotate_raises is not None:
+            raise _FakeStore.rotate_raises
+        return {"tenant": tenant, "token": "RAW-ROTATE-xyz", "token_hash": "h2",
+                "scope": scope or "tenant"}
 
     def revoke_token(self, selector: str) -> dict[str, Any]:
         _FakeStore.calls.append(("revoke_token", (selector,)))
@@ -53,6 +69,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeStore.calls = []
     _FakeStore.revoke_result = {"revoked": True, "token_hash": "abc123def456"}
     _FakeStore.list_result = []
+    _FakeStore.rotate_raises = None
     monkeypatch.setattr(service_cmd, "HttpTokenStore", _FakeStore)
 
 
@@ -82,6 +99,15 @@ def test_issue_passes_mint_locked_scope_flag() -> None:
     assert _FakeStore.calls == [("issue_token", ("conexus-edge-locked", None, None, "mint-locked"))]
 
 
+def test_issue_passes_board_ci_scope_flag() -> None:
+    # nexus-r3ur5: board-ci writer credential — the CLI just forwards the string
+    # verbatim; server-side (AuthFilter/TupleHandler/TokenAdminHandler) is the
+    # security boundary that confines it to POST /v1/tuples/out on board/ci/<topic>.
+    result = _run(["token", "issue", "--tenant", "ci-board-writer", "--scope", "board-ci"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("issue_token", ("ci-board-writer", None, None, "board-ci"))]
+
+
 def test_issue_omits_scope_by_default() -> None:
     result = _run(["token", "issue", "--tenant", "t-a"])
     assert result.exit_code == 0, result.output
@@ -109,11 +135,75 @@ def test_issue_requires_tenant() -> None:
 def test_rotate_passes_grace_and_mentions_lease_rediscovery() -> None:
     result = _run(["token", "rotate", "--tenant", "t-b", "--grace", "120"])
     assert result.exit_code == 0, result.output
-    assert _FakeStore.calls == [("rotate_token", ("t-b", 120))]
+    assert _FakeStore.calls == [("rotate_token", ("t-b", 120, None))]
     assert result.output.count("RAW-ROTATE-xyz") == 1
     # Help text contract: clients rediscover via the lease (no 401s during overlap).
     help_out = _run(["token", "rotate", "--help"]).output
     assert "lease" in help_out.lower()
+
+
+def test_rotate_omits_scope_by_default() -> None:
+    result = _run(["token", "rotate", "--tenant", "t-b"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("rotate_token", ("t-b", None, None))]
+
+
+def test_rotate_passes_scope_flag() -> None:
+    # nexus-r3ur5: rotate just the board-ci-scope credential on a mixed-scope tenant.
+    result = _run(["token", "rotate", "--tenant", "nexus", "--scope", "board-ci"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("rotate_token", ("nexus", None, "board-ci"))]
+
+
+def test_rotate_rejects_non_issuable_scope() -> None:
+    assert _run(["token", "rotate", "--tenant", "t-b", "--scope", "data"]).exit_code != 0
+    assert _run(["token", "rotate", "--tenant", "t-b", "--scope", "root"]).exit_code != 0
+    assert _FakeStore.calls == []
+
+
+def test_issue_shows_scope_in_output() -> None:
+    result = _run(["token", "issue", "--tenant", "t-a"])
+    assert result.exit_code == 0, result.output
+    assert "Scope: tenant" in result.output
+
+    result = _run(["token", "issue", "--tenant", "ci-board-writer", "--scope", "board-ci"])
+    assert result.exit_code == 0, result.output
+    assert "Scope: board-ci" in result.output
+
+
+def test_rotate_shows_scope_in_output() -> None:
+    result = _run(["token", "rotate", "--tenant", "nexus", "--scope", "board-ci"])
+    assert result.exit_code == 0, result.output
+    assert "Scope: board-ci" in result.output
+
+
+def test_rotate_mixed_scope_409_becomes_clean_clickexception() -> None:
+    # nexus-r3ur5 critique: the engine refuses (409) a mixed-scope tenant when no
+    # --scope is given; the CLI must surface a clear message naming the scopes and
+    # the remedy, never a raw httpx traceback.
+    _FakeStore.rotate_raises = _http_status_error(
+        409,
+        {
+            "error": "tenant 'nexus' holds live tokens of multiple scopes "
+                      "[board-ci, tenant]; pass 'scope' to rotate one scope at a time",
+            "scopes": ["board-ci", "tenant"],
+        },
+    )
+    result = _run(["token", "rotate", "--tenant", "nexus"])
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "board-ci" in result.output
+    assert "tenant" in result.output
+    assert "--scope" in result.output
+
+
+def test_rotate_other_http_errors_propagate_unmodified() -> None:
+    # Only 409 gets the clean-message treatment; any other status is not swallowed.
+    _FakeStore.rotate_raises = _http_status_error(500, {"error": "internal server error"})
+    result = _run(["token", "rotate", "--tenant", "t-b"])
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, SystemExit)
+    assert isinstance(result.exception, httpx.HTTPStatusError)
 
 
 def test_revoke_success_and_no_match_exit_code() -> None:

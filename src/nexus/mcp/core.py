@@ -4895,9 +4895,17 @@ def store_put(
         raise_if_oversized(content, doc_id=chunk_chroma_id, collection=col_name)
         catalog_doc_id = ""
         catalog_row_minted = False
+        # nexus-k54nk fix-round 1: captures the document's pre-call
+        # meta.doc_id when catalog_store_hook_tracked reconciles this
+        # call onto an existing row — see rollback_uncataloged_chunk_
+        # write's SELF-EXCLUSION guard for why the rollback below needs
+        # it (distinguishing "already this document's identity" from
+        # "this call's own not-yet-landed stamp").
+        pre_call_doc_id_out: dict[str, str] = {}
         try:
             catalog_doc_id, catalog_row_minted = catalog_store_hook_tracked(
                 title=title, doc_id=chunk_chroma_id, collection_name=col_name,
+                pre_call_doc_id_out=pre_call_doc_id_out,
             )
         except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -5074,6 +5082,7 @@ def store_put(
                 )
             outcome = rollback_uncataloged_chunk_write(
                 t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
+                pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
             )
             return (
                 f"Error: store_put could not catalog content in {col_name}: "

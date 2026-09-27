@@ -51,6 +51,11 @@ SUBSPACE: str = f"board/{TOPIC}"
 MAX_BODY_BYTES: int = 1024
 
 
+#: Fan-in jobs that fail when a job they aggregate is missing, so a failure
+#: of theirs beside a cancelled job says nothing new.
+AGGREGATORS: frozenset[str] = frozenset({"pytest-gate"})
+
+
 def verdict_from_results(results: dict[str, str]) -> tuple[str, list[str]]:
     """Fold ``needs.<job>.result`` values into one conclusion.
 
@@ -59,10 +64,22 @@ def verdict_from_results(results: dict[str, str]) -> tuple[str, list[str]]:
     lane skips jobs on purpose). A result outside GitHub's closed set
     (success, failure, cancelled, skipped) counts as a failure, never as a
     silent success. Returns ``(conclusion, failed_job_names)``.
+
+    One exception: when some job was cancelled and the only failures are
+    ``AGGREGATORS``, the run is ``cancelled``. A newer push cancels the older
+    run's jobs, and ``pytest-gate`` then fails on the shards it never got
+    (run 36271319947, 2026-09-26). The workflow's ``cancelled()`` cannot say
+    this: the verdict job starts after the cancellation under ``always()``
+    and sees ``cancelled()`` false. A job that hits its ``timeout-minutes``
+    also reads as cancelled, with no newer run behind it, so a ``cancelled``
+    verdict with no newer ``ci-pending`` needs a rerun. ``failed`` always
+    names every job that did not end green.
     """
     known = {"success", "skipped", "cancelled"}
     failed = sorted(j for j, r in results.items() if r not in known)
     cancelled = sorted(j for j, r in results.items() if r == "cancelled")
+    if cancelled and set(failed) <= AGGREGATORS:
+        return "cancelled", sorted(set(failed) | set(cancelled))
     if failed:
         return "failure", failed + cancelled
     if cancelled:

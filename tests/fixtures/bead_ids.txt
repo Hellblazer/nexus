@@ -149,6 +149,7 @@ nexus-0rh10
 nexus-0rws
 nexus-0rwwv
 nexus-0rwwv.1
+nexus-0rxvg
 nexus-0s0o1
 nexus-0s0o1.1
 nexus-0sauz
@@ -2583,6 +2584,7 @@ nexus-do2mz
 nexus-do2mz.1
 nexus-dodjd
 nexus-dotwy
+nexus-dotwy.1
 nexus-dpe79
 nexus-dpm
 nexus-dpm.1
@@ -3997,6 +3999,7 @@ nexus-k4c6x
 nexus-k4c6x.1
 nexus-k4ldv
 nexus-k52g0
+nexus-k54nk
 nexus-k5hxw
 nexus-k5sdi
 nexus-k5sdi.1
@@ -5234,6 +5237,7 @@ nexus-q8rbu
 nexus-q9u2n
 nexus-qab
 nexus-qajw7
+nexus-qajw7.1
 nexus-qaw07
 nexus-qaw07.1
 nexus-qaz
@@ -6760,6 +6764,7 @@ nexus-xyh.8.1
 nexus-xyh.9
 nexus-xyk9o
 nexus-xzeml
+nexus-xzeml.1
 nexus-xzop6
 nexus-xzyr3
 nexus-xzyr3.1
