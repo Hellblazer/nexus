@@ -2540,9 +2540,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 natural_ids = [r.chash for r in manifest if r.chash]  # RDR-180: full digest
                 if natural_ids:
                     try:
-                        present = col.get(
-                            ids=natural_ids, include=["metadatas"],
-                        )
+                        present = col.get(ids=natural_ids, include=[])
                     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         present = None
                     if present and present.get("ids"):
@@ -2570,7 +2568,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 where = {"doc_id": doc_id}
                 try:
                     existing = _paginated_get(
-                        col, include=["metadatas"], where=where,
+                        col, include=[], where=where,
                     )
                 except Exception:  # noqa: BLE001 — nexus-ou4tb: isolate this FILE, not the run
                     # The client fails loud now (a degraded service no longer
@@ -2587,9 +2585,14 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
             if not existing["ids"]:
                 continue  # not yet indexed — needs full nx index repo
 
+            # nexus-vhyar: send only the key this pass owns. The engine
+            # merges, so the rest of the row is untouched; echoing back the
+            # metadata read above ({**m, ...}) re-asserted every key as it
+            # stood at read time over any write that committed in between
+            # (the read-modify-write race nexus-w94eo removed from the PDF
+            # post-pass).
             updated_metadatas = [
-                {**m, "frecency_score": float(score)}
-                for m in existing["metadatas"]
+                {"frecency_score": float(score)} for _ in existing["ids"]
             ]
             db.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 

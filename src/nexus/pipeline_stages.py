@@ -265,6 +265,11 @@ def _build_chunk_metadata(
     # untouched.
     meta.pop("title", None)
     meta.pop("source_author", None)
+    # nexus-vhyar: same reason for the default frecency_score. The
+    # frecency-only reindex owns that key, and a late stub duplicate carrying
+    # 0.0 would reset a score it had bumped. Readers default a missing score
+    # to 0.0 (scoring.py), so omitting it changes nothing on a fresh chunk.
+    meta.pop("frecency_score", None)
     return meta
 
 
@@ -1595,6 +1600,14 @@ def _update_chunk_metadata(
 
     Paginates the T3 query to handle documents with 300+ chunks.
     Returns True on success, False on failure (nexus-f8it).
+
+    nexus-vhyar: *update_fn* mutates a copy of the row it was given, and only
+    the keys it added or changed are written. The engine merges, so the rest
+    of the row is untouched; writing the whole row back re-asserted every key
+    as it stood at read time over any write that committed in between (the
+    read-modify-write race nexus-w94eo removed from the enrichment post-pass).
+    A key *update_fn* deletes is not written and so not removed; no caller
+    deletes one today.
     """
     try:
         all_ids: list[str] = []
@@ -1620,9 +1633,12 @@ def _update_chunk_metadata(
     ids_to_update: list[str] = []
     updated_metas: list[dict] = []
     for cid, meta in zip(all_ids, all_metas):
+        before = dict(meta)
         if update_fn(meta):
-            ids_to_update.append(cid)
-            updated_metas.append(meta)
+            delta = {k: v for k, v in meta.items() if k not in before or before[k] != v}
+            if delta:
+                ids_to_update.append(cid)
+                updated_metas.append(delta)
 
     if ids_to_update:
         try:

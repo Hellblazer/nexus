@@ -392,8 +392,9 @@ def test_frecency_only_updates_frecency_score(tmp_path):
         _run_index_frecency_only(repo, _reg())
     kw = db.update_chunks.call_args_list[0].kwargs
     assert kw["ids"] == ["c1"]
-    assert kw["metadatas"][0]["frecency_score"] == 0.75
-    assert kw["metadatas"][0]["title"] == "main.py:1-1"
+    # nexus-vhyar: the write carries only the key this pass owns; echoing
+    # the read-back row (title included) re-asserted stale values.
+    assert kw["metadatas"] == [{"frecency_score": 0.75}]
     where = col.get.call_args.kwargs["where"]
     assert where == {"doc_id": "1.1.1"}
 

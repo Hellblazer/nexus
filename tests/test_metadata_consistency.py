@@ -255,7 +255,9 @@ def test_pipeline_pdf_emits_full_keyset() -> None:
         embedding_model="voyage-context-3",
         now_iso="2026-04-26T00:00:00+00:00",
     )
-    expected = _full_keyset_minus_optional() - {"title", "source_author"}
+    # nexus-vhyar: frecency_score is omitted at its 0.0 default for the same
+    # reason; the frecency-only reindex owns it.
+    expected = _full_keyset_minus_optional() - {"title", "source_author", "frecency_score"}
     missing = expected - set(meta.keys())
     assert not missing, (
         f"streaming pipeline dropped: {missing}; got keys {sorted(meta.keys())}"
@@ -267,6 +269,9 @@ def test_pipeline_pdf_emits_full_keyset() -> None:
     assert "source_author" not in meta, (
         "nexus-w94eo: source_author is unknown at streaming chunk-time and "
         "must be omitted, not stamped as an empty-string placeholder"
+    )
+    assert "frecency_score" not in meta, (
+        "nexus-vhyar: the stub must not carry the frecency-only reindex's key"
     )
 
 
