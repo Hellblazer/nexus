@@ -1,5 +1,10 @@
 # Changelog
 
+## [7.63.0] - 2026-09-26
+
+Plugin version aligned with conexus 7.63.0. No plugin-side behaviour change in
+this release.
+
 ## [7.62.0] - 2026-09-26
 
 Plugin version aligned with conexus 7.62.0. The plugin-side changes go live as
