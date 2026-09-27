@@ -883,9 +883,24 @@ class TestG1OnlyGappedFilter:
         assert result.docs_skipped_has_manifest == 1
         assert result.docs_processed == 1
         assert result.chunks_written == 0  # dry run: nothing written
+        # ...but it reports what it WOULD write (conexus-4b's live dry run
+        # printed "would write 0" for a doc it was about to heal).
+        assert result.chunks_would_write > 0
 
         # No manifest materialized for the gapped doc -- dry run never wrote.
         assert active_catalog.get_manifest(gapped) == []
+
+        assert result.dry_run is True
+
+        # With no FK-409 in this fixture, the real run writes exactly what
+        # the dry run planned (in general the dry-run count is an upper
+        # bound: FK-409 is decided server-side at write time).
+        real = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False, only_gapped=True,
+        )
+        assert real.chunks_written == result.chunks_would_write
+        assert real.chunks_would_write == 0
+        assert real.dry_run is False
 
     def test_only_gapped_limit_bounds_the_gapped_set_not_the_raw_list(
         self, active_catalog, t3_db,

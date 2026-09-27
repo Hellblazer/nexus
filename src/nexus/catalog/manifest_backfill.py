@@ -75,6 +75,13 @@ Edge-case contracts:
     applied BEFORE the T3 lookup/write for each doc, and before the
     ``dry_run`` branch, so a dry run reports the same partition a real run
     would touch. Default is ``False`` — unset, behavior is unchanged.
+  - DRY-RUN COUNTS ARE AN UPPER BOUND: every skip class except
+    ``docs_skipped_fk_409`` is decided before the ``dry_run`` branch, so a
+    dry run reports it exactly. The FK check (``fk_catalog_chunks_chunk``)
+    happens server-side only when a manifest is written, so a dry run
+    cannot predict it: ``docs_processed`` and ``chunks_would_write`` can
+    exceed the real run's ``docs_processed``/``chunks_written`` by the
+    documents the real run skips as FK-409.
   - REVERSE notes discovery (nexus-wbfpw.7, review of nexus-wbfpw.4 round 2,
     T2 nexus/review-wbfpw4-code-r2): the census
     (``scripts/sql/manifest_less_census.sql``) classifies a chunk as
@@ -299,7 +306,16 @@ class BackfillResult:
 
     collection: str
     docs_processed: int = 0
+    # True when this result came from a dry run: docs_processed and the
+    # skip counters then describe the plan, not writes that happened.
+    dry_run: bool = False
     chunks_written: int = 0
+    # Rows a dry run WOULD write (chunks_written stays 0 in a dry run, since
+    # nothing is written). A real run leaves this 0; callers report
+    # chunks_would_write in dry run and chunks_written otherwise. An upper
+    # bound: a server-side FK-409 at write time is not predictable (see the
+    # module docstring).
+    chunks_would_write: int = 0
     docs_skipped_no_t3: int = 0
     # nexus-w5zv: count Phase-3 docs that couldn't be backfilled because
     # chunk_index is missing from metadata (multi-chunk only). Operator
@@ -806,7 +822,7 @@ def backfill_manifest_for_collection(
     (``docs_skipped_chash_divergent``, ``docs_skipped_fk_409``) rather
     than propagating -- see the module docstring's edge-case contracts.
     """
-    result = BackfillResult(collection=collection_name)
+    result = BackfillResult(collection=collection_name, dry_run=dry_run)
 
     # taxonomy__* carve-out: centroids use centroid_hash, not chunk_text_hash.
     if collection_name.startswith(_TAXONOMY_PREFIX):
@@ -993,7 +1009,9 @@ def backfill_manifest_for_collection(
 
         chunks.sort(key=lambda c: c["position"])
 
-        if not dry_run:
+        if dry_run:
+            result.chunks_would_write += len(chunks)
+        else:
             try:
                 catalog.write_manifest(doc_id, chunks, collection=collection_name)
             except httpx.HTTPStatusError as exc:

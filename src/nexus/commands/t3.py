@@ -1049,7 +1049,7 @@ def backfill_manifest_cmd(
         )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
-            f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
+            f"doc(s), {verb} {result.chunks_would_write if dry_run else result.chunks_written} chunk manifest row(s)"
             f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}"
             f"{has_manifest_part}{chash_divergent_part}{fk_409_part}{reverse_part}"
             f"{cross_collection_part}{reverse_multi_piece_part}",
@@ -1059,7 +1059,7 @@ def backfill_manifest_cmd(
         # Emit to stdout as well for the summary output.
         click.echo(
             f"  {coll_name}: processed {result.docs_processed} doc(s), "
-            f"{verb} {result.chunks_written} chunk manifest row(s)"
+            f"{verb} {result.chunks_would_write if dry_run else result.chunks_written} chunk manifest row(s)"
             + (
                 f" ({result.docs_skipped_no_t3} skipped: no T3 collection)"
                 if result.docs_skipped_no_t3
@@ -1110,7 +1110,7 @@ def backfill_manifest_cmd(
         )
 
         total_docs += result.docs_processed
-        total_chunks += result.chunks_written
+        total_chunks += result.chunks_would_write if dry_run else result.chunks_written
         total_skipped_no_t3 += result.docs_skipped_no_t3
         total_skipped_zero_chunks += result.docs_skipped_zero_chunks
         total_skipped_phase3_no_index += result.docs_skipped_phase3_no_index
