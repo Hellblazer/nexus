@@ -287,8 +287,11 @@ def test_manifest_hook_exception_with_partial_t3_write_fails_with_reconcile_reme
 
     def truncating_upsert(
         self, collection_name, ids, documents, embeddings,
-        metadatas=None, *, force_re_embed=False,
+        metadatas=None, **kwargs,
     ):
+        # ``**kwargs`` forwards whatever the real signature grows (nexus-w94eo
+        # added ``delete_keys``); a pinned signature here raised TypeError
+        # inside the index run and the hook under test never fired.
         # Drop the LAST chunk before it ever reaches T3 -- genuinely
         # short, not a duplicate-content collapse (RDR-108's OTHER benign
         # explanation for a manifest shortfall).
@@ -300,7 +303,7 @@ def test_manifest_hook_exception_with_partial_t3_write_fails_with_reconcile_reme
             metadatas = (metadatas or [])[:keep]
         return real_upsert(
             self, collection_name, ids, documents, embeddings,
-            metadatas=metadatas, force_re_embed=force_re_embed,
+            metadatas=metadatas, **kwargs,
         )
 
     call_log: list[str] = []
