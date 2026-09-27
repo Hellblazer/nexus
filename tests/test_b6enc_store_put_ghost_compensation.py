@@ -1745,8 +1745,10 @@ class TestWbfpw28OppositeOrderingRecovery:
         )
         assert chash in outcome_b.protected
 
-        present = client.get_collection(collection).get(ids=[chash], include=[])
-        assert chash in (present.get("ids") or []), (
+        # Physical presence, not visibility (RDR-192 Step 5): existing_ids
+        # asks whether the chunk is stored, owned or not.
+        present = client.existing_ids(collection, [chash])
+        assert chash in present, (
             "the chunk must still be physically present after B's "
             "rollback attempt -- nothing was deleted"
         )
@@ -1774,8 +1776,10 @@ class TestWbfpw28OppositeOrderingRecovery:
         assert chash in active_reader().get_chunk_chashes(tumbler_a), (
             "A's manifest must reference the chash"
         )
-        present = client.get_collection(collection).get(ids=[chash], include=[])
-        assert chash in (present.get("ids") or []), (
+        # Physical presence, not visibility (RDR-192 Step 5): existing_ids
+        # asks whether the chunk is stored, owned or not.
+        present = client.existing_ids(collection, [chash])
+        assert chash in present, (
             "the chunk must remain physically present after A's "
             "manifest write lands"
         )
