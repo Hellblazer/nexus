@@ -48,10 +48,13 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "CHROMA_IDENTITY_FIELD",
     "FILE_ROUTED_PREFIXES",
+    "HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S",
+    "HTTPS_ETAG_CAPTURE_TIMEOUT_S",
     "HTTPS_ETAG_META_KEY",
     "HTTPS_STAT_MAX_ATTEMPTS",
     "HTTPS_STAT_RETRY_DELAYS_S",
     "HTTPS_STAT_TIMEOUT_S",
+    "NX_REFERENCE_ETAG_CAPTURE_ENV",
     "ReadFail",
     "ReadFailReason",
     "ReadOk",
@@ -1229,14 +1232,28 @@ def read_source(
 #                          ``catalog_documents.metadata[HTTPS_ETAG_META_KEY]``),
 #                          a differing ETag is 'stale' and a matching one is
 #                          'fresh'; Last-Modified still wins whenever both are
-#                          present.  With no recorded ETag to compare against
-#                          this remains reason='error' ('unknown').  Writers
-#                          record the ETag via :func:`capture_https_etag` /
-#                          :func:`record_https_etag` at register/refresh time
-#                          — see those functions.  Wired into a real caller
-#                          (nexus-tb2yj): ``nx doctor --check-references``
-#                          samples reference-only catalog documents and
-#                          calls stat_source/staleness_signal over them
+#                          present.  A leading W/ weak-validator prefix is
+#                          stripped from both sides before comparing, so
+#                          W/"x" and "x" read equal (RFC 7232 SS2.3).  With
+#                          no recorded ETag to compare against this remains
+#                          reason='error' ('unknown').  KNOWN LIMITATION: a
+#                          server that mints a genuinely fresh ETag on
+#                          every response (no stable validator at all) will
+#                          read 'stale' on every check regardless of
+#                          whether the content changed — stripping W/
+#                          narrows the weak/strong false-stale case, it
+#                          does not paper over a server with nothing
+#                          stable to compare.  Writers record the ETag via
+#                          :func:`capture_https_etag` / :func:`record_https_etag`
+#                          at register/refresh time, bounded to
+#                          HTTPS_ETAG_CAPTURE_TIMEOUT_S (~3s) rather than
+#                          this read-time path's looser budget, since the
+#                          write path runs synchronously inside
+#                          register/update — see those functions.  Wired
+#                          into a real caller (nexus-tb2yj): ``nx doctor
+#                          --check-references`` samples reference-only
+#                          catalog documents and calls
+#                          stat_source/staleness_signal over them
 #                          (``nexus.doctor_references``).  See
 #                          _stat_https_uri.
 #   Java-side: still DEFERRED, owned by nexus-oqenh (leg 2).  The
@@ -1521,6 +1538,45 @@ HTTPS_STAT_MAX_ATTEMPTS: int = 3
 #: is fine for a maintenance sweep and wrong per result on a search path.
 HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 
+#: Write-path ETag capture budget (nexus-0ne1m critique, 40c235f69 Critical):
+#: :func:`capture_https_etag` runs SYNCHRONOUSLY inside `nx catalog register`/
+#: `update` and the `register` MCP tool — a caller waiting on a register call
+#: must never be exposed to HTTPS_STAT_TIMEOUT_S's ~61.5s read-time worst
+#: case. ``httpx.Timeout(HTTPS_ETAG_CAPTURE_TIMEOUT_S,
+#: connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)`` applies the default to
+#: read/write/pool and the (tighter) connect value only to the connect
+#: phase, one attempt, no retry — worst case for the whole capture is
+#: bounded near HTTPS_ETAG_CAPTURE_TIMEOUT_S, not per-phase.
+HTTPS_ETAG_CAPTURE_TIMEOUT_S: float = 3.0
+HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S: float = 2.0
+
+#: Opt-out for the write-path ETag capture entirely (nexus-0ne1m critique):
+#: ``NX_REFERENCE_ETAG_CAPTURE=0`` makes :func:`record_https_etag` a pure
+#: no-op with NO network attempt at all — for a caller that cannot tolerate
+#: ANY added register/update latency, or that runs somewhere the outbound
+#: HEAD itself is undesirable (an offline/sandboxed install, a firewalled
+#: CI runner). Any other value (including unset) keeps capture enabled.
+NX_REFERENCE_ETAG_CAPTURE_ENV = "NX_REFERENCE_ETAG_CAPTURE"
+
+
+def _https_etag_capture_enabled() -> bool:
+    return os.environ.get(NX_REFERENCE_ETAG_CAPTURE_ENV, "") != "0"
+
+
+def _strip_weak_etag_prefix(etag: str) -> str:
+    """Strip a leading ``W/`` weak-validator prefix (RFC 7232 §2.3), so a
+    weak and a strong ETag naming the same value compare equal.
+
+    Limitation named here rather than re-derived at each call site: a
+    server that mints a FRESH ETag on every response (no stable validator
+    at all — some dynamically-rendered pages do this) makes this
+    comparison read 'stale' on every check regardless of whether the
+    underlying content actually changed. Stripping ``W/`` narrows false
+    stale reports from the weak/strong distinction; it cannot fix a
+    server with no stable validator to compare in the first place.
+    """
+    return etag.removeprefix("W/") if etag else etag
+
 
 def _parse_http_date_to_mtime(value: str) -> float | None:
     """Parse an RFC 7231 HTTP-date (a ``Last-Modified`` header value) into a
@@ -1661,11 +1717,14 @@ def _stat_https_uri(
 
     etag = response.headers.get("etag")
     if etag and recorded_etag:
-        # nexus-0ne1m: the ETag-only comparison. Opaque-string equality —
-        # no weak-validator (W/"...") normalisation; a recorded and current
-        # ETag are compared exactly as the header sent them, both here and
-        # at capture time (record_https_etag stores the raw header value).
-        return StatOk(current_mtime=None, etag_stale=(recorded_etag != etag))
+        # nexus-0ne1m critique (code review): the ETag-only comparison
+        # strips a leading W/ weak-validator prefix from BOTH sides first,
+        # so W/"x" and "x" compare equal — the raw header value is still
+        # what record_https_etag stores; only the COMPARISON normalises.
+        # See _strip_weak_etag_prefix's docstring for the residual
+        # limitation (a server minting a fresh ETag every response).
+        is_stale = _strip_weak_etag_prefix(recorded_etag) != _strip_weak_etag_prefix(etag)
+        return StatOk(current_mtime=None, etag_stale=is_stale)
     return StatFail(
         reason="error",
         detail=(
@@ -1690,33 +1749,45 @@ def capture_https_etag(source_uri: str, *, http_client: Any = None) -> str:
     to store in ``catalog_documents.metadata[HTTPS_ETAG_META_KEY]`` at
     register/refresh time.
 
-    ONE HEAD request, no retry — this runs on a WRITE path (register/update),
-    never a maintenance sweep, so a slow or unreachable upstream must never
-    stall or fail the caller's register/update call.  Contrast
-    :func:`_stat_https_uri`, which retries boundedly because it runs on a
-    read-time staleness check where a transient failure should be given a
-    second chance.  Same client conventions otherwise (timeout,
-    follow_redirects) as :func:`_stat_https_uri`.
+    ONE HEAD request, no retry, bounded to
+    ``httpx.Timeout(HTTPS_ETAG_CAPTURE_TIMEOUT_S,
+    connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)`` (nexus-0ne1m critique,
+    40c235f69 Critical) — this runs SYNCHRONOUSLY on a WRITE path
+    (register/update/the MCP ``register`` tool), never a maintenance sweep,
+    so a slow or unreachable upstream must never stall the caller's
+    register/update call for anywhere near :data:`HTTPS_STAT_TIMEOUT_S`'s
+    read-time budget.  Contrast :func:`_stat_https_uri`, which retries
+    boundedly under the LOOSER read-time budget because it runs on a
+    staleness check where a transient failure should be given a second
+    chance and nothing is waiting on it synchronously.
 
     Returns the raw ``ETag`` header value verbatim (quotes included, exactly
-    as the server sent it — comparison at stat time is opaque-string
-    equality, so capture and comparison must agree on the same
-    representation), or ``""`` on ANY failure: a network error (including
-    an unsupported/non-HTTP *source_uri* scheme, which httpx itself refuses
-    before any I/O), a non-2xx/3xx status, or a response with no ``ETag``
-    header.  Nothing here ever raises.  This function does not itself check
-    that *source_uri* is ``https://`` — :func:`record_https_etag` is the
-    caller that gates on scheme, cheaply, before ever reaching here.
+    as the server sent it — comparison at stat time strips a leading
+    ``W/`` from both sides before comparing, see
+    :func:`_strip_weak_etag_prefix`, but otherwise capture and comparison
+    must agree on the same representation), or ``""`` on ANY failure: a
+    network error (including an unsupported/non-HTTP *source_uri* scheme,
+    which httpx itself refuses before any I/O), a non-2xx/3xx status, or a
+    response with no ``ETag`` header.  Nothing here ever raises.  This
+    function does not itself check that *source_uri* is ``https://`` —
+    :func:`record_https_etag` is the caller that gates on scheme, cheaply,
+    before ever reaching here.
 
     ``http_client`` is injected for tests (a real ``httpx.Client``); a sweep
-    that captures many ETags in one run should pass the SAME client across
-    calls rather than let each call build and close its own.
+    that captures many ETags in one run (``nx catalog backfill-etags``)
+    should pass the SAME client across calls rather than let each call
+    build and close its own.
     """
     own_client = False
     if http_client is None:
         import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
 
-        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(
+                HTTPS_ETAG_CAPTURE_TIMEOUT_S, connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S,
+            ),
+            follow_redirects=True,
+        )
         own_client = True
     try:
         response = http_client.head(source_uri)
@@ -1740,15 +1811,27 @@ def record_https_etag(
     """Capture and persist an https:// reference's ``ETag`` on *tumbler*,
     best-effort (nexus-0ne1m).
 
-    No-op for a non-``https://`` *source_uri*, or when the HEAD request
-    (:func:`capture_https_etag`) yields no ETag.  Otherwise calls
-    ``writer.update(tumbler, meta={HTTPS_ETAG_META_KEY: etag})`` — the
-    engine's meta MERGE semantics (jsonb_concat, never a bare replace) make
-    this safe to call unconditionally on both a fresh ``register()`` (whose
-    own ``meta=`` argument the engine only applies on the INSERT leg — a
-    register that reconciles onto an ALREADY-EXISTING row silently skips
-    the caller's meta entirely) and a ``register()``/``update()`` that
-    "refreshes" an existing row's ``source_uri``.
+    **Side effect callers must know about** (nexus-0ne1m critique,
+    40c235f69 Critical): for an ``https://`` *source_uri* this makes ONE
+    real outbound HEAD request, bounded to
+    ``HTTPS_ETAG_CAPTURE_TIMEOUT_S`` (~3s, one attempt, no retry — see
+    :func:`capture_https_etag`), BEFORE returning.  Every call site
+    (`nx catalog register`, `nx catalog update --source-uri`, the MCP
+    ``register`` tool) accepts this added latency as the cost of capturing
+    the ETag at the moment the reference is known-fresh; set
+    ``NX_REFERENCE_ETAG_CAPTURE=0`` to disable the network attempt
+    entirely (a pure no-op then, zero latency added). No-op already for a
+    non-``https://`` *source_uri*, or when the HEAD request yields no
+    ETag.
+
+    Otherwise calls ``writer.update(tumbler, meta={HTTPS_ETAG_META_KEY:
+    etag})`` — the engine's meta MERGE semantics (jsonb_concat, never a
+    bare replace) make this safe to call unconditionally on both a fresh
+    ``register()`` (whose own ``meta=`` argument the engine only applies
+    on the INSERT leg — a register that reconciles onto an
+    ALREADY-EXISTING row silently skips the caller's meta entirely) and a
+    ``register()``/``update()`` that "refreshes" an existing row's
+    ``source_uri``.
 
     Call this AFTER a register/update call has already produced *tumbler* —
     never before, and never in place of the caller's own error handling.
@@ -1757,6 +1840,8 @@ def record_https_etag(
     time records nothing and never fails the index."
     """
     if not source_uri.startswith("https://"):
+        return
+    if not _https_etag_capture_enabled():
         return
     try:
         etag = capture_https_etag(source_uri, http_client=http_client)

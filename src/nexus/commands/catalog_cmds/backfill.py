@@ -13,6 +13,15 @@ re-derives ``chroma://`` catalog ``source_uri`` values for filesystem-backed
 collections (``rdr__``/``docs__``/``code__``) whose identity was minted by an
 older ``uri_for`` that predated those prefixes routing to ``file://``. See
 the command's own docstring for the mechanism and safety rails.
+
+``backfill-etags`` (nexus-0ne1m critique, significant #2) is the second live
+verb: every ``https://`` reference registered/refreshed BEFORE nexus-0ne1m
+shipped has no recorded ``ETag`` and reads 'unknown' forever under
+``nx doctor --check-references`` unless an operator individually re-runs
+``nx catalog update <tumbler> --source-uri <same-url>``. This is the bulk
+form, following this file's own ``backfill-source-uri`` shape: a plain
+report first, ``--dry-run`` for a preview with zero network calls, and
+``--limit`` to keep one run bounded rather than an unbounded fan-out.
 """
 from __future__ import annotations
 
@@ -161,6 +170,120 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
         raise click.exceptions.Exit(1)
 
 
+@click.command(name="backfill-etags")
+@click.option(
+    "--owner", default="",
+    help="Restrict to this owner tumbler (e.g. 1.1). Default: every owner.",
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Report what would be captured; makes NO network calls and writes nothing.",
+)
+@click.option(
+    "--limit", type=click.IntRange(min=1, max=2000), default=500, show_default=True,
+    help="Cap on candidate documents processed in one run — a bounded sweep, "
+         "never an unlimited fan-out. Re-run to continue past the cap; "
+         "idempotent, so already-recorded documents are excluded from the "
+         "next run's candidates automatically.",
+)
+def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
+    """Capture the ``ETag`` for every ``https://`` reference that lacks one
+    (nexus-0ne1m critique, significant #2).
+
+    Every ``https://`` reference registered or refreshed BEFORE nexus-0ne1m
+    shipped has no ``catalog_documents.metadata[HTTPS_ETAG_META_KEY]`` and
+    reads 'unknown' forever under ``nx doctor --check-references`` — this is
+    the bulk remedy. Candidates: live (non-alias) documents whose
+    ``source_uri`` starts with ``https://`` and whose ``meta`` does not
+    already carry an ETag. IDEMPOTENT by construction: a document that
+    already has one is excluded from candidates on every run, so re-running
+    after a partial run (or after the ``--limit`` cap) only touches what is
+    still missing.
+
+    ``--dry-run`` lists the candidates and makes NO network call and NO
+    write at all. Without it, one bounded HEAD request per candidate
+    (``capture_https_etag``, the same tight write-path budget
+    ``nx catalog register``/``update`` use — see
+    ``aspect_readers.HTTPS_ETAG_CAPTURE_TIMEOUT_S``) shares ONE
+    ``httpx.Client`` across the whole run. A document whose HEAD fails or
+    returns no ``ETag`` header is reported, not retried; a document whose
+    catalog write fails is reported and counted as a failure (exit 1),
+    without aborting the rest of the run.
+    """
+    from nexus.aspect_readers import (  # noqa: PLC0415 — command-local
+        HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S,
+        HTTPS_ETAG_CAPTURE_TIMEOUT_S,
+        HTTPS_ETAG_META_KEY,
+        capture_https_etag,
+    )
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — command-local
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+
+    cat = _cat_cmd._get_catalog()
+    entries = cat.by_owner(Tumbler.parse(owner)) if owner else cat.all_documents(limit=0)
+
+    candidates = [
+        e for e in entries
+        if not e.alias_of
+        and (e.source_uri or "").startswith("https://")
+        and not (e.meta or {}).get(HTTPS_ETAG_META_KEY)
+    ]
+    scoped = candidates[:limit]
+
+    click.echo(
+        f"https:// reference(s) missing an ETag: {len(candidates)}"
+        + (f" under owner {owner}" if owner else "")
+        + f"; this run processes up to --limit {limit}: {len(scoped)}"
+    )
+
+    if dry_run:
+        for e in scoped[:20]:
+            click.echo(f"  would capture: {e.tumbler}  {e.source_uri}")
+        if len(scoped) > 20:
+            click.echo(f"  ... and {len(scoped) - 20} more")
+        click.echo("Dry-run: no network calls made, nothing recorded. Re-run without --dry-run to apply.")
+        return
+
+    if not scoped:
+        click.echo("Nothing to backfill.")
+        return
+
+    import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
+
+    writer = _cat_cmd._get_catalog_writer()
+    recorded = 0
+    no_etag = 0
+    failed = 0
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(
+                HTTPS_ETAG_CAPTURE_TIMEOUT_S, connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S,
+            ),
+            follow_redirects=True,
+        ) as client:
+            for e in scoped:
+                etag = capture_https_etag(e.source_uri, http_client=client)
+                if not etag:
+                    no_etag += 1
+                    continue
+                try:
+                    writer.update(e.tumbler, meta={HTTPS_ETAG_META_KEY: etag})
+                    recorded += 1
+                except Exception as exc:  # noqa: BLE001 — one row's failure is reported, never aborts the sweep
+                    failed += 1
+                    click.echo(f"  FAILED to record {e.tumbler}: {type(exc).__name__}: {exc}", err=True)
+    finally:
+        writer.close()
+
+    click.echo(
+        f"Recorded {recorded} ETag(s); {no_etag} had none to capture "
+        f"(HEAD failed or no ETag header); {failed} write failure(s)."
+    )
+    if failed:
+        raise click.exceptions.Exit(1)
+
+
 def register(group: click.Group) -> None:
     """Attach the live backfill verb(s) to the shared ``catalog`` group."""
     group.add_command(backfill_source_uri_cmd)
+    group.add_command(backfill_etags_cmd)

@@ -580,6 +580,41 @@ class TestStatHttpsUri:
         assert result.etag_stale is True
         assert staleness_signal(1_000_000.0, result) == "stale"
 
+    def test_weak_etag_matches_the_equivalent_strong_one(self, https_stat_server) -> None:
+        """nexus-0ne1m critique (code review): W/"x" and "x" name the same
+        value under RFC 7232 SS2.3 weak comparison -- a leading W/ is
+        stripped from BOTH sides before comparing, so a server that
+        toggles between weak and strong validators for the same resource
+        does not read a false 'stale'."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": 'W/"x"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri(
+                "/paper.pdf", http_client=client, recorded_etag='"x"',
+            )
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        assert result.etag_stale is False
+        assert staleness_signal(0.0, result) == "fresh"
+
+    def test_weak_etag_on_the_recorded_side_also_matches(self, https_stat_server) -> None:
+        """The strip applies to whichever side carries the W/ prefix."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": '"x"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri(
+                "/paper.pdf", http_client=client, recorded_etag='W/"x"',
+            )
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        assert result.etag_stale is False
+
     def test_last_modified_wins_over_mismatched_etag(self, https_stat_server) -> None:
         """Last-Modified drives the verdict even when a recorded ETag would
         say 'stale' — Last-Modified always wins when both are present."""
@@ -855,6 +890,47 @@ class TestCaptureHttpsEtag:
             client.close()
         assert handler.request_count == 1
 
+    def test_builds_its_own_client_with_the_tight_write_path_timeout(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-0ne1m critique (Critical): when no http_client is injected
+        (the real register/update/MCP call sites never inject one),
+        capture_https_etag must build its OWN client bounded to
+        HTTPS_ETAG_CAPTURE_TIMEOUT_S/HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S —
+        the tight write-path budget, NOT HTTPS_STAT_TIMEOUT_S's ~10s-per-
+        phase read-time budget a caller waiting synchronously must never
+        be exposed to."""
+        captured: dict[str, Any] = {}
+
+        class _FakeResponse:
+            status_code = 200
+            headers = {"etag": '"x"'}
+
+        class _FakeClient:
+            def __init__(self, *, timeout: Any, follow_redirects: bool) -> None:
+                captured["timeout"] = timeout
+                captured["follow_redirects"] = follow_redirects
+
+            def head(self, uri: str) -> _FakeResponse:
+                return _FakeResponse()
+
+            def close(self) -> None:
+                captured["closed"] = True
+
+        monkeypatch.setattr(httpx, "Client", _FakeClient)
+
+        etag = capture_https_etag("https://example.invalid/doc")
+
+        assert etag == '"x"'
+        assert captured["follow_redirects"] is True
+        assert captured["closed"] is True
+        timeout = captured["timeout"]
+        assert timeout.connect == pytest.approx(ar_mod.HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)
+        assert timeout.read == pytest.approx(ar_mod.HTTPS_ETAG_CAPTURE_TIMEOUT_S)
+        # Sanity: the write-path budget is genuinely tighter than the
+        # read-time sweep's, so a future accidental swap is caught here.
+        assert ar_mod.HTTPS_ETAG_CAPTURE_TIMEOUT_S < ar_mod.HTTPS_STAT_TIMEOUT_S
+
 
 class _FakeHttpsResponse:
     """Duck-typed response stub — just enough surface for capture_https_etag
@@ -902,6 +978,35 @@ class TestRecordHttpsEtag:
         writer = self._RecordingWriter()
         record_https_etag(writer, "1.2.3", "file:///tmp/x")
         assert writer.calls == []
+
+    def test_env_opt_out_disables_capture_entirely(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-0ne1m critique (Critical): NX_REFERENCE_ETAG_CAPTURE=0
+        makes record_https_etag a pure no-op with NO network attempt at
+        all -- even a client injected by the caller must never be
+        touched."""
+        monkeypatch.setenv(ar_mod.NX_REFERENCE_ETAG_CAPTURE_ENV, "0")
+
+        class _ExplodingClient:
+            def head(self, uri: str):
+                raise AssertionError("HEAD must not be attempted when opted out")
+
+        writer = self._RecordingWriter()
+        record_https_etag(
+            writer, "1.2.3", "https://example.invalid/doc", http_client=_ExplodingClient(),
+        )
+
+        assert writer.calls == []
+
+    @pytest.mark.parametrize("value", ["1", "true", "", "no"])
+    def test_any_other_env_value_keeps_capture_enabled(
+        self, monkeypatch: pytest.MonkeyPatch, value: str,
+    ) -> None:
+        """Only the literal '0' opts out -- anything else (including an
+        empty string, which is what an unset var reads as) is enabled."""
+        monkeypatch.setenv(ar_mod.NX_REFERENCE_ETAG_CAPTURE_ENV, value)
+        assert ar_mod._https_etag_capture_enabled() is True
 
     def test_https_reference_records_etag_via_writer_update(self) -> None:
         writer = self._RecordingWriter()

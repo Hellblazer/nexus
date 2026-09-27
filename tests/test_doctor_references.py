@@ -27,6 +27,8 @@ it proves the CATALOG WALK and ORCHESTRATION around them.
 """
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -36,7 +38,10 @@ from nexus import doctor_references
 from nexus.aspect_readers import HTTPS_ETAG_META_KEY, StatFail, StatOk
 from nexus.cli import main
 from nexus.doctor_references import (
+    MAX_CONCURRENCY,
     ReferenceCheckResult,
+    check_references,
+    estimated_worst_case_s,
     format_report,
     is_reference_only,
     sample_candidates,
@@ -94,6 +99,82 @@ class TestSampleCandidates:
         candidates = list(range(500))
         result = sample_candidates(candidates, 50, seed=3)
         assert len(result) == len(set(result))
+
+
+# ── sizing / concurrency (nexus-0ne1m critique, significant #1) ──────────────
+
+
+def test_default_sample_is_sized_so_the_check_is_actually_runnable() -> None:
+    """50 (the original default) made the worst case ~51 minutes serial;
+    10 keeps the default estimate in the low minutes even before
+    --references-sample is narrowed for a specific need."""
+    assert doctor_references.DEFAULT_SAMPLE == 10
+
+
+class TestEstimatedWorstCaseS:
+    def test_matches_serial_bound_at_concurrency_one(self) -> None:
+        serial = estimated_worst_case_s(10, concurrency=1)
+        per_call = doctor_references._https_worst_case_per_call_s()
+        assert serial == pytest.approx(10 * per_call)
+
+    def test_concurrency_divides_the_bound(self) -> None:
+        per_call = doctor_references._https_worst_case_per_call_s()
+        assert estimated_worst_case_s(8, concurrency=8) == pytest.approx(per_call)
+        assert estimated_worst_case_s(16, concurrency=8) == pytest.approx(2 * per_call)
+
+    def test_concurrency_never_exceeds_the_sample_size(self) -> None:
+        """8 workers for a sample of 3 is nonsensical -- workers is capped
+        at the sample size, so this reads the same as concurrency=3."""
+        per_call = doctor_references._https_worst_case_per_call_s()
+        assert estimated_worst_case_s(3, concurrency=8) == pytest.approx(per_call)
+
+    def test_zero_sample_is_zero(self) -> None:
+        assert estimated_worst_case_s(0) == 0.0
+
+    def test_default_concurrency_is_max_concurrency(self) -> None:
+        assert estimated_worst_case_s(16) == pytest.approx(estimated_worst_case_s(16, MAX_CONCURRENCY))
+
+
+class TestCheckReferencesConcurrency:
+    """A deterministic fake stat_source proves check_references actually
+    runs candidates concurrently, bounded to MAX_CONCURRENCY, rather than
+    serially (the exact 'no mitigation' shape the critique names)."""
+
+    def test_runs_with_bounded_concurrency(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lock = threading.Lock()
+        state = {"current": 0, "max_seen": 0}
+
+        def _fake_stat_one(entry: Any, *, http_client: Any) -> ReferenceCheckResult:
+            with lock:
+                state["current"] += 1
+                state["max_seen"] = max(state["max_seen"], state["current"])
+            time.sleep(0.05)
+            with lock:
+                state["current"] -= 1
+            return ReferenceCheckResult(
+                scheme="https", tumbler=str(entry), title="t",
+                source_uri="https://example.invalid/doc", signal="fresh",
+            )
+
+        monkeypatch.setattr(doctor_references, "stat_one", _fake_stat_one)
+
+        candidates = list(range(20))
+        start = time.monotonic()
+        results = check_references(candidates, http_client=None)
+        elapsed = time.monotonic() - start
+
+        assert len(results) == 20
+        assert [r.tumbler for r in results] == [str(c) for c in candidates], (
+            "ThreadPoolExecutor.map preserves input order in its results"
+        )
+        assert state["max_seen"] > 1, "never actually ran concurrently"
+        assert state["max_seen"] <= MAX_CONCURRENCY
+        # Serial would be 20 * 0.05s = 1.0s; bounded concurrency of up to 8
+        # should finish well under half that.
+        assert elapsed < 0.5, f"took {elapsed:.2f}s -- looks serial, not concurrent"
+
+    def test_empty_candidates_returns_empty_without_a_pool(self) -> None:
+        assert check_references([], http_client=None) == []
 
 
 # ── format_report ─────────────────────────────────────────────────────────────
@@ -338,6 +419,48 @@ class TestRealCatalogRoundTrip:
         assert "1 reference-only document(s) sampled (of 1 candidate(s))" in result.output
         assert "1 fresh, 0 stale" in result.output
         assert str(ref_tumbler) not in result.output  # only stale/dangling rows are named
+
+    def test_record_https_etag_merges_with_preexisting_meta(self, t2_service_env) -> None:
+        """nexus-0ne1m critique (verified-correct-but-undertested note):
+        record_https_etag's docstring claims the ENGINE's meta write is a
+        MERGE (jsonb_concat), never a bare replace -- confirmed by reading
+        CatalogRepository.java, but every prior test exercised this via a
+        fake writer, so a future engine-side regression (replace instead
+        of merge) would go undetected. This registers with a real,
+        unrelated meta key through the REAL engine, calls
+        record_https_etag for real, and reads the row back for real."""
+        from nexus.aspect_readers import HTTPS_ETAG_META_KEY, record_https_etag
+        from nexus.catalog.tumbler import Tumbler
+
+        class _FakeHttpsResponse:
+            status_code = 200
+            headers = {"etag": '"merge-test-etag"'}
+
+        class _FakeHttpsClient:
+            def head(self, uri: str) -> _FakeHttpsResponse:
+                return _FakeHttpsResponse()
+
+        cat = ActiveCatalog()
+        cat.register_owner("test-repo", "repo", repo_hash="abcd1234")
+
+        tumbler = cat.register(
+            Tumbler.parse("1.1"), "Merge-test doc",
+            content_type="knowledge", source_uri="https://example.invalid/merge-doc",
+            meta={"pre_existing_key": "pre_existing_value"},
+        )
+
+        record_https_etag(
+            cat, tumbler, "https://example.invalid/merge-doc",
+            http_client=_FakeHttpsClient(),
+        )
+
+        entry = cat.resolve(tumbler)
+        assert entry is not None
+        assert entry.meta.get("pre_existing_key") == "pre_existing_value", (
+            "the pre-existing meta key must survive the ETag write -- a "
+            "bare replace instead of jsonb_concat would silently drop it"
+        )
+        assert entry.meta.get(HTTPS_ETAG_META_KEY) == '"merge-test-etag"'
 
     def test_no_reference_only_documents_on_a_real_fresh_tenant(self, t2_service_env) -> None:
         """A virgin tenant with only file-backed documents (or none at

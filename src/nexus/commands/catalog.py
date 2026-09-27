@@ -777,6 +777,29 @@ def update_cmd(
     if not fields:
         raise click.ClickException("No fields to update")
 
+    if source_uri and (owner or search_query):
+        # nexus-0ne1m critique (significant #3): refused outright, on two
+        # independent grounds. (1) source_uri is a PER-DOCUMENT identity
+        # (ux_catalog_documents_live_source_uri, catalog-016) -- setting
+        # the SAME literal URI across a batch would have every entry but
+        # the first lose the race to the engine's own unique index, a
+        # confusing partial-batch failure with no clean per-entry report.
+        # (2) even if source_uri varied per entry (it cannot, from one
+        # CLI flag), best-effort ETag capture firing once per matched
+        # document turns a metadata edit into an uncontrolled-fan-out
+        # network sweep -- exactly the "silent network call" shape this
+        # critique's Critical finding is about, multiplied by batch size.
+        # `nx catalog backfill-etags` is the bounded, purpose-built sweep
+        # for capturing ETags across many documents at once.
+        raise click.ClickException(
+            "--source-uri cannot be combined with --owner/--search: "
+            "source_uri is a per-document identity, and batching would "
+            "either collide on the engine's live-source_uri uniqueness "
+            "constraint or silently fan out one ETag-capture HEAD request "
+            "per matched document. Update one tumbler at a time, or run "
+            "`nx catalog backfill-etags` to capture ETags in bulk."
+        )
+
     # Batch mode
     if owner or search_query:
         entries = []

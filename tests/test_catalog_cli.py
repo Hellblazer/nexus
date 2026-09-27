@@ -751,6 +751,32 @@ class TestUpdateCommand:
         show = runner.invoke(main, ["catalog", "show", "1.1.1"])
         assert "x-devonthink-item://8EDC855D" in show.output
 
+    def test_update_source_uri_refused_in_batch_mode_with_owner(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nexus-0ne1m critique (significant #3): --source-uri combined
+        with --owner (batch mode) is refused outright, not silently
+        fanning out one ETag-capture HEAD request per matched document
+        (or colliding every matched entry but one on the engine's
+        live-source_uri uniqueness constraint)."""
+        result = CliRunner().invoke(main, [
+            "catalog", "update", "--owner", "1.1",
+            "--source-uri", "https://example.com/doc", "--corpus", "x",
+        ])
+        assert result.exit_code != 0, result.output
+        assert "--source-uri cannot be combined with --owner/--search" in result.output
+        assert "backfill-etags" in result.output
+
+    def test_update_source_uri_refused_in_batch_mode_with_search(
+        self, initialized_catalog, catalog_env,
+    ):
+        result = CliRunner().invoke(main, [
+            "catalog", "update", "--search", "anything",
+            "--source-uri", "https://example.com/doc", "--corpus", "x",
+        ])
+        assert result.exit_code != 0, result.output
+        assert "--source-uri cannot be combined with --owner/--search" in result.output
+
     @_needs_diagnosis_nexus_02avu
     def test_update_source_uri_validates_scheme(
         self, initialized_catalog, catalog_env,

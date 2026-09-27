@@ -26,12 +26,16 @@ call to ``aspect_readers.HTTPS_STAT_MAX_ATTEMPTS`` attempts, each up to
 twice ``aspect_readers.HTTPS_STAT_TIMEOUT_S`` (httpx applies that timeout
 to connect/read/write/pool separately), plus
 ``aspect_readers.HTTPS_STAT_RETRY_DELAYS_S`` backoff between attempts —
-about 61.5s worst case per document. Worst case for the whole run, if every
-sampled document were ``https://`` and every one exhausted its retries, is
-``sample * that per-call bound``; ``nx doctor --check-references --help``
-computes and states the number at the default sample size
-(``commands/doctor.py``'s ``_REFERENCES_HTTPS_WORST_CASE_S``, derived from
-the same three constants so it cannot silently drift from them).
+about 61.5s worst case per document. Sampled documents are stat'd with up
+to :data:`MAX_CONCURRENCY` (nexus-0ne1m critique, significant #1) concurrent
+threads sharing ONE ``httpx.Client`` (thread-safe for concurrent requests),
+so worst case for the whole run, if every sampled document were ``https://``
+and every one exhausted its retries, is
+``ceil(sample / min(MAX_CONCURRENCY, sample)) * that per-call bound`` — see
+:func:`estimated_worst_case_s`. ``nx doctor --check-references --help``
+states the number at the default sample size, and a run prints its own
+estimate (from the REQUESTED ``--references-sample``, before sampling
+narrows it to however many candidates actually exist) as its first line.
 
 Exit 0 (informational) when the sample found zero reference-only documents
 at all — "not applicable", never a red line on a box with none (the
@@ -42,8 +46,10 @@ not evidence of a real problem, only of an inconclusive one.
 """
 from __future__ import annotations
 
+import math
 import random
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -53,6 +59,8 @@ import structlog
 
 from nexus.aspect_readers import (
     HTTPS_ETAG_META_KEY,
+    HTTPS_STAT_MAX_ATTEMPTS,
+    HTTPS_STAT_RETRY_DELAYS_S,
     HTTPS_STAT_TIMEOUT_S,
     StalenessSignal,
     staleness_signal,
@@ -62,10 +70,37 @@ from nexus.doctor_embeddings import default_seed
 
 _log = structlog.get_logger(__name__)
 
-#: Reference-only documents sampled when the caller names no size.
-DEFAULT_SAMPLE = 50
+#: Reference-only documents sampled when the caller names no size (nexus-0ne1m
+#: critique, significant #1: 50 made this a check nobody would run — sized
+#: so the default estimate stays in the tens-of-seconds range, not tens of
+#: minutes, even before --references-sample is narrowed for a specific need).
+DEFAULT_SAMPLE = 10
+#: Concurrent https:// stats in flight at once, sharing ONE httpx.Client
+#: (nexus-0ne1m critique, significant #1). httpx.Client is documented
+#: thread-safe for concurrent requests, so N workers sharing one client is
+#: the intended usage, not a foot-gun.
+MAX_CONCURRENCY = 8
 #: Stale/dangling rows named per run.
 _MAX_NAMED = 10
+
+
+def _https_worst_case_per_call_s() -> float:
+    """Worst-case wall time for ONE https:// stat call — derived from
+    ``aspect_readers``' own bounded-retry constants so this cannot drift
+    from them (mirrors ``commands/doctor.py``'s own computation)."""
+    return HTTPS_STAT_MAX_ATTEMPTS * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
+
+
+def estimated_worst_case_s(sample: int, concurrency: int = MAX_CONCURRENCY) -> float:
+    """Worst-case wall time for a run sampling *sample* documents with up to
+    *concurrency* concurrent stats, if every one were ``https://`` and every
+    one exhausted its retries: ``ceil(sample / workers) * per_call_bound``,
+    where ``workers = max(1, min(concurrency, sample))``.
+    """
+    if sample <= 0:
+        return 0.0
+    workers = max(1, min(concurrency, sample))
+    return math.ceil(sample / workers) * _https_worst_case_per_call_s()
 
 
 @dataclass
@@ -143,8 +178,17 @@ def stat_one(entry: Any, *, http_client: Any) -> ReferenceCheckResult:
 
 def check_references(candidates: list[Any], *, http_client: Any) -> list[ReferenceCheckResult]:
     """Stat every entry in *candidates* through :func:`stat_one`, sharing
-    ONE ``http_client`` across every ``https://`` call."""
-    return [stat_one(entry, http_client=http_client) for entry in candidates]
+    ONE ``http_client`` across up to :data:`MAX_CONCURRENCY` concurrent
+    threads (nexus-0ne1m critique, significant #1: a strictly serial walk
+    made the wall-time bound ``sample * per_call``, with no mitigation).
+    ``ThreadPoolExecutor.map`` preserves input order in its results, so the
+    report lists documents in the same order regardless of which thread's
+    stat finished first."""
+    if not candidates:
+        return []
+    workers = max(1, min(MAX_CONCURRENCY, len(candidates)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda entry: stat_one(entry, http_client=http_client), candidates))
 
 
 def _bucket(r: ReferenceCheckResult) -> str:
@@ -228,6 +272,17 @@ def run_check_references(*, sample: int, seed: int | None) -> None:
     if not candidates:
         click.echo("[✓] Reference staleness: not applicable (no reference-only catalog documents)")
         return
+
+    # nexus-0ne1m critique, significant #1: print the worst-case estimate
+    # (computed from the REQUESTED sample and MAX_CONCURRENCY, before
+    # sampling narrows it to however many candidates actually exist) as the
+    # run's first line, not only in --help.
+    workers = max(1, min(MAX_CONCURRENCY, sample))
+    click.echo(
+        f"[i] Reference staleness: worst case for this run (sample={sample}, "
+        f"concurrency={workers}) is ~{estimated_worst_case_s(sample):.0f}s if "
+        "every sampled document is https:// and every one exhausts its retries"
+    )
 
     chosen = sample_candidates(candidates, sample, run_seed)
 

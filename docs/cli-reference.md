@@ -1030,6 +1030,16 @@ orphan behind. Most indexing paths (`nx index repo`/`pdf`/`md`/`rdr`, `nx dt
 index`) register through their own pipelines; this verb is for one-off or
 scripted registration outside those flows.
 
+**Side effect for `https://` (nexus-0ne1m):** after a successful register, this
+makes ONE real outbound HEAD request to capture the resource's `ETag` for
+`nx doctor --check-references` to compare against later — bounded to
+`aspect_readers.HTTPS_ETAG_CAPTURE_TIMEOUT_S` (~3s), one attempt, best-effort
+(a slow, failed, or `ETag`-less response never fails the register and records
+nothing). No other scheme makes any network call. Set
+`NX_REFERENCE_ETAG_CAPTURE=0` to disable this HEAD entirely. `nx catalog
+backfill-etags` captures it in bulk for references already registered before
+this shipped.
+
 ### nx catalog backfill (hidden)
 
 ```
@@ -1315,7 +1325,14 @@ Update catalog entry metadata. `TUMBLER` accepts a tumbler or title. Batch mode 
 entries whose DT-URI stamp failed during `nx dt index` (the entry carries
 `source_uri=file://…` instead of `x-devonthink-item://<UUID>`), or for
 manual reassignment of catalog identity. Validated against the same scheme
-allowlist as register-time.
+allowlist as register-time. **Side effect for `https://` (nexus-0ne1m):**
+same bounded, best-effort ETag-capture HEAD request `nx catalog register`
+makes (see above) — one attempt, ~3s bound, `NX_REFERENCE_ETAG_CAPTURE=0`
+disables it. Refused outright in combination with `--owner`/`--search`
+batch mode: `source_uri` is a per-document identity, and a batch write
+would either collide on the engine's live-`source_uri` uniqueness
+constraint or fan out one HEAD request per matched document — use
+`nx catalog backfill-etags` for bulk ETag capture instead.
 
 `--file-path` sets or replaces the `file_path` column (nexus-y8qtj) —
 repoints an entry whose recorded path is dead (moved/renamed on disk)
@@ -1492,6 +1509,20 @@ For each candidate, parses the path component out of the stored `chroma://<colle
 |------|-------------|
 | `--apply` | Perform the rewrite (default: dry-run report only) |
 | `--json` | Emit JSON instead of the human-readable report |
+
+### nx catalog backfill-etags
+
+```
+nx catalog backfill-etags [--owner PREFIX] [--dry-run] [--limit N]
+```
+
+Captures the ETag for every `https://` catalog reference that lacks one (nexus-0ne1m): a reference registered/refreshed before ETag capture shipped, or whose HEAD request failed at the time, reads `unknown` forever under `nx doctor --check-references` otherwise. Candidates are live (non-alias) documents whose `source_uri` starts with `https://` and whose metadata does not already carry an ETag; already-recorded documents are excluded automatically, so re-running is idempotent and safe to repeat past the `--limit` cap. `--dry-run` lists the candidates and makes NO network call and NO write. Otherwise one bounded HEAD request per candidate (the same tight ~3s write-path budget `nx catalog register`/`update` use) shares ONE `httpx.Client` across the run; a document whose HEAD fails or returns no ETag is reported, not retried, and a document whose catalog write fails is reported and counted (exit 1 if any failed), without aborting the rest.
+
+| Flag | Description |
+|------|-------------|
+| `--owner PREFIX` | Restrict to this owner tumbler (e.g. `1.1`). Default: every owner |
+| `--dry-run` | Report candidates only; no network calls, no writes |
+| `--limit N` | Cap on candidates processed in one run (default 500, max 2000) — a bounded sweep, never an unlimited fan-out |
 
 ### nx catalog backfill-collections
 
@@ -3075,7 +3106,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-collection-shape` | Read-only shape audit of the collection set against [docs/collections.md](collections.md), the doctor surface of `nx collection shape`: one row per check with its finding count and an examined count so a clean tenant is never confused with an audit that saw nothing. Findings are curation input and never fail doctor; **exit 1 only when the tenant cannot be read** (nexus-ger23) |
 | `--check-embeddings` | Embedding drift probe (nexus-f9duo): samples chunks per collection, embeds their stored text again with the collection's registered model (`POST /v1/vectors/embed`, which stores nothing) and compares with the stored vector. A chunk below cosine 0.99 is named with its collection's median and minimum; healthy engine-written chunks measure 0.998 or above, and the nexus-tysei stale vectors sat at 0.25 to 0.87. `--embeddings-sample N` (default 20, max 300) sets chunks per collection, drawn from non-overlapping windows at random offsets in four equal strata (engine rows are ordered by chash, so a window is not one document or one indexing era); a sampled chunk with text but no stored vector at the collection's dim (a re-embed in progress) is counted and not compared, and a collection with nothing comparable is named NOT CHECKED; `--embeddings-collection NAME` (repeatable) narrows the scope from every collection holding chunks; `--embeddings-seed` repeats a sample (default: today's UTC date, printed in the result). **Exit 1** when any sampled chunk is below the floor, when any collection could not be probed, or when nothing was compared. Opt-in because it costs one embedding call per sampled chunk. Remedy: `nx collection re-embed <collection>`, a production write |
 | `--check-assignments` | Cross-collection ("projection") topic-assignment audit (nexus-v4pj4): since engine-service-v0.1.132 the projection pass of `assign_from_chashes_<dim>` picks each chunk's nearest FOREIGN-collection centroid via an HNSW `LATERAL` (approximate) instead of an exact join — measured equal to exact under production insertion order, but a wrong pick would be silent. Round 1 compared a STORED historical pick against today's live centroids and could false-alarm on healthy taxonomy growth; round 2 closes that structurally with a new read-only engine route, `POST /v1/taxonomy/assignments/cross-preview` (`nexus.cross_preview_<dim>`, taxonomy-021 — a read-only twin of `assign_from_chashes`'s cross branch: the byte-identical `batch`/`nearest` CTE under the identical HNSW/access-path settings, but no persisted INSERT, so it can never write to `topic_assignments`). For each sampled chunk this compares the engine's LIVE ANN pick (via that route, right now) against an exact Python recompute over the SAME live foreign-centroid snapshot fetched in the same run — never a stored row; a currently-persisted assignment, if any, is shown in a disagreement's report line as context only (`stored=N`), never consulted to decide pass or fail. Same tie-break as the engine's own `ORDER BY distance, topic_id`. At the default sample of 20, a systemic wrong-pick rate of 10% is caught with ~88% probability, 20% with ~99%; a rare, isolated bad pick under 1% of a collection's population may not land in any one run's sample. `--assignments-sample N` (default 20, max 300), `--assignments-collection NAME` (repeatable; default: every collection holding chunks), `--assignments-seed` (default: today's UTC date). Each sampled chunk's foreign-centroid snapshot is fetched twice per attempt — once immediately before the `cross-preview` call, once immediately after — and compared; a change (a topic added, removed, or revised in place mid-probe) means this collection's batch is not compared this run, retried once, and if it still changed, reported CHANGED DURING PROBE rather than risking a comparison against a snapshot the engine's own answer never actually saw. **Exit 1** when any sampled chunk disagrees beyond a float-noise tolerance, any collection could not be probed, or nothing was compared. A collection with no live foreign centroid to project onto is not applicable; a sample that turned up no comparable chunk is reported INCONCLUSIVE; an engine older than this route 404s on the first call and is reported not applicable, exit 0 — none of the four counts as a failure alone. No billed calls, but opt-in: real per-collection network work (up to `sample` route calls plus up to four foreign-centroid fetches per collection audited), and its false-positive behavior against a real corpus is not yet observed |
-| `--check-references` | Reference-only staleness sweep (nexus-tb2yj, RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see nexus-0ne1m below) with one shared `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 50, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff — about 61.5s worst case per document, so `sample * 61.5s` worst case for the whole run (~51 minutes at the default sample of 50 if every sampled document were `https://` and every one exhausted its retries). **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents |
+| `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff — about 61.5s worst case per document, so `ceil(sample / min(8, sample)) * 61.5s` worst case for the whole run (~2 minutes at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags` |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 

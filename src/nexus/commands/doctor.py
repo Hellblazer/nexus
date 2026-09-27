@@ -17,6 +17,8 @@ from nexus.aspect_readers import (
 )
 from nexus.bounded_subprocess import run_bounded
 from nexus.doctor_references import DEFAULT_SAMPLE as _REFERENCES_DEFAULT_SAMPLE
+from nexus.doctor_references import MAX_CONCURRENCY as _REFERENCES_MAX_CONCURRENCY
+from nexus.doctor_references import estimated_worst_case_s as _references_estimated_worst_case_s
 from nexus.redact import redact_credentials
 
 
@@ -32,6 +34,15 @@ _log = structlog.get_logger(__name__)
 #: cannot silently drift from the constants it describes.
 _REFERENCES_HTTPS_WORST_CASE_S: float = (
     HTTPS_STAT_MAX_ATTEMPTS * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
+)
+#: Whole-run worst case AT THE DEFAULT SAMPLE, concurrency-aware
+#: (nexus-0ne1m critique, significant #1): doctor_references.check_references
+#: runs up to MAX_CONCURRENCY stats in parallel, so the naive
+#: sample * per_call_bound overstated the bound by ~MAX_CONCURRENCY-fold.
+#: doctor_references.estimated_worst_case_s is the single source of truth
+#: for this arithmetic; a run's own printed estimate uses the same function.
+_REFERENCES_WORST_CASE_AT_DEFAULT_SAMPLE_S: float = _references_estimated_worst_case_s(
+    _REFERENCES_DEFAULT_SAMPLE, _REFERENCES_MAX_CONCURRENCY,
 )
 
 _CHECK = "✓"
@@ -2657,14 +2668,19 @@ def _run_supplementary_checks() -> None:
          "worst case per document (aspect_readers.HTTPS_STAT_MAX_ATTEMPTS "
          "attempts, each up to twice HTTPS_STAT_TIMEOUT_S since httpx "
          "applies that timeout to connect/read/write/pool separately, "
-         "plus HTTPS_STAT_RETRY_DELAYS_S backoff), so the whole run's "
-         "worst case is sample * that bound -- "
-         f"{_REFERENCES_DEFAULT_SAMPLE * _REFERENCES_HTTPS_WORST_CASE_S / 60:.0f} "
-         f"minutes at the default sample of {_REFERENCES_DEFAULT_SAMPLE} if "
-         "every sampled document were https:// and every one exhausted its "
-         "retries. Exits 1 when any sampled document reads 'stale' or "
-         "'dangling'; 'unknown' never fails this check alone. Not "
-         "applicable (exit 0) on a box with no reference-only documents.",
+         "plus HTTPS_STAT_RETRY_DELAYS_S backoff). Up to "
+         f"{_REFERENCES_MAX_CONCURRENCY} stats run concurrently sharing one "
+         "httpx.Client, so the whole run's worst case is "
+         "ceil(sample / min(concurrency, sample)) * that per-call bound -- "
+         f"~{_REFERENCES_WORST_CASE_AT_DEFAULT_SAMPLE_S:.0f}s at the default "
+         f"sample of {_REFERENCES_DEFAULT_SAMPLE} if every sampled document "
+         "were https:// and every one exhausted its retries (a run also "
+         "prints its own estimate for the --references-sample it was given, "
+         "as its first line). Exits 1 when any sampled document reads "
+         "'stale' or 'dangling'; 'unknown' never fails this check alone. "
+         "Not applicable (exit 0) on a box with no reference-only "
+         "documents. Remedy for a document stuck at 'unknown' because it "
+         "predates ETag capture: `nx catalog backfill-etags`.",
 )
 @click.option(
     "--references-sample",
