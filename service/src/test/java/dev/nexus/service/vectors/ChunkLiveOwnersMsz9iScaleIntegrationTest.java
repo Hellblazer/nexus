@@ -23,10 +23,16 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -126,12 +132,30 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     HikariDataSource svcDs;
     TenantScope tenantScope;
 
-    /** All NUM_DOCS document tumblers, in seed order -- {@link #setTombstoneFraction}
-     *  tombstones a deterministic PREFIX of this list. */
+    /** All NUM_DOCS document tumblers, in SPATIAL order: document d owns the d-th run of
+     *  manifest chunks sorted by cosine similarity to a fixed anchor vector (nearest
+     *  first), so a prefix of this list is one spherical cap of the space HNSW searches.
+     *  Chunk indices [NUM_MANIFEST, NUM_CHUNKS) are manifest-less. */
     final List<String> docIds = new ArrayList<>(NUM_DOCS);
-    /** All NUM_CHUNKS chash hex strings, in seed order. Indices
-     *  [0, NUM_MANIFEST) have a manifest row (assigned round-robin across docIds);
-     *  indices [NUM_MANIFEST, NUM_CHUNKS) are manifest-less. */
+
+    /** {@link #docIds} in a seeded shuffled order: a prefix of it is a spatially
+     *  scattered set of documents. */
+    final List<String> scatteredDocOrder = new ArrayList<>(NUM_DOCS);
+
+    /** How {@link #setTombstoneFraction} picks the tombstoned documents. SCATTERED leaves
+     *  deletion independent of vector position; CORRELATED kills one contiguous region,
+     *  the shape of a topically-related batch superseded together (RDR-192 Background). */
+    enum Tombstones { SCATTERED, CORRELATED }
+
+    /** Owning document index per chunk, or -1 for a manifest-less chunk. */
+    int[] chunkDoc;
+
+    /** Chunk index by chash hex, to map a search result back to its owning document. */
+    final Map<String, Integer> chunkIndexByHex = new HashMap<>(NUM_CHUNKS * 2);
+
+    /** Document indices currently tombstoned (mirrors deleted_at). */
+    final Set<Integer> deadDocs = new HashSet<>();
+
     final List<String> chashHex = new ArrayList<>(NUM_CHUNKS);
 
     @BeforeAll
@@ -169,11 +193,39 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         for (int i = 0; i < NUM_DOCS; i++) docIds.add(String.format("clo-msz9i-doc-%05d", i));
         Random rnd = new Random(20260927101L);
         List<float[]> vectors = new ArrayList<>(NUM_CHUNKS);
+        float[] anchor = fixtureVector(new Random(20260927097L));
+        double[] anchorSimilarity = new double[NUM_CHUNKS];
         for (int i = 0; i < NUM_CHUNKS; i++) {
             String id = "clo-msz9i-chunk-" + i;
             chashHex.add(Chash.ofText(id).toHex());
-            vectors.add(fixtureVector(rnd));
+            chunkIndexByHex.put(chashHex.get(i), i);
+            float[] v = fixtureVector(rnd);
+            vectors.add(v);
+            double dot = 0;
+            for (int d = 0; d < DIM; d++) dot += v[d] * anchor[d];
+            anchorSimilarity[i] = dot;
         }
+
+        // Spatial document assignment: manifest chunks sorted by cosine similarity to the
+        // anchor (both unit vectors, so the dot product is the cosine), nearest first, cut
+        // into NUM_DOCS consecutive runs. Positions count up within each run. A first
+        // attempt sorted on one raw latent coordinate; that is not a compact region in
+        // the cosine metric, and the dead-neighbourhood pin below caught it (0 of 20
+        // queries at 60%).
+        Integer[] bySlab = new Integer[NUM_MANIFEST];
+        for (int i = 0; i < NUM_MANIFEST; i++) bySlab[i] = i;
+        Arrays.sort(bySlab, Comparator.comparingDouble(i -> -anchorSimilarity[i]));
+        chunkDoc = new int[NUM_CHUNKS];
+        Arrays.fill(chunkDoc, -1);
+        int[] positionOf = new int[NUM_CHUNKS];
+        int[] nextPosition = new int[NUM_DOCS];
+        for (int k = 0; k < NUM_MANIFEST; k++) {
+            int doc = (int) ((long) k * NUM_DOCS / NUM_MANIFEST);
+            chunkDoc[bySlab[k]] = doc;
+            positionOf[bySlab[k]] = nextPosition[doc]++;
+        }
+        scatteredDocOrder.addAll(docIds);
+        Collections.shuffle(scatteredDocOrder, new Random(20260927098L));
 
         // Chunks, in batches (upsertChunksWithVectors -- no embedder call, precomputed
         // low-intrinsic-dimension vectors; see fixtureVector for why not uniform noise).
@@ -209,8 +261,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             su.commit();
         }
 
-        // Manifest: first NUM_MANIFEST chunks, assigned round-robin across NUM_DOCS
-        // documents (chunk i -> doc i % NUM_DOCS, position i / NUM_DOCS). The
+        // Manifest: first NUM_MANIFEST chunks, assigned spatially (see chunkDoc above). The
         // remaining (NUM_CHUNKS - NUM_MANIFEST) chunks are manifest-less (R1's
         // shape) -- always "not live" regardless of tombstone fraction, matching
         // msz9i's own chunk/manifest-row count split.
@@ -222,8 +273,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
                 int end = Math.min(start + manifestBatch, NUM_MANIFEST);
                 List<Query> chunkQueries = new ArrayList<>(end - start);
                 for (int i = start; i < end; i++) {
-                    String doc = docIds.get(i % NUM_DOCS);
-                    int position = i / NUM_DOCS;
+                    String doc = docIds.get(chunkDoc[i]);
+                    int position = positionOf[i];
                     chunkQueries.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -242,12 +293,18 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         }
     }
 
-    /** Resets every fixture document to live, then tombstones a deterministic PREFIX
-     *  of {@link #docIds} sized to {@code percent}% of {@link #NUM_DOCS} -- msz9i's own
-     *  sweep methodology (mutate the SAME fixture between measurements). Re-ANALYZEs
-     *  catalog_documents (small, cheap) so the planner's row estimate reflects the new
-     *  tombstone fraction. */
+    /** {@link #setTombstoneFraction(int, Tombstones)} with SCATTERED deletion. */
     private void setTombstoneFraction(int percent) throws Exception {
+        setTombstoneFraction(percent, Tombstones.SCATTERED);
+    }
+
+    /** Resets every fixture document to live, then tombstones a deterministic PREFIX of
+     *  the {@code mode}'s document order, sized to {@code percent}% of {@link #NUM_DOCS}
+     *  -- msz9i's own sweep methodology (mutate the SAME fixture between measurements).
+     *  Re-ANALYZEs catalog_documents (small, cheap) so the planner's row estimate
+     *  reflects the new tombstone fraction. */
+    private void setTombstoneFraction(int percent, Tombstones mode) throws Exception {
+        List<String> order = mode == Tombstones.CORRELATED ? docIds : scatteredDocOrder;
         int tombstoneCount = (int) Math.ceil(percent / 100.0 * NUM_DOCS);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -260,9 +317,11 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
                 ctx.update(CATALOG_DOCUMENTS)
                     .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
                     .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)
-                        .and(CATALOG_DOCUMENTS.TUMBLER.in(docIds.subList(0, tombstoneCount))))
+                        .and(CATALOG_DOCUMENTS.TUMBLER.in(order.subList(0, tombstoneCount))))
                     .execute();
             }
+            deadDocs.clear();
+            for (String id : order.subList(0, tombstoneCount)) deadDocs.add(docIds.indexOf(id));
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
         }
     }
@@ -276,8 +335,16 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      *  this fixture now does too, which is what lets a filtered-vs-unfiltered recall
      *  comparison mean anything. */
     private static float[] fixtureVector(Random rnd) {
+        return lift(latent(rnd));
+    }
+
+    private static double[] latent(Random rnd) {
         double[] z = new double[LOW_RANK];
         for (int k = 0; k < LOW_RANK; k++) z[k] = rnd.nextGaussian();
+        return z;
+    }
+
+    private static float[] lift(double[] z) {
         float[] v = new float[DIM];
         double sumSq = 0;
         for (int i = 0; i < DIM; i++) {
@@ -506,6 +573,27 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return recalls;
     }
 
+    /** Over {@link #RECALL_QUERY_COUNT} fixture queries, how many have an unfiltered exact
+     *  top-K whose MANIFEST-OWNED members are at least 90% tombstoned: queries whose whole
+     *  neighbourhood is dead, the hard case for a filtered HNSW search. Manifest-less
+     *  chunks are excluded from both counts: they are a quarter of the fixture and
+     *  scattered everywhere, so counting them would cap the dead share near 0.75 even
+     *  inside a fully tombstoned region. */
+    private int deadNeighbourhoodQueries(long seed) {
+        Random rnd = new Random(seed);
+        int dead = 0;
+        for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
+            List<String> top = runExact(NO_PREDICATE_KNN, fixtureVector(rnd), K);
+            int[] owners = top.stream()
+                .mapToInt(h -> chunkDoc[chunkIndexByHex.get(h)])
+                .filter(doc -> doc >= 0)
+                .toArray();
+            long tombstoned = Arrays.stream(owners).filter(deadDocs::contains).count();
+            if (owners.length > 0 && tombstoned >= 0.9 * owners.length) dead++;
+        }
+        return dead;
+    }
+
     private static double avg(List<Double> values) {
         return values.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
     }
@@ -714,6 +802,42 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             // run and produce a real number in [0,1].
             assertThat(beforeAvg).isBetween(0.0, 1.0);
             assertThat(afterAvg).isBetween(0.0, 1.0);
+        }
+
+        // Correlated deletion (critique-wbfpw9-r3 Significant 1): the series above deletes
+        // documents independently of vector position. Here one contiguous region dies
+        // together, the shape of a topically-related batch superseded at once. Recall is
+        // reported, not gated: both predicates share the same HNSW index, so a loss here
+        // would be a property of filtered ANN search, not of chunk_live_owners. The pin
+        // is that CORRELATED mode really does produce dead neighbourhoods.
+        System.out.println("case     | tombstone% | avg_recall@10 | per_query                     | dead-neighbourhood queries (scattered/correlated)");
+        for (int pct : TOMBSTONE_FRACTIONS_PCT) {
+            setTombstoneFraction(pct, Tombstones.SCATTERED);
+            int scatteredDead = deadNeighbourhoodQueries(20260927500L + pct);
+            setTombstoneFraction(pct, Tombstones.CORRELATED);
+            int correlatedDead = deadNeighbourhoodQueries(20260927500L + pct);
+
+            List<Double> beforeCorr = recallSeries(
+                BEFORE_DEAD_SET_ANTI_JOIN, BEFORE_DEAD_SET_ANTI_JOIN, 20260927500L + pct);
+            List<Double> afterCorr = recallSeries(
+                AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, 20260927500L + pct);
+            System.out.printf("%-8s | %10d | %13.3f | %-30s | %d/%d%n",
+                "b-corr", pct, avg(beforeCorr), beforeCorr, scatteredDead, correlatedDead);
+            System.out.printf("%-8s | %10d | %13.3f | %-30s | %d/%d%n",
+                "c-corr", pct, avg(afterCorr), afterCorr, scatteredDead, correlatedDead);
+            assertThat(avg(beforeCorr)).isBetween(0.0, 1.0);
+            assertThat(avg(afterCorr)).isBetween(0.0, 1.0);
+
+            if (pct == 60) {
+                assertThat(correlatedDead)
+                    .as("CORRELATED deletion at 60% must leave some queries with a dead"
+                        + " neighbourhood, or this series measures the scattered case again")
+                    .isGreaterThanOrEqualTo(3);
+                assertThat(scatteredDead)
+                    .as("SCATTERED deletion at 60% must not produce dead neighbourhoods,"
+                        + " or the two modes are not distinct")
+                    .isLessThanOrEqualTo(1);
+            }
         }
 
         // Positive control: the instrument must be able to SEE a filtering loss, or the
