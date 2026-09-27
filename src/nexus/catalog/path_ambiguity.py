@@ -21,9 +21,30 @@ that the path was already catalogued and under which tumblers — the same
 contract ``HttpCatalogClient.find_by_file_path`` now honours when it chooses
 among several, applied at the write instead of the read.
 
-Cost note: this costs one owner-agnostic ``/list?file_path=`` per MINT, so it
-belongs on per-document write paths and NOT inside a batched
-``register_many`` loop, where it would turn one round trip into N+1.
+Cost note: this costs one owner-agnostic ``/list?file_path=`` per attempted
+MINT (the owner-scoped lookup missed), so it belongs on per-document write
+paths and NOT inside a batched ``register_many`` loop, where it would turn
+one round trip into N+1.
+
+nexus-r1tnx: the query and the announcement are deliberately TWO functions,
+not one. A single call made *before* ``register()`` (the original shape) had
+no way to know whether that ``register()`` would actually mint a second
+document or resolve to the pre-existing one via its own idempotency leg
+(matching ``source_uri``/``file_path`` across owners) — so it warned
+"registering an ADDITIONAL document" even on runs where ``register()``
+handed back the SAME existing tumbler and nothing new was written. It fired
+twice this way on 2026-09-26 re-indexing a PDF that resolved to its existing
+catalog row.
+
+The fix threads the ``created`` signal ``register(with_created=True)``
+already exposes (nexus-vfef0) through the split:
+
+* :func:`find_cross_owner_conflict` runs BEFORE ``register()`` — it must,
+  because a query run AFTER would see the just-minted row too and misreport
+  a brand-new, uncontested path as "conflicting with itself".
+* :func:`announce_cross_owner_mint` runs AFTER ``register()``, once the
+  caller knows whether THIS call actually minted anything, and stays silent
+  when it did not.
 """
 
 from __future__ import annotations
@@ -65,58 +86,75 @@ def reset_mints_over_existing_path() -> None:
         _MINTS_OVER_EXISTING.clear()
 
 
-def announce_cross_owner_mint(
-    reader: Any,
-    file_path: str,
-    *,
-    owner: Any,
-    context: str,
-) -> None:
-    """Log that *file_path* is already catalogued elsewhere, before minting.
+def find_cross_owner_conflict(reader: Any, file_path: str) -> list[str] | None:
+    """Tumblers of every document already catalogued at *file_path*, under
+    ANY owner — or ``None`` if there are none, the reader can't answer, or
+    the query itself fails.
 
-    Call immediately BEFORE the ``register`` that mints a new document, on a
-    path where the owner-scoped lookup returned ``None``.
+    Call this BEFORE the ``register()`` that might mint a second document
+    for a path an owner-scoped lookup missed. Querying afterward would also
+    see the just-minted row and misreport an uncontested path as a
+    conflict with itself.
 
-    Best-effort by construction: a catalog that cannot answer must never turn
-    a successful index into a failed one, so every error is swallowed to a
-    debug line. That is the same posture the surrounding write paths already
-    take, and the reason this reports rather than guards — a check that can
-    fail open must not be the thing a correctness argument rests on.
-
-    Args:
-        reader: a catalog reader exposing ``find_all_by_file_path``.
-        file_path: the path about to be registered, exactly as it will be stored.
-        owner: the owner the new document will be registered under.
-        context: short name of the calling write path, so the log line says
-            which indexer minted the row.
+    Best-effort by construction: a catalog that cannot answer must never
+    turn a successful index into a failed one, so every error is swallowed
+    to a debug line.
     """
     if not file_path:
-        return
+        return None
     try:
         finder = getattr(reader, "find_all_by_file_path", None)
         if finder is None:
-            return
+            return None
         existing = finder(file_path)
         if not existing:
-            return
-        with _mints_over_existing_lock:
-            _MINTS_OVER_EXISTING.append({
-                "file_path": file_path,
-                "owner": str(owner),
-                "context": context,
-                "existing": [str(e.tumbler) for e in existing],
-            })
-        _log.warning(
-            "catalog_mint_over_existing_file_path",
-            file_path=file_path,
-            owner=str(owner),
-            context=context,
-            existing=len(existing),
-            existing_tumblers=[str(e.tumbler) for e in existing],
-            detail="this path is already catalogued under another owner; "
-                   "registering an ADDITIONAL document for it. Several "
-                   "documents per path is allowed — this line exists so it "
-                   "is never a surprise.",
-        )
+            return None
+        return [str(e.tumbler) for e in existing]
     except Exception:  # noqa: BLE001 — reporting must never fail a write
         _log.debug("catalog_mint_announce_failed", file_path=file_path, exc_info=True)
+        return None
+
+
+def announce_cross_owner_mint(
+    conflict: list[str] | None,
+    *,
+    file_path: str,
+    owner: Any,
+    context: str,
+    created: bool,
+) -> None:
+    """Log + record that *file_path* was minted as an ADDITIONAL document.
+
+    Call this AFTER the ``register()`` whose ``with_created=True`` answer
+    this reports.
+
+    Silent unless BOTH hold: *conflict* names at least one document that
+    already carried this path (the pre-register answer from
+    :func:`find_cross_owner_conflict`), AND *created* is ``True`` — a
+    register call that resolved to a pre-existing row instead of minting a
+    new one (``created=False``) minted nothing, so there is nothing to
+    announce; that mismatch (a real conflict list alongside
+    ``created=False``) is exactly the nexus-r1tnx false positive this split
+    exists to prevent.
+    """
+    if not conflict or not created:
+        return
+    with _mints_over_existing_lock:
+        _MINTS_OVER_EXISTING.append({
+            "file_path": file_path,
+            "owner": str(owner),
+            "context": context,
+            "existing": list(conflict),
+        })
+    _log.warning(
+        "catalog_mint_over_existing_file_path",
+        file_path=file_path,
+        owner=str(owner),
+        context=context,
+        existing=len(conflict),
+        existing_tumblers=list(conflict),
+        detail="this path is already catalogued under another owner; "
+               "registered an ADDITIONAL document for it. Several "
+               "documents per path is allowed — this line exists so it "
+               "is never a surprise.",
+    )

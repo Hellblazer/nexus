@@ -31,7 +31,10 @@ from click.testing import CliRunner
 from structlog.testing import capture_logs
 
 from nexus import indexer as indexer_mod
-from nexus.catalog.path_ambiguity import announce_cross_owner_mint
+from nexus.catalog.path_ambiguity import (
+    announce_cross_owner_mint,
+    find_cross_owner_conflict,
+)
 from nexus.commands import catalog as _cat_cmd
 from nexus.commands.catalog_cmds import report as report_mod
 from nexus.commands.dt import _stamp_dt_uri_on_entry
@@ -164,13 +167,43 @@ class _AnnounceReader:
         return list(self._matches)
 
 
-class TestAnnounceCrossOwnerMint:
+class TestFindCrossOwnerConflict:
+    """The pre-register query half of the split (nexus-r1tnx)."""
+
     def test_it_names_every_existing_document(self) -> None:
         reader = _AnnounceReader(matches=[_entry("3.1"), _entry("3.2")])
 
+        assert find_cross_owner_conflict(reader, "a/b.md") == ["3.1", "3.2"]
+
+    def test_a_genuinely_new_path_is_none(self) -> None:
+        assert find_cross_owner_conflict(_AnnounceReader(matches=[]), "a/new.md") is None
+
+    def test_a_failing_catalog_never_propagates(self) -> None:
+        """Reporting must not convert a successful index into a failed one."""
+        assert find_cross_owner_conflict(_AnnounceReader(raises=True), "a/b.md") is None
+
+    def test_a_reader_without_the_method_is_tolerated(self) -> None:
+        """Several catalog doubles predate ``find_all_by_file_path``."""
+        assert find_cross_owner_conflict(SimpleNamespace(), "a/b.md") is None
+
+
+class TestAnnounceCrossOwnerMint:
+    """The post-register announcement half of the split (nexus-r1tnx).
+
+    Every case here is gated on BOTH a non-empty conflict list AND
+    ``created=True`` — the pre-fix code fired the warning off the conflict
+    list alone, before ``register()`` had even run, so it warned
+    "registering an ADDITIONAL document" on runs where ``register()``
+    resolved to the pre-existing tumbler and minted nothing (observed
+    2026-09-26, twice, re-indexing a PDF that reconciled onto its existing
+    catalog row).
+    """
+
+    def test_it_names_every_existing_document_when_created(self) -> None:
         with capture_logs() as logs:
             announce_cross_owner_mint(
-                reader, "a/b.md", owner="4.0", context="unit",
+                ["3.1", "3.2"], file_path="a/b.md", owner="4.0",
+                context="unit", created=True,
             )
 
         events = [e for e in logs
@@ -181,27 +214,41 @@ class TestAnnounceCrossOwnerMint:
         assert events[0]["owner"] == "4.0"
         assert events[0]["context"] == "unit"
 
+    def test_register_resolving_to_the_existing_doc_is_silent(self) -> None:
+        """PRE-FIX (nexus-r1tnx): this fired the warning even though
+        ``register()`` minted nothing — reproduces the exact false
+        positive: a real conflict list, but ``created=False`` because
+        ``register()`` reconciled onto the pre-existing row instead of
+        minting a second document."""
+        with capture_logs() as logs:
+            announce_cross_owner_mint(
+                ["3.1", "3.2"], file_path="a/b.md", owner="4.0",
+                context="unit", created=False,
+            )
+
+        assert not [e for e in logs
+                    if e.get("event") == "catalog_mint_over_existing_file_path"], (
+            "created=False means register() did not mint an additional "
+            "document — the pre-existing conflict list must not be enough "
+            "to warn on its own"
+        )
+
     def test_a_genuinely_new_path_is_silent(self) -> None:
         """Without this, the warning could fire on every mint and the test
         above would still pass — making the signal worthless."""
         with capture_logs() as logs:
             announce_cross_owner_mint(
-                _AnnounceReader(matches=[]), "a/new.md", owner="4.0", context="unit",
+                None, file_path="a/new.md", owner="4.0", context="unit",
+                created=True,
             )
 
         assert not [e for e in logs
                     if e.get("event") == "catalog_mint_over_existing_file_path"]
 
-    def test_a_failing_catalog_never_propagates(self) -> None:
-        """Reporting must not convert a successful index into a failed one."""
+    def test_no_conflict_and_no_mint_is_silent(self) -> None:
         announce_cross_owner_mint(
-            _AnnounceReader(raises=True), "a/b.md", owner="4.0", context="unit",
-        )
-
-    def test_a_reader_without_the_method_is_tolerated(self) -> None:
-        """Several catalog doubles predate ``find_all_by_file_path``."""
-        announce_cross_owner_mint(
-            SimpleNamespace(), "a/b.md", owner="4.0", context="unit",
+            None, file_path="a/new.md", owner="4.0", context="unit",
+            created=False,
         )
 
 
@@ -408,10 +455,18 @@ class TestTheMintSitesActuallyCallIt:
     is stated as such rather than dressed up as coverage it is not.
     """
 
-    def test_register_or_lookup_doc_id_announces_before_minting(
+    def test_register_or_lookup_doc_id_announces_after_minting(
         self, monkeypatch, tmp_path,
     ) -> None:
-        """The behavioural arm: a real mint through the doc_indexer pre-flight."""
+        """The behavioural arm: a real mint through the doc_indexer pre-flight.
+
+        nexus-r1tnx: the announcement now runs AFTER ``register()`` — it
+        needs register()'s own ``created`` signal to know whether this call
+        actually minted anything, rather than assuming it did the moment an
+        owner-scoped lookup missed (see ``test_every_mint_site_is_wired``
+        below for the source-order pin, and ``TestAnnounceCrossOwnerMint``
+        for the false-positive this fixes).
+        """
         from nexus import doc_indexer as di
 
         md = tmp_path / "shared.md"
@@ -450,7 +505,7 @@ class TestTheMintSitesActuallyCallIt:
         )
         monkeypatch.setattr(
             "nexus.catalog.path_ambiguity.announce_cross_owner_mint",
-            lambda reader, fp, **kw: announced.append((fp, kw)),
+            lambda conflict, **kw: announced.append((kw.get("file_path"), kw)),
         )
 
         di._register_or_lookup_doc_id(
@@ -459,21 +514,28 @@ class TestTheMintSitesActuallyCallIt:
 
         assert registered, "the test must reach the mint, or it proves nothing"
         assert len(announced) == 1, (
-            "the mint branch must announce before registering; "
+            "the mint branch must announce after registering; "
             f"registered={registered} announced={announced}"
         )
         assert announced[0][0] == registered[0], (
             "the announced path must be the one actually registered — "
             "announcing a different path would report on the wrong file"
         )
+        # writer.register's fake returns a bare tumbler (no with_created
+        # support), so the defensive "no tuple -> created=True" fallback
+        # must have kicked in.
+        assert announced[0][1]["created"] is True
 
     def test_every_mint_site_is_wired(self) -> None:
         """The wiring arm. Deleting any of the four call statements reds this.
 
-        Each entry names the function whose mint must be preceded by the
-        announce. Asserting POSITION (announce before register, inside the
-        same function body) is what makes this more than a grep for the
-        string somewhere in the file.
+        Each entry names the function whose mint must be preceded by a
+        conflict CHECK and followed by an ANNOUNCE (nexus-r1tnx: the check
+        has to run before ``register()`` — querying after would see the
+        just-minted row too — while the announcement has to run after, so
+        it can see register()'s own ``created`` signal). Asserting POSITION
+        is what makes this more than a grep for the strings somewhere in
+        the file.
         """
         import inspect
 
@@ -496,17 +558,25 @@ class TestTheMintSitesActuallyCallIt:
             src = "\n".join(
                 line.split("#", 1)[0] for line in raw.splitlines()
             )
+            c = src.find("find_cross_owner_conflict(")
             a = src.find("announce_cross_owner_mint(")
             r = src.find(".register(")
+            if c == -1:
+                missing.append(f"{mod.__name__}.{fname}: no conflict check at all")
+            elif r != -1 and c > r:
+                missing.append(
+                    f"{mod.__name__}.{fname}: conflict check comes AFTER the register",
+                )
             if a == -1:
                 missing.append(f"{mod.__name__}.{fname}: no announce at all")
-            elif r != -1 and a > r:
+            elif r != -1 and a < r:
                 missing.append(
-                    f"{mod.__name__}.{fname}: announce comes AFTER the register",
+                    f"{mod.__name__}.{fname}: announce comes BEFORE the register "
+                    "(it needs register()'s created signal)",
                 )
         assert not missing, (
-            "every path-keyed mint must announce before it registers: "
-            + "; ".join(missing)
+            "every path-keyed mint must check before, and announce after, "
+            "it registers: " + "; ".join(missing)
         )
 
 
@@ -530,8 +600,8 @@ class TestTheAnnouncementReachesTheOperator:
         from nexus.catalog.path_ambiguity import get_mints_over_existing_path
 
         announce_cross_owner_mint(
-            _AnnounceReader(matches=[_entry("3.1"), _entry("3.2")]),
-            "a/b.md", owner="4.0", context="unit",
+            ["3.1", "3.2"], file_path="a/b.md", owner="4.0", context="unit",
+            created=True,
         )
 
         rows = get_mints_over_existing_path()
@@ -544,7 +614,19 @@ class TestTheAnnouncementReachesTheOperator:
         from nexus.catalog.path_ambiguity import get_mints_over_existing_path
 
         announce_cross_owner_mint(
-            _AnnounceReader(matches=[]), "a/new.md", owner="4.0", context="unit",
+            None, file_path="a/new.md", owner="4.0", context="unit", created=True,
+        )
+
+        assert get_mints_over_existing_path() == []
+
+    def test_a_non_mint_records_nothing_even_with_a_conflict(self) -> None:
+        """nexus-r1tnx: a real conflict list, but register() didn't mint —
+        must not reach the collector any more than the log line."""
+        from nexus.catalog.path_ambiguity import get_mints_over_existing_path
+
+        announce_cross_owner_mint(
+            ["3.1", "3.2"], file_path="a/b.md", owner="4.0", context="unit",
+            created=False,
         )
 
         assert get_mints_over_existing_path() == []
@@ -556,8 +638,7 @@ class TestTheAnnouncementReachesTheOperator:
         )
 
         announce_cross_owner_mint(
-            _AnnounceReader(matches=[_entry("3.1")]),
-            "a/b.md", owner="4.0", context="unit",
+            ["3.1"], file_path="a/b.md", owner="4.0", context="unit", created=True,
         )
         assert get_mints_over_existing_path()
 

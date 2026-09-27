@@ -823,12 +823,18 @@ def _catalog_pdf_hook(
             # nexus-yzij1: the lookup above is owner-scoped (and the
             # source_uri leg missed, or there was no URI), so this mint can
             # be the second document for a path another owner already holds.
-            # That is allowed; going unremarked is not.
-            from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog)
-            announce_cross_owner_mint(
-                reader, file_path_str, owner=owner, context="catalog_pdf_hook",
+            # That is allowed; going unremarked is not. nexus-r1tnx: the
+            # conflict check runs BEFORE register() (querying after would
+            # see the just-minted row too), but the announcement itself
+            # waits until AFTER, gated on register()'s own created signal —
+            # register() can resolve to the pre-existing row instead of
+            # minting a new one, and that is not an additional document.
+            from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog)
+                announce_cross_owner_mint,
+                find_cross_owner_conflict,
             )
-            writer.register(
+            _conflict = find_cross_owner_conflict(reader, file_path_str)
+            _write_result = writer.register(
                 owner=owner, title=effective_title, content_type="paper",
                 author=author, year=year, corpus=corpus,
                 physical_collection=collection_name,
@@ -836,6 +842,12 @@ def _catalog_pdf_hook(
                 file_path=file_path_str,
                 source_mtime=source_mtime,
                 source_uri=source_uri,
+                with_created=True,
+            )
+            _created = _write_result[1] if isinstance(_write_result, tuple) else True
+            announce_cross_owner_mint(
+                _conflict, file_path=file_path_str, owner=owner,
+                context="catalog_pdf_hook", created=_created,
             )
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is

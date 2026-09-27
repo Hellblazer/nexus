@@ -1624,17 +1624,28 @@ def _backfill_per_file_from_t3(
         # nexus-yzij1: owner-scoped miss, about to mint. The backfill walks
         # T3 chunks, so it reaches files other indexers have already
         # catalogued under their own owners more often than most writers.
-        from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-        announce_cross_owner_mint(
-            cat, rel, owner=owner, context="backfill_per_file_from_t3",
+        # nexus-r1tnx: the conflict check runs before register() (querying
+        # after would see the just-minted row too), the announcement runs
+        # after, gated on register()'s own created signal — a resolve onto
+        # an existing row is not an additional document.
+        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+            announce_cross_owner_mint,
+            find_cross_owner_conflict,
         )
+        _conflict = find_cross_owner_conflict(cat, rel)
         try:
-            w.register(
+            _write_result = w.register(
                 owner=owner,
                 title=Path(rel).name or rel,
                 content_type=content_type,
                 physical_collection=collection,
                 file_path=rel,
+                with_created=True,
+            )
+            _created = _write_result[1] if isinstance(_write_result, tuple) else True
+            announce_cross_owner_mint(
+                _conflict, file_path=rel, owner=owner,
+                context="backfill_per_file_from_t3", created=_created,
             )
             registered += 1
         except ValueError as exc:
