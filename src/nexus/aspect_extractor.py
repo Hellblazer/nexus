@@ -822,40 +822,58 @@ def _engine_aspects_enabled(collection: str) -> tuple[bool, bool]:
     :data:`_ENGINE_ASPECTS_ENABLED_CACHE`).
 
     Returns ``(enabled, has_opinion)``. ``has_opinion`` is ``False`` when the
-    engine carries no fact at all to read — an old engine that predates
-    catalog-040 and so never sends the ``aspects_enabled`` key, an
-    unregistered collection (``get_collection`` returns ``None``), or a
-    transport error; ``enabled`` is meaningless in that case and always
-    ``False``. Never raises and never crashes the enqueue/worker path over a
+    engine carries no fact at all to read: an old engine that predates
+    catalog-040 and so never sends the ``aspects_enabled`` key, a row on a
+    CURRENT engine nobody has ever called ``--enable``/``--disable``/
+    ``--from-config`` on (catalog-040 ships the column ``BOOLEAN NULL``, no
+    default — round-2 fix, Finding A, T2 critique-nexus-l46pu-
+    round2-2026-09-27: a ``NOT NULL DEFAULT FALSE`` column could not tell
+    "nobody has set this" apart from "explicitly disabled", so every
+    pre-existing docs__ collection would have silently overridden a
+    machine's local opt-in the instant a tenant's engine crossed the
+    migration), an unregistered collection (``get_collection`` returns
+    ``None``), or a transport error; ``enabled`` is meaningless in that case
+    and always ``False``. The three "no opinion" cases (absent key, present
+    key with a ``null``/non-bool value, no row at all) are deliberately
+    indistinguishable here — a bare ``fnmatch`` local fallback either
+    applies or it doesn't, and there is no fourth thing to do with any of
+    them. Never raises and never crashes the enqueue/worker path over a
     catalog read — same fail-closed contract as :func:`_docs_opt_in_patterns`.
+
+    A transient read failure (timeout, connection reset, a mid-request
+    engine restart) is answered as ``(False, False)`` but is NEVER cached
+    (round 2, Important item 2, T2 critique-nexus-l46pu-round2-2026-09-27):
+    caching a failure for the full TTL would silently disable extraction on
+    a genuinely-enabled collection for up to :data:`_ENGINE_ASPECTS_CACHE_TTL_S`
+    seconds after a blip that would otherwise have resolved on the very next
+    call — a materially worse outcome than an uncached immediate retry.
     """
     cached = _ENGINE_ASPECTS_ENABLED_CACHE.get(collection)
     if cached is not None:
         fetched_at, cached_enabled, cached_has_opinion = cached
         if _clock() - fetched_at < _ENGINE_ASPECTS_CACHE_TTL_S:
             return cached_enabled, cached_has_opinion
-    enabled = False
-    has_opinion = False
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: catalog import is heavier than this module's callers need at load
 
         reader = make_catalog_reader()
         row = reader.get_collection(collection) if reader is not None else None
-        # "aspects_enabled" in row (not row.get(...)) distinguishes an old
-        # engine that never sends the key (row present, key absent) from one
-        # that sends it False — d.get() alone cannot tell those apart, and
-        # the two now drive different behaviour (has_opinion gates whether
-        # the engine is authoritative at all, see docs_collection_opted_in).
-        if row is not None and "aspects_enabled" in row:
-            enabled = bool(row["aspects_enabled"])
-            has_opinion = True
-    except Exception as exc:  # noqa: BLE001 — any catalog failure means "no opinion", never a crash on the enqueue/worker path
+    except Exception as exc:  # noqa: BLE001 — any catalog failure means "no opinion" for THIS call, never a crash on the enqueue/worker path — and never cached, so the next call retries the engine instead of a remembered failure
         _log.warning(
             "aspects_engine_opt_in_unreadable",
             collection=collection, error=f"{type(exc).__name__}: {exc}",
         )
-        enabled = False
-        has_opinion = False
+        return False, False
+    # The opinion test is "the value is a bool", not "the key is present"
+    # (round 2 fix round, Finding A): with the column nullable, a CURRENT
+    # engine sends the key on every row, but an untouched row's value is
+    # JSON null, not a bool. isinstance(..., bool) reads a null the same as
+    # an absent key (both "no opinion") while still reading an explicit
+    # True/False as an opinion — a bare `"aspects_enabled" in row` or
+    # `row.get(...)` truthiness check cannot make that distinction.
+    val = row.get("aspects_enabled") if row is not None else None
+    has_opinion = isinstance(val, bool)
+    enabled = val if has_opinion else False
     _ENGINE_ASPECTS_ENABLED_CACHE[collection] = (_clock(), enabled, has_opinion)
     return enabled, has_opinion
 
@@ -871,15 +889,21 @@ def docs_collection_opted_in(collection: str) -> bool:
     nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1 gap (two
     machines with different local config giving partial ``document_aspects``
     coverage). The LOCAL ``aspects.docs_collections`` glob list (nexus-kk4ut)
-    is consulted ONLY as a fallback for an engine with no opinion yet — a
-    row that predates catalog-040, or an old engine that never sends the
-    key at all — so a fresh install with nothing synced keeps today's
-    per-machine-only behaviour until ``nx collection aspects --from-config``
-    (or a bare ``--enable``/``--disable``) gives the engine a first opinion,
-    round-2 critic decision, T2 critique-nexus-l46pu-tenant-wide-aspects-
-    enabled item 1: "local wins" kept exactly the cross-machine drift this
-    bead exists to close, since a stale local entry would silently
-    re-override a value another machine had already synced to the engine.
+    is consulted ONLY as a fallback for an engine with no opinion yet — an
+    old engine that never sends the ``aspects_enabled`` key at all, OR a
+    row on a perfectly current engine that no operator has ever called
+    ``--enable``/``--disable``/``--from-config`` on (the column is
+    ``BOOLEAN NULL`` with no default, catalog-040 round-2 fix, Finding A,
+    T2 critique-nexus-l46pu-round2-2026-09-27 — an untouched row's value is
+    ``None``, distinct from an explicit ``False``, so it is never mistaken
+    for "another machine disabled this") — so a fresh install with nothing
+    synced keeps today's per-machine-only behaviour until ``nx collection
+    aspects --from-config`` (or a bare ``--enable``/``--disable``) gives the
+    engine a first opinion, round-2 critic decision, T2
+    critique-nexus-l46pu-tenant-wide-aspects-enabled item 1: "local wins"
+    kept exactly the cross-machine drift this bead exists to close, since a
+    stale local entry would silently re-override a value another machine
+    had already synced to the engine.
     """
     if not collection.startswith(_DOCS_PREFIX):
         return False

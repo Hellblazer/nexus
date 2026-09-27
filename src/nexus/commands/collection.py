@@ -268,7 +268,10 @@ def _require_docs_collection(row: dict, name: str) -> None:
     "--dry-run", "dry_run", is_flag=True, default=False,
     help="With --from-config, report what would change without writing.",
 )
-def aspects_cmd(name: str | None, enable: bool | None, from_config: bool, dry_run: bool) -> None:
+@click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
+def aspects_cmd(
+    name: str | None, enable: bool | None, from_config: bool, dry_run: bool, yes: bool,
+) -> None:
     """Show or set a collection's engine-side ``aspects_enabled`` attribute.
 
     nexus-l46pu (follow-up to nexus-kk4ut): the tenant-wide, engine-hosted
@@ -281,14 +284,15 @@ def aspects_cmd(name: str | None, enable: bool | None, from_config: bool, dry_ru
     ``--from-config`` is the migration path off the local-only list.
 
     Bare ``nx collection aspects NAME`` shows the current value;
-    ``--enable``/``--disable`` sets it, tenant-wide, for every machine.
+    ``--enable``/``--disable`` sets it, tenant-wide, for every machine —
+    each write prompts for confirmation unless ``--yes``/``-y`` is given.
     """
     if from_config:
         if name is not None or enable is not None:
             raise click.ClickException(
                 "--from-config cannot be combined with NAME or --enable/--disable"
             )
-        _aspects_from_config(dry_run=dry_run)
+        _aspects_from_config(dry_run=dry_run, yes=yes)
         return
     if name is None:
         raise click.ClickException("NAME is required unless --from-config is given")
@@ -304,9 +308,19 @@ def aspects_cmd(name: str | None, enable: bool | None, from_config: bool, dry_ru
     if enable is None:
         current = row.get("aspects_enabled")
         if current is None:
+            # round-2 fix round item 5a: "no opinion" now covers both an old
+            # engine (never sends the key) AND an untouched row on a current
+            # one (catalog-040's column is nullable, no default) — the two
+            # are deliberately indistinguishable, and both fall back to the
+            # SAME local answer, so show what that fallback actually
+            # resolves to instead of leaving the operator to check it by hand.
+            from nexus.aspect_extractor import docs_collection_opted_in  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            local_answer = docs_collection_opted_in(name)
             click.echo(
-                f"{name}: aspects_enabled not reported by this engine "
-                "(pre-nexus-l46pu floor) — falling back to local config.yml"
+                f"{name}: aspects_enabled has no opinion on this engine yet "
+                "(never set, or an engine older than nexus-l46pu) — falling "
+                f"back to local config.yml, which resolves to {local_answer} "
+                "for this machine"
             )
         else:
             click.echo(f"{name}: aspects_enabled={bool(current)}")
@@ -326,6 +340,8 @@ def aspects_cmd(name: str | None, enable: bool | None, from_config: bool, dry_ru
             "rows are left in place (see: nx enrich delete)."
         )
     )
+    if not yes:
+        click.confirm(f"Set aspects_enabled={enable} for {name!r} on the engine?", abort=True)
 
     writer = make_catalog_writer()
     updated = writer.set_collection_aspects_enabled(name, enable)
@@ -338,7 +354,7 @@ def aspects_cmd(name: str | None, enable: bool | None, from_config: bool, dry_ru
     click.echo(f"{name}: aspects_enabled={enable}")
 
 
-def _aspects_from_config(*, dry_run: bool) -> None:
+def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
     """``nx collection aspects --from-config`` (round-2 critic item 1a):
     sync every registered docs__ collection this machine's LOCAL
     ``aspects.docs_collections`` list matches onto the engine's
@@ -350,6 +366,12 @@ def _aspects_from_config(*, dry_run: bool) -> None:
     construction; there is nothing in it that means "disable"). Prints
     what it changed (or would change, under ``--dry-run``) and nothing
     when the local list is empty or matches nothing registered.
+
+    ``yes``: skip the confirmation prompt (round-2 fix round item 4,
+    blast-radius confirmation). Prompted once for the whole batch, not once
+    per collection — this is one operator decision ("sync everything my
+    local list already opted in"), not N independent ones. Never prompts
+    under ``--dry-run`` (nothing is written) or when nothing would change.
     """
     import fnmatch
 
@@ -378,6 +400,20 @@ def _aspects_from_config(*, dry_run: bool) -> None:
         )
         return
 
+    to_change = [r for r in matched if r.get("aspects_enabled") is not True]
+    if not dry_run and to_change and not yes:
+        click.confirm(
+            f"Set aspects_enabled=True on the ENGINE for {len(to_change)} "
+            "docs__ collection(s), tenant-wide — every machine indexing "
+            "them will see this, and prose documents will cost an LLM call "
+            "each time they change. Proceed?",
+            abort=True,
+        )
+
+    # nexus-l46pu round-2 fix round item 5b: hoisted out of the loop — a
+    # lightweight proxy over a shared handle, not a new connection per row.
+    writer = make_catalog_writer()
+
     changed = 0
     for row in matched:
         name = row["name"]
@@ -388,7 +424,6 @@ def _aspects_from_config(*, dry_run: bool) -> None:
             click.echo(f"{name}: would set aspects_enabled=True (dry run)")
             changed += 1
             continue
-        writer = make_catalog_writer()
         writer.set_collection_aspects_enabled(name, True)
         invalidate_engine_aspects_enabled_cache(name)
         _log.info("collection_aspects_enabled_set", collection=name, aspects_enabled=True, tenant_wide=True, source="from_config")

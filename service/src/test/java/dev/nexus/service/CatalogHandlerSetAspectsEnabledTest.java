@@ -15,6 +15,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -104,14 +105,28 @@ class CatalogHandlerSetAspectsEnabledTest {
 
     @Test
     void post_setsTrue_returns200AndUpdatedOne() throws Exception {
+        // round-2 fix (Finding A): an untouched row is null ("no opinion"),
+        // never a coerced false -- see catalog-040's own javadoc.
         assertThat(collectionRow("hasp__target").get("aspects_enabled"))
-            .as("guard: starts at the column default").isEqualTo(false);
+            .as("guard: an untouched row has no opinion, never a coerced false").isNull();
 
         var resp = post("/v1/catalog/collections/set_aspects_enabled",
             "{\"name\":\"hasp__target\",\"aspects_enabled\":true}");
         assertThat(resp.statusCode()).isEqualTo(200);
         assertThat(mapper.readValue(resp.body(), MAP_T).get("updated")).isEqualTo(1);
         assertThat(collectionRow("hasp__target").get("aspects_enabled")).isEqualTo(true);
+    }
+
+    @Test
+    void get_untouchedRow_aspectsEnabledIsNull() throws Exception {
+        // Companion to post_setsTrue_returns200AndUpdatedOne's guard, as its
+        // own test: GET on a row nobody has ever written this column for
+        // must return JSON null, not false -- an explicit false (an
+        // operator's --disable) must stay a distinct, later-written fact.
+        try (Connection su = pg.createConnection("")) {
+            seedDocs(DSL.using(su, SQLDialect.POSTGRES), "hasp__untouched");
+        }
+        assertThat(collectionRow("hasp__untouched").get("aspects_enabled")).isNull();
     }
 
     @Test
@@ -178,7 +193,63 @@ class CatalogHandlerSetAspectsEnabledTest {
         assertThat(resp.statusCode()).isEqualTo(405);
     }
 
+    @Test
+    void post_setsTrue_logsAStructuredAuditEvent() throws Exception {
+        // round-2 fix round item 4 (audit trail): every write logs tenant,
+        // collection, and the new value -- the only durable record of who
+        // changed this tenant-wide setting and when.
+        try (Connection su = pg.createConnection("")) {
+            seedDocs(DSL.using(su, SQLDialect.POSTGRES), "hasp__audited");
+        }
+        List<String> lines = captureAuditLogLines(() -> {
+            try {
+                var resp = post("/v1/catalog/collections/set_aspects_enabled",
+                    "{\"name\":\"hasp__audited\",\"aspects_enabled\":true}");
+                assertThat(resp.statusCode()).isEqualTo(200);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        assertThat(lines).hasSize(1);
+        String line = lines.get(0);
+        assertThat(fieldValue(line, "tenant")).isEqualTo(TENANT);
+        assertThat(fieldValue(line, "collection")).isEqualTo("hasp__audited");
+        assertThat(fieldValue(line, "aspects_enabled")).isEqualTo("true");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /** Attaches a {@link ch.qos.logback.core.read.ListAppender} to the ROOT
+     *  logger for the duration of {@code body} (mirrors
+     *  {@code CatalogManifestSweepRepositoryTest#captureTimingLogLines}'s
+     *  attach/detach pattern) and returns every
+     *  {@code event=collection_aspects_enabled_set} line it observed. */
+    private List<String> captureAuditLogLines(Runnable body) {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=collection_aspects_enabled_set "))
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    /** Extracts {@code key=<value>}'s value from a structured-logging line;
+     *  fails loud if {@code key} never appears. */
+    private static String fieldValue(String line, String key) {
+        var m = java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(key) + "=(\\S*)").matcher(line);
+        assertThat(m.find()).as("line must contain " + key + "=: " + line).isTrue();
+        return m.group(1);
+    }
 
     private Map<String, Object> collectionRow(String name) throws Exception {
         var req = TestHttp.request("http://127.0.0.1:" + service.getPort()

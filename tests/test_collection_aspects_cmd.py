@@ -34,17 +34,22 @@ def _register(name: str, *, content_type: str = "docs") -> None:
     )
 
 
-def test_bare_shows_the_column_default(runner: CliRunner) -> None:
+def test_bare_shows_no_opinion_for_an_untouched_row(runner: CliRunner) -> None:
+    """Round-2 fix, Finding A: an untouched row is null ("no opinion"),
+    never a coerced ``aspects_enabled=False`` -- the bare show falls back
+    to (and names) the local config answer instead."""
     _register("docs__l46pu-cli-a")
     result = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-a"])
     assert result.exit_code == 0, result.output
-    assert "aspects_enabled=False" in result.output
+    assert "no opinion" in result.output
+    assert "aspects_enabled=False" not in result.output
+    assert "aspects_enabled=True" not in result.output
 
 
 def test_enable_then_bare_shows_true(runner: CliRunner) -> None:
     _register("docs__l46pu-cli-b")
 
-    enabled = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-b", "--enable"])
+    enabled = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-b", "--enable", "--yes"])
     assert enabled.exit_code == 0, enabled.output
     assert "aspects_enabled=True" in enabled.output
 
@@ -56,10 +61,10 @@ def test_enable_then_bare_shows_true(runner: CliRunner) -> None:
 def test_disable_flips_it_back(runner: CliRunner) -> None:
     _register("docs__l46pu-cli-c")
     assert runner.invoke(
-        main, ["collection", "aspects", "docs__l46pu-cli-c", "--enable"]
+        main, ["collection", "aspects", "docs__l46pu-cli-c", "--enable", "--yes"]
     ).exit_code == 0
 
-    disabled = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-c", "--disable"])
+    disabled = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-c", "--disable", "--yes"])
     assert disabled.exit_code == 0, disabled.output
     assert "aspects_enabled=False" in disabled.output
 
@@ -75,7 +80,7 @@ def test_the_engine_row_is_the_one_actually_changed(runner: CliRunner) -> None:
 
     _register("docs__l46pu-cli-d")
     assert runner.invoke(
-        main, ["collection", "aspects", "docs__l46pu-cli-d", "--enable"]
+        main, ["collection", "aspects", "docs__l46pu-cli-d", "--enable", "--yes"]
     ).exit_code == 0
 
     row = make_catalog_reader().get_collection("docs__l46pu-cli-d")
@@ -113,7 +118,7 @@ def test_enable_prints_the_tenant_wide_cost_notice_at_execution_time(runner: Cli
     """Round-2 critic item 3: the notice fires on the actual invocation,
     not only inside --help text."""
     _register("docs__l46pu-cli-notice")
-    result = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-notice", "--enable"])
+    result = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-notice", "--enable", "--yes"])
     assert result.exit_code == 0, result.output
     assert "tenant-wide" in result.output.lower()
     assert "llm call" in result.output.lower()
@@ -129,13 +134,38 @@ def test_enable_emits_a_structured_log_event(runner: CliRunner, monkeypatch: pyt
     )
 
     _register("docs__l46pu-cli-logged")
-    result = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-logged", "--enable"])
+    result = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-logged", "--enable", "--yes"])
     assert result.exit_code == 0, result.output
     matches = [kw for event, kw in calls if event == "collection_aspects_enabled_set"]
     assert len(matches) == 1
     assert matches[0]["collection"] == "docs__l46pu-cli-logged"
     assert matches[0]["aspects_enabled"] is True
     assert matches[0]["tenant_wide"] is True
+
+
+def test_enable_without_yes_prompts_and_declining_writes_nothing(runner: CliRunner) -> None:
+    """nexus-l46pu round-2 fix round item 4 (blast-radius confirmation):
+    without --yes, the write prompts; declining must leave the row
+    untouched, exactly like nx collection delete's confirm gate."""
+    from nexus.catalog.factory import make_catalog_reader
+
+    _register("docs__l46pu-cli-decline")
+    result = runner.invoke(
+        main, ["collection", "aspects", "docs__l46pu-cli-decline", "--enable"], input="n\n",
+    )
+    assert result.exit_code != 0
+
+    row = make_catalog_reader().get_collection("docs__l46pu-cli-decline")
+    assert row is not None
+    assert row["aspects_enabled"] is None
+
+
+def test_enable_non_interactive_without_yes_refuses(runner: CliRunner) -> None:
+    """A non-interactive invocation (no answer available at all) must
+    refuse rather than hang or silently proceed."""
+    _register("docs__l46pu-cli-noninteractive")
+    result = runner.invoke(main, ["collection", "aspects", "docs__l46pu-cli-noninteractive", "--enable"])
+    assert result.exit_code != 0
 
 
 def test_from_config_dry_run_reports_without_writing(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,7 +182,7 @@ def test_from_config_dry_run_reports_without_writing(runner: CliRunner, monkeypa
     assert "would" in result.output.lower()
 
     row = make_catalog_reader().get_collection("docs__l46pu-cli-fcdry")
-    assert row["aspects_enabled"] is False, "dry-run must not write"
+    assert row["aspects_enabled"] is None, "dry-run must not write"
 
 
 def test_from_config_syncs_every_locally_matched_collection(
@@ -167,13 +197,45 @@ def test_from_config_syncs_every_locally_matched_collection(
         "nexus.config.load_config",
         lambda *a, **k: {"aspects": {"docs_collections": ["docs__l46pu-cli-fc1*", "docs__l46pu-cli-fc2*"]}},
     )
-    result = runner.invoke(main, ["collection", "aspects", "--from-config"])
+    result = runner.invoke(main, ["collection", "aspects", "--from-config", "--yes"])
     assert result.exit_code == 0, result.output
 
     reader = make_catalog_reader()
     assert reader.get_collection("docs__l46pu-cli-fc1")["aspects_enabled"] is True
     assert reader.get_collection("docs__l46pu-cli-fc2")["aspects_enabled"] is True
-    assert reader.get_collection("docs__l46pu-cli-other")["aspects_enabled"] is False
+    assert reader.get_collection("docs__l46pu-cli-other")["aspects_enabled"] is None
+
+
+def test_from_config_without_yes_prompts_and_declining_writes_nothing(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.catalog.factory import make_catalog_reader
+
+    _register("docs__l46pu-cli-fc-decline")
+    monkeypatch.setattr(
+        "nexus.config.load_config",
+        lambda *a, **k: {"aspects": {"docs_collections": ["docs__l46pu-cli-fc-decline*"]}},
+    )
+    result = runner.invoke(main, ["collection", "aspects", "--from-config"], input="n\n")
+    assert result.exit_code != 0
+
+    row = make_catalog_reader().get_collection("docs__l46pu-cli-fc-decline")
+    assert row is not None
+    assert row["aspects_enabled"] is None
+
+
+def test_from_config_dry_run_never_prompts(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--dry-run never writes, so it must never prompt either -- a
+    non-interactive dry-run (no input at all) must still succeed."""
+    _register("docs__l46pu-cli-fc-dryprompt")
+    monkeypatch.setattr(
+        "nexus.config.load_config",
+        lambda *a, **k: {"aspects": {"docs_collections": ["docs__l46pu-cli-fc-dryprompt*"]}},
+    )
+    result = runner.invoke(main, ["collection", "aspects", "--from-config", "--dry-run"])
+    assert result.exit_code == 0, result.output
 
 
 def test_from_config_combined_with_name_is_refused(runner: CliRunner) -> None:

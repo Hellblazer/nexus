@@ -1994,6 +1994,31 @@ class TestDocsOptInEngineAttribute:
         assert ae.docs_collection_opted_in("docs__l46pu-i") is False
         assert reader.calls == 2, "past the TTL, the cache must not answer from the stale entry"
 
+    def test_a_transient_failure_is_never_cached_so_the_next_call_retries(
+        self, monkeypatch,
+    ) -> None:
+        """Round-3 fix: a catalog read failure answers "no opinion" for
+        that call only. The clock does not move, so a cached failure would
+        answer the second call from the cache and never reach the engine."""
+        import nexus.aspect_extractor as ae
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-t", "aspects_enabled": True})
+        calls = {"n": 0}
+
+        def flaky_reader():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("engine restarting")
+            return reader
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", flaky_reader)
+        monkeypatch.setattr(ae, "_clock", lambda: 1000.0)
+
+        assert ae.docs_collection_opted_in("docs__l46pu-t") is False
+        assert ae.docs_collection_opted_in("docs__l46pu-t") is True
+        assert calls["n"] == 2, "the failed read must not have been cached"
+
 
 def test_an_unreadable_config_means_not_opted_in_and_never_raises(monkeypatch) -> None:
     """nexus-kk4ut code review: select_config runs on the aspect worker's

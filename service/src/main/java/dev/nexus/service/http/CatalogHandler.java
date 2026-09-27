@@ -1860,7 +1860,10 @@ public final class CatalogHandler implements HttpHandler {
      * T2 critique-nexus-l46pu-tenant-wide-aspects-enabled) when the row's
      * {@code content_type} is not {@code docs} — {@code aspects_enabled}
      * only ever gates the docs__ prose-extraction path, so setting it on
-     * anything else is a no-op dressed up as a real setting.
+     * anything else is a no-op dressed up as a real setting. Logs a
+     * structured {@code event=collection_aspects_enabled_set} line on every
+     * successful write (round-2 fix round item 4, audit trail) — this is a
+     * tenant-wide setting with no other durable record of who changed it.
      */
     private void handleCollectionSetAspectsEnabled(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1883,6 +1886,12 @@ public final class CatalogHandler implements HttpHandler {
                     + "' has content_type '" + contentType + "'") + "}"); return;
         }
         int updated = repo.setCollectionAspectsEnabled(tenant, name, enabled);
+        // nexus-l46pu round-2 fix (item 4, audit trail): every write is a
+        // tenant-wide setting with no other durable record of who changed it
+        // or when -- log it structurally so a later "why is this on/off"
+        // question has an answer beyond the row's current value.
+        log.info("event=collection_aspects_enabled_set tenant={} collection={} aspects_enabled={}",
+            tenant, name, enabled);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", updated)));
     }
 

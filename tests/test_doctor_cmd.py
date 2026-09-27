@@ -1430,6 +1430,122 @@ def test_harness_grant_row_absent_from_fresh_install_mvv_allowlist() -> None:
     assert "harness_grant" not in allowlist_regex
 
 
+class TestCheckDocsAspectsConfig:
+    """Direct unit tests of ``_run_check_docs_aspects_config`` (nexus-l46pu
+    round-2 review, T2 code-review-nexus-l46pu-round2-2026-09-27 Important
+    item 2 / critique-nexus-l46pu-round2-2026-09-27 Finding C). Same shape
+    as ``TestCheckGhostSweep``/``TestCheckHarnessGrant``: no dedicated
+    ``--check-*`` flag, runs only in the default supplementary sweep,
+    called directly (no ``CliRunner``).
+
+    nexus-7zhag doctrine: a virgin box (empty ``aspects.docs_collections``)
+    reads N/A, with no engine/catalog call made at all.
+    """
+
+    def test_empty_local_patterns_is_not_applicable_and_makes_no_engine_call(
+        self, monkeypatch, capsys,
+    ) -> None:
+        from nexus.commands.doctor import _run_check_docs_aspects_config
+
+        monkeypatch.setattr("nexus.aspect_extractor._docs_opt_in_patterns", lambda: [])
+
+        def _boom():
+            raise AssertionError("must not call the catalog when local patterns are empty")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", _boom)
+
+        _run_check_docs_aspects_config()
+        out = capsys.readouterr().out
+        assert "N/A" in out
+
+    def test_every_local_match_synced_reads_ok(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_docs_aspects_config
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor._docs_opt_in_patterns", lambda: ["docs__la*"],
+        )
+
+        class _Reader:
+            def list_collections(self):
+                return [{"name": "docs__la-one", "content_type": "docs", "aspects_enabled": True}]
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+
+        _run_check_docs_aspects_config()
+        out = capsys.readouterr().out
+        assert "OK" in out
+
+    def test_a_drifted_match_warns_and_names_the_remedy(self, monkeypatch, capsys) -> None:
+        """A row whose engine value is ``None`` (never synced) is drift,
+        exactly like an explicit ``False`` -- both mean "not opted in on
+        the engine" while the local list says otherwise."""
+        from nexus.commands.doctor import _run_check_docs_aspects_config
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor._docs_opt_in_patterns", lambda: ["docs__lb*"],
+        )
+
+        class _Reader:
+            def list_collections(self):
+                return [
+                    {"name": "docs__lb-one", "content_type": "docs", "aspects_enabled": None},
+                    {"name": "docs__lb-two", "content_type": "docs", "aspects_enabled": True},
+                ]
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+
+        _run_check_docs_aspects_config()
+        out = capsys.readouterr().out
+        assert "docs__lb-one" in out
+        assert "docs__lb-two" not in out
+        assert "--from-config" in out
+
+    def test_catalog_unreachable_is_reported_and_never_raises(self, monkeypatch, capsys) -> None:
+        from nexus.commands.doctor import _run_check_docs_aspects_config
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor._docs_opt_in_patterns", lambda: ["docs__lc*"],
+        )
+
+        def _boom():
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", _boom)
+
+        _run_check_docs_aspects_config()
+        out = capsys.readouterr().out
+        assert "catalog unreachable" in out
+
+
+def test_docs_aspects_config_row_registered_in_supplementary_checks() -> None:
+    """Registration proof, mirroring
+    ``test_ghost_sweep_row_registered_in_supplementary_checks``."""
+    import inspect
+
+    from nexus.commands.doctor import _SUPPLEMENTARY_CHECK_NAMES, _run_supplementary_checks
+
+    assert "docs-aspects-config" in _SUPPLEMENTARY_CHECK_NAMES
+    source = inspect.getsource(_run_supplementary_checks)
+    assert '"docs-aspects-config": _run_check_docs_aspects_config' in source
+
+
+def test_docs_aspects_config_row_absent_from_fresh_install_mvv_allowlist() -> None:
+    """nexus-7zhag doctrine, mirroring
+    ``test_ghost_sweep_row_absent_from_fresh_install_mvv_allowlist``: a
+    virgin box never sets ``aspects.docs_collections``, so this row must
+    never gain an entry in ``tests/e2e/fresh-install-mvv.sh``'s doctor
+    warnings allowlist."""
+    import re as _re
+
+    mvv_path = Path(__file__).resolve().parent / "e2e" / "fresh-install-mvv.sh"
+    source = mvv_path.read_text(encoding="utf-8")
+    match = _re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
+    assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
+    allowlist_regex = match.group(1)
+    assert "docs-aspects-config" not in allowlist_regex
+    assert "docs_aspects_config" not in allowlist_regex
+
+
 def test_tuple_projection_row_registered_in_supplementary_checks() -> None:
     """Registration proof (mirrors ``test_all_three_rows_are_registered_
     in_run_health_checks`` in ``tests/test_health_tuple_doctor_rows.py``,

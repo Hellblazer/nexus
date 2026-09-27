@@ -4790,20 +4790,24 @@ class CatalogRepositoryTest {
     // ── nexus-l46pu (follow-up to nexus-kk4ut): catalog_collections.aspects_enabled ──
 
     @Test @Order(330)
-    void collection_aspectsEnabled_defaultsFalseForANewRegistration() {
-        // catalog-040: NOT NULL DEFAULT FALSE reproduces "not opted in" -- the
-        // exact behaviour a docs__ collection had before this column existed
-        // (aspects.docs_collections defaults to [], nexus-kk4ut) -- for every
-        // row, new or pre-existing. A brand-new upsertCollection() call never
-        // sets ASPECTS_ENABLED explicitly (see upsertCollection's INSERT
-        // column list), so this is exactly the "row never touched this
-        // column" case the column default must cover.
+    void collection_aspectsEnabled_isNullForANewRegistration() {
+        // catalog-040 round-2 fix (Finding A, T2 critique-nexus-l46pu-
+        // round2-2026-09-27): BOOLEAN NULL with NO default -- an untouched
+        // row means "nobody has ever set this," which must NOT read the
+        // same as an explicit false (an operator-issued --disable). A
+        // NOT NULL DEFAULT FALSE column could not make that distinction: it
+        // would have read every existing docs__ collection as an explicit
+        // engine opinion the instant this migration ran, silently
+        // overriding any machine's local aspects.docs_collections opt-in.
+        // A brand-new upsertCollection() call never sets ASPECTS_ENABLED
+        // explicitly (see upsertCollection's INSERT column list), so this
+        // is exactly the "row never touched this column" case.
         String name = "docs__aspects-default__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
             "owner_id", "aspects-default", "embedding_model", "voyage-context-3"));
         var coll = repo.getCollection(TENANT_A, name);
-        assertThat(coll.get("aspects_enabled")).isEqualTo(false);
+        assertThat(coll.get("aspects_enabled")).isNull();
     }
 
     @Test @Order(331)
@@ -4827,7 +4831,9 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
             "owner_id", "aspects-set", "embedding_model", "voyage-context-3"));
-        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(false);
+        // An untouched row is null (no opinion), not false -- see
+        // collection_aspectsEnabled_isNullForANewRegistration.
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
 
         int updated = repo.setCollectionAspectsEnabled(TENANT_A, name, true);
         assertThat(updated).isEqualTo(1);
@@ -4862,7 +4868,25 @@ class CatalogRepositoryTest {
         int updated = repo.setCollectionAspectsEnabled(TA, name, true);
         assertThat(updated).isEqualTo(0);
 
-        // Tenant B's row is untouched.
-        assertThat(repo.getCollection(TB, name).get("aspects_enabled")).isEqualTo(false);
+        // Tenant B's row is untouched -- still null (nobody has set it),
+        // not false.
+        assertThat(repo.getCollection(TB, name).get("aspects_enabled")).isNull();
+    }
+
+    @Test @Order(335)
+    void collection_aspectsEnabled_explicitFalseIsDistinctFromNeverSet() {
+        // Companion to collection_aspectsEnabled_isNullForANewRegistration
+        // (round-2 fix, Finding A): an OPERATOR-ISSUED false must read back
+        // as exactly false, not collapse into the same null a never-touched
+        // row carries -- these are different facts (see this column's own
+        // javadoc, CatalogRepository#collRowWithAspects).
+        String name = "docs__aspects-explicit-false__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-explicit-false", "embedding_model", "voyage-context-3"));
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
+
+        repo.setCollectionAspectsEnabled(TENANT_A, name, false);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(false);
     }
 }

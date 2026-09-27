@@ -10419,9 +10419,15 @@ public final class CatalogRepository {
      * @param lifecycleState {@code catalog_collections.lifecycle_state} — NOT NULL
      *                       on any real row since hygiene-002, but {@code nne()}'d
      *                       for defensive consistency with every other string field here
-     * @param aspectsEnabled {@code catalog_collections.aspects_enabled} — NOT NULL
-     *                       DEFAULT FALSE since catalog-040; defensively coerced to
-     *                       {@code false} on a {@code null} read (should not occur)
+     * @param aspectsEnabled {@code catalog_collections.aspects_enabled} — {@code BOOLEAN
+     *                       NULL}, no default, since catalog-040's round-2 fix (Finding A,
+     *                       T2 critique-nexus-l46pu-round2-2026-09-27): {@code null} means
+     *                       "nobody has set this yet" and is passed through AS {@code null}
+     *                       on the wire, never coerced to {@code false} — coercing it would
+     *                       make an untouched row indistinguishable from an explicit
+     *                       {@code false}, which is exactly the ship-blocker this column
+     *                       shape exists to avoid. The client's opinion test keys on the
+     *                       value being a bool, not on key presence.
      */
     private static Map<String, Object> collRowWithLifecycle(String name, String ctype, String owner,
                                                  String embd, String mver, String dname,
@@ -10431,7 +10437,7 @@ public final class CatalogRepository {
         Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
         m.put("dimension",       dimension);
         m.put("lifecycle_state", nne(lifecycleState));
-        m.put("aspects_enabled", aspectsEnabled != null ? aspectsEnabled : Boolean.FALSE);
+        m.put("aspects_enabled", aspectsEnabled);
         return m;
     }
 
@@ -10444,13 +10450,18 @@ public final class CatalogRepository {
      * lifecycle_state} (those stay {@link #listCollections(String, String,
      * String)}-only, per that method's own javadoc) — {@code aspects_enabled}
      * is the one field both single-row and list reads now share.
+     *
+     * <p>{@code aspectsEnabled} is passed through AS-IS, {@code null} included
+     * (see {@link #collRowWithLifecycle}'s javadoc for why: coercing a
+     * {@code null} read to {@code false} was the round-2 ship-blocker, Finding
+     * A, T2 critique-nexus-l46pu-round2-2026-09-27).
      */
     private static Map<String, Object> collRowWithAspects(String name, String ctype, String owner,
                                                  String embd, String mver, String dname,
                                                  Boolean legcy, String supBy, String supAt, String crAt,
                                                  Boolean aspectsEnabled) {
         Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
-        m.put("aspects_enabled", aspectsEnabled != null ? aspectsEnabled : Boolean.FALSE);
+        m.put("aspects_enabled", aspectsEnabled);
         return m;
     }
 
