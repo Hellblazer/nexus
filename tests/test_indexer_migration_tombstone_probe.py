@@ -178,6 +178,13 @@ def test_post_rename_registration_carries_the_rendered_collectionname_fields(
     ``conformant`` from, rather than re-parsed back out of that string via
     the retired ``parse_conformant_collection_name``.
 
+    nexus-aotql: the call itself is now routed through
+    ``ensure_collection_registered`` instead of a direct
+    ``writer.register_collection`` call -- the seam calls
+    ``writer.register_collection(conformant, **kwargs)`` with the
+    IDENTICAL explicit kwargs this test already pinned, so the assertion
+    below is unchanged.
+
     Reuses this module's own rename-path harness (the ONLY existing
     coverage of decision-tree case 1 -- see this file's module docstring
     and ``tests/test_collection_name_migration.py``'s GAP-CANDIDATE note)

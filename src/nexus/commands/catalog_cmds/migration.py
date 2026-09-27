@@ -189,19 +189,35 @@ def migrate_fallback_cmd(
         )
         return
 
-    # Register every unique target ONCE (each register_collection
-    # acquires its own flock; the targets count is small relative to
-    # the document count so no batched register is needed yet).
+    # Register every unique target ONCE (the targets count is small
+    # relative to the document count so no batched register is needed
+    # yet). nexus-aotql: routed through the registration seam
+    # (ensure_collection_registered) instead of a direct
+    # writer.register_collection call -- gets the seam's early
+    # EmbeddingProfileMismatchError diagnostic and per-process idempotency
+    # cache this loop previously bypassed, matching every other
+    # registration call site. EXPLICIT kwargs, never bare name-derivation:
+    # content_type/target_owners/target_model/target_version are already
+    # the REAL derivation this command computed above (owner via
+    # owner_segment_for_tumbler, never a name parse). registrar=lambda:
+    # writer reuses this command's own writer -- its ``.close()`` (called
+    # once per name by the seam) is a documented no-op on the shared
+    # service-catalog handle it wraps, safe to call from a loop.
+    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — command-local import (nexus.corpus)
+
     targets_seen: set[str] = set()
     for _, target in proposals:
         if target in targets_seen:
             continue
-        writer.register_collection(
+        ensure_collection_registered(
             target,
-            content_type=content_type,
-            owner_id=target_owners[target],
-            embedding_model=target_model,
-            model_version=target_version,
+            registrar=lambda: writer,
+            kwargs={
+                "content_type": content_type,
+                "owner_id": target_owners[target],
+                "embedding_model": target_model,
+                "model_version": target_version,
+            },
         )
         targets_seen.add(target)
 

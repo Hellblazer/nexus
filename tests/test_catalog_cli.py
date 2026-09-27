@@ -3133,7 +3133,15 @@ class TestWhh61MigrationCarve:
         the fix -- now carried through from the local variables the
         f-string ``target`` was built from, instead of being re-parsed
         back out of that rendered string via the retired
-        ``parse_conformant_collection_name``."""
+        ``parse_conformant_collection_name``.
+
+        nexus-aotql: the loop itself is now routed through
+        ``ensure_collection_registered`` instead of a direct
+        ``writer.register_collection`` call -- the seam calls
+        ``writer.register_collection(target, **kwargs)`` with the
+        IDENTICAL explicit kwargs this test already pinned, so the
+        assertion below is unchanged; only the writer double's spec
+        gained ``close`` (see below)."""
         from unittest.mock import MagicMock, patch
 
         from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -3147,7 +3155,14 @@ class TestWhh61MigrationCarve:
         # above's comment -- content_type comes from src_row directly.
         cat.get_collection.return_value = {"name": "docs__default", "content_type": "docs"}
         cat.list_by_collection.return_value = [entry]
-        writer = MagicMock(spec=list(CATALOG_WRITE_OPS))
+        # nexus-aotql: the registration now routes through
+        # ensure_collection_registered, which calls writer.close() once
+        # per registration (a documented no-op on the shared service-
+        # catalog handle) -- "close" is not itself a CATALOG_WRITE_OPS
+        # entry (it is connection lifecycle, not a catalog RPC), so the
+        # spec must name it explicitly or the seam's own finally block
+        # raises AttributeError against this restricted double.
+        writer = MagicMock(spec=[*CATALOG_WRITE_OPS, "close"])
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch("nexus.commands.catalog._get_catalog_writer", return_value=writer):
             result = CliRunner().invoke(

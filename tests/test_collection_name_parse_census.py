@@ -226,13 +226,14 @@ comparison moved to the REGISTRATION SEAM instead
 about to be used for real I/O and the model is about to be committed);
 ``effective_embedding_model_for_writes`` reverted to pure local
 computation (``_write_intent_embedding_model``, delegated to
-unconditionally). The engine's own register-time 422 on a mismatch
-remains the correctness guard for every registration call site OUTSIDE
-this one funnel, until nexus-aotql consolidates them (the prior
-tracker, nexus-ft04v.27, CLOSED on 164fc06b2 with a census predating
-the indexer.py pre-sweep registration loop added by nexus-bd44g --
-see ``corpus.ensure_collection_registered``'s own docstring for the
-current site list). Tests:
+unconditionally). The engine's own register-time 422 on a mismatch is
+the correctness guard of last resort for any future call site that
+bypasses the funnel; nexus-aotql (2026-09-27) closed out the last two
+production sites that still called ``register_collection`` directly
+(``indexer.py``'s ``_migrate_legacy_collections`` and ``commands/
+catalog_cmds/migration.py``'s ``migrate_fallback_cmd``) -- see
+``corpus.ensure_collection_registered``'s own docstring for the current,
+fully-consolidated site list. Tests:
 ``tests/test_collection_registration.py``'s
 ``TestRegistrationSeamProfileCheck`` (agree / mismatch / empty-profile
 bootstrap / pre-Phase-2 route-missing propagation).

@@ -832,20 +832,42 @@ def _migrate_legacy_collections(
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+                    ensure_collection_registered,
+                    is_conformant_collection_name,
+                )
+                # nexus-aotql: routed through the registration seam
+                # (ensure_collection_registered) instead of a direct
+                # writer.register_collection call -- gets the seam's early
+                # EmbeddingProfileMismatchError diagnostic and per-process
+                # idempotency cache this post-rename registration
+                # previously bypassed, matching every other registration
+                # call site. registrar=lambda: w reuses this function's own
+                # writer (the SAME pattern as every other seam-routed
+                # site's loop-safe registrar); ``w``'s ``.close()`` (called
+                # once per name by the seam) is a documented no-op on the
+                # shared service-catalog handle it wraps.
                 if is_conformant_collection_name(conformant):
                     # nexus-ft04v.27: reuse the CollectionName the render
                     # above already built instead of parsing the very name
-                    # it just rendered back apart.
-                    w.register_collection(
+                    # it just rendered back apart. EXPLICIT kwargs, never
+                    # bare name-derivation: the generic seam derivation
+                    # would recompute embedding_model via the CURRENT
+                    # write-intent, which can disagree with the model this
+                    # SAME migration just resolved via resolve_write_
+                    # embedding_model above.
+                    ensure_collection_registered(
                         conformant,
-                        content_type=conformant_name.content_type,
-                        owner_id=conformant_name.owner_id,
-                        embedding_model=conformant_name.embedding_model,
-                        model_version=f"v{conformant_name.model_version}",
+                        registrar=lambda: w,
+                        kwargs={
+                            "content_type": conformant_name.content_type,
+                            "owner_id": conformant_name.owner_id,
+                            "embedding_model": conformant_name.embedding_model,
+                            "model_version": f"v{conformant_name.model_version}",
+                        },
                     )
                 else:
-                    w.register_collection(conformant)
+                    ensure_collection_registered(conformant, registrar=lambda: w)
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_register_collection_failed_after_rename",

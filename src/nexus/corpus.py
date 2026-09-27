@@ -1771,24 +1771,39 @@ def ensure_collection_registered(
     engine, :class:`~nexus.catalog.http_catalog_client.
     EmbeddingProfileRouteMissingError` propagates uncaught. This is an
     EARLY, more actionable diagnostic layered on top of the engine's
-    own register-time 422 on a mismatch, which remains the correctness
-    guard on its own for every registration call site OUTSIDE this
-    funnel (``commands/index.py``, ``commands/collection.py``'s
-    ``reindex_cmd``, ``commands/catalog_cmds/collections.py``'s
-    backfill/rename, ``db/t3.py``'s row synthesis — all call
-    :func:`collection_registration_kwargs` directly and register
-    without going through this function) until nexus-aotql
-    consolidates them through one funnel. ``nexus-ft04v.27`` (the prior
-    tracker for this consolidation) CLOSED on 164fc06b2 with a census
-    predating the site below, so it never carried a live count for it;
-    nexus-aotql is the current tracker. ``indexer.py``'s
-    ``index_repository`` pre-staleness-sweep registration loop
-    (nexus-bd44g) is a FIFTH related site, added after that census —
-    unlike the four above it already calls THIS function (no bypass,
-    same profile check), but it is a fifth place that independently
-    decides WHEN to register a name, so it is tracked alongside the
-    other four under nexus-aotql for the same eventual single-authority
-    design.
+    own register-time 422 on a mismatch, which is the correctness guard
+    of last resort for any FUTURE call site that manages to reintroduce
+    a bypass. nexus-aotql (2026-09-27) closed out the last two: every
+    production ``register_collection`` call in this tree now goes
+    through this function. The full site list, so a future audit has
+    something concrete to check against:
+
+    - T3 chunk writes / aspects / taxonomy (:func:`write_with_registration_retry`,
+      this function's own primary caller).
+    - ``indexer.py``'s ``index_repository`` pre-staleness-sweep
+      registration loop (nexus-bd44g) and its ``_migrate_legacy_
+      collections`` post-rename registration (nexus-aotql).
+    - ``commands/index.py``'s ``_CatalogBackedRegistry.update`` (the
+      ``--corpus knowledge`` reroute).
+    - ``commands/collection.py``'s ``reindex_cmd`` (re-registration
+      after ``purge_collection_cascade``).
+    - ``commands/catalog_cmds/collections.py``'s ``backfill_collections_cmd``
+      and ``rename_collection_cmd``.
+    - ``commands/catalog_cmds/migration.py``'s ``migrate_fallback_cmd``
+      (nexus-aotql).
+
+    Several of these pass an EXPLICIT *kwargs* override rather than
+    relying on this function's own :func:`collection_registration_kwargs`
+    name-derivation — see each site's own comment for why (typically: a
+    mint-time or re-registration-after-row-deletion name has no row to
+    read the real owner/model from yet, so the site's own already-correct
+    derivation — a real owner lookup or a preserved existing segment,
+    never a fresh name parse — is passed through unchanged rather than
+    recomputed here). ``db/t3.py``'s ``list_collections`` row synthesis is
+    NOT a registration call site at all (it derives display fields for a
+    read-time listing on the retired, TEST-ONLY Chroma-era substrate,
+    which has no catalog to register against) — it was a stale reference
+    in an earlier revision of this docstring, corrected here.
     """
     scope = getattr(registrar, "scope", None)
     if _registration_cache_contains(scope, name):
