@@ -627,12 +627,12 @@ def test_dual_population_baseline_locked():
     # 28 since nexus-iygza: `nx index repo`'s unassigned-chunk drain lists
     # pages through a third read-only construction in commands/index.py, on
     # the command's shared client; its assigns go through t2_index_write.
-    # 29 since nexus-du6d0: a fourth read-only construction in
-    # commands/index.py, _collections_with_failed_discover -- the
-    # discover-health probe behind the "no files changed" skip line's
-    # courtesy warning (qgc4b residual staleness: a collection whose
-    # taxonomy already has topics gets no self-heal retry, so a later
-    # discover failure needs a signal independent of index runs).
+    # nexus-du6d0 review round 1 briefly added a fourth construction here
+    # (_collections_with_failed_discover, a per-collection T2Database
+    # probe); review round 2 replaced it with a direct
+    # HttpMemoryStore().get_all(...) call -- ONE round trip, and not a
+    # T2Database/T3Database construction at all (BANNED_CONSTRUCTORS is
+    # exactly those two names), so the count stays at 28.
     assert result.t2database_constructions == sum(
         T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
     ), (
@@ -640,7 +640,7 @@ def test_dual_population_baseline_locked():
         f"{result.t2database_constructions} != allowlist sum "
         f"{sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values())}"
     )
-    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 29
+    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 28
 
 
 def test_named_allowlists_point_at_live_files():

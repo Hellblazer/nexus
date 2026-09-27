@@ -8516,6 +8516,34 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
     Read-only, degrades internally. No entries recorded yet — a virgin
     box, or a client predating this bead — reads not-applicable, never a
     false clean pass masquerading as "checked and fine".
+
+    STALE ROWS (review round 2, nexus-du6d0): a collection deleted or
+    renamed after a failed attempt would otherwise warn forever — its T2
+    memory record never gets a follow-up write once the collection is
+    gone, so its ``last_outcome`` stays ``"failure"`` indefinitely. The
+    live collection list (:func:`nexus.db.make_t3` ``.list_collections()``,
+    ONE call, never one per entry) is read once and any entry whose
+    collection is not in it is dropped and counted, named in the detail
+    line rather than silently absorbed. A failure to read the live list
+    fails OPEN — no filtering is applied rather than risk swallowing a
+    genuine, still-live warning because liveness could not be checked.
+
+    DIVERGENCE WITH THE ENGINE (review round 2, nexus-du6d0, item 3):
+    NOT implemented. ``taxonomy_meta.last_discover_at`` — the engine's
+    own success stamp, which would let a T2-write failure following a
+    real engine-side success read as ok instead of a false warning — has
+    no batched read for arbitrary collections: ``HttpTaxonomyStore``
+    exposes only ``needs_rebalance``/``get_doc_count_drift`` (routed
+    through ``/meta/last_count``, doc_count only, no timestamp, and
+    per-collection, not batched) and ``detect_hubs(warn_stale=True)``
+    (``max_last_discover_at`` via ``/hubs``, aggregated over HUB topics
+    only — a small cross-collection subset, not every collection this
+    check tracks). Adding a batched route is an engine change, out of
+    scope here per the no-new-engine-schema/route decision boundary;
+    reconciling one collection at a time here would trade the "ONE round
+    trip" property item 1 depends on for a per-entry N+1 read on every
+    `nx doctor` run. Left as a residual, named rather than silently
+    absorbed into "not implemented" scope creep.
     """
     label = "taxonomy.discover health"
     try:
@@ -8551,17 +8579,50 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
             detail="not applicable (no taxonomy-discover attempts recorded yet)",
         )]
 
+    # nexus-du6d0 fix round: drop entries for a collection that no longer
+    # exists (deleted or renamed since the recorded attempt) — ONE call,
+    # never one per entry. A failure to read the live list fails OPEN:
+    # `live_names = None` means "couldn't check, don't filter", never
+    # "assume everything is stale".
+    live_names: set[str] | None
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+        live_names = {str(c.get("name", "")) for c in make_t3().list_collections()}
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_taxonomy_discover_health_check_failed", stage="list_collections", error=str(exc))
+        live_names = None
+
+    stale = 0
+    tracked = 0
     failed: list[tuple[str, dict]] = []
     for e in entries:
         collection = str((e or {}).get("title", ""))
+        if live_names is not None and collection not in live_names:
+            stale += 1
+            continue
+        tracked += 1
         record = parse_taxonomy_discover_health((e or {}).get("content", ""))
         if record.get("last_outcome") == "failure":
             failed.append((collection, record))
 
+    stale_note = (
+        f" ({stale} stale entr{'y' if stale == 1 else 'ies'} for a deleted/renamed collection ignored)"
+        if stale else ""
+    )
+
+    if tracked == 0:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"not applicable ({stale} recorded attempt(s) reference a deleted/renamed collection)",
+        )]
+
     if not failed:
         return [HealthResult(
             label=label, ok=True,
-            detail=f"{len(entries)} collection(s) tracked, most recent discover attempt succeeded for all",
+            detail=(
+                f"{tracked} collection(s) tracked, most recent discover attempt "
+                f"succeeded for all{stale_note}"
+            ),
         )]
 
     def _pretty(item: tuple[str, dict]) -> str:
@@ -8578,7 +8639,7 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
         detail=(
             f"{len(failed)} collection(s) whose last taxonomy-discover attempt failed "
             f"more recently than it last succeeded: {names}. Run `nx taxonomy discover "
-            "--collection <name>` to retry."
+            f"--collection <name>` to retry.{stale_note}"
         ),
         fix_suggestions=["nx taxonomy discover --collection <name>"],
     )]

@@ -178,14 +178,37 @@ class TestCheckTaxonomyDiscoverHealth:
 
         store = _Store()
         store.calls = calls  # type: ignore[attr-defined]
+        store._entries = entries  # type: ignore[attr-defined] -- _run's default live-set derives from this
         return store
 
-    def _run(self, monkeypatch, store):
+    def _run(
+        self, monkeypatch, store, *,
+        live_collections: set[str] | None = None,
+        list_collections_exc: Exception | None = None,
+    ):
+        """*live_collections*, when omitted, defaults to every title in
+        *store*'s own entries -- i.e. "everything the fixture names is
+        live" -- so every PRE-EXISTING test (written before the
+        review-round-2 stale-row filter) keeps its exact prior semantics
+        without having to know the filter exists. Tests exercising
+        staleness pass an explicit, narrower set."""
         import nexus.health as h
         monkeypatch.setattr(
             "nexus.db.t2.http_memory_store.HttpMemoryStore",
             lambda *a, **k: store, raising=False,
         )
+        names = (
+            live_collections if live_collections is not None
+            else {str(e.get("title", "")) for e in getattr(store, "_entries", [])}
+        )
+
+        class _T3:
+            def list_collections(self) -> list[dict]:
+                if list_collections_exc is not None:
+                    raise list_collections_exc
+                return [{"name": n} for n in names]
+
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _T3(), raising=False)
         return h._check_taxonomy_discover_health()[0]
 
     def test_no_entries_is_not_applicable(self, monkeypatch) -> None:
@@ -276,6 +299,55 @@ class TestCheckTaxonomyDiscoverHealth:
         assert "12 collection(s)" in r.detail
         assert "… 2 more" in r.detail
 
+    def test_stale_failed_entry_is_ignored_and_counted(self, monkeypatch) -> None:
+        """Item 2: a collection deleted or renamed after a failed attempt
+        must not warn forever -- its entry is dropped and the drop is
+        named, not silently absorbed into a clean pass."""
+        content = '{"last_outcome": "failure", "last_attempt_at": "t1", "error_class": "Boom"}'
+        store = self._store([{"title": "code__deleted", "content": content}])
+        r = self._run(monkeypatch, store, live_collections=set())
+        assert r.ok is True
+        assert r.warn is False
+        assert "not applicable" in r.detail
+        assert "1 recorded attempt" in r.detail
+
+    def test_stale_and_live_failed_mixed_only_warns_on_the_live_one(self, monkeypatch) -> None:
+        bad = '{"last_outcome": "failure", "last_attempt_at": "t1", "error_class": "Boom"}'
+        store = self._store([
+            {"title": "code__live_bad", "content": bad},
+            {"title": "code__deleted", "content": bad},
+        ])
+        r = self._run(monkeypatch, store, live_collections={"code__live_bad"})
+        assert r.ok is False and r.warn is True
+        assert "code__live_bad" in r.detail
+        assert "code__deleted" not in r.detail
+        assert "1 stale entry" in r.detail
+
+    def test_stale_note_pluralizes_correctly(self, monkeypatch) -> None:
+        ok = '{"last_outcome": "success", "last_attempt_at": "t1", "error_class": ""}'
+        store = self._store([
+            {"title": "code__live", "content": ok},
+            {"title": "code__deleted_1", "content": ok},
+            {"title": "code__deleted_2", "content": ok},
+        ])
+        r = self._run(monkeypatch, store, live_collections={"code__live"})
+        assert r.ok is True
+        assert "2 stale entries" in r.detail
+
+    def test_list_collections_failure_fails_open_not_toward_silence(self, monkeypatch) -> None:
+        """A failure to check liveness must never silently drop a
+        genuine, still-live warning -- it fails OPEN (no filtering),
+        never toward treating everything as stale."""
+        content = (
+            '{"last_outcome": "failure", "last_attempt_at": "2026-09-20T00:00:00Z", '
+            '"error_class": "ConnectionError"}'
+        )
+        store = self._store([{"title": "code__nexus", "content": content}])
+        r = self._run(monkeypatch, store, list_collections_exc=RuntimeError("t3 unreachable"))
+        assert r.ok is False and r.warn is True
+        assert "code__nexus" in r.detail
+        assert "stale" not in r.detail
+
     def test_registered_in_run_health_checks(self) -> None:
         import inspect
         import nexus.health as h
@@ -301,66 +373,146 @@ class TestCheckTaxonomyDiscoverHealth:
 # ── 4: the "no files changed — skipping discovery" line ─────────────────────
 
 
-class _FakeMemoryStore:
-    def __init__(self, failed: set[str]) -> None:
+class _FakeHttpMemoryStore:
+    """Minimal stand-in for ``HttpMemoryStore`` (review round 2, nexus-du6d0):
+    ``_collections_with_failed_discover`` now takes ONE ``get_all(project)``
+    round trip, the same shape ``nx doctor``'s ``taxonomy.discover health``
+    row uses, rather than a per-collection ``T2Database`` open."""
+
+    closed = False
+
+    def __init__(self, failed: set[str], all_collections: set[str] | None = None, *, get_all_exc=None) -> None:
         self._failed = failed
+        self._all = all_collections if all_collections is not None else failed
+        self._get_all_exc = get_all_exc
+        self.get_all_calls = 0
 
-    def get(self, project: str, title: str) -> dict | None:
-        if title in self._failed:
-            return {
-                "project": project, "title": title,
-                "content": '{"last_outcome": "failure", "last_attempt_at": "t1", "error_class": "Boom"}',
-            }
-        return {
-            "project": project, "title": title,
-            "content": '{"last_outcome": "success", "last_attempt_at": "t1", "error_class": ""}',
-        }
+    def get_all(self, project: str) -> list[dict]:
+        self.get_all_calls += 1
+        if self._get_all_exc is not None:
+            raise self._get_all_exc
+        rows = []
+        for col in sorted(self._all):
+            outcome = "failure" if col in self._failed else "success"
+            rows.append({
+                "project": project, "title": col,
+                "content": f'{{"last_outcome": "{outcome}", "last_attempt_at": "t1", "error_class": "Boom"}}',
+            })
+        return rows
 
-
-class _FakeDB:
-    def __init__(self, memory) -> None:
-        self.memory = memory
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        pass
+    def close(self) -> None:
+        self.closed = True
 
 
-def _patch_t2_memory(monkeypatch, failed: set[str]) -> None:
-    import nexus.db.t2 as t2mod
+def _patch_http_memory_store(monkeypatch, store) -> None:
     monkeypatch.setattr(
-        t2mod, "T2Database", lambda *_a, **_k: _FakeDB(_FakeMemoryStore(failed)),
+        "nexus.db.t2.http_memory_store.HttpMemoryStore", lambda *_a, **_k: store, raising=False,
     )
 
 
 class TestCollectionsWithFailedDiscover:
+    """Review round 2, nexus-du6d0 item 1: one HttpMemoryStore().get_all(...)
+    round trip, filtered to the caller's *collections*, instead of a
+    per-collection T2Database probe."""
+
     def test_empty_collections_short_circuits(self) -> None:
         from nexus.commands.index import _collections_with_failed_discover
         assert _collections_with_failed_discover([]) == set()
 
     def test_names_the_failed_collection(self, monkeypatch) -> None:
         from nexus.commands.index import _collections_with_failed_discover
-        _patch_t2_memory(monkeypatch, {"code__a"})
+        store = _FakeHttpMemoryStore({"code__a"}, {"code__a", "docs__b"})
+        _patch_http_memory_store(monkeypatch, store)
         result = _collections_with_failed_discover(["code__a", "docs__b"])
         assert result == {"code__a"}
 
     def test_all_succeeded_returns_empty(self, monkeypatch) -> None:
         from nexus.commands.index import _collections_with_failed_discover
-        _patch_t2_memory(monkeypatch, set())
+        store = _FakeHttpMemoryStore(set(), {"code__a", "docs__b"})
+        _patch_http_memory_store(monkeypatch, store)
         result = _collections_with_failed_discover(["code__a", "docs__b"])
         assert result == set()
 
     def test_probe_error_fails_safe_to_empty(self, monkeypatch) -> None:
         from nexus.commands.index import _collections_with_failed_discover
-        import nexus.db.t2 as t2mod
+        store = _FakeHttpMemoryStore(set(), get_all_exc=RuntimeError("boom"))
+        _patch_http_memory_store(monkeypatch, store)
+        assert _collections_with_failed_discover(["code__a"]) == set()
+
+    def test_connect_failure_fails_safe_to_empty(self, monkeypatch) -> None:
+        from nexus.commands.index import _collections_with_failed_discover
 
         def _raise(*a, **k):
-            raise RuntimeError("boom")
+            raise RuntimeError("no service registered")
 
-        monkeypatch.setattr(t2mod, "T2Database", _raise)
+        monkeypatch.setattr(
+            "nexus.db.t2.http_memory_store.HttpMemoryStore", _raise, raising=False,
+        )
         assert _collections_with_failed_discover(["code__a"]) == set()
+
+    def test_a_failed_entry_outside_collections_is_ignored(self, monkeypatch) -> None:
+        """A collection this repo doesn't have is never even considered --
+        the filter to *collections* is item 1's own staleness guard for
+        the skip line (item 2's report note)."""
+        from nexus.commands.index import _collections_with_failed_discover
+        store = _FakeHttpMemoryStore(
+            {"code__a", "code__deleted_elsewhere"}, {"code__a", "code__deleted_elsewhere"},
+        )
+        _patch_http_memory_store(monkeypatch, store)
+        result = _collections_with_failed_discover(["code__a"])
+        assert result == {"code__a"}
+
+    def test_one_round_trip_regardless_of_collection_count(self, monkeypatch) -> None:
+        cols = [f"code__{i}" for i in range(20)]
+        store = _FakeHttpMemoryStore(set(cols[:3]), set(cols))
+        _patch_http_memory_store(monkeypatch, store)
+        from nexus.commands.index import _collections_with_failed_discover
+        result = _collections_with_failed_discover(cols)
+        assert result == set(cols[:3])
+        assert store.get_all_calls == 1
+        assert store.closed is True
+
+
+# ── item 4 (review round 2): _record_discover_health survives a facade ──────
+# with no `.memory` attribute at all, and logs the swallowed failure at
+# WARNING (not DEBUG) so a real facade missing `.memory` is visible.
+
+
+class _NoMemoryDB:
+    """Minimal double standing in for ``db``: no ``.memory`` at all --
+    the exact shape that escaped the discover loop's own exception
+    handling in review round 1 (evaluating ``db.memory`` as an argument
+    expression raises ``AttributeError`` before any try/except inside
+    the wrapped function ever runs)."""
+
+    taxonomy = object()
+
+
+class TestRecordDiscoverHealthWrapper:
+    def test_success_branch_survives_missing_memory_attribute(self) -> None:
+        from nexus.commands.index import _record_discover_health
+        # Must not raise -- the whole point of the wrapper.
+        _record_discover_health(_NoMemoryDB(), "code__x", success=True)
+
+    def test_failure_branch_survives_missing_memory_attribute(self) -> None:
+        from nexus.commands.index import _record_discover_health
+        _record_discover_health(_NoMemoryDB(), "code__x", success=False, error_class="Boom")
+
+    def test_swallowed_failure_logs_at_warning_not_debug(self) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.commands.index import _record_discover_health
+
+        with capture_logs() as cap:
+            _record_discover_health(_NoMemoryDB(), "code__x", success=True)
+
+        matches = [e for e in cap if e.get("event") == "taxonomy_discover_health_record_call_failed"]
+        assert matches, f"expected a taxonomy_discover_health_record_call_failed log entry, got: {cap}"
+        assert matches[0].get("log_level") == "warning", (
+            f"a real facade missing .memory must be visible at WARNING, not swallowed at "
+            f"DEBUG: got {matches[0].get('log_level')!r}"
+        )
+        assert matches[0].get("collection") == "code__x"
 
 
 @pytest.fixture

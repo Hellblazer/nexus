@@ -1681,7 +1681,7 @@ def index_repo_cmd(
                 # forever. Name the failure here too, not just in `nx doctor`
                 # (taxonomy.discover health), since an operator watching an
                 # interactive `nx index repo` may never run doctor.
-                _failed_discover = _collections_with_failed_discover(collections, client=_t2_client)
+                _failed_discover = _collections_with_failed_discover(collections)
                 if _failed_discover:
                     click.echo(
                         "  Taxonomy: no files changed — skipping discovery "
@@ -2064,7 +2064,7 @@ def _collections_without_topics(collections: list[str], *, client=None) -> set[s
         return set(collections)
 
 
-def _collections_with_failed_discover(collections: list[str], *, client=None) -> set[str]:
+def _collections_with_failed_discover(collections: list[str]) -> set[str]:
     """Subset of *collections* whose last recorded taxonomy-discover
     attempt failed (nexus-du6d0, qgc4b residual staleness).
 
@@ -2077,27 +2077,53 @@ def _collections_with_failed_discover(collections: list[str], *, client=None) ->
     run, so "skipping discovery" doesn't read as reassurance when the
     last real attempt failed. Fails safe toward silence: a probe error
     returns an empty set rather than raising or crashing the index run.
+
+    ONE round trip regardless of ``len(collections)`` (review round 2,
+    nexus-du6d0): a single ``HttpMemoryStore().get_all(...)`` fetches
+    every tracked collection's record — the SAME shape `nx doctor`'s
+    ``taxonomy.discover health`` row uses
+    (:func:`nexus.health._check_taxonomy_discover_health`) — filtered
+    here to *collections* rather than probed one collection at a time
+    via ``T2Database``. This runs on EVERY no-change ``nx index repo``
+    invocation, including the post-commit hook path, so it must stay one
+    round trip and must never fail the run: a filter to *collections*
+    (this repo's own currently-registered set) also means a stale entry
+    for a collection this repo no longer has is never even considered —
+    it isn't in *collections* to begin with.
     """
     if not collections:
         return set()
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+    from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
         TAXONOMY_DISCOVER_HEALTH_PROJECT,
         parse_taxonomy_discover_health,
     )
 
+    wanted = set(collections)
     try:
-        with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only discover-health probe
-            out: set[str] = set()
-            for col in collections:
-                entry = db.memory.get(TAXONOMY_DISCOVER_HEALTH_PROJECT, col)
-                if entry and parse_taxonomy_discover_health(entry.get("content", "")).get("last_outcome") == "failure":
-                    out.add(col)
-            return out
+        store = HttpMemoryStore()  # self-resolves the endpoint, as t2/__init__ does
     except Exception:  # noqa: BLE001 — probe is best-effort; on failure err toward silence, not a crash
         _log.debug("taxonomy_discover_health_probe_failed", exc_info=True)
         return set()
+    try:
+        entries = store.get_all(TAXONOMY_DISCOVER_HEALTH_PROJECT)
+    except Exception:  # noqa: BLE001 — probe is best-effort; on failure err toward silence, not a crash
+        _log.debug("taxonomy_discover_health_probe_failed", exc_info=True)
+        return set()
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 — best-effort close, never masks the probe's own result
+            pass
+
+    out: set[str] = set()
+    for e in entries:
+        collection = str((e or {}).get("title", ""))
+        if collection not in wanted:
+            continue
+        if parse_taxonomy_discover_health((e or {}).get("content", "")).get("last_outcome") == "failure":
+            out.add(collection)
+    return out
 
 
 def _record_discover_health(db: Any, collection: str, *, success: bool, error_class: str = "") -> None:
@@ -2121,7 +2147,7 @@ def _record_discover_health(db: Any, collection: str, *, success: bool, error_cl
     try:
         record_taxonomy_discover_attempt(db.memory, collection, success=success, error_class=error_class)
     except Exception as exc:  # noqa: BLE001 — best-effort: a diagnostic write must never mask or abort the real discover outcome
-        _log.debug("taxonomy_discover_health_record_call_failed", collection=collection, error=str(exc))
+        _log.warning("taxonomy_discover_health_record_call_failed", collection=collection, error=str(exc))
 
 
 def _discover_subset(
