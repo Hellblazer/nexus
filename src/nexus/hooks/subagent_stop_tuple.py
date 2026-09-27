@@ -56,9 +56,12 @@ teardown, so a SubagentStop at the end of a short ``-p`` run (an ordinary
 shape for this project's CCR, GitHub Actions and owned-mode dispatch) could
 lose its REPORT tuple. Run synchronously, the POST finishes, or times out at
 ``project()``'s ``_POST_TIMEOUT_S = 5``, before Claude Code moves on. See
-:mod:`nexus.hooks.subagent_start_tuple` for the cost (about 0.14 s per event)
-and the RDR-205 citation. The ``hooks.json`` ``"timeout": 10`` is enforced
-for a synchronous hook. The RDR-184 ``.expectations`` TSV ledger, written by
+:mod:`nexus.hooks.subagent_start_tuple` for the measured ``claude -p``
+spike, the RDR-205 citation and the cost. This side also reads the agent's
+transcript for VERIFY dims before posting, which adds time in proportion to
+the transcript's size. The ``hooks.json`` ``"timeout": 20`` covers two
+bounded POSTs, two interpreter starts and that read; a timeout here lets the
+subagent stop normally and costs only the row. The RDR-184 ``.expectations`` TSV ledger, written by
 :mod:`nexus.hooks.subagent_stop` on the same event, stays the authoritative
 record of whether an agent reported, including for
 ``scripts/check_agent_verify_claims.py``.

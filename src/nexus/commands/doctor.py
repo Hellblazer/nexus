@@ -3466,8 +3466,9 @@ def _run_check_tuple_projection() -> None:
     command-tier entries ``"async": true``, and Claude Code kills a
     still-running async command hook at ``claude -p`` teardown, which would
     drop a projection mid-POST with no SKIP line. Both entries now run
-    synchronously (Sam, 2026-09-27), so a projection either lands, logs a
-    SKIP, or hits ``project()``'s 5 s bound inside the hook's own lifetime.
+    synchronously (Sam, 2026-09-27; measured under ``claude -p``), so a
+    projection either lands, logs a SKIP, or is cut by the hook's 20 s
+    timeout inside the hook's own lifetime.
     The RDR-184 ``.expectations`` TSV ledger stays the authoritative record
     of whether an agent reported.
     """

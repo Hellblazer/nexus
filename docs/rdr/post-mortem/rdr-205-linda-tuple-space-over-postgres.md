@@ -58,6 +58,15 @@ beads listed below. Closed 2026-09-11.
 - **The relay sweep had never been run.** Its space arm was built in Phase 6;
   the first real run surfaced an inbound conexus request twelve days old with
   no acknowledgement (nexus-abyi9). The sweep worked; nothing scheduled it.
+- **The projectors run synchronously, not async (2026-09-27).** CA 4 wired
+  the START and REPORT projections `async: true` so they never delayed a
+  dispatch. nexus-egm7p moved them to the command tier, keeping async;
+  nexus-wgalh then made both synchronous on Sam's decision, because Claude
+  Code kills a still-running async hook at `claude -p` teardown. Measured
+  with a 30 s SubagentStop hook under `claude -p`: the async run exited
+  after 11 s and its write never happened, while the synchronous run waited
+  and its write landed. Cost: about 0.16 s per SubagentStart and
+  SubagentStop.
 
 ## What To Check First Next Time
 

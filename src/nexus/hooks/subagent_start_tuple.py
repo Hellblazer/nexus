@@ -52,12 +52,17 @@ chose so projection never delays dispatch. Claude Code kills a still-running
 async command hook at ``claude -p`` teardown ("Run hooks in the background >
 Configure an async hook"), which RDR-205 had accepted as a silent, recorded
 loss (``docs/rdr/rdr-205-linda-tuple-space-over-postgres.md`` ~231,
-~1136-1137). Running it synchronously removes that loss: a SubagentStart at
-the end of a short ``-p`` run still gets its START row. The cost is this
-process's wall time on every SubagentStart, measured at about 0.14 s, and at
-most ``project()``'s ``_POST_TIMEOUT_S = 5`` plus interpreter start when the
-engine is unreachable. The ``hooks.json`` ``"timeout": 10`` is enforced for a
-synchronous command hook and sits above that bound. The RDR-184
+~1136-1137). Measured under ``claude -p`` with a 30 s SubagentStop hook: the
+async run exited after 11 s and its write never happened; the synchronous run
+waited and its write landed. So running synchronously removes the loss.
+
+The cost is this process's wall time on every SubagentStart: about 0.16 s
+warm, 0.4 s cold. The worst case is longer. ``project()`` may POST twice (a
+retry after a below-floor engine's schema refusal), each bounded at
+``_POST_TIMEOUT_S = 5``, after two interpreter starts (the shim and
+``nx-hook``). The ``hooks.json`` ``"timeout": 20`` covers that. If it ever
+fires, Claude Code cancels the hook and proceeds as if it had allowed, so a
+timeout costs the row, never the dispatch. The RDR-184
 ``.expectations`` TSV ledger stays the authoritative record either way.
 """
 from __future__ import annotations

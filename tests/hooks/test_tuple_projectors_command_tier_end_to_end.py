@@ -136,9 +136,9 @@ def test_both_projectors_are_wired_on_the_command_tier_not_mcp_tool() -> None:
                         "subagent-start-tuple must run synchronously (nexus-wgalh): "
                         "an async hook is killed at claude -p teardown"
                     )
-                    assert hook.get("timeout", 0) > 5, (
-                        "subagent-start-tuple needs a timeout above project()'s "
-                        "5 s POST bound"
+                    assert hook.get("timeout", 0) >= 20, (
+                        "subagent-start-tuple needs a timeout covering two "
+                        "5 s-bounded POSTs plus interpreter starts"
                     )
                 if command_verb(hook) == "subagent-stop-tuple":
                     found_stop = True
@@ -146,9 +146,9 @@ def test_both_projectors_are_wired_on_the_command_tier_not_mcp_tool() -> None:
                         "subagent-stop-tuple must run synchronously (nexus-wgalh): "
                         "an async hook is killed at claude -p teardown"
                     )
-                    assert hook.get("timeout", 0) > 5, (
-                        "subagent-stop-tuple needs a timeout above project()'s "
-                        "5 s POST bound"
+                    assert hook.get("timeout", 0) >= 20, (
+                        "subagent-stop-tuple needs a timeout covering two "
+                        "5 s-bounded POSTs plus interpreter starts"
                     )
     assert found_start, "subagent-start-tuple is not wired as a command-tier verb anywhere"
     assert found_stop, "subagent-stop-tuple is not wired as a command-tier verb anywhere"
