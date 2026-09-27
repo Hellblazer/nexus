@@ -709,7 +709,12 @@ class TestTupleSubscriptions:
         entries = tuple_subscriptions()
         subspaces = {e["subspace"] for e in entries}
         assert "board/release-notes" in subspaces
-        assert all(set(e) == {"subspace"} for e in entries), "no cursor: delivery position lives in the engine (nexus-q82tk)"
+        # No cursor: delivery position lives in the engine (nexus-q82tk). A
+        # board entry carries `since`, its subscribe time, the START position
+        # push delivery begins from (nexus-zxthy), never a delivery cursor.
+        assert all(set(e) <= {"subspace", "since"} for e in entries)
+        [board] = [e for e in entries if e["subspace"] == "board/release-notes"]
+        assert "since" in board and "cursor" not in board
 
         msg = tuple_unsubscribe("board/release-notes")
         assert "Unsubscribed" in msg
