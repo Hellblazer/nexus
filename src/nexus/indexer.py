@@ -1694,6 +1694,14 @@ def _catalog_hook(
         # construction (register_many itself already failed), so THAT is
         # where find_cross_owner_conflict/announce_cross_owner_mint are
         # wired instead.
+        #
+        # nexus-r1tnx round 3: ``reconcile_stale_physical_collection`` is a
+        # DIFFERENT cost shape and DOES run in this batched loop, at the
+        # ``reconciled.append`` site below — it costs one resolve() plus a
+        # conditional update(), paid only for a doc THIS batch's own
+        # ``created=False`` pairs already singled out, not the whole page,
+        # so it never reintroduces the N+1 that ruled out the conflict
+        # check above.
         for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
@@ -1742,6 +1750,26 @@ def _catalog_hook(
                         "catalog_register_reconciled_onto_existing_row",
                         repo=repo_name, rel_path=doc.get("file_path", ""),
                         tumbler=str(tum), owner=str(owner),
+                    )
+                    # nexus-r1tnx round 3: find_cross_owner_conflict stays
+                    # OUT of this batched loop (documented above — one
+                    # /list?file_path= per doc would turn this page's ONE
+                    # register_many round trip into N+1), but
+                    # reconcile_stale_physical_collection is a DIFFERENT
+                    # cost shape: one resolve() + a conditional update(),
+                    # paid only for a doc that already reconciled — a
+                    # subset this batch's own pairs already singled out,
+                    # not the whole page. Closes the same nexus-2t63u
+                    # stale-physical_collection exposure the per-file
+                    # fallback below already closes, without reintroducing
+                    # the N+1 the conflict check was kept out for.
+                    from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                        reconcile_stale_physical_collection,
+                    )
+                    reconcile_stale_physical_collection(
+                        reader, writer, tumbler=tum,
+                        target_collection=doc.get("physical_collection", ""),
+                        file_path=doc.get("file_path", ""),
                     )
             except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
                 _log.warning(

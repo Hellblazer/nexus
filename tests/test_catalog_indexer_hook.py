@@ -764,13 +764,26 @@ class TestCatalogHookBatchedServiceMode:
         def close(self) -> None:
             pass
 
-    def _http_client_and_log(self, monkeypatch, docs: list[dict]):
-        """Real HttpCatalogClient over a MockTransport serving *docs*."""
+    def _http_client_and_log(
+        self, monkeypatch, docs: list[dict], *, show_responses: dict[str, dict] | None = None,
+    ):
+        """Real HttpCatalogClient over a MockTransport serving *docs*.
+
+        ``show_responses`` (nexus-r1tnx round 3): optional
+        ``{tumbler: document_dict}`` map answering ``/v1/catalog/show``
+        (``reader.resolve(tumbler)``) — the resolve probe
+        ``reconcile_stale_physical_collection`` makes for a batched
+        ``created=False`` pair. Absent/unmatched tumblers fall through to
+        the existing empty-``{}`` response (``resolve()`` reads that as
+        "not found" and reconciliation is a no-op), so every test that
+        predates this parameter is unaffected.
+        """
         import httpx
 
         from nexus.catalog.http_catalog_client import HttpCatalogClient
 
         requests: list[tuple[str, dict]] = []
+        _show_responses = show_responses or {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
@@ -779,6 +792,10 @@ class TestCatalogHookBatchedServiceMode:
                 return httpx.Response(200, json={"tumbler_prefix": "1.1"})
             if request.url.path == "/v1/catalog/list":
                 return httpx.Response(200, json={"documents": docs})
+            if request.url.path == "/v1/catalog/show":
+                doc = _show_responses.get(params.get("tumbler", ""))
+                if doc is not None:
+                    return httpx.Response(200, json=doc)
             return httpx.Response(200, json={})
 
         monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
@@ -789,11 +806,16 @@ class TestCatalogHookBatchedServiceMode:
         )
         return client, requests
 
-    def _run_hook(self, tmp_path, monkeypatch, docs, head_hash, *, writer=None, files=None):
+    def _run_hook(
+        self, tmp_path, monkeypatch, docs, head_hash, *, writer=None, files=None,
+        show_responses: dict[str, dict] | None = None,
+    ):
         from nexus.indexer import _catalog_hook
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-        client, requests = self._http_client_and_log(monkeypatch, docs)
+        client, requests = self._http_client_and_log(
+            monkeypatch, docs, show_responses=show_responses,
+        )
         writer = writer if writer is not None else self._StubWriter()
 
         import nexus.catalog.factory as factory
@@ -1606,6 +1628,42 @@ class TestCatalogHookReconciledIsNotNew:
         assert mapping[a] == "1.1.99"
         events = [e for e in logs if e["event"] == "catalog_register_reconciled_onto_existing_row"]
         assert len(events) == 1 and events[0]["tumbler"] == "1.10.41" and events[0]["rel_path"] == "b.py"
+
+    def test_a_reconciled_rows_stale_physical_collection_is_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-r1tnx round 3: the BATCHED ``register_many`` fast path's own
+        ``created=False`` branch must reconcile ``physical_collection`` too,
+        exactly like the per-file fallback and the same-owner branches
+        already do (nexus-2t63u) — b.py resolves onto 1.10.41, a row still
+        stamped with an OLD collection; this run's target is ``code__nexus``
+        (the ``indexed_files`` collection arg threaded through to
+        ``register_many``'s ``page_docs``)."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+
+        _, writer, _ = t._run_hook(
+            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+            show_responses={
+                "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
+            },
+        )
+
+        assert {"tumbler": "1.10.41", "physical_collection": "code__nexus"} in writer.update_calls, (
+            f"the reconciled row's stale physical_collection was never repointed: "
+            f"update_calls={writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 1
 
     def test_all_created_keeps_the_plain_line(self, tmp_path, monkeypatch, capsys) -> None:
         t = TestCatalogHookBatchedServiceMode()
