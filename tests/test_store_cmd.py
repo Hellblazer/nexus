@@ -245,7 +245,12 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
 
     exc_cls = getattr(corpus_mod, exc_cls_name)
     message = "content_type='knowledge': this install's configured intent is 'voyage-context-3', but the engine's embedding_profile still says 'bge-base-en-v15-768'. A restart is required: `nx daemon service stop && nx daemon service start`."
-    mock_store.put.side_effect = exc_cls(message)
+    # EmbeddingProfileMismatchError builds its message from structured
+    # fields since nexus-aotql; the credential error still takes one string.
+    if exc_cls_name == "EmbeddingProfileMismatchError":
+        mock_store.put.side_effect = exc_cls("knowledge", "voyage-context-3", "bge-base-en-v15-768")
+    else:
+        mock_store.put.side_effect = exc_cls(message)
 
     src = tmp_path / "note.md"
     src.write_text("a note under a mismatched embedding intent")
