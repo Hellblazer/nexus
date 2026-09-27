@@ -10,11 +10,29 @@ from typing import Any
 import click
 import structlog
 
+from nexus.aspect_readers import (
+    HTTPS_STAT_MAX_ATTEMPTS,
+    HTTPS_STAT_RETRY_DELAYS_S,
+    HTTPS_STAT_TIMEOUT_S,
+)
 from nexus.bounded_subprocess import run_bounded
+from nexus.doctor_references import DEFAULT_SAMPLE as _REFERENCES_DEFAULT_SAMPLE
 from nexus.redact import redact_credentials
 
 
 _log = structlog.get_logger(__name__)
+
+#: Worst-case wall time (seconds) for ONE --check-references https:// stat,
+#: derived from aspect_readers' own bounded-retry constants (nexus-tb2yj):
+#: httpx applies its timeout to connect/read/write/pool separately, so one
+#: attempt can take up to 2x HTTPS_STAT_TIMEOUT_S; HTTPS_STAT_MAX_ATTEMPTS
+#: attempts plus the backoff between them is the same "~61.5s" figure
+#: aspect_readers._stat_https_uri's own module comment states. Computed
+#: here (not hand-typed into the --check-references help text below) so it
+#: cannot silently drift from the constants it describes.
+_REFERENCES_HTTPS_WORST_CASE_S: float = (
+    HTTPS_STAT_MAX_ATTEMPTS * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
+)
 
 _CHECK = "✓"
 _WARN = "✗"
@@ -2165,6 +2183,16 @@ def _run_check_mineru() -> None:
 #                                          | see doctor_assignments.py's
 #                                          | module docstring for the full
 #                                          | round-1/round-2 design history.
+#   --check-references            | NO        | one HTTP HEAD per sampled
+#                                          | https:// document (no other
+#                                          | scheme costs network at all),
+#                                          | bounded per aspect_readers'
+#                                          | own retry constants but real
+#                                          | wall time on a large tenant
+#                                          | (nexus-tb2yj: the first
+#                                          | production caller of
+#                                          | stat_source/staleness_signal,
+#                                          | RDR-169 Gap 6 leg 3).
 #   --check-wal-retention         | NO        | explicitly "Always exit 0:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
@@ -2242,7 +2270,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-mcp-logs", "--check-tier-discipline",
     "--check-storage-boundary", "--check-post-store-hooks",
     "--check-mineru", "--check-wal-retention", "--check-collection-shape",
-    "--check-embeddings", "--check-assignments",
+    "--check-embeddings", "--check-assignments", "--check-references",
 )
 
 
@@ -2617,6 +2645,44 @@ def _run_supplementary_checks() -> None:
          "date as YYYYMMDD, printed in the result so a run can be repeated.",
 )
 @click.option(
+    "--check-references",
+    "check_references",
+    is_flag=True,
+    default=False,
+    help="Sample reference-only catalog documents (source_uri names an "
+         "external, non-file:// resource) and stat each one's CURRENT "
+         "source against its RECORDED mtime/ETag (nexus-tb2yj, RDR-169 "
+         "Gap 6 leg 3). Every scheme but https:// is a cheap local check; "
+         f"the https:// HEAD is bounded to {_REFERENCES_HTTPS_WORST_CASE_S:.1f}s "
+         "worst case per document (aspect_readers.HTTPS_STAT_MAX_ATTEMPTS "
+         "attempts, each up to twice HTTPS_STAT_TIMEOUT_S since httpx "
+         "applies that timeout to connect/read/write/pool separately, "
+         "plus HTTPS_STAT_RETRY_DELAYS_S backoff), so the whole run's "
+         "worst case is sample * that bound -- "
+         f"{_REFERENCES_DEFAULT_SAMPLE * _REFERENCES_HTTPS_WORST_CASE_S / 60:.0f} "
+         f"minutes at the default sample of {_REFERENCES_DEFAULT_SAMPLE} if "
+         "every sampled document were https:// and every one exhausted its "
+         "retries. Exits 1 when any sampled document reads 'stale' or "
+         "'dangling'; 'unknown' never fails this check alone. Not "
+         "applicable (exit 0) on a box with no reference-only documents.",
+)
+@click.option(
+    "--references-sample",
+    "references_sample",
+    type=click.IntRange(min=1, max=300),
+    default=_REFERENCES_DEFAULT_SAMPLE,
+    show_default=True,
+    help="Reference-only catalog documents sampled by --check-references.",
+)
+@click.option(
+    "--references-seed",
+    "references_seed",
+    type=int,
+    default=None,
+    help="Sampling seed for --check-references. Default: today's UTC date "
+         "as YYYYMMDD, printed in the result so a run can be repeated.",
+)
+@click.option(
     "--check-wal-retention",
     "check_wal_retention",
     is_flag=True,
@@ -2696,6 +2762,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                assignments_sample: int,
                assignments_collections: tuple[str, ...],
                assignments_seed: int | None,
+               check_references: bool,
+               references_sample: int,
+               references_seed: int | None,
                check_wal_retention: bool,
                check_engine_activity: bool,
                check_index_failures: bool,
@@ -2725,6 +2794,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-collection-shape": check_collection_shape,
             "--check-embeddings": check_embeddings,
             "--check-assignments": check_assignments,
+            "--check-references": check_references,
             "--check-wal-retention": check_wal_retention,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
@@ -2818,6 +2888,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             sample=assignments_sample,
             collections=assignments_collections,
             seed=assignments_seed,
+        )
+        return
+
+    if check_references:
+        from nexus.doctor_references import run_check_references  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        run_check_references(
+            sample=references_sample,
+            seed=references_seed,
         )
         return
 

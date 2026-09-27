@@ -422,6 +422,11 @@ def catalog_register(
             meta=_json.loads(meta) if meta else None,
             source_uri=source_uri,
         )
+        # nexus-0ne1m: best-effort ETag capture for an https:// reference —
+        # no-op for every other scheme, never raises, never fails this call.
+        from nexus.aspect_readers import record_https_etag  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        record_https_etag(writer, tumbler, source_uri)
         return {"tumbler": str(tumbler), "title": title}
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}

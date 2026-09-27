@@ -663,6 +663,11 @@ def register_cmd(
             corpus=corpus, author=author, year=year,
             source_uri=source_uri,
         )
+        # nexus-0ne1m: best-effort ETag capture for an https:// reference —
+        # no-op for every other scheme, never raises, never fails this call.
+        from nexus.aspect_readers import record_https_etag  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        record_https_etag(writer, tumbler, source_uri)
     except ValueError as exc:
         # P3.1 register-boundary validation surfaced a malformed URI.
         # Hard error rather than silent persistence.
@@ -808,6 +813,13 @@ def update_cmd(
     t = _resolve_tumbler(cat, tumbler)
     try:
         writer.update(t, **fields)
+        if source_uri:
+            # nexus-0ne1m: --source-uri is the "refresh" path (recovering a
+            # dead/replaced identity) — best-effort ETag capture, no-op for
+            # every non-https scheme, never raises.
+            from nexus.aspect_readers import record_https_etag  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+            record_https_etag(writer, t, source_uri)
     except ValueError as exc:
         # nexus-fb6x: same UX-cleanup as the batch path.
         raise click.ClickException(str(exc)) from exc

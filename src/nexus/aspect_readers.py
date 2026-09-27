@@ -48,6 +48,10 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "CHROMA_IDENTITY_FIELD",
     "FILE_ROUTED_PREFIXES",
+    "HTTPS_ETAG_META_KEY",
+    "HTTPS_STAT_MAX_ATTEMPTS",
+    "HTTPS_STAT_RETRY_DELAYS_S",
+    "HTTPS_STAT_TIMEOUT_S",
     "ReadFail",
     "ReadFailReason",
     "ReadOk",
@@ -56,11 +60,21 @@ __all__ = [
     "StatFail",
     "StatOk",
     "StatResult",
+    "capture_https_etag",
     "read_source",
+    "record_https_etag",
     "staleness_signal",
     "stat_source",
     "uri_for",
 ]
+
+
+#: ``catalog_documents.metadata`` JSONB key an https:// reference's ETag is
+#: recorded under at register/refresh time (nexus-0ne1m). Single source of
+#: truth so every writer (:func:`record_https_etag`) and
+#: :func:`_stat_https_uri`'s comparison agree on the same key — a drift here
+#: would silently make every stored ETag unreadable to the stat path.
+HTTPS_ETAG_META_KEY = "https_etag"
 
 
 # ── URI construction (RDR-096 P2.1) ──────────────────────────────────────────
@@ -1207,14 +1221,23 @@ def read_source(
 #                          (indeterminate — 'unknown', never 'dangling'), and
 #                          a timeout/connection failure retries a bounded
 #                          number of times before falling into the same
-#                          reason='error' bucket.  No ETag-based comparison
-#                          yet: nexus does not yet record an ETag at index
-#                          time (catalog_documents.metadata could hold one
-#                          with no engine change; follow-up bead), so an
-#                          ETag-only response (no Last-Modified) is
-#                          reason='error' naming that gap.  Nothing in
-#                          production calls stat_source/staleness_signal yet
-#                          (wiring is its own follow-up bead).  See
+#                          reason='error' bucket.  ETag-based comparison DONE
+#                          (nexus-0ne1m): when a response carries no usable
+#                          Last-Modified but does carry an ETag, and the
+#                          caller passes the ETag it recorded at index time
+#                          (``recorded_etag``, sourced from
+#                          ``catalog_documents.metadata[HTTPS_ETAG_META_KEY]``),
+#                          a differing ETag is 'stale' and a matching one is
+#                          'fresh'; Last-Modified still wins whenever both are
+#                          present.  With no recorded ETag to compare against
+#                          this remains reason='error' ('unknown').  Writers
+#                          record the ETag via :func:`capture_https_etag` /
+#                          :func:`record_https_etag` at register/refresh time
+#                          — see those functions.  Wired into a real caller
+#                          (nexus-tb2yj): ``nx doctor --check-references``
+#                          samples reference-only catalog documents and
+#                          calls stat_source/staleness_signal over them
+#                          (``nexus.doctor_references``).  See
 #                          _stat_https_uri.
 #   Java-side: still DEFERRED, owned by nexus-oqenh (leg 2).  The
 #     UriSchemeHandler interface has a comment-only seam; no stat/head
@@ -1229,8 +1252,17 @@ class StatOk:
     mtime is unavailable (e.g. ``chroma://`` is content-addressed, ``nx-scratch``
     lacks per-entry mtime).  When ``None``, ``staleness_signal`` returns
     ``'fresh'`` — absence of a mtime signal is treated as non-stale.
+
+    ``etag_stale`` (nexus-0ne1m) is set ONLY by :func:`_stat_https_uri`'s
+    ETag-only comparison path (no usable Last-Modified, but both a current
+    and a recorded ETag exist): ``True`` when they differ (stale), ``False``
+    when they match (fresh).  ``None`` everywhere else — either a real
+    ``current_mtime`` was available (which always wins) or the scheme has no
+    ETag concept at all.  ``staleness_signal`` reads this only when
+    ``current_mtime is None``.
     """
     current_mtime: float | None
+    etag_stale: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -1464,7 +1496,7 @@ def _stat_chroma_uri(uri: str, **_kw: Any) -> StatResult:
 #: nexus-oqenh).  Short because this runs on read-time / sweep paths, not a
 #: user-facing request hot-path — a genuinely slow upstream should fail
 #: fast rather than block a sweep over many references.
-_HTTPS_STAT_TIMEOUT_S: float = 10.0
+HTTPS_STAT_TIMEOUT_S: float = 10.0
 
 #: Bounded local retry count for a HEAD stat call: 1 initial attempt + 2
 #: retries.  This is deliberately NOT routed through one of
@@ -1478,7 +1510,7 @@ _HTTPS_STAT_TIMEOUT_S: float = 10.0
 #: those quotas; tripping the shared brake for a slow or flaky third-party
 #: site would throttle unrelated Voyage/vector calls process-wide.  This
 #: handler retries locally and boundedly instead, with no shared state.
-_HTTPS_STAT_MAX_ATTEMPTS: int = 3
+HTTPS_STAT_MAX_ATTEMPTS: int = 3
 
 #: Delay (seconds) before retry attempts 2 and 3 respectively.
 #:
@@ -1487,7 +1519,7 @@ _HTTPS_STAT_MAX_ATTEMPTS: int = 3
 #: separately, so one attempt can take about 20 s (a slow connect then a
 #: slow read); three attempts plus 1.5 s of backoff is about 61.5 s. That
 #: is fine for a maintenance sweep and wrong per result on a search path.
-_HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
+HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 
 
 def _parse_http_date_to_mtime(value: str) -> float | None:
@@ -1515,23 +1547,35 @@ def _stat_https_uri(
     uri: str,
     *,
     http_client: Any = None,
+    recorded_etag: str | None = None,
     **_kw: Any,
 ) -> StatResult:
-    """Stat an ``https://`` URI via a HEAD request, reading ``Last-Modified``.
+    """Stat an ``https://`` URI via a HEAD request, reading ``Last-Modified``
+    (or, absent that, comparing ``ETag`` against *recorded_etag*).
 
     nexus-oqenh (RDR-169 G6 residual, leg 1 — the client-side https:// stat;
     the Java engine-side resolver stat is leg 2, still deferred): a real
     network HEAD request replaces the Phase A ``StatOk(current_mtime=None)``
     placeholder.
 
-    **Last-Modified only, no ETag comparison.**  ``ETag`` is an opaque
-    validator, not a timestamp: staleness detection by ETag would require
-    comparing the CURRENT ETag against a RECORDED one, and nexus does not
-    yet record an ETag at index time (``catalog_documents`` carries
-    ``source_mtime``; its ``metadata`` JSONB could carry one with no engine
-    change, which is a filed follow-up).  Until then an ``ETag``-only
-    response (no ``Last-Modified``) is a ``StatFail`` naming that gap
-    explicitly, not a best-effort comparison against a value never stored.
+    **Last-Modified wins when present; ETag is the fallback comparison**
+    (nexus-0ne1m).  ``ETag`` is an opaque validator, not a timestamp, so
+    staleness detection by ETag requires comparing the CURRENT ETag against
+    a RECORDED one — *recorded_etag* is that baseline, read by the caller
+    from ``catalog_documents.metadata[HTTPS_ETAG_META_KEY]`` (see
+    :func:`record_https_etag`).  When the response has no usable
+    Last-Modified:
+
+    * an ``ETag`` header present AND a non-empty *recorded_etag* given —
+      compared as opaque strings; a match returns
+      ``StatOk(current_mtime=None, etag_stale=False)`` (fresh), a mismatch
+      ``StatOk(current_mtime=None, etag_stale=True)`` (stale).
+    * an ``ETag`` header present but *recorded_etag* is empty/``None`` (no
+      baseline ever captured — a reference that predates nexus-0ne1m, or
+      whose HEAD failed at register time) — still a ``StatFail`` naming the
+      gap: there is genuinely nothing to compare against yet.
+    * no ``ETag`` header either — unchanged: a plain ``StatFail`` naming
+      that neither header was usable.
 
     A 404 is retried once before it is trusted as ``absent``: a CDN edge or
     a mid-deploy origin can answer one spurious 404, and ``absent`` becomes
@@ -1541,16 +1585,19 @@ def _stat_https_uri(
 
     * ``StatOk(current_mtime=<mtime>)`` — 2xx/3xx response with a parseable
       ``Last-Modified`` header.
+    * ``StatOk(current_mtime=None, etag_stale=<bool>)`` — no usable
+      Last-Modified, but a current ETag and a non-empty *recorded_etag* both
+      exist (nexus-0ne1m); ``staleness_signal`` reads ``etag_stale`` directly.
     * ``StatFail(reason='absent', ...)`` — HTTP 404: the resource is
       confirmed gone at this URL, mirroring the ``file://`` handler's
       ``FileNotFoundError`` → ``'absent'`` semantics.  ``staleness_signal``
       then raises (default) or returns ``'dangling'`` (``allow_dangling=True``).
     * ``StatFail(reason='error', ...)`` — every other outcome: a non-404
       4xx/5xx status, a request timeout or connection failure (after
-      exhausting the bounded retry), a missing ``Last-Modified`` header, or
-      an unparseable one.  Indeterminate, not confirmed-absent —
-      ``staleness_signal`` returns ``'unknown'`` and never raises for this
-      reason.
+      exhausting the bounded retry), a missing ``Last-Modified`` header, an
+      unparseable one, or an ETag with no *recorded_etag* to compare
+      against.  Indeterminate, not confirmed-absent — ``staleness_signal``
+      returns ``'unknown'`` and never raises for this reason.
 
     ``http_client`` is injected for tests (a real ``httpx.Client`` pointed at
     a local test server — never mocked); production calls construct a
@@ -1560,14 +1607,14 @@ def _stat_https_uri(
     if http_client is None:
         import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
 
-        http_client = httpx.Client(timeout=_HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
         own_client = True
 
     response: Any = None
     last_detail = ""
     seen_404 = False
     try:
-        for attempt in range(_HTTPS_STAT_MAX_ATTEMPTS):
+        for attempt in range(HTTPS_STAT_MAX_ATTEMPTS):
             try:
                 response = http_client.head(uri)
             except Exception as e:  # noqa: BLE001 — boundary catch; classified below
@@ -1578,8 +1625,8 @@ def _stat_https_uri(
                     seen_404 = True  # confirm once before trusting "absent"
                 elif response.status_code < 500:
                     break
-            if attempt < _HTTPS_STAT_MAX_ATTEMPTS - 1:
-                time.sleep(_HTTPS_STAT_RETRY_DELAYS_S[attempt])
+            if attempt < HTTPS_STAT_MAX_ATTEMPTS - 1:
+                time.sleep(HTTPS_STAT_RETRY_DELAYS_S[attempt])
     finally:
         if own_client:
             http_client.close()
@@ -1588,7 +1635,7 @@ def _stat_https_uri(
         return StatFail(
             reason="error",
             detail=(
-                f"HEAD {uri!r} failed after {_HTTPS_STAT_MAX_ATTEMPTS} "
+                f"HEAD {uri!r} failed after {HTTPS_STAT_MAX_ATTEMPTS} "
                 f"attempt(s): {last_detail}"
             ),
         )
@@ -1613,19 +1660,114 @@ def _stat_https_uri(
         )
 
     etag = response.headers.get("etag")
+    if etag and recorded_etag:
+        # nexus-0ne1m: the ETag-only comparison. Opaque-string equality —
+        # no weak-validator (W/"...") normalisation; a recorded and current
+        # ETag are compared exactly as the header sent them, both here and
+        # at capture time (record_https_etag stores the raw header value).
+        return StatOk(current_mtime=None, etag_stale=(recorded_etag != etag))
     return StatFail(
         reason="error",
         detail=(
             f"HTTP {status} from {uri!r}: no Last-Modified header"
             + (
-                f" (ETag {etag!r} present but unusable — nexus records no "
-                "stored ETag at index time to compare a fresh one against; "
-                "only Last-Modified drives https:// staleness, nexus-oqenh)"
+                f" (ETag {etag!r} present but no stored ETag recorded yet "
+                "to compare against — a reference registered/refreshed "
+                "before nexus-0ne1m, or whose index-time HEAD failed; "
+                "record_https_etag captures one on the next register/update)"
                 if etag
                 else " (no Last-Modified or ETag header either)"
             )
         ),
     )
+
+
+# ── https:// ETag capture at register/refresh time (nexus-0ne1m) ────────────
+
+
+def capture_https_etag(source_uri: str, *, http_client: Any = None) -> str:
+    """Best-effort ``ETag`` capture for an https:// reference, for a writer
+    to store in ``catalog_documents.metadata[HTTPS_ETAG_META_KEY]`` at
+    register/refresh time.
+
+    ONE HEAD request, no retry — this runs on a WRITE path (register/update),
+    never a maintenance sweep, so a slow or unreachable upstream must never
+    stall or fail the caller's register/update call.  Contrast
+    :func:`_stat_https_uri`, which retries boundedly because it runs on a
+    read-time staleness check where a transient failure should be given a
+    second chance.  Same client conventions otherwise (timeout,
+    follow_redirects) as :func:`_stat_https_uri`.
+
+    Returns the raw ``ETag`` header value verbatim (quotes included, exactly
+    as the server sent it — comparison at stat time is opaque-string
+    equality, so capture and comparison must agree on the same
+    representation), or ``""`` on ANY failure: a network error (including
+    an unsupported/non-HTTP *source_uri* scheme, which httpx itself refuses
+    before any I/O), a non-2xx/3xx status, or a response with no ``ETag``
+    header.  Nothing here ever raises.  This function does not itself check
+    that *source_uri* is ``https://`` — :func:`record_https_etag` is the
+    caller that gates on scheme, cheaply, before ever reaching here.
+
+    ``http_client`` is injected for tests (a real ``httpx.Client``); a sweep
+    that captures many ETags in one run should pass the SAME client across
+    calls rather than let each call build and close its own.
+    """
+    own_client = False
+    if http_client is None:
+        import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
+
+        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+        own_client = True
+    try:
+        response = http_client.head(source_uri)
+    except Exception as e:  # noqa: BLE001 — best-effort write-path capture; a failed HEAD records nothing and never fails the caller
+        _log.debug(
+            "https_etag_capture_failed", source_uri=source_uri,
+            error=f"{type(e).__name__}: {e}",
+        )
+        return ""
+    finally:
+        if own_client:
+            http_client.close()
+    if response.status_code >= 400:
+        return ""
+    return response.headers.get("etag") or ""
+
+
+def record_https_etag(
+    writer: Any, tumbler: Any, source_uri: str, *, http_client: Any = None,
+) -> None:
+    """Capture and persist an https:// reference's ``ETag`` on *tumbler*,
+    best-effort (nexus-0ne1m).
+
+    No-op for a non-``https://`` *source_uri*, or when the HEAD request
+    (:func:`capture_https_etag`) yields no ETag.  Otherwise calls
+    ``writer.update(tumbler, meta={HTTPS_ETAG_META_KEY: etag})`` — the
+    engine's meta MERGE semantics (jsonb_concat, never a bare replace) make
+    this safe to call unconditionally on both a fresh ``register()`` (whose
+    own ``meta=`` argument the engine only applies on the INSERT leg — a
+    register that reconciles onto an ALREADY-EXISTING row silently skips
+    the caller's meta entirely) and a ``register()``/``update()`` that
+    "refreshes" an existing row's ``source_uri``.
+
+    Call this AFTER a register/update call has already produced *tumbler* —
+    never before, and never in place of the caller's own error handling.
+    Every failure here (HEAD failure, or the ``update()`` call itself
+    raising) is caught and logged, never re-raised: "a failed HEAD at index
+    time records nothing and never fails the index."
+    """
+    if not source_uri.startswith("https://"):
+        return
+    try:
+        etag = capture_https_etag(source_uri, http_client=http_client)
+        if not etag:
+            return
+        writer.update(tumbler, meta={HTTPS_ETAG_META_KEY: etag})
+    except Exception as e:  # noqa: BLE001 — best-effort write-path capture; never blocks the caller's register/update
+        _log.debug(
+            "https_etag_record_failed", tumbler=str(tumbler), source_uri=source_uri,
+            error=f"{type(e).__name__}: {e}",
+        )
 
 
 # ── Stat registry ─────────────────────────────────────────────────────────────
@@ -1648,6 +1790,7 @@ def stat_source(
     tenant: dict[str, Any] | None = None,
     dt_resolver: Callable[[str], tuple[str | None, str]] | None = None,
     http_client: Any = None,
+    recorded_etag: str | None = None,
 ) -> StatResult:
     """Dispatch ``uri`` to its registered stat handler by scheme.
 
@@ -1669,11 +1812,17 @@ def stat_source(
     callers leave it ``None`` and the handler builds and closes its own
     short-timeout client per call.
 
+    ``recorded_etag`` (nexus-0ne1m) is forwarded to the ``https://`` handler
+    only — the caller's baseline ETag (e.g.
+    ``entry.meta.get(HTTPS_ETAG_META_KEY, "")``), used for the ETag-only
+    comparison when no usable Last-Modified is present. Every other handler
+    ignores it via ``**_kw``.
+
     RDR-169 G6 split (inherits G3):
     - Python-side handlers: ``file``, ``obsidian``, ``x-devonthink-item``,
       ``nx-scratch``, ``chroma`` (content-addressed → always fresh),
-      ``https`` (nexus-oqenh leg 1, DONE: real HEAD + Last-Modified stat —
-      see ``_stat_https_uri``).
+      ``https`` (nexus-oqenh leg 1, DONE: real HEAD + Last-Modified stat;
+      nexus-0ne1m, DONE: ETag fallback comparison — see ``_stat_https_uri``).
     - Java-side stat: still deferred, owned by nexus-oqenh (leg 2).
     """
     if not uri:
@@ -1695,6 +1844,7 @@ def stat_source(
         vault_root=vault_root,
         dt_resolver=dt_resolver,
         http_client=http_client,
+        recorded_etag=recorded_etag,
     )
 
 
@@ -1713,12 +1863,17 @@ def staleness_signal(
 
     Four outcomes (``StalenessSignal = Literal['fresh', 'stale', 'dangling', 'unknown']``):
 
-    * ``'fresh'``    — ``StatOk`` and ``current_mtime is None`` (scheme has no
+    * ``'fresh'``    — ``StatOk`` and ``current_mtime is None`` and
+                        ``etag_stale`` is not ``False`` (scheme has no
                         meaningful mtime, e.g. ``chroma://``, ``nx-scratch://``)
                         OR ``StatOk`` and ``recorded_mtime >= current_mtime``
-                        (source has not changed since the reference was recorded).
+                        (source has not changed since the reference was recorded)
+                        OR ``StatOk(current_mtime=None, etag_stale=False)``
+                        (nexus-0ne1m: the https:// ETag-only comparison matched).
     * ``'stale'``    — ``StatOk`` and ``recorded_mtime < current_mtime``
-                        (source has changed since the reference was recorded).
+                        (source has changed since the reference was recorded)
+                        OR ``StatOk(current_mtime=None, etag_stale=True)``
+                        (nexus-0ne1m: the recorded and current ETag differ).
     * ``'dangling'`` — ``StatFail(reason='absent')`` only: source is confirmed
                         gone (``FileNotFoundError`` on a path we know existed).
                         With ``allow_dangling=False`` (default) this raises
@@ -1772,8 +1927,13 @@ def staleness_signal(
     # StatOk
     current_mtime = stat_result.current_mtime
     if current_mtime is None:
-        # Scheme has no meaningful mtime (chroma://, nx-scratch://).
-        # Treat as fresh — absence of mtime signal is not evidence of staleness.
+        # nexus-0ne1m: the https:// ETag-only comparison path sets
+        # etag_stale explicitly; every other no-mtime scheme (chroma://,
+        # nx-scratch://) leaves it None, and absence of ANY signal is
+        # treated as fresh, same as before.
+        etag_stale = getattr(stat_result, "etag_stale", None)
+        if etag_stale is not None:
+            return "stale" if etag_stale else "fresh"
         return "fresh"
 
     if recorded_mtime >= current_mtime:
