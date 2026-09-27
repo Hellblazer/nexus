@@ -47,7 +47,10 @@ class _FakeServiceCollection:
     def __init__(self, rows: dict[str, dict]) -> None:
         self.rows = dict(rows)  # id -> metadata
 
-    def get_all_metadata(self, where: dict | None = None) -> dict:
+    def get_all_metadata(self, where: dict | None = None, *, include_non_live: bool = False) -> dict:
+        # The forced cleanup must read stored rows: the orphans it removes have
+        # no owner, and a live read (RDR-192 Step 5) hides them.
+        assert include_non_live is True, "forced orphan cleanup must read stored rows"
         if not where:
             ids = list(self.rows)
         else:
