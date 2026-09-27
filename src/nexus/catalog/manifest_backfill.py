@@ -75,6 +75,58 @@ Edge-case contracts:
     applied BEFORE the T3 lookup/write for each doc, and before the
     ``dry_run`` branch, so a dry run reports the same partition a real run
     would touch. Default is ``False`` — unset, behavior is unchanged.
+  - REVERSE notes discovery (nexus-wbfpw.7, review of nexus-wbfpw.4 round 2,
+    T2 nexus/review-wbfpw4-code-r2): the census
+    (``scripts/sql/manifest_less_census.sql``) classifies a chunk as
+    ``legacy-unmanifested`` via TWO paths, not one. The forward path above
+    is the first; the second is the "nl3fn NOTES GUARD" reverse match —
+    a chunk with no live forward pointer (absent, or naming a tombstoned
+    document) whose chash is instead named by a LIVE, note-shaped
+    (``file_path`` empty) catalog document's OWN ``meta["doc_id"]`` (the
+    same predicate :func:`nexus.indexer_utils.is_note_shaped` /
+    :func:`nexus.indexer_utils.live_note_chashes` already use to protect
+    such chunks from GC). Before this fix, backfill's discovery
+    (``_iter_chunks_for_doc``) only ever queried a chunk's FORWARD
+    metadata key, so a reverse-owned note-shaped document always matched
+    zero chunks and landed in ``docs_skipped_zero_chunks`` — the census
+    would keep reporting it ``legacy-unmanifested`` forever, and the
+    census-zero gate (nexus-wbfpw.7's own bead) could never read zero for
+    this shape.
+
+    Discovery is materialized ONCE per collection from the SAME ``docs``
+    list ``list_by_collection`` already returned (every live document in
+    this collection) — never a per-chunk catalog or T3 round trip, mirroring
+    the census's own ``live_notes``/``rev_candidates`` CTEs. For each
+    note-shaped document, its own ``meta["doc_id"]`` is grouped by chash;
+    when several live notes reverse-match the SAME chash, the census's
+    EXACT tie-break applies — fewest manifest rows anywhere (any
+    collection) wins, ties broken by the lowest tumbler
+    (:class:`nexus.catalog.tumbler.Tumbler`'s own ``__lt__``, the same
+    integer-segment ordering the engine's tumbler column sorts by) — via
+    ONE batched ``catalog.get_manifests(...)`` call over just the
+    candidate note tumblers (reusing the ``only_gapped`` pre-pass's own
+    batched call when it already covers every doc in the collection,
+    never a second round trip for the same information). A winning
+    candidate is only eligible when it has ZERO manifest rows in ANY
+    collection — matching the census's own ``legacy-unmanifested``
+    condition; a note with rows elsewhere is ``dead-owner`` territory
+    (a rename-copy leftover) and backfill must not touch it.
+
+    In the main loop, reverse discovery is consulted ONLY as the fallback
+    when a document's FORWARD lookup (``_iter_chunks_for_doc``) matches
+    zero chunks — the two paths are precedence-ordered exactly like the
+    census (forward wins when live; reverse only rescues a document the
+    forward path found nothing for), and a note-shaped document's defining
+    property (nexus-cotmr) is that it carries no forward-pointing chunk in
+    the first place. The reverse chunk itself is fetched directly by id
+    (``col.get(ids=[chash])``) — a where-filter lookup by definition finds
+    nothing, since the chunk carries no forward pointer to this document —
+    and, since a note's catalog identity is always single-chunk
+    (``catalog/store_hook.py::single_chunk_manifest_metadata``), manifested
+    at position 0. Counted separately from forward discovery in
+    ``BackfillResult.docs_reverse_discovered`` (never folded into a
+    forward-only counter) so a dry run's report distinguishes the two
+    discovery paths, matching the census's own ``owner_path`` column.
 """
 from __future__ import annotations
 
@@ -84,6 +136,7 @@ from typing import TYPE_CHECKING
 import httpx
 import structlog
 from nexus.errors import collection_not_found_errors
+from nexus.indexer_utils import is_note_shaped
 
 from nexus.db.limits import QUOTAS
 
@@ -215,6 +268,15 @@ class BackfillResult:
     # must SEE this count rise, not a silent abort of the collection.
     docs_skipped_fk_409: int = 0
     skipped_taxonomy: bool = False
+    # nexus-wbfpw.7: count docs manifested via the REVERSE notes-guard path
+    # (a live note-shaped document's own meta["doc_id"] naming a chash with
+    # no live forward owner) rather than the forward metadata-key path.
+    # Counted regardless of dry_run -- see the module docstring's "REVERSE
+    # notes discovery" contract. Non-vacuity: a caller pointing backfill at
+    # a collection holding reverse-owned notes must SEE this count rise,
+    # never a silent 0 that reads as "nothing to discover" when the census
+    # says otherwise.
+    docs_reverse_discovered: int = 0
 
 
 # nexus-b91tv: the two metadata keys a doc's tumbler can be stamped under.
@@ -285,6 +347,172 @@ def _fetch_chunks_by_key(
             break
         offset += _PAGE_SIZE
     return chunks
+
+
+def _fetch_chunk_by_id(
+    col: "_ServiceCollectionStub",
+    chash: str,
+    doc_id: str,
+    collection: str,
+) -> dict | None:
+    """Fetch ONE T3 chunk directly by its own id (nexus-wbfpw.7 REVERSE path).
+
+    Unlike :func:`_fetch_chunks_by_key`, this never filters by a forward
+    metadata key -- a reverse-owned chunk by definition carries no forward
+    pointer to *doc_id* (that absence, or a forward pointer to a tombstoned
+    document, is exactly why the census's reverse rescue exists), so a
+    ``where``-filter lookup would always find nothing. ``doc_id`` here is
+    the note-shaped document whose own ``meta["doc_id"]`` named *chash* --
+    used only for error attribution, never as a lookup key.
+
+    Returns None if the chunk no longer exists in T3 (its catalog row
+    stamped this chash into ``meta["doc_id"]`` at write time, but the T3
+    chunk was since deleted out from under it) -- the caller folds this
+    into the same ``docs_skipped_zero_chunks`` accounting as any other
+    doc whose lookup matches nothing, never writing a manifest for a chunk
+    that is not there.
+
+    Raises MissingChunkHashError if the chunk lacks ``chunk_text_hash``.
+    Raises ChashDivergentError (nexus-dmf7r) if the chunk's own id
+    disagrees with its ``chunk_text_hash`` copy -- same contract as the
+    forward path, applied uniformly to the reverse one.
+    """
+    result = col.get(ids=[chash], include=["metadatas"])
+    ids: list[str] = result.get("ids") or []
+    if not ids:
+        return None
+    metas: list[dict] = result.get("metadatas") or []
+    cid = ids[0]
+    meta = metas[0] if metas else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta_chash = meta.get("chunk_text_hash") or ""
+    if not meta_chash:
+        raise MissingChunkHashError(chunk_id=cid, collection=collection)
+    if cid != meta_chash:
+        raise ChashDivergentError(
+            doc_id=doc_id, collection=collection,
+            chunk_id=cid, meta_chash=meta_chash,
+        )
+    return {
+        "chash": cid,
+        # A note's catalog identity is always single-chunk
+        # (store_hook.py::single_chunk_manifest_metadata) -- position 0 is
+        # the only defensible value, never a guess among several.
+        "position": 0,
+        "line_start": meta.get("line_start"),
+        "line_end": meta.get("line_end"),
+        "char_start": meta.get("chunk_start_char"),
+        "char_end": meta.get("chunk_end_char"),
+    }
+
+
+def _forward_hint_for_chash(col: "_ServiceCollectionStub", chash: str) -> str:
+    """Return the RAW forward-pointer value stamped on *chash*'s own T3
+    chunk metadata (``catalog_doc_id``, falling back to ``doc_id``), or
+    ``""`` when absent or the chunk itself does not exist.
+
+    Used ONLY to decide reverse-candidacy eligibility in
+    :func:`_reverse_note_owner_by_doc` -- deliberately NOT chash-validated
+    here (no ``chunk_text_hash``/divergence check): the actual manifest
+    write later re-fetches and validates via :func:`_fetch_chunk_by_id`,
+    so a light, unvalidated read is all this needs.
+    """
+    result = col.get(ids=[chash], include=["metadatas"])
+    ids: list[str] = result.get("ids") or []
+    if not ids:
+        return ""
+    metas: list[dict] = result.get("metadatas") or []
+    meta = metas[0] if metas else {}
+    if not isinstance(meta, dict):
+        return ""
+    return meta.get("catalog_doc_id") or meta.get("doc_id") or ""
+
+
+def _reverse_note_owner_by_doc(
+    catalog: "CatalogReader",
+    col: "_ServiceCollectionStub",
+    docs: list,
+    collection: str,
+    *,
+    manifest_counts_by_doc: "dict[str, list] | None",
+) -> dict[str, str]:
+    """Map winning reverse-note doc_id -> the chash it should manifest.
+
+    Mirrors ``manifest_less_census.sql``'s ``live_notes``/``rev_candidates``
+    CTEs exactly: every note-shaped document in *docs* (already scoped to
+    ONE physical collection, the same live set ``list_by_collection``
+    returns) is grouped by its own ``meta["doc_id"]`` chash. When several
+    live notes reverse-match the SAME chash, the winner is the one with
+    the FEWEST manifest rows anywhere (any collection), ties broken by the
+    lowest tumbler -- the identical ``ORDER BY doc_id_hex, total_count ASC,
+    tumbler ASC`` the census's ``rev_candidates`` CTE applies. A winner is
+    only returned when it has ZERO manifest rows anywhere -- the
+    ``legacy-unmanifested`` condition; a winner with rows elsewhere is
+    ``dead-owner`` territory the census does not rescue, and backfill must
+    not touch it either.
+
+    PRECEDENCE (forward wins when live, exactly like the census): before
+    any tie-break, a candidate chash whose OWN T3 chunk carries a forward
+    pointer (``catalog_doc_id``/``doc_id``) naming a document that is LIVE
+    in *docs* -- this same collection's live-document population -- is
+    dropped from reverse candidacy entirely. Without this, a chunk a LIVE
+    document already forward-owns (and which that document's own
+    ``_iter_chunks_for_doc`` pass will manifest normally) could ALSO get
+    manifested into an unrelated reverse-matching note, duplicating
+    ownership of one chunk across two documents -- exactly what "never
+    manifest a chunk into a document the census would not name as owner"
+    forbids. Scoped to THIS collection's live-doc set, not the whole
+    tenant: a forward pointer to a live document registered under a
+    DIFFERENT physical_collection is the documented rename-copy edge case
+    the census resolves via its own tenant-wide join, and unlike the
+    same-collection shape it carries no risk of THIS run's own writes
+    duplicating ownership, so it is out of scope here.
+
+    *manifest_counts_by_doc*, when not None, is the ``only_gapped``
+    pre-pass's already-fetched ``catalog.get_manifests(...)`` result over
+    EVERY doc in this collection -- a superset of the note-shaped
+    candidates here, reused rather than re-fetched. When None, this
+    function makes its OWN single batched ``catalog.get_manifests(...)``
+    call over just the note candidates -- still bounded to once per
+    collection, never a per-chunk or per-doc round trip.
+    """
+    note_candidates: dict[str, list] = {}
+    for doc in docs:
+        if not is_note_shaped(doc):
+            continue
+        doc_chash = (getattr(doc, "meta", None) or {}).get("doc_id", "")
+        if doc_chash:
+            note_candidates.setdefault(doc_chash, []).append(doc)
+
+    if not note_candidates:
+        return {}
+
+    if manifest_counts_by_doc is None:
+        note_doc_ids = [
+            str(d.tumbler) for cands in note_candidates.values() for d in cands
+        ]
+        manifest_counts_by_doc = catalog.get_manifests(note_doc_ids)
+
+    live_tumblers_this_collection = {str(d.tumbler) for d in docs}
+
+    winner_chash_by_doc: dict[str, str] = {}
+    for doc_chash, candidates in note_candidates.items():
+        forward_hint = _forward_hint_for_chash(col, doc_chash)
+        if forward_hint and forward_hint in live_tumblers_this_collection:
+            # A live forward owner always wins -- this chash is never a
+            # reverse candidate at all, tie-break included.
+            continue
+        winner = min(
+            candidates,
+            key=lambda d: (
+                len(manifest_counts_by_doc.get(str(d.tumbler), []) or []),
+                d.tumbler,
+            ),
+        )
+        if len(manifest_counts_by_doc.get(str(winner.tumbler), []) or []) == 0:
+            winner_chash_by_doc[str(winner.tumbler)] = doc_chash
+    return winner_chash_by_doc
 
 
 def _iter_chunks_for_doc(
@@ -362,7 +590,12 @@ def backfill_manifest_for_collection(
             or real-run mode.
 
     Returns:
-        BackfillResult with counts.
+        BackfillResult with counts. ``docs_reverse_discovered`` counts docs
+        manifested via the REVERSE notes-guard path (nexus-wbfpw.7) rather
+        than the forward metadata-key path -- see the module docstring's
+        "REVERSE notes discovery" contract. Counted regardless of
+        ``dry_run``, and included in ``docs_processed``/``chunks_written``
+        as well (it is a breakdown, not a separate total).
 
     Raises:
         MissingChunkHashError: if any chunk lacks ``chunk_text_hash``.
@@ -396,6 +629,11 @@ def backfill_manifest_for_collection(
 
     # Get docs from catalog for this collection.
     docs = catalog.list_by_collection(collection_name)
+    # nexus-wbfpw.7: reverse notes discovery needs the FULL, untruncated
+    # live-document population for this collection -- exactly what the
+    # census's own live_notes CTE scans -- captured before --only-gapped's
+    # pre-pass or --limit mutate `docs` below.
+    all_docs = docs
 
     # nexus-3n7pr G1: pre-pass, BEFORE any T3 read or write, so a repair
     # run touches only zero-manifest docs. ONE batched get_manifests() call
@@ -404,6 +642,7 @@ def backfill_manifest_for_collection(
     # are absent from the result, not keyed to empty list" -- see its
     # docstring), so absence from the returned dict IS the gapped signal.
     gapped_doc_ids: set[str] | None = None
+    existing_manifests: dict[str, list] | None = None
     if only_gapped and docs:
         candidate_ids = [str(doc.tumbler) for doc in docs]
         existing_manifests = catalog.get_manifests(candidate_ids)
@@ -429,6 +668,25 @@ def backfill_manifest_for_collection(
             docs = kept
     elif limit > 0:
         docs = docs[:limit]
+
+    # nexus-wbfpw.7: reverse notes discovery, materialized ONCE per
+    # collection over the full population -- see the module docstring's
+    # "REVERSE notes discovery" contract. Reuses the --only-gapped
+    # pre-pass's batched get_manifests() call above when it ran (it already
+    # covers every doc in this collection, a superset of the note-shaped
+    # candidates here) instead of a second round trip. Requires a real T3
+    # collection handle (the forward-liveness check reads chunk metadata);
+    # when `col is None` (collection absent in T3), every doc is about to
+    # be counted docs_skipped_no_t3 below regardless, so there is nothing
+    # to discover.
+    reverse_owner_chash_by_doc: dict[str, str] = (
+        _reverse_note_owner_by_doc(
+            catalog, col, all_docs, collection_name,
+            manifest_counts_by_doc=existing_manifests,
+        )
+        if col is not None
+        else {}
+    )
 
     for doc in docs:
         doc_id = str(doc.tumbler)
@@ -480,6 +738,35 @@ def backfill_manifest_for_collection(
                 meta_chash=exc.meta_chash,
             )
             continue
+
+        # nexus-wbfpw.7: REVERSE fallback -- only consulted when the
+        # forward lookup above found nothing, and only for a document this
+        # collection's census-matching tie-break (_reverse_note_owner_by_doc)
+        # already picked as the winning reverse owner. Forward wins whenever
+        # it finds anything, exactly like the census's own precedence.
+        is_reverse = False
+        if not chunks and doc_id in reverse_owner_chash_by_doc:
+            reverse_chash = reverse_owner_chash_by_doc[doc_id]
+            try:
+                reverse_chunk = _fetch_chunk_by_id(
+                    col, reverse_chash, doc_id, collection_name,
+                )
+            except ChashDivergentError as exc:
+                # Same contract as the forward path's ChashDivergentError
+                # handling above -- never write a manifest row keyed on an
+                # unverifiable copy.
+                result.docs_skipped_chash_divergent += 1
+                _log.warning(
+                    "manifest_backfill_doc_skipped_chash_divergent",
+                    collection=collection_name,
+                    doc_id=doc_id,
+                    chunk_id=exc.chunk_id,
+                    meta_chash=exc.meta_chash,
+                )
+                continue
+            if reverse_chunk is not None:
+                chunks = [reverse_chunk]
+                is_reverse = True
 
         if not chunks:
             # nexus-gvmbo: never write an empty manifest. write_manifest is
@@ -540,6 +827,10 @@ def backfill_manifest_for_collection(
             result.chunks_written += len(chunks)
 
         result.docs_processed += 1
+        if is_reverse:
+            # nexus-wbfpw.7: counted regardless of dry_run -- a dry run must
+            # report reverse-discovered counts separately from forward ones.
+            result.docs_reverse_discovered += 1
 
         _log.debug(
             "manifest_backfill_doc",
@@ -547,6 +838,7 @@ def backfill_manifest_for_collection(
             doc_id=doc_id,
             chunks=len(chunks),
             dry_run=dry_run,
+            reverse=is_reverse,
         )
 
     return result

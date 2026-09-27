@@ -1563,3 +1563,202 @@ class TestNexus69c94CritiqueFixes:
         assert events[0]["collection"] == coll
 
 
+# ── nexus-wbfpw.7: REVERSE notes discovery ─────────────────────────────────
+
+
+def _register_note_doc(cat: Any, coll: str, chash: str, *, title: str | None = None) -> str:
+    """Register ONE live, note-shaped document (no ``file_path``) whose OWN
+    ``meta['doc_id']`` names *chash* -- the reverse notes-guard shape
+    (``catalog/store_hook.py::single_chunk_manifest_metadata``,
+    :func:`nexus.indexer_utils.is_note_shaped`)."""
+    slug = uuid.uuid4().hex[:8]
+    owner = cat.register_owner(f"wbfpw7-note-{slug}", "curator")
+    return str(cat.register(
+        owner, title or f"wbfpw7-note-{slug}",
+        content_type="knowledge",
+        physical_collection=coll,
+        meta={"doc_id": chash},
+    ))
+
+
+def _seed_reverse_chunk(
+    t3_db: T3Database, *, collection: str, content: str, chunk_text_hash: str,
+) -> None:
+    """Seed one T3 chunk with NO forward pointer at all (neither ``doc_id``
+    nor ``catalog_doc_id``) -- the legacy shape the reverse notes-guard
+    rescue exists for: a chunk's forward metadata key is absent (or, in
+    production, could instead name a tombstoned document), and only a live
+    note's own reverse ``meta['doc_id']`` names it."""
+    col = t3_db._client.get_or_create_collection(collection)
+    col.add(
+        ids=[chunk_text_hash],
+        documents=[content],
+        metadatas=[{"chunk_text_hash": chunk_text_hash}],
+    )
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    seed_manifest_chunks(collection, [chunk_text_hash])
+
+
+class TestWbfpw7ReverseNotesDiscovery:
+    """nexus-wbfpw.7: ``manifest_less_census.sql`` (nexus-wbfpw.4) classifies
+    a chunk as ``legacy-unmanifested`` via TWO paths -- the pre-existing
+    forward metadata-key path, and a REVERSE path: a chunk with no live
+    forward owner whose chash is instead named by a live, note-shaped
+    document's own ``meta['doc_id']``. Before this fix, backfill's
+    discovery only ever queried the forward path, so a reverse-owned note
+    always matched zero chunks and the census-zero gate could never read
+    zero for this shape. These tests exercise the fix against the real
+    engine substrate (``active_catalog``), with the fake in-memory ``t3_db``
+    standing in for T3 reads (same split every other test in this module
+    uses -- see ``_seed_chunk``'s docstring)."""
+
+    def test_reverse_owned_note_gets_manifested_and_census_reads_zero(
+        self, active_catalog, t3_db, t2_service_env,
+    ):
+        """(a) A note whose chunk has no forward key but whose meta.doc_id
+        names it must be manifested into that note, and the census (the
+        real engine route nexus-wbfpw.4 landed) must then report
+        legacy-unmanifested 0 for this collection."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        coll = _unique_coll("knowledge")
+        chash = "d" * 64
+        note = _register_note_doc(active_catalog, coll, chash)
+        _seed_reverse_chunk(
+            t3_db, collection=coll, content="note body", chunk_text_hash=chash,
+        )
+
+        # RED (pre-fix): the note's forward lookup matches zero chunks, so
+        # this chunk was entirely invisible to backfill.
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_reverse_discovered == 1
+        assert result.docs_skipped_zero_chunks == 0
+        assert result.docs_processed == 1
+        assert result.chunks_written == 1
+
+        manifest = active_catalog.get_manifest(note)
+        assert len(manifest) == 1
+        assert manifest[0].chash == chash
+
+        db = HttpVectorClient(tenant=t2_service_env)
+        totals = db.manifest_less_census(coll)["totals"]
+        assert totals["legacy-unmanifested"] == 0, totals
+
+    def test_dry_run_reports_reverse_count_separately_and_writes_nothing(
+        self, active_catalog, t3_db,
+    ):
+        """(d) A dry run must count the reverse discovery (separately from
+        forward discovery) but write nothing."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll("knowledge")
+        chash = "e" * 64
+        note = _register_note_doc(active_catalog, coll, chash)
+        _seed_reverse_chunk(
+            t3_db, collection=coll, content="note body", chunk_text_hash=chash,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=True,
+        )
+
+        assert result.docs_reverse_discovered == 1
+        assert result.docs_processed == 1
+        assert result.chunks_written == 0
+        assert active_catalog.get_manifest(note) == []
+
+    def test_reverse_tie_break_picks_fewest_manifest_rows_anywhere(
+        self, active_catalog, t3_db,
+    ):
+        """(b) Two live notes both name the SAME chash -- the census's own
+        tie-break (fewest manifest rows anywhere, THEN lowest tumbler)
+        must decide, not registration order alone. ``note_with_other_row``
+        is registered FIRST (so it would win a tumbler-only tie-break) but
+        carries an unrelated manifest row elsewhere, so its total count is
+        1 -- it must LOSE to the second-registered, zero-manifest note."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll("knowledge")
+        chash = "f" * 64
+        note_with_other_row = _register_note_doc(
+            active_catalog, coll, chash, title="wbfpw7-first",
+        )
+        note_clean = _register_note_doc(
+            active_catalog, coll, chash, title="wbfpw7-second",
+        )
+
+        other_chash = "1" * 64
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        seed_manifest_chunks(coll, [other_chash])
+        active_catalog.write_manifest(
+            note_with_other_row,
+            [{
+                "chash": other_chash, "position": 0, "line_start": None,
+                "line_end": None, "char_start": None, "char_end": None,
+            }],
+            collection=coll,
+        )
+
+        _seed_reverse_chunk(
+            t3_db, collection=coll, content="shared note body",
+            chunk_text_hash=chash,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_reverse_discovered == 1
+
+        clean_manifest = active_catalog.get_manifest(note_clean)
+        assert len(clean_manifest) == 1
+        assert clean_manifest[0].chash == chash
+
+        # The first-registered note's manifest is untouched -- only its
+        # pre-existing unrelated row, never the shared chash.
+        other_manifest = active_catalog.get_manifest(note_with_other_row)
+        assert len(other_manifest) == 1
+        assert other_manifest[0].chash == other_chash
+
+    def test_forward_owned_live_document_still_wins_over_reverse_note(
+        self, active_catalog, t3_db,
+    ):
+        """(c) A chunk with a LIVE forward pointer must be manifested into
+        its forward owner, never into an unrelated note that also
+        reverse-matches the same chash -- forward wins whenever it is
+        live, exactly like the census's own precedence."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll("knowledge")
+        chash = "9" * 64
+        forward_doc = _register_doc(active_catalog, coll)
+        note = _register_note_doc(active_catalog, coll, chash)
+
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="forward-owned", doc_id=forward_doc, chunk_index=0,
+            chunk_text_hash=chash,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_reverse_discovered == 0
+
+        forward_manifest = active_catalog.get_manifest(forward_doc)
+        assert len(forward_manifest) == 1
+        assert forward_manifest[0].chash == chash
+
+        # The note gets nothing -- forward already owns this chash, and a
+        # note with zero manifestable chunks is a zero-chunks skip, not a
+        # reverse discovery.
+        assert active_catalog.get_manifest(note) == []
+
+

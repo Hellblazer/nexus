@@ -937,6 +937,7 @@ def backfill_manifest_cmd(
     total_skipped_has_manifest = 0
     total_skipped_chash_divergent = 0
     total_skipped_fk_409 = 0
+    total_reverse_discovered = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -1022,11 +1023,18 @@ def backfill_manifest_cmd(
             if result.docs_skipped_fk_409
             else ""
         )
+        # nexus-wbfpw.7: reverse-note discoveries -- reported separately
+        # from forward discovery, never folded into docs_processed alone.
+        reverse_part = (
+            f" ({result.docs_reverse_discovered} via reverse notes-guard)"
+            if result.docs_reverse_discovered
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
             f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
             f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}"
-            f"{has_manifest_part}{chash_divergent_part}{fk_409_part}",
+            f"{has_manifest_part}{chash_divergent_part}{fk_409_part}{reverse_part}",
             file=sys.stderr,
         )
 
@@ -1064,6 +1072,11 @@ def backfill_manifest_cmd(
                 if result.docs_skipped_fk_409
                 else ""
             )
+            + (
+                f" ({result.docs_reverse_discovered} via reverse notes-guard)"
+                if result.docs_reverse_discovered
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
@@ -1074,6 +1087,7 @@ def backfill_manifest_cmd(
         total_skipped_has_manifest += result.docs_skipped_has_manifest
         total_skipped_chash_divergent += result.docs_skipped_chash_divergent
         total_skipped_fk_409 += result.docs_skipped_fk_409
+        total_reverse_discovered += result.docs_reverse_discovered
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -1164,6 +1178,13 @@ def backfill_manifest_cmd(
         if total_skipped_fk_409
         else ""
     )
+    # nexus-wbfpw.7: reverse notes-guard discovery total -- reported
+    # separately from forward discovery in every summary, dry-run included.
+    reverse_discovered_part = (
+        f", {total_reverse_discovered} doc(s) manifested via reverse notes-guard"
+        if total_reverse_discovered
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
@@ -1173,6 +1194,7 @@ def backfill_manifest_cmd(
         + skipped_has_manifest_part
         + skipped_chash_divergent_part
         + skipped_fk_409_part
+        + reverse_discovered_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )
