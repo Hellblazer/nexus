@@ -85,6 +85,16 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   budget stop now logs a SKIP instead of returning silently. Deferred because
   the same fix is in the wheel copy (`src/nexus/hooks/mailbox_drain.py`), so
   both copies ship together in the next client release.
+- nexus-smsau: `conexus/hooks/scripts/version_lockstep_hook.py` now derives
+  its plugin set from marketplace.json (a `known_plugins()` reader keyed off
+  the `CLAUDE_PLUGIN_ROOT` clone this hook already resolves), replacing the
+  hardcoded `PLUGINS = ("conexus", "sn")` tuple that silently dropped any
+  plugin marketplace.json listed without a matching source edit. Deferred
+  because the wheel-side half of the same fix (`src/nexus/plugin_registry.py`,
+  `src/nexus/plugin_lockstep.py`, `src/nexus/routing_stats.py`) is wheel
+  content, so both derivations ship together at the next client release --
+  until then the hook's own fallback and the wheel's fallback must keep
+  agreeing on the same hardcoded set.
 
 _The four RDR-215 straddling beads deferred here by nexus-2x3qy
 (nexus-t9klx, nexus-z9cz2, nexus-silj0, nexus-veh77) shipped with the 7.58.0

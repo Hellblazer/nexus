@@ -97,11 +97,10 @@ from typing import Any
 import structlog
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.plugin_registry import known_plugins
 
 _log = structlog.get_logger(__name__)
 
-#: Plugins this wheel ships; the registry key's marketplace half is taken verbatim.
-PLUGINS: tuple[str, ...] = ("conexus", "sn")
 #: Per-plugin wall-clock budget for ``claude plugin update`` (a git fetch,
 #: measured 5-10 s). Two plugins must stay inside the RDR-143 action's 120 s.
 UPDATE_TIMEOUT_S = 45
@@ -173,9 +172,10 @@ def registry_entries(registry_path: Path | None = None) -> dict[str, list[dict[s
     if not isinstance(data, dict):
         return None
     plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else data
+    ours = known_plugins()
     found: dict[str, list[dict[str, Any]]] = {}
     for key, entries in plugins.items():
-        if not isinstance(key, str) or "@" not in key or key.split("@", 1)[0] not in PLUGINS:
+        if not isinstance(key, str) or "@" not in key or key.split("@", 1)[0] not in ours:
             continue
         if isinstance(entries, dict):
             entries = [entries]

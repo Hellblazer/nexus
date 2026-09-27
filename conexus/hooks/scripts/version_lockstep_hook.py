@@ -120,10 +120,12 @@ DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 _ACTION = _SCRIPTS_DIR / "version_lockstep_action.py"
 
-#: The plugins this wheel ships -- same set as
-#: ``nexus.plugin_lockstep.PLUGINS``, duplicated per the stdlib-only
-#: constraint above.
-PLUGINS: tuple[str, ...] = ("conexus", "sn")
+#: Used only when marketplace.json cannot be located/read (see
+#: ``known_plugins`` below) -- the set this hook ships with as of this
+#: file's own last edit. Never a silent skip: a fallback is always
+#: ``debug()``-logged, so a stale fallback disagreeing with a live
+#: marketplace.json is discoverable (NX_HOOK_DEBUG=1), never swallowed.
+_FALLBACK_PLUGINS: tuple[str, ...] = ("conexus", "sn")
 #: Same env-var names as ``nexus.plugin_lockstep`` (its ``REGISTRY_ENV`` /
 #: ``MARKETPLACES_ENV``) so this hook's no-network probe and ``nx
 #: upgrade``'s own network-refreshed confirm read the identical files, and
@@ -191,6 +193,70 @@ def read_plugin_version() -> str | None:
     except (OSError, ValueError) as exc:
         debug(f"could not read plugin.json: {exc}")
         return None
+
+
+def _marketplace_json_path() -> Path | None:
+    """The clone's own marketplace.json, next to the plugin root Claude
+    Code already resolved for this process (``CLAUDE_PLUGIN_ROOT``, read
+    by :func:`read_plugin_version` above).
+
+    A real Claude Code install sets ``CLAUDE_PLUGIN_ROOT`` to
+    ``<clone_root>/<plugin-subdir>`` -- verified against a real clone by
+    ``tests/test_plugin_install.py``'s own fixture, and by inspection
+    ``<plugin-subdir>/.claude-plugin/plugin.json`` is what
+    :func:`read_plugin_version` reads. So the PARENT of
+    ``CLAUDE_PLUGIN_ROOT`` is the clone root, and it carries
+    ``.claude-plugin/marketplace.json`` for every install shape this hook
+    runs under: a marketplace-cloned install, and a project-scoped dev
+    checkout alike (there, ``CLAUDE_PLUGIN_ROOT`` is the repo's own
+    ``conexus/`` directory, whose parent is the repo root). ``None`` when
+    ``CLAUDE_PLUGIN_ROOT`` is unset -- :func:`read_plugin_version` already
+    returns ``None`` in that case too, so this hook has nothing to look a
+    plugin set up for regardless.
+    """
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if not root:
+        return None
+    return Path(root).parent / ".claude-plugin" / "marketplace.json"
+
+
+def known_plugins() -> tuple[str, ...]:
+    """Plugin short names ``.claude-plugin/marketplace.json`` currently
+    lists, read from the clone next to ``CLAUDE_PLUGIN_ROOT`` (see
+    :func:`_marketplace_json_path`) -- the ONE thing
+    ``nexus.plugin_lockstep`` (which this file cannot import; stdlib-only,
+    see the module docstring) also derives from, via
+    ``nexus.plugin_registry``. Both readers ultimately parse the SAME
+    marketplace.json, so the two stay in agreement without a shared
+    import.
+
+    Missing/unreadable/malformed -> :data:`_FALLBACK_PLUGINS`, logged via
+    :func:`debug` -- the same fail-open posture every other reader in
+    this file takes: this is a self-heal input (this session's plugin
+    lockstep check), never a session-blocking read, so "cannot tell" is
+    never an error here.
+    """
+    path = _marketplace_json_path()
+    if path is not None:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            debug(f"could not read marketplace.json at {path}: {exc}")
+            data = None
+        if isinstance(data, dict):
+            plugins = data.get("plugins")
+            if isinstance(plugins, list):
+                names = tuple(
+                    p["name"] for p in plugins
+                    if isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"]
+                )
+                if names:
+                    return names
+        debug(f"marketplace.json at {path} had no usable plugins list")
+    else:
+        debug("CLAUDE_PLUGIN_ROOT unset; cannot locate marketplace.json")
+    debug(f"falling back to the built-in plugin set {_FALLBACK_PLUGINS}")
+    return _FALLBACK_PLUGINS
 
 
 def read_marker() -> str | None:
@@ -285,12 +351,13 @@ def _our_plugin_shas() -> dict[str, tuple[str, str]]:
     plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else data
     if not isinstance(plugins, dict):
         return {}
+    ours = known_plugins()
     found: dict[str, tuple[str, str]] = {}
     for key, entries in plugins.items():
         if not isinstance(key, str) or "@" not in key:
             continue
         plugin_short, marketplace_name = key.split("@", 1)
-        if plugin_short not in PLUGINS:
+        if plugin_short not in ours:
             continue
         if isinstance(entries, dict):
             entries = [entries]
