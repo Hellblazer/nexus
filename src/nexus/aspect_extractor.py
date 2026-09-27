@@ -1962,8 +1962,12 @@ def _run_claude_isolated(
         # itself, which is synchronous), so closing our handle the
         # moment Popen() returns is safe -- mirrors
         # _spawn_with_prompt_file's identical close-immediately shape.
-        from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.util.process_group import contain, isolation_popen_kwargs, release  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+        # Pre-declared so the outer ``finally`` below can always release it
+        # -- including on a spawn failure (``Popen`` itself raising), where
+        # ``contain()`` is never reached and this stays None.
+        job: int | None = None
         with open(prompt_path, "rb") as prompt_file:
             proc = subprocess.Popen(
                 argv,
@@ -1986,11 +1990,20 @@ def _run_claude_isolated(
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_process_group(proc, job)
+            # Already closed (or its close was already attempted) above --
+            # the outer finally must never touch it again.
+            job = None
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=5)  # reap the killed group
             raise
         return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
     finally:
+        # nexus-6y4e0 review (CRITICAL): the job handle must close on
+        # EVERY outcome, not only the except branch above -- success and a
+        # non-zero return (this function never raises on either) never
+        # touched it and leaked it every time. A no-op when job is None:
+        # POSIX, a spawn failure, or the timeout path (already released).
+        release(job)
         with contextlib.suppress(OSError):
             prompt_path.unlink(missing_ok=True)
 

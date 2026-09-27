@@ -259,7 +259,7 @@ def run_bounded(
     if input is not None and stdin is not None:
         raise ValueError("run_bounded: pass input= or stdin=, not both")
 
-    from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 — deferred: avoids import-time cost on the hot common path
+    from nexus.util.process_group import contain, isolation_popen_kwargs, release  # noqa: PLC0415 — deferred: avoids import-time cost on the hot common path
 
     proc = subprocess.Popen(  # noqa: S603 - argv is a sequence, never a shell string
         argv,
@@ -282,22 +282,35 @@ def run_bounded(
     # single-process reach kill_child_and_descendants already reported).
     job = contain(proc)
     try:
-        out, err = proc.communicate(input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        reach = kill_child_and_descendants(proc, job)
-        with contextlib.suppress(Exception):
-            proc.communicate(timeout=REAP_TIMEOUT_S)
-        _log.warning(
-            "bounded_subprocess_timeout",
-            argv0=argv[0] if argv else None,
-            timeout_s=timeout,
-            kill_reach=reach,
-            # "process" means descendants of this child, if any, survived
-            # the bound. On Windows that is every time; on POSIX it means
-            # the group was already gone.
-            descendants_reached=(reach == "group"),
-        )
-        raise
+        try:
+            out, err = proc.communicate(input=input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            reach = kill_child_and_descendants(proc, job)
+            # Already closed (or its close was already attempted) by the
+            # call above -- the finally below must never touch it again.
+            job = None
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=REAP_TIMEOUT_S)
+            _log.warning(
+                "bounded_subprocess_timeout",
+                argv0=argv[0] if argv else None,
+                timeout_s=timeout,
+                kill_reach=reach,
+                # "process" means descendants of this child, if any, survived
+                # the bound. On Windows that is every time; on POSIX it means
+                # the group was already gone.
+                descendants_reached=(reach == "group"),
+            )
+            raise
+    finally:
+        # nexus-6y4e0 review (CRITICAL): contain()'s handle must close on
+        # EVERY outcome, not only the except branch above -- success and a
+        # non-zero return (via ``check=True``'s CalledProcessError, raised
+        # below, AFTER this finally already ran) never touched it and
+        # leaked it every time. A no-op when job is already None: POSIX
+        # (contain() never assigned one) or the timeout path above (which
+        # already released it and cleared its own local `job`).
+        release(job)
 
     completed = subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
     if check:

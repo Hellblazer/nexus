@@ -528,3 +528,80 @@ def test_hard_failure_falls_back_to_raw_stdout_excerpt_when_not_json(monkeypatch
     monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
     with pytest.raises(ax._HardFailure, match="segmentation fault"):
         ax._invoke_once("some prompt")
+
+
+# nexus-6y4e0 review: the same success-path job-handle leak
+# tests/test_bounded_subprocess.py's TestJobHandleClosesOnEveryOutcome
+# pins for run_bounded also existed here -- _kill_process_group(proc, job)
+# was called only on TimeoutExpired, so success and non-zero-return never
+# closed the job contain() assigned at spawn.
+
+
+@pytest.fixture
+def windows_shaped_real_spawn(monkeypatch: pytest.MonkeyPatch):
+    """Same shape as tests/test_bounded_subprocess.py's fixture of the same
+    name: Windows-shaped job containment via a fake kernel32, real Popen
+    spawn kwargs kept empty since this box is not Windows."""
+    from nexus.util import process_group as pg
+    from nexus.util import win_job
+    from tests.test_win_job import _FakeKernel32
+
+    monkeypatch.delattr(os, "killpg", raising=False)
+    monkeypatch.delattr(os, "getpgid", raising=False)
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    fake = _FakeKernel32()
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+    monkeypatch.setattr(pg, "isolation_popen_kwargs", lambda: {})
+    return fake
+
+
+def _job_handle_from(fake) -> int:
+    assign_call = next(c for c in fake.calls if c[0] == "AssignProcessToJobObject")
+    return assign_call[1]
+
+
+class TestJobHandleClosesOnEveryOutcome:
+    def test_success_closes_the_job_exactly_once(
+        self, windows_shaped_real_spawn,
+    ) -> None:
+        fake = windows_shaped_real_spawn
+        ax._run_claude_isolated(
+            "x", timeout=10, _argv=[sys.executable, "-c", "print('ok')"],
+        )
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on the "
+            f"success path (want exactly 1) -- closed_handles={fake.closed_handles}"
+        )
+
+    def test_nonzero_exit_closes_the_job_exactly_once(
+        self, windows_shaped_real_spawn,
+    ) -> None:
+        fake = windows_shaped_real_spawn
+        # _run_claude_isolated never raises on a non-zero exit -- it just
+        # returns the CompletedProcess, same as claude -p exiting non-zero
+        # for any real reason.
+        ax._run_claude_isolated(
+            "x", timeout=10,
+            _argv=[sys.executable, "-c", "import sys; sys.exit(3)"],
+        )
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on a "
+            f"non-zero exit (want exactly 1) -- closed_handles={fake.closed_handles}"
+        )
+
+    def test_timeout_closes_the_job_exactly_once(
+        self, windows_shaped_real_spawn,
+    ) -> None:
+        fake = windows_shaped_real_spawn
+        with pytest.raises(subprocess.TimeoutExpired):
+            ax._run_claude_isolated(
+                "x", timeout=0.2,
+                _argv=[sys.executable, "-c", "import time; time.sleep(999)"],
+            )
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on "
+            f"timeout (want exactly 1) -- closed_handles={fake.closed_handles}"
+        )

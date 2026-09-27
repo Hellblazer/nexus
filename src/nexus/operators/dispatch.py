@@ -1468,6 +1468,11 @@ async def claude_dispatch(
     # measurement" rather than raising.
     _dispatch_spawn_at: float | None = None
     _first_event_at: float | None = None
+    # nexus-6y4e0 review (CRITICAL): pre-declared for the same reason as
+    # the two above -- the outer ``finally`` must always be able to
+    # release it, including on a spawn failure where ``contain()`` is
+    # never reached and this stays None.
+    _dispatch_job: int | None = None
     try:
         from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
@@ -1595,6 +1600,9 @@ async def claude_dispatch(
                     proc.kill()
                 except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal
                     pass
+            # Already closed (or its close was already attempted) above --
+            # the outer finally must never touch it again.
+            _dispatch_job = None
 
             async def _post_kill_cleanup() -> None:
                 # Reap the leader so the asyncio transport closes cleanly,
@@ -1896,6 +1904,16 @@ async def claude_dispatch(
             return structured
         return parsed
     finally:
+        # nexus-6y4e0 review (CRITICAL): the job handle must close on
+        # EVERY outcome, not only the except-asyncio.TimeoutError branch
+        # above -- success and a non-zero return (neither raises it) never
+        # touched it and leaked it every time. A no-op when the job is
+        # None: POSIX, a spawn failure, or the timeout path (already
+        # released and cleared above). Deferred import for the same
+        # reason as the except branch's own kill_tree import.
+        from nexus.util.process_group import release  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        release(_dispatch_job)
         # nexus-tx5hd critic point 4 (T2 [24197]): cheap instrumentation
         # for "measure child time-to-first-model-event vs timeout" --
         # the bead's own open question. This is the ONE choke point that
