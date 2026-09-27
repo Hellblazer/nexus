@@ -796,9 +796,27 @@ public final class TupleHandler implements HttpHandler {
         if (createdAtRaw == null || idRaw == null) {
             return null;
         }
-        OffsetDateTime createdAt = OffsetDateTime.parse(String.valueOf(createdAtRaw));
+        OffsetDateTime createdAt = parseCreatedAtStrict(createdAtRaw);
         byte[] id = HEX.parseHex(String.valueOf(idRaw));
         return new TupleRepository.ReadCursor(createdAt, id);
+    }
+
+    /**
+     * Strict {@code created_at} parse (code-review round, bead nexus-n36sw),
+     * the same convention {@code CatalogRepository.parseCreatedAtBeforeStrict}
+     * uses: {@link OffsetDateTime#parse} throws {@link DateTimeParseException}
+     * on a malformed value, which is NOT an {@link IllegalArgumentException} and
+     * would otherwise fall through this class's generic catch-all to a bare 500
+     * -- a caller-supplied field that fails to parse is a caller error and must
+     * 400, exactly like every other malformed-field case this handler already
+     * maps via {@link IllegalArgumentException}.
+     */
+    private static OffsetDateTime parseCreatedAtStrict(Object createdAtRaw) {
+        try {
+            return OffsetDateTime.parse(String.valueOf(createdAtRaw));
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException("created_at: not a parseable timestamp: " + createdAtRaw, e);
+        }
     }
 
     /** {@code since} on a PER-SUBSCRIBER announce spec (bead nexus-n36sw): {@code
@@ -821,7 +839,7 @@ public final class TupleHandler implements HttpHandler {
         if (createdAtRaw == null) {
             return null;
         }
-        OffsetDateTime createdAt = OffsetDateTime.parse(String.valueOf(createdAtRaw));
+        OffsetDateTime createdAt = parseCreatedAtStrict(createdAtRaw);
         return new TupleRepository.ReadCursor(createdAt, EMPTY_ID);
     }
 

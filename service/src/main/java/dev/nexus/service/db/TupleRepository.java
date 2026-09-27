@@ -1035,6 +1035,29 @@ public final class TupleRepository {
      * sufficient -- shape for it. {@code null} (an announce.perSubscriber() spec
      * with no since) is today's unchanged behaviour: no watermark, every due row
      * eligible, exactly the pre-nexus-n36sw predicate.
+     *
+     * <p>Commit-visibility race (critic finding, round 2): {@code created_at}
+     * is stamped from {@code DSL.currentOffsetDateTime()} -- Postgres's
+     * {@code now()}/{@code transaction_timestamp()}, fixed at the WRITER's
+     * transaction START, never its commit ({@link #out}'s own {@link
+     * #writeOut}) -- so a writer transaction that starts before a watermark
+     * is captured but is held open past that capture commits a row whose
+     * {@code created_at} predates the watermark even though the row is only
+     * visible to anyone else AFTER it: excluded by this predicate,
+     * permanently. {@code TupleAnnounceTest
+     * .subscriberAnnounce_sinceWatermarkExclusion_isACommitVisibilityRace_
+     * boundedByTheWriterTransactionsOwnDuration} proves this happens under an
+     * artificially held writer transaction, and also proves what bounds it in
+     * real operation: {@link #out}'s production transaction ({@link
+     * TenantScope#withTenant}) is one bounded sequence of synchronous round
+     * trips -- an optional max-live-rows check, one {@code INSERT}, {@link
+     * #maintainTenant}'s upsert -- with nothing between {@code BEGIN} and
+     * {@code COMMIT} that can block on anything external, so that span is
+     * single-digit milliseconds in practice, never remotely close to
+     * {@code ChannelWaiter.DEFAULT_BOARD_START_SKEW_S}'s 30 seconds, which the
+     * client subtracts from the watermark it sends specifically to absorb
+     * this (that constant's own javadoc names it as the second thing the
+     * margin covers, alongside engine/client clock skew).
      */
     private List<TupleRow> queryOnceAnnounceSubscriber(DSLContext ctx, Condition baseCond, int limit,
                                                         WaitSpec.Announce announce, String tenant,

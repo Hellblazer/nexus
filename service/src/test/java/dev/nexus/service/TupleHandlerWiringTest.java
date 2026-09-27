@@ -706,6 +706,35 @@ class TupleHandlerWiringTest {
         assertThat(resp.body()).contains("UnknownSubspace");
     }
 
+    // ── malformed since.created_at (code-review round, bead nexus-n36sw):
+    // ── OffsetDateTime.parse's DateTimeParseException must map to 400, not the
+    // ── generic catch-all's bare 500 -- readCursor's own path (rd/rdp, and a
+    // ── wait spec with no per-subscriber announce) and readSinceWatermark's
+    // ── (a per-subscriber announce spec) are separate parse call sites and
+    // ── each needs its own pin. ─────────────────────────────────────────────
+
+    @Test
+    void rd_malformedSinceCreatedAt_is400() throws Exception {
+        var resp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/rd-since-malformed",
+                "since", Map.of("created_at", "not-a-timestamp", "id", "00")));
+        assertThat(resp.statusCode())
+                .as("readCursor's OffsetDateTime.parse must 400 a malformed created_at, never a bare 500")
+                .isEqualTo(400);
+    }
+
+    @Test
+    void wait_malformedSinceWatermarkOnPerSubscriberAnnounce_is400() throws Exception {
+        var resp = post(withRegistry, "/v1/tuples/wait", Map.of(
+                "subspaces", java.util.List.of(Map.of(
+                        "subspace", "board/wait-since-watermark-malformed",
+                        "since", Map.of("created_at", "not-a-timestamp"),
+                        "announce", Map.of("interval_s", 0, "max", 1, "subscriber", "session-malformed")))));
+        assertThat(resp.statusCode())
+                .as("readSinceWatermark's OffsetDateTime.parse must 400 a malformed created_at, never a bare 500")
+                .isEqualTo(400);
+    }
+
     // ── RDR-211 Phase 1 Step 1 (bead nexus-rplay.5): max_live_rows over HTTP ──
 
     @Test
