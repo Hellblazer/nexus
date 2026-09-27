@@ -4889,4 +4889,21 @@ class CatalogRepositoryTest {
         repo.setCollectionAspectsEnabled(TENANT_A, name, false);
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(false);
     }
+
+    @Test @Order(336)
+    void collection_aspectsEnabled_survivesAReRegisterOfTheSameCollection() {
+        // Round-3 critique: every indexer run re-upserts its collection, so
+        // an upsert that reset this column would silently undo an operator's
+        // --enable on the next index. upsertCollection's ON CONFLICT SET
+        // list must leave aspects_enabled alone.
+        String name = "docs__aspects-survives-upsert__voyage-context-3__v1";
+        Map<String, Object> row = Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-survives-upsert", "embedding_model", "voyage-context-3");
+        repo.upsertCollection(TENANT_A, row);
+        repo.setCollectionAspectsEnabled(TENANT_A, name, true);
+
+        repo.upsertCollection(TENANT_A, row);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
+    }
 }

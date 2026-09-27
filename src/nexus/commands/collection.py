@@ -402,6 +402,12 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
 
     to_change = [r for r in matched if r.get("aspects_enabled") is not True]
     if not dry_run and to_change and not yes:
+        # Name what will change before asking (round-3 critique): a bare
+        # count gives the operator nothing to check against.
+        for r in to_change[:20]:
+            click.echo(f"  will enable: {r['name']}")
+        if len(to_change) > 20:
+            click.echo(f"  ... and {len(to_change) - 20} more")
         click.confirm(
             f"Set aspects_enabled=True on the ENGINE for {len(to_change)} "
             "docs__ collection(s), tenant-wide — every machine indexing "

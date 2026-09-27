@@ -1896,6 +1896,18 @@ class TestDocsOptInEngineAttribute:
 
         assert select_config("docs__l46pu-c") is None
 
+    def test_a_current_engine_null_value_falls_back_to_local_config(self, monkeypatch) -> None:
+        """A current engine sends the key on every row; an untouched row's
+        value is JSON null (catalog-040 is BOOLEAN NULL). Present-but-null
+        must read as no opinion, so a local match still opts in."""
+        self._local_config(monkeypatch, ["docs__l46pu-n*"])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-n", "aspects_enabled": None})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+
+        from nexus.aspect_extractor import docs_collection_opted_in
+
+        assert docs_collection_opted_in("docs__l46pu-n") is True
+
     def test_an_old_engine_row_with_no_aspects_enabled_key_falls_back_to_local_config(
         self, monkeypatch,
     ) -> None:

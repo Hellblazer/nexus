@@ -218,6 +218,7 @@ def test_from_config_without_yes_prompts_and_declining_writes_nothing(
     )
     result = runner.invoke(main, ["collection", "aspects", "--from-config"], input="n\n")
     assert result.exit_code != 0
+    assert "will enable: docs__l46pu-cli-fc-decline" in result.output
 
     row = make_catalog_reader().get_collection("docs__l46pu-cli-fc-decline")
     assert row is not None
