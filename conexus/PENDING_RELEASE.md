@@ -47,7 +47,15 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-_Empty. The four RDR-215 straddling beads deferred here by nexus-2x3qy
+- `conexus/skills/orchestration/SKILL.md` — new "Resuming a Worktree Agent
+  After a /clear" section (nexus-xxvv3): a SendMessage-resumed agent runs in
+  the primary checkout, so the subagent git guard refuses its commits and its
+  own hand-back must use `git -C <worktree>`; the ledger credits it as
+  RESUMED. Deferred because the bead's ledger half is wheel content
+  (`src/nexus/hooks/expectations.py`, `subagent_start_stamp.py`), so the
+  doc ships with the client release that makes it true.
+
+_The four RDR-215 straddling beads deferred here by nexus-2x3qy
 (nexus-t9klx, nexus-z9cz2, nexus-silj0, nexus-veh77) shipped with the 7.58.0
 client release, except their hooks.json entries: 7.58.0 kept the v7.57.0
 plugin-script entries, because an older `nx-hook` exits 2 on a verb it does not
