@@ -775,6 +775,43 @@ class TestMarketplaceVersion:
             assert plugin.get("version", "") == pv, \
                 f"marketplace.json '{plugin['name']}' version != pyproject.toml {pv!r}"
 
+    def test_every_plugins_own_plugin_json_version_matches_pyproject(self) -> None:
+        """nexus-smsau follow-up (2026-09-27): ``conexus/.claude-plugin/
+        plugin.json`` had NO dedicated parity test -- only sn's own copy
+        (``tests/test_sn_plugin.py::test_sn_version_matches_pyproject``,
+        now REMOVED as an exact duplicate of what this test does for the
+        "sn" case) did. Loops over EVERY plugin marketplace.json lists
+        (today conexus and sn; not a fixed pair), so a plugin added there
+        gets this coverage with no test edit, AND conexus is covered for
+        the first time.
+
+        ``test_sn_version_matches_plugin_json`` (still in
+        ``tests/test_sn_plugin.py``) stays -- it compares marketplace.json's
+        own per-plugin version FIELD against that plugin's plugin.json, a
+        different pair of values than pyproject.toml vs plugin.json, so it
+        is not redundant with this test (only transitively implied by it
+        together with :func:`test_marketplace_version_matches_pyproject`,
+        which is not the same as duplicating it).
+        """
+        pv = self._pyproject_version()
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin.get("source")
+            assert isinstance(source, dict), (
+                f"marketplace.json {plugin['name']!r} source must be the "
+                f"object form -- covered by test_marketplace_source_ref_matches_pyproject"
+            )
+            plugin_json_path = REPO_ROOT / source.get("path", "") / ".claude-plugin" / "plugin.json"
+            assert plugin_json_path.exists(), (
+                f"marketplace.json {plugin['name']!r} source.path has no "
+                f"plugin.json at {plugin_json_path} -- covered by "
+                f"test_plugin_source_path_has_plugin_json"
+            )
+            plugin_json_version = json.loads(plugin_json_path.read_text()).get("version")
+            assert plugin_json_version == pv, (
+                f"{plugin['name']}/.claude-plugin/plugin.json version "
+                f"{plugin_json_version!r} != pyproject.toml {pv!r}"
+            )
+
     def test_marketplace_source_ref_matches_pyproject(self) -> None:
         """nexus-mkj6u, extended by RDR-197 P1b (nexus-a2wmi.3): each
         plugin's source.ref is judged under invariant R, per plugin --

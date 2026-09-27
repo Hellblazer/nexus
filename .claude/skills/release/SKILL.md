@@ -302,13 +302,15 @@ Update any drift before bumping version. Doc audit is what catches "we changed t
 
 ### 3. Bump version in ALL EIGHT bump targets
 
-CI enforces parity on all but two of these (`conexus/.claude-plugin/plugin.json` has no
-dedicated test yet, and `conexus/PENDING_RELEASE.md` is a drift ledger, not a version
-field — see `AGENTS.md` § Release cadence policy rule 6 and `docs/contributing.md` §
-Release Process Step 7 for the exact enumeration these agree on, nexus-smsau 2026-09-27).
-Missing any one of the six CI-enforced ones fails the marketplace-version-matches-pyproject
-test, the marketplace-source-ref-matches-pyproject test, the mcpb-manifest-version-matches-
-pyproject test, the sn-version-matches-plugin-json/pyproject tests, or the
+CI enforces parity on all but one of these (`conexus/PENDING_RELEASE.md` is a drift
+ledger, not a version field — see `AGENTS.md` § Release cadence policy rule 6 and
+`docs/contributing.md` § Release Process Step 7 for the exact enumeration these
+agree on, nexus-smsau 2026-09-27). Missing any one of the seven CI-enforced ones
+fails the marketplace-version-matches-pyproject test, the
+marketplace-source-ref-matches-pyproject test, the
+mcpb-manifest-version-matches-pyproject test, the
+every-plugins-own-plugin-json-version-matches-pyproject test (covers BOTH conexus
+and sn, plus any plugin added later — no longer sn-only), or the
 uv-lock-version-matches-pyproject test.
 
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
@@ -317,8 +319,7 @@ uv-lock-version-matches-pyproject test.
 - `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus and sn; a loop, not a fixed pair)
 - `.claude-plugin/marketplace.json`: **`plugins[].source.ref` for every plugin the file lists** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
 - `uv.lock`: `version` — pinned exact versions the release publishes from
-- `sn/.claude-plugin/plugin.json`: `version`
-- `conexus/.claude-plugin/plugin.json`: `version` (no dedicated parity test yet — bump it anyway; forgetting it will not fail CI, only `sn/.claude-plugin/plugin.json`'s own tests catch that class of miss for sn)
+- every plugin's own `<plugin>/.claude-plugin/plugin.json`: `version` (today `conexus/.claude-plugin/plugin.json` **and** `sn/.claude-plugin/plugin.json` — bump each file the marketplace lists; `test_every_plugins_own_plugin_json_version_matches_pyproject` loops over all of them, so a plugin added there is covered with no test edit)
 - `conexus/PENDING_RELEASE.md`: **empty the pending list.** Not a version field (nothing here equals `X.Y.Z`) — a drift LEDGER. Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).

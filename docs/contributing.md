@@ -314,24 +314,25 @@ Every step below is **required**. Missing any one of them has caused problems in
 
 7. **Bump every manifest in lock-step (CI enforces parity)**
    Counted from the actual parity tests in `tests/test_plugin_structure.py`
-   and `tests/test_sn_plugin.py` (nexus-smsau, 2026-09-27 — this list and
-   AGENTS.md's own copy had drifted to two different counts, "seven" and
-   "six", that also disagreed on WHICH files they meant): **seven**
-   version surfaces (`pyproject.toml` plus the six others below) must
-   equal the new `X.Y.Z`, and every plugin's `source.ref` in
-   `.claude-plugin/marketplace.json` must become `vX.Y.Z`:
+   (nexus-smsau, 2026-09-27 — this list and AGENTS.md's own copy had
+   drifted to two different counts, "seven" and "six", that also
+   disagreed on WHICH files they meant, and `conexus/.claude-plugin/
+   plugin.json` had NO parity test at all until this same pass added
+   one): **seven** version surfaces (`pyproject.toml` plus the six
+   others below) must equal the new `X.Y.Z`, and every plugin's
+   `source.ref` in `.claude-plugin/marketplace.json` must become
+   `vX.Y.Z`:
    - `pyproject.toml` — `version` (the canonical source of truth every other surface is checked against)
    - `mcpb/pyproject.toml` — `version` (`TestMarketplaceVersion::test_mcpb_manifest_version_matches_pyproject`)
    - `mcpb/manifest.json` — `version` (same test)
    - `.claude-plugin/marketplace.json` — every plugin's `plugins[].version` (`test_marketplace_version_matches_pyproject`, loops over every entry in the file — currently conexus and sn, but ANY plugin added there is covered without a test edit) **and** every plugin's `plugins[].source.ref` (the pinned tag that decouples installed users from main HEAD; `test_marketplace_source_ref_matches_pyproject` enforces `source.ref == "v" + pyproject.version` per plugin, same loop)
-   - `sn/.claude-plugin/plugin.json` — `version` (`test_sn_version_matches_plugin_json`, `test_sn_version_matches_pyproject`; controls the sn plugin cache refresh)
+   - every plugin's own `<plugin>/.claude-plugin/plugin.json` — `version` (`test_every_plugins_own_plugin_json_version_matches_pyproject`, same loop-over-every-plugin shape — today that means both `conexus/.claude-plugin/plugin.json` and `sn/.claude-plugin/plugin.json`; controls each plugin's cache refresh)
    - `uv.lock` — `version` (`test_uv_lock_version_matches_pyproject`)
 
    Forgetting any one fails CI parity; forgetting `source.ref` ships a release that installed Claude Code users never receive.
 
-   Two more manual bump targets are NOT in the seven above because neither has its own CI parity test yet (a real gap, not a dismissal):
-   - `conexus/.claude-plugin/plugin.json` — `version` (controls the conexus plugin cache refresh; bump it by hand, same as `sn/.claude-plugin/plugin.json`, but nothing currently fails CI if you forget)
-   - `conexus/PENDING_RELEASE.md` — empty the pending-drift list for every entry this release ships (this is a drift LEDGER, not a version field — nothing here equals `X.Y.Z` — advancing `source.ref` is what makes those plugin changes live; `tests/test_plugin_release_drift_ledger.py` fails on a stale entry)
+   One more bump target is NOT in the seven above because it is not a version field at all:
+   - `conexus/PENDING_RELEASE.md` — empty the pending-drift list for every entry this release ships (this is a drift LEDGER — nothing here equals `X.Y.Z` — advancing `source.ref` is what makes those plugin changes live; `tests/test_plugin_release_drift_ledger.py` fails on a stale entry)
 
 7a. **Run the fresh-install MVV** (~3-5 min; downloads on first run)
    ```bash

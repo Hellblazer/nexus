@@ -17,7 +17,6 @@ from sync_sn_serena_tools import parse_snapshot, serena_pin  # noqa: E402
 REPO_ROOT = Path(__file__).parent.parent
 SN_DIR = REPO_ROOT / "sn"
 MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
-PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 SUBAGENT_START = SN_DIR / "hooks" / "scripts" / "subagent_start.py"
 SESSION_START = SN_DIR / "hooks" / "scripts" / "session_start.py"
 
@@ -298,17 +297,12 @@ class TestSnMarketplace:
         plugin_json = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
         assert sn_entry["version"] == plugin_json["version"]
 
-    def test_sn_version_matches_pyproject(self) -> None:
-        """sn plugin.json version must match pyproject.toml — shared release version."""
-        import tomllib
-        plugin_json = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
-        with PYPROJECT_PATH.open("rb") as f:
-            pyproject = tomllib.load(f)
-        assert plugin_json["version"] == pyproject["project"]["version"], (
-            f"sn plugin.json version {plugin_json['version']!r} "
-            f"!= pyproject.toml {pyproject['project']['version']!r}. "
-            f"Update sn/.claude-plugin/plugin.json when bumping version."
-        )
+    # test_sn_version_matches_pyproject REMOVED (nexus-smsau, 2026-09-27):
+    # exact duplicate of tests/test_plugin_structure.py::TestMarketplaceVersion
+    # ::test_every_plugins_own_plugin_json_version_matches_pyproject, which
+    # loops over EVERY plugin marketplace.json lists (this file's "sn" case
+    # included) rather than hardcoding just sn -- covers conexus too, and any
+    # future plugin, with no test edit.
 
 
 # ── Hook output ──────────────────────────────────────────────────────────────
