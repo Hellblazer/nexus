@@ -236,7 +236,7 @@ def test_agent_dispatch_expect_writes_its_row_with_no_mcp_server_reachable(
         {
             "session_id": session_id,
             "tool_name": "Agent",
-            "tool_use_id": "e2e-tu-1",
+            "tool_use_id": "toolu_e2etu1",
             "tool_input": {"subagent_type": "general-purpose", "run_in_background": True},
         },
         xdg_state_home=xdg_state_home,
@@ -261,7 +261,7 @@ def test_agent_dispatch_expect_writes_its_row_with_no_mcp_server_reachable(
     fields = lines[0].split("\t")
     assert fields[1] == "EXPECT", lines[0]
     assert fields[2] == "general-purpose", lines[0]
-    assert fields[4] == "e2e-tu-1", lines[0]
+    assert fields[4] == "toolu_e2etu1", lines[0]
 
 
 def test_subagent_start_stamp_writes_its_row_with_no_mcp_server_reachable(

@@ -63,6 +63,11 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   verbs resolve — an installed CLI predating this release would exit 2 on
   a direct `nx-hook` call naming either verb, which is exactly what the
   shim-routed form in hooks.json avoids.
+- nexus-5l8i8: `conexus/skills/orchestration/SKILL.md` item 1's prose named
+  `hook_agent_dispatch_expect` as the MCP tool that writes the EXPECT row;
+  corrected to say the writer fires on the command tier
+  (`nx-hook agent-dispatch-expect`) and the MCP tool is registration-only,
+  same reasoning and same wheel-content dependency as the bullet above.
 - `conexus/skills/orchestration/SKILL.md` — nexus-xxvv3: new "Resuming a
   Worktree Agent After a /clear" section. A SendMessage-resumed agent runs in
   the primary checkout, so the subagent git guard refuses its commits and its

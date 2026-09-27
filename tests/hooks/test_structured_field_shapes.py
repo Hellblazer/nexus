@@ -199,12 +199,12 @@ class TestTheThreeHooksAgreeAcrossShapes:
 
         inner = {"subagent_type": "conexus:code-review-expert", "run_in_background": True}
 
-        dispatch_mod.run({"session_id": "shape-a", "tool_name": "Agent", "tool_use_id": "u1", "tool_input": inner})
+        dispatch_mod.run({"session_id": "shape-a", "tool_name": "Agent", "tool_use_id": "toolu_u1", "tool_input": inner})
         dispatch_mod.run(
             {
                 "session_id": "shape-b",
                 "tool_name": "Agent",
-                "tool_use_id": "u1",
+                "tool_use_id": "toolu_u1",
                 "tool_input": json.dumps(inner),
             }
         )

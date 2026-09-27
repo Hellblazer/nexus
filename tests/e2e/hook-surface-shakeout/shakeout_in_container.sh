@@ -241,6 +241,36 @@ if [ -n "${SHAKEOUT_HOOK_PROBE:-}" ]; then
     # The verdict is asserted here, not compared by hand across runs.
     python3 "$HOME_DIR/hook_census.py" --probe "$RUN/mcp-stdin.jsonl"
     PROBE_RC=$?
+
+    # LEDGER CHECK (nexus-5l8i8 review, code-review-expert suggestion): the
+    # mcp_tool roster above cannot see agent-dispatch-expect /
+    # subagent-start-stamp any more -- both moved to the command tier
+    # (nx-hook, via nx_hook_shim.py), so mcp-stdin.jsonl carries no trace of
+    # them by construction, not by regression. This is this fast path's own
+    # replacement signal: the same subagent-dispatch turn that provokes the
+    # mcp_tool roster also fires both command-tier writers, so the
+    # session's real ledger file should carry one EXPECT row and one START
+    # row the instant the turn ends. Resolved the same way the full run's
+    # own expectations_census check resolves it below (sid_from_sentinel,
+    # HOME_DIR's default XDG_STATE_HOME) -- no per-hook env override exists
+    # in a real hooks.json invocation for this to depend on instead.
+    SID_OF="$(sid_from_sentinel || true)"
+    LEDGER_RC=0
+    if [ -n "$SID_OF" ]; then
+        LEDGER="$HOME_DIR/.local/state/nexus/orchestration/$SID_OF.expectations"
+        if [ -f "$LEDGER" ] && grep -q "$(printf '\t')EXPECT$(printf '\t')" "$LEDGER" \
+            && grep -q "$(printf '\t')START$(printf '\t')" "$LEDGER"; then
+            ok "command-tier ledger writers (agent-dispatch-expect, subagent-start-stamp) both fired: $LEDGER"
+        else
+            bad "command-tier ledger is missing an EXPECT or a START row: $LEDGER"
+            LEDGER_RC=1
+        fi
+    else
+        bad "no turn-end sentinel found -- cannot resolve the session id for the ledger check"
+        LEDGER_RC=1
+    fi
+    [ "$LEDGER_RC" -ne 0 ] && PROBE_RC=1
+
     echo "HOOK PROBE COMPLETE (override=${SHAKEOUT_MCP_OVERRIDE:-0}, rc=$PROBE_RC)"
     exit "$PROBE_RC"
 fi
