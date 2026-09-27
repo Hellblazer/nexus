@@ -8477,6 +8477,113 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
             pass
 
 
+def _check_taxonomy_discover_health() -> list[HealthResult]:
+    """Name collections whose last taxonomy-discover attempt FAILED more
+    recently than it last succeeded (bead nexus-du6d0, qgc4b residual
+    staleness).
+
+    THE GAP. qgc4b's self-heal guard (``_taxonomy_incomplete`` /
+    ``_collections_without_topics`` in ``nexus.commands.index``) re-runs
+    discovery on a no-change ``nx index repo`` run only while a
+    collection has ZERO topics. Once a collection has produced >=1
+    topic, a LATER discover failure (credential expiry, quota, schema
+    drift) has no operator-visible signal on a repo whose files stopped
+    changing: ``run_collection_postprocessing`` only invokes discover at
+    all when ``files_changed>0`` or the zero-topic self-heal fires, and
+    neither holds on a maintenance-mode repo coincident with a failing
+    discover backend — the "no files changed — skipping discovery" line
+    (see ``nexus.commands.index``) reads as reassurance while the
+    taxonomy silently goes stale, indefinitely, with no operator signal.
+
+    THE FIX is client-side, deliberately: recording the attempt/outcome
+    needs no new engine column or changeset (an engine schema change is
+    Sam's decision, not this bead's) because T2's generic ``memory``
+    project/title store already serves this without one.
+    ``nexus.mcp_infra.record_taxonomy_discover_attempt`` upserts one T2
+    memory entry per collection (project
+    ``nexus_taxonomy_discover_health``) on EVERY discover attempt a
+    process makes, success and failure alike — independent of
+    ``taxonomy_meta.last_discover_at`` (the engine column, which only
+    advances on a SUCCESSFUL discover via ``record_discover_count``).
+    This check reads that project back; because each attempt UPSERTS
+    the same title, the stored record is always the most recent
+    attempt's outcome, so "last recorded outcome is failure" already
+    means "failed more recently than it last succeeded" without needing
+    to compare two separate timestamps. Run-independent: the warning
+    stays visible across `nx doctor` runs even when the repo that would
+    have retried discovery never indexes again.
+
+    Read-only, degrades internally. No entries recorded yet — a virgin
+    box, or a client predating this bead — reads not-applicable, never a
+    false clean pass masquerading as "checked and fine".
+    """
+    label = "taxonomy.discover health"
+    try:
+        from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred: CLI startup cost
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+            TAXONOMY_DISCOVER_HEALTH_PROJECT,
+            parse_taxonomy_discover_health,
+        )
+
+        store = HttpMemoryStore()  # self-resolves the endpoint, as t2/__init__ does
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_taxonomy_discover_health_check_failed", stage="connect", error=str(exc))
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable (no engine-backed T2 on this box)",
+        )]
+
+    try:
+        try:
+            entries = store.get_all(TAXONOMY_DISCOVER_HEALTH_PROJECT)
+        except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degrades to a named skip
+            _log.debug("doctor_taxonomy_discover_health_check_failed", stage="get_all", error=str(exc))
+            return [HealthResult(label=label, ok=True, detail="skipped (T2 memory store unavailable)")]
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 — best-effort close, never masks the check's own result
+            pass
+
+    if not entries:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable (no taxonomy-discover attempts recorded yet)",
+        )]
+
+    failed: list[tuple[str, dict]] = []
+    for e in entries:
+        collection = str((e or {}).get("title", ""))
+        record = parse_taxonomy_discover_health((e or {}).get("content", ""))
+        if record.get("last_outcome") == "failure":
+            failed.append((collection, record))
+
+    if not failed:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"{len(entries)} collection(s) tracked, most recent discover attempt succeeded for all",
+        )]
+
+    def _pretty(item: tuple[str, dict]) -> str:
+        collection, record = item
+        when = record.get("last_attempt_at") or "unknown time"
+        err = record.get("error_class") or "unknown error"
+        return f"{collection} (failed {when}, {err})"
+
+    names = "; ".join(_pretty(item) for item in failed[:10])
+    if len(failed) > 10:
+        names += f"; … {len(failed) - 10} more"
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"{len(failed)} collection(s) whose last taxonomy-discover attempt failed "
+            f"more recently than it last succeeded: {names}. Run `nx taxonomy discover "
+            "--collection <name>` to retry."
+        ),
+        fix_suggestions=["nx taxonomy discover --collection <name>"],
+    )]
+
+
 def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -8554,6 +8661,12 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # taxonomy-013's recompute triggers). Self-heals on the engine's next
     # restart (hygiene-007-1); silent until then, so reportable here.
     results.extend(_check_topics_doc_count_drift())
+    # nexus-du6d0 (qgc4b residual staleness): a collection whose taxonomy
+    # already has topics gets no self-heal retry on a no-change index run,
+    # so a discover backend that starts failing after an earlier success
+    # is invisible on a repo whose files stopped changing. Degrades
+    # internally (not-applicable with no recorded attempts).
+    results.extend(_check_taxonomy_discover_health())
 
     results.extend(_check_tools())
     results.extend(_check_mcp_entry_points())
