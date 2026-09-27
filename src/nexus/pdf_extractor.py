@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import contextlib
 import json
 import os
 import re
@@ -2476,8 +2477,19 @@ class PDFExtractor:
                 # On Windows, kill_tree closes the job (reaching the whole
                 # pool the worker spawned) when containment succeeded at
                 # spawn; otherwise it degrades to the direct worker only,
-                # exactly as before nexus-6y4e0.
-                kill_tree(proc, worker_job)
+                # exactly as before nexus-6y4e0. nexus-6y4e0 review
+                # (SIGNIFICANT): the return value used to be discarded --
+                # on Windows safe_killpg_group below is ALWAYS a no-op (no
+                # process groups there), so a failed close_job (job already
+                # gone, or a genuine API failure) left the worker itself
+                # running with nothing left to fall back to, and the
+                # TimeoutExpired branch's untimed proc.wait() right after
+                # this call would then hang on a worker that was never
+                # actually killed. Matches the fallback the other three
+                # contain() call sites already use.
+                if not kill_tree(proc, worker_job):
+                    with contextlib.suppress(Exception):
+                        proc.kill()
                 safe_killpg_group(worker_pgid)
 
             try:

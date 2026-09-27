@@ -64,6 +64,43 @@ def _run_with_returncode(returncode: int, *, ceiling: bool):
         return ext._mineru_run_subprocess(Path("/tmp/does-not-matter.pdf"), 0, 1)
 
 
+def test_windows_shaped_kill_tree_failure_falls_back_to_proc_kill() -> None:
+    """nexus-6y4e0 review (SIGNIFICANT): on Windows, safe_killpg_group
+    right after kill_tree in _killpg_safe is ALWAYS a no-op there (no
+    process groups on Windows), so a failed close_job (job already gone,
+    or a genuine API failure) used to leave the worker itself running
+    with nothing left to reach it -- and the untimed ``proc.wait()`` reap
+    right after, in the TimeoutExpired branch, would then hang on a
+    worker that was never actually killed. ``_killpg_safe`` now falls
+    back to ``proc.kill()`` when ``kill_tree`` fails, matching the other
+    three ``contain()`` call sites (bounded_subprocess, aspect_extractor,
+    operators.dispatch).
+    """
+    import subprocess
+
+    ext = PDFExtractor()
+    proc = MagicMock(pid=4321)
+    # First call (the bounded wait) times out; the reap call right after
+    # the kill attempt succeeds harmlessly -- isolates the ONE behaviour
+    # under test (does a failed kill_tree fall back to proc.kill()?) from
+    # an unrelated second TimeoutExpired on the reap, which is not this
+    # test's subject.
+    proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="worker", timeout=1), 0]
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("subprocess.Popen", return_value=proc))
+        stack.enter_context(patch("nexus.util.process_group.kill_tree", return_value=False))
+        stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
+        stack.enter_context(patch(
+            "nexus.config.get_mineru_page_timeout_s", return_value=180,
+        ))
+        stack.enter_context(patch(
+            "nexus.config.get_mineru_memory_ceiling_mb", return_value=0,
+        ))
+        with pytest.raises(RuntimeError, match="timed out"):
+            ext._mineru_run_subprocess(Path("/tmp/does-not-matter.pdf"), 0, 1)
+    proc.kill.assert_called_once()
+
+
 @pytest.mark.parametrize("returncode,ceiling", [
     (-signal.SIGKILL, False),   # OS OOM-killer / jetsam
     (_MINERU_OOM_EXIT, False),  # in-process MemoryError sentinel (RLIMIT_AS)
