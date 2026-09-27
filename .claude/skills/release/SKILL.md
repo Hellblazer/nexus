@@ -701,25 +701,39 @@ by name), then runs `tests/e2e/post-publish-dispatch-check.sh` on the box
 with that SAME id passed explicitly. Because the id is minted and forced
 rather than discovered, a concurrent session's ledger on the shared box can
 never make the result ambiguous — this is what makes "one command passes"
-true even when qwentescence is not exclusively this run's. It ends
-`QWENTESCENCE LOCAL-SUPERVISOR 11d GATE PASSED` (exit 0), `... FAILED`
-(exit 1, a real dispatch or check-script miss), or `... FAILED
-(prerequisite absent)` (exit 2, nothing was checkable — box unreachable,
-an unsafe argument value, unit wouldn't activate, version wouldn't
-converge, lease port unstable). Manual per-box-class dispatch (the
-paragraph above) remains the fallback if the box is unreachable from this
-Mac.
+true even when qwentescence is not exclusively this run's.
+
+**Four distinct exit codes, four distinct operator actions** (never fold a
+driver-side flake and a real ledger finding into one generic FAILED — that
+is exactly the ambiguity the script's own "never retry a transient
+failure" rule exists to prevent, one layer up):
+
+| Exit | Verdict | What it means | Operator action |
+|---|---|---|---|
+| 0 | `QWENTESCENCE LOCAL-SUPERVISOR 11d GATE PASSED` | The check script ran and confirmed the dispatch. | Done. |
+| 1 | `... FAILED -- LEDGER MISS` | The check script ran to completion and reported a real miss. | **Investigate — this is a real finding, do not just rerun.** |
+| 2 | `... FAILED -- PREREQUISITE ABSENT` | Nothing was checkable at all: box unreachable, an unsafe argument value, the unit wouldn't activate (or needed `--allow-enable-unit`), the version wouldn't converge (or needed `--allow-reinstall`/`--allow-downgrade`), lease port unstable, or the check script's own exit 2. | Fix the named prerequisite and rerun; not evidence either way about the dispatch. |
+| 3 | `... FAILED -- DRIVER FAILURE` | The interactive session itself never reached a checkable state (`claude_start` never reached the main prompt, the busy indicator never appeared, or the debounced idle wait timed out) — it never even reached the check script. | **Rerun once — a UI-timing flake is the common cause.** Investigate only if it recurs; a recurring driver failure may mean Claude Code's UI text changed (the script's own `DRIVER_FAILED` diagnostic names the pattern and the constant to update). |
+
+Manual per-box-class dispatch (the paragraph above) remains the fallback
+if the box is unreachable from this Mac.
 
 **Live-provisioning actions are gated behind explicit flags, off by
-default** (Sam has not authorized an unattended reinstall or unit-enable
-on qwentescence): `--allow-reinstall` (required whenever the installed
-version does not already match X.Y.Z — without it the gate refuses rather
-than running `uv tool install`), `--allow-downgrade` (required IN ADDITION
+default, and EACH ONE NEEDS SAM'S EXPLICIT GO FOR THAT SPECIFIC RUN before
+it is passed** — "off by default" states the script's own posture, it does
+not by itself authorize a human to flip one on unattended (Sam has not
+authorized an unattended reinstall or unit-enable on qwentescence, and
+this was raised and left open once already before round 3 made it
+explicit): `--allow-reinstall` (required whenever the installed version
+does not already match X.Y.Z — without it the gate refuses rather than
+running `uv tool install`), `--allow-downgrade` (required IN ADDITION
 whenever X.Y.Z is older than what is installed), `--allow-enable-unit`
 (required whenever the systemd unit is found inactive — without it the
 gate refuses rather than running `systemctl --user enable --now
 nexus-service`). On a box already converged to X.Y.Z with the unit active
-(the common case), none of the three is needed.
+(the common case), none of the three is needed — ask Sam before passing
+any of them, do not treat "off by default" as blanket pre-authorization
+the moment one is actually needed.
 
 **Manual rerun (`--skip-dispatch --session-id <SID>`), used together, never
 apart:** reuses an already-completed dispatch's evidence without issuing a

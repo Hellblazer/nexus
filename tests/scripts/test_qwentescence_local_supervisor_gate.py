@@ -61,6 +61,8 @@ def _kind_of(argv: list[str], input_text: str | None) -> str:
         return "dispatch"
     if gate._CHECK_SCRIPT_NAME in " ".join(argv):
         return "check"
+    if "ORPHAN_NONE_FOUND" in text or "tmux -S" in text:
+        return "orphan-sweep"
     if "rm -rf" in text:
         return "cleanup"
     if gate._HARNESS_DIR_NAME in text and "mkdir -p" in text:
@@ -168,6 +170,7 @@ def _full_pass_responses(target_version: str = "7.60.0"):  # -> dict[str, list[C
         "systemd-state": [_ok("UNIT_STATE=active\nLINGER=yes\n")],
         "status": [_ok(status_json), _ok(status_json)],
         "version": [_ok(f"nx, version {target_version}\n")],
+        "orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")],
         "harness-stage": [_ok("")],
         "driver-stage": [_ok("")],
         "dispatch": [_ok(f"DRIVER_OK session_id={VALID_SID}\n")],
@@ -639,6 +642,38 @@ def test_build_driver_script_settles_before_exit_for_a_deferred_completion_hook(
     assert gate._POST_IDLE_SETTLE_SECONDS > 0
 
 
+def test_build_driver_script_ui_strings_consolidated_and_named():
+    """Finding 8: every UI-string pattern lives in ONE named block
+    (`_UI_READY_PATTERN`, `_BUSY_INDICATOR_PATTERN`), and every failure
+    site that stems from a UI-string mismatch calls `_ui_diagnostic` with
+    that constant's OWN name (not just its value), so a future maintainer
+    reading a DRIVER_FAILED line knows exactly which constant to update."""
+    script = gate._build_driver_script(VALID_SID, "/home/nexus/nexus-u0mcx-harness")
+    assert gate._UI_READY_PATTERN in script
+    assert '_ui_diagnostic "_UI_READY_PATTERN"' in script
+    assert '_ui_diagnostic "_BUSY_INDICATOR_PATTERN"' in script
+    # Named at least twice: phase 1 (never started) and the debounce
+    # timeout (never went idle) are both UI-string-mismatch-shaped misses.
+    assert script.count('_ui_diagnostic "_BUSY_INDICATOR_PATTERN"') >= 2
+
+
+def test_build_driver_script_captures_claude_version_before_tmux_starts():
+    """Finding 8: the Claude Code version diagnostic is read ONCE, as a
+    plain command outside tmux, before the pane (and anything that could
+    go wrong inside it) exists -- so a DRIVER_FAILED always has a version
+    to report, never "unknown" purely because tmux itself never started."""
+    script = gate._build_driver_script(VALID_SID, "/home/nexus/nexus-u0mcx-harness")
+    version_idx = script.index("CC_VERSION=")
+    new_session_idx = script.index("_tmux new-session")
+    assert version_idx < new_session_idx
+
+
+def test_build_driver_script_ui_diagnostic_names_the_constant_to_update():
+    script = gate._build_driver_script(VALID_SID, "/home/nexus/nexus-u0mcx-harness")
+    assert "scripts/qwentescence_local_supervisor_gate.py" in script
+    assert "UI STRINGS" in script
+
+
 def test_stage_interactive_driver_ok():
     runner = ScriptedRunner({"driver-stage": [_ok("")]})
     path = gate._stage_interactive_driver(
@@ -661,6 +696,7 @@ def test_stage_interactive_driver_failure_raises():
 def test_dispatch_via_interactive_session_ok():
     runner = ScriptedRunner(
         {
+            "orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")],
             "harness-stage": [_ok("")],
             "driver-stage": [_ok("")],
             "dispatch": [_ok(f"DRIVER_OK session_id={VALID_SID}\n")],
@@ -695,6 +731,7 @@ def test_dispatch_via_interactive_session_rejects_hostile_session_id_before_any_
 def test_dispatch_via_interactive_session_process_failure_raises_gate_failure():
     runner = ScriptedRunner(
         {
+            "orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")],
             "harness-stage": [_ok("")],
             "driver-stage": [_ok("")],
             "dispatch": [_fail(1, stderr="ssh: connection refused")],
@@ -710,6 +747,7 @@ def test_dispatch_via_interactive_session_missing_driver_ok_marker_raises():
     that never prints DRIVER_OK. Must be checked explicitly."""
     runner = ScriptedRunner(
         {
+            "orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")],
             "harness-stage": [_ok("")],
             "driver-stage": [_ok("")],
             "dispatch": [_ok("some unrelated output, no marker")],
@@ -720,10 +758,35 @@ def test_dispatch_via_interactive_session_missing_driver_ok_marker_raises():
 
 
 def test_dispatch_via_interactive_session_staging_failure_never_reaches_dispatch():
-    runner = ScriptedRunner({"harness-stage": [_fail(1, stderr="disk full")]})
+    runner = ScriptedRunner(
+        {
+            "orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")],
+            "harness-stage": [_fail(1, stderr="disk full")],
+        }
+    )
     with pytest.raises(gate.GateError, match="could not stage the interactive harness"):
         gate.dispatch_via_interactive_session(runner, gate.Options(), VALID_SID)
     assert runner.count("dispatch") == 0
+
+
+def test_dispatch_via_interactive_session_sweeps_orphans_first_and_logs():
+    """Finding 11: orphan cleanup runs at the START of a dispatch, before
+    staging anything, and what was cleaned reaches the caller's log."""
+    runner = ScriptedRunner(
+        {
+            "orphan-sweep": [_ok("ORPHAN_CLEANED /tmp/tmux-1000/nx-u0mcx-deadbeef\n")],
+            "harness-stage": [_ok("")],
+            "driver-stage": [_ok("")],
+            "dispatch": [_ok(f"DRIVER_OK session_id={VALID_SID}\n")],
+        }
+    )
+    logs: list[str] = []
+    gate.dispatch_via_interactive_session(runner, gate.Options(), VALID_SID, log=logs.append)
+    [orphan_call] = runner.calls_of("orphan-sweep")
+    [harness_call] = runner.calls_of("harness-stage")
+    assert runner.calls.index(orphan_call) < runner.calls.index(harness_call)
+    assert any("nx-u0mcx-deadbeef" in line for line in logs)
+    assert any("1" in line and "orphan" in line.lower() for line in logs)
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +852,7 @@ def test_stage_check_script_failure_raises_gate_error():
 
 
 def test_cleanup_staged_removes_everything_this_gate_staged():
-    runner = ScriptedRunner({"cleanup": [_ok("")]})
+    runner = ScriptedRunner({"orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")], "cleanup": [_ok("")]})
     gate._cleanup_staged(runner, gate.Options())
     [call] = runner.calls_of("cleanup")
     _argv, input_text = _unpack(call)
@@ -798,11 +861,87 @@ def test_cleanup_staged_removes_everything_this_gate_staged():
     assert gate._check_script_path(gate.Options()) in input_text
 
 
+def test_cleanup_staged_also_sweeps_orphans_and_logs():
+    """Finding 11: `_cleanup_staged` (run.gate's own `finally`) is the
+    "in finally" half of orphan cleanup, and logs what it found."""
+    runner = ScriptedRunner(
+        {
+            "orphan-sweep": [_ok("ORPHAN_CLEANED /tmp/tmux-1000/nx-u0mcx-cafef00d\n")],
+            "cleanup": [_ok("")],
+        }
+    )
+    logs: list[str] = []
+    gate._cleanup_staged(runner, gate.Options(), log=logs.append)
+    assert runner.count("orphan-sweep") == 1
+    assert any("nx-u0mcx-cafef00d" in line for line in logs)
+
+
 def test_cleanup_staged_swallows_runner_exceptions():
     def _raising_runner(argv, **kwargs):
         raise RuntimeError("network blip")
 
     gate._cleanup_staged(_raising_runner, gate.Options())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# cleanup_orphan_sessions (finding 11)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_orphan_sessions_none_found_returns_empty():
+    runner = ScriptedRunner({"orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")]})
+    cleaned = gate.cleanup_orphan_sessions(runner, gate.Options())
+    assert cleaned == []
+
+
+def test_cleanup_orphan_sessions_reports_each_cleaned_socket():
+    runner = ScriptedRunner(
+        {
+            "orphan-sweep": [
+                _ok(
+                    "ORPHAN_CLEANED /tmp/tmux-1000/nx-u0mcx-aaaaaaaa\n"
+                    "ORPHAN_CLEANED /tmp/tmux-1000/nx-u0mcx-bbbbbbbb\n"
+                )
+            ]
+        }
+    )
+    cleaned = gate.cleanup_orphan_sessions(runner, gate.Options())
+    assert cleaned == [
+        "/tmp/tmux-1000/nx-u0mcx-aaaaaaaa",
+        "/tmp/tmux-1000/nx-u0mcx-bbbbbbbb",
+    ]
+
+
+def test_cleanup_orphan_sessions_counts_stale_socket_removal_as_cleaned():
+    """Live finding, qwentescence, round 3: tmux 3.6 leaves the socket
+    special-file on disk even after a clean `kill-server` -- a later
+    sweep's own `kill-server` attempt against it then (correctly) fails
+    with "no server running", and the sweep script's own fallback removes
+    the stale FILE directly (`ORPHAN_STALE_REMOVED`), which must count as
+    cleaned rather than being silently dropped or reported as a failure."""
+    runner = ScriptedRunner(
+        {"orphan-sweep": [_ok("ORPHAN_STALE_REMOVED /tmp/tmux-1000/nx-u0mcx-deadbeef\n")]}
+    )
+    cleaned = gate.cleanup_orphan_sessions(runner, gate.Options())
+    assert cleaned == ["/tmp/tmux-1000/nx-u0mcx-deadbeef"]
+
+
+def test_cleanup_orphan_sessions_sweep_keyed_strictly_by_gate_prefix():
+    """Finding 11: the sweep script's glob must be exactly
+    `_TMUX_NAME_PREFIX`, never a bare wildcard that could reach a socket
+    belonging to something else on the box."""
+    runner = ScriptedRunner({"orphan-sweep": [_ok("ORPHAN_NONE_FOUND\n")]})
+    gate.cleanup_orphan_sessions(runner, gate.Options())
+    [call] = runner.calls_of("orphan-sweep")
+    _argv, input_text = _unpack(call)
+    assert f'"$sockdir"/{gate._TMUX_NAME_PREFIX}*' in input_text
+
+
+def test_cleanup_orphan_sessions_swallows_runner_exceptions():
+    def _raising_runner(argv, **kwargs):
+        raise RuntimeError("network blip")
+
+    assert gate.cleanup_orphan_sessions(_raising_runner, gate.Options()) == []
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +1044,8 @@ def test_run_gate_skip_dispatch_with_session_id_reuses_it_no_new_dispatch():
 
 
 def test_run_gate_check_script_reports_failed():
+    """Finding 9: a LEDGER MISS is exit 1 with its OWN verdict string,
+    naming it a real finding rather than "just rerun"."""
     responses = _full_pass_responses()
     responses["check"] = [
         gate.CommandResult(
@@ -922,7 +1063,8 @@ def test_run_gate_check_script_reports_failed():
         session_id_factory=_sid_factory(),
     )
     assert code == 1
-    assert gate.VERDICT_FAIL in report
+    assert gate.VERDICT_LEDGER_MISS in report
+    assert "real finding" in report.lower()
 
 
 def test_run_gate_check_script_prerequisite_absent():
@@ -995,7 +1137,10 @@ def test_run_gate_version_mismatch_without_flag_exits_2():
     assert runner.count("dispatch") == 0
 
 
-def test_run_gate_dispatch_failure_exits_1():
+def test_run_gate_dispatch_failure_exits_3_driver_failure():
+    """Finding 9: a driver-side failure is exit 3 (DRIVER FAILURE), never
+    the same code as a ledger miss -- it never even reached the check
+    script, so it carries no evidence the ledger/hook wiring is broken."""
     responses = _full_pass_responses()
     responses["dispatch"] = [_fail(1, stderr="claude: authentication failed")]
     runner = ScriptedRunner(responses)
@@ -1008,10 +1153,25 @@ def test_run_gate_dispatch_failure_exits_1():
         sleep_fn=lambda s: None,
         session_id_factory=_sid_factory(),
     )
-    assert code == 1
+    assert code == 3
+    assert gate.VERDICT_DRIVER_FAILURE in report
+    assert "rerun once" in report
     assert runner.count("check") == 0  # never reached the assertion half
     assert FakePopen.instances[0].terminated is True
     assert runner.count("cleanup") == 1  # cleanup still runs on a checked failure
+
+
+def test_run_gate_verdicts_are_all_distinct_strings():
+    """Finding 9: the four verdict constants must be four DIFFERENT
+    strings, or a caller matching one substring could accidentally match
+    another."""
+    verdicts = [
+        gate.VERDICT_PASS,
+        gate.VERDICT_LEDGER_MISS,
+        gate.VERDICT_DRIVER_FAILURE,
+        gate.VERDICT_PREREQUISITE_ABSENT,
+    ]
+    assert len(set(verdicts)) == len(verdicts)
 
 
 # ---------------------------------------------------------------------------

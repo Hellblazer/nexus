@@ -119,7 +119,105 @@ Findings this script encodes, or it reports green/red for the wrong reason:
    already active) none of the three flags is needed for an ordinary,
    already-converged run; they exist for the day the box's state has
    drifted, so that day requires a human's explicit opt-in rather than a
-   silent reinstall.
+   silent reinstall. Each of these three flags also needs SAM'S EXPLICIT
+   GO for that specific run before it is passed (round-3 review) -- "off
+   by default" states the SCRIPT's posture; it does not by itself
+   authorize a human to flip one on unattended.
+
+8. UI-STRING BRITTLENESS HAS A NAMED DIAGNOSTIC, NOT A BARE TIMEOUT
+   (round-3 review). `_UI_READY_PATTERN` and `_BUSY_INDICATOR_PATTERN`
+   (one named "UI STRINGS" block, just above :data:`_TMUX_NAME_PREFIX`)
+   are inherently coupled to Claude Code's own rendered TUI text, and a
+   future Claude Code release changing that text would otherwise turn
+   this gate permanently red with nothing naming the real cause. Every
+   failure site in :func:`_build_driver_script` that stems from a UI
+   string not matching calls `_ui_diagnostic`, which prints WHICH pattern
+   (by constant name) was expected, the actual `claude --version` read
+   from the box at failure time, and a pointer to update that named
+   constant in this file. This fails SAFE regardless of whether the
+   diagnostic is ever read: the real PASS verdict always comes from
+   `post-publish-dispatch-check.sh`'s own independent ledger read, never
+   from this driver's own `DRIVER_OK` claim, so a stale UI string can only
+   ever produce an unneeded DRIVER FAILURE (exit 3, finding 9), never a
+   false green.
+
+9. DRIVER FAILURE AND LEDGER MISS ARE DISTINCT VERDICTS WITH DISTINCT EXIT
+   CODES (round-3 review; see EXIT CODES above for the full table). A
+   `GateFailure` from :func:`dispatch_via_interactive_session` (the
+   interactive session never started / never went idle / timed out) means
+   the check script was never even reached -- it carries NO evidence about
+   the box's own hook wiring, and the right operator action is "rerun
+   once". A `check_result.returncode == 1` (the check script ran to
+   completion and reported a real miss) is the opposite: a genuine
+   finding that must NOT be waved away with a rerun. Folding both into one
+   generic FAILED string, as this script's own round-2 version did, is
+   exactly the ambiguity finding 1's "never retry a transient failure"
+   rule exists to prevent, reproduced one layer up.
+
+10. THE FOUR LIVE ATTEMPTS ROUND 2'S INTERACTIVE REWORK ACTUALLY TOOK,
+    RECORDED PRECISELY (round-3 review: this history belongs where a
+    future maintainer would find it, not only in a chat transcript).
+    Against the real box, conexus 7.63.0, in order:
+    (1) FAILED, `NO_TERMINAL` (TSV START with zero REPORTED rows). The
+        first interactive version polled for a literal marker token this
+        script itself had instructed Claude to print at the end of its
+        reply -- but `claude_prompt` pastes the prompt into the pane,
+        which echoes the submitted user turn (marker text included, since
+        it has to be NAMED in the instruction) before Claude even starts
+        responding. The poll matched its own prompt's echo within
+        roughly a second and called `claude_exit`, killing the dispatched
+        subagent before it had done anything.
+    (2) FAILED, `NO_TERMINAL` again. The marker was replaced with a
+        two-phase busy-indicator wait (poll for `esc to interrupt` to
+        APPEAR, confirming Claude actually started this turn, then a
+        single recheck for its absence after `claude_wait`). Still killed
+        the subagent early: live-observed on Claude Code v2.1.283, an
+        Explore dispatch runs as a BACKGROUND agent, and the status bar's
+        hint region rotates through OTHER text for a few seconds while
+        that background agent is still genuinely running, so a single
+        absence check reads as "finished" when it is not.
+    (3) FAILED, `BLOCKED_UNRESOLVED` (progress: the tuple space now held a
+        matching `kind=report` tuple, but the TSV ledger's own REPORTED
+        row was still missing). A debounce (`_IDLE_DEBOUNCE_COUNT`
+        consecutive absent checks) fixed the flicker from (2), but the
+        RDR-184 completion hook for a BACKGROUNDED agent fires on a LATER
+        tick than the UI's own "finished" render -- `claude_exit` still
+        raced ahead of it even with a stable-idle UI.
+    (4) PASSED. A short settle window (`_POST_IDLE_SETTLE_SECONDS`)
+        between the debounce succeeding and `claude_exit` closed the gap:
+        `POST-PUBLISH DISPATCH CHECK PASSED -- violations=0`. Every fix
+        from (1)-(3) is retained in the code (never reverted away once
+        diagnosed) -- (3)'s debounce did not replace (2)'s two-phase wait,
+        and (4)'s settle window did not replace (3)'s debounce.
+
+11. ORPHAN CLEANUP IS KEYED STRICTLY BY THIS GATE'S OWN NAME PREFIX, NEVER
+    ANYTHING ELSE ON THE BOX (round-3 review). A remote tmux session (and
+    whatever it is running, `claude` included) from a run that never
+    reached its own `trap cleanup EXIT` -- the whole ssh/wsl chain killed
+    abruptly, for instance -- would otherwise linger forever unrevisited,
+    since every run's own socket name is freshly minted from ITS OWN
+    session id (:data:`_TMUX_NAME_PREFIX` + 8 hex chars). Plausibly the
+    origin of round-1's own "unexplained second session ledger" finding.
+    :func:`cleanup_orphan_sessions` sweeps for exactly `_TMUX_NAME_PREFIX`
+    and kills the tmux SERVER for each match it finds -- killing a tmux
+    server kills every process inside every one of its panes too, so no
+    separate `claude`-process scan is needed. Run at TWO points: once at
+    the START of :func:`dispatch_via_interactive_session` (so a stray
+    orphan from a prior failed run is swept before this run starts its
+    own), and once from `run_gate`'s own `finally` (:func:`_cleanup_staged`,
+    covering the case where THIS run's own driver never reached its trap).
+    Both log what was cleaned, by socket path, through the same `log`
+    callback as everything else in this script's report.
+
+    LIVE FINDING while proving this fix (same day): a live round-3 run's
+    own tmux server, killed cleanly by its own `trap cleanup EXIT`, still
+    left its socket SPECIAL-FILE behind on disk (tmux 3.6) -- a later
+    sweep's `kill-server` attempt against it correctly reports "no server
+    running" and fails, since there genuinely is no server, only a stale
+    file. The sweep script falls back to removing that file directly
+    (`ORPHAN_STALE_REMOVED`, counted as cleaned exactly like
+    `ORPHAN_CLEANED`) rather than reporting it as a cleanup failure on
+    every subsequent run forever.
 
 USAGE:
     uv run python scripts/qwentescence_local_supervisor_gate.py [VERSION]
@@ -139,18 +237,31 @@ refused, precisely so nothing in this script's own default path can ever
 depend on auto-discovery.
 
 EXIT CODES (same discipline as ``tests/e2e/post-publish-dispatch-check.sh``
--- never a silent skip-pass, nexus-moht0):
-    0 = QWENTESCENCE LOCAL-SUPERVISOR 11d GATE PASSED
-    1 = QWENTESCENCE LOCAL-SUPERVISOR 11d GATE FAILED -- a real dispatch or
-        check-script miss (the box answered, something it checked was
-        wrong).
-    2 = a prerequisite could not be satisfied at all -- box unreachable,
-        an unsafe argument value, WSL/systemd unit could not be brought
-        up (or needed `--allow-enable-unit`), version could not be made
-        to match (or needed `--allow-reinstall`/`--allow-downgrade`),
-        lease port unstable, or the underlying check script itself
-        reported prerequisite-absent (its own exit 2). Nothing was
-        checkable; this is not evidence either way.
+-- never a silent skip-pass, nexus-moht0; FOUR distinct codes, not three --
+see finding 9): each carries its own OPERATOR ACTION, not just its own
+name, because collapsing "rerun this" and "do not just rerun this" into
+one generic FAILED is precisely the ambiguity nexus-moht0 exists to
+prevent:
+    0 = QWENTESCENCE LOCAL-SUPERVISOR 11d GATE PASSED.
+    1 = ... GATE FAILED -- LEDGER MISS. The check script ran to completion
+        and reported a genuine miss -- a real finding. OPERATOR ACTION:
+        investigate; do not just rerun.
+    2 = ... GATE FAILED -- PREREQUISITE ABSENT. Nothing was checkable at
+        all -- box unreachable, an unsafe argument value, WSL/systemd unit
+        could not be brought up (or needed `--allow-enable-unit`), version
+        could not be made to match (or needed
+        `--allow-reinstall`/`--allow-downgrade`), lease port unstable, or
+        the check script itself reported its own prerequisite-absent (its
+        own exit 2). OPERATOR ACTION: fix the named prerequisite; this is
+        not evidence either way about the dispatch/ledger.
+    3 = ... GATE FAILED -- DRIVER FAILURE. The interactive session itself
+        never reached a checkable state -- `claude_start` never reached
+        the main prompt, the busy indicator never appeared, or the debounced
+        idle wait timed out (see finding 8's UI-string diagnostic for
+        which). It never even reached the check script, so it carries NO
+        evidence that anything is wrong with the box's own hook wiring.
+        OPERATOR ACTION: rerun once (a UI-timing flake is the common
+        cause); investigate only if it recurs.
 """
 from __future__ import annotations
 
@@ -181,8 +292,44 @@ DEFAULT_DISPATCH_TIMEOUT = 360.0
 DEFAULT_CLAUDE_WAIT_SECONDS = 150
 
 VERDICT_PASS = "QWENTESCENCE LOCAL-SUPERVISOR 11d GATE PASSED"
-VERDICT_FAIL = "QWENTESCENCE LOCAL-SUPERVISOR 11d GATE FAILED"
+#: Three DISTINCT verdicts for three DISTINCT failure classes (finding 9,
+#: round 3 review) -- collapsing them under one `VERDICT_FAIL` string gave
+#: the operator no way to tell "rerun this, it is probably a UI-timing
+#: flake" from "do not just rerun, the ledger genuinely never saw a
+#: report" from "nothing was even checkable". Exactly the ambiguity
+#: finding 1's own "never retry" rule exists to prevent, now reproduced at
+#: the verdict layer if these three are folded back into one string.
+VERDICT_LEDGER_MISS = (
+    "QWENTESCENCE LOCAL-SUPERVISOR 11d GATE FAILED -- LEDGER MISS "
+    "(real finding: the check script ran and reported a miss; do not just rerun)"
+)
+VERDICT_DRIVER_FAILURE = (
+    "QWENTESCENCE LOCAL-SUPERVISOR 11d GATE FAILED -- DRIVER FAILURE "
+    "(the interactive session itself never started/never went idle/timed out; "
+    "rerun once -- investigate only if it recurs)"
+)
+VERDICT_PREREQUISITE_ABSENT = (
+    "QWENTESCENCE LOCAL-SUPERVISOR 11d GATE FAILED -- PREREQUISITE ABSENT "
+    "(nothing was checkable; this is not evidence either way)"
+)
 
+# ---------------------------------------------------------------------------
+# UI STRINGS (finding 8, round 3 review). Every literal string this driver
+# matches against the Claude Code TUI lives HERE, in one named block,
+# because each is inherently coupled to Claude Code's own rendered text and
+# WILL need updating when that text changes -- a future Claude Code UI
+# change must never silently turn this gate permanently red with no
+# diagnostic naming the real cause. Fails SAFE regardless: the actual PASS
+# verdict always comes from `post-publish-dispatch-check.sh`'s own
+# independent ledger read, never from the driver's own `DRIVER_OK` claim,
+# so a UI-string mismatch here can only ever produce a false NEGATIVE
+# (an unneeded DRIVER FAILURE), never a false positive.
+# ---------------------------------------------------------------------------
+
+#: What `claude_start`'s own loop is polled against to confirm it reached
+#: the main prompt (workspace-trust/bypass-permissions/login screens all
+#: cleared).
+_UI_READY_PATTERN = "bypass permissions on|Type a message"
 #: The busy-indicator pattern `tests/e2e/lib.sh`'s own `claude_wait` polls
 #: for absence of. `_build_driver_script` also polls for its PRESENCE right
 #: after submitting the prompt -- see the two-phase-wait comment there for
@@ -214,6 +361,13 @@ _IDLE_DEBOUNCE_GAP_SECONDS = 4
 #: giving that deferred hook time to land before the session (and its
 #: process) is torn down.
 _POST_IDLE_SETTLE_SECONDS = 10
+
+#: Every tmux socket/session this gate ever creates is named with this
+#: prefix plus 8 hex chars of the run's own session id (finding 11, round
+#: 3 review). Orphan cleanup greps for EXACTLY this prefix and nothing
+#: else, so it can never reach a socket or session belonging to anyone or
+#: anything but this gate.
+_TMUX_NAME_PREFIX = "nx-u0mcx-"
 
 DISPATCH_PROMPT = (
     "This is an automated, mechanized run of nexus release-skill Step 11d, "
@@ -777,7 +931,7 @@ def _build_driver_script(
     *,
     claude_wait_seconds: int = DEFAULT_CLAUDE_WAIT_SECONDS,
 ) -> str:
-    tmux_name = f"nx-u0mcx-{session_id[:8]}"
+    tmux_name = f"{_TMUX_NAME_PREFIX}{session_id[:8]}"
     return f"""#!/bin/bash
 set -u
 export TMUX_SESSION="{tmux_name}"
@@ -789,10 +943,27 @@ cleanup() {{
     _tmux kill-server 2>/dev/null || true
 }}
 trap cleanup EXIT
+# UI STRINGS (finding 8, round 3 review): every failure below that stems
+# from a UI-string mismatch prints WHICH pattern it expected, the Claude
+# Code version actually on the box (captured here, once, as a plain
+# one-shot command outside tmux -- cheap, and unaffected by anything that
+# happens inside the pane later), and the exact constant name to update
+# in scripts/qwentescence_local_supervisor_gate.py. This never masks a
+# false PASS: the real verdict always comes from
+# post-publish-dispatch-check.sh's own ledger read, never from this
+# script's own DRIVER_OK claim, so a stale UI string can only ever cause
+# an unneeded DRIVER FAILURE, not a false green.
+CC_VERSION="$(claude --version 2>&1)" || CC_VERSION="unknown (claude --version itself failed)"
+_ui_diagnostic() {{
+    local pattern_name="$1" pattern_value="$2"
+    echo "DRIVER_FAILED: expected UI pattern $pattern_name=\\"$pattern_value\\" was not observed" >&2
+    echo "DRIVER_FAILED: Claude Code version on box: $CC_VERSION" >&2
+    echo "DRIVER_FAILED: if Claude Code's rendered UI text has changed, update $pattern_name in scripts/qwentescence_local_supervisor_gate.py (see its 'UI STRINGS' block)" >&2
+}}
 _tmux new-session -d -s "$TMUX_SESSION" -c "$HOME" -x 220 -y 50
 claude_start
-if ! capture | grep -qiE "bypass permissions on|Type a message"; then
-    echo "DRIVER_FAILED: claude_start did not reach the main prompt" >&2
+if ! capture | grep -qiE "{_UI_READY_PATTERN}"; then
+    _ui_diagnostic "_UI_READY_PATTERN" "{_UI_READY_PATTERN}"
     capture -80 >&2
     exit 1
 fi
@@ -824,6 +995,7 @@ claude_prompt "$PROMPT_TEXT"
 # flicker, which cleared within a couple of seconds every time it was
 # live-observed.
 if ! poll_for "{_BUSY_INDICATOR_PATTERN}" 30 "processing started"; then
+    _ui_diagnostic "_BUSY_INDICATOR_PATTERN" "{_BUSY_INDICATOR_PATTERN}"
     echo "DRIVER_FAILED: Claude never appeared to start processing the prompt (no busy indicator within 30s)" >&2
     capture -80 >&2
     claude_exit
@@ -843,6 +1015,7 @@ while [[ $(date +%s) -lt $_deadline ]]; do
     fi
 done
 if [[ $_stable_clear -lt {_IDLE_DEBOUNCE_COUNT} ]]; then
+    _ui_diagnostic "_BUSY_INDICATOR_PATTERN" "{_BUSY_INDICATOR_PATTERN}"
     echo "DRIVER_FAILED: dispatch never reached a stable idle state within {claude_wait_seconds}s" >&2
     capture -150 >&2
     claude_exit
@@ -877,10 +1050,80 @@ def _stage_interactive_driver(
     return path
 
 
+# ---------------------------------------------------------------------------
+# Orphan cleanup (finding 11, round 3 review). A remote tmux session (and
+# whatever it is running, `claude` included) from a PRIOR run that never
+# reached its own `trap cleanup EXIT` -- the whole ssh/wsl chain killed
+# abruptly, for instance -- would otherwise linger on the box forever,
+# unrevisited, since each run's own socket name is freshly minted from ITS
+# session id. Keyed STRICTLY by `_TMUX_NAME_PREFIX`: this can never reach a
+# socket or session belonging to anyone or anything else on the box.
+# Killing a tmux SERVER kills every process running inside every one of
+# its panes too, so no separate process scan is needed to also reap a
+# still-running `claude`.
+# ---------------------------------------------------------------------------
+
+_ORPHAN_SWEEP_SCRIPT_TEMPLATE = """
+found=0
+for sockdir in /tmp/tmux-*; do
+    [ -d "$sockdir" ] || continue
+    for sock in "$sockdir"/{prefix}*; do
+        [ -e "$sock" ] || continue
+        found=1
+        if tmux -S "$sock" kill-server 2>/dev/null; then
+            echo "ORPHAN_CLEANED $sock"
+        elif rm -f "$sock" 2>/dev/null; then
+            # Live finding, qwentescence, nexus-u0mcx round 3: tmux 3.6
+            # leaves the socket special-file on disk even after a clean
+            # `kill-server` terminates the server process -- a later sweep
+            # sees `-e "$sock"` still true but `kill-server` itself then
+            # (correctly) reports "no server running" and fails. That is
+            # not a session still running; it is a stale file, and the fix
+            # is to remove the file directly rather than re-report it as a
+            # cleanup failure forever.
+            echo "ORPHAN_STALE_REMOVED $sock"
+        else
+            echo "ORPHAN_CLEAN_FAILED $sock"
+        fi
+    done
+done
+if [ "$found" = 0 ]; then
+    echo "ORPHAN_NONE_FOUND"
+fi
+"""
+
+
+def cleanup_orphan_sessions(runner: Runner, opts: Options) -> list[str]:
+    """Finds and kills any remote tmux session/socket THIS GATE could have
+    started in a prior run and never cleaned up, keyed strictly by
+    `_TMUX_NAME_PREFIX` -- never anything else on the box. Returns the
+    socket paths actually cleaned (for the caller to log); best-effort,
+    never raises, since a sweep failure must not mask the real verdict."""
+    try:
+        script = _ORPHAN_SWEEP_SCRIPT_TEMPLATE.format(prefix=_TMUX_NAME_PREFIX)
+        result = run_remote_script(runner, opts, script, timeout=20.0)
+    except Exception:
+        return []
+    cleaned = []
+    for line in result.stdout.splitlines():
+        for prefix in ("ORPHAN_CLEANED ", "ORPHAN_STALE_REMOVED "):
+            if line.startswith(prefix):
+                cleaned.append(line[len(prefix) :])
+                break
+    return cleaned
+
+
 def dispatch_via_interactive_session(
-    runner: Runner, opts: Options, session_id: str
+    runner: Runner,
+    opts: Options,
+    session_id: str,
+    *,
+    log: Callable[[str], None] = lambda _: None,
 ) -> CommandResult:
     _validate_token("session_id", session_id, _SESSION_ID_RE)
+    cleaned = cleanup_orphan_sessions(runner, opts)
+    if cleaned:
+        log(f"orphan cleanup (start): killed {len(cleaned)} stray tmux socket(s): {cleaned}")
     harness_dir = _stage_harness_files(runner, opts)
     driver_path = _stage_interactive_driver(runner, opts, session_id, harness_dir)
     remote_shell = f"wsl -d {opts.distro} -u {opts.remote_user} --exec /bin/bash -s --"
@@ -966,11 +1209,20 @@ def run_check_script(runner: Runner, opts: Options) -> CommandResult:
 # ---------------------------------------------------------------------------
 
 
-def _cleanup_staged(runner: Runner, opts: Options) -> None:
-    """Best-effort removal of every file/dir this gate staged on the box.
+def _cleanup_staged(
+    runner: Runner, opts: Options, *, log: Callable[[str], None] = lambda _: None
+) -> None:
+    """Best-effort removal of every file/dir this gate staged on the box,
+    AND (finding 11) a sweep for any orphaned tmux socket this gate itself
+    could have left behind -- covering the "in finally" half of that
+    finding regardless of whether this run actually dispatched (the
+    "at start" half is `dispatch_via_interactive_session`'s own sweep).
     Never raises -- a cleanup failure must not mask the real verdict, and
     a staged artifact left behind after a genuine cleanup failure is
     harmless (each is overwritten wholesale on the next run)."""
+    cleaned = cleanup_orphan_sessions(runner, opts)
+    if cleaned:
+        log(f"orphan cleanup (finally): killed {len(cleaned)} stray tmux socket(s): {cleaned}")
     try:
         cleanup_script = (
             f"rm -rf {_harness_dir(opts)} {_driver_script_path(opts)} "
@@ -1068,7 +1320,7 @@ def run_gate(
         log(f"installed version confirmed: {installed}")
 
         if not opts.skip_dispatch:
-            dispatch_via_interactive_session(runner, opts, effective_session_id)
+            dispatch_via_interactive_session(runner, opts, effective_session_id, log=log)
             log("real dispatch: interactive Claude Code session completed (DRIVER_OK)")
         else:
             log("dispatch SKIPPED (--skip-dispatch; reusing an existing completed dispatch)")
@@ -1084,28 +1336,39 @@ def run_gate(
         log("--- end post-publish-dispatch-check.sh output ---")
         log("")
 
+        # Finding 9 (round 3 review): a LEDGER MISS (the check script ran
+        # and reported a real miss) and a PREREQUISITE-ABSENT report from
+        # the check script's own exit 2 are DISTINCT outcomes with DISTINCT
+        # exit codes -- never folded into one generic "FAILED" the way
+        # `GateFailure` below is also distinct from both.
         if check_result.returncode == 0:
             log(VERDICT_PASS)
             return 0, "\n".join(lines)
         if check_result.returncode == 1:
-            log(VERDICT_FAIL)
+            log(VERDICT_LEDGER_MISS)
             return 1, "\n".join(lines)
         log(
-            f"{VERDICT_FAIL} (prerequisite absent inside the check script itself, "
-            f"rc={check_result.returncode})"
+            f"{VERDICT_PREREQUISITE_ABSENT} (the check script itself reported "
+            f"prerequisite-absent, rc={check_result.returncode})"
         )
         return 2, "\n".join(lines)
     except GateFailure as exc:
-        log(f"MISS: {exc}")
-        log(VERDICT_FAIL)
-        return 1, "\n".join(lines)
+        # Finding 9: a DRIVER failure (the interactive session itself never
+        # started / never went idle / timed out) is a DIFFERENT class from
+        # a ledger miss -- it never even reached the check script, so it
+        # carries no evidence that anything is actually wrong with the
+        # box's own hook wiring. Distinct verdict, distinct exit code (3):
+        # the operator action is "rerun once", not "investigate the ledger".
+        log(f"DRIVER FAILURE: {exc}")
+        log(VERDICT_DRIVER_FAILURE)
+        return 3, "\n".join(lines)
     except GateError as exc:
         log(f"PREREQUISITE ABSENT: {exc}")
-        log(f"{VERDICT_FAIL} (prerequisite absent)")
+        log(VERDICT_PREREQUISITE_ABSENT)
         return 2, "\n".join(lines)
     finally:
         if reached_box:
-            _cleanup_staged(runner, opts)
+            _cleanup_staged(runner, opts, log=log)
         hold.stop()
 
 
@@ -1169,7 +1432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             version = fetch_current_published_version()
         except GateError as exc:
             print(f"PREREQUISITE ABSENT: {exc}", file=sys.stderr)
-            print(f"{VERDICT_FAIL} (prerequisite absent)", file=sys.stderr)
+            print(VERDICT_PREREQUISITE_ABSENT, file=sys.stderr)
             return 2
     exit_code, report = run_gate(opts, version)
     print(report)
