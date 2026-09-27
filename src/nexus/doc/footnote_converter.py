@@ -249,7 +249,7 @@ def _scan_markers(body: str) -> list[tuple[int, int, str]]:
     "start of a new block").
     """
     out: list[tuple[int, int, str]] = []
-    for lineno, line in iter_plain_lines(body):
+    for lineno, line in iter_plain_lines(body, mask_inline_code=True):
         for mm in _MARKER_RE.finditer(line):
             out.append((lineno, mm.start() + 1, mm.group(1)))
     return out
@@ -555,7 +555,7 @@ def _convert_footnotes_to_links_lf(text: str) -> ConversionResult:
     # One whole-body pass for fence/inline-code/indented-code state
     # (see _scan_markers's docstring for why NOT per-line); a line
     # absent from this map is fenced/indented-code and copied verbatim.
-    plain = dict(iter_plain_lines(body))
+    plain = dict(iter_plain_lines(body, mask_inline_code=True))
 
     dangling: list[DanglingRef] = []
     out_lines: list[str] = []

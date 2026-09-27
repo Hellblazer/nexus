@@ -16,7 +16,7 @@ from nexus.doc.catalog_links import scan_catalog_links
 class TestInlineCodeSpanMasking:
     def test_single_backtick_span_is_masked(self) -> None:
         line = "See `[x](nx://catalog/1.1.1)` as an example."
-        (lineno, masked), = list(iter_plain_lines(line))
+        (lineno, masked), = list(iter_plain_lines(line, mask_inline_code=True))
         assert lineno == 1
         assert len(masked) == len(line)  # length-preserving
         assert "nx://catalog" not in masked
@@ -27,7 +27,7 @@ class TestInlineCodeSpanMasking:
         # CommonMark: `` `x` `` uses a longer delimiter to wrap content
         # that itself contains a backtick.
         line = "Use `` `nx://catalog/1.1.1` `` literally."
-        (_, masked), = list(iter_plain_lines(line))
+        (_, masked), = list(iter_plain_lines(line, mask_inline_code=True))
         assert "nx://catalog" not in masked
         assert "Use " in masked and " literally." in masked
 
@@ -217,3 +217,21 @@ class TestGh896WorkedExampleInline:
         # code spans (the POST endpoint, `delta`, `tool_use`, `done`)
         # contain a catalog link and must not appear or be miscounted.
         assert [link.tumbler for link in links] == ["1.1.146", "1.1.194", "1.1.194"]
+
+
+class TestInlineCodeMaskingIsOptIn:
+    """ref_scanner finds collection names inside backticks, so the
+    default must leave inline code spans intact (nexus-3ioz2 regression)."""
+
+    def test_default_leaves_inline_code_spans_intact(self) -> None:
+        line = "- `docs__alpha`: 10 chunks"
+        (_, plain), = list(iter_plain_lines(line))
+        assert plain == line
+
+    def test_ref_scanner_still_sees_a_backticked_collection(self, tmp_path) -> None:
+        from nexus.doc.ref_scanner import scan_markdown
+
+        p = tmp_path / "doc.md"
+        p.write_text("- `docs__alpha`: 10 chunks\n")
+        refs = scan_markdown(p, ["docs"])
+        assert [r.collection for r in refs] == ["docs__alpha"]

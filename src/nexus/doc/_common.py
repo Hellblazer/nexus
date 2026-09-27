@@ -14,7 +14,8 @@ likely to demonstrate the syntax being scanned for — a docs page
 explaining ``[label](nx://catalog/<tumbler>)`` almost certainly quotes
 that literal syntax inside inline backticks, and this very repo's own
 ``docs/cli-reference.md`` does. Both are handled HERE, once, so every
-consumer of :func:`iter_plain_lines` benefits without its own fix:
+consumer of :func:`iter_plain_lines` benefits without its own fix
+(inline-code masking is opt-in; see :func:`iter_plain_lines`):
 
 * **Inline code spans** — `` `...` `` or `` ``...`` `` (CommonMark:
   closing delimiter must be the SAME backtick-run length as the
@@ -118,6 +119,10 @@ def _mask_inline_code_spans(line: str) -> str:
     return _INLINE_CODE_SPAN_RE.sub(lambda m: _MASK_CHAR * len(m.group(0)), line)
 
 
+def _identity(line: str) -> str:
+    return line
+
+
 def _leading_indent_and_rest(line: str) -> tuple[int, str]:
     """``(indent, line-with-that-indent-stripped)``. Indent counts
     columns, not characters — a tab advances to the next multiple of 4,
@@ -136,9 +141,18 @@ def _leading_indent_and_rest(line: str) -> tuple[int, str]:
     return indent, line[i:]
 
 
-def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
+def iter_plain_lines(
+    text: str, *, mask_inline_code: bool = False
+) -> Iterator[tuple[int, str]]:
     """Yield ``(1-based lineno, line)`` for every non-fenced,
-    non-indented-code line, with inline code spans masked out.
+    non-indented-code line, with inline code spans masked out when
+    *mask_inline_code* is set.
+
+    Masking is OPT-IN. :mod:`nexus.doc.ref_scanner` finds collection
+    names precisely inside backticks (`` `docs__x` ``), so masking for
+    every consumer erased every reference it looks for; the catalog-link
+    and footnote scanners, which must not match link syntax quoted as an
+    example, pass ``mask_inline_code=True``.
 
     Content inside ```` ``` ```` / ``~~~`` fences, and inside a
     4-space-indented code block, is skipped entirely (yielded to no
@@ -154,6 +168,7 @@ def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
     changes it), so a reported column is always valid against the
     real file too.
     """
+    emit = _mask_inline_code_spans if mask_inline_code else _identity
     in_fence = False
     fence_marker: str | None = None
     in_indented_code = False
@@ -187,7 +202,7 @@ def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
             if in_indented_code:
                 continue
             prev_line_blank = True
-            yield lineno, _mask_inline_code_spans(line)
+            yield lineno, emit(line)
             continue
 
         indent, rest = _leading_indent_and_rest(line)
@@ -207,7 +222,7 @@ def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
             list_stack.append(indent + marker_width)
             in_indented_code = False
             prev_line_blank = False
-            yield lineno, _mask_inline_code_spans(line)
+            yield lineno, emit(line)
             continue
 
         if list_stack and indent >= list_stack[-1]:
@@ -216,7 +231,7 @@ def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
             # of a preceding blank line.
             in_indented_code = False
             prev_line_blank = False
-            yield lineno, _mask_inline_code_spans(line)
+            yield lineno, emit(line)
             continue
 
         # Outside any open list's content zone — the plain heuristic.
@@ -233,4 +248,4 @@ def iter_plain_lines(text: str) -> Iterator[tuple[int, str]]:
             continue
 
         prev_line_blank = False
-        yield lineno, _mask_inline_code_spans(line)
+        yield lineno, emit(line)

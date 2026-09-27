@@ -100,7 +100,7 @@ def scan_catalog_links(md_text: str) -> list[CatalogLink]:
     not itself a reference.
     """
     links: list[CatalogLink] = []
-    for lineno, line in iter_plain_lines(md_text):
+    for lineno, line in iter_plain_lines(md_text, mask_inline_code=True):
         for m in _CATALOG_LINK_RE.finditer(line):
             links.append(CatalogLink(
                 display=m.group("display"),
