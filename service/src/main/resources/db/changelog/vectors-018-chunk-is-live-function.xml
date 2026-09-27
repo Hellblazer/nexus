@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Step 4 (bead nexus-wbfpw.9): ship live(c) — the ONE engine
+    liveness predicate the RDR's Technical Design section defines — as an
+    inlinable SQL function, `nexus.chunk_is_live(tenant, collection, chash)`.
+    Non-destructive: this changeset creates the function and nothing else. No
+    call site is migrated onto it here (that is Step 5, nexus-wbfpw.10);
+    plain_search_<dim>/text_gated_search_<dim>/hybrid_search_<dim>
+    (vectors-009/010/017), nexus.live_chunks (vectors-005-1), and
+    PgVectorRepository#liveChunksCondition all keep their own,
+    independently-maintained predicate bodies for now.
+
+    live(c), verbatim from the RDR (docs/rdr/rdr-192-superseded-note-chunks-
+    outlive-manifest-less-is-live.md, Technical Design):
+
+        live(c) := EXISTS (
+            SELECT 1
+              FROM catalog_document_chunks m
+              JOIN catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+             WHERE m.tenant_id = c.tenant_id
+               AND m.collection = c.collection
+               AND m.chash = c.chash
+               AND d.deleted_at IS NULL
+        )
+
+    This is the DIRECT POSITIVE form — "does an own-collection manifest row
+    exist whose owning document is live" — not the "dead set" double-negation
+    (NOT EXISTS tombstoned-owner AND NOT EXISTS live-owner-elsewhere) that
+    plain_search_<dim>/liveChunksCondition carry today. The two forms are
+    equivalent exactly because fk_catalog_chunks_catalog_doc (fk-001,
+    VALIDATED) makes a manifest row with no owning document impossible —
+    see PgVectorRepository#liveChunksCondition's own nexus-msz9i derivation
+    comment and ForeignKeyConstraintTest's FK-validation pin, the identical
+    argument this function relies on. The positive form is chosen here
+    because it is what the RDR names, and because a single EXISTS is the
+    simplest shape a search-time filter can carry inline in a WHERE clause
+    (Step 5's job).
+
+    Signature: nexus.chunk_is_live(p_tenant text, p_collection text,
+    p_chash bytea) — p_chash is bytea, matching nexus.catalog_document_chunks
+    .chash's post-rdr180-6 type (and nexus.chunks.chash's own type), so a
+    caller passes c.chash directly with no encode/decode at the call site.
+
+    INLINABLE BY CONSTRUCTION (vectors-009/017 precedent, vectors-009's own
+    header): LANGUAGE sql, single SELECT, STABLE (not VOLATILE — reads
+    committed state within the current statement/transaction snapshot, same
+    volatility class as plain_search_<dim>/nexus.live_chunks), no SECURITY
+    DEFINER (SECURITY INVOKER is the default and is stated explicitly here to
+    match the codebase's convention of never leaving it implicit), and no
+    function-level SET clause (a SET clause disables planner inlining —
+    vectors-009's own note). SECURITY INVOKER means FORCE RLS on
+    nexus.catalog_document_chunks/catalog_documents remains the tenant-
+    isolation boundary, not this function — identical posture to every
+    sibling search-serving function in this file's family.
+
+    NEVER a view join (vectors-009 changeset header, RDR Technical Design
+    "Risk: live(c) as a view join breaks HNSW binds"): this ships as a
+    function, never as a VIEW that a caller would JOIN against nexus.chunks —
+    a view join over this predicate defeats the HNSW index bind the search
+    functions' ORDER BY/LIMIT depends on (vectors-009's own precedent
+    explaining why plain_search_<dim> never joins nexus.live_chunks either).
+
+    EXECUTE defaults to PUBLIC for a newly created function (vectors-007/009
+    precedent — hybrid_search_<dim>/plain_search_<dim> issue no explicit
+    grant either, relying on the same PostgreSQL default); no explicit GRANT
+    EXECUTE here, and no REVOKE-from-PUBLIC exists anywhere in this schema
+    for functions (surveyed: every REVOKE EXECUTE ON FUNCTION statement in
+    this changelog targets nexus_svc specifically, as a changeset's own
+    rollback undoing that changeset's own explicit grant — never a REVOKE
+    FROM PUBLIC). nexus_svc and nexus_diag (SELECT-only diagnostic role) both
+    reach this function through that PUBLIC default, exactly as they reach
+    plain_search_<dim>/hybrid_search_<dim> today.
+
+    Placed after hygiene-008-gc-bounded-registration-from-origin-row.xml
+    (current tail) and before the grants-nexus-svc.xml runAlways block,
+    matching the established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-018-1" author="nexus-wbfpw.9">
+        <comment>nexus.chunk_is_live(tenant, collection, chash): the RDR-192 live(c) predicate, one inlinable SQL function, no call site migrated yet (Step 5)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chunk_is_live(
+    p_tenant     text,
+    p_collection text,
+    p_chash      bytea
+) RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM nexus.catalog_document_chunks m
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE m.tenant_id  = p_tenant
+           AND m.collection = p_collection
+           AND m.chash      = p_chash
+           AND d.deleted_at IS NULL
+    )
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">DROP FUNCTION IF EXISTS nexus.chunk_is_live(text, text, bytea);</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

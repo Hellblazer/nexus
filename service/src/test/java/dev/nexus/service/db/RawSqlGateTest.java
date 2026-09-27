@@ -1198,6 +1198,13 @@ class RawSqlGateTest {
         // (it asserts live_notes/rev_candidates materialize once and live_notes
         // uses idx_catalog_documents_collection_live), and the pg_proc
         // proleakproof probe for texteq and jsonb_object_field_text.
+        // RDR-192 Step 4 (bead nexus-wbfpw.9): 2 raw-SQL sites -- the
+        // nexus.chunk_is_live-filtered KNN query (chunkIsLiveFilteredKnn) and its
+        // EXPLAIN (ANALYZE, BUFFERS) twin (explainChunkIsLiveFilteredKnn). Both carry
+        // the vector-distance OPERATOR(nexus.<=>) ORDER BY, which has no jOOQ DSL
+        // operator (same reason GraphHopParityTest/TaxonomyAssignCrossLateralHnswTest
+        // use the identical raw-literal-SQL idiom for their own KNN plan-shape tests).
+        Map.entry("dev/nexus/service/vectors/ChunkIsLiveHnswExplainRecallIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
@@ -1569,7 +1576,10 @@ class RawSqlGateTest {
     // 3 -- see that entry's own comment).
     // nexus-wbfpw.4 round 4: 961 -> 963 (+2: that file 3 -> 5, the other-
     // collection seed INSERT and the proleakproof probe; see its entry).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 963;
+    // nexus-wbfpw.9 (RDR-192 Step 4): 963 -> 965 (+2: one new test file,
+    // vectors/ChunkIsLiveHnswExplainRecallIntegrationTest.java new at 2 -- see
+    // that entry's own comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 965;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
