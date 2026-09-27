@@ -97,9 +97,10 @@
     vectors-018's include) — technically free (never released, no
     checksum on any deployed cluster) but reusing it invites a confusing
     git-blame read; catalog-039 is the first genuinely untouched number.
-    Also placed to avoid any collision with a pending sibling changeset
-    named vectors-019 (a different filename prefix entirely, so no
-    ordering conflict either way).
+    The sibling changeset vectors-019 (nexus-wbfpw.10) landed first, and the
+    master changelog includes this file after it. The two are independent
+    (a gc_restore function versus read-path functions and views), so their
+    order does not matter to the schema.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
