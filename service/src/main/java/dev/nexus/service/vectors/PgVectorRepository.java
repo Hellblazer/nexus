@@ -2681,9 +2681,9 @@ public final class PgVectorRepository {
 -- the engine route (POST /v1/vectors/manifest-less-census,
 -- PgVectorRepository.MANIFEST_LESS_CENSUS_SQL) and this file execute the
 -- IDENTICAL text -- ManifestLessCensusSqlIdentityTest pins them equal, so
--- there is no second copy that can drift. No engine tag carries the route
--- until the rest of RDR-192 ships (Sam, 2026-09-26); until then, run this
--- file directly against production (psql), substituting each positional
+-- there is no second copy that can drift. engine-service-v0.1.133 and
+-- later carry the route; against an older engine, or to census without the
+-- engine, run this file directly (psql), substituting each positional
 -- placeholder below with its literal value in this exact order:
 --   1. tenant_id   (text)                -- live_notes scope
 --   2. collection  (text)                -- live_notes scope (physical_collection)

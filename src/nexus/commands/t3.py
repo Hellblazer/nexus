@@ -1475,11 +1475,9 @@ def reidentify_cmd(
 #
 # `nx t3 census-manifest-less` wraps the engine's read-only
 # `POST /v1/vectors/manifest-less-census` route (bead nexus-wbfpw.4,
-# `HttpVectorClient.manifest_less_census`). Sam's 2026-09-26 ruling on
-# nexus-wbfpw.5: this verb no longer gates the production census (that
-# runs as direct SQL, `scripts/sql/manifest_less_census.sql`) -- it still
-# ships, built and tested against a dev jar, in the client release paired
-# with the eventual RDR-192 engine tag.
+# `HttpVectorClient.manifest_less_census`). The route is first carried by
+# engine-service-v0.1.133; against an older engine the verb exits 4 and the
+# same census runs as direct SQL, `scripts/sql/manifest_less_census.sql`.
 
 #: Bucket names the manifest-less-census route returns (RDR-192 S2, bead
 #: nexus-wbfpw.4's response contract -- see that route's docstring and
@@ -1761,12 +1759,9 @@ def census_manifest_less_cmd(
     "require_zero_violations" (list of bucket names), and "exit_code".
 
     \b
-    This verb no longer gates the production census (Sam's 2026-09-26
-    ruling on nexus-wbfpw.5): that runs as direct SQL
-    (``scripts/sql/manifest_less_census.sql``) against production until
-    the rest of RDR-192 ships. This verb ships anyway, built and tested
-    against a dev jar, for the client release paired with the eventual
-    RDR-192 engine tag.
+    Needs engine-service-v0.1.133 or later; against an older engine it
+    exits 4, and the same census runs as direct SQL
+    (``scripts/sql/manifest_less_census.sql``).
     """
     if bool(collection) == bool(all_collections):
         raise click.UsageError(

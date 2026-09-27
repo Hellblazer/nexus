@@ -1180,10 +1180,9 @@ public final class VectorHandler implements HttpHandler {
      * OWN-COLLECTION manifest row into exactly one of five buckets (superseded,
      * legacy-unmanifested, dead-owner, no-owner, unclassified) — see {@link
      * PgVectorRepository#MANIFEST_LESS_CENSUS_SQL}'s header comment for the full
-     * bucket definitions. Sam's ruling 2026-09-26: no engine tag carries this
-     * route until the rest of RDR-192 ships; the production census runs the
-     * identical text ({@code scripts/sql/manifest_less_census.sql}) directly
-     * until then.
+     * bucket definitions. First carried by engine-service-v0.1.133; the same
+     * text ({@code scripts/sql/manifest_less_census.sql}) runs directly under
+     * psql against an older engine.
      *
      * <p>Request:
      * <pre>
