@@ -1747,3 +1747,91 @@ class TestCatalogHookReconciledIsNotNew:
         err = capsys.readouterr().err
         assert "Catalog: 1 new, 0 updated, 1 reconciled onto rows outside this owner" in err, err
         assert mapping[b] == "1.10.41" and mapping[a] == "1.1.99"
+
+    def test_the_per_file_fallbacks_same_owner_resolve_is_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-r1tnx round 5 (fix-check2 gap): the per-file fallback's
+        own ``reconcile_stale_physical_collection`` call (reached only
+        when ``register_many`` itself raises) had no BEHAVIORAL test of
+        its owner gate -- only the static call-count wiring test. b.py
+        resolves onto 1.1.55, a document under THIS fixture's own owner
+        (1.1) -- the genuine nexus-2t63u same-owner case -- so the
+        fallback must still repoint its stale physical_collection."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter(reconcile_tumbler="1.1.55")
+        writer.reconcile_paths = {"b.py"}
+
+        def boom(*a, **k):
+            raise RuntimeError("batch endpoint down")
+
+        writer.register_many = boom
+        _, writer, _ = t._run_hook(
+            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+            show_responses={
+                "1.1.55": {"tumbler": "1.1.55", "physical_collection": "code__OLD"},
+            },
+        )
+
+        assert {"tumbler": "1.1.55", "physical_collection": "code__nexus"} in writer.update_calls, (
+            f"the per-file fallback's same-owner resolve was never repointed: "
+            f"update_calls={writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 1
+
+    def test_the_per_file_fallbacks_cross_owner_resolve_is_never_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The owner-gate mirror of the test above: b.py resolves onto
+        1.10.41, which belongs to owner 1.10 -- a DIFFERENT owner than
+        this fixture's own (1.1). The per-file fallback's reconcile call
+        must not write to that foreign document; it must only log the
+        divergence, exactly like the batched path's own owner gate."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+
+        def boom(*a, **k):
+            raise RuntimeError("batch endpoint down")
+
+        writer.register_many = boom
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _, writer, _ = t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+                show_responses={
+                    "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
+                },
+            )
+
+        assert writer.update_calls == [], (
+            f"the per-file fallback must not repoint a foreign owner's "
+            f"document: {writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 0
+        events = [
+            e for e in logs
+            if e["event"] == "catalog_physical_collection_reconcile_skipped_foreign_owner"
+        ]
+        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
+        assert events[0]["resolved_tumbler"] == "1.10.41"
+        assert events[0]["owner"] == "1.1"
