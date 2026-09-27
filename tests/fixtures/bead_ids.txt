@@ -1081,6 +1081,7 @@ nexus-5kl1b.1
 nexus-5krl
 nexus-5kwkf
 nexus-5l8i8
+nexus-5l8i8.1
 nexus-5ldk1
 nexus-5lygi
 nexus-5lygi.1
@@ -1166,6 +1167,7 @@ nexus-5yrob.1
 nexus-5z39x
 nexus-5z7f2
 nexus-5zv4j
+nexus-5zv4j.1
 nexus-5zvdw
 nexus-604tt
 nexus-60b6
@@ -4182,6 +4184,7 @@ nexus-l2ku5
 nexus-l2ku5.1
 nexus-l2yn
 nexus-l3dg2
+nexus-l3dg2.1
 nexus-l3yuc
 nexus-l3yuc.1
 nexus-l3yuc.10
@@ -4535,6 +4538,7 @@ nexus-n2ls1
 nexus-n2ls1.1
 nexus-n2w4q
 nexus-n36sw
+nexus-n36sw.1
 nexus-n3bwh
 nexus-n3bwh.1
 nexus-n3md
