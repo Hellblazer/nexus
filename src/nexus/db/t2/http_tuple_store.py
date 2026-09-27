@@ -437,11 +437,25 @@ def _since_payload(since: tuple[str, str] | None) -> dict[str, str] | None:
     """``since`` on the wire is ``{"created_at": ..., "id": ...}``
     (``TupleHandler.readCursor``); the client-facing shape is the plain
     ``(created_at, id)`` cursor pair RDR-205 §Technical Design
-    "Operations" describes the caller as keeping."""
+    "Operations" describes the caller as keeping.
+
+    Bead nexus-n36sw: a per-subscriber board wait's watermark
+    (``ChannelWaiter._build_specs``) carries no tuple id -- a board
+    subscriber's ``since`` is the topic's subscribe TIME, and there is no
+    id to pair a bare timestamp with. Such a caller passes an empty-string
+    sentinel as ``cursor_id``, and THIS renders as ``created_at`` alone,
+    with no ``id`` key at all -- exactly the shape
+    ``TupleHandler.readSinceWatermark`` expects (it never reads ``id``)
+    and never the shape ``readCursor`` uses for every other caller (``rd``/
+    ``rdp``'s own cursor, a row-level announce spec), which always has a
+    real, non-empty id and renders both fields unchanged."""
     if since is None:
         return None
     created_at, cursor_id = since
-    return {"created_at": created_at, "id": cursor_id}
+    payload: dict[str, str] = {"created_at": created_at}
+    if cursor_id:
+        payload["id"] = cursor_id
+    return payload
 
 
 # ── HttpTupleStore ──────────────────────────────────────────────────────────
