@@ -17,6 +17,7 @@ returned (nexus-t9klx ported it from a plugin script; see
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -67,26 +68,109 @@ def _env(tmp_path: Path, env_overrides: dict[str, str] | None = None) -> dict[st
     return env
 
 
-def _code_under_test() -> tuple[Path, ...]:
-    """The source files a drain subprocess executes, resolved the way the
-    subprocess resolves them (same interpreter, same ``sys.path``)."""
-    from importlib.util import find_spec  # noqa: PLC0415 -- only _run needs it
+def _nexus_module_file(name: str) -> Path | None:
+    """Source file of ``nexus.*`` module *name* as this interpreter resolves
+    it (the subprocess uses the same interpreter and ``sys.path``), or None
+    when *name* is not a module (an imported attribute, a missing module)."""
+    from importlib.util import find_spec  # noqa: PLC0415 -- only the closure walk needs it
 
-    modules = (
-        "nexus.hooks.mailbox_drain",
-        "nexus.hooks.tuple_ledger_project",
-        "nexus._hook_runtime.entry",
-        "nexus._hook_runtime._io",
-    )
-    return tuple(Path(find_spec(m).origin) for m in modules) + (_PLUGIN_SCRIPT,)
+    try:
+        spec = find_spec(name)
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.origin or not spec.origin.endswith(".py"):
+        return None
+    return Path(spec.origin)
 
 
-def _stamps(paths: tuple[Path, ...]) -> dict[Path, tuple[int, int] | None]:
-    out: dict[Path, tuple[int, int] | None] = {}
+def _import_closure(roots: tuple[Path, ...]) -> frozenset[Path]:
+    """Every source file reachable from *roots* through their imports, read
+    from the source rather than hand-listed (nexus-3lc5s review).
+
+    Follows two kinds of import and nothing else, because nothing else in
+    either entry point can be edited under a test: ``nexus.*`` modules
+    (resolved by ``find_spec``, with each parent package's ``__init__``,
+    which Python executes on the way in), and a bare ``import _x`` that names
+    a file beside the importing file -- the plugin script's ``sys.path``
+    insert makes exactly those importable. Imports inside functions count:
+    the drain defers most of its own. Stdlib and third-party imports are not
+    followed. An over-approximation of what one run loads (a branch not taken
+    still counts), never an under-approximation, which is the direction the
+    guard needs.
+    """
+    import ast  # noqa: PLC0415 -- only the closure walk needs it
+
+    seen: set[Path] = set()
+    todo = list(roots)
+    while todo:
+        path = todo.pop()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.extend(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names.append(node.module)
+                # `from nexus.hooks import tuple_ledger_project` imports a module.
+                names.extend(f"{node.module}.{a.name}" for a in node.names)
+        for name in names:
+            if name == "nexus" or name.startswith("nexus."):
+                parts = name.split(".")
+                for i in range(1, len(parts) + 1):
+                    found = _nexus_module_file(".".join(parts[:i]))
+                    if found is not None:
+                        todo.append(found)
+            elif "." not in name:
+                sibling = path.parent / f"{name}.py"
+                if sibling.is_file():
+                    todo.append(sibling)
+    return frozenset(seen)
+
+
+def _wheel_roots() -> tuple[Path, ...]:
+    from nexus._hook_runtime.entry import VERB_TABLE  # noqa: PLC0415 -- deferred like _load_module
+
+    # entry.main imports the verb through importlib, which no AST walk can
+    # see, so the verb module is a root in its own right.
+    verb = _nexus_module_file(VERB_TABLE[_VERB_ARGV[-1]])
+    entry = _nexus_module_file(_VERB_ARGV[-2])
+    assert verb is not None and entry is not None
+    return (entry, verb)
+
+
+def _code_under_test(argv: list[str]) -> frozenset[Path]:
+    """The files the run *argv* loads: the plugin script and its siblings for
+    a script argv, the wheel verb's ``nexus`` closure otherwise. Scoped per
+    entry point, so an edit to the other entry point's code cannot fail a run.
+
+    The wheel closure is about 250 files, because deferred imports on
+    branches a drain never takes still count. That over-approximation is the
+    direction the guard needs: a spurious red means someone edited this
+    checkout's ``nexus`` package mid-run, which is itself the hazard."""
+    return _closure_for(tuple(argv))
+
+
+@functools.lru_cache(maxsize=None)
+def _closure_for(argv: tuple[str, ...]) -> frozenset[Path]:
+    # Cached: the wheel walk parses ~250 files (~0.9s), once per argv per worker.
+    scripts = tuple(Path(a) for a in argv if a.endswith(".py"))
+    return _import_closure(scripts) if scripts else _import_closure(_wheel_roots())
+
+
+def _stamps(paths) -> dict[Path, tuple[int, int, str] | None]:
+    """(mtime_ns, size, sha256) per path. The mtime catches an edit that was
+    reverted before the run ended; the hash catches one that restored the
+    mtime too."""
+    import hashlib  # noqa: PLC0415 -- only the guard needs it
+
+    out: dict[Path, tuple[int, int, str] | None] = {}
     for p in paths:
         try:
             st = p.stat()
-            out[p] = (st.st_mtime_ns, st.st_size)
+            out[p] = (st.st_mtime_ns, st.st_size, hashlib.sha256(p.read_bytes()).hexdigest())
         except OSError:
             out[p] = None
     return out
@@ -98,7 +182,7 @@ def _run(
     stdin: str | None = None,
     env_overrides: dict[str, str] | None = None,
     argv: list[str] | None = None,
-    watched: tuple[Path, ...] | None = None,
+    watched=None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the hook once, and refuse the result if its code changed meanwhile.
 
@@ -112,10 +196,11 @@ def _run(
     no single tree, so it fails here, naming the files, instead of as
     whatever assertion happens to come next.
     """
-    paths = watched if watched is not None else _code_under_test()
+    argv = argv if argv is not None else _VERB_ARGV
+    paths = sorted(watched if watched is not None else _code_under_test(argv))
     before = _stamps(paths)
     res = subprocess.run(
-        argv if argv is not None else _VERB_ARGV,
+        argv,
         input=stdin if stdin is not None else _payload(),
         capture_output=True,
         text=True,
@@ -1951,6 +2036,86 @@ def test_run_refuses_a_result_whose_code_changed_while_the_hook_ran(tmp_path, en
     with pytest.raises(pytest.fail.Exception, match="changed on disk while the hook subprocess ran"):
         _run(tmp_path=tmp_path, watched=(watched,))
     assert watched.read_text() == "CONFLATE = False\n"
+
+
+def test_each_entry_points_watch_set_is_what_it_imports_and_nothing_of_the_others() -> None:
+    """nexus-3lc5s review: the first guard hand-listed four wheel modules plus
+    the plugin script, which missed the plugin's three siblings and the
+    wheel's ``nexus._locking``, and made each run watch the other's file."""
+    plugin = _code_under_test(_PLUGIN_ARGV)
+    wheel = _code_under_test(_VERB_ARGV)
+    scripts = _PLUGIN_SCRIPT.parent
+    src = Path(_nexus_module_file("nexus").parent)
+
+    assert {_PLUGIN_SCRIPT, scripts / "_interpreter.py", scripts / "_endpoint_resolve.py",
+            scripts / "_tuple_size_limits.py"} <= plugin
+    for mod in ("_locking.py", "hooks/mailbox_drain.py", "hooks/tuple_ledger_project.py",
+                "_hook_runtime/entry.py", "_hook_runtime/_io.py", "__init__.py",
+                "hooks/__init__.py"):
+        assert src / mod in wheel, mod
+    assert not any(p.is_relative_to(src) for p in plugin), "the plugin run loads no nexus"
+    assert not any(p.is_relative_to(scripts) for p in wheel), "the wheel run loads no plugin script"
+
+
+def test_the_watch_set_follows_a_new_sibling_import_without_a_list_to_update(tmp_path) -> None:
+    """The set is computed, so a sibling import added tomorrow is watched with
+    no edit here, and a file beside the script that nothing imports is not."""
+    (tmp_path / "hook.py").write_text("def f():\n    import _new_helper\n")
+    (tmp_path / "_new_helper.py").write_text("import _deeper\n")
+    (tmp_path / "_deeper.py").write_text("")
+    (tmp_path / "_unimported.py").write_text("")
+    assert _import_closure((tmp_path / "hook.py",)) == {
+        tmp_path / "hook.py", tmp_path / "_new_helper.py", tmp_path / "_deeper.py",
+    }
+
+
+def _plugin_copy(tmp_path: Path) -> Path:
+    """The plugin script and everything it imports, copied where a test may
+    edit them, plus one file beside them that nothing imports."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for src in _code_under_test(_PLUGIN_ARGV):
+        (scripts / src.name).write_bytes(src.read_bytes())
+    (scripts / "_unimported.py").write_text("X = 1\n")
+    return scripts
+
+
+def test_a_mid_run_edit_to_a_watched_sibling_fails_the_plugin_run(tmp_path, engine) -> None:
+    """The review's case: a mutation in ``_endpoint_resolve.py`` mid-run would
+    have reproduced the original bug and passed the first guard."""
+    scripts = _plugin_copy(tmp_path)
+    argv = [sys.executable, str(scripts / "mailbox_drain.py")]
+    env = {"NX_HOOK_INTERPRETER_REEXEC": "1"}  # run this copy, never re-exec away from it
+    sibling = scripts / "_endpoint_resolve.py"
+    original = sibling.read_bytes()
+
+    eng = engine()
+    _wired(tmp_path, eng)
+    res = _run(tmp_path=tmp_path, argv=argv, env_overrides=env)
+    assert res.returncode == 0 and eng.calls, f"control run never reached the engine: {res.stderr!r}"
+
+    def _mutation_check(_route: str) -> None:
+        sibling.write_bytes(original + b"\n# mutation\n")
+        sibling.write_bytes(original)
+
+    eng.on_request = _mutation_check
+    with pytest.raises(pytest.fail.Exception, match="_endpoint_resolve.py"):
+        _run(tmp_path=tmp_path, argv=argv, env_overrides=env)
+
+
+def test_a_mid_run_edit_to_a_file_the_run_never_loads_does_not_fail_it(tmp_path, engine) -> None:
+    """Scoping: an edit beside the script, to a file it does not import, is
+    not evidence against this run."""
+    scripts = _plugin_copy(tmp_path)
+    argv = [sys.executable, str(scripts / "mailbox_drain.py")]
+    unrelated = scripts / "_unimported.py"
+
+    eng = engine()
+    _wired(tmp_path, eng)
+    eng.on_request = lambda _route: unrelated.write_text("X = 2\n")
+    res = _run(tmp_path=tmp_path, argv=argv, env_overrides={"NX_HOOK_INTERPRETER_REEXEC": "1"})
+    assert res.returncode == 0 and eng.calls, res.stderr
+    assert unrelated.read_text() == "X = 2\n", "the edit must actually have happened"
 
 
 _BUDGET_DRIVER = r"""
