@@ -1207,11 +1207,15 @@ def read_source(
 #                          (indeterminate — 'unknown', never 'dangling'), and
 #                          a timeout/connection failure retries a bounded
 #                          number of times before falling into the same
-#                          reason='error' bucket.  No ETag-based comparison:
-#                          nexus records no stored ETag at index time to
-#                          compare a fresh response against, so an ETag-only
-#                          response (no Last-Modified) is reason='error'
-#                          naming that gap explicitly.  See _stat_https_uri.
+#                          reason='error' bucket.  No ETag-based comparison
+#                          yet: nexus does not yet record an ETag at index
+#                          time (catalog_documents.metadata could hold one
+#                          with no engine change; follow-up bead), so an
+#                          ETag-only response (no Last-Modified) is
+#                          reason='error' naming that gap.  Nothing in
+#                          production calls stat_source/staleness_signal yet
+#                          (wiring is its own follow-up bead).  See
+#                          _stat_https_uri.
 #   Java-side: still DEFERRED, owned by nexus-oqenh (leg 2).  The
 #     UriSchemeHandler interface has a comment-only seam; no stat/head
 #     capability is implemented yet, so POST /v1/vectors/resolve cannot
@@ -1477,6 +1481,12 @@ _HTTPS_STAT_TIMEOUT_S: float = 10.0
 _HTTPS_STAT_MAX_ATTEMPTS: int = 3
 
 #: Delay (seconds) before retry attempts 2 and 3 respectively.
+#:
+#: Worst case per call, for whoever wires this onto a caller:
+#: ``httpx.Timeout(10.0)`` applies to connect, read, write and pool
+#: separately, so one attempt can take about 20 s (a slow connect then a
+#: slow read); three attempts plus 1.5 s of backoff is about 61.5 s. That
+#: is fine for a maintenance sweep and wrong per result on a search path.
 _HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 
 
@@ -1516,12 +1526,16 @@ def _stat_https_uri(
 
     **Last-Modified only, no ETag comparison.**  ``ETag`` is an opaque
     validator, not a timestamp: staleness detection by ETag would require
-    comparing the CURRENT ETag against a RECORDED one, and nexus records no
-    ETag at index time (``catalog_documents`` carries ``source_mtime``, a
-    POSIX float, and nothing ETag-shaped) — there is nothing here to compare
-    a fresh ETag against.  So an ``ETag``-only response (no
-    ``Last-Modified``) is a ``StatFail`` naming that gap explicitly, not a
-    best-effort ETag comparison against a value this reader never stored.
+    comparing the CURRENT ETag against a RECORDED one, and nexus does not
+    yet record an ETag at index time (``catalog_documents`` carries
+    ``source_mtime``; its ``metadata`` JSONB could carry one with no engine
+    change, which is a filed follow-up).  Until then an ``ETag``-only
+    response (no ``Last-Modified``) is a ``StatFail`` naming that gap
+    explicitly, not a best-effort comparison against a value never stored.
+
+    A 404 is retried once before it is trusted as ``absent``: a CDN edge or
+    a mid-deploy origin can answer one spurious 404, and ``absent`` becomes
+    ``dangling``, the one verdict a caller could act on destructively.
 
     Outcomes:
 
@@ -1551,6 +1565,7 @@ def _stat_https_uri(
 
     response: Any = None
     last_detail = ""
+    seen_404 = False
     try:
         for attempt in range(_HTTPS_STAT_MAX_ATTEMPTS):
             try:
@@ -1559,7 +1574,9 @@ def _stat_https_uri(
                 last_detail = f"{type(e).__name__}: {e}"
                 response = None
             else:
-                if response.status_code < 500:
+                if response.status_code == 404 and not seen_404:
+                    seen_404 = True  # confirm once before trusting "absent"
+                elif response.status_code < 500:
                     break
             if attempt < _HTTPS_STAT_MAX_ATTEMPTS - 1:
                 time.sleep(_HTTPS_STAT_RETRY_DELAYS_S[attempt])

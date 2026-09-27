@@ -435,12 +435,19 @@ class _StatHandler(http.server.BaseHTTPRequestHandler):
     response_status: int = 200
     response_headers: dict[str, str] = {}
     delay: float = 0.0
+    #: Status for each successive request, overriding ``response_status``
+    #: while entries remain (a 404 then a 200, for the confirm-once path).
+    status_sequence: list[int] = []
+    #: HEAD requests received, so a test can pin the retry count.
+    request_count: int = 0
 
     def do_HEAD(self) -> None:  # noqa: N802 — stdlib handler method name
+        type(self).request_count += 1
         if self.delay:
             import time as _time  # noqa: PLC0415 — test-local, avoids a module-level time import collision
             _time.sleep(self.delay)
-        self.send_response(self.response_status)
+        seq = type(self).status_sequence
+        self.send_response(seq.pop(0) if seq else self.response_status)
         for key, value in self.response_headers.items():
             self.send_header(key, value)
         self.end_headers()
@@ -475,6 +482,8 @@ def https_stat_server():
     _StatHandler.response_status = 200
     _StatHandler.response_headers = {}
     _StatHandler.delay = 0.0
+    _StatHandler.status_sequence = []
+    _StatHandler.request_count = 0
     srv = _StatHTTPServer(("127.0.0.1", 0), _StatHandler)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
@@ -518,9 +527,9 @@ class TestStatHttpsUri:
         assert staleness_signal(mtime - 10, result) == "stale"
 
     def test_etag_only_returns_statfail_naming_no_last_modified(self, https_stat_server) -> None:
-        """ETag with no Last-Modified: nexus records no stored ETag at index
-        time to compare a fresh one against, so this is a named StatFail,
-        not a best-effort ETag comparison (RDR-169 G6 residual decision)."""
+        """ETag with no Last-Modified: nexus does not yet record an ETag at
+        index time to compare a fresh one against, so this is a named
+        StatFail, not a best-effort ETag comparison."""
         base_url, handler = https_stat_server
         handler.response_headers = {"ETag": '"abc123"'}
         client = httpx.Client(base_url=base_url, timeout=5.0)
@@ -572,6 +581,22 @@ class TestStatHttpsUri:
         assert isinstance(result, StatFail)
         assert result.reason == "absent"
         assert "404" in result.detail
+        assert handler.request_count == 2, "a 404 is confirmed once before it is trusted"
+
+    def test_a_single_spurious_404_is_not_trusted(self, https_stat_server) -> None:
+        """A CDN edge can answer one 404 for a page that exists; the confirm
+        request sees the real answer, so the reference stays live."""
+        base_url, handler = https_stat_server
+        handler.status_sequence = [404]
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/flaky.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        assert handler.request_count == 2
 
     def test_404_produces_dangling_signal_when_allowed(self, https_stat_server) -> None:
         base_url, handler = https_stat_server
@@ -608,6 +633,7 @@ class TestStatHttpsUri:
         assert isinstance(result, StatFail)
         assert result.reason == "error"
         assert "503" in result.detail
+        assert handler.request_count == 3, "the bounded retry makes exactly three attempts"
 
     def test_5xx_produces_unknown_signal_never_raises(self, https_stat_server) -> None:
         base_url, handler = https_stat_server
@@ -636,6 +662,21 @@ class TestStatHttpsUri:
         assert isinstance(result, StatFail)
         assert result.reason == "error"
         assert staleness_signal(1_000_000.0, result) == "unknown"
+        assert handler.request_count == 3, "each timed-out attempt reached the server"
+
+    def test_an_injected_client_stays_open_for_the_next_call(self, https_stat_server) -> None:
+        """The injected-client seam exists so a sweep can reuse one client;
+        the handler must never close a client it did not create."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            first = _stat_https_uri("/a.pdf", http_client=client)
+            second = _stat_https_uri("/b.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(first, StatOk) and isinstance(second, StatOk)
 
 
 class TestStatSourceHttpsForwarding:
