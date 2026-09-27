@@ -2006,9 +2006,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         announce_cross_owner_mint`'s one-owner-agnostic-``/list``-per-mint
         cost inside a batch loop (that module's own docstring). This method
         pays ONE ``POST /list_by_file_paths`` per page of
-        ``QUOTAS.MAX_RECORDS_PER_WRITE`` paths instead — the caller then
-        drives :func:`nexus.catalog.path_ambiguity.
-        announce_cross_owner_mint_bulk` off the result.
+        ``QUOTAS.MAX_RECORDS_PER_WRITE`` paths instead — the indexer's
+        batched registrar then drives
+        :func:`~nexus.catalog.path_ambiguity.announce_cross_owner_mint` and
+        :func:`~nexus.catalog.path_ambiguity.announce_cross_owner_resolve`
+        off the result.
 
         Returns ``{file_path: [CatalogEntry, ...]}``; a path with no live
         document anywhere is absent from the result (same "absent means no

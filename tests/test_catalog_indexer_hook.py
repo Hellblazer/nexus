@@ -1759,6 +1759,49 @@ class TestCatalogHookReconciledIsNotNew:
         assert events[0]["file_path"] == "a.py"
         assert events[0]["existing_tumblers"] == ["1.10.7"]
 
+    def test_a_conflict_minted_between_pages_is_seen_by_the_later_page(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-1vc0n critique round: the bulk lookup runs once PER PAGE,
+        just before that page's register_many, not once for the whole
+        batch. A concurrent indexer that mints b.py under another owner
+        after page 1 registered must still be announced on page 2. With a
+        batch-wide snapshot taken before page 1 this event never fires."""
+        import structlog.testing
+
+        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 1)
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        # Non-empty so the fixture keeps THIS dict (it substitutes a fresh
+        # one for a falsy argument); an empty entry list is "no conflict".
+        live = {"unrelated.py": []}
+        writer = t._StubWriter()
+        inner = writer.register_many
+        pages: list[int] = []
+
+        def register_many(owner, docs, *, with_created=False):
+            pages.append(len(docs))
+            out = inner(owner, docs, with_created=with_created)
+            if len(pages) == 1:  # a concurrent indexer, after page 1
+                live["b.py"] = [{"tumbler": "1.10.9", "title": "b.py (other owner)",
+                                 "content_type": "code", "file_path": "b.py"}]
+            return out
+
+        writer.register_many = register_many
+
+        with structlog.testing.capture_logs() as logs:
+            t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer,
+                files=[a, b], list_by_file_paths_response=live,
+            )
+
+        assert pages == [1, 1], f"expected two one-doc pages, got {pages}"
+        events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
+        assert [e["file_path"] for e in events] == ["b.py"], logs
+        assert events[0]["existing_tumblers"] == ["1.10.9"]
+
     def test_a_batched_reconcile_onto_another_owner_is_announced(
         self, tmp_path, monkeypatch,
     ) -> None:

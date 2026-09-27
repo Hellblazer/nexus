@@ -1673,33 +1673,35 @@ def _catalog_hook(
         _stage_mark = time.monotonic()
 
         # nexus-1vc0n: the bulk owner-agnostic twin of
-        # ``find_cross_owner_conflict`` for this WHOLE batch's misses, in
-        # ONE round trip — computed BEFORE any register_many call below,
-        # for the identical reason find_cross_owner_conflict's own
-        # docstring gives for running before register(): querying after
-        # would also see this run's own just-minted rows and misreport an
-        # uncontested path as conflicting with itself. This is what makes
-        # the batched fast path affordable to wire at all — the per-doc
-        # ``find_cross_owner_conflict`` cost that path_ambiguity.py's
-        # module docstring rules out of this loop (one owner-agnostic
-        # ``/list?file_path=`` per doc, N+1 against this page's ONE
-        # register_many round trip) becomes one bulk
-        # ``find_all_by_file_paths`` call for the entire batch instead.
-        _conflicts_by_path: dict[str, list[str]] = {}
-        if new_batch:
+        # ``find_cross_owner_conflict``, one round trip PER PAGE, taken
+        # immediately BEFORE that page's register_many call for the
+        # identical reason find_cross_owner_conflict's own docstring gives
+        # for running before register(): querying after would also see
+        # this run's own just-minted rows and misreport an uncontested path
+        # as conflicting with itself. Per page rather than once per batch
+        # (critique round, nexus-1vc0n): a cold index spans many pages,
+        # each paying a round trip plus the fairness backoff, and a
+        # batch-wide snapshot went stale across them, missing a conflict
+        # a concurrent indexer minted meanwhile or naming a tumbler since
+        # tombstoned. The per-doc ``find_cross_owner_conflict`` cost that
+        # path_ambiguity.py's module docstring rules out of this loop (one
+        # owner-agnostic ``/list?file_path=`` per doc) becomes one bulk
+        # ``find_all_by_file_paths`` call per register_many page instead.
+        def _page_conflicts(page_docs: list[dict]) -> dict[str, list[str]]:
             try:
-                _existing_by_path = cat.find_all_by_file_paths(
-                    [doc["file_path"] for _, doc in new_batch],
+                existing = cat.find_all_by_file_paths(
+                    [d["file_path"] for d in page_docs],
                 )
-                _conflicts_by_path = {
-                    fp: [str(e.tumbler) for e in entries]
-                    for fp, entries in _existing_by_path.items()
-                }
             except Exception:  # noqa: BLE001 — announce must never fail the write
                 _log.debug(
                     "catalog_bulk_conflict_lookup_failed",
                     repo=repo_name, exc_info=True,
                 )
+                return {}
+            return {
+                fp: [str(e.tumbler) for e in entries]
+                for fp, entries in existing.items()
+            }
 
         # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
         # from per-file to a per-PAGE check — a page is ONE register_many round-
@@ -1714,11 +1716,11 @@ def _catalog_hook(
         # collision IS possible here (a repo file this owner is registering
         # can already be catalogued under a DIFFERENT owner — the exact
         # nexus-yzij1 population this whole module exists to make audible).
-        # nexus-1vc0n closes it: the bulk ``_conflicts_by_path`` computed
-        # above feeds ``announce_cross_owner_mint``/``announce_cross_owner_
+        # nexus-1vc0n closes it: the per-page ``_page_conflicts`` lookup
+        # feeds ``announce_cross_owner_mint``/``announce_cross_owner_
         # resolve`` below exactly like the per-file fallback's
         # ``find_cross_owner_conflict`` answer feeds the SAME two
-        # functions — one round trip for the whole batch, not one per doc.
+        # functions — one round trip per page, not one per doc.
         #
         # nexus-r1tnx round 3: ``reconcile_stale_physical_collection`` is a
         # DIFFERENT cost shape and DOES run in this batched loop, at the
@@ -1740,6 +1742,7 @@ def _catalog_hook(
                 break
             page = new_batch[_start : _start + _CATALOG_REGISTER_PAGE]
             page_docs = [doc for _, doc in page]
+            _conflicts_by_path = _page_conflicts(page_docs)
             _page_t0 = time.monotonic()
             _page_ok = False
             try:
