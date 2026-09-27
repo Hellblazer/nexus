@@ -2268,7 +2268,64 @@ def _run_check_mineru() -> None:
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
     "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep", "harness-grant",
+    "docs-aspects-config",
 )
+
+
+def _run_check_docs_aspects_config() -> None:
+    """Warn when a local ``aspects.docs_collections`` pattern matches a
+    registered docs__ collection whose engine ``aspects_enabled`` is still
+    not True (nexus-l46pu round-2 critic item 1b, T2 critique-nexus-l46pu-
+    tenant-wide-aspects-enabled). The engine is authoritative once it
+    carries an opinion (``docs_collection_opted_in``), so a local match
+    that has never been synced is silent drift: this machine's config.yml
+    says the collection is opted in while the engine -- and every OTHER
+    machine reading it -- disagrees. Remedy named in the warning:
+    ``nx collection aspects --from-config``.
+
+    A virgin box with no ``docs_collections`` entries is NOT-APPLICABLE
+    (project convention: a new doctor row is N/A on a virgin box, decided
+    after reading the config, never allowlisted up front) -- nothing to
+    warn about, no engine call made.
+    """
+    import fnmatch as _fnmatch
+
+    from nexus.aspect_extractor import _docs_opt_in_patterns  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    patterns = _docs_opt_in_patterns()
+    if not patterns:
+        click.echo("docs-aspects-config: N/A (aspects.docs_collections is empty on this machine)")
+        return
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+        reader = make_catalog_reader()
+        rows = reader.list_collections() if reader is not None else []
+    except Exception as exc:  # noqa: BLE001 — best-effort diagnostic; never crash the sweep
+        click.echo(f"docs-aspects-config: catalog unreachable ({_exc_detail(exc)}); skipped")
+        return
+
+    drifted = [
+        r["name"] for r in rows
+        if r.get("content_type") == "docs"
+        and any(_fnmatch.fnmatchcase(r["name"], p) for p in patterns)
+        and r.get("aspects_enabled") is not True
+    ]
+    if not drifted:
+        click.echo(
+            "docs-aspects-config: OK (every docs__ collection this machine's "
+            "local list matches is already synced to the engine)"
+        )
+        return
+    click.echo(
+        f"docs-aspects-config: {len(drifted)} docs__ collection(s) match this "
+        "machine's local aspects.docs_collections but are NOT opted in on the "
+        "engine -- other machines indexing them get no aspect extraction. "
+        "Remedy: nx collection aspects --from-config"
+    )
+    for name in drifted[:20]:
+        click.echo(f"  {name}")
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
 #: of the supplementary section so the operator knows what a default
@@ -2310,6 +2367,7 @@ def _run_supplementary_checks() -> None:
         "tuple-projection": _run_check_tuple_projection,
         "ghost-sweep": _run_check_ghost_sweep,
         "harness-grant": _run_check_harness_grant,
+        "docs-aspects-config": _run_check_docs_aspects_config,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "

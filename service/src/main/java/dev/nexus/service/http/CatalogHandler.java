@@ -1856,7 +1856,11 @@ public final class CatalogHandler implements HttpHandler {
      * 404 when the collection is not registered (same guard-in-the-handler
      * shape as the sibling verb {@link #handleCollectionSupersede}, whose
      * 404 comment nexus-hz785 this mirrors) — a set on a typo'd name must
-     * fail loud, not silently update zero rows.
+     * fail loud, not silently update zero rows. 400 (round-2 critic item 4,
+     * T2 critique-nexus-l46pu-tenant-wide-aspects-enabled) when the row's
+     * {@code content_type} is not {@code docs} — {@code aspects_enabled}
+     * only ever gates the docs__ prose-extraction path, so setting it on
+     * anything else is a no-op dressed up as a real setting.
      */
     private void handleCollectionSetAspectsEnabled(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1866,9 +1870,17 @@ public final class CatalogHandler implements HttpHandler {
         if (name == null || name.isBlank() || !(enabledObj instanceof Boolean enabled)) {
             HttpUtil.send(exchange, 400, "{\"error\":\"name and aspects_enabled (boolean) required\"}"); return;
         }
-        if (repo.getCollection(tenant, name) == null) {
+        Map<String, Object> row = repo.getCollection(tenant, name);
+        if (row == null) {
             HttpUtil.send(exchange, 404,
                 "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+        }
+        Object contentType = row.get("content_type");
+        if (!"docs".equals(contentType)) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "aspects_enabled only applies to docs__ collections; '" + name
+                    + "' has content_type '" + contentType + "'") + "}"); return;
         }
         int updated = repo.setCollectionAspectsEnabled(tenant, name, enabled);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", updated)));

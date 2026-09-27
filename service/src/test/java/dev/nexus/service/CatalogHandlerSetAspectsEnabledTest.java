@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
@@ -16,6 +17,7 @@ import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -76,7 +78,7 @@ class CatalogHandlerSetAspectsEnabledTest {
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
 
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hasp__target");
+            seedDocs(DSL.using(su, SQLDialect.POSTGRES), "hasp__target");
         }
     }
 
@@ -85,6 +87,19 @@ class CatalogHandlerSetAspectsEnabledTest {
         if (service != null) service.stop();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
+    }
+
+    /** Seed a docs__ collection row directly (round-2 critic item 4): {@link
+     * PgContainerHelper#insertCollection} hardcodes {@code content_type="unknown"},
+     * which the new content-type guard below now refuses. */
+    private static void seedDocs(DSLContext dsl, String name) {
+        dsl.insertInto(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .values(TENANT, name, "docs", "hasp-owner", "voyage-context-3", "live")
+            .onConflictDoNothing()
+            .execute();
     }
 
     @Test
@@ -102,7 +117,7 @@ class CatalogHandlerSetAspectsEnabledTest {
     @Test
     void post_setsFalse_returns200() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hasp__flip");
+            seedDocs(DSL.using(su, SQLDialect.POSTGRES), "hasp__flip");
         }
         assertThat(post("/v1/catalog/collections/set_aspects_enabled",
             "{\"name\":\"hasp__flip\",\"aspects_enabled\":true}").statusCode()).isEqualTo(200);
@@ -112,6 +127,18 @@ class CatalogHandlerSetAspectsEnabledTest {
             "{\"name\":\"hasp__flip\",\"aspects_enabled\":false}");
         assertThat(resp.statusCode()).isEqualTo(200);
         assertThat(collectionRow("hasp__flip").get("aspects_enabled")).isEqualTo(false);
+    }
+
+    @Test
+    void post_nonDocsCollection_returns400() throws Exception {
+        // round-2 critic item 4: aspects_enabled only applies to docs__ collections.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hasp__code");
+        }
+        var resp = post("/v1/catalog/collections/set_aspects_enabled",
+            "{\"name\":\"hasp__code\",\"aspects_enabled\":true}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("only applies to docs__ collections");
     }
 
     @Test

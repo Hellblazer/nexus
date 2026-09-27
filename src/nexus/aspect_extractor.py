@@ -787,15 +787,19 @@ def _docs_opt_in_patterns() -> list[str]:
 
 
 #: nexus-l46pu (follow-up to nexus-kk4ut, T2 critique
-#: nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1): per-process
+#: nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1, round 2
+#: nexus/critique-nexus-l46pu-tenant-wide-aspects-enabled item 2): per-process
 #: cache of the engine's tenant-wide ``catalog_collections.aspects_enabled``
-#: read, keyed by collection name. A per-file catalog round trip on the
-#: aspect-enqueue hot path would regress index throughput; this makes the
-#: engine read happen once per collection per process ("once per index run
-#: or worker batch") rather than once per file. Populated lazily by
-#: :func:`_engine_aspects_enabled`; cleared by
+#: read, keyed by collection name, with a bounded TTL (not process-lifetime
+#: — a remote ``--disable`` must take effect within a known window, not only
+#: on process restart). Each entry is ``(fetched_at, enabled, has_opinion)``.
+#: Populated lazily by :func:`_engine_aspects_enabled`; cleared by
 #: :func:`invalidate_engine_aspects_enabled_cache`.
-_ENGINE_ASPECTS_ENABLED_CACHE: dict[str, bool] = {}
+_ENGINE_ASPECTS_CACHE_TTL_S: float = 60.0
+#: Injectable clock (nexus-l46pu round 2): tests swap this for a fake to
+#: exercise TTL expiry deterministically, without a real sleep.
+_clock: Callable[[], float] = time.monotonic
+_ENGINE_ASPECTS_ENABLED_CACHE: dict[str, tuple[float, bool, bool]] = {}
 
 
 def invalidate_engine_aspects_enabled_cache(collection: str | None = None) -> None:
@@ -804,26 +808,34 @@ def invalidate_engine_aspects_enabled_cache(collection: str | None = None) -> No
     ``nx collection aspects <name> --enable/--disable`` sets the row, and in
     tests that exercise :func:`docs_collection_opted_in` across a value
     change — otherwise a same-process read after the write would still see
-    the value cached before it."""
+    the value cached before it (or before the TTL above lapses)."""
     if collection is None:
         _ENGINE_ASPECTS_ENABLED_CACHE.clear()
     else:
         _ENGINE_ASPECTS_ENABLED_CACHE.pop(collection, None)
 
 
-def _engine_aspects_enabled(collection: str) -> bool:
+def _engine_aspects_enabled(collection: str) -> tuple[bool, bool]:
     """The engine's ``catalog_collections.aspects_enabled`` for ``collection``
-    (nexus-l46pu), cached per process (see
+    (nexus-l46pu), cached per process for
+    :data:`_ENGINE_ASPECTS_CACHE_TTL_S` seconds (see
     :data:`_ENGINE_ASPECTS_ENABLED_CACHE`).
 
-    ``False`` on any failure to reach or parse the row: an old engine that
-    predates catalog-040 and so never sends the key, an unregistered
-    collection (``get_collection`` returns ``None``), or a transport error.
-    Never raises and never crashes the enqueue/worker path over a catalog
-    read — same fail-closed contract as :func:`_docs_opt_in_patterns`."""
-    if collection in _ENGINE_ASPECTS_ENABLED_CACHE:
-        return _ENGINE_ASPECTS_ENABLED_CACHE[collection]
+    Returns ``(enabled, has_opinion)``. ``has_opinion`` is ``False`` when the
+    engine carries no fact at all to read — an old engine that predates
+    catalog-040 and so never sends the ``aspects_enabled`` key, an
+    unregistered collection (``get_collection`` returns ``None``), or a
+    transport error; ``enabled`` is meaningless in that case and always
+    ``False``. Never raises and never crashes the enqueue/worker path over a
+    catalog read — same fail-closed contract as :func:`_docs_opt_in_patterns`.
+    """
+    cached = _ENGINE_ASPECTS_ENABLED_CACHE.get(collection)
+    if cached is not None:
+        fetched_at, cached_enabled, cached_has_opinion = cached
+        if _clock() - fetched_at < _ENGINE_ASPECTS_CACHE_TTL_S:
+            return cached_enabled, cached_has_opinion
     enabled = False
+    has_opinion = False
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: catalog import is heavier than this module's callers need at load
 
@@ -832,46 +844,51 @@ def _engine_aspects_enabled(collection: str) -> bool:
         # "aspects_enabled" in row (not row.get(...)) distinguishes an old
         # engine that never sends the key (row present, key absent) from one
         # that sends it False — d.get() alone cannot tell those apart, and
-        # collapsing them is harmless here (both mean "not opted in") but
-        # the explicit check documents the two are different facts.
+        # the two now drive different behaviour (has_opinion gates whether
+        # the engine is authoritative at all, see docs_collection_opted_in).
         if row is not None and "aspects_enabled" in row:
             enabled = bool(row["aspects_enabled"])
-    except Exception as exc:  # noqa: BLE001 — any catalog failure means "not opted in", never a crash on the enqueue/worker path
+            has_opinion = True
+    except Exception as exc:  # noqa: BLE001 — any catalog failure means "no opinion", never a crash on the enqueue/worker path
         _log.warning(
             "aspects_engine_opt_in_unreadable",
             collection=collection, error=f"{type(exc).__name__}: {exc}",
         )
         enabled = False
-    _ENGINE_ASPECTS_ENABLED_CACHE[collection] = enabled
-    return enabled
+        has_opinion = False
+    _ENGINE_ASPECTS_ENABLED_CACHE[collection] = (_clock(), enabled, has_opinion)
+    return enabled, has_opinion
 
 
 def docs_collection_opted_in(collection: str) -> bool:
     """True when ``collection`` is a docs__ collection opted in to aspect
-    extraction, either through the LOCAL ``aspects.docs_collections`` glob
-    list (nexus-kk4ut) or through the engine's tenant-wide
-    ``catalog_collections.aspects_enabled`` attribute (nexus-l46pu, the
-    durable, cross-machine home for the same decision — see T2 critique
-    nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1: two machines
-    indexing the same shared collection with different local config gave
-    partial ``document_aspects`` coverage).
+    extraction.
 
-    The local list is checked FIRST and, when it matches, WINS outright —
-    a deliberate per-machine override (e.g. a one-off local experiment)
-    that the engine attribute never overrides. A machine with no local
-    entry for ``collection`` falls through to the engine's row, cached per
-    process (see :func:`_engine_aspects_enabled`) so this is one engine
-    read per collection, not one per file. Until the column is set on any
-    row, the engine always answers ``False`` (catalog-040's column
-    default), so today's per-machine-only behaviour is unchanged for every
-    collection nobody has opted in at the engine yet."""
+    The engine's tenant-wide ``catalog_collections.aspects_enabled``
+    attribute (nexus-l46pu) is AUTHORITATIVE the moment it carries an
+    opinion (see :func:`_engine_aspects_enabled`'s ``has_opinion``): every
+    machine indexing this collection then agrees, closing the T2 critique
+    nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1 gap (two
+    machines with different local config giving partial ``document_aspects``
+    coverage). The LOCAL ``aspects.docs_collections`` glob list (nexus-kk4ut)
+    is consulted ONLY as a fallback for an engine with no opinion yet — a
+    row that predates catalog-040, or an old engine that never sends the
+    key at all — so a fresh install with nothing synced keeps today's
+    per-machine-only behaviour until ``nx collection aspects --from-config``
+    (or a bare ``--enable``/``--disable``) gives the engine a first opinion,
+    round-2 critic decision, T2 critique-nexus-l46pu-tenant-wide-aspects-
+    enabled item 1: "local wins" kept exactly the cross-machine drift this
+    bead exists to close, since a stale local entry would silently
+    re-override a value another machine had already synced to the engine.
+    """
     if not collection.startswith(_DOCS_PREFIX):
         return False
+    enabled, has_opinion = _engine_aspects_enabled(collection)
+    if has_opinion:
+        return enabled
     import fnmatch  # noqa: PLC0415 — stdlib, only needed on this branch
 
-    if any(fnmatch.fnmatchcase(collection, p) for p in _docs_opt_in_patterns()):
-        return True
-    return _engine_aspects_enabled(collection)
+    return any(fnmatch.fnmatchcase(collection, p) for p in _docs_opt_in_patterns())
 
 
 def extraction_applies_to_source(collection: str, source_path: str) -> bool:

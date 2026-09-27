@@ -2447,7 +2447,8 @@ nx collection list
 |------------|-------------|
 | `list` | All T3 collections with live chunk counts and the catalog's columns: `CONTENT_TYPE`, `OWNER`, `MODEL`, `DIM`, `STATE` (`live`, `quarantine`, `dormant`, `disputed`). Every column is read from the collection's catalog row, never parsed from its name (RDR-204 Day 2, nexus-ft04v.32), so a row whose name disagrees with its columns shows the columns. A collection with no catalog row prints `-` in each column; a registered row with no chunks (dormant) prints `0`. If the catalog cannot be read the listing says so and prints names and counts only |
 | `info NAME` | Details for one collection |
-| `aspects NAME [--enable\|--disable]` | Show or set the engine's tenant-wide `catalog_collections.aspects_enabled` attribute — the docs__ aspect-extraction opt-in (nexus-l46pu, follow-up to nexus-kk4ut). Bare invocation shows the current value; `--enable`/`--disable` sets it. A machine's local `aspects.docs_collections` config.yml entry still overrides and wins when it names the collection — this verb only changes the durable, cross-machine engine row |
+| `aspects NAME [--enable\|--disable]` | Show or set the engine's tenant-wide `catalog_collections.aspects_enabled` attribute — the docs__ aspect-extraction opt-in (nexus-l46pu, follow-up to nexus-kk4ut). Bare invocation shows the current value; `--enable`/`--disable` sets it and prints the tenant-wide blast radius and the LLM-call cost before writing. Refuses (nonzero exit) a non-docs__ collection. The engine is AUTHORITATIVE once it has an opinion — round 2, T2 critique-nexus-l46pu-tenant-wide-aspects-enabled item 1 — a machine's local `aspects.docs_collections` config.yml entry is consulted only when the engine has none yet |
+| `aspects --from-config [--dry-run]` | Sync every registered docs__ collection this machine's local `aspects.docs_collections` list matches onto the engine (sets `aspects_enabled=true` there); the migration path off the local-only list. `--dry-run` reports without writing. Cannot combine with `NAME` or `--enable`/`--disable` |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn) |
@@ -3030,10 +3031,16 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-`tuple-projection`, `ghost-sweep`, `harness-grant` (the last four have no
-`--check-fanout-floor` / `--check-tuple-projection` / `--check-ghost-sweep`
-/ `--check-harness-grant` flag; they only run as
-part of this supplementary set).
+`tuple-projection`, `ghost-sweep`, `harness-grant`, `docs-aspects-config`
+(the last five have no `--check-fanout-floor` / `--check-tuple-projection`
+/ `--check-ghost-sweep` / `--check-harness-grant` / `--check-docs-aspects-config`
+flag; they only run as part of this supplementary set).
+`docs-aspects-config` (nexus-l46pu round 2) warns when a local
+`aspects.docs_collections` glob matches a registered `docs__` collection
+whose engine `aspects_enabled` is not yet `True` — the engine is
+authoritative once it has an opinion (see [Aspects](configuration.md#aspects)),
+so an unsynced local match is silent cross-machine drift. N/A on a machine
+with an empty `docs_collections` list.
 `tuple-projection` (nexus-08cfl) reports whether
 this session's RDR-205 ledger tuple projector
 (`nexus.hooks.tuple_ledger_project`) has logged any SKIP lines to its

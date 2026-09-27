@@ -1840,12 +1840,12 @@ class _FakeCatalogReader:
 
 
 class TestDocsOptInEngineAttribute:
-    """nexus-l46pu (follow-up to nexus-kk4ut): the tenant-wide engine
-    ``catalog_collections.aspects_enabled`` attribute is the fallback a
-    machine with no matching local ``aspects.docs_collections`` entry now
-    consults, cached once per process per collection. Local config still
-    wins outright when it matches (nexus-kk4ut's original per-machine
-    override, unchanged)."""
+    """nexus-l46pu (follow-up to nexus-kk4ut, round 2 critic decision T2
+    critique-nexus-l46pu-tenant-wide-aspects-enabled item 1): the tenant-wide
+    engine ``catalog_collections.aspects_enabled`` attribute is AUTHORITATIVE
+    the moment it carries an opinion -- the local ``aspects.docs_collections``
+    list is consulted only as a fallback for an engine with no opinion at all
+    (an old engine, or a row nobody has synced yet)."""
 
     @staticmethod
     def _local_config(monkeypatch, value) -> None:
@@ -1881,17 +1881,20 @@ class TestDocsOptInEngineAttribute:
 
         assert select_config("docs__l46pu-b") is None
 
-    def test_local_config_wins_and_the_engine_is_never_consulted(self, monkeypatch) -> None:
+    def test_engine_says_false_overrides_a_stale_local_match(self, monkeypatch) -> None:
+        """Round-2 decision: the engine is authoritative once it has an
+        opinion, so a local list entry that would have opted this collection
+        in under the OLD (local-wins) precedence must now be OVERRULED by an
+        explicit engine False -- otherwise a stale local entry silently
+        re-introduces the exact cross-machine drift this bead exists to
+        close."""
         from nexus.aspect_extractor import select_config
 
         self._local_config(monkeypatch, ["docs__l46pu-c*"])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-c", "aspects_enabled": False})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
 
-        def _boom():
-            raise AssertionError("the engine must not be consulted when the local list already matched")
-
-        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", _boom)
-        config = select_config("docs__l46pu-c")
-        assert config is not None and config.extractor_name == "general-prose-v1"
+        assert select_config("docs__l46pu-c") is None
 
     def test_an_old_engine_row_with_no_aspects_enabled_key_falls_back_to_local_config(
         self, monkeypatch,
@@ -1899,9 +1902,8 @@ class TestDocsOptInEngineAttribute:
         """A pre-nexus-l46pu engine's ``get_collection`` response carries no
         ``aspects_enabled`` key at all (the column did not exist). This must
         read as "the engine has no opinion," never crash and never be
-        mistaken for an explicit ``False`` -- the two are different facts
-        even though both currently resolve to "not opted in" (docstring on
-        ``_engine_aspects_enabled``)."""
+        mistaken for an explicit ``False`` -- the two are different facts,
+        and only the no-opinion case falls back to local config."""
         from nexus.aspect_extractor import select_config
 
         self._local_config(monkeypatch, [])
@@ -1910,8 +1912,7 @@ class TestDocsOptInEngineAttribute:
 
         assert select_config("docs__l46pu-d") is None
 
-        # ...and local config still wins on an old engine exactly as it did
-        # before this bead -- the fallback never disables the override.
+        # ...and local config is the fallback for exactly this no-opinion case.
         self._local_config(monkeypatch, ["docs__l46pu-d*"])
         config = select_config("docs__l46pu-d")
         assert config is not None and config.extractor_name == "general-prose-v1"
@@ -1964,6 +1965,34 @@ class TestDocsOptInEngineAttribute:
 
         invalidate_engine_aspects_enabled_cache("docs__l46pu-h")
         assert docs_collection_opted_in("docs__l46pu-h") is True, "cache cleared -- reads the new value"
+
+    def test_the_cache_entry_expires_after_the_ttl(self, monkeypatch) -> None:
+        """Round-2 fix: a bounded TTL (not process-lifetime) so a remote
+        ``--disable`` takes effect within a known window. Deterministic via
+        the injectable clock -- no real sleep."""
+        import nexus.aspect_extractor as ae
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-i", "aspects_enabled": True})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+
+        fake_now = [1000.0]
+        monkeypatch.setattr(ae, "_clock", lambda: fake_now[0])
+
+        assert ae.docs_collection_opted_in("docs__l46pu-i") is True
+        assert reader.calls == 1
+
+        # Still within the TTL: cache hit, no second read.
+        fake_now[0] += ae._ENGINE_ASPECTS_CACHE_TTL_S - 1
+        assert ae.docs_collection_opted_in("docs__l46pu-i") is True
+        assert reader.calls == 1
+
+        # Past the TTL, and the engine's answer has since changed: the next
+        # read must reach the engine again and see the new value.
+        reader._row = {"name": "docs__l46pu-i", "aspects_enabled": False}
+        fake_now[0] += 2  # now (TTL - 1) + 2 = TTL + 1 past the first fetch
+        assert ae.docs_collection_opted_in("docs__l46pu-i") is False
+        assert reader.calls == 2, "past the TTL, the cache must not answer from the stale entry"
 
 
 def test_an_unreadable_config_means_not_opted_in_and_never_raises(monkeypatch) -> None:
